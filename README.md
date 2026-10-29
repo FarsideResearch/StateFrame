@@ -200,6 +200,8 @@ If you modify StateFrame and let others use it over a network, the AGPL requires
 
 ## Contributing
 
-Contributions are welcome. They require signing the CLA (see CONTRIBUTING.md).
+We'd genuinely love your help. Bug reports, small fixes, docs, new benchmarks, or a wild idea about how agents should keep state: all welcome. Open an issue or a pull request and we'll take a look. First-time contributors are very welcome too.
+
+Code contributions need a one-time CLA signature (it takes a minute, and you keep your copyright). Details are in [CONTRIBUTING.md](CONTRIBUTING.md).
 
 Originally created by [Michael Arida](https://www.linkedin.com/in/michael-arida/).

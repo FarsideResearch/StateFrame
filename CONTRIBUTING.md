@@ -1,6 +1,6 @@
 # Contributing to StateFrame
 
-Thanks for wanting to help. Bug reports, fixes, tests and documentation improvements are all welcome.
+We'd genuinely love your help, and first-time contributors are very welcome. Bug reports, small fixes, docs, new benchmarks, or a wild idea about how agents should keep state: open an issue or a pull request and we'll take a look. The notes below just make it easy to land.
 
 ## Before you start
 
