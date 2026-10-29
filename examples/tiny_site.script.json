@@ -1,0 +1,75 @@
+{
+ "model": "scripted",
+ "steps": [
+  {
+   "tool": "file_create",
+   "required": true,
+   "arguments": {
+    "path": "site/products.json",
+    "content": "[\n  {\"name\": \"Mug\", \"price\": 12.5},\n  {\"name\": \"Tote bag\", \"price\": 18},\n  {\"name\": \"Notebook\", \"price\": 7.25}\n]\n"
+   }
+  },
+  {
+   "tool": "run_tests",
+   "required": true,
+   "arguments": {
+    "target": "tests/test_site.py"
+   }
+  },
+  {
+   "tool": "file_create",
+   "required": true,
+   "arguments": {
+    "path": "site/index.html",
+    "content": "<!doctype html>\n<html lang=\"en\">\n<head>\n  <meta charset=\"utf-8\">\n  <title>Tiny shop</title>\n  <link rel=\"stylesheet\" href=\"styles.css\">\n</head>\n<body>\n  <header><h1>Tiny shop</h1></header>\n  <main id=\"products\" class=\"cards\"></main>\n  <footer>Made with StateFrame</footer>\n  <script src=\"app.js\"></script>\n</body>\n</html>\n"
+   }
+  },
+  {
+   "tool": "run_tests",
+   "required": true,
+   "arguments": {
+    "target": "tests/test_site.py"
+   }
+  },
+  {
+   "tool": "file_create",
+   "required": true,
+   "arguments": {
+    "path": "site/styles.css",
+    "content": "body { font-family: system-ui, sans-serif; margin: 0; }\nheader, footer { padding: 1rem; background: #f3f4f6; }\n.cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(12rem, 1fr)); gap: 1rem; padding: 1rem; }\n.card { border: 1px solid #e5e7eb; border-radius: 8px; padding: 1rem; }\n"
+   }
+  },
+  {
+   "tool": "run_tests",
+   "required": true,
+   "arguments": {
+    "target": "tests/test_site.py"
+   }
+  },
+  {
+   "tool": "file_create",
+   "required": true,
+   "arguments": {
+    "path": "site/app.js",
+    "content": "fetch('products.json')\n  .then((response) => response.json())\n  .then((products) => {\n    const list = document.getElementById('products');\n    for (const product of products) {\n      const card = document.createElement('div');\n      card.className = 'card';\n      card.innerHTML = `<h2>${product.name}</h2><p>$${product.price}</p><button>Buy</button>`;\n      card.querySelector('button').addEventListener('click', () => alert(product.name));\n      list.appendChild(card);\n    }\n  });\n"
+   }
+  },
+  {
+   "tool": "run_tests",
+   "required": true,
+   "arguments": {
+    "target": "tests/test_site.py"
+   }
+  },
+  {
+   "tool": "done",
+   "required": true,
+   "arguments": {
+    "summary": "Created site/index.html, styles.css, app.js and products.json; app.js renders the 3 product cards from products.json and alerts the product name on click."
+   }
+  }
+ ],
+ "tokenize": {
+  "mode": "ok"
+ }
+}

@@ -1,0 +1,9 @@
+id,category,status
+T-101,billing,closed
+T-102,login,open
+T-103,billing,open
+T-104,bug,closed
+T-105,login,closed
+T-106,billing,closed
+T-107,bug,open
+T-108,billing,closed

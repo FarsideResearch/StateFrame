@@ -1,0 +1,45 @@
+{
+ "model": "scripted",
+ "steps": [
+  {
+   "tool": "file_create",
+   "required": true,
+   "arguments": {
+    "path": "report/summary.json",
+    "content": "{\n  \"total\": 8,\n  \"open\": 3,\n  \"by_category\": {\"billing\": 4, \"login\": 2, \"bug\": 2}\n}\n"
+   }
+  },
+  {
+   "tool": "run_tests",
+   "required": true,
+   "arguments": {
+    "target": "tests/test_report.py"
+   }
+  },
+  {
+   "tool": "file_create",
+   "required": true,
+   "arguments": {
+    "path": "report/report.md",
+    "content": "# Support tickets, week 42\n\n## Summary\n\n8 tickets came in this week and 3 are still open. Billing questions were half of the load.\n\n## By category\n\n- billing: 4\n- login: 2\n- bug: 2\n"
+   }
+  },
+  {
+   "tool": "run_tests",
+   "required": true,
+   "arguments": {
+    "target": "tests/test_report.py"
+   }
+  },
+  {
+   "tool": "done",
+   "required": true,
+   "arguments": {
+    "summary": "Wrote report/summary.json (8 tickets, 3 open; billing 4, login 2, bug 2) and report/report.md with the same numbers."
+   }
+  }
+ ],
+ "tokenize": {
+  "mode": "ok"
+ }
+}

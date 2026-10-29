@@ -1,0 +1,23 @@
+# StateFrame
+
+> An Open Agent Engine, built and measured on software engineering work, for local OpenAI-compatible model servers. Every request is rebuilt from system instructions, tools, the task, a typed state frame and the newest exchange, in a fixed 33,344-token budget; no chat history is resent.
+
+## Start here
+- [AGENTS.md](AGENTS.md): orientation, repository map, install/run/test
+- [README.md](README.md): what it is, why it matters, requirements
+- [QUICKSTART.md](QUICKSTART.md): install and first runs
+
+## Guide
+- [Concepts](docs/guide/concepts.md): typed state frame, receipts, checkpoints, disk-backed history, determinism
+- [Request lifecycle](docs/guide/request-lifecycle.md): how a run and each request are built
+- [Code map](docs/guide/code-map.md): which module owns what
+- [Running](docs/guide/running.md): commands, flags, test interpreter, profiles, resume
+- [Extending](docs/guide/extending.md): profiles, tools, switches, tests
+- [Troubleshooting](docs/guide/troubleshooting.md): errors and fixes
+- [Design rationale](docs/guide/design.md): why it is built this way
+
+## Reference
+- [KNOWN_LIMITATIONS.md](KNOWN_LIMITATIONS.md)
+- [ARCHITECTURE.md](ARCHITECTURE.md): Mermaid diagrams of lifecycle, frame, completion, resume, history, code map
+- [CHANGELOG.md](CHANGELOG.md)
+- [CONTRIBUTING.md](CONTRIBUTING.md), [CLA.md](CLA.md), [COMMERCIAL-LICENSE.md](COMMERCIAL-LICENSE.md)

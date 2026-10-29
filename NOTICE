@@ -1,0 +1,19 @@
+StateFrame
+Copyright 2026 Farside Research LLC
+
+Licensed under the GNU Affero General Public License v3.0 only, or under a commercial license (see COMMERCIAL-LICENSE.md).
+
+Included code:
+- src/stateframe/engine/mc_repo_intel_vendor/: repository map, code graph and LSP resolve
+  helpers, written by the same author for another of his projects and included here under
+  this product's license.
+
+Third-party software (full license texts and a version-by-version license check: THIRD_PARTY_LICENSES.md,
+shipped inside the installed stateframe package and in the source package):
+- Bundled in the source package, in wheelhouse/ for offline installs (redistributed with their license files):
+  pytest (MIT), pluggy (MIT), iniconfig (MIT), packaging (Apache-2.0 OR BSD-2-Clause), Pygments (BSD-2-Clause),
+  attrs (MIT), PyYAML (MIT; repackaged as a pure-Python wheel, code and license unchanged), jedi (MIT; includes
+  typeshed, Apache-2.0, and django-stubs, MIT), parso (MIT; includes PSF-licensed files), networkx (BSD-3-Clause).
+- Installed by pip from PyPI, pinned and hash-checked, not redistributed by StateFrame: the packages above plus
+  jsonschema, referencing, jsonschema-specifications, rpds-py (all MIT), typing-extensions (PSF-2.0), and for the
+  repo map tree-sitter and 16 official grammar packages (all MIT).

@@ -1,0 +1,38 @@
+{
+ "model": "scripted",
+ "steps": [
+  {
+   "tool": "read",
+   "required": true,
+   "arguments": {
+    "path": "shop/pricing.py"
+   }
+  },
+  {
+   "tool": "str_replace",
+   "required": true,
+   "arguments": {
+    "path": "shop/pricing.py",
+    "old_str": "    return round(price * percent / 100, 2)",
+    "new_str": "    return round(price * (100 - percent) / 100, 2)"
+   }
+  },
+  {
+   "tool": "run_tests",
+   "required": true,
+   "arguments": {
+    "target": "tests/test_pricing.py"
+   }
+  },
+  {
+   "tool": "done",
+   "required": true,
+   "arguments": {
+    "summary": "apply_discount returned the discount amount instead of the discounted price; it now keeps (100 - percent) percent of the price."
+   }
+  }
+ ],
+ "tokenize": {
+  "mode": "ok"
+ }
+}

@@ -1,0 +1,168 @@
+"""Shared OS boundary for all restricted v46 execution.
+
+Path checks on read/grep are insufficient: model-created code can open host
+files. Restricted policies therefore execute children with only the selected
+workspace and installed interpreter/libraries readable, with no network.
+
+This builder is intentionally shared by the central execution policy and the
+typed observation probe. Callers must still use the policy's capability check
+and resource-limited launcher; this function never supplies an unsandboxed
+fallback.
+"""
+from __future__ import annotations
+
+import json
+import os
+from pathlib import Path
+import platform
+import shutil
+import site
+import sys
+
+from kernel_test_python import test_python
+
+
+# Host task policy is read LAZILY at sandbox-build time, never frozen at import: a module imported
+# before the host policy is visible (or across a config purge) must still honour it (10-06, batch 837).
+def host_task_network() -> str:
+    return os.environ.get("STATEFRAME_TASK_NETWORK", "")
+
+
+def host_task_pytest_plugins() -> str:
+    return os.environ.get("STATEFRAME_TASK_PYTEST_PLUGINS", "")
+
+
+def _declared_relay_dir(env: dict[str, str]) -> Path | None:
+    raw = env.get("STATEFRAME_TASK_RELAY_SOCKET_DIR")
+    if not raw:
+        return None
+    candidate = Path(raw)
+    if (
+        candidate.parent != Path("/tmp")
+        or candidate.is_symlink()
+        or not candidate.is_dir()
+        or not candidate.name.startswith("stage6-pg-")
+    ):
+        raise RuntimeError("invalid Stage 6 relay directory")
+    return candidate
+
+
+def backend() -> str:
+    name = "sandbox-exec" if platform.system() == "Darwin" else "bwrap"
+    executable = shutil.which(name)
+    if executable is None:
+        raise RuntimeError(f"restricted information policy requires {name}; no unsandboxed fallback")
+    return executable
+
+
+def _interpreter_roots(selected: Path) -> set[str]:
+    """Admit only installed Python prefixes, including virtualenvs and PATH Pythons."""
+    roots: set[str] = set()
+    for binary in (selected, selected.resolve()):
+        prefix = binary.parent.parent
+        if prefix == Path.home() or prefix in {
+                Path("/"), Path("/Users"), Path("/home"), Path("/opt"), Path("/tmp"),
+                Path("/private/tmp")}:
+            continue
+        library = prefix / "lib"
+        if (prefix / "pyvenv.cfg").is_file() or any(
+                path.is_dir() for path in library.glob("python*/site-packages")):
+            roots.add(str(prefix))
+    return roots
+
+
+def isolated_command(command: list[str], root: Path, env: dict[str, str], *,
+                     readonly_workspace: bool = False) -> tuple[list[str], dict[str, str]]:
+    executable = backend()
+    root = root.resolve()
+    scratch = root / ".test-tmp"
+    scratch.mkdir(exist_ok=True)
+    # Second filter layer: keep it in sync with kernel_execution_policy._safe_environment,
+    # which also admits host-declared task keys (STATEFRAME_TASK_ENV_KEYS). 10-03: this
+    # layer re-stripped DATABASE_URL and every AHA check still died with pytest exit 4.
+    from kernel_execution_policy import _host_task_env_keys
+    allowed = {
+        "PATH", "LANG", "LC_ALL", "PYTHONHASHSEED", "PYTEST_DISABLE_PLUGIN_AUTOLOAD",
+        "STATEFRAME_TASK_RELAY_SOCKET_DIR",
+    }
+    allowed |= _host_task_env_keys()
+    clean = {key: value for key, value in env.items() if key in allowed}
+    clean.update(HOME=str(scratch), TMPDIR=str(scratch), PYTHONDONTWRITEBYTECODE="1",
+                 PYTEST_DISABLE_PLUGIN_AUTOLOAD="1")
+    # HOST-declared: a real project's pytest.ini can require installed plugins
+    # (pytest-cov addopts, pytest-asyncio). The image's installed plugins are host
+    # supplied, not model supplied. 10-03: forcing autoload off made every AHA check
+    # exit 4 ("unrecognized arguments: --cov=...").
+    if host_task_pytest_plugins() == "installed":
+        clean.pop("PYTEST_DISABLE_PLUGIN_AUTOLOAD", None)
+    relay_dir = _declared_relay_dir(clean)
+    selected = Path(test_python())
+    resolved_selected = selected.resolve()
+    interpreter_roots = (_interpreter_roots(selected)
+                         if selected != Path(sys.executable) else set())
+    if platform.system() == "Darwin":
+        readable = {"/System", "/usr", "/Library/Apple",
+                    sys.prefix, sys.base_prefix, str(Path(sys.executable).parent),
+                    str(Path(sys.prefix).resolve()), str(Path(sys.base_prefix).resolve()),
+                    str(Path(sys.executable).resolve().parent), str(root)}
+        if selected != Path(sys.executable):
+            # A selected executable can sit directly under HOME. Permit the file,
+            # not its entire parent directory, before adding verified Python roots.
+            readable.update((str(selected), str(resolved_selected)))
+            readable.update(interpreter_roots)
+        # Homebrew's launcher and dynamically linked runtime cross opt/Cellar
+        # symlinks; these are installed code directories, not its var/data tree.
+        if relay_dir is not None:
+            readable.add(str(relay_dir))
+        if any(str(p).startswith("/opt/homebrew/")
+               for p in (Path(sys.executable), Path(sys.executable).resolve())):
+            readable.update({"/opt/homebrew/Cellar", "/opt/homebrew/opt", "/opt/homebrew/lib"})
+        readable.update(str(Path(value).resolve()) for value in site.getsitepackages())
+        rules = " ".join(f"(subpath {json.dumps(value)})" for value in sorted(readable))
+        ancestors = {str(parent) for value in readable for parent in Path(value).parents}
+        metadata = " ".join(f"(literal {json.dumps(value)})" for value in sorted(ancestors))
+        devices = '(subpath "/dev")'
+        # Keep ordinary interpreter Mach/IPC operations while restricting its
+        # information-bearing filesystem and network capabilities explicitly.
+        writable = scratch if readonly_workspace else root
+        profile = ("(version 1) (allow default) (deny network*) "
+                   # The launcher reads ancestor directories while resolving its
+                   # executable. Permit those exact directories, not their children.
+                   f"(deny file-read-data (require-not (require-any {rules} {metadata} {devices}))) "
+                   f"(deny file-read-metadata (require-not (require-any {rules} {metadata} {devices}))) "
+                   f"(deny file-write* (require-not (require-any (subpath {json.dumps(str(writable))}) {devices})))")
+        return [executable, "-p", profile, *command], clean
+    # No host home, repository, private result tree, sockets or audit directory is mounted.
+    arguments = [executable, "--die-with-parent", "--unshare-all", "--new-session",
+                 "--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp"]
+    # The HOST (never the model) may declare that checks need the container's own
+    # private network, e.g. a stage6 worker whose tests reach a per-run Postgres on an
+    # unpublished Docker bridge. Only then share the net namespace and expose the two
+    # name-resolution files (nothing else from /etc). 10-03: without this, AHA checks
+    # failed to connect to their database inside the sandbox.
+    if host_task_network() == "container":
+        arguments.append("--share-net")
+        for path in ("/etc/hosts", "/etc/resolv.conf"):
+            if os.path.exists(path):
+                arguments.extend(["--ro-bind", path, path])
+    # Do not mount host /etc: deployed images may place credentials and service
+    # configuration there. Python and its dynamic libraries are covered by the
+    # explicit runtime prefixes below; DNS is unavailable by design.
+    for value in ("/usr", "/bin", "/lib", "/lib64"):
+        if Path(value).exists():
+            arguments.extend(["--ro-bind", value, value])
+    prefixes = {str(Path(sys.prefix).resolve()), str(Path(sys.base_prefix).resolve())}
+    if selected != Path(sys.executable):
+        prefixes.update((str(selected), str(resolved_selected)))
+        prefixes.update(interpreter_roots)
+    for value in sorted(prefixes):
+        if not value.startswith("/usr") and value not in {"/", "/home", "/root"}:
+            arguments.extend(["--ro-bind", value, value])
+    if relay_dir is not None:
+        # /tmp is a fresh sandbox tmpfs; expose only this run's relay directory.
+        arguments.extend(["--bind", str(relay_dir), str(relay_dir)])
+    arguments.extend(["--ro-bind" if readonly_workspace else "--bind", str(root), str(root)])
+    if readonly_workspace:
+        arguments.extend(["--bind", str(scratch), str(scratch)])
+    arguments.extend(["--chdir", str(root), "--", *command])
+    return arguments, clean
