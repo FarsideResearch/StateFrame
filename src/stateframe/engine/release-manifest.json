@@ -622,7 +622,7 @@
   "kernel_tool_reply.py": "535ae3cad88576fb6632642c9570860441dc3525abb3eb59a8d4b47fc001fdc7",
   "kernel_tool_schema_diet.py": "c3b732bbe34db1402e8031c3c507ddf7e0ff9c19a993f8b1b2026bc59d339cb0",
   "kernel_tool_schema_lint.py": "e911b96caf2f7c6caacdeb25dfa05e250c4a4746fec22b8171680490a3ad7142",
-  "kernel_tool_settings.py": "c1cafdab168d859e9fc0ec87f201db808990775af63e29d2fa70724b07fdd300",
+  "kernel_tool_settings.py": "585bc86ad009a2c2b58105daae817148ae0eb7bfb96b225f66c5b91f2a7da186",
   "kernel_tool_surface.py": "f42e93c74df7fc860b551bc57bc1912aeee2524fb573d132009d81b635941cd5",
   "kernel_tool_tape.py": "663548f0d2452771f414185fd22a4f51a80ec38c79bf45706872540936b6d586",
   "kernel_trajectory_frame.py": "fa108d4a4ef165a080afad752a531bb857d969568d268e4652e986e1c5379533",
