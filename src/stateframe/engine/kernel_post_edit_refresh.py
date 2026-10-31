@@ -7,7 +7,7 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 
 
-_EDIT_KINDS = frozenset({"edit", "str_replace", "file_create", "replace_module", "write", "replace"})
+_EDIT_KINDS = frozenset({"edit", "str_replace", "file_create", "file_delete", "file_move", "replace_module", "write", "replace"})
 _CHECK_KINDS = frozenset({"test", "run_tests", "pytest", "check", "verification"})
 
 

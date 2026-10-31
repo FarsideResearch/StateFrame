@@ -1,0 +1,10 @@
+{
+ "model": "scripted",
+ "steps": [
+  {"tool": "file_move", "required": true, "arguments": {"source": "pkg/old.py", "destination": "pkg/new.py", "why": "Rename module"}},
+  {"tool": "str_replace", "required": true, "arguments": {"path": "pkg/consumer.py", "old_str": "from pkg.old import VALUE", "new_str": "from pkg.new import VALUE"}},
+  {"tool": "run_tests", "required": true, "arguments": {"target": "tests/test_consumer.py"}},
+  {"tool": "done", "required": true, "arguments": {"summary": "Renamed the module and updated its import."}}
+ ],
+ "tokenize": {"mode": "ok"}
+}

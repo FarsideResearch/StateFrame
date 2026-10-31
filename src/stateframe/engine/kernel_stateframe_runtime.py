@@ -549,7 +549,7 @@ def _lean_no_host_recovery_tools(runtime: object, tools: object) -> list[dict[st
         return current
     preferred_names = (
         "done", "run_tests", "edit", "str_replace", "read",
-        "grep", "list_files", "file_create", "read_check_receipt",
+        "grep", "list_files", "file_create", "file_delete", "file_move", "read_check_receipt",
         "where_defined", "who_calls", "references", "decide",
         "launch_job", "job_status", "job_output", "job_kill",
         "note_update", "note_retrieve", "recall_evidence", "recall",
@@ -11470,7 +11470,7 @@ class StateFrameRuntime:
 
     def completion_mutation_guard(self, tool: str, *, evidence: object = None) -> str | None:
         """Return typed feedback when a mutation arrives after accepted done."""
-        if tool not in {"edit", "str_replace", "file_create", "replace_module", "write", "replace"}:
+        if tool not in {"edit", "str_replace", "file_create", "file_delete", "file_move", "replace_module", "write", "replace"}:
             return None
         if getattr(self, "stateframe_completion_v2_mode", "off") == "on":
             authority = self._sync_completion_authority()
@@ -12701,7 +12701,7 @@ class StateFrameRuntime:
         if session is None:
             return None
         if str(name or "").strip().lower() in {
-                "edit", "str_replace", "file_create", "replace_module", "write", "replace"
+                "edit", "str_replace", "file_create", "file_delete", "file_move", "replace_module", "write", "replace"
         } and getattr(getattr(session, "phase", None), "value", "") == "locate":
             try:
                 from kernel_bounded_locate_code import hypothesis_from_edit_arguments
@@ -12723,6 +12723,12 @@ class StateFrameRuntime:
             raw_path = receipt.get("target_path")
             if isinstance(raw_path, str) and raw_path:
                 changed_paths.append(raw_path)
+            changed_files = receipt.get("changed_files")
+            if isinstance(changed_files, Sequence) and not isinstance(changed_files, (str, bytes)):
+                for item in changed_files:
+                    value = item.get("path") if isinstance(item, Mapping) else item
+                    if isinstance(value, str):
+                        changed_paths.append(value)
             action = getattr(self, "current_action", None)
             if not changed_paths and isinstance(action, Mapping):
                 arguments = action.get("arguments")
@@ -13705,7 +13711,10 @@ class StateFrameRuntime:
             self.journal.emit("ripple_preview_unavailable", payload_schema="stateframe-ripple-preview/1",
                               reason="text_mode_dispatch", advisory_only=True, dispatch=False)
         if engine is None or kind not in {
-                "edit", "str_replace", "file_create", "replace_module", "write", "replace"}:
+                "edit", "str_replace", "file_create", "file_delete", "file_move", "replace_module", "write", "replace"}:
+            return
+        if kind in {"file_delete", "file_move"}:
+            # A source-only overlay cannot represent a deletion or paired rename.
             return
         path_arg = arguments.get("path")
         if not isinstance(path_arg, str) or not path_arg:
@@ -13918,7 +13927,7 @@ class StateFrameRuntime:
 
     @_host_phase("pre_dispatch")
     def start_action(self, kind: str, arguments: dict, *, charge_dispatch: bool = True) -> str | None:
-        if kind in {"edit", "str_replace", "file_create", "replace_module", "write", "replace"}:
+        if kind in {"edit", "str_replace", "file_create", "file_delete", "file_move", "replace_module", "write", "replace"}:
             # Do this before any pre-dispatch binding read.  Non-mutating
             # actions deliberately retain the current revision cache.
             self._invalidate_binding_cache()
@@ -14213,7 +14222,7 @@ class StateFrameRuntime:
         if getattr(self, "stateframe_other_end_contract_mode", "off") != "on":
             return
         kind = str(receipt.get("kind", "")).lower()
-        if kind not in {"edit", "str_replace", "file_create", "replace_module", "write", "replace"}:
+        if kind not in {"edit", "str_replace", "file_create", "file_delete", "file_move", "replace_module", "write", "replace"}:
             return
         if str(receipt.get("result_class", "")).upper() != "APPLIED":
             return
@@ -15092,7 +15101,7 @@ class StateFrameRuntime:
         tool = str(record.get("tool", "")).strip().lower()
         result_value = str(record.get("result", record.get("result_class", ""))).strip().upper()
         product_progress = tool in {
-            "edit", "str_replace", "file_create", "replace_module", "write", "replace",
+            "edit", "str_replace", "file_create", "file_delete", "file_move", "replace_module", "write", "replace",
         } and result_value in {"APPLIED", "PASS", "SUCCESS", "OK"}
         gating_check_closed = tool in {
             "run_tests", "test", "pytest",

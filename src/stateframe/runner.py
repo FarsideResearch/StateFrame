@@ -984,18 +984,22 @@ def _stop_group(process: subprocess.Popen) -> None:
         pass
 
 
-def _artifact_digest(files: dict[str, bytes]) -> str | None:
+def _artifact_digest(files: dict[str, bytes | None]) -> str | None:
     """Use the engine's source-map hash, distinct from the host-check tree hash."""
-    from .engine.kernel_done_is_submit_authority import artifact_digest
+    from .engine.kernel_done_is_submit_authority import DoneCaptureError, artifact_digest
 
     try:
-        sources = {name: data.decode("utf-8") for name, data in files.items()}
+        sources = {name: data.decode("utf-8") if data is not None else None
+                   for name, data in files.items()}
     except UnicodeError:
         return None  # A binary partial capture cannot establish a textual DoneSeal.
-    return artifact_digest(sources)
+    try:
+        return artifact_digest(sources)
+    except DoneCaptureError:
+        return None
 
 
-def final_candidate(run: Path) -> dict[str, bytes] | None:
+def final_candidate(run: Path) -> dict[str, bytes | None] | None:
     """Export the immutable DoneSeal artifact; unsealed captures are partial only."""
     folder = run / "worker" / "candidates"
     captures = sorted(folder.glob("[0-9][0-9][0-9][0-9].json")) if folder.is_dir() else []
@@ -1018,13 +1022,20 @@ def final_candidate(run: Path) -> dict[str, bytes] | None:
                for index in range(1, len(path.relative_to(run).parts) + 1)):
             raise RunError("sealed candidate artifact contains a symlink")
         record = json.loads(path.read_text(encoding="utf-8"))
-        sources = record.get("sources") if isinstance(record, dict) else None
-        if (not isinstance(record, dict) or record.get("schema") != "stateframe-done-artifact/1"
-                or record.get("artifact_digest") != digest or not isinstance(sources, dict)
-                or not sources or not all(isinstance(k, str) and isinstance(v, str)
-                                          for k, v in sources.items())):
+        writes = record.get("writes") if isinstance(record, dict) else None
+        deletes = record.get("deletes") if isinstance(record, dict) else None
+        if (not isinstance(record, dict)
+                or set(record) != {"schema", "artifact_digest", "writes", "deletes"}
+                or record.get("schema") != "stateframe-done-artifact/2"
+                or record.get("artifact_digest") != digest or not isinstance(writes, dict)
+                or not isinstance(deletes, list) or not (writes or deletes)
+                or not all(isinstance(k, str) and isinstance(v, str)
+                           for k, v in writes.items())
+                or not all(isinstance(path, str) for path in deletes)
+                or deletes != sorted(set(deletes)) or set(writes) & set(deletes)):
             raise RunError("malformed sealed candidate artifact")
-        files = {name: source.encode("utf-8") for name, source in sources.items()}
+        files = {name: source.encode("utf-8") for name, source in writes.items()}
+        files.update({name: None for name in deletes})
         if _artifact_digest(files) != digest:
             raise RunError("candidate digest does not match submission seal; candidate remains partial")
         return files
@@ -1035,7 +1046,13 @@ def final_candidate(run: Path) -> dict[str, bytes] | None:
     if not isinstance(files, dict) or not all(isinstance(k, str) and isinstance(v, str)
                                              for k, v in files.items()):
         raise RunError("malformed candidate capture")
-    return {name: base64.b64decode(data, validate=True) for name, data in files.items()}
+    deletes = record.get("deleted_files", [])
+    if not isinstance(deletes, list) or not all(isinstance(path, str) for path in deletes):
+        raise RunError("malformed candidate capture deletions")
+    if set(files) & set(deletes):
+        raise RunError("candidate capture writes and deletes overlap")
+    return {**{name: base64.b64decode(data, validate=True) for name, data in files.items()},
+            **{name: None for name in deletes}}
 
 
 def _read_send_metrics(run: Path, sends: list[dict]) -> list[dict[str, int | None]]:

@@ -84,7 +84,7 @@ _LOW_RELEVANCE_TOOLS = frozenset({
     "help", "status", "job_status", "job_output", "job_kill", "abstain",
 })
 _CORE_TOOLS = frozenset({
-    "read", "grep", "edit", "str_replace", "file_create", "probe", "run_tests", "typed_test_writer", "authored_check", "localize",
+    "read", "grep", "edit", "str_replace", "file_create", "file_delete", "file_move", "probe", "run_tests", "typed_test_writer", "authored_check", "localize",
     "localization_frontier", "question_gate", "requirement_table", "done",
 })
 TRIM_ORDER = ("least_relevant_tools", "optional_sections", "defer")

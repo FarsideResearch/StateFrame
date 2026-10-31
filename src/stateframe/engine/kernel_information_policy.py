@@ -252,7 +252,7 @@ class InformationPolicy:
             return False
         if not words:
             return True
-        if words[0] in {"read", "edit", "str_replace", "file_create"}:
+        if words[0] in {"read", "edit", "str_replace", "file_create", "file_delete", "file_move"}:
             paths = words[1:2]
         elif words[0] == "test":
             paths = [word for word in words[1:] if not word.startswith("-")]
