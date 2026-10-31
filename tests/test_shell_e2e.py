@@ -128,14 +128,17 @@ def build_wheel(wheel_directory, config_settings=None, metadata_directory=None):
         "def test_value():\n    import shell_fixture\n    assert shell_fixture.VALUE == 42\n")
 
 
-def test_local_pip_install_is_available_to_engine_and_final_checks(tmp_path):
+def test_local_pip_install_is_available_to_engine_and_final_checks(tmp_path, clean_test_environment):
+    # A clean interpreter: the harness venv has StateFrame installed editable from outside the
+    # repository, which import authority correctly refuses to clone into a run environment.
+    python = clean_test_environment(tmp_path / "test-env")
     run, requests = run_script(tmp_path, [
         step("shell", command="pip install --no-index --no-build-isolation ./localpkg"),
         # The engine verifies automatically after the environment change; once green the menu
         # (correctly) no longer offers run_tests, so that step is optional here.
         {**step("run_tests", target="tests/test_value.py"), "required": False},
         step("done", summary="Installed the dependency and verified.")],
-        flags=("--shell-network", "full"), prepare=local_package)
+        flags=("--shell-network", "full", "--test-python", str(python)), prepare=local_package)
     assert "environment changed:" in requests
     assert "Successfully installed shell-fixture-1.0" in requests
     checks = [json.loads(zlib.decompress(path.read_bytes()))
