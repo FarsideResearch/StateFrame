@@ -87,7 +87,14 @@ def test_linux_builder_network_and_mount_contract(cap, monkeypatch, network):
     assert command[index - 1] == "--ro-bind"
     assert env == dict(cap.env)
     nested, _ = capability_command(["/bin/true"], cap, platform_backend="bwrap", shared_namespace=True)
-    assert "--unshare-pid" not in nested and "--unshare-all" not in nested
+    # DELIBERATE CHANGE (0.2.0, Linux procfs fix): nested commands used to share the supervisor's PID namespace
+    # with an empty tmpfs on /proc, which broke df, ps, free and mount. Each nested command now gets its own PID
+    # namespace and a fresh procfs of only its own processes; the supervisor still sees every descendant from the
+    # parent namespace, and escaped children die with the command's namespace (test_exec_session heartbeat test).
+    assert "--unshare-all" not in nested
+    assert "--unshare-pid" in nested
+    proc = nested.index("/proc")
+    assert nested[proc - 1] == "--proc", "nested /proc must be a real procfs, not a tmpfs"
     assert ("--unshare-net" in nested) is (network == "none")
     assert "--cap-drop" in nested
     assert ("--network-none" in nested) is (network == "none")
