@@ -54,6 +54,7 @@ def converse(request: dict) -> object:
     total = 0
     counter = 0
     descendants: dict[int, str] = {}
+    next_scan = 0.0
 
     def process_table() -> dict[int, tuple[int, str]]:
         try:
@@ -110,7 +111,7 @@ def converse(request: dict) -> object:
             raise ProtocolError("server exited before accepting a request") from error
 
     def receive(expected: int) -> dict:
-        nonlocal total
+        nonlocal total, next_scan
         while True:
             if b"\n" in buffer:
                 line, _, rest = buffer.partition(b"\n")
@@ -151,7 +152,10 @@ def converse(request: dict) -> object:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 raise TimeoutError("MCP server deadline exceeded")
-            record_descendants()
+            # Scanning spawns ps; bound it to a few times per second, not once per chunk.
+            if time.monotonic() >= next_scan:
+                record_descendants()
+                next_scan = time.monotonic() + .25
             if not selector.select(min(remaining, .25)):
                 continue
             chunk = os.read(process.stdout.fileno(), 65536)

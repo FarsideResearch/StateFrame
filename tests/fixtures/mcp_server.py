@@ -25,9 +25,10 @@ while line := sys.stdin.readline():
     request = json.loads(line)
     method = request.get("method")
     if method == "initialize":
-        if mode == "init_connect":
-            with socket.create_connection(("127.0.0.1", int(sys.argv[2])), timeout=2):
-                pass
+        if mode == "init_effect":
+            # Record each launch in the sandbox's scratch home, writable even during discovery.
+            with open(os.path.join(os.environ["HOME"], "init-effects"), "a", encoding="utf-8") as effects:
+                effects.write("launch\n")
         if mode == "version":
             version = request["params"]["clientInfo"]["version"]
             if version != sys.argv[2]:

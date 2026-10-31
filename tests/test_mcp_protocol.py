@@ -54,9 +54,19 @@ def test_driver_cleans_detached_or_malformed_peer(tmp_path, mode):
     pidfile = tmp_path / "pid"
     response = call(mode, timeout=.3, extra=(str(pidfile),))
     assert response["ok"] is False
-    pid = int(pidfile.read_text())
-    with pytest.raises(ProcessLookupError):
+    assert not alive(int(pidfile.read_text()))
+
+
+def alive(pid):
+    """True for a running process; a killed orphan left unreaped by a container init counts as dead."""
+    try:
         os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    stat = Path(f"/proc/{pid}/stat")
+    if stat.exists():
+        return stat.read_text().rsplit(")", 1)[1].split()[0] != "Z"
+    return True
 
 
 def test_driver_uses_product_version():

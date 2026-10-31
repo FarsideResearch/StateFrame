@@ -349,7 +349,7 @@
   "kernel_localization_spans.py": "3a398e45ba3dad66b1109c9be553cdd08090a1abacad458aaf7179be6e63219c",
   "kernel_localize.py": "4f7f3b4b73e52e0f137c3d191afede8ad2820d7cc1bffb3b72bdd9a650afd46b",
   "kernel_lossless_store_paging.py": "70e7b7f1ad0c6dcea88eeb27ccc7c3cac22b00f37b2e83779708e9b513ed7f2f",
-  "kernel_mcp_driver.py": "2523242e5dfcf255c84688423778c3d4ac1f78547db72d938d22b999aa0a63d5",
+  "kernel_mcp_driver.py": "bb4e53e199f9c045bf63589ab0b5b08abdfba257b4f7ea88d2d9aea89e751c92",
   "kernel_mcp_tools.py": "08c01a301c708ce7d30e30171de5f53c4ca35973a1fa1f9f7443302cca582c7c",
   "kernel_measurement.py": "1999bdf940ef71b0788ab462d94ad7b3377a6736ab5ce998f19f4d9fee6bc7bd",
   "kernel_mechanism_admission.py": "f8fcbf4afb8775a2cebadccbe43f337c6eddb8835145551b9ae59433b85beb0c",

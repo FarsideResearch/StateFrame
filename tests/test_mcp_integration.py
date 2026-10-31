@@ -130,28 +130,22 @@ def test_external_discovery_requires_resume_authorization_before_launch(tmp_path
     repo.mkdir()
     (repo / "sample.py").write_text("VALUE = 1\n")
     (repo / "test_sample.py").write_text("def test_sample():\n    assert True\n")
-    with socket.socket() as listener:
-        listener.bind(("127.0.0.1", 0))
-        listener.listen(4)
-        listener.settimeout(2)
-        mcp = config(tmp_path, "init_connect", argv_tail=(str(listener.getsockname()[1]),))
-        settings = ToolSettings(shell_network="loopback", mcp_files=({"path": str(mcp), "digest": "pending"},))
-        endpoint = Endpoint.from_args("http://127.0.0.1:8080/v1", "scripted", None)
-        run_dir, _, _ = prepare(RunOptions(repo=repo, task="inspect sample", endpoint=endpoint,
-                                          run_dir=tmp_path / "run", tool_settings=settings))
-        connection, _ = listener.accept()
-        connection.close()
-        with pytest.raises(ResumeRefused, match="--replay-external"):
-            resume_run(run_dir)
-        listener.settimeout(.1)
-        with pytest.raises(TimeoutError):
-            listener.accept()
-        listener.settimeout(5)
-        with pytest.raises(Exception) as failure:
-            resume_run(run_dir, replay_external=True)
-        assert not isinstance(failure.value, ResumeRefused)
-        connection, _ = listener.accept()
-        connection.close()
+    # The fixture records every initialize in the discovery scratch home, a side
+    # effect the sandbox permits, so the count proves whether a launch happened.
+    mcp = config(tmp_path, "init_effect")
+    settings = ToolSettings(shell_network="none", mcp_files=({"path": str(mcp), "digest": "pending"},))
+    endpoint = Endpoint.from_args("http://127.0.0.1:8080/v1", "scripted", None)
+    run_dir, _, _ = prepare(RunOptions(repo=repo, task="inspect sample", endpoint=endpoint,
+                                      run_dir=tmp_path / "run", tool_settings=settings))
+    effects = run_dir / "mcp-discovery-home" / "init-effects"
+    assert effects.read_text().count("launch") == 1
+    with pytest.raises(ResumeRefused, match="--replay-external"):
+        resume_run(run_dir)
+    assert effects.read_text().count("launch") == 1
+    with pytest.raises(Exception) as failure:
+        resume_run(run_dir, replay_external=True)
+    assert not isinstance(failure.value, ResumeRefused)
+    assert effects.read_text().count("launch") == 2
 
 
 def test_child_bind_refuses_external_discovery_before_launch(tmp_path):
