@@ -32,7 +32,8 @@ def test_e1_e2_read_only_smuggling_is_refused(tmp_path, command):
 def test_e8_protected_tests_restored_after_shell(tmp_path, command):
     case = run_case(tmp_path, "shell_policy.script.json",
                     substitutions={"COMMAND": command})
-    case.assert_reply("restored (not allowed): tests/test_app.py")
+    case.assert_reply("restored (not allowed):")
+    case.assert_reply("tests/test_app.py (protected test or inode alias)")
     original = (case.repo / "tests" / "test_app.py").read_bytes()
     assert (case.run_dir / "workspace" / "tests" / "test_app.py").read_bytes() == original
     assert not (case.run_dir / "workspace" / "tests" / "moved.py").exists()

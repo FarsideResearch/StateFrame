@@ -33,6 +33,11 @@ def load(name: str) -> dict[str, str]:
     if privileged:
         raise ValueError(f"{path.name}: privileged tool settings belong on the host CLI, not in profiles: "
                          + ", ".join(sorted(privileged)))
+    # The product requires sealed typed frames; lean builds an append-only
+    # transcript instead. Refuse before materialization, not at request 1.
+    if str(switches.get("STATEFRAME_LEAN", "off")).strip().lower() != "off":
+        raise ValueError("REFUSED LEAN_UNSUPPORTED: product runs require typed frames; "
+                         "set STATEFRAME_LEAN=off and use the composed loop")
     return {str(k): str(v) for k, v in switches.items()}
 
 

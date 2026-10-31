@@ -63,8 +63,8 @@ CASES = [
     ("network", "full", "network: exceeds --shell-network"),
     ("writes", "host", "writes: expected none or workspace"),
     ("replay", "automatic", "replay: expected local or external"),
-    ("timeout_seconds", 0, "timeout_seconds: expected number from 0 to 3600"),
-    ("timeout_seconds", 3601, "timeout_seconds: expected number from 0 to 3600"),
+    ("timeout_seconds", 0, "timeout_seconds: expected finite number greater than 0 and at most 600"),
+    ("timeout_seconds", 601, "timeout_seconds: expected finite number greater than 0 and at most 600"),
 ]
 
 
@@ -147,3 +147,10 @@ def test_bounded_public_regex_subset(expression):
 def test_regex_rejects_unbounded_or_ambiguous_work(expression):
     with pytest.raises(CustomToolError):
         _pattern(expression, "test")
+
+
+@pytest.mark.parametrize('timeout', [0.1, 600])
+def test_timeout_matches_execution_limit(tmp_path, timeout):
+    from kernel_exec_capability import ExecLimits
+    tools = load(tmp_path, [mutate('timeout_seconds', timeout)])
+    assert ExecLimits(wall_seconds=tools.tools[0].timeout_seconds).wall_seconds == timeout

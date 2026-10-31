@@ -11,7 +11,7 @@ from typing import Callable, Mapping
 from stateframe.workcopy import IGNORE_DIRS, _ignored
 
 _OID = re.compile(r"[0-9a-fA-F]{40,64}\Z")
-_REF = re.compile(r"(?:refs/)?[A-Za-z0-9_./-]+\Z")
+_REF = re.compile(r"(?:refs/)?[A-Za-z0-9_./-]+(?:[~^][0-9]*)*\Z")
 _MAX_OUTPUT = 64 * 1024
 
 
@@ -89,14 +89,46 @@ def _refs(root: Path) -> dict[str, str]:
     if refdir.is_dir():
         for path in refdir.rglob("*"):
             if path.is_file() and not path.is_symlink():
-                result[path.relative_to(root).as_posix()] = path.read_text().strip()
+                name = path.relative_to(root).as_posix()
+                _validate_ref(name)
+                result[name] = path.read_text().strip()
     packed = root / "packed-refs"
     if packed.is_file():
         for line in packed.read_text().splitlines():
             if line and line[0] not in "#^":
                 oid, name = line.split(" ", 1)
+                _validate_ref(name)
                 result.setdefault(name, oid)
     return result
+
+
+def _validate_ref(name: str) -> None:
+    parts = name.split("/")
+    if (not name.startswith("refs/") or len(parts) < 3
+            or any(not p or p.startswith(".") or p.endswith((".", ".lock")) for p in parts)
+            or ".." in name or "@{" in name
+            or any(ord(c) < 33 or ord(c) == 127 or c in "~^:?*[\\" for c in name)):
+        raise GitRequestError(f"invalid git ref name: {name!r}")
+
+
+def _write_ref(private: Path, name: str, value: str) -> None:
+    _validate_ref(name)
+    fd = os.open(private, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        for component in name.split("/")[:-1]:
+            try:
+                os.mkdir(component, mode=0o700, dir_fd=fd)
+            except FileExistsError:
+                pass
+            child = os.open(component, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+            os.close(fd)
+            fd = child
+        output = os.open(name.split("/")[-1], os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                         0o600, dir_fd=fd)
+        with os.fdopen(output, "w") as stream:
+            stream.write(value.lower() + "\n")
+    finally:
+        os.close(fd)
 
 
 def _resolve_head(head: str, refs: Mapping[str, str]) -> str:
@@ -148,9 +180,7 @@ class GitView:
         for name, value in refs.items():
             if not name.startswith("refs/") or not _OID.fullmatch(value):
                 continue
-            target = private / name
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_text(f"{value.lower()}\n")
+            _write_ref(private, name, value)
         (private / "config").write_text(
             "[core]\n\tbare = false\n\tfsmonitor = false\n\tpager = cat\n\thooksPath = empty-hooks\n"
             "[diff]\n\texternal =\n")
@@ -181,8 +211,8 @@ class GitView:
         if action not in {"status", "diff", "log", "show", "blame"}:
             raise GitRequestError(f"unsupported git action: {action}")
         allowed = {"status": {"against"}, "diff": {"against", "paths"},
-                   "log": {"max_count", "path", "since_rev"},
-                   "show": {"rev", "path"}, "blame": {"path", "start_line", "end_line"}}[action]
+                   "log": {"max_count", "path", "since_rev", "rev"},
+                   "show": {"rev", "path"}, "blame": {"path", "start_line", "end_line", "rev"}}[action]
         extra = set(params) - allowed
         if extra:
             raise GitRequestError(f"unsupported {action} parameters: {', '.join(sorted(extra))}")
@@ -207,12 +237,14 @@ class GitView:
             if type(count) is not int or not 1 <= count <= 50:
                 raise GitRequestError("max_count must be an integer from 1 to 50")
             rev = (_safe_rev(params["since_rev"]) + ".." + self.head_oid
-                   if "since_rev" in params else self.head_oid)
+                   if "since_rev" in params else _safe_rev(params.get("rev", self.head_oid)))
             path = params.get("path")
             return base + ["log", "--no-color", f"--max-count={count}", "--format=medium", rev,
                            "--", *([self._path(path)] if path is not None else self._scope())]
         if action == "show":
-            rev = _safe_rev(params.get("rev", self.head_oid))
+            # Git's commit peel rejects raw blob/tree IDs before rendering any
+            # bytes. Paths may only address an authorized commit tree.
+            rev = _safe_rev(params.get("rev", self.head_oid)) + "^{commit}"
             path = params.get("path")
             if path is not None:
                 return base + ["show", "--no-ext-diff", "--no-textconv", "--no-color",
@@ -227,7 +259,7 @@ class GitView:
             raise GitRequestError("blame requires a positive inclusive line range")
         line = ["-L", f"{start},{end}"] if start is not None else []
         return base + ["blame", *line,
-                       self.head_oid, "--", path]
+                       _safe_rev(params.get("rev", self.head_oid)), "--", path]
 
     def filter_output(self, action: str, text: str) -> str:
         if action == "status":
@@ -405,3 +437,36 @@ def handle_git_call(view: GitView | None, session_runner: Callable, arguments: M
         return f"git request refused: {exc}", {"ok": False, "refusal": "invalid_request", "detail": str(exc)}
     except GitObjectError as exc:
         return f"git object unavailable: {exc}", {"ok": False, "refusal": "object_unavailable", "detail": str(exc)}
+
+
+def legacy_git_query(repository: Path, args: list[str], *, timeout: float = 10) -> str | None:
+    """Repo-intel queries use the same private config and offline process boundary.
+
+    Remote-config cache keys deliberately become unavailable: a sanitized view
+    has no remotes. Optional indexing must not consult executable repo config.
+    """
+    import shutil
+    import tempfile
+    from kernel_safe_probe import run_probe
+
+    repository = Path(repository).resolve()
+    while not (repository / ".git").exists():
+        if repository == repository.parent:
+            return None
+        repository = repository.parent
+    executable = shutil.which("git", path=os.defpath)
+    if executable is None:
+        raise GitObjectError("git executable unavailable")
+    with tempfile.TemporaryDirectory(prefix="stateframe-git-intel-") as directory:
+        view = GitView.build(repository, Path(directory), secret_filter=excluded_path)
+        if view is None:
+            return None
+        view.workspace = repository
+        result = run_probe(
+            [executable, "--no-pager", *args], repository, timeout=timeout,
+            env=view.env(), read_roots=(view.git_dir, *view.object_dirs))
+        if result.timed_out or result.exit_code != 0:
+            return None
+        if result.output_truncated:
+            raise GitObjectError("repo-intel git output exceeded its bounded collector")
+        return result.output.decode("utf-8", "replace")

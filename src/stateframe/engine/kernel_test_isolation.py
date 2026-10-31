@@ -15,11 +15,16 @@ import json
 import os
 from pathlib import Path
 import platform
+import re
 import shutil
 import site
+import subprocess
 import sys
 
-from kernel_test_python import test_python
+if __package__:
+    from .kernel_test_python import test_python
+else:
+    from kernel_test_python import test_python
 
 
 # Host task policy is read LAZILY at sandbox-build time, never frozen at import: a module imported
@@ -168,6 +173,37 @@ def isolated_command(command: list[str], root: Path, env: dict[str, str], *,
     return arguments, clean
 
 
+def _darwin_user_temp_dir() -> Path:
+    """Some Python builds omit Darwin's confstr names; getconf exposes them."""
+    try:
+        directory = os.confstr("CS_DARWIN_USER_TEMP_DIR")
+    except ValueError:
+        try:
+            result = subprocess.run(
+                ["/usr/bin/getconf", "DARWIN_USER_TEMP_DIR"], check=True,
+                capture_output=True, text=True, timeout=5, cwd="/",
+                env={"PATH": os.defpath, "LANG": "C", "LC_ALL": "C"})
+        except (OSError, subprocess.SubprocessError) as error:
+            raise RuntimeError("cannot determine Darwin user temporary directory via getconf") from error
+        directory = result.stdout.strip()
+    if not directory or not Path(directory).is_absolute():
+        raise RuntimeError("cannot determine absolute Darwin user temporary directory")
+    return Path(directory)
+
+
+def _darwin_xcrun_filter() -> str:
+    """Developer shims use confstr's cache directory even with a private TMPDIR."""
+    if sys.platform != "darwin":
+        return ""
+    directory = _darwin_user_temp_dir()
+    # Anchor both ends and exclude slashes: never grant the directory or children
+    # of a cache-named directory. Admit the canonical /private path and its alias.
+    paths = {directory, directory.resolve(strict=True)}
+    return " ".join('(regex #' + json.dumps("^" + re.escape(str(path)) +
+                                          "/xcrun_db-[^/]+$") + ')'
+                    for path in sorted(paths))
+
+
 def capability_command(command, cap, *, platform_backend=None, shared_namespace=False):
     """Build a shell/job boundary from explicit authority, never host test policy.
 
@@ -187,14 +223,15 @@ def capability_command(command, cap, *, platform_backend=None, shared_namespace=
             Path(__file__).with_name("sf_launch.py").resolve()}
     writes = set(cap.write_roots) | ({cap.workspace} if cap.workspace_writable else set())
     if selected == "sandbox-exec":
+        cache_filter = _darwin_xcrun_filter()
         def filters(paths):
             return " ".join(f"(subpath {json.dumps(str(p))})" for p in sorted(paths))
         ancestors = {p for root in reads for p in root.parents}
         metadata = " ".join(f"(literal {json.dumps(str(p))})" for p in sorted(ancestors))
         devices = '(literal "/dev/null") (literal "/dev/zero") (literal "/dev/random") (literal "/dev/urandom") (literal "/dev/fd")'
         profile = ("(version 1) (allow default) "
-                   f"(deny file-read* (require-not (require-any {filters(reads)} {metadata} {devices}))) "
-                   f"(deny file-write* (require-not (require-any {filters(writes)} (literal \"/dev/null\")))) ")
+                   f"(deny file-read* (require-not (require-any {filters(reads)} {metadata} {devices} {cache_filter}))) "
+                   f"(deny file-write* (require-not (require-any {filters(writes)} {cache_filter} (literal \"/dev/null\")))) ")
         if cap.network != "full":
             profile += "(deny network*) "
         if cap.network == "loopback":

@@ -1,5 +1,10 @@
 from dataclasses import replace
+import json
+import re
+import subprocess
 import sys
+from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -148,3 +153,83 @@ def test_changed_symlink_target_cannot_expand_authority(cap, tmp_path):
     link.symlink_to(secret)
     with pytest.raises(ValueError, match="lacks explicit authority"):
         capability_from_dict(authority.as_dict())
+
+
+@pytest.mark.skipif(sys.platform != 'darwin', reason='macOS runtime authority')
+def test_macos_developer_aliases_and_homebrew_runtime_roots(cap):
+    from pathlib import Path
+    from kernel_exec_capability import _macos_developer_roots
+    developer = Path('/var/select/developer_dir')
+    if developer.is_symlink():
+        assert developer in _macos_developer_roots()
+        assert developer.resolve() in _macos_developer_roots()
+        assert developer in cap.read_roots
+    prefix = Path('/opt/homebrew')
+    if (prefix / 'Cellar').is_dir():
+        assert prefix / 'Cellar' in cap.read_roots
+        assert prefix / 'var' not in cap.read_roots
+        assert prefix not in cap.read_roots
+
+
+def test_darwin_cache_filter_only_matches_cache_basename(cap, tmp_path, monkeypatch):
+    import kernel_test_isolation as isolation
+    directory = tmp_path / 'temp.[literal]'
+    directory.mkdir()
+    monkeypatch.setattr(isolation.sys, 'platform', 'darwin')
+    monkeypatch.setattr(isolation.os, 'confstr', lambda key: str(directory) + '/')
+    monkeypatch.setattr(isolation.shutil, 'which', lambda name: '/usr/bin/' + name)
+    cache_filter = isolation._darwin_xcrun_filter()
+    encoded = re.findall(r'\(regex #("(?:[^"\\]|\\.)*")\)', cache_filter)
+    patterns = [json.loads(value) for value in encoded]
+    assert patterns
+    assert any(re.fullmatch(pattern, str(directory / 'xcrun_db-Ab123')) for pattern in patterns)
+    for path in (directory, directory / 'unrelated', directory / 'xcrun_db-',
+                 directory / 'xcrun_db-dir/child', directory / 'prefix-xcrun_db-a',
+                 directory.parent / 'other/xcrun_db-a'):
+        assert not any(re.fullmatch(pattern, str(path)) for pattern in patterns)
+    command, _ = capability_command(['/bin/true'], cap, platform_backend='sandbox-exec')
+    assert command[2].count(cache_filter) == 2
+    assert f'(subpath {json.dumps(str(directory))})' not in command[2]
+
+
+@pytest.mark.parametrize('directory', [None, '', 'relative/path'])
+def test_darwin_cache_unknown_directory_fails_closed(monkeypatch, directory):
+    import kernel_test_isolation as isolation
+    monkeypatch.setattr(isolation.sys, 'platform', 'darwin')
+    monkeypatch.setattr(isolation.os, 'confstr', lambda key: directory)
+    with pytest.raises(RuntimeError, match='Darwin user temporary directory'):
+        isolation._darwin_xcrun_filter()
+
+
+@pytest.mark.parametrize('failure', [False, True])
+def test_darwin_confstr_name_falls_back_to_bounded_getconf(tmp_path, monkeypatch, failure):
+    import kernel_test_isolation as isolation
+    def unsupported(key):
+        raise ValueError('unrecognized configuration name')
+    def getconf(argv, **kwargs):
+        assert argv == ['/usr/bin/getconf', 'DARWIN_USER_TEMP_DIR']
+        assert kwargs['timeout'] == 5 and kwargs['check']
+        assert kwargs['cwd'] == '/'
+        assert set(kwargs['env']) == {'PATH', 'LANG', 'LC_ALL'}
+        if failure:
+            raise subprocess.CalledProcessError(1, argv)
+        return SimpleNamespace(stdout=str(tmp_path) + '/\n')
+    monkeypatch.setattr(isolation.os, 'confstr', unsupported)
+    monkeypatch.setattr(isolation.subprocess, 'run', getconf)
+    if failure:
+        with pytest.raises(RuntimeError, match='via getconf'):
+            isolation._darwin_user_temp_dir()
+    else:
+        assert isolation._darwin_user_temp_dir() == tmp_path
+
+
+@pytest.mark.skipif(sys.platform != 'darwin', reason='macOS system Git config')
+def test_system_git_config_readonly_or_disabled_when_absent(cap):
+    config = Path('/etc/gitconfig')
+    if config.is_file():
+        assert config.resolve() in cap.read_roots
+        assert 'GIT_CONFIG_NOSYSTEM' not in cap.env
+    else:
+        assert cap.env['GIT_CONFIG_NOSYSTEM'] == '1'
+    assert config.parent not in cap.read_roots
+    assert not any(config.resolve().is_relative_to(root) for root in cap.write_roots)

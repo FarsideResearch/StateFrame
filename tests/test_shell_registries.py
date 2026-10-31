@@ -58,3 +58,30 @@ def test_shell_module_is_release_declared_and_hashed():
     assert source.name in {p.name for p in _declared_python_files(engine)}
     manifest = json.loads((engine / "release-manifest.json").read_text())
     assert manifest["files"][source.name] == hashlib.sha256(source.read_bytes()).hexdigest()
+
+
+def test_agent_observation_registries_do_not_grant_check_or_edit_credit():
+    from kernel_agent_schemas import OBSERVATION_NAMES, BUILTIN_SCHEMAS
+    from kernel_continuation_evidence import has_execution_receipt_contract
+    for name in OBSERVATION_NAMES:
+        assert name in TOOL_SPECS
+        assert has_execution_receipt_contract(name)
+        assert name in PLAIN_TOOL_NAMES and name in _KNOWN_TOOL_NAMES
+        assert name in EFFECT_TOOLS
+        assert name not in _EDIT_TOOLS | _CHECK_TOOLS | _PRODUCT_EDIT_TOOLS
+    assert {s["function"]["name"] for s in BUILTIN_SCHEMAS} == OBSERVATION_NAMES
+
+
+def test_per_run_registration_menu_and_admission(host):
+    from kernel_agent_tools import project_menu
+    from kernel_tool_surface import dispatch_admissible
+    from kernel_frame_budget import compact_tool_surface
+    hub, _, _ = host
+    hub.shell.execute({"command": "echo ready", "background": True}, "launch")
+    for gear in ("g0", "g1", "g2", "g3"):
+        selected = compact_tool_surface(project_menu([]), gear, truth={"green": True})
+        names = {s["function"]["name"] for s in selected}
+        assert {"job_wait", "job_output", "job_stop", "web_fetch"} <= names
+        assert all(dispatch_admissible(name) for name in names)
+
+from test_agent_tools import host  # noqa: E402,F401

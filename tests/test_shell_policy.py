@@ -73,7 +73,8 @@ def test_normalization_preserves_meaning_and_bounds_utf8():
     assert len(head.encode()) <= 6144 and len(tail.encode()) <= 6144
     assert "7712 bytes omitted" in output
     assert normalize_output(b"\0", total_bytes=1000) == "[binary output, 1000 bytes]"
-    assert "�" in normalize_output(b"invalid \xff")
+    assert normalize_output(b"invalid \xff") == "[binary output, 9 bytes]"
+    assert normalize_output(b"\xff\xfe") == "[binary output, 2 bytes]"
     assert normalize_output(b"abcdef", total_bytes=100) == "abc\n[... 94 bytes omitted ...]\ndef"
 
 

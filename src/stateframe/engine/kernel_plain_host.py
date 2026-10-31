@@ -20,7 +20,6 @@ import json
 import os
 from pathlib import Path
 import shlex
-import subprocess
 import sys
 import tempfile
 import time
@@ -116,6 +115,8 @@ class PlainHost:
         self._tool_call_id = call_id
 
     def _shell(self, args: dict) -> str:
+        if args.get("background"):
+            return "REFUSED PLAIN_UNSUPPORTED: background jobs require the composed or lean loop"
         from kernel_shell_tool import service
         shell = service()
         if shell is None or shell.settings.shell == "off":
@@ -166,13 +167,13 @@ class PlainHost:
         target = self.authority.resolve(raw)
         arg = str(target) if str(raw).startswith("/") else (target.relative_to(self.root).as_posix()
                                                           if target != self.root else ".")
-        try:
-            p = subprocess.run(["grep", "-rnE", "--exclude-dir=__pycache__", "--exclude-dir=node_modules",
-                                a["pattern"], arg], cwd=self.root, capture_output=True, text=True,
-                               errors="replace", timeout=GREP_TIMEOUT_S)
-            return self.alias(f"exit={p.returncode}\n{p.stdout}{p.stderr}")
-        except subprocess.TimeoutExpired:
+        from kernel_safe_probe import run_probe
+        process = run_probe(["/usr/bin/grep", "-rnE", "--exclude-dir=__pycache__",
+                             "--exclude-dir=node_modules", "--", a["pattern"], arg],
+                            self.root, timeout=GREP_TIMEOUT_S)
+        if process.timed_out:
             return f"TIMEOUT after {GREP_TIMEOUT_S}s"
+        return self.alias(f"exit={process.exit_code}\n" + process.output.decode("utf-8", "replace"))
 
     def _str_replace(self, a: dict) -> str:
         scope, path, relative = self.authority.classify(a["path"])
@@ -590,6 +591,10 @@ def run_plain(row: Mapping[str, object], output: Path, *,
               before_request: Callable[[dict], None] | None = None,
               environ: Mapping[str, str] | None = None) -> dict[str, object]:
     """One plain episode inside ``output`` (the worker directory); returns the outcome mapping."""
+    from kernel_tool_settings import load_tool_settings, ToolSettingsError
+    tool_settings = load_tool_settings()
+    if tool_settings is not None and (tool_settings.git_tool or tool_settings.web or tool_settings.tools_files):
+        raise ToolSettingsError("plain loop does not support git, web or custom tools; use --git-tool off, --web off and no --tools")
     env = dict(os.environ if environ is None else environ)
     limits = limits_from_env(env)
     settings = HookSettings.from_env(env)

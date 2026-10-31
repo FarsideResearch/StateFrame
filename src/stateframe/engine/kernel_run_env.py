@@ -7,8 +7,8 @@ import json
 import os
 import re
 import stat
-import subprocess
-import sys
+import shutil
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, Mapping
@@ -28,17 +28,25 @@ class RunEnv:
     external_import_roots: tuple[Path, ...] = ()
 
 
-def _run(argv: list[str], *, env: Mapping[str, str] | None = None) -> str:
+def _run(argv: list[str], *, workspace: Path, destination: Path,
+         env: Mapping[str, str] | None = None, read_roots: tuple[Path, ...] = ()) -> str:
+    if __package__:
+        from .kernel_safe_probe import run_probe
+        from .kernel_exec_session import ExecSessionError
+    else:
+        from kernel_safe_probe import run_probe
+        from kernel_exec_session import ExecSessionError
     try:
-        result = subprocess.run(argv, capture_output=True, text=True, check=False,
-                                timeout=120, env=dict(env) if env is not None else None)
-    except (OSError, subprocess.TimeoutExpired) as error:
+        with tempfile.TemporaryDirectory(prefix="stateframe-provision-") as directory:
+            result = run_probe(argv, Path(directory), timeout=120, env=env,
+                               write_roots=(destination,), read_roots=read_roots)
+    except (OSError, ExecSessionError) as error:
         raise RunEnvError(f"run environment command failed: {argv[0]}: {error}") from error
-    if result.returncode:
-        detail = (result.stderr or result.stdout).strip()[-1000:]
-        raise RunEnvError(f"run environment command failed ({result.returncode}): "
-                          f"{argv[0]}: {detail}")
-    return result.stdout.strip()
+    if result.timed_out or result.exit_code or result.output_truncated:
+        detail = result.output.decode("utf-8", "replace").strip()[-1000:]
+        raise RunEnvError(f"run environment command failed ({result.exit_code}, "
+                          f"timed_out={result.timed_out}, truncated={result.output_truncated}): {argv[0]}: {detail}")
+    return result.output.decode("utf-8", "strict").strip()
 
 
 def _replace_root(data: bytes, old: Path, new: Path) -> bytes:
@@ -76,10 +84,12 @@ def _external_root(value: str, source_repo: Path | None, source_env: Path) -> Pa
     path = Path(value).resolve()
     if path.is_relative_to(source_env) or (source_repo is not None and path.is_relative_to(source_repo)):
         return None
+    if path == Path.home() or path in Path.home().parents:
+        raise RunEnvError("import metadata cannot grant the home directory or its ancestors")
     if path.is_dir():
         return path
     if path.is_file():
-        return path.parent
+        return path
     return None
 
 
@@ -239,22 +249,6 @@ def _check_clone_paths(source: Path) -> None:
                     raise RunEnvError(f"executable .pth cannot be safely cloned: {path.name}")
 
 
-def _import_probe(python: Path) -> str:
-    code = (
-        "import importlib.util, importlib.metadata as m, json, re\n"
-        "c = []\n"
-        "for d in m.distributions():\n"
-        "    name = d.metadata.get('Name', '')\n"
-        "    c.extend((name, x.strip()) for x in (d.read_text('top_level.txt') or '').splitlines())\n"
-        "    c.append((name, name.replace('-', '_')))\n"
-        "c.sort(key=lambda x: (x[0].lower() in ('pip', 'setuptools', 'wheel'), x))\n"
-        "ok = next((module for _, module in c if re.fullmatch(r'[A-Za-z_][A-Za-z_0-9]*', module) "
-        "and importlib.util.find_spec(module) is not None), None)\n"
-        "print(json.dumps(ok))\n"
-    )
-    return _run([str(python), "-c", code])
-
-
 def create_run_env(run_dir: Path, test_python: Path, *, source_repo: Path | None = None) -> RunEnv:
     root = Path(run_dir).absolute() / "env"
     interpreter = Path(test_python).absolute()
@@ -268,26 +262,22 @@ def create_run_env(run_dir: Path, test_python: Path, *, source_repo: Path | None
     if clone:
         assert source is not None
         _check_clone_paths(source)
-        if sys.platform == "darwin":
-            command = ["cp", "-a", "-c", str(source), str(root)]
-        elif sys.platform.startswith("linux"):
-            command = ["cp", "-a", "--reflink=auto", str(source), str(root)]
-        else:
-            raise RunEnvError(f"unsupported run environment platform: {sys.platform}")
-        _run(command)
+        # Copy links as links; no source interpreter or startup hook is run.
+        shutil.copytree(source, root, symlinks=True)
         external_roots = _relocate(source, root, source_repo, workspace)
         kind: Literal["clone", "system-site"] = "clone"
     else:
-        _run([str(interpreter), "-m", "venv", "--system-site-packages", str(root)])
+        root.mkdir()
+        _run([str(interpreter), "-I", "-S", "-m", "venv", "--system-site-packages", str(root)],
+             workspace=root, destination=root)
         kind = "system-site"
         external_roots = ()
     bin_dir = root / "bin"
     python = bin_dir / "python"
-    environment = dict(os.environ)
     cache = root / "cache"
     overrides = {
         "VIRTUAL_ENV": str(root),
-        "PATH": str(bin_dir) + os.pathsep + environment.get("PATH", ""),
+        "PATH": str(bin_dir) + os.pathsep + os.defpath,
         "PIP_CACHE_DIR": str(cache / "pip"),
         "npm_config_cache": str(cache / "npm"),
         "CARGO_HOME": str(cache / "cargo"),
@@ -295,19 +285,18 @@ def create_run_env(run_dir: Path, test_python: Path, *, source_repo: Path | None
         "GOMODCACHE": str(cache / "go" / "pkg" / "mod"),
         "PYTHONDONTWRITEBYTECODE": "1",
     }
-    environment.update(overrides)
     run_env = RunEnv(root, python, bin_dir, overrides, kind, external_roots)
-    _run([str(python), "-m", "pip", "--version"], env=environment)
-    if clone:
-        package = json.loads(_import_probe(interpreter))
-        if package is None:
-            raise RunEnvError(f"source environment has no importable installed package: {source}")
-        code = "import importlib,sys; importlib.import_module(sys.argv[1])"
-        _run([str(python), "-c", code, package], env=environment)
-    # Pin site directories while the host-created interpreter is still trusted.
-    sites = json.loads(_run([str(python), "-c",
-                             "import json,site; print(json.dumps(site.getsitepackages()))"]))
-    (root.parent / "env-sites.json").write_text(json.dumps(sites))
+    _run([str(python), "-I", "-B", "-m", "pip", "--version"], workspace=root,
+         destination=root, env=overrides, read_roots=external_roots)
+    # Site roots are host-derived metadata, never paths printed by package code.
+    sites = {str(path.resolve()) for path in root.glob("lib/python*/site-packages")}
+    config = dict(line.split("=", 1) for line in (root / "pyvenv.cfg").read_text().splitlines()
+                  if "=" in line)
+    config = {key.strip(): value.strip() for key, value in config.items()}
+    if config.get("include-system-site-packages", "false").lower() == "true":
+        prefix = interpreter.resolve(strict=True).parent.parent
+        sites.update(str(path.resolve()) for path in prefix.glob("lib/python*/site-packages"))
+    (root.parent / "env-sites.json").write_text(json.dumps(sorted(sites)))
     return run_env
 
 

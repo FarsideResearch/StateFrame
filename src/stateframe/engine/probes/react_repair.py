@@ -953,6 +953,10 @@ def _is_product_path(relative: str, row: Mapping[str, object]) -> bool:
     if (parts[-1].startswith("test_") or parts[-1].endswith("_test.py")
             or parts[-1] == "conftest.py"):
         return False
+    # Ordinary unscoped user repositories admit new product roots as well as
+    # files present at startup. Exclusions and test guards above still apply.
+    if row.get("tier") == "USER-REPO" and row.get("scoped_edits") is False:
+        return True
     return any(path == root or path.startswith(root + "/") for root in _product_roots(row))
 
 
@@ -2437,6 +2441,8 @@ _PROBE_TOOL = {"type": "function", "function": {
         "required": ["obligation", "code"]}}}
 
 TOOLS.append(SHELL_SCHEMA)
+from kernel_agent_schemas import BUILTIN_SCHEMAS
+TOOLS.extend(BUILTIN_SCHEMAS)
 
 # Tool calls accept an optional `why`: one declared line
 # of intent per action. The model narrates its plan as it works (a commitment device that
@@ -2528,6 +2534,8 @@ def _tools_for_probe_modes(*, probe_gate_on: bool,
     shell = shell_service()
     base_tools = [tool for tool in TOOLS if tool["function"]["name"] != "shell"
                   or (shell is not None and shell.settings.shell != "off")]
+    from kernel_agent_tools import project_menu
+    base_tools = project_menu(base_tools)
     boundary_aliases = os.environ.get("STATEFRAME_BOUNDARY_CHECKS", "off").lower() == "on"
     probe_modes = ["python"]
     if not observation_probe_on:
@@ -6171,9 +6179,13 @@ def work(d, *, resume=None):
             | {str(p) for p in root.rglob("conftest.py")}
         from kernel_shell_tool import service as shell_service
         _shell = shell_service()
-        if _shell is not None and _shell.settings.shell != "off":
+        if _shell is not None:
             _shell.bind(root, d, baseline_tests)
             os.environ["REACT_ENVIRONMENT_REVISION"] = _shell.identity()
+        from kernel_agent_tools import service as agent_tools_service
+        _agent_tools = agent_tools_service()
+        if _agent_tools is not None:
+            _agent_tools.bind()
         created_this_run: set = set()
         action_anchor = len(msgs)     # conversation index just after the last real ACTION
         last_surgery_step = -99       # cooldown so back-to-back surgeries cannot thrash
@@ -8094,10 +8106,25 @@ def work(d, *, resume=None):
                                                            "name": _name,
                                                            "arguments": _fn.get("arguments")
                                                            or "{}"}}]})
+                        if _agent_tools is not None and _name == "git" and not _agent_tools.offered("git"):
+                            _obs = "REFUSED NOT_A_GIT_REPO: source is not a Git repository or Git is disabled"
+                            bolt.receipt("git", "git", "unavailable", "REFUSED", _obs)
+                            measurement.observe("git", _obs)
+                            msgs.append(_tool_reply_for_call(msgs, tool_call_id, _obs))
+                            continue
                         if _name == "shell" and (_shell is None or _shell.settings.shell == "off"):
                             _obs = "REFUSED SHELL_OFF: shell is disabled by --shell off"
                             bolt.receipt("shell", "shell", "off", "REFUSED", _obs)
                             measurement.observe("shell", _obs)
+                            msgs.append(_tool_reply_for_call(msgs, tool_call_id, _obs))
+                            continue
+                        if (_schema_errors and _agent_tools is not None and _name in _agent_tools.names):
+                            _code = ("BAD_ARGUMENTS" if _name in _agent_tools.custom else
+                                     "BAD_CONDITION" if _name.startswith("job_") else
+                                     "BAD_ARGUMENT" if _name == "git" else "WEB_HTTP_ERROR")
+                            _obs = f"REFUSED {_code}: " + "; ".join(_schema_errors[:3])
+                            bolt.receipt(_name, _name, "arguments", "REFUSED", _obs)
+                            measurement.observe(_name, _obs)
                             msgs.append(_tool_reply_for_call(msgs, tool_call_id, _obs))
                             continue
                         _active_menu_capture = getattr(measurement, "_active_capture", None)
@@ -8406,16 +8433,17 @@ def work(d, *, resume=None):
                             line = "edit " + str(_args.get("path") or "")
                             tool_edit_src = str(_args.get("function_source") or "")
                             tool_target_ref = _args.get("target_ref")
-                        elif _name == "shell":
+                        elif _name == "shell" or (_agent_tools is not None and _name in _agent_tools.names):
                             from kernel_shell_tool import ShellCleanupFailed, ShellExecutionFailed, publish_effects
-                            if _shell is None or _shell.settings.shell == "off":
+                            if _name == "shell" and (_shell is None or _shell.settings.shell == "off"):
                                 _obs = "REFUSED SHELL_OFF: shell is disabled by --shell off"
                                 bolt.receipt("shell", "shell", "off", "REFUSED", _obs)
                             else:
-                                _reply = _shell.execute(_args, tool_call_id)
+                                _reply = (_shell.execute(_args, tool_call_id) if _name == "shell" else
+                                          _agent_tools.execute(_name, _args, tool_call_id))
                                 _obs = _reply.observation
                                 try:
-                                    _rebound = publish_effects(_reply, measurement, bolt, created_this_run)
+                                    _rebound = publish_effects(_reply, measurement, bolt, created_this_run, name=_name)
                                 except Exception as _error:
                                     raise ShellExecutionFailed(
                                         f"shell receipt publication failed: {type(_error).__name__}: {_error}") from _error
@@ -8427,9 +8455,9 @@ def work(d, *, resume=None):
                                     if first_edit_step is None:
                                         first_edit_step = step
                             msgs.append(_tool_reply_for_call(msgs, tool_call_id, _obs))
-                            measurement.observe("shell", _obs)
-                            _edit_nturn_after_action("shell", _obs, step, model_action_args=_args)
-                            if _shell is not None and _shell.settings.shell != "off" and _reply.fatal:
+                            measurement.observe(_name, _obs)
+                            _edit_nturn_after_action(_name, _obs, step, model_action_args=_args)
+                            if _shell is not None and _reply.fatal:
                                 raise ShellCleanupFailed(_obs)
                             continue
                         elif _name in {"file_delete", "file_move"}:
@@ -8474,7 +8502,7 @@ def work(d, *, resume=None):
                                 edits += 1
                                 _result = "APPLIED"
                             except FileOperationRefused as _error:
-                                _obs = f"{_name} REFUSED: {_error}"
+                                _obs = _error.reply()
                                 _result = "REFUSED"
                             except OSError as _error:
                                 _obs = f"{_name} FAILED: {type(_error).__name__}: {_error}"
@@ -9851,6 +9879,10 @@ def work(d, *, resume=None):
                         break
                     continue
             if line.startswith("done"):
+                _jobs_stopped = (_agent_tools.stop_jobs(str(tool_call_id or f"done-{step}"))
+                                 if _agent_tools is not None else "")
+                if _jobs_stopped:
+                    measurement.observe("job_stop", _jobs_stopped)
                 from kernel_done_is_submit_authority import (
                     enabled as done_submit_enabled,
                     ownerless_early_done_refusal,
@@ -9865,7 +9897,7 @@ def work(d, *, resume=None):
                         ),
                     )
                     if refusal is not None:
-                        observation = str(refusal["detail"])
+                        observation = str(refusal["detail"]) + ("\n" + _jobs_stopped if _jobs_stopped else "")
                         bolt.receipt(
                             "done", line, "current candidate", "NEEDS_WORK",
                             detail=observation,
@@ -9882,7 +9914,7 @@ def work(d, *, resume=None):
                         "done", line, "current candidate",
                         "SUBMIT_PENDING", detail="model done routed to host artifact capture",
                     )
-                    observation = "Submission requested; capturing the current candidate."
+                    observation = "Submission requested; capturing the current candidate." + ("\n" + _jobs_stopped if _jobs_stopped else "")
                     measurement.observe(line, observation)
                     msgs.append(_tool_reply_for_call(msgs, tool_call_id, observation, no_id_role="user"))
                     break
@@ -10475,6 +10507,8 @@ def work(d, *, resume=None):
                         _unresolved_questions)
                 if _decisive_factor_advisory:
                     _done_receipt_detail += "\n" + _decisive_factor_advisory[:360]
+                if _jobs_stopped:
+                    _done_receipt_detail += "\n" + _jobs_stopped
                 bolt.receipt("done", bolt.last_done_summary[:100] or "done",
                              bolt.last_done_summary,
                              "ACCEPTED" if ok_finish else "CHALLENGED",
@@ -10493,6 +10527,8 @@ def work(d, *, resume=None):
                         before=_done_snapshot, after=_done_snapshot,
                         selectors=tuple(getattr(bolt, "f2p_ids", ())),
                         failure_tail=why if not ok_finish else "")
+                if _jobs_stopped:
+                    why = (why + "\n" if why else "") + _jobs_stopped
                 if not ok_finish:
                     measurement.observe("done", why)
                     if (getattr(measurement, "portfolio", None) is not None

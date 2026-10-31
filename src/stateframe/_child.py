@@ -771,6 +771,9 @@ def main(argv: list[str]) -> int:
     try:
         if settings is not None:
             configure_shell(run, settings, spec, session)
+            from kernel_shell_tool import service as shell_service
+            from kernel_agent_tools import configure as configure_agent_tools
+            configure_agent_tools(shell_service(), custom)
         from probes import react_repair as rr
         from kernel_protocol_spec import publish_public_spec
 

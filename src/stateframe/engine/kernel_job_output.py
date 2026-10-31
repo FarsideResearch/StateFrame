@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import codecs
 import os
+import stat
 from pathlib import Path
 
 
@@ -45,6 +46,8 @@ class JobOutputCollector:
         self._finished = False
         self._sealed = False
         self._file = self.path.open("xb", buffering=0)
+        info = os.fstat(self._file.fileno())
+        self._identity = (info.st_dev, info.st_ino)
 
     def watch(self, text: str) -> LiteralMatcher:
         if len(self._matchers) >= 16:
@@ -108,7 +111,20 @@ class JobOutputCollector:
     def snapshot(self) -> bytes:
         if not self._sealed:
             return bytes(self._ring)
-        data = self.path.read_bytes()
+        fd = os.open(self.path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        try:
+            info = os.fstat(fd)
+            expected = min(self.total_bytes, self.capacity)
+            if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1
+                    or (info.st_dev, info.st_ino) != self._identity
+                    or info.st_size != expected):
+                raise ValueError("job output spool identity or size changed")
+            with os.fdopen(fd, "rb", closefd=False) as stream:
+                data = stream.read(self.capacity + 1)
+            if len(data) != expected:
+                raise ValueError("job output spool changed during read")
+        finally:
+            os.close(fd)
         if self.total_bytes >= self.capacity:
             start = self.total_bytes % self.capacity
             return data[start:] + data[:start]

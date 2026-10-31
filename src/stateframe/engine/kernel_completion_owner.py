@@ -4999,6 +4999,8 @@ def _registry_schemas() -> tuple[tuple[str, dict[str, object]], ...]:
     add("file_move", {**string("source", "destination", "why")}, ("source", "destination"))
     from kernel_shell_tool import SHELL_SCHEMA
     schemas.append(("shell", SHELL_SCHEMA["function"]["parameters"]))
+    from kernel_agent_schemas import BUILTIN_SCHEMAS
+    schemas.extend((tool["function"]["name"], tool["function"]["parameters"]) for tool in BUILTIN_SCHEMAS)
     add("run_tests", {**string("target")})
     add("reproduce", {
         **string("source", "test_name", "rationale"),
@@ -5241,6 +5243,12 @@ def _spec_for_tool(tool: Mapping[str, object], *, probe_modes: Sequence[str] | N
     function = tool.get("function")
     provider = function.get("parameters") if isinstance(function, Mapping) else None
     base = TOOL_SPECS.get(name)
+    from kernel_agent_tools import service as agent_tools_service
+    host_tools = agent_tools_service()
+    if host_tools is not None and name in host_tools.custom:
+        schema = next(item["function"]["parameters"] for item in host_tools.custom_schemas
+                      if item["function"]["name"] == name)
+        return _make_tool_spec(name, copy.deepcopy(schema))
     if base is None:
         schema = (copy.deepcopy(dict(provider)) if isinstance(provider, Mapping)
                   else _object_schema({}, additional=False))

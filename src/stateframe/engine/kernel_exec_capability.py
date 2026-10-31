@@ -184,6 +184,27 @@ def capability_from_dict(value: dict) -> ExecCapability:
     return ExecCapability(**values)
 
 
+def _macos_developer_roots() -> list[Path]:
+    """Read-only authority for the active macOS developer directory.
+
+    /usr/bin/make, git, cc, clang and friends are shims that resolve the developer tools through
+    /var/db/xcode_select_link. If the sandbox hides it, the shim concludes no tools are installed
+    and asks launchd to open the "Install Command Line Developer Tools" dialog on the user's desktop.
+    """
+    if sys.platform != "darwin":
+        return []
+    roots = []
+    for value in ("/private/var/db/xcode_select_link", "/var/select/developer_dir",
+                  "/private/var/select/developer_dir"):
+        link = Path(value)
+        if link.is_symlink() and link.resolve().is_dir():
+            roots.extend(symlink_hops(link))
+    fallback = Path("/Library/Developer/CommandLineTools")
+    if fallback.is_dir():
+        roots.append(fallback)
+    return roots
+
+
 def shell_capability(*, workspace, run_env_dir, scratch_home, network, writable,
                      extra_read_roots=(), path_dirs=()) -> ExecCapability:
     home = Path(scratch_home).resolve(strict=True)
@@ -196,7 +217,18 @@ def shell_capability(*, workspace, run_env_dir, scratch_home, network, writable,
     roots = [Path(p) for p in ("/usr", "/bin", "/sbin", "/lib", "/lib64",
                               "/System", "/Library/Apple", "/private/var/select") if Path(p).exists()]
     roots += [Path(sys.base_prefix), Path(sys.prefix),
-              Path(sys.executable), *extra_read_roots, *path_dirs]
+              Path(sys.executable), *extra_read_roots]
+    roots += _macos_developer_roots()
+    system_gitconfig = Path("/etc/gitconfig")
+    if sys.platform == "darwin" and system_gitconfig.is_file():
+        roots.extend(symlink_hops(system_gitconfig))
+    # Homebrew binaries and Python extensions load libraries from sibling
+    # formulae, not just executable directories. Match the test boundary's
+    # installed-code roots; never admit Homebrew var or the user's home.
+    for prefix in (Path("/opt/homebrew"), Path("/usr/local")):
+        if (prefix / "Cellar").is_dir():
+            roots.extend(path for name in ("Cellar", "opt", "lib")
+                         if (path := prefix / name).is_dir())
     # Freeze executable and shebang authority for shell, jobs and derived custom
     # capabilities. Runtime libraries retain the existing resolved-root policy.
     for directory in dict.fromkeys(paths):
@@ -214,6 +246,9 @@ def shell_capability(*, workspace, run_env_dir, scratch_home, network, writable,
            "npm_config_cache": str(run_env / "npm-cache"),
            "CARGO_HOME": str(run_env / "cargo"), "GOPATH": str(run_env / "go"),
            "GOMODCACHE": str(run_env / "go-mod")}
+    if sys.platform == "darwin" and not system_gitconfig.is_file():
+        # An absent file outside the read roots yields EPERM rather than ENOENT.
+        env["GIT_CONFIG_NOSYSTEM"] = "1"
     admitted = {root for path in roots for root in executable_read_roots(Path(path))}
     return ExecCapability("shell", Path(workspace), writable, tuple(admitted),
                           (run_env, home), network, env, ExecLimits())

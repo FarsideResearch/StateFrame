@@ -151,7 +151,11 @@ def normalize_output(raw: bytes, *, replacements: Mapping[str, str] | None = Non
     total = len(raw) if total_bytes is None else total_bytes
     if b"\0" in raw:
         return f"[binary output, {total} bytes]"
-    text = _ANSI.sub("", raw.decode("utf-8", errors="replace"))
+    try:
+        decoded = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return f"[binary output, {total} bytes]"
+    text = _ANSI.sub("", decoded)
     text = "\n".join(line.split("\r")[-1] for line in text.replace("\r\n", "\n").split("\n"))
     for source, replacement in sorted((replacements or {}).items(), key=lambda pair: -len(pair[0])):
         if source:

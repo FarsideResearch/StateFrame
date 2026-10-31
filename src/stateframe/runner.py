@@ -556,6 +556,7 @@ def profile_steps(profile: str) -> int:
 def prepare(options: RunOptions) -> tuple[Path, workcopy.WorkCopy, dict]:
     _validate_timeout(options.timeout_s)
     _remaining(options)
+    environment = profiles.load(options.profile)
     if options.max_turns is None:
         options.max_turns = profile_steps(options.profile)
     if options.max_turns == 0:
@@ -596,7 +597,6 @@ def prepare(options: RunOptions) -> tuple[Path, workcopy.WorkCopy, dict]:
     work.snapshot = run / "parent"
     row = build_row(work, task=options.task, checks=options.checks or None, target=options.target,
                     edit_paths=options.edit_paths or None)
-    environment = profiles.load(options.profile)
     environment.update({
         "DS_URL": options.endpoint.chat_url,
         "DS_MODEL": options.endpoint.model,
@@ -956,7 +956,8 @@ def drive(run: Path, options: RunOptions, printer=print) -> int:
                     except ValueError:
                         continue
                     rendered = _render_event(event)
-                    if rendered and (not options.quiet or event.get("kind") == "token_counting_unavailable"):
+                    if rendered and (not options.quiet or event.get("kind") in {
+                            "token_counting_unavailable", "engine_error"}):
                         printer(rendered)
             code = process.wait(timeout=60)
             if timed_out.is_set():

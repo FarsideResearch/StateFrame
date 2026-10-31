@@ -230,3 +230,27 @@ time.sleep(30)
             process.wait(timeout=3)
         process.stdout.close()
         process.stderr.close()
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="Linux namespace narrowing")
+def test_custom_loopback_narrows_full_session_network(setup):
+    import socket
+    run, cap = setup
+    full = replace(cap, network="full")
+    with socket.socket() as listener:
+        listener.bind(("127.0.0.1", 0))
+        listener.listen()
+        port = listener.getsockname()[1]
+        code = ("import socket\n"
+                "s=socket.socket(); s.bind(('127.0.0.1',0)); s.close()\n"
+                "try:\n"
+                f" s=socket.create_connection(('127.0.0.1',{port}),.5)\n"
+                "except OSError:\n print('isolated loopback')\n"
+                "else:\n s.close(); raise RuntimeError('host network leaked')\n")
+        argv = script(cap, code)
+        with ExecSession(run) as session:
+            session.configure(full)
+            narrowed = replace(full, purpose="custom_tool", network="loopback", workspace_writable=False)
+            result = session.run(argv, narrowed)
+            assert result.exit_code == 0 and result.cleanup.ok, result.output
+            assert b"isolated loopback" in result.output

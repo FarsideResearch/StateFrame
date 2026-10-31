@@ -642,6 +642,10 @@ def compact_tool_surface(tools: Sequence[Mapping[str, object]], gear: str,
         if not isinstance(tool, Mapping):
             continue
         name = _tool_name(tool)
+        from kernel_agent_tools import is_registered
+        if is_registered(name):
+            result.append(dict(tool))
+            continue
         if name in _LEGACY_ASYNC_TOOLS:
             continue
         if name == "done" and (gear != "g3" or not green):

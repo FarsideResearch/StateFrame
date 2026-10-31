@@ -34,8 +34,11 @@ The engine is a flat package of modules, each owning one mechanism; `release-man
 | `kernel_stateframe_runtime.py` | `StateFrameRuntime`: building, fitting and qualifying each request (`prepare`) and recording what each action observed. |
 | `kernel_frame_*.py` | The frame's sections and how they are budgeted. |
 | `kernel_checkpoint.py` | Saving and loading signed checkpoints. |
-| `kernel_shell_tool.py`, `kernel_exec_session.py` | Foreground shell admission, per-run execution, effects, confirmation and replay. |
+| `kernel_shell_tool.py`, `kernel_exec_session.py` | Shell/custom command execution, per-run capabilities, effects, confirmation and replay. |
+| `kernel_agent_tools.py`, `kernel_agent_jobs.py`, `kernel_agent_schemas.py` | Per-run tool registration, Git/web adapters, background jobs, frozen job snapshots and schema budget admission. |
 | `kernel_execution_policy.py`, `kernel_test_isolation.py` | Sandboxed command and test execution. |
+| `kernel_safe_probe.py` | Shared read-only, offline diagnostic and provisioning execution with fatal cleanup failures. |
+| `kernel_ship_tree_smoke.py` | Automatic Python import diagnostics, executed with read-only product/environment authority and disposable scratch. |
 | `kernel_git_view.py` | Pinned, sanitized Git history observations and run-baseline diffs. |
 | `kernel_web_fetch.py` | Direct-IP, SSRF-checked web observations with bounded text extraction. |
 | `kernel_release_switch_registry.py` | Which `STATEFRAME_*` switches this engine reads; a setting with no reader is refused. |

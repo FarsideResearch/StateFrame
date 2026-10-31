@@ -165,6 +165,11 @@ def build_body(messages: list, limits: Limits) -> dict:
     shell = service()
     tools = [t for t in TOOLS if t["function"]["name"] != "shell"
              or (shell is not None and shell.settings.shell != "off")]
+    import copy
+    tools = copy.deepcopy(tools)
+    for tool in tools:
+        if tool["function"]["name"] == "shell":
+            tool["function"]["parameters"]["properties"].pop("background", None)
     body = {"model": limits.model, "messages": messages, "tools": tools, "temperature": limits.temperature,
             "max_tokens": limits.max_tokens, **dict(limits.sampler)}
     if limits.reasoning_budget:

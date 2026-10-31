@@ -11,6 +11,7 @@ from .engine.kernel_run_env import RunEnvError, create_run_env
 
 def path_authority() -> tuple[list[str], list[str]]:
     """Freeze PATH directories and resolved executable locations before execution."""
+    from .engine.kernel_exec_capability import executable_read_roots
     directories, roots = [], set()
     for value in os.get_exec_path():
         if not value or not Path(value).is_absolute():
@@ -22,10 +23,9 @@ def path_authority() -> tuple[list[str], list[str]]:
             continue
         if str(directory) not in directories:
             directories.append(str(directory))
-        roots.add(str(directory))
         for executable in directory.iterdir():
             if executable.is_file() and os.access(executable, os.X_OK):
-                roots.add(str(executable.resolve(strict=True).parent))
+                roots.update(map(str, executable_read_roots(executable)))
     return directories, sorted(roots)
 
 

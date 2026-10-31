@@ -720,6 +720,12 @@ def decide(lock: object, action: object, arguments: Mapping[str, object] | None 
         return Decision(name, False, "runner_capability_unavailable")
     if name in OBSERVATION_TOOLS:
         return Decision(name, True, "observation_authority")
+    from kernel_agent_tools import service as agent_tools_service
+    host_tools = agent_tools_service()
+    if host_tools is not None and name in host_tools.custom:
+        # These commands have explicit host trust and reconcile their effects.
+        # Any mutation retires green evidence through the shell_effect receipt.
+        return Decision(name, True, "custom_tool_capability")
     if name in EDIT_ACTIONS and not _repro_first_edit_allowed(
             lock.runtime, args, for_menu=for_menu):
         return Decision(name, False, "repro_first_required")

@@ -32,7 +32,6 @@ import pickle
 import random
 import re
 import shutil
-import subprocess
 import sys
 import threading
 import time
@@ -1346,6 +1345,10 @@ def _cell_full(cell) -> bool:
 
 def probe(frame, step: int, out_dir: Path) -> dict:
     """Try to pickle every root; record sizes, time and the unpicklable leaves."""
+    from kernel_agent_tools import service as agent_tools_service
+    host_tools = agent_tools_service()
+    if host_tools is not None and any(job.state == "running" for job in host_tools.jobs.jobs.values()):
+        raise CheckpointError("live background jobs are checkpoint-ineligible; resume uses observation replay")
     started = time.perf_counter()
     payload, ctx = collect(frame)
     collected = time.perf_counter() - started
@@ -1468,13 +1471,10 @@ def _clone(source: Path, target: Path) -> None:
     """APFS clone (copy-on-write) when available, plain copy otherwise."""
     if _clonefile(source, target):
         return
-    args = ["cp", "-cR"] if sys.platform == "darwin" else ["cp", "-R", "--reflink=auto"]
-    result = subprocess.run(args + [str(source), str(target)], capture_output=True, text=True)
-    if result.returncode != 0:
-        if source.is_dir():
-            shutil.copytree(source, target, symlinks=True)
-        else:
-            shutil.copy2(source, target)
+    if source.is_dir() and not source.is_symlink():
+        shutil.copytree(source, target, symlinks=True)
+    else:
+        shutil.copy2(source, target, follow_symlinks=False)
 
 
 _BIG_FILE = 4 << 20
@@ -1576,10 +1576,10 @@ def _copy_tree(source: Path, target: Path, previous: Path | None) -> dict[str, i
                     counts["linked"] += 1
                     continue
             if info.st_size >= _BIG_FILE and sys.platform == "darwin":
-                if subprocess.run(["cp", "-c", "-p", path, str(destination)], capture_output=True).returncode == 0:
+                if _clonefile(Path(path), destination):
                     counts["cloned"] += 1
                     continue
-            shutil.copy2(path, destination)
+            shutil.copy2(path, destination, follow_symlinks=False)
             counts["copied"] += 1
     return counts
 

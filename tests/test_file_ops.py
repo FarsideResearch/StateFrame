@@ -101,7 +101,7 @@ def test_delete_and_move_guard_paths_and_collisions(tmp_path):
     with pytest.raises(FileOperationRefused, match="NEW_FILE_FORBIDDEN"):
         file_move(root, "old.py", "new.py", protected=_unprotected,
                   editable=_allow, new_file_allowed=lambda _: False)
-    with pytest.raises(FileOperationRefused, match="DIRECTORY_OR_SPECIAL"):
+    with pytest.raises(FileOperationRefused, match="PATH_NOT_FOUND"):
         file_move(root, "old.py", "other.py/child.py", protected=_unprotected,
                   editable=_allow, new_file_allowed=_allow)
     effect = file_move(root, "old.py", "sub/new.py", protected=_unprotected,
@@ -129,7 +129,7 @@ def test_protected_inode_symlinks_and_directories_refused(tmp_path):
     with pytest.raises(FileOperationRefused, match="SYMLINK"):
         file_delete(root, "link.py", protected=_unprotected, editable=_allow)
     (root / "dir").mkdir()
-    with pytest.raises(FileOperationRefused, match="DIRECTORY_OR_SPECIAL"):
+    with pytest.raises(FileOperationRefused, match="IS_DIRECTORY"):
         file_delete(root, "dir", protected=_unprotected, editable=_allow)
     (root / "outer").symlink_to(tmp_path)
     with pytest.raises(FileOperationRefused, match="SYMLINK"):
@@ -238,3 +238,13 @@ def test_rename_apply_installs_destination_before_deleting_source(tmp_path):
     assert applied == ["z_new.py", "a_old.py"]
     assert not (work.copy / "a_old.py").exists()
     assert (work.copy / "z_new.py").read_bytes() == b"value = 1\n"
+
+
+@pytest.mark.parametrize('raw,code', [('', 'OUTSIDE_WORKSPACE'), ('../x', 'OUTSIDE_WORKSPACE'),
+                                    ('missing', 'PATH_NOT_FOUND'), ('dir', 'IS_DIRECTORY')])
+def test_file_refusal_contract(tmp_path, raw, code):
+    (tmp_path / 'dir').mkdir()
+    with pytest.raises(FileOperationRefused) as caught:
+        file_delete(tmp_path, raw, protected=_unprotected, editable=_allow)
+    assert caught.value.code == code
+    assert caught.value.reply().startswith(f'REFUSED {code}: ')

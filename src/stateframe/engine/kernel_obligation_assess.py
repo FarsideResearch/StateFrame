@@ -20,10 +20,8 @@ import hashlib
 import json
 import os
 import re
-import shutil
 import subprocess
 import sys
-import tempfile
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -3033,7 +3031,7 @@ def _script_for_check_base(check: CheckDefinition) -> str:
         "expected": check.expected,
     }
     # The script is data-only and runs in a fresh interpreter.  Product source
-    # is imported from the copied workspace; no candidate code is executed in
+    # is imported from the read-only workspace; no candidate code is executed in
     # the StateFrame host process.
     return """
 import copy, importlib, inspect, json, os, sys, traceback
@@ -3495,109 +3493,103 @@ def run_check(root: str | Path, check: CheckDefinition | Mapping[str, object], *
         return receipt
     try:
         timeout = min(MAX_TIMEOUT_SECONDS, max(0.1, float(timeout)))
-        with tempfile.TemporaryDirectory(prefix="host_check_") as directory:
-            copied = Path(directory) / "workspace"
-            shutil.copytree(root, copied, symlinks=False,
-                            ignore=shutil.ignore_patterns("__pycache__", ".pytest_cache", ".git", ".test-tmp"))
-            before_files = workspace_snapshot(copied)
-            env = dict(os.environ)
-            env.update({"PYTHONDONTWRITEBYTECODE": "1", "PYTHONNOUSERSITE": "1"})
-            process = subprocess.run(
-                [test_python(), "-B", "-c", _script_for_check(check)],
-                cwd=str(copied), env=env, capture_output=True, text=True,
-                timeout=timeout)
-            after_files = workspace_snapshot(copied)
-            if before_files != after_files:
-                raise RuntimeError("CHECK_WROTE_WORKSPACE")
-            stdout = (process.stdout or "")[-MAX_OUTPUT_CHARS:]
-            stderr = (process.stderr or "")[-MAX_OUTPUT_CHARS:]
-            if process.returncode != 0:
-                raise RuntimeError((stderr or stdout or "subprocess failed")[-MAX_OUTPUT_CHARS:])
-            line = next((item for item in reversed(stdout.splitlines()) if item.strip()), "")
-            payload = json.loads(line)
-            if "error" in payload:
-                raise RuntimeError(payload["error"].get("message", "check error"))
-            passed = payload.get("ok") is True
-            observed = payload.get("observed")
-            detail = payload.get("detail")
-            execution = str(payload.get("execution", EXECUTED)).upper()
-            reason = str(payload.get("reason", "PASS" if passed else "COUNTEREXAMPLE"))
-            unbound = reason == UNBOUND_INVOCATION or execution == SKIPPED
-            binding_uncertainty = unbound and (
-                check.contract_cell is not None
-                or check.template in {
-                    "INVOCATION_WITNESS", "COMPATIBILITY_WITNESS", "PRESERVE_CALL_SHAPE",
-                }
-            )
-            # Union of boundary_precision (any grounded contract cell) and check_coverage (promised
-            # surface/alias/arity) triggers: a promised binding that fails is a witnessed violation.
-            binding_counterexample = bool(
-                binding_uncertainty and (
-                    (precision_features_enabled() and check.contract_cell is not None)
-                    or _promised_binding_cell(check)))
-            binding_error = None
-            if isinstance(detail, Mapping):
-                binding_error = detail.get("binding_error")
-                if not binding_error:
-                    def find_binding_error(value: object) -> object:
-                        if isinstance(value, Mapping):
-                            if value.get("binding_error"):
-                                return value.get("binding_error")
-                            for child in value.values():
-                                found = find_binding_error(child)
-                                if found:
-                                    return found
-                        elif isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
-                            for child in value:
-                                found = find_binding_error(child)
-                                if found:
-                                    return found
-                        return None
-                    binding_error = find_binding_error(detail)
-            counterexample = None
-            if (precision_features_enabled() and not passed and not binding_uncertainty) or binding_counterexample:
-                counterexample = {
-                    "fixture": copy.deepcopy(check.fixture),
-                    "observed": copy.deepcopy(observed),
-                    "expected": copy.deepcopy(payload.get("expected", check.expected)),
-                    "detail": copy.deepcopy(detail),
-                }
-                if binding_error:
-                    counterexample["binding_error"] = str(binding_error)
-                if binding_counterexample and _promised_binding_cell(check):
-                    # check_coverage shape: surface + arity_error/missing_symbol for repair hints.
-                    counterexample.update(_binding_counterexample(check, detail=detail))
-            elif not passed and not binding_uncertainty:
-                counterexample = {
-                    "observed": copy.deepcopy(observed),
-                    "expected": copy.deepcopy(payload.get("expected", check.expected)),
-                    "detail": copy.deepcopy(detail),
-                }
-            if (counterexample is not None
-                    and os.environ.get("STATEFRAME_GREEN_LOCK_REPAIR", "off").lower() == "on"):
-                try:
-                    from kernel_green_lock_repair import annotate_preservation_counterexample
-                    counterexample = annotate_preservation_counterexample(
-                        copied, check, counterexample, detail)
-                except (ImportError, OSError, TypeError, ValueError):
-                    # Diagnostic enrichment must never change the underlying
-                    # check verdict when a source tree cannot be scanned.
-                    pass
-            receipt = CheckReceipt(
-                **({**common, "oracle_basis": "ADVISORY"}
-                   if (os.environ.get("STATEFRAME_GREEN_LOCK_REPAIR", "off").lower() == "on"
-                       and binding_uncertainty) else common),
-                status=(COUNTEREXAMPLE if binding_counterexample else
-                        NOT_EXECUTED if binding_uncertainty else
-                        PASS if passed else COUNTEREXAMPLE),
-                observed=observed,
-                counterexample=counterexample,
-                reason=(COUNTEREXAMPLE if binding_counterexample else
-                        UNBOUND_INVOCATION if binding_uncertainty else
-                        "PASS" if passed else "COUNTEREXAMPLE"),
-                execution=EXECUTED if binding_counterexample else (SKIPPED if unbound else execution),
-                observed_values=observed,
-            )
+        from kernel_safe_probe import run_probe
+        # Read-only execution makes a copied workspace unnecessary and avoids
+        # following repository symlinks while copying untrusted input.
+        process = run_probe(
+            [test_python(), "-I", "-B", "-c",
+             "import sys; sys.path.insert(0, sys.argv[1]); " + _script_for_check(check), str(root)],
+            Path(root), timeout=timeout)
+        if process.timed_out:
+            raise subprocess.TimeoutExpired("obligation check", timeout)
+        stdout = process.output.decode("utf-8", "replace")[-MAX_OUTPUT_CHARS:]
+        if process.exit_code != 0:
+            raise RuntimeError(stdout or "sandboxed check failed")
+        line = next((item for item in reversed(stdout.splitlines()) if item.strip()), "")
+        payload = json.loads(line)
+        if "error" in payload:
+            raise RuntimeError(payload["error"].get("message", "check error"))
+        passed = payload.get("ok") is True
+        observed = payload.get("observed")
+        detail = payload.get("detail")
+        execution = str(payload.get("execution", EXECUTED)).upper()
+        reason = str(payload.get("reason", "PASS" if passed else "COUNTEREXAMPLE"))
+        unbound = reason == UNBOUND_INVOCATION or execution == SKIPPED
+        binding_uncertainty = unbound and (
+            check.contract_cell is not None
+            or check.template in {
+                "INVOCATION_WITNESS", "COMPATIBILITY_WITNESS", "PRESERVE_CALL_SHAPE",
+            }
+        )
+        # Union of boundary_precision (any grounded contract cell) and check_coverage (promised
+        # surface/alias/arity) triggers: a promised binding that fails is a witnessed violation.
+        binding_counterexample = bool(
+            binding_uncertainty and (
+                (precision_features_enabled() and check.contract_cell is not None)
+                or _promised_binding_cell(check)))
+        binding_error = None
+        if isinstance(detail, Mapping):
+            binding_error = detail.get("binding_error")
+            if not binding_error:
+                def find_binding_error(value: object) -> object:
+                    if isinstance(value, Mapping):
+                        if value.get("binding_error"):
+                            return value.get("binding_error")
+                        for child in value.values():
+                            found = find_binding_error(child)
+                            if found:
+                                return found
+                    elif isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+                        for child in value:
+                            found = find_binding_error(child)
+                            if found:
+                                return found
+                    return None
+                binding_error = find_binding_error(detail)
+        counterexample = None
+        if (precision_features_enabled() and not passed and not binding_uncertainty) or binding_counterexample:
+            counterexample = {
+                "fixture": copy.deepcopy(check.fixture),
+                "observed": copy.deepcopy(observed),
+                "expected": copy.deepcopy(payload.get("expected", check.expected)),
+                "detail": copy.deepcopy(detail),
+            }
+            if binding_error:
+                counterexample["binding_error"] = str(binding_error)
+            if binding_counterexample and _promised_binding_cell(check):
+                # check_coverage shape: surface + arity_error/missing_symbol for repair hints.
+                counterexample.update(_binding_counterexample(check, detail=detail))
+        elif not passed and not binding_uncertainty:
+            counterexample = {
+                "observed": copy.deepcopy(observed),
+                "expected": copy.deepcopy(payload.get("expected", check.expected)),
+                "detail": copy.deepcopy(detail),
+            }
+        if (counterexample is not None
+                and os.environ.get("STATEFRAME_GREEN_LOCK_REPAIR", "off").lower() == "on"):
+            try:
+                from kernel_green_lock_repair import annotate_preservation_counterexample
+                counterexample = annotate_preservation_counterexample(
+                    root, check, counterexample, detail)
+            except (ImportError, OSError, TypeError, ValueError):
+                # Diagnostic enrichment must never change the underlying
+                # check verdict when a source tree cannot be scanned.
+                pass
+        receipt = CheckReceipt(
+            **({**common, "oracle_basis": "ADVISORY"}
+               if (os.environ.get("STATEFRAME_GREEN_LOCK_REPAIR", "off").lower() == "on"
+                   and binding_uncertainty) else common),
+            status=(COUNTEREXAMPLE if binding_counterexample else
+                    NOT_EXECUTED if binding_uncertainty else
+                    PASS if passed else COUNTEREXAMPLE),
+            observed=observed,
+            counterexample=counterexample,
+            reason=(COUNTEREXAMPLE if binding_counterexample else
+                    UNBOUND_INVOCATION if binding_uncertainty else
+                    "PASS" if passed else "COUNTEREXAMPLE"),
+            execution=EXECUTED if binding_counterexample else (SKIPPED if unbound else execution),
+            observed_values=observed,
+        )
     except subprocess.TimeoutExpired:
         receipt = CheckReceipt(**common, status=HARNESS_ERROR,
                                reason=f"TIMEOUT:{timeout:g}s",

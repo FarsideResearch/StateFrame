@@ -11,6 +11,11 @@ from pathlib import Path, PurePosixPath
 from typing import Callable, Literal, Mapping, Protocol
 
 
+MAX_FILE_BYTES = 16 << 20
+MAX_WORKSPACE_BYTES = 256 << 20
+MAX_WORKSPACE_ENTRIES = 20000
+
+
 class EffectError(RuntimeError):
     """The workspace cannot be inspected or its pre-call state cannot be trusted."""
 
@@ -37,6 +42,8 @@ class ContentStore:
         return self.root / digest[:2] / digest[2:]
 
     def put(self, data: bytes) -> str:
+        if len(data) > MAX_FILE_BYTES:
+            raise EffectError("CAS file exceeds per-file byte limit")
         digest = hashlib.sha256(data).hexdigest()
         target = self._path(digest)
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -63,22 +70,75 @@ class ContentStore:
         try:
             fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
             with os.fdopen(fd, "rb") as source:
-                data = source.read()
+                if os.fstat(source.fileno()).st_size > MAX_FILE_BYTES:
+                    raise EffectError("CAS file exceeds per-file byte limit")
+                data = source.read(MAX_FILE_BYTES + 1)
+                if len(data) > MAX_FILE_BYTES:
+                    raise EffectError("CAS file exceeds per-file byte limit")
         except OSError as error:
             raise EffectError(f"CAS object {digest} unavailable: {error}") from error
         if hashlib.sha256(data).hexdigest() != digest:
             raise EffectError(f"CAS object {digest} is corrupt")
         return data
 
+    def verify(self, digest: str) -> None:
+        """Verify an existing CAS object with bounded memory and no link following."""
+        fd = os.open(self._path(digest), os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        try:
+            info = os.fstat(fd)
+            if not stat.S_ISREG(info.st_mode) or info.st_size > MAX_FILE_BYTES:
+                raise EffectError("invalid CAS file type or size")
+            actual = hashlib.sha256()
+            total = 0
+            while block := os.read(fd, 1 << 20):
+                total += len(block)
+                if total > MAX_FILE_BYTES:
+                    raise EffectError("CAS file exceeds per-file byte limit")
+                actual.update(block)
+            if total != info.st_size or actual.hexdigest() != digest:
+                raise EffectError(f"CAS object {digest} is corrupt")
+        finally:
+            os.close(fd)
+
     def capture(self, workspace: Path, manifest: Manifest) -> None:
         """Seed pre-call bytes; reject a workspace changed since its manifest was scanned."""
+        _validate_manifest_limits(manifest)
         for relative, entry in manifest.items():
             if entry.kind != "file":
                 continue
-            data = _read_file(Path(workspace) / relative)
-            if hashlib.sha256(data).hexdigest() != entry.digest or len(data) != entry.size:
-                raise EffectError(f"workspace changed while capturing {relative}")
-            self.put(data)
+            path = Path(workspace) / relative
+            fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+            try:
+                info = os.fstat(fd)
+                if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_size != entry.size:
+                    raise EffectError(f"workspace changed while capturing {relative}")
+                target = self._path(entry.digest)
+                target.parent.mkdir(parents=True, exist_ok=True)
+                out_fd, temporary = tempfile.mkstemp(prefix=".cas-", dir=target.parent)
+                try:
+                    digest = hashlib.sha256()
+                    total = 0
+                    with os.fdopen(out_fd, "wb") as output:
+                        while block := os.read(fd, 1 << 20):
+                            total += len(block)
+                            if total > entry.size or total > MAX_FILE_BYTES:
+                                raise EffectError(f"workspace grew while capturing {relative}")
+                            digest.update(block)
+                            output.write(block)
+                        output.flush()
+                        os.fsync(output.fileno())
+                    if total != entry.size or digest.hexdigest() != entry.digest:
+                        raise EffectError(f"workspace changed while capturing {relative}")
+                    if target.exists():
+                        # Verification is bounded, independently of the workspace.
+                        self.verify(entry.digest)
+                    else:
+                        os.chmod(temporary, 0o444)
+                        os.link(temporary, target)
+                finally:
+                    os.unlink(temporary)
+            finally:
+                os.close(fd)
 
 
 @dataclass(frozen=True)
@@ -102,9 +162,22 @@ def _read_file(path: Path) -> bytes:
         if (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino):
             raise EffectError(f"file changed while opening: {path}")
         with os.fdopen(fd, "rb", closefd=False) as source:
-            return source.read()
+            if opened.st_size > MAX_FILE_BYTES:
+                raise EffectError(f"file exceeds per-file byte limit: {path}")
+            data = source.read(MAX_FILE_BYTES + 1)
+            if len(data) > MAX_FILE_BYTES:
+                raise EffectError(f"file exceeds per-file byte limit: {path}")
+            return data
     finally:
         os.close(fd)
+
+
+def _validate_manifest_limits(manifest: Manifest) -> None:
+    if len(manifest) > MAX_WORKSPACE_ENTRIES:
+        raise EffectError("workspace exceeds entry-count limit")
+    sizes = [entry.size for entry in manifest.values() if entry.kind == "file"]
+    if any(size < 0 or size > MAX_FILE_BYTES for size in sizes) or sum(sizes) > MAX_WORKSPACE_BYTES:
+        raise EffectError("workspace exceeds per-file or aggregate byte limit")
 
 
 def scan(workspace: Path, *, exclude: Callable[[str], bool]) -> Manifest:
@@ -113,14 +186,22 @@ def scan(workspace: Path, *, exclude: Callable[[str], bool]) -> Manifest:
     if not stat.S_ISDIR(os.lstat(root).st_mode):
         raise EffectError(f"workspace is not a directory: {root}")
     result: dict[str, Entry] = {}
+    total_bytes = 0
 
     def visit(directory: Path) -> None:
+        nonlocal total_bytes
         with os.scandir(directory) as children:
             for child in children:
                 relative = (directory / child.name).relative_to(root).as_posix()
                 if exclude(relative):
                     continue
+                if len(result) >= MAX_WORKSPACE_ENTRIES:
+                    raise EffectError("workspace exceeds entry-count limit")
                 info = child.stat(follow_symlinks=False)
+                if stat.S_ISREG(info.st_mode):
+                    total_bytes += info.st_size
+                    if info.st_size > MAX_FILE_BYTES or total_bytes > MAX_WORKSPACE_BYTES:
+                        raise EffectError("workspace exceeds per-file or aggregate byte limit")
                 mode = stat.S_IMODE(info.st_mode)
                 if stat.S_ISDIR(info.st_mode):
                     result[relative] = Entry("dir", mode, None, 0)
@@ -135,9 +216,15 @@ def scan(workspace: Path, *, exclude: Callable[[str], bool]) -> Manifest:
                         opened = os.fstat(fd)
                         if (opened.st_dev, opened.st_ino) != (info.st_dev, info.st_ino):
                             raise EffectError(f"workspace changed while scanning {relative}")
+                        consumed = 0
                         with os.fdopen(fd, "rb", closefd=False) as source:
                             while block := source.read(1024 * 1024):
+                                consumed += len(block)
+                                if consumed > info.st_size or consumed > MAX_FILE_BYTES:
+                                    raise EffectError(f"workspace grew while scanning {relative}")
                                 digest.update(block)
+                        if consumed != info.st_size:
+                            raise EffectError(f"workspace changed while scanning {relative}")
                     finally:
                         os.close(fd)
                     result[relative] = Entry("file", mode, digest.hexdigest(), opened.st_size)
@@ -193,6 +280,12 @@ class WorkspaceEffectPolicy:
             return False, "protected test or inode alias"
         if effect.after and effect.after.kind in {"symlink", "other"}:
             return False, "symlinks, hardlinks, and special files are not allowed"
+        if effect.before and effect.before.kind == "file" and effect.before.mode & 0o111 and effect.after is None:
+            return False, "shell removal of executable files cannot preserve move metadata; use file_delete"
+        if effect.after and effect.after.kind == "file":
+            previous = effect.before.mode & 0o111 if effect.before and effect.before.kind == "file" else 0
+            if effect.after.mode & 0o111 != previous:
+                return False, "executable mode changes are not supported by the sealed artifact"
         if effect.before is None and effect.after and effect.after.kind == "dir":
             allowed = self.directory_allowed is not None and self.directory_allowed(effect.path)
             return allowed, "structural product directory" if allowed else "new directory is not allowed"
@@ -241,7 +334,9 @@ def effect_policy_for_run(workspace: Path, row: Mapping[str, object],
                                                        _is_product_path(path, row))),
         new_file_allowed=lambda path: _is_product_path(path, row),
         baseline_manifest=baseline_manifest,
-        directory_allowed=lambda path: any(
+        directory_allowed=lambda path: (
+            row.get("tier") == "USER-REPO" and row.get("scoped_edits") is False
+            and _is_product_path(path, row)) or any(
             path == str(base).rstrip("/") or path.startswith(str(base).rstrip("/") + "/")
             for base in row.get("allowed_product_paths", ())
             if (root / str(base)).is_dir()),
@@ -337,6 +432,8 @@ class Reconciliation:
 
 def reconcile(workspace: Path, before: Manifest, after: Manifest, policy: EffectPolicy,
               store: ContentStore, baseline_store: ContentStore | None) -> Reconciliation:
+    _validate_manifest_limits(before)
+    _validate_manifest_limits(after)
     effects = diff(before, after)
     decisions = [(effect, *policy.authorize(effect)) for effect in effects]
     # A new directory is structural authority, not a product-file extension.

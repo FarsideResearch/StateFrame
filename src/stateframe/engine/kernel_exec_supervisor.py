@@ -139,7 +139,10 @@ class Supervisor:
             raise ValueError("background jobs require read-only workspace")
         if sum(job.cleanup is None for job in self.jobs.values()) >= 5:
             raise ValueError("execution session has five active commands")
-        if self.namespace_network != "host" and cap.network not in {"none", self.namespace_network}:
+        private_loopback = (self.namespace_network == "full" and cap.network == "loopback"
+                            and cap.purpose == "custom_tool")
+        if (self.namespace_network != "host" and not private_loopback
+                and cap.network not in {"none", self.namespace_network}):
             raise ValueError("capability network differs from persistent session network")
         argv = request["argv"]
         if not isinstance(argv, list) or not argv or any(not isinstance(v, str) or "\0" in v for v in argv):
@@ -154,6 +157,10 @@ class Supervisor:
         command, environment = capability_command(
             launch, cap, platform_backend=self.backend,
             shared_namespace=self.namespace_network != "host")
+        if private_loopback:
+            # A custom tool may narrow a full-network run. Keep the supervised
+            # PID namespace, but give this command a disconnected loopback netns.
+            command.insert(1, "--unshare-net")
         self.next_id += 1
         ident = f"j{self.next_id}"
         collector = JobOutputCollector(self.directory / f"{ident}.output", capacity=1 << 20)

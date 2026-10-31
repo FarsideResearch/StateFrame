@@ -11763,6 +11763,17 @@ class StateFrameRuntime:
         return tool_allowed(name, runtime=self)
 
     def tool_menu(self, tools: list[dict], messages: Sequence[dict]) -> list[dict]:
+        from kernel_agent_tools import service, project_menu
+        host = service()
+        if host is not None:
+            host.jobs.next_request(getattr(self.owner, "current_step", 0))
+            if host.jobs.jobs:
+                host.snapshot()
+        selected = project_menu(self._base_tool_menu(tools, messages))
+        self.completion_menu = tuple(tool["function"]["name"] for tool in selected)
+        return selected
+
+    def _base_tool_menu(self, tools: list[dict], messages: Sequence[dict]) -> list[dict]:
         from kernel_lean import enabled as lean_enabled, plain_tool_surface
         if lean_enabled():
             selected = plain_tool_surface(tools)
@@ -12897,6 +12908,12 @@ class StateFrameRuntime:
 
     def job_operation(self, name: str, arguments: dict) -> str | None:
         """Dispatch one typed background-job operation in the opt-in organ."""
+        from kernel_agent_tools import service
+        agent_tools = service()
+        if agent_tools is not None and name in agent_tools.names:
+            # The per-run adapter owns this name, including its intent/completion
+            # tape. In particular job_output also exists in the legacy organ.
+            return None
         job_watch = getattr(self, "job_watch", None)
         from kernel_frame_diet import JOB_TOOL_NAME, enabled as frame_diet_enabled, job_call
         if job_watch is not None and name == JOB_TOOL_NAME and frame_diet_enabled():
@@ -17296,8 +17313,14 @@ class StateFrameRuntime:
             grounding_frame = self.claim_grounding.frame_projection()
             frame["claim_grounding"] = grounding_frame
             frame["ungrounded_claims"] = list(grounding_frame.get("facts", ()))[:3]
+        from kernel_agent_tools import service as agent_tools_service
+        host_tools = agent_tools_service()
         job_watch = getattr(self, "job_watch", None)
-        if job_watch is not None:
+        if host_tools is not None and host_tools.jobs.frozen is not None:
+            # Receipt-side frame inspection must not freeze a partial tool batch.
+            # Only the logical request boundary samples new job observations.
+            frame["jobs"] = host_tools.snapshot()
+        elif job_watch is not None:
             frame["jobs"] = job_watch.frame()
         if getattr(self, "stateframe_completion_v2_mode", "off") == "on":
             authority = self._sync_completion_authority()
@@ -18114,8 +18137,8 @@ class StateFrameRuntime:
                 "decision_continuity", Priority.REQUIRED_CONTROL_CONTEXT,
                 "decision_continuity", continuity_message["content"],
                 token_estimate(continuity_message), action_required=True))
-        if (getattr(self, "job_watch", None) is not None
-                and getattr(self, "environment_state", None) is None):
+        if ("jobs" in frame and ("sequence" in frame["jobs"]
+                or getattr(self, "environment_state", None) is None)):
             from kernel_job_watch import render_jobs_block
             jobs_block = render_jobs_block(frame.get("jobs", ()))
             messages["jobs"] = {"role": "user", "content": jobs_block}
@@ -19661,8 +19684,8 @@ class StateFrameRuntime:
                 "decision_continuity", Priority.REQUIRED_CONTROL_CONTEXT,
                 "decision_continuity", continuity_message["content"],
                 token_estimate(continuity_message), action_required=True))
-        if (getattr(self, "job_watch", None) is not None
-                and self.unified_mode != "on"):
+        if ("jobs" in frame and ("sequence" in frame["jobs"]
+                or self.unified_mode != "on")):
             from kernel_job_watch import render_jobs_block
             jobs_block = render_jobs_block(frame.get("jobs", ()))
             messages["jobs"] = {"role": "user", "content": jobs_block}
@@ -24174,7 +24197,7 @@ class StateFrameRuntime:
                 )
                 raise RuntimeError("frame-only request projection failed") from error
         def emit_request_prepared_event() -> dict[str, object]:
-            return self.journal.emit("request_prepared", request_id=capture.request_id,
+            event = self.journal.emit("request_prepared", request_id=capture.request_id,
                               **({"continuation_source": source_delivery}
                                  if self.continuation_source_refresh else {}),
                               **({"cache_layout": cache_layout_audit}
@@ -24222,6 +24245,11 @@ class StateFrameRuntime:
                                     if cache_layout_audit is not None
                                    else ("stateframe-render/1" if self.latest_exchange_mode == 'off'
                                            else "stateframe-render-latest-exchange/1"))))))
+            from kernel_agent_tools import service as agent_tools_service
+            host_tools = agent_tools_service()
+            if host_tools is not None:
+                host_tools.jobs.commit(self.journal)
+            return event
 
         if (provider_request and not framefit_on
                 and evictfix_enabled()):

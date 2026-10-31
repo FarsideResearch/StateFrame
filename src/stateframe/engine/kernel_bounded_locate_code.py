@@ -18,7 +18,7 @@ READ_TOOLS = frozenset({
     "read", "grep", "list", "ls", "list_files", "where_defined", "who_calls",
     "references", "recall_evidence", "recall", "recall_generated_artifact", "read_ticket",
 })
-OBSERVATION_TOOLS = frozenset({*READ_TOOLS, "probe"})
+OBSERVATION_TOOLS = frozenset({*READ_TOOLS, "probe", "job_wait", "job_output", "job_stop", "git", "web_fetch"})
 EDIT_TOOLS = frozenset({
     "edit", "str_replace", "file_create", "file_delete", "file_move", "shell", "replace_module", "write", "replace",
 })

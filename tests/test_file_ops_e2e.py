@@ -96,7 +96,7 @@ def test_refusals_are_typed_and_run_continues(tmp_path):
                     for path in sorted((run_dir / "requests").glob("*.json")))
     for code in ("PROTECTED_TEST", "PATH_NOT_FOUND", "OUTSIDE_WORKSPACE",
                  "DESTINATION_EXISTS", "NOT_EDITABLE"):
-        assert code in log
+        assert f"REFUSED {code}:" in log
 
 
 @pytest.mark.host_sandbox

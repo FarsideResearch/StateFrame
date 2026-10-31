@@ -30,6 +30,7 @@ def wheel(directory: Path, name: str) -> Path:
     return path
 
 
+@pytest.mark.host_sandbox
 def test_clone_relocates_pip_and_installed_packages(tmp_path, record_property):
     source = tmp_path / "source"
     command(sys.executable, "-m", "venv", str(source))
@@ -56,6 +57,7 @@ def test_clone_relocates_pip_and_installed_packages(tmp_path, record_property):
                ("PIP_CACHE_DIR", "npm_config_cache", "CARGO_HOME", "GOPATH", "GOMODCACHE"))
 
 
+@pytest.mark.host_sandbox
 def test_system_site_environment_sees_base_distributions(tmp_path, record_property):
     base = Path(sys.base_prefix) / "bin" / "python3"
     assert base.is_file()
@@ -72,6 +74,7 @@ def test_system_site_environment_sees_base_distributions(tmp_path, record_proper
     assert len(identity) == 64
 
 
+@pytest.mark.host_sandbox
 def test_runner_hook_uses_same_python_for_host_and_child(tmp_path):
     source = tmp_path / "source"
     command(sys.executable, "-m", "venv", str(source))
@@ -104,6 +107,7 @@ def _import_file(python: Path, script: Path) -> Path:
     return Path(command(str(python), str(script))).resolve()
 
 
+@pytest.mark.host_sandbox
 def test_editable_install_imports_workspace_copy(tmp_path):
     repository, workspace = _project(tmp_path)
     base = Path(shutil.which("python3.11") or sys.executable)
@@ -118,6 +122,7 @@ def test_editable_install_imports_workspace_copy(tmp_path):
     assert not run_env.external_import_roots
 
 
+@pytest.mark.host_sandbox
 def test_finder_mapping_and_namespace_paths_are_remapped(tmp_path):
     repository, workspace = _project(tmp_path)
     external = tmp_path / "external"
@@ -145,6 +150,7 @@ def test_finder_mapping_and_namespace_paths_are_remapped(tmp_path):
     assert run_env.external_import_roots == (external.resolve(),)
 
 
+@pytest.mark.host_sandbox
 def test_legacy_egg_link_and_external_path(tmp_path):
     repository, workspace = _project(tmp_path)
     source = tmp_path / "source-env"
@@ -163,6 +169,7 @@ def test_legacy_egg_link_and_external_path(tmp_path):
     assert run_env.external_import_roots == (external.resolve(),)
 
 
+@pytest.mark.host_sandbox
 def test_project_venv_internal_pth_stays_in_cloned_env(tmp_path):
     repository, _ = _project(tmp_path)
     source = repository / ".venv"
@@ -174,6 +181,7 @@ def test_project_venv_internal_pth_stays_in_cloned_env(tmp_path):
     assert (cloned_site / "internal.pth").read_text() == str(cloned_site) + "\n"
 
 
+@pytest.mark.host_sandbox
 def test_host_provision_records_external_import_root(tmp_path):
     from types import SimpleNamespace
     from kernel_tool_settings import ToolSettings

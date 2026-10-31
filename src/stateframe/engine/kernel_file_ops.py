@@ -16,6 +16,9 @@ class FileOperationRefused(ValueError):
         self.code = code
         super().__init__(f"{code}: {detail}")
 
+    def reply(self) -> str:
+        return f"REFUSED {self}"
+
 
 @dataclass(frozen=True)
 class FileOperationEffect:
@@ -26,7 +29,7 @@ class FileOperationEffect:
 
 def _path(root: Path, raw: str) -> tuple[Path, str]:
     if not isinstance(raw, str) or not raw or "\\" in raw or "\x00" in raw:
-        raise FileOperationRefused("INVALID_PATH", "use a nonempty repository-relative path")
+        raise FileOperationRefused("OUTSIDE_WORKSPACE", "use a nonempty repository-relative path")
     pure = PurePosixPath(raw)
     if pure.is_absolute() or any(part in {".", "..", ""} for part in raw.split("/")):
         raise FileOperationRefused("OUTSIDE_WORKSPACE", f"path {raw!r} is not repository-relative")
@@ -39,7 +42,7 @@ def _path(root: Path, raw: str) -> tuple[Path, str]:
             continue
         except NotADirectoryError as error:
             raise FileOperationRefused(
-                "DIRECTORY_OR_SPECIAL", f"path {raw!r} traverses a non-directory") from error
+                "PATH_NOT_FOUND", f"path {raw!r} traverses a non-directory") from error
         if stat.S_ISLNK(mode):
             raise FileOperationRefused("SYMLINK", f"path {raw!r} contains a symlink")
     if not current.resolve().is_relative_to(root.resolve()):
@@ -53,8 +56,10 @@ def _source(path: Path, relative: str, *, protected: Callable[[Path], bool],
         info = path.lstat()
     except FileNotFoundError as error:
         raise FileOperationRefused("PATH_NOT_FOUND", f"{relative!r} does not exist") from error
+    if stat.S_ISDIR(info.st_mode):
+        raise FileOperationRefused("IS_DIRECTORY", f"{relative!r} is a directory")
     if not stat.S_ISREG(info.st_mode):
-        raise FileOperationRefused("DIRECTORY_OR_SPECIAL", f"{relative!r} is not a regular file")
+        raise FileOperationRefused("NOT_EDITABLE", f"{relative!r} is not a regular file")
     if protected(path):
         raise FileOperationRefused("PROTECTED_TEST", f"{relative!r} is a protected test or inode alias")
     if not editable(relative):
@@ -75,8 +80,10 @@ def file_move(root: Path, raw_source: str, raw_destination: str, *,
     source, source_rel = _path(root, raw_source)
     destination, destination_rel = _path(root, raw_destination)
     _source(source, source_rel, protected=protected, editable=editable)
+    if source.stat().st_mode & 0o111:
+        raise FileOperationRefused("UNSUPPORTED_MODE", "moving executable files is not supported by the sealed artifact")
     if source_rel == destination_rel:
-        raise FileOperationRefused("SAME_PATH", "source and destination are identical")
+        raise FileOperationRefused("DESTINATION_EXISTS", "source and destination are identical")
     if protected(destination):
         raise FileOperationRefused("PROTECTED_TEST", f"{destination_rel!r} is a protected test path")
     if not new_file_allowed(destination_rel):

@@ -14,7 +14,6 @@ import hashlib
 import json
 import os
 import re
-import subprocess
 from collections import Counter, defaultdict
 from collections.abc import Mapping, Sequence
 from pathlib import Path
@@ -159,22 +158,8 @@ def _file_digest(path: Path) -> str:
 
 def _run_git(cwd: Path, args: Sequence[str], *, timeout: float = 3.0) -> str | None:
     """Run a read-only Git query with user config and pager effects disabled."""
-    try:
-        result = subprocess.run(
-            ["git", "-C", str(cwd), *[str(arg) for arg in args]],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            check=False,
-            timeout=timeout,
-            env={**os.environ, "GIT_CONFIG_NOSYSTEM": "1", "GIT_OPTIONAL_LOCKS": "0",
-                 "GIT_PAGER": "cat"},
-        )
-    except (OSError, subprocess.SubprocessError):
-        return None
-    if result.returncode != 0:
-        return None
-    return result.stdout
+    from kernel_git_view import legacy_git_query
+    return legacy_git_query(cwd, [str(arg) for arg in args], timeout=timeout)
 
 
 def _git_root(root: Path) -> Path | None:

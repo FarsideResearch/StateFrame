@@ -16,7 +16,9 @@ pytestmark = pytest.mark.host_sandbox
 def test_u1_environment_inspection(tmp_path, mode):
     case = run_case(tmp_path, "inspection.script.json", flags=("--shell", mode))
     case.assert_offered("shell")
-    for fragment in ("Python", "Filesystem", platform.system()):
+    # Interpreters are deliberately outside the enforced inspection grammar.
+    version_result = "REFUSED READ_ONLY_POLICY:" if mode == "read-only" else "Python"
+    for fragment in (version_result, "Filesystem", platform.system()):
         case.assert_reply(fragment)
     assert case.summary is not None
     assert case.summary["files_changed"] == []
@@ -69,7 +71,7 @@ def test_u5_formatter_effect_invalidates_prior_read(tmp_path):
 
 def test_u6_local_install_is_used_by_shell_and_engine_checks(tmp_path):
     case = run_case(tmp_path, "install.script.json", repo_name="install_repo",
-                    flags=("--shell-network", "none"))
+                    flags=("--shell-network", "full"))
     case.assert_reply("environment changed:")
     case.assert_reply("installed")
     assert case.summary is not None and case.summary["succeeded"] is True, case.summary
@@ -101,3 +103,47 @@ def test_u10_file_housekeeping_stays_coherent_with_shell_effect(tmp_path):
     assert not (case.repo / "obsolete.py").exists()
     assert not (case.repo / "renamed.py").exists()
     assert 'VALUE = "after"' in (case.repo / "app.py").read_text()
+
+
+@pytest.mark.parametrize('mode', ['off', 'read-only', 'standard'])
+def test_zero_product_actions_preserve_workspace_and_empty_diff(tmp_path, mode):
+    import json
+    from ._support import copy_repo
+    repo = copy_repo(tmp_path)
+    baseline = {p.relative_to(repo): p.read_bytes() for p in repo.rglob('*') if p.is_file()}
+    script = tmp_path / 'no-product-actions.json'
+    script.write_text(json.dumps({'model': 'scripted', 'tokenize': {'mode': 'ok'}, 'steps': [
+        {'tool': 'done', 'arguments': {'summary': 'No product change requested.'}}]}))
+    case = run_case(tmp_path, str(script), repo=repo, flags=('--shell', mode),
+                    task='Inspect the repository without changing any product file.')
+    assert case.summary is not None, case.process.stdout + case.process.stderr
+    assert case.summary['provider_sends'] >= 1
+    assert case.summary['engine_result'] != 'ENGINE_ERROR', case.summary
+    assert case.summary['files_changed'] == []
+    assert case.diff.strip() in {'', '(no changes)'}
+    workspace = case.run_dir / 'workspace'
+    assert {p: (workspace / p).read_bytes() for p in baseline} == baseline
+    assert not (workspace / 'generated.py').exists()
+    assert not (workspace / 'build.ok').exists()
+    workers = tuple((case.run_dir / 'worker/continuation-workspaces').glob('*/repo'))
+    assert workers
+    for worker in workers:
+        assert {p: (worker / p).read_bytes() for p in baseline} == baseline
+        assert not (worker / 'generated.py').exists()
+        assert not (worker / 'build.ok').exists()
+
+
+def test_file_operation_directory_refusal_uses_frozen_contract(tmp_path):
+    import json
+    script = tmp_path / 'file-refusals.json'
+    script.write_text(json.dumps({'model': 'scripted', 'tokenize': {'mode': 'ok'}, 'steps': [
+        {'tool': 'file_delete', 'required': True, 'arguments': {'path': 'scripts'}},
+        {'tool': 'file_move', 'required': True,
+         'arguments': {'source': 'scripts', 'destination': 'moved'}},
+        {'tool': 'run_tests', 'arguments': {'target': 'tests/test_app.py'}},
+        {'tool': 'done', 'arguments': {'summary': 'File refusals inspected.'}}]}))
+    case = run_case(tmp_path, str(script))
+    replies = [str(m.get('content', '')) for request in case.requests
+               for m in request['messages'] if m.get('role') == 'tool']
+    assert sum(reply.startswith('REFUSED IS_DIRECTORY:') for reply in replies) >= 2
+    assert case.summary is not None and case.summary['files_changed'] == []

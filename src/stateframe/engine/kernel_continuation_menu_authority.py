@@ -62,6 +62,13 @@ def _dispatchable_subset(names: Iterable[str], runtime: object | None = None) ->
     )
 
 
+def observation_tools() -> frozenset[str]:
+    """Include explicitly registered per-run commands in observation menus."""
+    from kernel_agent_tools import service
+    host = service()
+    return OBSERVATION_TOOLS | (frozenset(host.custom) if host is not None else frozenset())
+
+
 def state_allow_set(state: object) -> frozenset[str]:
     """Return the durable executive's name-level set without changing state.
 
@@ -71,12 +78,13 @@ def state_allow_set(state: object) -> frozenset[str]:
     control plus a possible typed verification retry.
     """
     identity = getattr(state, "active_id", None)
+    observations = observation_tools()
     intentions = getattr(state, "intentions", {})
     if not isinstance(intentions, dict) or identity not in intentions:
-        return _dispatchable_subset({"done", *OBSERVATION_TOOLS})
+        return _dispatchable_subset({"done", *observations})
     item = intentions[identity]
     if getattr(item, "phase", "active") != "active":
-        return _dispatchable_subset({"done", *OBSERVATION_TOOLS})
+        return _dispatchable_subset({"done", *observations})
     effects = getattr(state, "effects", {})
     unresolved_ids = {
         effect_id for effect_id, effect in (effects.items() if isinstance(effects, dict) else ())
@@ -84,7 +92,7 @@ def state_allow_set(state: object) -> frozenset[str]:
         and getattr(effect, "status", None) in {"pending", "unknown"}
     }
     if unresolved_ids:
-        allowed = {"done", *OBSERVATION_TOOLS}
+        allowed = {"done", *observations}
         if any(getattr(effects[effect_id], "tool", None) == "run_tests"
                for effect_id in unresolved_ids):
             allowed.add("run_tests")
@@ -93,8 +101,8 @@ def state_allow_set(state: object) -> frozenset[str]:
             allowed.add("predict")
         return _dispatchable_subset(allowed)
     if predict_enabled():
-        return _dispatchable_subset(CONTROL_TOOLS | EFFECT_TOOLS | OBSERVATION_TOOLS | {"predict"})
-    return _dispatchable_subset(CONTROL_TOOLS | EFFECT_TOOLS | OBSERVATION_TOOLS)
+        return _dispatchable_subset(CONTROL_TOOLS | EFFECT_TOOLS | observations | {"predict"})
+    return _dispatchable_subset(CONTROL_TOOLS | EFFECT_TOOLS | observations)
 
 
 def per_step_allow_set(runtime: object | None) -> frozenset[str] | None:
@@ -119,7 +127,7 @@ def per_step_allow_set(runtime: object | None) -> frozenset[str] | None:
     if isinstance(raw, (str, bytes)) or not isinstance(raw, Iterable):
         return _dispatchable_subset(OBSERVATION_TOOLS, runtime)
     return _dispatchable_subset(
-        {*(str(name).strip().lower() for name in raw if str(name).strip()), *OBSERVATION_TOOLS},
+        {*(str(name).strip().lower() for name in raw if str(name).strip()), *observation_tools()},
         runtime,
     )
 

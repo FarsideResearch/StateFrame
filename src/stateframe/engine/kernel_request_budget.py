@@ -561,6 +561,8 @@ def apply_budget(
     reserved = {str(name) for name in reserved_tool_names if str(name)}
     required = completion_required if completion_only and completion_required else stage_required | completion_required
     required.update(reserved)
+    from kernel_agent_tools import is_registered
+    required.update(_tool_name(tool) for tool in before_tools if is_registered(_tool_name(tool)))
     protected_tools: list[object] = []
     protected_seen: set[str] = set()
     for tool in before_tools:
@@ -1231,6 +1233,13 @@ def _graceful_trim_optional_messages(
                 and measure_request_tokens() > max_request_tokens)
         )
 
+    from kernel_execution_reply_budget import fit_execution_replies
+    fitted_execution = fit_execution_replies(
+        body, max_request_bytes=max_request_bytes,
+        measure_bytes=lambda: _wire_bytes(body),
+        max_request_tokens=max_request_tokens, measure_tokens=measure_request_tokens,
+    )
+
     def is_protected(index: int, message: object) -> bool:
         if not isinstance(message, Mapping):
             return False
@@ -1257,7 +1266,7 @@ def _graceful_trim_optional_messages(
     from kernel_diet_accounting import RemovalAccounting
 
     original_messages = list(messages)
-    dropped: list[str] = []
+    dropped: list[str] = [f"execution_reply_fit:{call_id}" for call_id in fitted_execution]
     accounting = None
     # Only this removal phase owns immutable retained messages. Excerpt and
     # headcarry rewrites below deliberately return to whole-body measurement.

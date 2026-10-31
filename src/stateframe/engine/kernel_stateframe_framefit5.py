@@ -1045,6 +1045,10 @@ def build_typed_state(
             messages, task_index, last_action_index),
         "open_work": open_work,
     }
+    from kernel_agent_tools import service as agent_tools_service
+    host_tools = agent_tools_service()
+    if host_tools is not None and host_tools.jobs.jobs:
+        state["jobs"] = host_tools.snapshot()
     from kernel_framefit_receipt_history import attach_history
 
     attach_history(state, action_context)

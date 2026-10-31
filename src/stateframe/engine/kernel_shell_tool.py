@@ -48,13 +48,19 @@ def attach_shell_verification(sequence: list[dict], call_id: str,
     Frame-only requests retain one complete batch. A separate synthetic batch
     would hide the command's output and effects before the model could see them.
     """
+    def is_effect_tool(name):
+        from kernel_agent_tools import service
+        host = service()
+        return name == "shell" or (host is not None and name in host.custom
+                                   and host.custom[name].writes == "workspace")
+
     for index in range(len(sequence) - 1, -1, -1):
         parent = sequence[index]
         calls = parent.get("tool_calls")
         if parent.get("role") != "assistant" or not isinstance(calls, list):
             continue
         if not any(call.get("id") == call_id and
-                   call.get("function", {}).get("name") == "shell" for call in calls):
+                   is_effect_tool(call.get("function", {}).get("name")) for call in calls):
             continue
         end = index + 1
         while end < len(sequence) and sequence[end].get("role") == "tool":
@@ -133,7 +139,7 @@ class ShellTool:
         env_root.mkdir(mode=0o700, exist_ok=True)
         writable = self.settings.shell != "read-only"
         cap = shell_capability(workspace=self.root, run_env_dir=env_root, scratch_home=home,
-            network=self.settings.shell_network if writable else "none", writable=writable,
+            network=self.settings.shell_network, writable=writable,
             extra_read_roots=tuple(Path(p) for p in self.spec.get("shell_read_roots", ())),
             path_dirs=tuple(Path(p) for p in self.spec.get("shell_path_dirs", ())))
         environment = dict(cap.env)
@@ -143,10 +149,13 @@ class ShellTool:
             # Inspection resolves trusted host tools, never executables installed by a prior command.
             environment["PATH"] = "/usr/bin:/bin:/usr/sbin:/sbin"
         self.capability = replace(cap, env=environment,
+            network=self.settings.shell_network if writable else "none",
             read_roots=(*cap.read_roots, env_root),
             write_roots=cap.write_roots if writable else (home,),
             sandboxed=self.settings.host_authorization is None)
-        self.session.configure(self.capability)
+        # The session envelope admits explicitly trusted custom capabilities;
+        # each actual command still receives its narrower per-tool capability.
+        self.session.configure(replace(self.capability, network=self.settings.shell_network))
         self.store = ContentStore(self.run_dir)
         self.baseline_store = ContentStore(self.run_dir / "shell-baseline")
         baseline_root = Path(self.spec.get("parent_snapshot", self.root))
@@ -192,36 +201,60 @@ class ShellTool:
         except (EffectError, RunEnvError, ToolTapeError, OSError) as error:
             raise ShellExecutionFailed(f"{type(error).__name__}: {error}") from error
 
-    def _execute(self, args: dict, call_id: str) -> ShellReply:
-        try:
-            admission = admit_shell(args.get("command"), self.settings)
-        except ShellPolicyRefused as error:
-            return ShellReply(f"REFUSED {error.code}: {error}")
-        if args.get("background"):
-            return ShellReply("REFUSED JOB_LIMIT: background jobs are unavailable in this foreground tool")
-        timeout = args.get("timeout_seconds", 120)
-        if type(timeout) is not int or not 1 <= timeout <= 600:
-            return ShellReply("REFUSED DENIED_PROGRAM: timeout_seconds must be an integer from 1 to 600")
-        command = args["command"]
-        cap = replace(self.capability, limits=replace(self.capability.limits, wall_seconds=timeout))
+    def _execute(self, args: dict, call_id: str, *, custom=None) -> ShellReply:
+        if custom is None:
+            try:
+                admission = admit_shell(args.get("command"), self.settings)
+            except ShellPolicyRefused as error:
+                return ShellReply(f"REFUSED {error.code}: {error}")
+            if args.get("background"):
+                from kernel_agent_tools import service
+                return service().background(args, call_id, admission)
+            timeout = args.get("timeout_seconds", 120)
+            if type(timeout) is not int or not 1 <= timeout <= 600:
+                return ShellReply("REFUSED DENIED_PROGRAM: timeout_seconds must be an integer from 1 to 600")
+            command, name = args["command"], "shell"
+            argv = ["/bin/sh", "-c", command]
+            cap = replace(self.capability, limits=replace(self.capability.limits, wall_seconds=timeout))
+            requires_confirmation = admission.requires_confirmation
+            replay_class = "external" if cap.network == "full" or not cap.sandboxed else "local"
+            if self.settings.shell == "read-only":
+                replay_class = "observation"
+        else:
+            from kernel_custom_tools import CustomToolError
+            try:
+                argv = custom.build_argv({k: v for k, v in args.items() if k != "why"})
+            except CustomToolError as error:
+                return ShellReply(f"REFUSED BAD_ARGUMENTS: {error}")
+            try:
+                custom.verify_executable()
+            except CustomToolError as error:
+                return ShellReply(f"REFUSED TOOL_CHANGED: {error}")
+            name, command = custom.name, custom.name
+            from kernel_exec_capability import executable_read_roots
+            cap = replace(self.capability, purpose="custom_tool", network=custom.network,
+                          workspace_writable=custom.writes == "workspace",
+                          read_roots=(*self.capability.read_roots, *executable_read_roots(custom.executable)),
+                          limits=replace(self.capability.limits, wall_seconds=custom.timeout_seconds))
+            requires_confirmation = False
+            replay_class = custom.replay
         before = self._scan()
         self.store.capture(self.root, before)
         identity = self.identity()
-        replay_class = "external" if cap.network == "full" or not cap.sandboxed else "local"
         # Runtime workspace names vary on replay. Bind the same semantic authority,
         # preserving every external read root and all resource/network settings.
         encoded = json.dumps(cap.as_dict(), sort_keys=True)
         for path, label in ((str(self.root), "<workspace>"), (str(self.run_dir), "<run>")):
             encoded = encoded.replace(path, label)
-        intent = dict(tool="shell", args=args, replay_class=replay_class,
+        intent = dict(tool=name, args=args, replay_class=replay_class,
                       capability_digest=hashlib.sha256(encoded.encode()).hexdigest(),
-                      definition_digest=None, env_identity=identity,
+                      definition_digest=custom.definition_digest if custom else None, env_identity=identity,
                       pre_manifest_digest=workspace_identity(before))
         tape = tape_for_run()
         record = tape.lookup(call_id) if replay_mode_active() else None
         if replay_mode_active():
             approved = (self.confirm(call_id, command, intent, replay=True)
-                        if admission.requires_confirmation else True)
+                        if requires_confirmation else True)
             if (record is not None and record.completed
                     and record.observation.startswith("REFUSED ASK_DECLINED:")):
                 reason = verify_intent(record, **intent)
@@ -238,15 +271,27 @@ class ShellTool:
                 reason = verify_intent(record, **intent)
             if reason:
                 raise ToolReplayRefused(reason)
+            if decision.serve_taped and not decision.reexecute:
+                return ShellReply(record.observation)
         else:
             tape.intent(call_id=call_id, **intent)
-        if record is None and admission.requires_confirmation and not self.confirm(call_id, command, intent, replay=False):
+        if record is None and requires_confirmation and not self.confirm(call_id, command, intent, replay=False):
             observation = "REFUSED ASK_DECLINED: user declined shell command"
             tape.complete(call_id=call_id, exit_code=None, observation=observation,
                           post_manifest_digest=workspace_identity(before), env_identity=identity)
             return ShellReply(observation)
         try:
-            result = self.session.run(["/bin/sh", "-c", command], cap, cwd=self.root)
+            if custom is not None:
+                try:
+                    custom.verify_executable()
+                except CustomToolError as error:
+                    observation = f"REFUSED TOOL_CHANGED: {error}"
+                    if record is not None:
+                        raise ToolReplayRefused(observation) from error
+                    tape.complete(call_id=call_id, exit_code=None, observation=observation,
+                                  post_manifest_digest=workspace_identity(before), env_identity=identity)
+                    return ShellReply(observation)
+            result = self.session.run(argv, cap, cwd=self.root)
         except (ExecSessionError, OSError) as error:
             if "requires " in str(error) and "no unsandboxed fallback" in str(error):
                 observation = f"REFUSED SANDBOX_UNAVAILABLE: {error}"
@@ -279,9 +324,14 @@ class ShellTool:
             replacements={str(self.run_dir / "shell-home"): "<scratch>",
                           str(self.run_dir): "<run>", str(Path.home()): "<home>"})
         observation = (f"$ {command[:200]}\nexit {'timeout' if result.timed_out else result.exit_code} | "
-                       f"{result.wall_seconds:.2f}s | {self.settings.shell} | network {cap.network}\n{output}")
+                       f"{result.wall_seconds:.2f}s | {self.settings.shell} | network {cap.network}\n")
+        if custom is not None:
+            observation = (f"{name} exit {'timeout' if result.timed_out else result.exit_code} | "
+                           f"{result.wall_seconds:.2f}s\n")
         if result.timed_out:
             observation = "REFUSED TIMEOUT: command exceeded its wall limit\n" + observation
+        head = observation
+        observation = ""
         if effects.applied:
             groups = []
             for kind in ("created", "modified", "deleted", "mode", "type"):
@@ -294,6 +344,8 @@ class ShellTool:
                 f"{e.path} ({reason})" for e, reason in effects.restored))
         if after_identity != identity:
             observation += f"\nenvironment changed: {after_identity[:12]} (check results from before are stale)"
+        from kernel_execution_reply_budget import record_delivery
+        observation = record_delivery(self.run_dir, head, output, observation)
         completion = dict(exit_code=result.exit_code, post_manifest_digest=workspace_identity(effects.manifest),
                           env_identity=after_identity)
         if record is not None:
@@ -318,7 +370,7 @@ def service() -> ShellTool | None:
     return _active
 
 
-def publish_effects(reply: ShellReply, runtime, bolt, created: set[str]) -> Path | None:
+def publish_effects(reply: ShellReply, runtime, bolt, created: set[str], *, name="shell") -> Path | None:
     """Publish an opaque observation and retire proof for every admitted mutation."""
     from kernel_post_edit_refresh import rebind_after_file_operation
     from kernel_green_lock import note_applied_product_edit
@@ -345,8 +397,8 @@ def publish_effects(reply: ShellReply, runtime, bolt, created: set[str]) -> Path
                              detail="Installed for this run; update dependency declarations to keep installs.")
     result = "APPLIED" if paths or reply.environment_changed else (
         "REFUSED" if reply.observation.startswith("REFUSED ") else "NO_OP")
-    bolt.receipt("shell_effect" if paths or reply.environment_changed else "shell",
-                 "shell", reply.observation, result, reply.observation,
+    bolt.receipt("shell_effect" if paths or reply.environment_changed else name,
+                 name, reply.observation, result, reply.observation,
                  changed_paths=paths,
                  effects=tuple({"path": e.path, "change": e.change} for e in reply.applied))
     return target

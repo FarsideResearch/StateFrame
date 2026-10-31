@@ -271,6 +271,9 @@ def _row_records(records: object) -> list[Mapping[str, object]]:
 
 def render_jobs_block(records: object) -> str:
     """Render the compact model-facing JOBS block from host-computed rows."""
+    if isinstance(records, Mapping) and "sequence" in records:
+        from kernel_agent_jobs import render_snapshot
+        return render_snapshot(records)
     rows = _row_records(records)
     lines = ["[JOBS]"]
     if not rows:

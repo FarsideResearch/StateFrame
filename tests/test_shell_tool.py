@@ -266,7 +266,9 @@ def test_host_path_authority_resolves_executable_targets(tmp_path, monkeypatch):
     monkeypatch.setenv("PATH", os.pathsep.join((str(bin_dir), str(tmp_path / "missing"), ".")))
     paths, roots = path_authority()
     assert paths == [str(bin_dir)]
-    assert roots == sorted((str(bin_dir), str(real)))
+    from kernel_exec_capability import executable_read_roots
+    assert roots == sorted(map(str, executable_read_roots(bin_dir / "cc")))
+    assert str(real) not in roots and str(bin_dir) not in roots
 
 
 def test_plain_shell_host_records_effect_without_check_credit(setup_tool, monkeypatch):
@@ -387,3 +389,14 @@ def test_host_provision_disables_run_env_on_unknown_executable_pth(tmp_path, cap
     assert json.loads((run / "spec.json").read_text())["tool_settings"]["run_env"] is False
     assert "run environment off: executable .pth cannot be safely cloned: unknown.pth; " \
            "dependency installs will not persist for checks" in capsys.readouterr().out
+
+
+def test_readonly_shell_does_not_narrow_explicit_custom_network_envelope(setup_tool):
+    make, _, _ = setup_tool
+    tool, process = make(settings=ToolSettings(shell="read-only", shell_network="full", run_env=False))
+    assert tool.capability.network == "none"
+    assert not tool.capability.workspace_writable
+    assert process.initial.network == "full"
+    reply = tool.execute({"command": "pwd"}, "inspect")
+    assert not reply.fatal
+    assert process.calls[-1][1].network == "none"

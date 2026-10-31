@@ -295,8 +295,8 @@ def load_tool_files(paths: Sequence[Path], *, builtin_names: frozenset[str],
             if network == "full" and replay == "local":
                 _fail(where, "replay", "full network tools must use external replay")
             timeout = definition.get("timeout_seconds")
-            if type(timeout) not in (int, float) or not math.isfinite(timeout) or not 0 < timeout <= 3600:
-                _fail(where, "timeout_seconds", "expected number from 0 to 3600")
+            if type(timeout) not in (int, float) or not math.isfinite(timeout) or not 0 < timeout <= 600:
+                _fail(where, "timeout_seconds", "expected finite number greater than 0 and at most 600")
             try:
                 executable_digest = _file_digest(executable)
             except OSError as error:

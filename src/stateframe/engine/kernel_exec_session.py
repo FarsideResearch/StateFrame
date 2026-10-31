@@ -18,7 +18,10 @@ import threading
 import time
 import uuid
 
-from kernel_exec_capability import ExecCapability
+if __package__:
+    from .kernel_exec_capability import ExecCapability
+else:
+    from kernel_exec_capability import ExecCapability
 
 
 class ExecSessionError(RuntimeError):
