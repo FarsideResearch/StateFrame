@@ -66,7 +66,8 @@ class ToolSettings:
             raise ToolSettingsError("tools_files: expected path and digest records")
 
     def as_dict(self) -> dict[str, object]:
-        return {"schema": SCHEMA, **asdict(self)}
+        # JSON-canonical form (tuples as lists): the child compares this against the spec's JSON copy.
+        return json.loads(json.dumps({"schema": SCHEMA, **asdict(self)}))
 
     @classmethod
     def from_dict(cls, data: object) -> "ToolSettings":

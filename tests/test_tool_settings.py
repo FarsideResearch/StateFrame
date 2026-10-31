@@ -112,3 +112,12 @@ def test_privileged_profile_key_refused(tmp_path, name):
     path.write_text(json.dumps({"schema": "stateframe-product-profile/1", "switches": {name: "on"}}))
     with pytest.raises(ValueError, match="privileged tool settings"):
         profiles.load(str(path))
+
+
+def test_as_dict_equals_its_json_round_trip_with_list_fields():
+    # Regression: tuples from from_dict() made the child's spec comparison fail on every run.
+    settings = ToolSettings.from_dict(ToolSettings().as_dict())
+    spec_copy = json.loads(json.dumps({"tool_settings": settings.as_dict()}))["tool_settings"]
+    assert settings.as_dict() == spec_copy
+    loaded = ToolSettings.from_dict({**ToolSettings().as_dict(), "shell_allow": ["make"], "web_allow": ["docs.python.org"]})
+    assert loaded.as_dict() == json.loads(json.dumps(loaded.as_dict()))
