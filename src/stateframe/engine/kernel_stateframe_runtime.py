@@ -11770,6 +11770,8 @@ class StateFrameRuntime:
             if host.jobs.jobs:
                 host.snapshot()
         selected = project_menu(self._base_tool_menu(tools, messages))
+        from kernel_read_lockout import project as project_read_lockout
+        selected = project_read_lockout(self, selected)
         self.completion_menu = tuple(tool["function"]["name"] for tool in selected)
         return selected
 
@@ -22009,6 +22011,9 @@ class StateFrameRuntime:
             # narrowing have been applied; this is the model's next-step
             # boundary, not an expendable transcript exchange.
             prepared.append(copy.deepcopy(frame_integrity_batch_message))
+        if provider_request:
+            from kernel_read_lockout import append_frame_line
+            append_frame_line(self, prepared)
         if provider_request and getattr(self, "environment_state", None) is not None:
             from kernel_environment_runtime import panel_content as environment_panel_content
             environment_panel = environment_panel_content(self, frame)
@@ -22455,6 +22460,8 @@ class StateFrameRuntime:
             # the stage exit; dispatch then force-closed every such read
             # (STAGE_TRANSITION_REPLAN x264).  IDEALPATH stays the last word.
             self._idealpath_boundary_reproject(tools)
+            from kernel_read_lockout import filter_tools as filter_locked_reads
+            tools[:] = filter_locked_reads(self, tools)
             if _boot_read_added:
                 from kernel_lane4_fixes import BOOT_READ_EVENT, tool_names
                 if "read" in tool_names(tools):
@@ -23631,6 +23638,9 @@ class StateFrameRuntime:
             prepared = [message for message in prepared
                         if message.get("content") != scope_continuation["content"]]
             prepared.append(scope_continuation)
+        if provider_request:
+            from kernel_read_lockout import append_frame_line
+            append_frame_line(self, prepared)
         if (provider_request
                 and getattr(self, "stateframe_completion_owner_mode", "off") == "on"):
             from kernel_completion_owner import (
@@ -23775,6 +23785,8 @@ class StateFrameRuntime:
                 and isinstance(tool.get("function"), Mapping)
             ]
             tools = align_tools_to_completion_route(self, tools)
+            from kernel_read_lockout import filter_tools as filter_locked_reads
+            tools = filter_locked_reads(self, tools)
             after_route_names = [
                 str(tool.get("function", {}).get("name", ""))
                 for tool in tools if isinstance(tool, Mapping)
@@ -24105,7 +24117,11 @@ class StateFrameRuntime:
                     owner_contract=request_action_contract,
                     owner_source_messages=owner_protocol_source,
                     owner_presentation=getattr(capture, "owner_presentation", None),
-                    host_text_messages=prepared if selected_draft_inputs else (),
+                    host_text_messages=(prepared if selected_draft_inputs else [
+                        message for message in prepared
+                        if isinstance(message.get("content"), str)
+                        and message["content"].startswith("[Read lockout] ")
+                        and message.get("_request_budget_section") == "stage_evidence"]),
                     frame_request_allocation=capture.frame_request_allocation,
                 )
                 if allocation_requested:
@@ -24428,6 +24444,9 @@ class StateFrameRuntime:
         if getattr(self, "stateframe_greenlock_menu_authority_mode", "off") == "on":
             from kernel_greenlock_menu_authority import finalize_wire_menu_authority
             finalize_wire_menu_authority(self, tools)
+        if provider_request:
+            from kernel_read_lockout import filter_tools as filter_locked_reads
+            tools = filter_locked_reads(self, tools)
         framefit_minimum_terminal = bool(
             isinstance(overflow, Mapping)
             and overflow.get("kind") == "FRAMEFIT5_IMPOSSIBLE_MINIMUM"
@@ -24437,6 +24456,8 @@ class StateFrameRuntime:
             try:
                 from kernel_request_tool_surface import author_final_tool_surface
 
+                from kernel_read_lockout import filter_tools as filter_locked_reads
+                tools = filter_locked_reads(self, tools)
                 final_body = {"messages": prepared, "tools": copy.deepcopy(tools)}
                 final_surface = author_final_tool_surface(
                     capture, self, final_body, request_id=capture.request_id,

@@ -634,6 +634,10 @@ def _prepare_replacement_candidate(runtime: object, original: object, preparatio
         framefit5_sources = None
     if not isinstance(framefit5_sources, Mapping):
         framefit5_sources = None
+    from kernel_read_lockout import append_frame_line, filter_tools as filter_locked_reads
+    tools = filter_locked_reads(runtime, tools)
+    body["tools"] = tools
+    append_frame_line(runtime, messages)
     if original_contract_kind == "lean_stable_surface":
         from kernel_completion_owner import establish_lean_request_action_contract
         contract = establish_lean_request_action_contract(

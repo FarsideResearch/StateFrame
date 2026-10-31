@@ -943,6 +943,13 @@ def dispatch_live_read(root: Path, p: Path, raw: str, display: str, start: int, 
     from kernel_reread_result_truth import enabled as result_truth_enabled
     if read_once_note is not None and not result_truth_enabled():
         observation = f"{observation}\n{read_once_note}"
+    # A menu decision needs the outcome actually returned to the model, rather
+    # than a cache hit (which may still have delivered source bytes).
+    from kernel_code_bookmarks import enabled as bookmarks_enabled
+    if (bookmarks_enabled()
+            and getattr(measurement, "_code_bookmarks_active", False) is True):
+        delivery["unchanged_since_request"] = observation.startswith(
+            f"[read] {display[:120]} unchanged since request ")
     from kernel_serve_reads import enabled as serve_reads_enabled, note_read_outcome
     if serve_reads_enabled():
         from kernel_gate_switches import deliver_requested_bytes_enabled

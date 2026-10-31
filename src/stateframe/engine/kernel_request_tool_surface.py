@@ -108,6 +108,9 @@ def _request_tool_floor_schemas(
     floor_names = list(_REQUEST_TOOL_FLOOR)
     if "list_files" in base_by_name:
         floor_names.append("list_files")
+    from kernel_code_bookmarks import enabled as bookmarks_enabled
+    if bookmarks_enabled() and getattr(runtime, "_read_lockout_notice", None):
+        floor_names = [name for name in floor_names if name != "read"]
 
     journal = getattr(runtime, "journal", None)
     run_id = getattr(journal, "run_id", None)
@@ -629,6 +632,8 @@ def author_final_tool_surface(
         if stabilize_cache_tools:
             from kernel_cache_layout_candidate import prepare_stable_tools
             final_tools = prepare_stable_tools(capture, runtime, final_tools, body)
+        from kernel_read_lockout import filter_tools as filter_locked_reads
+        final_tools = filter_locked_reads(runtime, final_tools)
         names = _tool_names(final_tools)
         if (not names or any(not name for name in names)
                 or len(names) != len(set(names))):

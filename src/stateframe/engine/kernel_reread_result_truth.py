@@ -177,6 +177,10 @@ def checkpoint_replay(measurement: object) -> dict[str, object]:
     snapshot = {"schema": _REPLAY_SCHEMA, "active": True,
                 "seen": rows[-_SEEN_LIMIT:], "failure": failure,
                 "bookmarks": bookmarks}
+    from kernel_read_lockout import checkpoint as lockout_checkpoint
+    lockout = lockout_checkpoint(measurement)
+    if lockout is not None:
+        snapshot["read_lockout"] = lockout
     restore_replay(_ReplayValidationTarget(), snapshot)
     return snapshot
 
@@ -242,6 +246,9 @@ def restore_replay(measurement: object, snapshot: object) -> None:
     measurement._bookmark_failure_data = dict(failure) if failure is not None else None
     measurement._code_bookmarks_active = True
     measurement._code_bookmark_carry = restored_bookmarks
+    if "read_lockout" in snapshot:
+        from kernel_read_lockout import restore as restore_lockout
+        restore_lockout(measurement, snapshot["read_lockout"])
 
 
 def _complete_body(path: str, revision: object,

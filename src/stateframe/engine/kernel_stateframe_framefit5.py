@@ -295,6 +295,9 @@ _FRAMEFIT5_HOST_CONTEXT_PREFIXES = (
 def _is_framefit5_host_context_panel(message: Mapping[str, object]) -> bool:
     """Recognize current host panels that must accompany the selected exchange."""
     content = message.get("content")
+    if isinstance(content, str) and content.startswith("[Read lockout] "):
+        return (message.get("role") == "user"
+                and message.get("_request_budget_section") == "stage_evidence")
     return (
         message.get("role") == "user"
         and isinstance(content, str)

@@ -200,6 +200,27 @@ def test_missing_startup_edit_scope_still_recommends_site(tmp_path):
     assert [site["path"] for site in state["open_sites"]] == ["pkg/app.py"]
 
 
+def test_framefit5_request_carries_bounded_read_lockout_line(tmp_path, monkeypatch):
+    from kernel_read_lockout import append_frame_line
+
+    monkeypatch.setenv("STATEFRAME_CODE_BOOKMARKS", "on")
+    messages, context, runtime = _frame_request(tmp_path, "pkg/app.py", ["pkg/app.py"])
+    state = build_typed_state(messages, context, runtime)
+    prepared = [{"role": "system", "content": "rules"}, messages[0],
+                {"role": "user", "content": _serialize_state_message(
+                    {"state": {"framefit5": state}})}]
+    runtime._read_lockout_notice = (
+        "Read lockout: pkg/app.py was re-read unchanged; failing assertion: "
+        "assert VALUE == 2; read is unavailable for this request.")
+    append_frame_line(runtime, prepared)
+    assembled = assemble_framefit5_request(
+        prepared, prepared[:2], live_frame=state, runtime=runtime,
+        host_text_messages=prepared)
+    notices = [row["content"] for row in assembled
+               if str(row.get("content", "")).startswith("[Read lockout] ")]
+    assert notices == ["[Read lockout] " + runtime._read_lockout_notice]
+
+
 def test_inventory_uses_next_original_candidate_after_forbidden(tmp_path, monkeypatch):
     import kernel_remaining_sites
 
