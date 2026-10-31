@@ -166,3 +166,72 @@ def isolated_command(command: list[str], root: Path, env: dict[str, str], *,
         arguments.extend(["--bind", str(scratch), str(scratch)])
     arguments.extend(["--chdir", str(root), "--", *command])
     return arguments, clean
+
+
+def capability_command(command, cap, *, platform_backend=None, shared_namespace=False):
+    """Build a shell/job boundary from explicit authority, never host test policy.
+
+    shared_namespace is private to the Linux session supervisor: keep its PID/net
+    namespaces while creating a per-command mount and user namespace. A none
+    capability still gets a fresh, disconnected network namespace.
+    """
+    if not cap.sandboxed:
+        return list(command), dict(cap.env)
+    selected = platform_backend or ("sandbox-exec" if platform.system() == "Darwin" else "bwrap")
+    if selected not in {"sandbox-exec", "bwrap"}:
+        raise ValueError("execution backend must be sandbox-exec or bwrap")
+    executable = shutil.which(selected)
+    if executable is None:
+        raise RuntimeError(f"execution capability requires {selected}; no unsandboxed fallback")
+    reads = set(cap.read_roots) | set(cap.write_roots) | {cap.workspace,
+            Path(__file__).with_name("sf_launch.py").resolve()}
+    writes = set(cap.write_roots) | ({cap.workspace} if cap.workspace_writable else set())
+    if selected == "sandbox-exec":
+        def filters(paths):
+            return " ".join(f"(subpath {json.dumps(str(p))})" for p in sorted(paths))
+        ancestors = {p for root in reads for p in root.parents}
+        metadata = " ".join(f"(literal {json.dumps(str(p))})" for p in sorted(ancestors))
+        devices = '(literal "/dev/null") (literal "/dev/zero") (literal "/dev/random") (literal "/dev/urandom") (literal "/dev/fd")'
+        profile = ("(version 1) (allow default) "
+                   f"(deny file-read* (require-not (require-any {filters(reads)} {metadata} {devices}))) "
+                   f"(deny file-write* (require-not (require-any {filters(writes)} (literal \"/dev/null\")))) ")
+        if cap.network != "full":
+            profile += "(deny network*) "
+        if cap.network == "loopback":
+            profile += ('(allow network-inbound (local ip "localhost:*")) '
+                        '(allow network-outbound (remote ip "localhost:*")) ')
+        return [executable, "-p", profile, *command], dict(cap.env)
+    arguments = [executable, "--die-with-parent"]
+    if shared_namespace:
+        arguments += ["--unshare-user", "--unshare-ipc", "--unshare-uts"]
+        if cap.network == "none":
+            arguments += ["--unshare-net"]
+        # Do not expose the supervisor's root/fds through procfs to commands.
+        arguments += ["--tmpfs", "/proc"]
+    else:
+        arguments += ["--unshare-all", "--new-session", "--proc", "/proc"]
+        if cap.network == "full":
+            arguments += ["--share-net"]
+    arguments += ["--dev", "/dev", "--cap-drop", "ALL"]
+    # Merged-/usr distributions make /lib, /bin, ... symlinks. Capability roots are resolved,
+    # so recreate those links or the ELF loader (/lib/ld-linux-*.so) is missing in the sandbox.
+    for link in ("/bin", "/sbin", "/lib", "/lib32", "/lib64", "/libx32"):
+        if os.path.islink(link):
+            arguments += ["--symlink", os.readlink(link), link]
+    # The loader finds libraries outside /lib and /usr/lib (e.g. /usr/local/lib/libpython*.so)
+    # only through its cache; it holds library paths, nothing secret. The rest of /etc stays out.
+    if os.path.isfile("/etc/ld.so.cache"):
+        arguments += ["--ro-bind", "/etc/ld.so.cache", "/etc/ld.so.cache"]
+    # Parent mounts first, narrower mounts last; writable roots are explicit.
+    mounts = {p: "--ro-bind" for p in reads}
+    mounts.update({p: "--bind" for p in writes})
+    for path in sorted(mounts, key=lambda p: (len(p.parts), str(p))):
+        arguments += [mounts[path], str(path), str(path)]
+    # bwrap builds the root as a writable tmpfs and creates missing parents there; without this a
+    # write outside every declared root "succeeds" into throwaway memory. Bind mounts keep their mode.
+    arguments += ["--remount-ro", "/"]
+    command = [os.path.realpath(sys.executable), "-I", str(Path(__file__).with_name("sf_launch.py").resolve()),
+               "--network-none" if cap.network == "none" else "--process-filter",
+               json.dumps(dict(cap.env), separators=(",", ":")), *command]
+    arguments += ["--chdir", str(cap.workspace), "--", *command]
+    return arguments, dict(cap.env)
