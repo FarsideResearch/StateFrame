@@ -29,9 +29,11 @@ from pathlib import Path
 if __package__:
     from .cache_metrics import normalize
     from .replay_tape import CheckpointUnfaithful, Replayer, mask_volatile
+    from .skills import SkillError, skills_digest, verify_records
 else:  # Executed by path under the selected project interpreter.
     from cache_metrics import normalize
     from replay_tape import CheckpointUnfaithful, Replayer, mask_volatile
+    from skills import SkillError, skills_digest, verify_records
 
 # The wrappers' own state (send counters, the id stream position, ...). An engine checkpoint saves
 # these by value and a checkpoint restore refills them in place (kernel_checkpoint participants), so
@@ -722,10 +724,6 @@ def main(argv: list[str]) -> int:
     install_run_identity(spec.get("run_identity_seed"))  # before any engine import
     key = os.environ.get(spec["api_key_env"], "") if spec.get("api_key_env") else ""
     try:
-        try:
-            from .skills import SkillError, verify_records, skills_digest
-        except ImportError:
-            from stateframe.skills import SkillError, verify_records, skills_digest
         skill_records = spec.get("skills", [])
         skill_digest = spec.get("skills_digest", skills_digest([]))
         if "skills" in spec:

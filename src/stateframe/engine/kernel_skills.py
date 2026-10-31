@@ -7,7 +7,10 @@ import os
 import re
 from pathlib import Path
 
-from stateframe.skills import SkillError, verify_records
+try:
+    from stateframe.skills import SkillError, verify_records
+except ModuleNotFoundError:  # engine child started by path: the host helper is a sibling of _child.py
+    from skills import SkillError, verify_records
 from kernel_request_diet import RequestTokenMeter
 
 MAX_CATALOG_TOKENS = 1200
