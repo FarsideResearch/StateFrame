@@ -8,7 +8,9 @@ from pathlib import Path
 import pytest
 
 from stateframe import skills as host
+from stateframe.resume import archive_attempt
 from kernel_skills import SkillRuntime, note_budget_omission
+from kernel_tool_tape import ToolTape
 from kernel_agent_schemas import OBSERVATION_NAMES
 from kernel_bounded_locate_code import OBSERVATION_TOOLS, READ_TOOLS
 from kernel_completion_owner import TOOL_SPECS
@@ -169,6 +171,28 @@ def test_budget_omission_notice_and_protected_state(tmp_path):
     runtime.commit_delivery(messages)
     assert runtime.resident == []
     assert runtime.load(skill.name) == "skill example-skill loaded"
+
+
+def test_changed_step_limit_archives_skill_tape_for_live_restart(tmp_path):
+    run = tmp_path / "run"
+    run.mkdir()
+    spec = {"max_turns": 1, "environment": {"REACT_STEPS": "1"}}
+    (run / "spec.json").write_text(json.dumps(spec))
+    tape = ToolTape(run)
+    intent = {"call_id": "skill-call", "tool": "skill_load", "args": {"name": "example-skill"},
+              "replay_class": "observation", "capability_digest": "cap", "definition_digest": "skill",
+              "env_identity": "env", "pre_manifest_digest": "before"}
+    tape.intent(**intent)
+    tape.complete(call_id="skill-call", exit_code=None, observation="skill example-skill loaded",
+                  post_manifest_digest="before", env_identity="env")
+    archived = archive_attempt({"run": run, "spec": spec, "attempt": 1, "max_turns": 8,
+                                "previous_status": "RESPONSE_BUDGET_EXHAUSTED"}, tmp_path / "engine")
+    assert (archived / "tool-tape.jsonl").is_file()
+    assert not (run / "tool-tape.jsonl").exists()
+    assert spec["resume"]["tape"] == []
+    assert spec["resume"]["restart_live"] is True
+    assert spec["max_turns"] == 8
+    ToolTape(run).intent(**intent)
 
 
 def test_diet_sheds_body_at_33344_edge_and_preserves_authority(tmp_path):

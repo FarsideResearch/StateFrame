@@ -1449,7 +1449,10 @@ def resume_run(run_dir: Path, *, endpoint: Endpoint | None = None, max_turns: in
                         "set back to the recorded name; nothing else is changed (recorded in spec.json, "
                         "summary.json and any resume-divergence.json)")
             checkpoint = spec["resume"].get("checkpoint")
-            if checkpoint:
+            if spec["resume"].get("restart_live"):
+                printer("restart live: the changed step limit starts at request 1; previous model and tool "
+                        "exchanges remain archived")
+            elif checkpoint:
                 printer(f"checkpoint: engine state restored as of send {checkpoint['sends']} (step "
                         f"{checkpoint['step']}); {checkpoint['tail']} later recorded exchange(s) are replayed "
                         "and checked byte for byte, then the run continues live")

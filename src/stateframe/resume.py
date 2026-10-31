@@ -321,9 +321,17 @@ def archive_attempt(state: dict[str, object], engine_dir: Path, *, use_checkpoin
     # A fallback after a refused checkpoint restore replays the INTERRUPTED attempt (``tape_from``),
     # not the refused one, which holds only the restored prefix.
     source = tape_from or folder
-    tape = carry_forward(spec, replay_tape.build(source / "wire", source / "sends.jsonl"),
-                         (source / "resume-divergence.json").exists())
-    checkpoint = select_checkpoint(run, tape, source / "wire") if use_checkpoint else None
+    restart_live = int(state["max_turns"]) != int(spec["max_turns"])
+    # The step limit is in request 1. A raised limit changes that request, so
+    # the prior model and tool tape cannot be replayed on this fresh attempt.
+    # Ordinary replay keeps tool-tape.jsonl at the run root for call-id lookup;
+    # a live restart must archive it so fresh calls can reuse their original ids.
+    if restart_live and (run / "tool-tape.jsonl").exists():
+        os.replace(run / "tool-tape.jsonl", folder / "tool-tape.jsonl")
+    tape = ([] if restart_live else carry_forward(
+        spec, replay_tape.build(source / "wire", source / "sends.jsonl"),
+        (source / "resume-divergence.json").exists()))
+    checkpoint = select_checkpoint(run, tape, source / "wire") if use_checkpoint and not restart_live else None
     spec["max_turns"] = int(state["max_turns"])
     spec["environment"]["REACT_STEPS"] = str(spec["max_turns"])
     spec["engine_dir"] = str(engine_dir)  # same release (checked in assess), current install path
@@ -337,6 +345,7 @@ def archive_attempt(state: dict[str, object], engine_dir: Path, *, use_checkpoin
                       "previous_status": state.get("previous_status"),
                       "resumed": datetime.now(timezone.utc).isoformat(timespec="seconds"),
                       "tape": tape,
+                      **({"restart_live": True} if restart_live else {}),
                       **({"model_swap": swap} if isinstance(swap, dict) else {})}
     if checkpoint is not None:
         spec["resume"]["checkpoint"] = checkpoint
