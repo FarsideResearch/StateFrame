@@ -271,8 +271,11 @@ def capability_command(command, cap, *, platform_backend=None, shared_namespace=
         arguments += ["--unshare-user", "--unshare-ipc", "--unshare-uts"]
         if cap.network == "none":
             arguments += ["--unshare-net"]
-        # Do not expose the supervisor's root/fds through procfs to commands.
-        arguments += ["--tmpfs", "/proc"]
+        # Each command gets its own PID namespace and a procfs of only its own processes:
+        # the supervisor's root and fds stay hidden, while tools that read /proc (df, ps,
+        # free, mount) work. The supervisor still sees every nested descendant in its table,
+        # and orphans die with the command's namespace instead of reparenting to it.
+        arguments += ["--unshare-pid", "--proc", "/proc"]
     else:
         arguments += ["--unshare-all", "--new-session", "--proc", "/proc"]
         if cap.network == "full":

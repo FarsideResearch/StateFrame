@@ -63,13 +63,17 @@ def test_output_flood_is_bounded(setup, sandboxed):
 def test_escaped_child_is_killed_after_leader_exit_or_timeout(setup, leader_exits, sandboxed):
     run, cap = setup
     cap = replace(cap, sandboxed=sandboxed, limits=replace(cap.limits, nproc=4096))
-    command = script(cap, '''import os, signal, time
+    beat = cap.workspace / "heartbeat"
+    command = script(cap, f'''import os, signal, time
 pid = os.fork()
 if pid == 0:
     os.setsid()
     signal.signal(signal.SIGTERM, signal.SIG_IGN)
     print(os.getpid(), flush=True)
-    time.sleep(30)
+    for _ in range(300):
+        with open({str(beat)!r}, "a") as handle:
+            handle.write(".")
+        time.sleep(0.1)
 else:
     time.sleep(0.5)
 ''' + ("    os._exit(0)\n" if leader_exits else "    time.sleep(30)\n"))
@@ -77,8 +81,17 @@ else:
     with ExecSession(run) as session:
         result = session.run(command, cap)
     assert result.cleanup.ok, result.cleanup
-    assert result.cleanup.killed >= 1
     assert result.timed_out is (not leader_exits)
+    # The escaped child must be dead, whoever killed it: its heartbeat stops growing.
+    size = beat.stat().st_size
+    time.sleep(0.6)
+    assert beat.stat().st_size == size, "escaped child is still running after cleanup"
+    if sandboxed and sys.platform.startswith("linux") and leader_exits:
+        # Each Linux command has its own PID namespace: when the leader exits, the namespace
+        # ends and the kernel kills the escaped child, so the supervisor may count no kill.
+        pass
+    else:
+        assert result.cleanup.killed >= 1
     pid = int(result.output.strip())
     # Linux PID is namespace-local and cannot be probed from the host.
     if sys.platform == "darwin":
@@ -254,3 +267,28 @@ def test_custom_loopback_narrows_full_session_network(setup):
             result = session.run(argv, narrowed)
             assert result.exit_code == 0 and result.cleanup.ok, result.output
             assert b"isolated loopback" in result.output
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="Linux procfs inside the bwrap session")
+def test_procfs_tools_work_without_exposing_the_supervisor(setup):
+    # Regression: the persistent session used to mount an empty tmpfs on /proc, so df, ps and
+    # free failed ("cannot read table of mounted file systems"). Each command now gets its own
+    # PID namespace and procfs: the tools work and the supervisor process stays invisible.
+    run, cap = setup
+    cap = replace(cap, sandboxed=True)
+    with ExecSession(run) as session:
+        result = session.run(["/bin/sh", "-c", "df -h /"], cap)
+        assert result.exit_code == 0, result.output
+        assert b"Filesystem" in result.output
+        listing = script(cap, '''import os
+for pid in sorted(p for p in os.listdir("/proc") if p.isdigit()):
+    try:
+        print(pid, open(f"/proc/{pid}/cmdline", "rb").read().replace(b"\\0", b" ").decode())
+    except OSError:
+        pass
+''')
+        result = session.run(listing, cap)
+        assert result.exit_code == 0, result.output
+        assert b"kernel_exec_supervisor" not in result.output, result.output
+        assert b"command.py" in result.output
+        assert result.cleanup.ok
