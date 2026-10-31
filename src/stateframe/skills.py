@@ -1,6 +1,7 @@
 """Host-side validation and management of explicitly selected skill bundles."""
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
 import math
@@ -46,48 +47,68 @@ def user_skills_dir() -> Path:
     return home / "skills"
 
 
-def read_skill_file(path: Path, root: Path, *, maximum: int) -> bytes:
-    """Read a bundle file through bounded descriptors without following links."""
+def _canonical_skill_root(path: Path) -> Path:
+    """Resolve platform aliases once, before the root is recorded in run settings."""
     try:
-        boundary = root.resolve(strict=True)
-        try:
-            relative = path.absolute().relative_to(boundary)
-        except ValueError as error:
-            raise SkillError(f"{path}: expected a file inside the skill directory") from error
-        if (not relative.parts or ".." in relative.parts
-                or not path.parent.resolve(strict=True).is_relative_to(boundary)):
-            raise SkillError(f"{path}: expected a file inside the skill directory")
-        directory_flags = os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_DIRECTORY", 0)
-        directory_flags |= getattr(os, "O_CLOEXEC", 0)
-        flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | getattr(os, "O_CLOEXEC", 0)
-        directories = [os.open(boundary, directory_flags)]
-        try:
-            for component in relative.parts[:-1]:
-                directories.append(os.open(component, directory_flags, dir_fd=directories[-1]))
-            if path.is_symlink():
-                raise SkillError(f"{path}: symlinks are not allowed")
-            fd = os.open(relative.parts[-1], flags, dir_fd=directories[-1])
-            try:
-                if not stat.S_ISREG(os.fstat(fd).st_mode):
-                    raise SkillError(f"{path}: expected a regular file inside the skill directory")
-                chunks = []
-                remaining = maximum + 1
-                while remaining:
-                    chunk = os.read(fd, remaining)
-                    if not chunk:
-                        break
-                    chunks.append(chunk)
-                    remaining -= len(chunk)
-                if remaining == 0:
-                    raise SkillError(f"{path}: file exceeds {maximum} bytes")
-                return b"".join(chunks)
-            finally:
-                os.close(fd)
-        finally:
-            for fd in reversed(directories):
-                os.close(fd)
+        return path.resolve(strict=True)
     except OSError as error:
+        raise SkillError(f"skill directory missing or linked: {path}: {error}") from error
+
+
+def _read_skill_file(path: Path, root: Path, *, maximum: int, missing_ok: bool) -> bytes | None:
+    """Walk the recorded canonical root from /, then read only below its descriptor."""
+    try:
+        relative = path.relative_to(root)
+    except ValueError as error:
+        raise SkillError(f"{path}: expected a file inside the skill directory") from error
+    if not root.is_absolute() or ".." in root.parts or not relative.parts or ".." in relative.parts:
+        raise SkillError(f"{path}: expected a file inside the skill directory")
+    directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+    file_flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
+    directories: list[int] = []
+    try:
+        directories.append(os.open("/", directory_flags))
+        for component in (*root.parts[1:], *relative.parts[:-1]):
+            directories.append(os.open(component, directory_flags, dir_fd=directories[-1]))
+        try:
+            fd = os.open(relative.parts[-1], file_flags, dir_fd=directories[-1])
+        except FileNotFoundError:
+            if missing_ok:
+                return None
+            raise
+        try:
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                raise SkillError(f"{path}: expected a regular file inside the skill directory")
+            chunks = []
+            remaining = maximum + 1
+            while remaining:
+                chunk = os.read(fd, remaining)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                remaining -= len(chunk)
+            if remaining == 0:
+                raise SkillError(f"{path}: file exceeds {maximum} bytes")
+            return b"".join(chunks)
+        finally:
+            os.close(fd)
+    except OSError as error:
+        if error.errno == errno.ELOOP:
+            raise SkillError(f"{path}: symlinks are not allowed") from error
+        if error.errno == errno.ENOTDIR:
+            raise SkillError(f"{path}: expected a file inside the skill directory (linked directory)") from error
         raise SkillError(f"{path}: cannot read: {error}") from error
+    finally:
+        for fd in reversed(directories):
+            os.close(fd)
+
+
+def read_skill_file(path: Path, root: Path, *, maximum: int) -> bytes:
+    """Read a bounded regular file beneath a previously canonicalized skill root."""
+    data = _read_skill_file(path, root, maximum=maximum, missing_ok=False)
+    if data is None:
+        raise SkillError(f"{path}: expected a regular file inside the skill directory")
+    return data
 
 
 def _json_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
@@ -126,7 +147,10 @@ def parse_skill(path: Path) -> Skill:
     directory = Path(path).expanduser()
     if directory.is_symlink() or not directory.is_dir():
         raise SkillError(f"skill directory missing or linked: {directory}")
-    directory = directory.resolve()
+    return _parse_skill_at_root(_canonical_skill_root(directory))
+
+
+def _parse_skill_at_root(directory: Path) -> Skill:
     raw = read_skill_file(directory / "SKILL.md", directory, maximum=MAX_BODY_BYTES + 4096)
     try:
         source = raw.decode("utf-8")
@@ -161,7 +185,7 @@ def parse_skill(path: Path) -> Skill:
     if not body.strip() or len(body.encode("utf-8")) > MAX_BODY_BYTES:
         raise SkillError(f"{directory / 'SKILL.md'}: body must be nonempty and at most 32 KiB")
     tools_file = directory / "tools.json"
-    tools_raw = read_skill_file(tools_file, directory, maximum=MAX_DIRECTORY_BYTES) if tools_file.exists() or tools_file.is_symlink() else None
+    tools_raw = _read_skill_file(tools_file, directory, maximum=MAX_DIRECTORY_BYTES, missing_ok=True)
     return Skill(name, description, fields.get("version"), directory, body,
                  hashlib.sha256(raw).hexdigest(),
                  hashlib.sha256(tools_raw).hexdigest() if tools_raw is not None else None,
@@ -250,7 +274,7 @@ def verify_records(records: Sequence[dict[str, object]], digest: str,
         if not path.is_dir():
             raise SkillError(f"skill {name} missing")
         try:
-            skill = parse_skill(path)
+            skill = _parse_skill_at_root(path)
         except SkillError as error:
             raise SkillError(f"skill {name} changed since the run started (SKILL.md digest or format: {error})") from error
         if skill.name != name or skill.skill_md_sha256 != record.get("skill_md_sha256"):

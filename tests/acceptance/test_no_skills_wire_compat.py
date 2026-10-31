@@ -17,6 +17,39 @@ from ._support import Endpoint, PYTHON, ROOT, copy_repo, environment
 pytestmark = pytest.mark.host_sandbox
 
 
+def _raw_tools(request: bytes) -> bytes:
+    """Extract the top-level tools value without changing its serialized bytes."""
+    source = request.decode("utf-8")
+    decoder = json.JSONDecoder()
+
+    def skip_space(offset: int) -> int:
+        while source[offset].isspace():
+            offset += 1
+        return offset
+
+    offset = 1
+    assert source.startswith("{")
+    while True:
+        offset = skip_space(offset)
+        if source[offset] == "}":
+            break
+        key, offset = decoder.raw_decode(source, offset)
+        assert isinstance(key, str)
+        offset = skip_space(offset)
+        assert source[offset] == ":"
+        offset += 1
+        offset = skip_space(offset)
+        start = offset
+        value, offset = decoder.raw_decode(source, offset)
+        if key == "tools":
+            assert isinstance(value, list)
+            return source[start:offset].encode("utf-8")
+        offset = skip_space(offset)
+        if source[offset] == ",":
+            offset += 1
+    raise AssertionError("request has no tools array")
+
+
 def _run_tree(root: Path, case: Path, repo: Path, script: Path) -> tuple[bytes, ...]:
     case.mkdir()
     run_dir = case / "run"
@@ -59,6 +92,8 @@ def test_no_skills_wire_matches_021(tmp_path):
     old = _run_tree(baseline, tmp_path / "old", repo, script)
     current = _run_tree(ROOT, tmp_path / "current", repo, script)
     assert len(current) == len(old)
+    assert current[0] == old[0], first_difference(old[0], current[0])
     for number, (expected, actual) in enumerate(zip(old, current), 1):
+        assert _raw_tools(actual) == _raw_tools(expected), number
         assert normalized_digest(actual) == normalized_digest(expected), (
             number, first_difference(expected, actual))

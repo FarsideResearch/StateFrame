@@ -124,6 +124,24 @@ def test_record_identity_and_missing(tmp_path):
         host.verify_records(records, digest)
 
 
+def test_selected_root_is_recorded_without_path_aliases(tmp_path):
+    actual = tmp_path / "actual"
+    actual.mkdir()
+    directory = make_skill(actual)
+    alias = tmp_path / "alias"
+    alias.symlink_to(actual, target_is_directory=True)
+    skill = host.parse_skill(alias / directory.name)
+    assert skill.path == directory.resolve()
+    record = skill.record(trusted=False)
+    assert record["path"] == str(directory.resolve())
+    alias.unlink()
+    attacker = tmp_path / "attacker"
+    attacker.mkdir()
+    make_skill(attacker, body="Do not read this content.\n")
+    alias.symlink_to(attacker, target_is_directory=True)
+    assert host.verify_records([record], host.skills_digest([record])) == (skill,)
+
+
 @pytest.mark.parametrize("replacement,fragment", [
     ("large", "file exceeds"), ("fifo", "regular file"), ("symlink", "symlinks")])
 def test_replaced_skill_file_is_bounded_at_load(tmp_path, replacement, fragment):
@@ -172,6 +190,75 @@ def test_shared_reader_refuses_linked_parent(tmp_path):
     (directory / "linked").symlink_to(outside, target_is_directory=True)
     with pytest.raises(host.SkillError, match="inside the skill directory"):
         host.read_skill_file(directory / "linked" / "extra.txt", directory, maximum=32)
+
+
+def test_validation_refuses_ancestor_swapped_after_canonicalization(tmp_path, monkeypatch):
+    parent = tmp_path / "selected"
+    parent.mkdir()
+    directory = make_skill(parent)
+    attacker = tmp_path / "attacker"
+    attacker.mkdir()
+    make_skill(attacker, body="Do not read this content.\n")
+    original = host._canonical_skill_root
+    real_read = os.read
+    reads = []
+
+    def track_read(fd, size):
+        reads.append(fd)
+        return real_read(fd, size)
+
+    def replace_ancestor(path):
+        canonical = original(path)
+        parent.rename(tmp_path / "moved")
+        parent.symlink_to(attacker, target_is_directory=True)
+        return canonical
+
+    monkeypatch.setattr(host, "_canonical_skill_root", replace_ancestor)
+    monkeypatch.setattr(host.os, "read", track_read)
+    with pytest.raises(host.SkillError, match="inside the skill directory"):
+        host.parse_skill(directory)
+    assert reads == []
+
+
+def test_runtime_and_resume_refuse_swapped_recorded_ancestor(tmp_path):
+    parent = tmp_path / "selected"
+    parent.mkdir()
+    directory = make_skill(parent)
+    skill = host.parse_skill(directory)
+    record = skill.record(trusted=False)
+    digest = host.skills_digest([record])
+    runtime = SkillRuntime([record], digest, None)
+    attacker = tmp_path / "attacker"
+    attacker.mkdir()
+    make_skill(attacker, body="Do not read this content.\n")
+    parent.rename(tmp_path / "moved")
+    parent.symlink_to(attacker, target_is_directory=True)
+    with pytest.raises(host.SkillError, match="inside the skill directory"):
+        runtime.load(skill.name)
+    with pytest.raises(host.SkillError, match="changed since the run started"):
+        host.verify_records([record], digest)
+
+
+def test_install_copy_refuses_swapped_source_ancestor(tmp_path, monkeypatch):
+    monkeypatch.setenv("STATEFRAME_HOME", str(tmp_path / "home"))
+    parent = tmp_path / "selected"
+    parent.mkdir()
+    directory = make_skill(parent)
+    attacker = tmp_path / "attacker"
+    attacker.mkdir()
+    make_skill(attacker, body="Do not copy this content.\n")
+    original = host._check_tree
+
+    def check_then_replace(path):
+        original(path)
+        if path == directory:
+            parent.rename(tmp_path / "moved")
+            parent.symlink_to(attacker, target_is_directory=True)
+
+    monkeypatch.setattr(host, "_check_tree", check_then_replace)
+    with pytest.raises(host.SkillError, match="inside the skill directory"):
+        host.install(directory)
+    assert not (tmp_path / "home" / "skills" / directory.name).exists()
 
 
 def test_catalog_body_caps_and_eviction(tmp_path):
