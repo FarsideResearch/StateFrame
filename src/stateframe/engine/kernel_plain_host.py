@@ -87,13 +87,14 @@ def _active_test_run_profile():
 class PlainHost:
     """The seven baseline tools over one sandbox root."""
 
-    SUPPORTED = frozenset({"list_dir", "read_file", "grep", "str_replace", "write_file", "run_tests"})
+    SUPPORTED = frozenset({"list_dir", "read_file", "grep", "str_replace", "write_file", "run_tests", "shell"})
 
     def __init__(self, authority: EditAuthority, *, check_runner: CheckRunner, journal, hooks: PlainHooks,
                  on_product_edit: Callable[[], None] = lambda: None):
         self.authority, self.check_runner, self.journal, self.hooks = authority, check_runner, journal, hooks
         self.on_product_edit = on_product_edit
         self.book = ReceiptBook()
+        self._tool_call_id = ""
         validate_schema_agreement(TOOLS, set(self.SUPPORTED))
 
     @property
@@ -110,6 +111,34 @@ class PlainHost:
         if handler is None:
             return f"error: unknown tool {name}"
         return handler(args)
+
+    def bind_tool_call(self, call_id: str) -> None:
+        self._tool_call_id = call_id
+
+    def _shell(self, args: dict) -> str:
+        from kernel_shell_tool import service
+        shell = service()
+        if shell is None or shell.settings.shell == "off":
+            return "REFUSED SHELL_OFF: shell is disabled by --shell off"
+        if not self._tool_call_id:
+            raise PlainContractError("shell call has no wire identity")
+        reply = shell.execute(args, self._tool_call_id)
+        self.journal.write("shell_effect", observation=reply.observation,
+                           effects=[{"path": e.path, "change": e.change} for e in reply.applied])
+        for effect in reply.applied:
+            self._edit_receipt("shell", effect.path, "product", True,
+                               effect.before.digest if effect.before else "absent",
+                               effect.after.digest if effect.after else "absent", None, "shell effect")
+        if reply.environment_changed:
+            # Plain check receipts bind only product bytes; an environment mutation
+            # retires them explicitly rather than reusing their green status.
+            self.book.checks.clear()
+        if reply.applied:
+            self.book.product_edits += 1
+            self.on_product_edit()
+        if reply.fatal:
+            raise PlainContractError(reply.observation)
+        return reply.observation
 
     def _list_dir(self, a: dict) -> str:
         p = self.authority.resolve(a.get("path", "."))
@@ -570,6 +599,17 @@ def run_plain(row: Mapping[str, object], output: Path, *,
     root.mkdir()
     workspace_source = materialize_workspace(root, row)
     authority = EditAuthority(root, list(row["files"]))
+    from kernel_shell_tool import service
+    shell = service()
+    if shell is not None and shell.settings.shell != "off":
+        from kernel_effects import WorkspaceEffectPolicy
+        protected = {p.relative_to(root).as_posix() for pattern in ("test_*.py", "conftest.py")
+                     for p in root.rglob(pattern)}
+        shell.bind(root, dict(row), {str(root / p) for p in protected},
+                   policy=WorkspaceEffectPolicy(
+                       protected=lambda p: p in protected,
+                       edit_scope=lambda p: p in authority.declared,
+                       new_file_allowed=lambda p: False))
     hooks = PlainHooks(settings, authority.declared, journal, out_cap=OUT_CAP)
     exports = {"count": 0, "failures": 0}
 

@@ -29,11 +29,12 @@ The engine is a flat package of modules, each owning one mechanism; `release-man
 
 | Module | Owns |
 |---|---|
-| `probes/react_repair.py` | The agent loop and the tool definitions (`TOOLS`: `grep`, `list_files`, `read`, `edit`, `str_replace`, `insert_before`, `authored_check`, `file_create`, `file_delete`, `file_move`, `run_tests`, `read_check_receipt`, `recall`, `done`) and their handlers. |
+| `probes/react_repair.py` | The agent loop and the tool definitions (`TOOLS`: `grep`, `list_files`, `read`, `edit`, `str_replace`, `insert_before`, `authored_check`, `file_create`, `file_delete`, `file_move`, `shell`, `run_tests`, `read_check_receipt`, `recall`, `done`) and their handlers. |
 | `kernel_file_ops.py`, `kernel_done_is_submit_authority.py` | Guarded file removal and moves; versioned sealed candidate writes and deletions. |
 | `kernel_stateframe_runtime.py` | `StateFrameRuntime`: building, fitting and qualifying each request (`prepare`) and recording what each action observed. |
 | `kernel_frame_*.py` | The frame's sections and how they are budgeted. |
 | `kernel_checkpoint.py` | Saving and loading signed checkpoints. |
+| `kernel_shell_tool.py`, `kernel_exec_session.py` | Foreground shell admission, per-run execution, effects, confirmation and replay. |
 | `kernel_execution_policy.py`, `kernel_test_isolation.py` | Sandboxed command and test execution. |
 | `kernel_git_view.py` | Pinned, sanitized Git history observations and run-baseline diffs. |
 | `kernel_web_fetch.py` | Direct-IP, SSRF-checked web observations with bounded text extraction. |

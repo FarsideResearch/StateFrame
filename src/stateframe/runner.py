@@ -20,6 +20,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Callable
 
 from . import cache_metrics, outer_checks, outcomes, preflight, profiles, test_interpreter, workcopy
 from . import resume as resume_module
@@ -166,6 +167,7 @@ class RunOptions:
     test_env: dict[str, str] = field(default_factory=dict)
     pytest_plugins: str | None = None  # "installed": let pytest load installed plugins
     tool_settings: ToolSettings = field(default_factory=ToolSettings)
+    shell_confirm: Callable[[str], bool] | None = field(default=None, repr=False)
     _deadline: float | None = field(default=None, init=False, repr=False)
 
 
@@ -934,6 +936,8 @@ def drive(run: Path, options: RunOptions, printer=print) -> int:
             reader.start()
             drain_until = None
             while True:
+                from .shell_host import answer_pending
+                answer_pending(run, options.shell_confirm)
                 if drain_until is None and process.poll() is not None:
                     drain_until = time.monotonic() + OUTPUT_DRAIN_SECONDS
                 try:
@@ -1370,7 +1374,8 @@ def resume_run(run_dir: Path, *, endpoint: Endpoint | None = None, max_turns: in
                            and endpoint.chat_url == spec["chat_url"] and not isinstance(swap, dict))
             if int(state["max_turns"]) != int(spec["max_turns"]):
                 printer(step_limit_restart_warning(int(spec["max_turns"]), int(state["max_turns"])))
-            previous = resume_module.archive_attempt(state, ENGINE_DIR, use_checkpoint=same_limits)
+            previous = resume_module.archive_attempt(
+                state, ENGINE_DIR, use_checkpoint=same_limits and options.tool_settings.shell == "off")
             spec = _resume_spec(run_dir, endpoint)
             # The cache slot stays the one the run started with: it is part of the request bytes.
             slot = spec.get("prompt_cache_slot") or {}
@@ -1392,6 +1397,8 @@ def resume_run(run_dir: Path, *, endpoint: Endpoint | None = None, max_turns: in
             else:
                 printer(f"replay: {state['tape_count']} recorded model exchanges are answered from the run's "
                         "records, then the run continues live")
+            from .shell_host import provision
+            provision(options, run_dir, spec)
             work = resume_module.fresh_workcopy(run_dir, options.repo)
             summary = _execute(options, started, printer, run_dir, work, spec)
             refused = (summary.get("checkpoint_refused") or _checkpoint_refusal(run_dir, summary.get("child_exit_code"))
@@ -1406,6 +1413,8 @@ def resume_run(run_dir: Path, *, endpoint: Endpoint | None = None, max_turns: in
             spec = _resume_spec(run_dir, endpoint)
             spec["resume"]["checkpoint_refused"] = refused
             (run_dir / "spec.json").write_text(json.dumps(spec, indent=1, sort_keys=True))
+            from .shell_host import provision
+            provision(options, run_dir, spec)
             work = resume_module.fresh_workcopy(run_dir, options.repo)
             return _execute(options, started, printer, run_dir, work, spec)
     finally:
@@ -1465,6 +1474,8 @@ def _run(options: RunOptions, started: float, printer=print) -> dict[str, object
     check_slot_context(options, printer)
     _select_prompt_cache_slot(options, printer)
     run_dir, work, spec = prepare(options)
+    from .shell_host import provision
+    provision(options, run_dir, spec)
     printer(f"run directory: {run_dir}")
     lock = resume_module.hold_run_lock(run_dir)  # noqa: F841 - held until this run returns
     return _execute(options, started, printer, run_dir, work, spec)

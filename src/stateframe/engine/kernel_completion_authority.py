@@ -175,6 +175,7 @@ ACTION_RESULT_EFFECTS: dict[str, frozenset[str]] = {
     "file_create": frozenset({"product_fixed", "candidate_revision"}),
     "file_delete": frozenset({"product_fixed", "candidate_revision"}),
     "file_move": frozenset({"product_fixed", "candidate_revision"}),
+    "shell": frozenset({"product_fixed", "candidate_revision"}),
     "replace_module": frozenset({"product_fixed", "candidate_revision"}),
     "write": frozenset({"product_fixed", "candidate_revision"}),
     "replace": frozenset({"product_fixed", "candidate_revision"}),
@@ -256,7 +257,7 @@ def _observed_effects(action: str, kind: str, status: str, result: Mapping[str, 
     if status in {"FAIL", "FAILED", "TIMEOUT", "TIMED_OUT", "ERROR", "RED", "REFUSED", "UNRESOLVED"}:
         return frozenset()
     if kind in {"edit_applied", "candidate_revision"} or (
-        action in {"edit", "str_replace", "file_create", "file_delete", "file_move", "replace_module", "write", "replace"}
+        action in {"edit", "str_replace", "file_create", "file_delete", "file_move", "shell", "replace_module", "write", "replace"}
         and status in {"APPLIED", "SUCCESS", "PASS", "OK"}
     ):
         return ACTION_RESULT_EFFECTS.get(action, frozenset())

@@ -167,7 +167,7 @@ _EVIDENCE_ROUTE_TOOLS = frozenset({
     "authored_check", "dispute_check", "probe", "read_check_receipt", "run_tests",
 })
 _PRODUCT_EDIT_TOOLS = frozenset({
-    "edit", "file_create", "file_delete", "file_move", "replace", "replace_module", "str_replace", "write",
+    "edit", "file_create", "file_delete", "file_move", "shell", "replace", "replace_module", "str_replace", "write",
 })
 _ADVISORY_ERROR_KIND = "completion_owner_advisory_gate_error"
 _ADVISORY_FAILURE_CAP = 100_000
@@ -904,7 +904,7 @@ def _progress_key(record: object) -> tuple[str, str] | None:
             for item in changes
             if isinstance(item, Mapping) and item.get("role", "product") == "product"
         ]
-    if tool in {"edit", "str_replace", "file_create", "file_delete", "file_move", "replace_module", "write", "replace"}:
+    if tool in {"edit", "str_replace", "file_create", "file_delete", "file_move", "shell", "replace_module", "write", "replace"}:
         explicit_byte_change = any(
             record.get(name) is True for name in ("byte_changed", "file_changed", "artifact_change")
         )
@@ -4997,6 +4997,8 @@ def _registry_schemas() -> tuple[tuple[str, dict[str, object]], ...]:
     add("file_create", {**string("path", "content")}, ("path", "content"))
     add("file_delete", {**string("path", "why")}, ("path",))
     add("file_move", {**string("source", "destination", "why")}, ("source", "destination"))
+    from kernel_shell_tool import SHELL_SCHEMA
+    schemas.append(("shell", SHELL_SCHEMA["function"]["parameters"]))
     add("run_tests", {**string("target")})
     add("reproduce", {
         **string("source", "test_name", "rationale"),

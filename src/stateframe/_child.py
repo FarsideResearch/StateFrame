@@ -166,6 +166,10 @@ def install_wire_recorder(run: Path, chat_url: str, replayer: Replayer | None = 
         elif replayer is not None:
             from kernel_tool_tape import end_replay
             end_replay()
+        if (replayer is not None and replayed is None and replayer.diverged is None
+                and not replayer.active and replayer.pending is None):
+            from kernel_tool_tape import end_replay
+            end_replay()
         try:
             response = replayed if replayed is not None else original(wire, endpoint, key, **kwargs)
         except Exception as error:
@@ -752,9 +756,21 @@ def main(argv: list[str]) -> int:
     for name in ("", "results", "scratch"):
         (output / name).mkdir(parents=True, exist_ok=True)
     tempfile.tempdir = str(output / "scratch")
+    from kernel_exec_session import ExecSession
+    from kernel_shell_tool import configure as configure_shell
+    session = ExecSession(run)
+    import signal
+    previous_term = signal.getsignal(signal.SIGTERM)
+
+    def terminate_shell_run(signum, frame):
+        raise KeyboardInterrupt("engine received SIGTERM")
+
+    signal.signal(signal.SIGTERM, terminate_shell_run)
     started = time.monotonic()
     result: object = None
     try:
+        if settings is not None:
+            configure_shell(run, settings, spec, session)
         from probes import react_repair as rr
         from kernel_protocol_spec import publish_public_spec
 
@@ -792,6 +808,21 @@ def main(argv: list[str]) -> int:
         emit("engine_error", error=type(error).__name__, detail=" ".join(str(error).split())[:300])
         result = {"result": "ENGINE_ERROR", "error": type(error).__name__}
         status = 1
+    finally:
+        try:
+            cleanup = session.stop_all()
+            if not cleanup.ok:
+                raise RuntimeError(f"CLEANUP_FAILED: {cleanup.detail}")
+        except (RuntimeError, OSError) as error:
+            emit("engine_error", error="ShellCleanupFailed", detail=str(error)[:300])
+            result, status = {"result": "ENGINE_ERROR", "error": "ShellCleanupFailed"}, 1
+        finally:
+            try:
+                session.close()
+            except (RuntimeError, OSError) as error:
+                emit("engine_error", error="ShellCleanupFailed", detail=str(error)[:300])
+                result, status = {"result": "ENGINE_ERROR", "error": "ShellCleanupFailed"}, 1
+            signal.signal(signal.SIGTERM, previous_term)
     elapsed = time.monotonic() - started
     (run / "engine-result.json").write_text(json.dumps(
         {"result": result, "seconds": round(elapsed, 3)}, default=str, indent=1))

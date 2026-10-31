@@ -28,6 +28,8 @@ from dataclasses import dataclass, field
 from types import SimpleNamespace
 from typing import Callable
 
+from kernel_shell_tool import SHELL_SCHEMA
+
 if __package__:
     from .decoy_tools import (
         build_tool_surface,
@@ -2434,6 +2436,8 @@ _PROBE_TOOL = {"type": "function", "function": {
         "expected": {"type": "string", "description": "your expectation from the brief, not source"}},
         "required": ["obligation", "code"]}}}
 
+TOOLS.append(SHELL_SCHEMA)
+
 # Tool calls accept an optional `why`: one declared line
 # of intent per action. The model narrates its plan as it works (a commitment device that
 # measurably keeps small models on track), the receipt tape records intent alongside
@@ -2520,6 +2524,10 @@ def _tools_for_probe_modes(*, probe_gate_on: bool,
                            observation_probe_on: bool,
                            dependency_fact_on: bool = False) -> list[dict]:
     """Select the per-request probe surface without changing the OFF base list."""
+    from kernel_shell_tool import service as shell_service
+    shell = shell_service()
+    base_tools = [tool for tool in TOOLS if tool["function"]["name"] != "shell"
+                  or (shell is not None and shell.settings.shell != "off")]
     boundary_aliases = os.environ.get("STATEFRAME_BOUNDARY_CHECKS", "off").lower() == "on"
     probe_modes = ["python"]
     if not observation_probe_on:
@@ -2563,9 +2571,9 @@ def _tools_for_probe_modes(*, probe_gate_on: bool,
                 "{clause_ref, entrypoint, input, expected_relation} case, or use "
                 "the clause review modes for the existing bounded packet flow; the "
                 "host owns execution, provenance, comparison, and bounds.")
-        selected = [tool for tool in TOOLS if tool is not _PROBE_TOOL] + [observation_tool]
+        selected = [tool for tool in base_tools if tool is not _PROBE_TOOL] + [observation_tool]
     else:
-        selected = ([tool for tool in TOOLS if tool is not _PROBE_TOOL]
+        selected = ([tool for tool in base_tools if tool is not _PROBE_TOOL]
                     + ([_PROBE_TOOL] if probe_gate_on else []))
     from kernel_where_used import mode as where_used_mode
     if where_used_mode() == "on":
@@ -2617,7 +2625,7 @@ def _parse_r1_tool_calls(content: str) -> list:
     the real args sometimes split into a following ```json fence. Merge every JSON
     object in the reply that carries a "function" key (fenced or bare); later objects'
     keys fill earlier gaps. Never raises; [] when nothing matches."""
-    _TOOLS = ("grep", "read", "edit", "str_replace", "insert_before", "authored_check", "file_create", "file_delete", "file_move",
+    _TOOLS = ("grep", "read", "edit", "str_replace", "insert_before", "authored_check", "file_create", "file_delete", "file_move", "shell",
                "replace_module", "run_tests", "reproduce", "test", "probe", "done",
                "where_defined", "who_calls", "references")
     # Fix round (rv_figure_it_out_REPORT.md finding 3): the three figure_it_out
@@ -6160,6 +6168,11 @@ def work(d, *, resume=None):
         # CREATES this run (file_create) stay editable: that is legitimate repro work.
         baseline_tests = {str(p) for p in root.rglob("test_*.py")} \
             | {str(p) for p in root.rglob("conftest.py")}
+        from kernel_shell_tool import service as shell_service
+        _shell = shell_service()
+        if _shell is not None and _shell.settings.shell != "off":
+            _shell.bind(root, d, baseline_tests)
+            os.environ["REACT_ENVIRONMENT_REVISION"] = _shell.identity()
         created_this_run: set = set()
         action_anchor = len(msgs)     # conversation index just after the last real ACTION
         last_surgery_step = -99       # cooldown so back-to-back surgeries cannot thrash
@@ -7958,7 +7971,7 @@ def work(d, *, resume=None):
                         from kernel_measurement import start_turn_timing_step
                         start_turn_timing_step("tool_execution")
                         if (_edit_nturn_request_active
-                                and _name not in {"edit", "file_create", "file_delete", "file_move", "str_replace",
+                                and _name not in {"edit", "file_create", "file_delete", "file_move", "shell", "str_replace",
                                                   "insert_before", "replace_module"}):
                             _finish_edit_nturn()
                         try:
@@ -8080,6 +8093,12 @@ def work(d, *, resume=None):
                                                            "name": _name,
                                                            "arguments": _fn.get("arguments")
                                                            or "{}"}}]})
+                        if _name == "shell" and (_shell is None or _shell.settings.shell == "off"):
+                            _obs = "REFUSED SHELL_OFF: shell is disabled by --shell off"
+                            bolt.receipt("shell", "shell", "off", "REFUSED", _obs)
+                            measurement.observe("shell", _obs)
+                            msgs.append(_tool_reply_for_call(msgs, tool_call_id, _obs))
+                            continue
                         _active_menu_capture = getattr(measurement, "_active_capture", None)
                         _menu_request_id = getattr(_active_menu_capture, "request_id", None)
                         from kernel_completion_owner import request_menu_action_admissible
@@ -8386,6 +8405,32 @@ def work(d, *, resume=None):
                             line = "edit " + str(_args.get("path") or "")
                             tool_edit_src = str(_args.get("function_source") or "")
                             tool_target_ref = _args.get("target_ref")
+                        elif _name == "shell":
+                            from kernel_shell_tool import ShellCleanupFailed, ShellExecutionFailed, publish_effects
+                            if _shell is None or _shell.settings.shell == "off":
+                                _obs = "REFUSED SHELL_OFF: shell is disabled by --shell off"
+                                bolt.receipt("shell", "shell", "off", "REFUSED", _obs)
+                            else:
+                                _reply = _shell.execute(_args, tool_call_id)
+                                _obs = _reply.observation
+                                try:
+                                    _rebound = publish_effects(_reply, measurement, bolt, created_this_run)
+                                except Exception as _error:
+                                    raise ShellExecutionFailed(
+                                        f"shell receipt publication failed: {type(_error).__name__}: {_error}") from _error
+                                if _rebound is not None:
+                                    target = _rebound
+                                if _reply.applied:
+                                    edits += 1
+                                    edits_since_test += 1
+                                    if first_edit_step is None:
+                                        first_edit_step = step
+                            msgs.append(_tool_reply_for_call(msgs, tool_call_id, _obs))
+                            measurement.observe("shell", _obs)
+                            _edit_nturn_after_action("shell", _obs, step, model_action_args=_args)
+                            if _shell is not None and _shell.settings.shell != "off" and _reply.fatal:
+                                raise ShellCleanupFailed(_obs)
+                            continue
                         elif _name in {"file_delete", "file_move"}:
                             from kernel_file_ops import FileOperationRefused, file_delete, file_move
                             from kernel_tool_surface import new_files_forbidden

@@ -75,3 +75,34 @@ Resume replays the recorded run by default. Checkpoints for a faster restore are
 ## Determinism scope
 
 Identical inputs give identical requests on the measured workload apart from three clock fields (the time in the environment panel, how long a job has run, when a navigation handle expires) and an edit-receipt ID. Tool output the engine does not recognize as volatile can still differ. See KNOWN_LIMITATIONS.md.
+
+
+## Foreground shell
+
+`--shell standard` enables bounded foreground commands by default. The sandbox
+is the security boundary; its program filter is a convenience, and interpreters
+and build scripts can run other programs within that boundary. `--shell read-only`
+uses an inspection grammar, a read-only workspace, scratch-only writes and no
+network. `--shell unrestricted` removes the filter. `--shell off` hides the tool.
+Host execution requires explicit `--shell unrestricted --shell-sandbox off`.
+
+Networking defaults to loopback. Use `--shell-network none` to disconnect it or
+`--shell-network full` for network installs. `--shell-allow`, `--shell-deny` and
+`--shell-read` extend the host policy. Chat answers `--shell-ask` requests on its
+TTY; unattended runs decline. Confirmation expires after 120 seconds.
+
+The default run environment clones the selected virtual environment or creates
+a system-site environment from the selected base interpreter. Installs affect
+this run only; update dependency declarations to keep them. Engine checks and
+final host checks use the same environment. `--no-run-env` disables provisioning.
+Shell output grants neither source-read credit nor test evidence: use native
+reads and `run_tests` for those. Authorized product changes invalidate earlier
+reads and checks; protected tests are restored from the immutable start snapshot.
+Plain-loop mode retains its declared-product-only edit/export contract.
+
+Shell-enabled resumes rebuild the environment and scratch state and replay from
+the beginning, even when a checkpoint exists. Local calls must reproduce their
+exit code, workspace and environment identity before their recorded output is
+served. Full-network and host calls require `--replay-external`; incomplete calls
+refuse resume. Raw retained output and truncation counters remain in the run
+directory. Background shell requests are not supported by this foreground tool.

@@ -46,12 +46,12 @@ EMPTY_EVENT = "green_lock_menu_authority_empty"
 EMPTY_OUTCOME = "green_lock_no_permitted_action"
 EMPTY_OVERFLOW_KIND = "GREEN_LOCK_NO_PERMITTED_ACTION"
 EDIT_ACTIONS = frozenset({
-    "edit", "str_replace", "file_create", "file_delete", "file_move", "replace_module", "write", "replace",
+    "edit", "str_replace", "file_create", "file_delete", "file_move", "shell", "replace_module", "write", "replace",
 })
 VERIFY_ACTIONS = frozenset({"run_tests", "test", "pytest", "predict"})
 WINDOW_ACTIONS = frozenset({"read", "probe"})
 # Product capabilities the readiness disposition never removes under hard-budget-only terminals (b1393).
-_READINESS_NEVER_STRIPS = frozenset({"edit", "str_replace", "file_create", "file_delete", "file_move", "run_tests", "read_check_receipt"})
+_READINESS_NEVER_STRIPS = frozenset({"edit", "str_replace", "file_create", "file_delete", "file_move", "shell", "run_tests", "read_check_receipt"})
 UPSTREAM_REFUSAL = "MENU: {action} is not offered on this request; use an offered tool."
 
 

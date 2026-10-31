@@ -30,7 +30,9 @@ RUN_LOCK = ".run.lock"
 # Per-attempt files: moved to attempts/<n>/ on resume, so the resumed attempt writes its own.
 ATTEMPT_FILES = ("worker", "wire", "requests", "sends.jsonl", "engine.log", "engine-result.json",
                  "child-traceback.txt", "summary.json", "final.diff", "tests-after.txt",
-                 "resume-divergence.json", "workspace", "checks", "checkpoint-refused.json")
+                 "resume-divergence.json", "workspace", "checks", "checkpoint-refused.json",
+                 "env", "env-sites.json", "shell-home", "shell-cache",
+                 "shell-ask.json", "shell-answer.json")
 
 
 CHECKPOINT_SCHEMA = "stateframe-engine-checkpoint/1"

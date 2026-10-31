@@ -20,7 +20,7 @@ READ_TOOLS = frozenset({
 })
 OBSERVATION_TOOLS = frozenset({*READ_TOOLS, "probe"})
 EDIT_TOOLS = frozenset({
-    "edit", "str_replace", "file_create", "file_delete", "file_move", "replace_module", "write", "replace",
+    "edit", "str_replace", "file_create", "file_delete", "file_move", "shell", "replace_module", "write", "replace",
 })
 
 

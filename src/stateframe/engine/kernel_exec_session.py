@@ -111,6 +111,13 @@ class ExecSession:
         self._sandboxed = None
         self._write_envelope: tuple[Path, ...] = ()
         self._handles: list[JobHandle] = []
+        self._initial_capability: ExecCapability | None = None
+
+    def configure(self, capability: ExecCapability) -> None:
+        """Pin the run namespace envelope before any purpose launches a command."""
+        if self._process is not None or self._initial_capability is not None:
+            raise ExecSessionError("execution session authority is already configured")
+        self._initial_capability = capability
 
     def _start(self, cap: ExecCapability) -> None:
         if self._closed:
@@ -188,6 +195,7 @@ class ExecSession:
         if isinstance(argv, (str, bytes)):
             raise TypeError("argv must be a sequence, not shell text")
         with self._lock:
+            self._start(self._initial_capability or cap)
             self._start(cap)
             value = self._rpc({"op": "start", "argv": list(argv), "cap": cap.as_dict(),
                                "cwd": str(cwd) if cwd is not None else None,

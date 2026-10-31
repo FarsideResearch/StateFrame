@@ -89,18 +89,19 @@ stateframe chat --repo path/to/your-repo
 
 - **Find and read:** search the code, list files, read files, and recall what it found earlier in the run.
 - **Change code:** make a targeted edit, replace an exact string, insert code at a spot, create, delete, or move a file, or rewrite a whole module.
+- **Run commands:** foreground shell commands with bounded output, per-run dependencies, protected-test restoration and replay verification. See [shell settings](docs/guide/running.md#foreground-shell).
 - **Check its work:** run your tests, try code in a sandboxed probe, write and run its own checks, and read the check results.
 - **Finish:** a run counts as done only after its checks pass. The engine makes that call, not the model.
 - **Around that:** a map of your repository's code (12 languages, plus structure for HTML, CSS, JSON, TOML and YAML), an interactive chat with diff, undo and apply, resume after a stop, and inspect to see exactly what the model was sent.
 
 **Not yet:**
 
-- No general shell: the agent runs your tests and sandboxed probes, nothing else.
+- No background shell jobs.
 - No plug-in or MCP tool interface: adding a tool means editing engine code (see [docs/guide/extending.md](docs/guide/extending.md)).
 - No web or documentation lookup.
 - No read-only git tool beyond the chat's diff and apply.
 
-Planned next: a plug-in tool interface and a safe shell tool, plus long-horizon work.
+Planned next: a plug-in tool interface and background jobs, plus long-horizon work.
 
 ## What works today
 

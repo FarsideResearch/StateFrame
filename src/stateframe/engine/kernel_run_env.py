@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import stat
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -167,28 +168,47 @@ def create_run_env(run_dir: Path, test_python: Path) -> RunEnv:
             raise RunEnvError(f"source environment has no importable installed package: {source}")
         code = "import importlib,sys; importlib.import_module(sys.argv[1])"
         _run([str(python), "-c", code, package], env=environment)
+    # Pin site directories while the host-created interpreter is still trusted.
+    sites = json.loads(_run([str(python), "-c",
+                             "import json,site; print(json.dumps(site.getsitepackages()))"]))
+    (root.parent / "env-sites.json").write_text(json.dumps(sites))
     return run_env
 
 
 def env_identity(run_env: RunEnv) -> str:
     """Hash installed distribution names/versions and run-local tool-cache metadata."""
-    site_code = "import json,site; print(json.dumps(site.getsitepackages()))"
-    sites = json.loads(_run([str(run_env.python), "-c", site_code]))
+    site_manifest = run_env.root.parent / "env-sites.json"
+    sites = (json.loads(site_manifest.read_text()) if site_manifest.is_file() else
+             [str(path) for path in run_env.root.glob("lib/python*/site-packages")])
+    if not isinstance(sites, list) or any(not isinstance(p, str) for p in sites):
+        raise RunEnvError("invalid host site-packages manifest")
     distributions: list[tuple[str, str]] = []
     for directory in sorted(set(sites)):
         path = Path(directory)
+        mutable = path.is_relative_to(run_env.root)
+        if mutable and any(p.is_symlink() for p in (path, *path.parents) if p.is_relative_to(run_env.root)):
+            raise RunEnvError(f"symlinked site-packages metadata: {path}")
         if not path.is_dir():
             continue
         for item in path.iterdir():
             if not item.name.endswith((".dist-info", ".egg-info")):
                 continue
+            if mutable and item.is_symlink():
+                raise RunEnvError(f"symlinked distribution metadata: {item}")
             metadata = item / "METADATA" if item.is_dir() else item
             if not metadata.is_file():
                 metadata = item / "PKG-INFO"
+            if mutable and metadata.is_symlink():
+                raise RunEnvError(f"symlinked package metadata: {metadata}")
             name = item.name
             version = ""
             if metadata.is_file():
-                for line in metadata.read_text(encoding="utf-8", errors="replace").splitlines():
+                # Metadata descriptions may be huge; identity needs only headers.
+                with metadata.open("rb") as source:
+                    headers = source.read(65536).decode("utf-8", errors="replace")
+                for line in headers.splitlines():
+                    if not line.strip():
+                        break
                     if line.startswith("Name: "):
                         name = line[6:].strip().lower()
                     elif line.startswith("Version: "):
@@ -201,14 +221,15 @@ def env_identity(run_env: RunEnv) -> str:
                       "Cargo.toml", "Cargo.lock", "go.mod", "go.sum", "config.json"}
     for key in ("npm_config_cache", "CARGO_HOME", "GOPATH", "GOMODCACHE"):
         base = Path(run_env.env[key])
+        if any(p.is_symlink() for p in (base, *base.parents) if p.is_relative_to(run_env.root)):
+            raise RunEnvError(f"symlinked tool cache: {base}")
         if not base.exists():
             continue
         for directory, _, files in os.walk(base):
             for filename in files:
                 path = Path(directory) / filename
-                info = path.lstat()
-                if path.is_symlink():
-                    continue
+                if not stat.S_ISREG(path.lstat().st_mode):
+                    raise RunEnvError(f"non-regular tool cache metadata: {path}")
                 relative = path.relative_to(base).as_posix()
                 if (filename in manifest_names or relative.startswith("registry/index/") or
                         relative.startswith("_cacache/index-v5/")):
@@ -217,8 +238,7 @@ def env_identity(run_env: RunEnv) -> str:
                         while block := source.read(1024 * 1024):
                             digest.update(block)
                     caches.append((key, relative, digest.hexdigest()))
-                else:
-                    caches.append((key, relative, info.st_size, info.st_mtime_ns))
+
     payload = {"distributions": sorted(distributions), "caches": sorted(caches)}
     return hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 

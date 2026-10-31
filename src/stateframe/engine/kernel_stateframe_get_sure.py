@@ -31,11 +31,11 @@ INVALID_VERDICT = "INVALID CHECK, IGNORE"
 APPLIED_PREFIX = "APPLIED"
 FORBIDDEN_LABELS = ("NOT_ENTAILED", "SHADOW", "ADVISORY", "tier", "admission")
 REPAIR_TOOLS = frozenset({
-    "edit", "str_replace", "file_create", "file_delete", "file_move", "replace_module", "write", "replace",
+    "edit", "str_replace", "file_create", "file_delete", "file_move", "shell", "replace_module", "write", "replace",
     "run_tests", "test", "pytest", "predict",
 })
 _EDIT_TOOLS = frozenset({
-    "edit", "str_replace", "file_create", "file_delete", "file_move", "replace_module", "write", "replace",
+    "edit", "str_replace", "file_create", "file_delete", "file_move", "shell", "replace_module", "write", "replace",
 })
 _PASS = frozenset({"PASS", "PASSED", "GREEN", "SUCCESS", "OK", "SATISFIED", "RESOLVED"})
 _FAIL = frozenset({
