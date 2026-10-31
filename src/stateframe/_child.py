@@ -390,11 +390,14 @@ def install_compact_capture(parent: Path) -> None:
             data = path.read_bytes()
             if name in declared or parent_bytes(name) != data:
                 files[name] = data
+        deleted = sorted(name for name in declared if parent_bytes(name) is not None
+                         and not (root / name).exists())
         target = str(row.get("path") or "")
         candidate = files.get(target, b"").decode("utf-8", errors="replace")
         before = (parent_bytes(target) or b"").decode("utf-8", errors="replace")
         record = {"proposals": proposals, "target": target, "capture": "stateframe-compact/1",
                   "files_base64": {n: base64.b64encode(d).decode("ascii") for n, d in files.items()},
+                  "deleted_files": deleted,
                   "file_hashes": {n: hashlib.sha256(d).hexdigest() for n, d in files.items()},
                   "patch": "".join(difflib.unified_diff(
                       before.splitlines(keepends=True), candidate.splitlines(keepends=True),

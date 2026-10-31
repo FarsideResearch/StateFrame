@@ -21,7 +21,7 @@ from kernel_verdict import (
 
 CONTROL_TOOLS = frozenset({"done", "continuation_detour", "work_update", "note_update", "work"})
 EFFECT_TOOLS = READ_ONLY | {
-    "edit", "str_replace", "file_create", "insert_before", "run_tests",
+    "edit", "str_replace", "file_create", "file_delete", "file_move", "insert_before", "run_tests",
 } | AUTHORED_CHECK_TOOLS
 # A witness is a host-owned evidence action, not a continuation effect.  It is
 # nevertheless a valid way to clear a read-only unknown effect: the old read

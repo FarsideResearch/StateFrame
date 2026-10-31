@@ -72,7 +72,7 @@ def challenge_class(codes: object) -> str:
 
 # Mutating repair actions: a menu offering one of these can make progress on a
 # repair-blocked row.  run_tests alone cannot fix a counterexample.
-REPAIR_EDIT_TOOLS = frozenset({"edit", "str_replace", "write", "file_create", "replace",
+REPAIR_EDIT_TOOLS = frozenset({"edit", "str_replace", "write", "file_create", "file_delete", "file_move", "replace",
                                "replace_module"})
 QUALIFYING_ACTIONS = frozenset({
     *REPAIR_EDIT_TOOLS, "read", "grep", "find", "search", "probe", "predict",

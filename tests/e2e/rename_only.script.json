@@ -1,0 +1,9 @@
+{
+ "model": "scripted",
+ "steps": [
+  {"tool": "file_move", "required": true, "arguments": {"source": "pkg/old.py", "destination": "pkg/new.py"}},
+  {"tool": "run_tests", "required": true, "arguments": {"target": "tests/test_rename.py"}},
+  {"tool": "done", "required": true, "arguments": {"summary": "Renamed the module."}}
+ ],
+ "tokenize": {"mode": "ok"}
+}

@@ -158,8 +158,8 @@ def _read_original(work: WorkCopy, rel: str) -> str:
     return data.decode("utf-8", errors="replace")
 
 
-def apply_files(work: WorkCopy, files: dict[str, bytes], *, declared: set[str]) -> list[str]:
-    """Write the engine's final candidate into the copy.
+def apply_files(work: WorkCopy, files: dict[str, bytes | None], *, declared: set[str]) -> list[str]:
+    """Apply the sealed candidate's writes and deletions to the copy.
 
     Only paths the run declared to the engine (or new files under the copy) are written,
     each must stay inside the copy, and symlinks are refused.
@@ -277,7 +277,9 @@ def guarded_apply(original: Path, changes: dict[str, bytes | None], baseline: di
     if conflicts:
         raise WorkCopyError(f"refusing {what}: " + "; ".join(conflicts[:10]))
     applied: list[str] = []
-    for rel in sorted(changes):
+    # For a rename, install the new path before deleting the old path. A later
+    # I/O failure can then leave a duplicate, but cannot lose the only copy.
+    for rel in sorted(changes, key=lambda path: (changes[path] is None, path)):
         why = _conflict(original, rel, baseline.get(rel))
         if why:
             raise WorkCopyError(f"refusing {what} at {rel} ({why}); already applied: {applied or 'nothing'}")

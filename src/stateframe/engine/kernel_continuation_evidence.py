@@ -191,6 +191,8 @@ EXECUTION_RECEIPT_CONTRACTS = {
     "edit": "edit_action_receipt",
     "str_replace": "edit_action_receipt",
     "file_create": "edit_action_receipt",
+    "file_delete": "edit_action_receipt",
+    "file_move": "edit_action_receipt",
     "insert_before": "edit_action_receipt",
     "run_tests": "test_action_receipt",
     "authored_check": "authored_check_receipt",

@@ -25,7 +25,7 @@ PLAIN_SYSTEM_PROMPT = (
     "When you are finished, call done with a short summary."
 )
 PLAIN_TOOL_NAMES = frozenset({
-    "list_files", "read", "grep", "str_replace", "edit", "file_create",
+    "list_files", "read", "grep", "str_replace", "edit", "file_create", "file_delete", "file_move",
     "write", "run_tests", "done",
 })
 MAX_TOOL_RESULT_BYTES = 24_000

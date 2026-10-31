@@ -13,6 +13,7 @@ CAPABILITY_GROUPS: tuple[tuple[str, ...], ...] = (
     ("read",),
     ("grep",),
     ("str_replace", "edit"),
+    ("file_delete", "file_move"),
     ("run_tests", "authored_check"),
     ("read_check_receipt", "read_receipt"),
     ("done",),

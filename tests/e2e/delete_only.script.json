@@ -1,0 +1,9 @@
+{
+ "model": "scripted",
+ "steps": [
+  {"tool": "file_delete", "required": true, "arguments": {"path": "pkg/stale.py"}},
+  {"tool": "run_tests", "required": true, "arguments": {"target": "tests/test_active.py"}},
+  {"tool": "done", "required": true, "arguments": {"summary": "Removed the unused stale module."}}
+ ],
+ "tokenize": {"mode": "ok"}
+}

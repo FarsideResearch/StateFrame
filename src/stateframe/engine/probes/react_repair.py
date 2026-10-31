@@ -813,7 +813,7 @@ def _capture_done_candidate_after_exception(
         current_sources = fallback_sources if isinstance(fallback_sources, Mapping) else {}
     source_map = {
         str(path): source for path, source in current_sources.items()
-        if isinstance(path, str) and isinstance(source, str)
+        if isinstance(path, str) and (isinstance(source, str) or source is None)
     } if isinstance(current_sources, Mapping) else {}
     parent_sources: dict[str, str] = {}
     parent = getattr(fileset, "parent", None)
@@ -933,6 +933,7 @@ def _product_roots(row: Mapping[str, object]) -> tuple[str, ...]:
 
 def _is_product_path(relative: str, row: Mapping[str, object]) -> bool:
     """Keep product snapshots out of tests, probes, scratch, and cache trees."""
+    from stateframe.workcopy import _ignored
     try:
         from build_tasks.multifile_row import normalize_repo_path
         path = normalize_repo_path(relative, field="product snapshot path")
@@ -945,7 +946,17 @@ def _is_product_path(relative: str, row: Mapping[str, object]) -> bool:
         return False
     if pathlib.PurePosixPath(path).suffix in {".pyc", ".pyo"}:
         return False
+    if any(_ignored(part, True) for part in parts[:-1]) or _ignored(parts[-1], False):
+        return False
+    if (parts[-1].startswith("test_") or parts[-1].endswith("_test.py")
+            or parts[-1] == "conftest.py"):
+        return False
     return any(path == root or path.startswith(root + "/") for root in _product_roots(row))
+
+
+# The run loop imports kernel_green_lock.is_product_path under the same local name, so tool
+# handlers inside it must call the row-aware check through this alias.
+_row_is_product_path = _is_product_path
 
 
 def _product_source_paths(root: pathlib.Path, fileset: FileSet,
@@ -2288,6 +2299,19 @@ TOOLS = [
             "content": {"type": "string"}},
             "required": ["path", "content"]}}},
     {"type": "function", "function": {
+        "name": "file_delete",
+        "description": "Delete one existing product file. Refuses protected tests, directories, symlinks, and paths outside the editable scope.",
+        "parameters": {"type": "object", "properties": {
+            "path": {"type": "string"}, "why": {"type": "string"}},
+            "required": ["path"]}}},
+    {"type": "function", "function": {
+        "name": "file_move",
+        "description": "Move one existing product file to a new path, creating destination directories. Refuses collisions and unauthorized paths.",
+        "parameters": {"type": "object", "properties": {
+            "source": {"type": "string"}, "destination": {"type": "string"},
+            "why": {"type": "string"}},
+            "required": ["source", "destination"]}}},
+    {"type": "function", "function": {
         "name": "run_tests",
         "description": "Run pytest. target may be a file, file::node, or a bare "
                        "test function name.",
@@ -2593,7 +2617,7 @@ def _parse_r1_tool_calls(content: str) -> list:
     the real args sometimes split into a following ```json fence. Merge every JSON
     object in the reply that carries a "function" key (fenced or bare); later objects'
     keys fill earlier gaps. Never raises; [] when nothing matches."""
-    _TOOLS = ("grep", "read", "edit", "str_replace", "insert_before", "authored_check", "file_create",
+    _TOOLS = ("grep", "read", "edit", "str_replace", "insert_before", "authored_check", "file_create", "file_delete", "file_move",
                "replace_module", "run_tests", "reproduce", "test", "probe", "done",
                "where_defined", "who_calls", "references")
     # Fix round (rv_figure_it_out_REPORT.md finding 3): the three figure_it_out
@@ -7934,7 +7958,7 @@ def work(d, *, resume=None):
                         from kernel_measurement import start_turn_timing_step
                         start_turn_timing_step("tool_execution")
                         if (_edit_nturn_request_active
-                                and _name not in {"edit", "file_create", "str_replace",
+                                and _name not in {"edit", "file_create", "file_delete", "file_move", "str_replace",
                                                   "insert_before", "replace_module"}):
                             _finish_edit_nturn()
                         try:
@@ -8362,6 +8386,65 @@ def work(d, *, resume=None):
                             line = "edit " + str(_args.get("path") or "")
                             tool_edit_src = str(_args.get("function_source") or "")
                             tool_target_ref = _args.get("target_ref")
+                        elif _name in {"file_delete", "file_move"}:
+                            from kernel_file_ops import FileOperationRefused, file_delete, file_move
+                            from kernel_tool_surface import new_files_forbidden
+
+                            _source_arg = _args.get("path") if _name == "file_delete" else _args.get("source")
+                            _dest_arg = _args.get("destination") if _name == "file_move" else None
+                            _paths = ()
+                            try:
+                                def _protected(path):
+                                    return protected_test_path(path, baseline_tests)
+
+                                def _editable(relative):
+                                    return (relative in fileset.paths
+                                            or str(root / relative) in created_this_run)
+                                if _name == "file_delete":
+                                    _effect = file_delete(root, _source_arg, protected=_protected,
+                                                          editable=_editable)
+                                else:
+                                    _effect = file_move(
+                                        root, _source_arg, _dest_arg, protected=_protected,
+                                        editable=_editable,
+                                        new_file_allowed=lambda relative: (
+                                            not new_files_forbidden(measurement)
+                                            and _row_is_product_path(relative, d)),
+                                    )
+                                _paths = _effect.changed_paths
+                                _obs = f"{_name} applied. {', '.join(_paths)}"
+                                from kernel_post_edit_refresh import rebind_after_file_operation
+                                _rebound_target = rebind_after_file_operation(
+                                    measurement, _effect.source, _effect.destination)
+                                if _rebound_target is not None:
+                                    target = _rebound_target
+                                if _name == "file_move":
+                                    created_this_run.discard(str(root / _effect.source))
+                                    created_this_run.add(str(root / _effect.destination))
+                                else:
+                                    created_this_run.discard(str(root / _effect.source))
+                                if first_edit_step is None:
+                                    first_edit_step = step
+                                edits += 1
+                                _result = "APPLIED"
+                            except FileOperationRefused as _error:
+                                _obs = f"{_name} REFUSED: {_error}"
+                                _result = "REFUSED"
+                            except OSError as _error:
+                                _obs = f"{_name} FAILED: {type(_error).__name__}: {_error}"
+                                _result = "FAILED"
+                            bolt.receipt(
+                                "edit", f"{_name} {_source_arg}",
+                                f"{_source_arg}|{_dest_arg or ''}", _result, _obs,
+                                target_path=(_effect.destination if _name == "file_move"
+                                             else _paths[0]) if _paths else None,
+                                changed_paths=_paths,
+                            )
+                            _obs = _append_structure_fact_observation(measurement, bolt, _obs, "edit")
+                            msgs.append(_tool_reply_for_call(msgs, tool_call_id, _obs))
+                            _edit_nturn_after_action(
+                                f"{_name} {_source_arg}", _obs, step, model_action_args=_args)
+                            continue
                         elif _name == "file_create":
                             # E298 graft #1 (coding.py _code_file_create's contract): both
                             # 4B lanes burned 25+ steps retrying edits on files they were
@@ -12394,7 +12477,7 @@ def work(d, *, resume=None):
             try:
                 current_sources = {
                     str(path): source for path, source in final_sources.items()
-                    if isinstance(path, str) and isinstance(source, str)
+                    if isinstance(path, str) and (isinstance(source, str) or source is None)
                 }
                 if multifile:
                     parent_sources = dict(fileset.parent)
