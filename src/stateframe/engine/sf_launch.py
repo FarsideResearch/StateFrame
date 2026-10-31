@@ -74,10 +74,15 @@ def launch(spec: dict) -> None:
             raise ValueError("macOS execution requires supervised resident-memory accounting")
     else:
         resource.setrlimit(resource.RLIMIT_AS, (limits["memory_bytes"], limits["memory_bytes"]))
-    for kind, value in ((resource.RLIMIT_CPU, math.ceil(limits["cpu_seconds"])),
-                        (resource.RLIMIT_FSIZE, limits["file_bytes"]),
-                        (resource.RLIMIT_NOFILE, limits["nofile"]),
-                        (resource.RLIMIT_NPROC, limits["nproc"])):
+    process_limits = [(resource.RLIMIT_CPU, math.ceil(limits["cpu_seconds"])),
+                      (resource.RLIMIT_FSIZE, limits["file_bytes"]),
+                      (resource.RLIMIT_NOFILE, limits["nofile"])]
+    if sys.platform != "darwin":
+        # macOS counts every process the user owns against RLIMIT_NPROC (hundreds on a normal
+        # desktop), so a per-command budget there would make the first fork fail. On macOS the
+        # supervisor enforces the budget on the tracked descendant tree instead.
+        process_limits.append((resource.RLIMIT_NPROC, limits["nproc"]))
+    for kind, value in process_limits:
         # Never silently keep a weaker limit if the OS refuses this request.
         hard = resource.getrlimit(kind)[1]
         value = min(value, hard) if hard != resource.RLIM_INFINITY else value

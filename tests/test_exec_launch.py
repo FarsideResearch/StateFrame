@@ -39,7 +39,12 @@ print(json.dumps({"session": os.getsid(0) == os.getpid(), "umask": os.umask(0),
     assert result.returncode == 0, result.stderr
     data = json.loads(result.stdout)
     assert data["session"] and data["umask"] == 0o077
-    assert data["cpu"] == 300 and data["nproc"] <= 256 and data["nofile"] <= 1024
+    assert data["cpu"] == 300 and data["nofile"] <= 1024
+    if sys.platform == "linux":
+        assert 0 < data["nproc"] <= 256
+    elif sys.platform == "darwin":
+        import resource
+        assert data["nproc"] == resource.getrlimit(resource.RLIMIT_NPROC)[0]
 
 
 def test_launcher_missing_executable_reports_failure(tmp_path):

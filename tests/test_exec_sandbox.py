@@ -114,3 +114,35 @@ print(s.recv(100).decode())
 ''')
         assert result.exit_code == 0 and result.output == b"session-connected\n", result.output
         assert job.wait(2) == 0
+
+
+@pytest.mark.parametrize("purpose", ["shell", "job", "custom_tool"])
+@pytest.mark.host_sandbox
+def test_venv_pip_through_outside_symlink_chain(setup, purpose):
+    import venv
+
+    root, original = setup
+    env = root / "env"
+    venv.EnvBuilder(with_pip=True, symlinks=True).create(env)
+    outside = root / "outside-interpreters"
+    outside.mkdir()
+    secret = outside / "unrelated-secret"
+    secret.write_text("must remain unreadable")
+    hop = outside / "python-hop"
+    hop.symlink_to(sys.executable)
+    directory_alias = root / "interpreter-directory"
+    directory_alias.symlink_to(outside, target_is_directory=True)
+    python = env / "bin/python"
+    python.unlink()  # Replace only this test's newly generated venv link.
+    python.symlink_to(directory_alias / "python-hop")
+    cap = shell_capability(workspace=original.workspace, run_env_dir=env,
+                           scratch_home=root / "home", network="none", writable=True)
+    cap = replace(cap, purpose=purpose, workspace_writable=purpose != "job")
+    with ExecSession(root / "run") as session:
+        result = session.run(["/bin/sh", "-c", "pip --version"], cap)
+        denied = session.run(["/bin/cat", str(secret)], cap)
+    assert result.cleanup.ok
+    assert result.exit_code == 0, result.output
+    assert result.output.startswith(b"pip ") and str(env).encode() in result.output
+    assert denied.cleanup.ok and denied.exit_code != 0
+    assert b"must remain unreadable" not in denied.output

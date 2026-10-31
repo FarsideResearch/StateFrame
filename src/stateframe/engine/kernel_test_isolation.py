@@ -223,10 +223,19 @@ def capability_command(command, cap, *, platform_backend=None, shared_namespace=
     if os.path.isfile("/etc/ld.so.cache"):
         arguments += ["--ro-bind", "/etc/ld.so.cache", "/etc/ld.so.cache"]
     # Parent mounts first, narrower mounts last; writable roots are explicit.
-    mounts = {p: "--ro-bind" for p in reads}
+    # Bind resolved targets, then recreate uncovered aliases. Binding a symlink
+    # follows it and can hide a required directory link or create the wrong tree.
+    from kernel_exec_capability import executable_symlinks
+    links = executable_symlinks(tuple(reads))
+    mounts = {p.resolve(strict=True): "--ro-bind" for p in reads}
     mounts.update({p: "--bind" for p in writes})
     for path in sorted(mounts, key=lambda p: (len(p.parts), str(p))):
         arguments += [mounts[path], str(path), str(path)]
+    system_links = {Path(p) for p in ("/bin", "/sbin", "/lib", "/lib32", "/lib64", "/libx32")
+                    if os.path.islink(p)}
+    for path, target in sorted(links.items(), key=lambda item: (len(item[0].parts), str(item[0]))):
+        if path not in system_links and not any(parent in mounts for parent in path.parents):
+            arguments += ["--symlink", target, str(path)]
     # bwrap builds the root as a writable tmpfs and creates missing parents there; without this a
     # write outside every declared root "succeeds" into throwaway memory. Bind mounts keep their mode.
     arguments += ["--remount-ro", "/"]

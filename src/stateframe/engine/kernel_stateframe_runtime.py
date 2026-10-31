@@ -9157,9 +9157,13 @@ class StateFrameRuntime:
             already = any(item.get("tool_call_id") == message.get("tool_call_id")
                           and item.get("content") == content for item in sequence)
             if not already:
-                if assistant is not None:
+                from kernel_shell_tool import attach_shell_verification
+                attached = (assistant is not None and attach_shell_verification(
+                    sequence, call_id, assistant, message))
+                if assistant is not None and not attached:
                     sequence.append(copy.deepcopy(assistant))
-                sequence.append(copy.deepcopy(message))
+                if not attached:
+                    sequence.append(copy.deepcopy(message))
             if getattr(self, "stateframe_tokenlab_host_result_guard_mode", "off") == "on":
                 from kernel_tokenlab_host_result_guard import ensure_sequence
                 ensure_sequence(self, sequence)

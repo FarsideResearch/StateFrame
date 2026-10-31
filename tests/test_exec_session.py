@@ -113,28 +113,33 @@ def test_small_bounded_fork_limit(setup, sandboxed):
     command = script(cap, '''import os, time
 children = []
 try:
-    for _ in range(80):
+    for _ in range(12):
         try: pid = os.fork()
         except OSError:
             print("bounded", flush=True)
             break
         if pid == 0:
-            time.sleep(3)
+            time.sleep(5)
             os._exit(0)
         children.append(pid)
-    else: print("limit-not-enforced", flush=True)
+    else:
+        time.sleep(5)
+        print("limit-not-enforced", flush=True)
 finally:
     for pid in children:
         try: os.kill(pid, 9)
         except ProcessLookupError: pass
     for pid in children: os.waitpid(pid, 0)
 ''')
-    cap = replace(cap, sandboxed=sandboxed, limits=replace(cap.limits, nproc=64, wall_seconds=10))
+    cap = replace(cap, sandboxed=sandboxed, limits=replace(cap.limits, nproc=8, wall_seconds=10))
     with ExecSession(run) as session:
         result = session.run(command, cap)
     assert result.cleanup.ok
     assert b"limit-not-enforced" not in result.output
-    # Already having >=64 processes under the UID can refuse the interpreter itself.
+    if sys.platform == "darwin":
+        assert "process limit" in result.cleanup.detail
+        assert result.cleanup.killed >= 1
+    # Linux counts processes under the UID and can refuse the interpreter itself.
     assert b"bounded" in result.output or result.exit_code != 0
 
 

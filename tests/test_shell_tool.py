@@ -92,6 +92,21 @@ def test_replay_reexecutes_local_and_serves_taped_bytes(setup_tool):
     assert len(process.calls) == 2
 
 
+def test_replay_ignores_cache_churn_but_still_scans_it(setup_tool):
+    make, root, run = setup_tool
+    cache = root / "__pycache__"
+    cache.mkdir()
+    (cache / "app.pyc").write_bytes(b"first execution path")
+    tool, process = make()
+    first = tool.execute({"command": "echo hi"}, "call-1")
+    (cache / "app.pyc").write_bytes(b"resume execution path")
+    assert "__pycache__/app.pyc" in tool._scan()
+    configure_replay(run, active=True)
+    second = tool.execute({"command": "echo hi"}, "call-1")
+    assert first.observation == second.observation
+    assert len(process.calls) == 2
+
+
 def test_replay_external_refuses_before_execution(setup_tool):
     make, _, run = setup_tool
     tool, process = make(settings=ToolSettings(shell_network="full", run_env=False))
@@ -342,3 +357,33 @@ def test_host_path_authority_preserves_search_precedence(tmp_path, monkeypatch):
     second.mkdir()
     monkeypatch.setenv("PATH", os.pathsep.join((str(first), str(second), str(first))))
     assert path_authority()[0] == [str(first), str(second)]
+
+
+def test_host_provision_disables_run_env_on_unknown_executable_pth(tmp_path, capsys):
+    import json
+    import subprocess
+    import sys
+    from types import SimpleNamespace
+    from stateframe.shell_host import provision
+
+    source = tmp_path / "project-env"
+    subprocess.run([sys.executable, "-m", "venv", str(source)], check=True, timeout=120)
+    site = next(source.glob("lib/python*/site-packages"))
+    (site / "unknown.pth").write_text("import unknown_hook; unknown_hook.install()\n")
+    run = tmp_path / "run"
+    run.mkdir()
+    selected = str(source / "bin/python")
+    settings = ToolSettings()
+    options = SimpleNamespace(tool_settings=settings, _test_python=selected,
+                              _capabilities={"test_python": selected})
+    spec = {"repo": str(tmp_path), "capabilities": options._capabilities,
+            "tool_settings": settings.as_dict()}
+    (run / "tool-settings.json").write_text(json.dumps(settings.as_dict()))
+    provision(options, run, spec)
+    assert options.tool_settings.run_env is False
+    assert options._test_python == selected
+    assert options._capabilities["test_python"] == selected
+    assert json.loads((run / "tool-settings.json").read_text())["run_env"] is False
+    assert json.loads((run / "spec.json").read_text())["tool_settings"]["run_env"] is False
+    assert "run environment off: executable .pth cannot be safely cloned: unknown.pth; " \
+           "dependency installs will not persist for checks" in capsys.readouterr().out

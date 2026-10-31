@@ -1,10 +1,12 @@
 """Actual CLI/provider/sandbox coverage; run these outside nested OS sandboxes."""
 import json
 import os
+import re
 import signal
 import subprocess
 import sys
 import time
+import zlib
 from pathlib import Path
 
 import pytest
@@ -93,7 +95,10 @@ def test_shell_product_edit_refreshes_read_and_final_diff(tmp_path):
     assert "files changed by this command: modified: pkg/value.py" in requests
     events = "\n".join(p.read_text() for p in (run / "worker").rglob("events.jsonl"))
     assert '"shell_effect"' in events
-    assert "post_edit" in requests or "historical_file_revision" in requests
+    # The read after the shell edit must see a NEW revision with the new bytes, not the stale page.
+    revisions = re.findall(r"\[read page\] path=pkg/value\.py revision=(sha256:[0-9a-f]+)", requests)
+    assert len(set(revisions)) >= 2, revisions
+    assert "VALUE = 2" in requests
 
 
 def test_ask_declines_without_tty(tmp_path):
@@ -124,10 +129,22 @@ def build_wheel(wheel_directory, config_settings=None, metadata_directory=None):
 
 
 def test_local_pip_install_is_available_to_engine_and_final_checks(tmp_path):
-    _, requests = run_script(tmp_path, [
+    run, requests = run_script(tmp_path, [
         step("shell", command="pip install --no-index --no-build-isolation ./localpkg"),
-        *finish()], flags=("--shell-network", "full"), prepare=local_package)
+        # The engine verifies automatically after the environment change; once green the menu
+        # (correctly) no longer offers run_tests, so that step is optional here.
+        {**step("run_tests", target="tests/test_value.py"), "required": False},
+        step("done", summary="Installed the dependency and verified.")],
+        flags=("--shell-network", "full"), prepare=local_package)
     assert "environment changed:" in requests
+    assert "Successfully installed shell-fixture-1.0" in requests
+    checks = [json.loads(zlib.decompress(path.read_bytes()))
+              for path in sorted((run / "checks").glob("*.json.z"))]
+    assert checks and all(check["argv"][0] == str(run / "env/bin/python") for check in checks)
+    assert checks[-1]["returncode"] == 0
+    summary = json.loads((run / "summary.json").read_text())
+    assert summary["tests_after"]["command"].startswith(str(run / "env/bin/python"))
+    assert summary["tests_after"]["passed"]
 
 
 def test_kill_resume_serves_byte_identical_next_request(tmp_path):
@@ -158,6 +175,9 @@ def test_kill_resume_serves_byte_identical_next_request(tmp_path):
                                stderr=subprocess.STDOUT)
     try:
         assert script.arrived.wait(120), (tmp_path / "first.log").read_text()
+        tape = [json.loads(line) for line in (run / "tool-tape.jsonl").read_text().splitlines()]
+        assert [row["kind"] for row in tape] == ["intent", "complete"]
+        assert tape[0]["call_id"] == tape[1]["call_id"]
         process.send_signal(signal.SIGTERM)
         process.wait(timeout=20)
         original = {p.name: p.read_bytes() for p in (run / "requests").glob("*.json")}

@@ -15,6 +15,76 @@ from typing import Literal
 NetworkMode = Literal["none", "loopback", "full"]
 
 
+def _walk_symlinks(path: Path) -> tuple[tuple[Path, ...], dict[Path, str]]:
+    """Return full-path hops and links, without admitting a link's whole directory.
+
+    Resolving only the endpoint loses the paths the kernel checks during exec.
+    Keep the links themselves, never broaden authority to their parent directories.
+    """
+    pending = list(Path(path).absolute().parts[1:])
+    current = Path("/")
+    hops: set[Path] = set()
+    links: dict[Path, str] = {}
+    traversals = 0
+    while pending:
+        component = pending.pop(0)
+        if component == "..":
+            current = current.parent
+            continue
+        current = current / component
+        if current.is_symlink():
+            traversals += 1
+            if traversals > 40:
+                raise ValueError(f"executable symlink chain exceeds 40 hops: {path}")
+            hops.add(current.joinpath(*pending))
+            links[current] = os.readlink(current)
+            target = Path(links[current])
+            current = Path("/") if target.is_absolute() else current.parent
+            pending = list(target.parts[1:] if target.is_absolute() else target.parts) + pending
+    current.stat()  # Missing targets are not executable authority.
+    return tuple(sorted(hops | {current})), links
+
+
+def symlink_hops(path: Path) -> tuple[Path, ...]:
+    """Admit each full executable path along a bounded symlink traversal."""
+    return _walk_symlinks(path)[0]
+
+
+def executable_symlinks(paths: tuple[Path, ...]) -> dict[Path, str]:
+    """Links to recreate in a private mount tree; targets are admitted separately."""
+    return {link: target for path in paths for link, target in _walk_symlinks(path)[1].items()}
+
+
+def executable_read_roots(path: Path) -> tuple[Path, ...]:
+    """Include a script's absolute shebang interpreter and its complete link chain."""
+    roots: set[Path] = set()
+    seen: set[Path] = set()
+    pending = [Path(path)]
+    while pending:
+        candidate = pending.pop()
+        hops = symlink_hops(candidate)
+        roots.update(hops)
+        resolved = candidate.resolve(strict=True)
+        if resolved in seen or not resolved.is_file():
+            continue
+        if len(seen) >= 40:
+            raise ValueError(f"executable interpreter chain exceeds 40 files: {path}")
+        seen.add(resolved)
+        # Execute-only native binaries (for example macOS sudo) have no
+        # readable script header. Their link authority still remains explicit.
+        if not os.access(resolved, os.R_OK):
+            continue
+        with resolved.open("rb") as stream:
+            line = stream.readline(4096)
+        if line.startswith(b"#!"):
+            words = line[2:].split()
+            if words:
+                interpreter = Path(os.fsdecode(words[0]))
+                if interpreter.is_absolute() and interpreter.exists():
+                    pending.append(interpreter)
+    return tuple(sorted(roots))
+
+
 @dataclass(frozen=True)
 class ExecLimits:
     wall_seconds: float = 120.0
@@ -68,7 +138,20 @@ class ExecCapability:
             raise TypeError("limits must be ExecLimits")
         object.__setattr__(self, "workspace", Path(self.workspace).resolve(strict=True))
         for name in ("read_roots", "write_roots"):
-            roots = tuple(sorted({Path(p).resolve(strict=True) for p in getattr(self, name)}))
+            # Interpreter discovery belongs to trusted provisioning, not to
+            # replace()/deserialization after a tool may have changed a script.
+            roots = tuple(sorted({Path(p).absolute() if name == "read_roots"
+                                  else Path(p).resolve(strict=True)
+                                  for p in getattr(self, name)}))
+            if name == "read_roots":
+                resolved = {p: p.resolve(strict=True) for p in roots}
+                canonical = {p for p in roots if p == resolved[p]}
+                directories = {p for p in canonical if p.is_dir()}
+                for path, target in resolved.items():
+                    if target not in canonical and not any(parent in directories for parent in target.parents):
+                        raise ValueError(f"read-root symlink target lacks explicit authority: {path}")
+                roots = tuple(p for p in roots if p.is_symlink()
+                              or not any(parent in directories for parent in p.parents))
             object.__setattr__(self, name, roots)
         environment = dict(self.env)
         for key, value in environment.items():
@@ -112,8 +195,15 @@ def shell_capability(*, workspace, run_env_dir, scratch_home, network, writable,
     # every /bin/sh start prints "Error opening /private/var/select/sh".
     roots = [Path(p) for p in ("/usr", "/bin", "/sbin", "/lib", "/lib64",
                               "/System", "/Library/Apple", "/private/var/select") if Path(p).exists()]
-    roots += [Path(sys.base_prefix).resolve(), Path(sys.prefix).resolve(),
-              Path(sys.executable).resolve(), *extra_read_roots, *path_dirs]
+    roots += [Path(sys.base_prefix), Path(sys.prefix),
+              Path(sys.executable), *extra_read_roots, *path_dirs]
+    # Freeze executable and shebang authority for shell, jobs and derived custom
+    # capabilities. Runtime libraries retain the existing resolved-root policy.
+    for directory in dict.fromkeys(paths):
+        if directory.is_dir():
+            for executable in sorted(directory.iterdir()):
+                if executable.is_file() and os.access(executable, os.X_OK):
+                    roots.extend(executable_read_roots(executable))
     if network == "full":
         roots += [Path(p).resolve() for p in ("/etc/hosts", "/etc/resolv.conf",
                   "/etc/nsswitch.conf", "/etc/ssl", "/etc/pki") if Path(p).exists()]
@@ -124,5 +214,6 @@ def shell_capability(*, workspace, run_env_dir, scratch_home, network, writable,
            "npm_config_cache": str(run_env / "npm-cache"),
            "CARGO_HOME": str(run_env / "cargo"), "GOPATH": str(run_env / "go"),
            "GOMODCACHE": str(run_env / "go-mod")}
-    return ExecCapability("shell", Path(workspace), writable, tuple(roots),
+    admitted = {root for path in roots for root in executable_read_roots(Path(path))}
+    return ExecCapability("shell", Path(workspace), writable, tuple(admitted),
                           (run_env, home), network, env, ExecLimits())

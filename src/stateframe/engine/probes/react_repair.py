@@ -4839,11 +4839,12 @@ def _run_tests_impl(root: pathlib.Path, fn: str, explicit: str | None,
         # precise rule: run normally; ONLY when the repo's conftest itself fails to
         # IMPORT (exit 4, AHA's Settings/DB-at-import world) retry oracle targets
         # without conftests — the conftest was unusable anyway, so nothing is lost.
+        from kernel_test_python import test_python
         executable = (
             row.get("python")
             if isinstance(row, dict) and isinstance(row.get("python"), str)
             and row.get("python")
-            else sys.executable
+            else test_python()
         )
         _cmd = ([executable, "-m", "pytest", "-x", "-q", "--no-header"]
                 + (["-k", kexpr] if kexpr else []) + ["-p", "no:cacheprovider"]

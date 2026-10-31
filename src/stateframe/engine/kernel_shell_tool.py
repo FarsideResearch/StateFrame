@@ -1,14 +1,15 @@
 """Foreground shell: capability admission, transactional effects and durable replay."""
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import time
 import tempfile
 from dataclasses import dataclass, replace
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
-from kernel_effects import ContentStore, EffectError, effect_policy_for_run, manifest_digest, reconcile, scan
+from kernel_effects import ContentStore, EffectError, Manifest, effect_policy_for_run, manifest_digest, reconcile, scan
 from kernel_exec_capability import shell_capability
 from kernel_exec_session import ExecSession, ExecSessionError
 from kernel_run_env import RunEnv, RunEnvError, env_identity
@@ -24,6 +25,50 @@ SHELL_SCHEMA = {"type": "function", "function": {
         "timeout_seconds": {"type": "integer", "minimum": 1, "maximum": 600},
         "background": {"type": "boolean"}, "why": {"type": "string"}},
         "required": ["command"]}}}
+
+
+def workspace_identity(manifest: Manifest) -> str:
+    """Tape identity follows workcopy scope, without weakening effect inspection."""
+    from stateframe.workcopy import _ignored
+
+    authoritative = {}
+    for relative, entry in manifest.items():
+        parts = PurePosixPath(relative).parts
+        if (any(_ignored(part, True) for part in parts[:-1])
+                or _ignored(parts[-1], entry.kind == "dir")):
+            continue
+        authoritative[relative] = entry
+    return manifest_digest(authoritative)
+
+
+def attach_shell_verification(sequence: list[dict], call_id: str,
+                              assistant: dict, message: dict) -> bool:
+    """Keep a shell result and its automatic check in one newest exchange.
+
+    Frame-only requests retain one complete batch. A separate synthetic batch
+    would hide the command's output and effects before the model could see them.
+    """
+    for index in range(len(sequence) - 1, -1, -1):
+        parent = sequence[index]
+        calls = parent.get("tool_calls")
+        if parent.get("role") != "assistant" or not isinstance(calls, list):
+            continue
+        if not any(call.get("id") == call_id and
+                   call.get("function", {}).get("name") == "shell" for call in calls):
+            continue
+        end = index + 1
+        while end < len(sequence) and sequence[end].get("role") == "tool":
+            end += 1
+        results = sequence[index + 1:end]
+        if ({item.get("tool_call_id") for item in results}
+                != {call.get("id") for call in calls} or len(results) != len(calls)):
+            return False
+        parent = copy.deepcopy(parent)
+        parent["tool_calls"].extend(copy.deepcopy(assistant["tool_calls"]))
+        sequence[index] = parent
+        sequence.insert(end, copy.deepcopy(message))
+        return True
+    return False
 
 
 def bounded_summary(text: str) -> str:
@@ -171,7 +216,7 @@ class ShellTool:
         intent = dict(tool="shell", args=args, replay_class=replay_class,
                       capability_digest=hashlib.sha256(encoded.encode()).hexdigest(),
                       definition_digest=None, env_identity=identity,
-                      pre_manifest_digest=manifest_digest(before))
+                      pre_manifest_digest=workspace_identity(before))
         tape = tape_for_run()
         record = tape.lookup(call_id) if replay_mode_active() else None
         if replay_mode_active():
@@ -198,14 +243,14 @@ class ShellTool:
         if record is None and admission.requires_confirmation and not self.confirm(call_id, command, intent, replay=False):
             observation = "REFUSED ASK_DECLINED: user declined shell command"
             tape.complete(call_id=call_id, exit_code=None, observation=observation,
-                          post_manifest_digest=manifest_digest(before), env_identity=identity)
+                          post_manifest_digest=workspace_identity(before), env_identity=identity)
             return ShellReply(observation)
         try:
             result = self.session.run(["/bin/sh", "-c", command], cap, cwd=self.root)
         except (ExecSessionError, OSError) as error:
             if "requires " in str(error) and "no unsandboxed fallback" in str(error):
                 observation = f"REFUSED SANDBOX_UNAVAILABLE: {error}"
-                completion = dict(exit_code=None, post_manifest_digest=manifest_digest(before),
+                completion = dict(exit_code=None, post_manifest_digest=workspace_identity(before),
                                   env_identity=identity)
                 if record is not None:
                     reason = verify_reexecution(record, **completion)
@@ -249,7 +294,7 @@ class ShellTool:
                 f"{e.path} ({reason})" for e, reason in effects.restored))
         if after_identity != identity:
             observation += f"\nenvironment changed: {after_identity[:12]} (check results from before are stale)"
-        completion = dict(exit_code=result.exit_code, post_manifest_digest=manifest_digest(effects.manifest),
+        completion = dict(exit_code=result.exit_code, post_manifest_digest=workspace_identity(effects.manifest),
                           env_identity=after_identity)
         if record is not None:
             reason = verify_reexecution(record, **completion)

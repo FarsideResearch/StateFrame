@@ -5,6 +5,7 @@ import pytest
 
 from kernel_exec_capability import ExecLimits, shell_capability, capability_from_dict
 from kernel_test_isolation import capability_command
+from kernel_exec_capability import executable_read_roots, symlink_hops
 
 
 @pytest.fixture
@@ -86,3 +87,64 @@ def test_linux_builder_network_and_mount_contract(cap, monkeypatch, network):
 
 def test_equal_numeric_limits_hash_identically(cap):
     assert replace(cap, limits=ExecLimits(wall_seconds=120)).digest() == cap.digest()
+
+
+def test_executable_directory_and_shebang_hops(cap, tmp_path, monkeypatch):
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    target = outside / "python"
+    target.symlink_to(sys.executable)
+    alias = tmp_path / "alias"
+    alias.symlink_to(outside, target_is_directory=True)
+    first = tmp_path / "interpreter"
+    first.symlink_to("alias/python")
+    script = tmp_path / "command"
+    script.write_text(f"#!{first}\n")
+    roots = executable_read_roots(script)
+    assert {script, first, alias / "python", target} <= set(roots)
+    assert outside not in roots and alias not in roots
+    assert tmp_path not in roots
+    for purpose in ("shell", "job", "custom_tool"):
+        authority = replace(cap, purpose=purpose, read_roots=(*cap.read_roots, *roots))
+        assert {script, first, alias / "python", target} <= set(authority.read_roots)
+        assert outside not in authority.read_roots
+        restored = capability_from_dict(authority.as_dict())
+        assert restored.digest() == authority.digest()
+        monkeypatch.setattr("kernel_test_isolation.shutil.which", lambda name: "/usr/bin/" + name)
+        command, _ = capability_command([str(script)], authority, platform_backend="sandbox-exec")
+        assert str(first) in command[2] and str(alias) in command[2]
+        command, _ = capability_command([str(script)], authority, platform_backend="bwrap")
+        assert any(command[i:i + 3] == ["--symlink", "alias/python", str(first)]
+                   for i in range(len(command)))
+
+
+def test_symlink_cycle_and_missing_target_fail_closed(tmp_path):
+    first, second = tmp_path / "first", tmp_path / "second"
+    first.symlink_to(second)
+    second.symlink_to(first)
+    with pytest.raises(ValueError, match="40 hops"):
+        symlink_hops(first)
+    with pytest.raises(FileNotFoundError):
+        symlink_hops(tmp_path / "missing")
+
+
+def test_deserialization_never_discovers_new_script_authority(cap, tmp_path):
+    script, secret = tmp_path / "script", tmp_path / "secret"
+    script.write_text("#!/bin/sh\n")
+    secret.write_text("private")
+    authority = replace(cap, read_roots=(*cap.read_roots, *executable_read_roots(script)))
+    script.write_text(f"#!{secret}\n")
+    assert capability_from_dict(authority.as_dict()).digest() == authority.digest()
+    assert secret not in capability_from_dict(authority.as_dict()).read_roots
+
+
+def test_changed_symlink_target_cannot_expand_authority(cap, tmp_path):
+    script, secret, link = tmp_path / "script", tmp_path / "secret", tmp_path / "link"
+    script.write_text("#!/bin/sh\n")
+    secret.write_text("private")
+    link.symlink_to(script)
+    authority = replace(cap, read_roots=(*cap.read_roots, *executable_read_roots(link)))
+    link.unlink()
+    link.symlink_to(secret)
+    with pytest.raises(ValueError, match="lacks explicit authority"):
+        capability_from_dict(authority.as_dict())

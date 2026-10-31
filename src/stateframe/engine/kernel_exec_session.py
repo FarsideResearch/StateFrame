@@ -13,6 +13,7 @@ import shutil
 import socket
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import uuid
@@ -101,8 +102,10 @@ class ExecSession:
         self.backend = platform_backend or ("sandbox-exec" if platform.system() == "Darwin" else "bwrap")
         if self.backend not in {"sandbox-exec", "bwrap"}:
             raise ValueError("platform_backend must be sandbox-exec or bwrap")
-        self._directory = self.run_dir / ("exec-" + uuid.uuid4().hex)
-        self._directory.mkdir(mode=0o700)
+        # Replay deliberately repeats the UUID stream, but a previous attempt's
+        # supervisor artifacts must remain intact. Allocate a fresh physical directory.
+        self._directory = Path(tempfile.mkdtemp(
+            prefix="exec-" + uuid.uuid4().hex + "-", dir=self.run_dir))
         self._process = None
         self._control = None
         self._log = None

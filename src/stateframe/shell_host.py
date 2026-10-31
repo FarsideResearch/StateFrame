@@ -3,9 +3,10 @@ from __future__ import annotations
 
 import json
 import os
+from dataclasses import replace
 from pathlib import Path
 
-from .engine.kernel_run_env import create_run_env
+from .engine.kernel_run_env import RunEnvError, create_run_env
 
 
 def path_authority() -> tuple[list[str], list[str]]:
@@ -38,11 +39,23 @@ def provision(options, run_dir: Path, spec: dict) -> None:
                                          {str(Path(p).resolve(strict=True)) for p in settings.shell_read})
     if settings.run_env and settings.shell != "off":
         source = spec.setdefault("run_env_source_python", options._test_python)
-        environment = create_run_env(run_dir, Path(source))
-        use_run_env_python(options, environment)
-        spec["run_env"] = {"root": str(environment.root), "kind": environment.kind,
-                           "env": dict(environment.env)}
-        spec["capabilities"]["test_python"] = str(environment.python)
+        try:
+            environment = create_run_env(run_dir, Path(source), source_repo=Path(spec["repo"]))
+        except RunEnvError as error:
+            print(f"run environment off: {error}; dependency installs will not persist for checks")
+            settings = replace(settings, run_env=False)
+            options.tool_settings = settings
+            spec["tool_settings"] = settings.as_dict()
+            settings_file = run_dir / "tool-settings.json"
+            settings_file.write_text(json.dumps(settings.as_dict(), indent=1, sort_keys=True))
+        else:
+            use_run_env_python(options, environment)
+            spec["run_env"] = {"root": str(environment.root), "kind": environment.kind,
+                               "env": dict(environment.env),
+                               "external_import_roots": [str(path) for path in environment.external_import_roots]}
+            spec["shell_read_roots"] = sorted(set(spec["shell_read_roots"]) |
+                                              {str(path) for path in environment.external_import_roots})
+            spec["capabilities"]["test_python"] = str(environment.python)
     (run_dir / "spec.json").write_text(json.dumps(spec, indent=1, sort_keys=True))
 
 

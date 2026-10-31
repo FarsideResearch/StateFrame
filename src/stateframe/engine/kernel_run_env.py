@@ -1,9 +1,11 @@
 """Per-run dependency environment and inexpensive installed-package identity."""
 from __future__ import annotations
 
+import ast
 import hashlib
 import json
 import os
+import re
 import stat
 import subprocess
 import sys
@@ -23,6 +25,7 @@ class RunEnv:
     bin_dir: Path
     env: Mapping[str, str]
     kind: Literal["clone", "system-site"]
+    external_import_roots: tuple[Path, ...] = ()
 
 
 def _run(argv: list[str], *, env: Mapping[str, str] | None = None) -> str:
@@ -42,16 +45,152 @@ def _replace_root(data: bytes, old: Path, new: Path) -> bytes:
     return data.replace(os.fsencode(str(old)), os.fsencode(str(new)))
 
 
-def _relocate(source: Path, destination: Path) -> None:
+_SETUPTOOLS_SHIM = (
+    "import os; var = 'SETUPTOOLS_USE_DISTUTILS'; enabled = "
+    "os.environ.get(var, 'local') == 'local'; enabled and "
+    "__import__('_distutils_hack').add_shim();"
+)
+_FINDER_IMPORT = re.compile(r"import (__editable___[A-Za-z_0-9]+_finder); \1\.install\(\);?")
+
+
+def _import_text(path: Path) -> str:
+    try:
+        return path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as error:
+        raise RunEnvError(f"cannot read import metadata: {path.name}: {error}") from error
+
+
+def _mapped_path(value: str, source_repo: Path | None, workspace: Path,
+                 source_env: Path, destination: Path) -> str:
+    if not Path(value).is_absolute():
+        return value
+    resolved = Path(value).resolve()
+    if resolved.is_relative_to(source_env):
+        return str(destination / resolved.relative_to(source_env))
+    if source_repo is not None and resolved.is_relative_to(source_repo):
+        return str(workspace / resolved.relative_to(source_repo))
+    return value
+
+
+def _external_root(value: str, source_repo: Path | None, source_env: Path) -> Path | None:
+    path = Path(value).resolve()
+    if path.is_relative_to(source_env) or (source_repo is not None and path.is_relative_to(source_repo)):
+        return None
+    if path.is_dir():
+        return path
+    if path.is_file():
+        return path.parent
+    return None
+
+
+def _rewrite_finder(path: Path, source_repo: Path | None, workspace: Path,
+                    source_env: Path, destination: Path) -> set[Path]:
+    if path.is_symlink() or not path.is_file():
+        raise RunEnvError(f"editable finder cannot be safely cloned: {path.name}")
+    original = _import_text(path)
+    try:
+        tree = ast.parse(original, filename=str(path))
+    except SyntaxError as error:
+        raise RunEnvError(f"invalid editable finder: {path.name}: {error.msg}") from error
+    lines = original.encode("utf-8").splitlines(keepends=True)
+    offsets = [0]
+    for line in lines:
+        offsets.append(offsets[-1] + len(line))
+    changes: list[tuple[int, int, str]] = []
+    roots: set[Path] = set()
+    seen: set[str] = set()
+    for node in tree.body:
+        if not isinstance(node, (ast.Assign, ast.AnnAssign)):
+            continue
+        targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+        names = {target.id for target in targets if isinstance(target, ast.Name)}
+        if not names.intersection({"MAPPING", "NAMESPACES"}):
+            continue
+        value = node.value
+        if value is None:
+            raise RunEnvError(f"invalid editable finder mappings: {path.name}")
+        try:
+            mapping = ast.literal_eval(value)
+        except (ValueError, TypeError, SyntaxError, MemoryError) as error:
+            raise RunEnvError(f"invalid editable finder mappings: {path.name}") from error
+        if not isinstance(mapping, dict) or not isinstance(value, ast.Dict):
+            raise RunEnvError(f"invalid editable finder mappings: {path.name}")
+        seen.update(names)
+        values = mapping.values()
+        for entry in values:
+            paths = entry if isinstance(entry, list) else [entry]
+            if not all(isinstance(item, str) for item in paths):
+                raise RunEnvError(f"invalid editable finder paths: {path.name}")
+        for entry in value.values:
+            nodes = entry.elts if isinstance(entry, ast.List) else [entry]
+            for child in nodes:
+                if not isinstance(child, ast.Constant) or not isinstance(child.value, str):
+                    raise RunEnvError(f"invalid editable finder paths: {path.name}")
+                if not Path(child.value).is_absolute():
+                    continue
+                external = _external_root(child.value, source_repo, source_env)
+                if external is not None:
+                    roots.add(external)
+                replacement = _mapped_path(child.value, source_repo, workspace,
+                                           source_env, destination)
+                if replacement != child.value:
+                    start = offsets[child.lineno - 1] + child.col_offset
+                    end = offsets[child.end_lineno - 1] + child.end_col_offset
+                    changes.append((start, end, repr(replacement)))
+    if not {"MAPPING", "NAMESPACES"}.issubset(seen):
+        raise RunEnvError(f"invalid editable finder mappings: {path.name}")
+    rewritten = original.encode("utf-8")
+    for start, end, replacement in sorted(changes, reverse=True):
+        rewritten = rewritten[:start] + replacement.encode("utf-8") + rewritten[end:]
+    if changes:
+        path.write_bytes(rewritten)
+    return roots
+
+
+def _relocate(source: Path, destination: Path, source_repo: Path | None,
+              workspace: Path) -> tuple[Path, ...]:
     config = destination / "pyvenv.cfg"
     if not config.is_file():
         raise RunEnvError(f"cloned environment has no pyvenv.cfg: {destination}")
     config.write_bytes(_replace_root(config.read_bytes(), source, destination))
-    for path in destination.glob("lib/python*/site-packages/*.pth"):
-        data = path.read_bytes()
-        changed = _replace_root(data, source, destination)
-        if data != changed:
-            path.write_bytes(changed)
+    roots: set[Path] = set()
+    for site in destination.glob("lib/python*/site-packages"):
+        for path in sorted(site.iterdir()):
+            if path.suffix not in (".pth", ".egg-link"):
+                continue
+            if path.is_symlink():
+                raise RunEnvError(f"symlinked {path.suffix} cannot be cloned: {path.name}")
+            lines = _import_text(path).splitlines(keepends=True)
+            revised = []
+            for line in lines:
+                value = line.strip()
+                match = _FINDER_IMPORT.fullmatch(value) if path.suffix == ".pth" else None
+                if match:
+                    roots.update(_rewrite_finder(site / (match.group(1) + ".py"),
+                                                 source_repo, workspace, source, destination))
+                    revised.append(line)
+                elif not value or value.startswith("#") or value == _SETUPTOOLS_SHIM:
+                    revised.append(line)
+                elif value.startswith(("import ", "import\t")):
+                    raise RunEnvError(f"executable .pth cannot be safely cloned: {path.name}")
+                else:
+                    # Relative entries are interpreted from the source site before copying.
+                    original_site = source / site.relative_to(destination)
+                    old_target = (original_site / value).resolve()
+                    external = _external_root(str(old_target), source_repo, source)
+                    if external is not None:
+                        roots.add(external)
+                    mapped = _mapped_path(str(old_target), source_repo, workspace,
+                                          source, destination)
+                    if mapped != str(old_target):
+                        revised.append(line.replace(value, mapped, 1))
+                    elif external is not None and not Path(value).is_absolute():
+                        revised.append(line.replace(value, str(old_target), 1))
+                    else:
+                        revised.append(line)
+            changed = "".join(revised)
+            if changed != "".join(lines):
+                path.write_text(changed, encoding="utf-8")
     bin_dir = destination / "bin"
     for script in bin_dir.iterdir():
         if not script.is_file() or script.is_symlink():
@@ -69,10 +208,11 @@ def _relocate(source: Path, destination: Path) -> None:
             changed = _replace_root(data, source, destination)
             if changed != data:
                 script.write_bytes(changed)
+    return tuple(sorted(roots))
 
 
 def _check_clone_paths(source: Path) -> None:
-    """Reject source-tree imports before copying or executing the cloned Python."""
+    """Reject unsafe import hooks before copying or executing the cloned Python."""
     if (source / "pyvenv.cfg").is_symlink() or (source / "bin").is_symlink():
         raise RunEnvError("symlinked environment configuration or bin directory cannot be cloned")
     for site in sorted(source.glob("lib/python*/site-packages")):
@@ -80,13 +220,13 @@ def _check_clone_paths(source: Path) -> None:
                if parent != source and source in parent.parents):
             raise RunEnvError(f"symlinked site-packages directory cannot be cloned: {site}")
         for path in sorted(site.iterdir()):
-            if path.suffix == ".egg-link":
-                raise RunEnvError(f"editable install cannot be cloned: {path.name}")
+            if path.suffix == ".egg-link" and path.is_symlink():
+                raise RunEnvError(f"symlinked .egg-link cannot be cloned: {path.name}")
             if path.suffix != ".pth":
                 continue
             if path.is_symlink():
                 raise RunEnvError(f"symlinked .pth cannot be cloned: {path.name}")
-            for line in path.read_text(encoding="utf-8").splitlines():
+            for line in _import_text(path).splitlines():
                 line = line.strip()
                 if not line or line.startswith("#"):
                     continue
@@ -94,16 +234,9 @@ def _check_clone_paths(source: Path) -> None:
                     # The standard setuptools shim selects its installed distutils.
                     # Other executable .pth files can import editable finders whose
                     # source mappings cannot safely be relocated without executing.
-                    setuptools_shim = (
-                        "import os; var = 'SETUPTOOLS_USE_DISTUTILS'; enabled = "
-                        "os.environ.get(var, 'local') == 'local'; enabled and "
-                        "__import__('_distutils_hack').add_shim();")
-                    if line == setuptools_shim:
+                    if line == _SETUPTOOLS_SHIM or _FINDER_IMPORT.fullmatch(line):
                         continue
                     raise RunEnvError(f"executable .pth cannot be safely cloned: {path.name}")
-                target = (site / line).resolve()
-                if not target.is_relative_to(source.resolve()):
-                    raise RunEnvError(f"external import path cannot be cloned: {path.name}: {line}")
 
 
 def _import_probe(python: Path) -> str:
@@ -122,10 +255,12 @@ def _import_probe(python: Path) -> str:
     return _run([str(python), "-c", code])
 
 
-def create_run_env(run_dir: Path, test_python: Path) -> RunEnv:
+def create_run_env(run_dir: Path, test_python: Path, *, source_repo: Path | None = None) -> RunEnv:
     root = Path(run_dir).absolute() / "env"
     interpreter = Path(test_python).absolute()
     source = interpreter.parent.parent if interpreter.parent.name == "bin" else None
+    source_repo = source_repo.resolve(strict=True) if source_repo is not None else None
+    workspace = Path(run_dir).absolute() / "workspace"
     clone = source is not None and (source / "pyvenv.cfg").is_file()
     if root.exists() or root.is_symlink():
         raise RunEnvError(f"run environment already exists: {root}")
@@ -140,11 +275,12 @@ def create_run_env(run_dir: Path, test_python: Path) -> RunEnv:
         else:
             raise RunEnvError(f"unsupported run environment platform: {sys.platform}")
         _run(command)
-        _relocate(source, root)
+        external_roots = _relocate(source, root, source_repo, workspace)
         kind: Literal["clone", "system-site"] = "clone"
     else:
         _run([str(interpreter), "-m", "venv", "--system-site-packages", str(root)])
         kind = "system-site"
+        external_roots = ()
     bin_dir = root / "bin"
     python = bin_dir / "python"
     environment = dict(os.environ)
@@ -160,7 +296,7 @@ def create_run_env(run_dir: Path, test_python: Path) -> RunEnv:
         "PYTHONDONTWRITEBYTECODE": "1",
     }
     environment.update(overrides)
-    run_env = RunEnv(root, python, bin_dir, overrides, kind)
+    run_env = RunEnv(root, python, bin_dir, overrides, kind, external_roots)
     _run([str(python), "-m", "pip", "--version"], env=environment)
     if clone:
         package = json.loads(_import_probe(interpreter))
