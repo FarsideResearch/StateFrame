@@ -96,6 +96,8 @@ def test_jobs_readonly_own_scratch_limit_and_output(host):
 
 def test_runtime_defers_owned_job_output_to_taped_adapter(host):
     from kernel_stateframe_runtime import StateFrameRuntime
+    from kernel_completion_owner import (canonicalize_tool_surface, dispatch_tool_call,
+                                         RequestActionContractError)
     hub, _, _ = host
     hub.shell.execute({"command": "echo ready", "background": True}, "launch")
 
@@ -104,12 +106,24 @@ def test_runtime_defers_owned_job_output_to_taped_adapter(host):
             pytest.fail("legacy job organ intercepted a per-run tool")
 
     runtime = SimpleNamespace(job_watch=LegacyJobs())
-    assert StateFrameRuntime.job_operation(runtime, "job_output", {"job": "j1"}) is None
-    reply = hub.execute("job_output", {"job": "j1"}, "output")
+    surface = canonicalize_tool_surface(hub.schemas())
+    with pytest.raises(RequestActionContractError):
+        dispatch_tool_call(surface, "job_output", {"job_id": "j1"})
+    dispatched = dispatch_tool_call(surface, "job_output", {"job": "j1"})
+    assert StateFrameRuntime.job_operation(runtime, dispatched.name, dispatched.arguments) is None
+    reply = hub.execute(dispatched.name, dispatched.arguments, "output")
     assert "ready" in reply.observation
     record = tape_for_run().lookup("output")
     assert record is not None and record.tool == "job_output"
     assert record.observation == reply.observation
+
+
+def test_legacy_job_output_schema_remains_available_without_adapter(monkeypatch):
+    from kernel_completion_owner import canonicalize_tool_surface, dispatch_tool_call
+    from kernel_job_watch import _job_tools
+    monkeypatch.setattr("kernel_agent_tools._active", None)
+    surface = canonicalize_tool_surface(_job_tools())
+    assert dispatch_tool_call(surface, "job_output", {"job_id": "legacy"}).arguments == {"job_id": "legacy"}
 
 
 def test_runtime_preserves_legacy_jobs_without_adapter(monkeypatch):

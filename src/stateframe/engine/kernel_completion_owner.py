@@ -5249,6 +5249,13 @@ def _spec_for_tool(tool: Mapping[str, object], *, probe_modes: Sequence[str] | N
         schema = next(item["function"]["parameters"] for item in host_tools.custom_schemas
                       if item["function"]["name"] == name)
         return _make_tool_spec(name, copy.deepcopy(schema))
+    if host_tools is not None and name in host_tools.names:
+        from kernel_agent_schemas import BUILTIN_SCHEMAS
+        schema = next(item["function"]["parameters"] for item in BUILTIN_SCHEMAS
+                      if item["function"]["name"] == name)
+        # Per-run jobs own job_output while active; merging the legacy schema
+        # would require both job and job_id and reject every new-API call.
+        return _make_tool_spec(name, copy.deepcopy(schema))
     if base is None:
         schema = (copy.deepcopy(dict(provider)) if isinstance(provider, Mapping)
                   else _object_schema({}, additional=False))
@@ -5327,6 +5334,9 @@ def assert_tool_dispatch_contract(
         properties = parameters.get("properties")
         property_names = set(properties) if isinstance(properties, Mapping) else set()
         expected = TOOL_SPECS.get(name)
+        from kernel_agent_tools import is_registered
+        if is_registered(name):
+            expected = _spec_for_tool(tool)
         actual_variants = _schema_variants(parameters)
         if name == "probe" and not isinstance(parameters.get("oneOf"), Sequence):
             raise RequestActionContractError(

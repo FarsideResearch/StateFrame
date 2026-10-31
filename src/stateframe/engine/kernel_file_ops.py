@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import os
+import hashlib
+import json
 import secrets
 import stat
 from dataclasses import dataclass
@@ -25,6 +27,51 @@ class FileOperationEffect:
     changed_paths: tuple[str, ...]
     source: str
     destination: str | None = None
+
+
+class FileOperationReplay:
+    """Bind native mutations to durable intent and verified local replay."""
+
+    def __init__(self, root: Path, name: str, arguments: dict, call_id: str, *,
+                 authority: dict, environment_identity: str):
+        from kernel_effects import scan
+        from kernel_shell_tool import workspace_identity
+        from kernel_tool_tape import (replay_mode_active, tape_for_run, replay_decision,
+                                      verify_intent, ToolReplayRefused)
+
+        self.root, self.call_id = root, call_id
+        self.identity = environment_identity
+        self.tape = tape_for_run()
+        self.record = self.tape.lookup(call_id) if replay_mode_active() else None
+        intent = dict(tool=name, args=arguments, replay_class="local",
+                      capability_digest=hashlib.sha256(json.dumps(
+                          authority, sort_keys=True, separators=(",", ":")).encode()).hexdigest(),
+                      definition_digest=None, env_identity=self.identity,
+                      pre_manifest_digest=workspace_identity(scan(root, exclude=lambda _: False)))
+        if replay_mode_active():
+            reason = replay_decision(self.record, replay_external_allowed=False).refuse_reason
+            if not reason:
+                reason = verify_intent(self.record, **intent)
+            if reason:
+                raise ToolReplayRefused(reason)
+        else:
+            self.tape.intent(call_id=call_id, **intent)
+
+    def complete(self, result: str, observation: str) -> str:
+        from kernel_effects import scan
+        from kernel_shell_tool import workspace_identity
+        from kernel_tool_tape import verify_reexecution, ToolReplayRefused
+
+        completion = dict(exit_code={"APPLIED": 0, "REFUSED": 1, "FAILED": 2}[result],
+                          post_manifest_digest=workspace_identity(scan(self.root, exclude=lambda _: False)),
+                          env_identity=self.identity)
+        if self.record is not None:
+            reason = verify_reexecution(self.record, **completion)
+            if reason:
+                raise ToolReplayRefused(reason)
+            return self.record.observation
+        self.tape.complete(call_id=self.call_id, observation=observation, **completion)
+        return observation
 
 
 def _path(root: Path, raw: str) -> tuple[Path, str]:

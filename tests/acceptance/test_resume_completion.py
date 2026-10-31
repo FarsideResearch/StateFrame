@@ -123,22 +123,31 @@ def test_e19_volatile_shell_observation_is_byte_identical_on_resume(tmp_path):
     assert actual["tools"] == expected["tools"]
 
 
-def test_file_move_kill_resume_replays_identical_request_and_sealed_rename(tmp_path):
+@pytest.mark.parametrize("operation", ["file_move", "file_delete"])
+def test_file_move_kill_resume_replays_identical_request_and_sealed_rename(tmp_path, operation):
     repo = copy_repo(tmp_path)
     (repo / "obsolete.py").write_text("OLD = True\n")
     script = tmp_path / "move.json"
     script.write_text(json.dumps({"model": "scripted", "tokenize": {"mode": "ok"}, "steps": [
-        {"tool": "file_move", "required": True,
-         "arguments": {"source": "obsolete.py", "destination": "renamed.py"}},
-        {"tool": "read", "arguments": {"path": "renamed.py"}}]}))
+        {"tool": operation, "required": True,
+         "arguments": ({"source": "obsolete.py", "destination": "renamed.py"}
+                       if operation == "file_move" else {"path": "obsolete.py"})},
+        {"tool": "read", "arguments": {"path": "app.py"}}]}))
     _, run_dir, expected = _interrupted_run(
         tmp_path, script_name=script, repo=repo,
-        task="Rename obsolete.py to renamed.py and verify imports.")
-    assert any("file_move applied" in str(m.get("content"))
-               for m in expected["messages"] if m.get("role") == "tool")
+        task=("Rename obsolete.py to renamed.py and verify imports." if operation == "file_move"
+              else "Delete obsolete.py and verify imports."))
+    # Automatic verification may be the newest exchange. Prove the mutation
+    # itself committed before killing, independently of which reply is newest.
+    tape = [json.loads(line) for line in (run_dir / "tool-tape.jsonl").read_text().splitlines()]
+    intent = next(row for row in tape if row.get("tool") == operation)
+    assert intent["replay_class"] == "local"
+    completion = next(row for row in tape if row["kind"] == "complete"
+                      and row["call_id"] == intent["call_id"])
+    assert completion["exit_code"] == 0 and operation + " applied" in completion["observation"]
     remaining = tmp_path / "move-remaining.json"
     remaining.write_text(json.dumps({"model": "scripted", "tokenize": {"mode": "ok"}, "steps": [
-        {"tool": "read", "arguments": {"path": "renamed.py"}},
+        {"tool": "read", "arguments": {"path": "app.py"}},
         {"tool": "run_tests", "arguments": {"target": "tests/test_app.py"}},
         {"tool": "done", "arguments": {"summary": "Rename verified after restart."}}]}))
     with Endpoint(remaining) as endpoint:
@@ -153,9 +162,13 @@ def test_file_move_kill_resume_replays_identical_request_and_sealed_rename(tmp_p
     summary = json.loads((run_dir / "summary.json").read_text())
     assert summary["succeeded"] is True
     assert summary["resume"]["faithful"] is True
-    assert set(summary["files_changed"]) == {"obsolete.py", "renamed.py"}
+    assert set(summary["files_changed"]) == ({"obsolete.py", "renamed.py"}
+                                            if operation == "file_move" else {"obsolete.py"})
     assert not (run_dir / "workspace/obsolete.py").exists()
-    assert (run_dir / "workspace/renamed.py").read_text() == "OLD = True\n"
+    if operation == "file_move":
+        assert (run_dir / "workspace/renamed.py").read_text() == "OLD = True\n"
+    else:
+        assert not (run_dir / "workspace/renamed.py").exists()
     assert (repo / "obsolete.py").exists() and not (repo / "renamed.py").exists()
 
 

@@ -69,13 +69,16 @@ def test_u5_formatter_effect_invalidates_prior_read(tmp_path):
     assert "stale" in str(case.requests[2]).lower()
 
 
-def test_u6_local_install_is_used_by_shell_and_engine_checks(tmp_path):
+def test_u6_local_install_is_used_by_shell_and_engine_checks(tmp_path, clean_test_environment):
+    python = clean_test_environment(tmp_path / "test-env")
     case = run_case(tmp_path, "install.script.json", repo_name="install_repo",
-                    flags=("--shell-network", "full"))
+                    flags=("--shell-network", "full", "--test-python", str(python)))
     case.assert_reply("environment changed:")
     case.assert_reply("installed")
     assert case.summary is not None and case.summary["succeeded"] is True, case.summary
     assert case.summary["tests_after"]["passed"] is True
+    assert str(case.run_dir / "env/bin/python") in case.summary["tests_after"]["command"]
+    assert (case.run_dir / "env").is_dir()
     assert not (case.repo / "localpkg.egg-info").exists()
 
 

@@ -8461,12 +8461,23 @@ def work(d, *, resume=None):
                                 raise ShellCleanupFailed(_obs)
                             continue
                         elif _name in {"file_delete", "file_move"}:
-                            from kernel_file_ops import FileOperationRefused, file_delete, file_move
+                            from kernel_file_ops import FileOperationRefused, FileOperationReplay, file_delete, file_move
                             from kernel_tool_surface import new_files_forbidden
 
                             _source_arg = _args.get("path") if _name == "file_delete" else _args.get("source")
                             _dest_arg = _args.get("destination") if _name == "file_move" else None
                             _paths = ()
+                            _file_replay = FileOperationReplay(
+                                root, _name, _args, tool_call_id,
+                                authority={"editable": sorted(fileset.paths),
+                                           "created": sorted(str(pathlib.Path(p).relative_to(root))
+                                                             for p in created_this_run),
+                                           "protected": sorted(str(pathlib.Path(p).relative_to(root))
+                                                               for p in baseline_tests),
+                                           "new_files_forbidden": new_files_forbidden(measurement),
+                                           "allowed_product_paths": d.get("allowed_product_paths"),
+                                           "new_file_roots": d.get("new_file_roots")},
+                                environment_identity=_shell.identity() if _shell is not None else "disabled")
                             try:
                                 def _protected(path):
                                     return protected_test_path(path, baseline_tests)
@@ -8507,6 +8518,7 @@ def work(d, *, resume=None):
                             except OSError as _error:
                                 _obs = f"{_name} FAILED: {type(_error).__name__}: {_error}"
                                 _result = "FAILED"
+                            _obs = _file_replay.complete(_result, _obs)
                             bolt.receipt(
                                 "edit", f"{_name} {_source_arg}",
                                 f"{_source_arg}|{_dest_arg or ''}", _result, _obs,

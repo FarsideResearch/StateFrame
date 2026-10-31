@@ -2,7 +2,6 @@
 import json
 from pathlib import Path
 import socket
-import subprocess
 import sys
 
 import pytest
@@ -66,12 +65,12 @@ def test_startup_capability_and_fail_closed_errors(tmp_path, monkeypatch, check,
 
 @pytest.mark.host_sandbox
 @pytest.mark.parametrize('check', ['engine', 'project'])
-def test_startup_hooks_cannot_write_or_connect_and_repo_pytest_is_not_imported(tmp_path, monkeypatch, check):
+def test_startup_hooks_cannot_write_or_connect_and_repo_pytest_is_not_imported(
+        tmp_path, monkeypatch, check, clean_test_environment):
     repo = tmp_path / 'repo'
     repo.mkdir()
     environment = repo / '.venv'
-    subprocess.run([sys.executable, '-I', '-m', 'venv', '--without-pip', str(environment)],
-                   check=True, timeout=60)
+    python = str(clean_test_environment(environment))
     site = next(environment.glob('lib/python*/site-packages'))
     outside = tmp_path / 'outside'
     outside.write_text('untouched')
@@ -103,19 +102,36 @@ builtins.STARTUP_BLOCKED = blocked
 '''
         (site / 'startup_attack.py').write_text(attack)
         (site / 'attack.pth').write_text('import startup_attack\n')
-        (site / 'sitecustomize.py').write_text(
-            'import builtins\nassert builtins.STARTUP_BLOCKED == 3\nbuiltins.SITE_RAN = True\n')
-        # A successful import proves startup actually ran and all three attacks
-        # failed; Python swallowing sitecustomize exceptions cannot pass this.
-        (site / 'pytest.py').write_text(
-            'import builtins\nassert builtins.STARTUP_BLOCKED == 3\nassert builtins.SITE_RAN\n')
-        (repo / 'pytest.py').write_text(attack + f'Path({str(local_marker)!r}).write_text("ran")\n')
-        python = str(environment / 'bin/python')
+        (repo / 'pytest.py').write_text(
+            f'from pathlib import Path\nPath({str(local_marker)!r}).write_text("ran")\n'
+            'raise RuntimeError("repository pytest shadow imported")\n')
+        # Observe the actual contained process. Python swallows .pth failures,
+        # so host-marker absence alone would be vacuous. The assertions execute
+        # after startup and require the hook's successful scratch write plus all
+        # denied operations, followed by a genuine pytest import.
+        from stateframe.engine import kernel_safe_probe
+        run_probe = kernel_safe_probe.run_probe
+        results = []
+
+        def observed_probe(argv, workspace, **kwargs):
+            proof = ("import builtins, os; from pathlib import Path; "
+                     "assert builtins.STARTUP_BLOCKED == 3; "
+                     "assert Path(os.environ['HOME'], 'scratch-proof').read_text() == 'allowed'; "
+                     "import pytest; assert hasattr(pytest, 'main'); ")
+            result = run_probe([*argv[:-1], proof + argv[-1]], workspace, **kwargs)
+            results.append(result)
+            return result
+
+        monkeypatch.setattr(kernel_safe_probe, 'run_probe', observed_probe)
         if check == 'engine':
             assert runner._check_python(python) == python
         else:
             options = runner.RunOptions(repo=repo, task='test', endpoint=None)
             selected = runner._select_test_python(options, printer=lambda _: None)
             assert Path(selected).parent == environment / 'bin'
+        assert len(results) == 1 and results[0].exit_code == 0
+        server.settimeout(0.1)
+        with pytest.raises(socket.timeout):
+            server.accept()
     assert outside.read_text() == 'untouched'
     assert not (repo / 'repo-write').exists() and not local_marker.exists()
