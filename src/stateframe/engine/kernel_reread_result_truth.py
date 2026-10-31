@@ -43,7 +43,7 @@ def _canonical_failure(receipt: object) -> dict[str, str] | None:
     fields = {key: str(receipt.get(key) or "") for key in ("outcome", "failure_phase")}
     if any(len(value) > 64 for value in fields.values()):
         return None
-    assertion = " ".join(str(receipt.get("assertion_context_preview") or "").split())[:200]
+    assertion = " ".join(str(receipt.get("assertion_context_preview") or "").split())[:200].rstrip()
     if not assertion:
         return None
     return {"receipt_id": receipt_id, "revision": revision, "status": "FAIL",
@@ -177,12 +177,7 @@ def checkpoint_replay(measurement: object) -> dict[str, object]:
     snapshot = {"schema": _REPLAY_SCHEMA, "active": True,
                 "seen": rows[-_SEEN_LIMIT:], "failure": failure,
                 "bookmarks": bookmarks}
-    try:
-        restore_replay(_ReplayValidationTarget(), snapshot)
-    except ValueError:
-        # Optional state never makes the worker's durable checkpoint unreadable.
-        return {"schema": _REPLAY_SCHEMA, "active": True,
-                "seen": [], "failure": None, "bookmarks": []}
+    restore_replay(_ReplayValidationTarget(), snapshot)
     return snapshot
 
 

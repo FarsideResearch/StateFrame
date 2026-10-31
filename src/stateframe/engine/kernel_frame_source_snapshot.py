@@ -457,8 +457,8 @@ def fit_recent_read_windows(body: Mapping[str, object], windows: Sequence[Mappin
 
     deferred_paths = frozenset(deferred_source_paths)
 
-    def candidate(reads: Sequence[Mapping[str, object]], checks: Sequence[str],
-                  check_chars: int = 0, *, release_deferred: bool = False) -> dict[str, object]:
+    def candidate(reads: Sequence[Mapping[str, object]], checks: Sequence[tuple[str, int]],
+                  *, release_deferred: bool = False) -> dict[str, object]:
         trial = copy.deepcopy(base)
         rows = trial["messages"]
         selected = []
@@ -515,13 +515,33 @@ def fit_recent_read_windows(body: Mapping[str, object], windows: Sequence[Mappin
                     "newest user suffix changed before recent-read fitting"
                 )
             position = suffix_start
-        source_chars = sum(int(row.get("source_chars", 0)) for row in reads) + check_chars
-        additions = [{"role": "user", "content": content}
-                     for content in [*(str(row["content"]) for row in reads), *checks]
-                     if content and window_key(content) not in existing]
-        summary = (f"kept {len(reads)} selected source windows; about {source_chars} chars of source fit"
-                   if any(row.get("bookmark") is True for row in reads)
-                   else f"kept {len(reads)} recent reads; about {source_chars} chars of source fit")
+        additions = []
+        emitted_keys = set(existing)
+        emitted_reads = 0
+        source_chars = 0
+        bookmark_emitted = False
+        for row in reads:
+            content = str(row["content"])
+            key = window_key(content)
+            if not content or key in emitted_keys:
+                continue
+            additions.append({"role": "user", "content": content})
+            if key is not None:
+                emitted_keys.add(key)
+            emitted_reads += 1
+            source_chars += int(row.get("source_chars", 0))
+            bookmark_emitted |= row.get("bookmark") is True
+        for content, chars in checks:
+            key = window_key(content)
+            if not content or key in emitted_keys:
+                continue
+            additions.append({"role": "user", "content": content})
+            if key is not None:
+                emitted_keys.add(key)
+            source_chars += chars
+        summary = (f"kept {emitted_reads} selected source windows; about {source_chars} chars of source fit"
+                   if bookmark_emitted
+                   else f"kept {emitted_reads} recent reads; about {source_chars} chars of source fit")
         additions.append({"role": "user", "content": summary})
         rows[position:position] = additions
         return trial
@@ -546,13 +566,13 @@ def fit_recent_read_windows(body: Mapping[str, object], windows: Sequence[Mappin
     for count in range(limit, -1, -1):
         for release_deferred in ((False, True) if deferred_paths and count else (False,)):
             for level in check_levels:
-                checks = [str(row.get(level) or "") for row in public_checks]
-                check_chars = sum(int(row.get(level + "_chars", 0)) for row in public_checks)
+                checks = [(str(row.get(level) or ""), int(row.get(level + "_chars", 0)))
+                          for row in public_checks]
                 proposals = (variants(windows[:count]) if count <= rank_one_count
                              else ([dict(row) for row in windows[:count]],))
                 for selection in proposals:
                     trial = candidate(
-                        selection, checks, check_chars,
+                        selection, checks,
                         release_deferred=release_deferred,
                     )
                     if fits(trial):

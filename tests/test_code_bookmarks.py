@@ -632,6 +632,42 @@ def test_replay_normalizes_before_bounding_and_never_replaces_check_receipt():
         original, "module.py", "1", "sha256:abc", 3)
 
 
+def test_assertion_truncation_boundary_preserves_replay_and_next_read(tmp_path):
+    from kernel_reread_result_truth import checkpoint_replay, restore_replay
+
+    path = tmp_path / "module.py"
+    path.write_text("VALUE = 3\n")
+    receipt = {"receipt_id": "one", "revision": "rev1", "status": "FAIL",
+               "assertion_context_preview": "a" * 199 + " b"}
+    original = SimpleNamespace(
+        owner=SimpleNamespace(workspace_revision=1), current_product_revision="rev1",
+        current_request_id="request-one", _code_bookmarks_active=True,
+        _code_bookmark_carry=[{"path": "module.py", "symbol": "target",
+                               "read_only": False}],
+        _latest_check_receipt=receipt, host_check_receipts=[receipt],
+        retained=None, step_ledger=None,
+        journal=SimpleNamespace(emit=lambda *_args, **_kwargs: None),
+    )
+    args = {"path": "module.py", "start_line": 1, "end_line": 1}
+    assert execute_read(tmp_path, path, "module.py", "module.py", 0,
+                        args=args, measurement=original, step=1)[0] == "OK"
+    snapshot = checkpoint_replay(original)
+    assert snapshot["seen"] and snapshot["bookmarks"]
+    assert snapshot["failure"]["assertion"] == "a" * 199
+    resumed = SimpleNamespace(
+        owner=SimpleNamespace(workspace_revision=1), current_product_revision="rev1",
+        current_request_id="request-two", retained=None, step_ledger=None,
+        journal=SimpleNamespace(emit=lambda *_args, **_kwargs: None),
+    )
+    restore_replay(resumed, snapshot)
+    assert resumed._code_bookmark_carry == snapshot["bookmarks"]
+    original.current_request_id = "request-two"
+    assert execute_read(tmp_path, path, "module.py", "module.py", 0,
+                        args=args, measurement=resumed, step=2) == execute_read(
+                            tmp_path, path, "module.py", "module.py", 0,
+                            args=args, measurement=original, step=2)
+
+
 def test_long_symbol_is_omitted_before_checkpoint(tmp_path, monkeypatch):
     from kernel_reread_result_truth import checkpoint_replay, restore_replay
 
@@ -721,6 +757,37 @@ def test_disjoint_ordinary_window_survives_bookmark_in_same_revision(tmp_path):
         fits=lambda _body: True)
     assert {bookmark["content"], ordinary["content"]} <= {
         row["content"] for row in fitted["messages"]}
+
+
+def test_exact_bookmark_overlap_leaves_room_for_disjoint_window(tmp_path):
+    path = tmp_path / "module.py"
+    path.write_text("def target(): return 1\nOTHER = 2\n")
+    revision = _revision(path)
+    bookmark = windows(tmp_path, [{"path": "module.py", "symbol": "target",
+                                   "rank": 1, "revision": revision}])[0]
+    overlap = _current_window(tmp_path, "module.py", 1, 1, revision)
+    disjoint = _current_window(tmp_path, "module.py", 2, 2, revision)
+    assert overlap is not None and disjoint is not None
+    assert bookmark["content"] != overlap[0]
+    ordinary_overlap = {"path": "module.py", "content": overlap[0],
+                        "start_line": 1, "end_line": 1, "source_chars": len(overlap[1])}
+    ordinary_disjoint = {"path": "module.py", "content": disjoint[0],
+                         "start_line": 2, "end_line": 2, "source_chars": len(disjoint[1])}
+    base = {"messages": [{"role": "system", "content": "rules"}], "tools": []}
+    expected = fit_recent_read_windows(
+        base, [bookmark, ordinary_disjoint], fits=lambda _body: True)
+    ceiling = token_estimate(expected)
+    fitted = fit_recent_read_windows(
+        base, [bookmark, ordinary_overlap, ordinary_disjoint],
+        fits=lambda body: token_estimate(body) <= ceiling)
+    contents = [row["content"] for row in fitted["messages"]]
+    assert token_estimate(fitted) <= ceiling
+    assert bookmark["content"] in contents
+    assert ordinary_overlap["content"] not in contents
+    assert ordinary_disjoint["content"] in contents
+    assert (f"kept 2 selected source windows; about "
+            f"{bookmark['source_chars'] + ordinary_disjoint['source_chars']} "
+            "chars of source fit") in contents
 
 
 def test_worker_checkpoint_writes_restorable_bookmark_section(monkeypatch):
