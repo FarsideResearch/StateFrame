@@ -34,5 +34,7 @@ The engine is a flat package of modules, each owning one mechanism; `release-man
 | `kernel_frame_*.py` | The frame's sections and how they are budgeted. |
 | `kernel_checkpoint.py` | Saving and loading signed checkpoints. |
 | `kernel_execution_policy.py`, `kernel_test_isolation.py` | Sandboxed command and test execution. |
+| `kernel_git_view.py` | Pinned, sanitized Git history observations and run-baseline diffs. |
+| `kernel_web_fetch.py` | Direct-IP, SSRF-checked web observations with bounded text extraction. |
 | `kernel_release_switch_registry.py` | Which `STATEFRAME_*` switches this engine reads; a setting with no reader is refused. |
 | `mc_repo_intel_vendor/` | The repo map: syntax-aware outlines of functions and classes. |
