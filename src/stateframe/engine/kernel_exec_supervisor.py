@@ -147,7 +147,9 @@ class Supervisor:
         cwd = Path(request.get("cwd") or cap.workspace).resolve(strict=True)
         spec = {"argv": argv, "cwd": str(cwd), "env": dict(cap.env), "limits": asdict(cap.limits),
                 "memory_supervised": True}
-        launch = [sys.executable, "-I", str(Path(__file__).with_name("sf_launch.py")),
+        # The launcher is stdlib-only and isolated (-I): exec the real interpreter, not a venv
+        # symlink, so the sandbox only has to admit the resolved runtime roots.
+        launch = [os.path.realpath(sys.executable), "-I", str(Path(__file__).with_name("sf_launch.py").resolve()),
                   json.dumps(spec, separators=(",", ":"))]
         command, environment = capability_command(
             launch, cap, platform_backend=self.backend,

@@ -1,4 +1,5 @@
 from dataclasses import replace
+import os
 import sys
 import time
 
@@ -6,6 +7,9 @@ import pytest
 
 from kernel_exec_capability import shell_capability
 from kernel_exec_session import ExecSession
+
+# Sandboxed targets run the real interpreter: the venv symlink lies outside the declared read roots.
+PYTHON = os.path.realpath(sys.executable)
 
 pytestmark = pytest.mark.host_sandbox
 
@@ -22,7 +26,7 @@ def setup(tmp_path):
 def run_python(session, cap, name, text):
     path = cap.workspace / name
     path.write_text(text)
-    return session.run([sys.executable, "-I", str(path)], cap)
+    return session.run([PYTHON, "-I", str(path)], cap)
 
 
 def test_filesystem_boundaries_and_fake_home(setup):
@@ -97,7 +101,7 @@ conn.sendall(b"session-connected")
 conn.close()
 ''')
     with ExecSession(root / "run") as session:
-        job = session.spawn([sys.executable, "-I", str(server)], replace(cap, purpose="job"))
+        job = session.spawn([PYTHON, "-I", str(server)], replace(cap, purpose="job"))
         data = b""
         deadline = time.monotonic() + 5
         while b"\n" not in data and time.monotonic() < deadline:

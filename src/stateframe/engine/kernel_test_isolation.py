@@ -213,12 +213,24 @@ def capability_command(command, cap, *, platform_backend=None, shared_namespace=
         if cap.network == "full":
             arguments += ["--share-net"]
     arguments += ["--dev", "/dev", "--cap-drop", "ALL"]
+    # Merged-/usr distributions make /lib, /bin, ... symlinks. Capability roots are resolved,
+    # so recreate those links or the ELF loader (/lib/ld-linux-*.so) is missing in the sandbox.
+    for link in ("/bin", "/sbin", "/lib", "/lib32", "/lib64", "/libx32"):
+        if os.path.islink(link):
+            arguments += ["--symlink", os.readlink(link), link]
+    # The loader finds libraries outside /lib and /usr/lib (e.g. /usr/local/lib/libpython*.so)
+    # only through its cache; it holds library paths, nothing secret. The rest of /etc stays out.
+    if os.path.isfile("/etc/ld.so.cache"):
+        arguments += ["--ro-bind", "/etc/ld.so.cache", "/etc/ld.so.cache"]
     # Parent mounts first, narrower mounts last; writable roots are explicit.
     mounts = {p: "--ro-bind" for p in reads}
     mounts.update({p: "--bind" for p in writes})
     for path in sorted(mounts, key=lambda p: (len(p.parts), str(p))):
         arguments += [mounts[path], str(path), str(path)]
-    command = [sys.executable, "-I", str(Path(__file__).with_name("sf_launch.py").resolve()),
+    # bwrap builds the root as a writable tmpfs and creates missing parents there; without this a
+    # write outside every declared root "succeeds" into throwaway memory. Bind mounts keep their mode.
+    arguments += ["--remount-ro", "/"]
+    command = [os.path.realpath(sys.executable), "-I", str(Path(__file__).with_name("sf_launch.py").resolve()),
                "--network-none" if cap.network == "none" else "--process-filter",
                json.dumps(dict(cap.env), separators=(",", ":")), *command]
     arguments += ["--chdir", str(cap.workspace), "--", *command]

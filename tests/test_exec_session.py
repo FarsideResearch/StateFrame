@@ -10,6 +10,9 @@ from kernel_exec_session import ExecSession
 
 pytestmark = pytest.mark.host_sandbox
 
+# Sandboxed targets run the real interpreter: the venv symlink lies outside the declared read roots.
+PYTHON = os.path.realpath(sys.executable)
+
 
 @pytest.fixture
 def setup(tmp_path):
@@ -23,7 +26,7 @@ def setup(tmp_path):
 def script(cap, text):
     path = cap.workspace / "command.py"
     path.write_text(text)
-    return [sys.executable, "-I", str(path)]
+    return [PYTHON, "-I", str(path)]
 
 
 @pytest.mark.parametrize("sandboxed", [False, True])
