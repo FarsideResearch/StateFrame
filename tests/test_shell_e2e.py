@@ -54,7 +54,10 @@ def run_script(tmp_path, steps, *, failing=False, flags=(), prepare=None):
     try:
         result = subprocess.run(command(repo, run, f"http://127.0.0.1:{server.server_port}/v1", flags),
                                 env=environment(), capture_output=True, text=True, timeout=240)
-        summary = json.loads((run / "summary.json").read_text())
+        summary_path = run / "summary.json"
+        assert summary_path.is_file(), ("run wrote no summary.json\nSTDOUT:\n" + result.stdout[-4000:]
+                                        + "\nSTDERR:\n" + result.stderr[-4000:])
+        summary = json.loads(summary_path.read_text())
         assert result.returncode == 0, result.stdout + result.stderr + str(summary)
         assert summary["succeeded"], summary
         script.assert_consumed()
