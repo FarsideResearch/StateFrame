@@ -24,7 +24,8 @@ PUBLIC_FIELDS = {
     "instance_id", "test_path", "public_test_path", "FAIL_TO_PASS", "PASS_TO_PASS", "fail_to_pass",
     "pass_to_pass", "files", "public_tests", "public_test_files", "public_test_source",
     "public_test_src", "test_source", "changed_functions", "shape", "public_check_paths",
-    "allowed_product_paths", "entry", "working_path", "_skip_db", "_oracle_preflight",
+    "allowed_product_paths", "scoped_edits", "allow_new_files", "new_file_roots",
+    "entry", "working_path", "_skip_db", "_oracle_preflight",
     "_bridge_ordinary_brief", "_bridge_capture", "information_policy",
 }
 _PUBLIC_NON_PRODUCT_PATH_PARTS = frozenset({
@@ -162,6 +163,10 @@ class InformationPolicy:
         if self.off:
             projected = {key: copy.deepcopy(value) for key, value in row.items()
                          if key in PUBLIC_FIELDS}
+            # This host-issued marker selects user repository scope semantics;
+            # arbitrary dataset tier labels remain private controller metadata.
+            if row.get("tier") == "USER-REPO":
+                projected["tier"] = "USER-REPO"
             # ``entry`` is a public controller orientation hint, not an oracle.
             # Keep only its path/function identity; nested annotations are not
             # allowed to smuggle a reference implementation across the boundary.
@@ -252,7 +257,7 @@ class InformationPolicy:
             return False
         if not words:
             return True
-        if words[0] in {"read", "edit", "str_replace", "file_create"}:
+        if words[0] in {"read", "edit", "str_replace", "file_create", "file_delete", "file_move"}:
             paths = words[1:2]
         elif words[0] == "test":
             paths = [word for word in words[1:] if not word.startswith("-")]

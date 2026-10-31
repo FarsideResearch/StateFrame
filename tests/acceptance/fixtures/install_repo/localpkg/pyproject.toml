@@ -1,0 +1,4 @@
+[build-system]
+requires = []
+build-backend = "fixture_backend"
+backend-path = ["."]

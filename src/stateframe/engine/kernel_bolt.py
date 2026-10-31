@@ -1284,9 +1284,11 @@ class KernelBolt:
                 why: str | None = None, *,
                 attempt: Mapping[str, object] | None = None,
                 target_path: str | None = None,
+                changed_paths: tuple[str, ...] = (),
                 read_contract: Mapping[str, object] | None = None,
                 result_set_digest: str | None = None,
-                test_output: str | None = None) -> None:
+                test_output: str | None = None,
+                effects: tuple[dict, ...] = ()) -> None:
         import hashlib
         import json as _json
         import time
@@ -1324,6 +1326,10 @@ class KernelBolt:
                "ts": round(time.time(), 2)})
         if target_path is not None:
             rec["target_path"] = target_path
+        if changed_paths:
+            rec["changed_files"] = [{"path": path} for path in changed_paths]
+        if effects:
+            rec["effects"] = list(effects)
         if anchor:
             rec["anchor"] = anchor
         # Baseline organs consume the exact legacy record. The experimental retry

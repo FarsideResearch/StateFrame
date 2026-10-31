@@ -1,0 +1,1 @@
+{"model":"scripted","steps":[{"tool":"shell","arguments":{"command":"make build"}},{"tool":"shell","arguments":{"command":"make check"}},{"tool":"done","arguments":{"summary":"Built and checked the project."}}],"tokenize":{"mode":"ok"}}

@@ -1,0 +1,1 @@
+{"model":"scripted","steps":[{"tool":"shell","arguments":{"command":"ls -la"}},{"tool":"shell","arguments":{"command":"find . -name '*.py'"}},{"tool":"shell","arguments":{"command":"grep -rn TODO ."}},{"tool":"done","arguments":{"summary":"Explored the repository."}}],"tokenize":{"mode":"ok"}}

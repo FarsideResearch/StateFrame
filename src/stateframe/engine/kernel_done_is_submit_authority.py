@@ -31,14 +31,14 @@ _ADVISORY_SPECS = {
 }
 TERMINAL_RESULT = "SUBMITTED"
 MAX_SETTLE_SECONDS = 30.0
-_MUTATION_TOOLS = frozenset({"edit", "str_replace", "file_create", "delete", "move"})
-_REQUIRED_CANDIDATE_TOOLS = ("edit", "str_replace", "file_create", "done")
+_MUTATION_TOOLS = frozenset({"edit", "str_replace", "file_create", "file_delete", "file_move"})
+_REQUIRED_CANDIDATE_TOOLS = ("edit", "str_replace", "file_create", "file_delete", "file_move", "done")
 _REQUIRED_CANDIDATE_MUTATION_TOOLS = _REQUIRED_CANDIDATE_TOOLS[:-1]
 _SHA256 = re.compile(r"^sha256:[0-9a-f]{64}$")
 OWNERLESS_EARLY_DONE_REASON = "OWNERLESS_DONE_SUBMIT_EARLY"
 OWNERLESS_EARLY_DONE_REFUSAL_LIMIT = 2
 _OWNERLESS_PROGRESS_TOOLS = frozenset({
-    "edit", "str_replace", "file_create", "replace_module", "write", "replace",
+    "edit", "str_replace", "file_create", "file_delete", "file_move", "replace_module", "write", "replace",
     "run_tests", "test",
 })
 _OWNERLESS_GATE_SKIP_REASONS = frozenset({
@@ -406,18 +406,27 @@ def _pending_mutations(runtime: object) -> tuple[str, ...]:
     return tuple(dict.fromkeys(values))
 
 
-def _normalized_sources(sources: Mapping[str, str]) -> dict[str, str]:
-    entries = [
-        (path, source) for path, source in sources.items()
-        if isinstance(path, str) and isinstance(source, str)
-    ]
-    return dict(sorted(entries))
+def _normalized_sources(sources: Mapping[str, str | None]) -> dict[str, str | None]:
+    from pathlib import PurePosixPath
+
+    normalized = {}
+    for path, source in sources.items():
+        if (not isinstance(path, str) or not path or "\\" in path or "\x00" in path
+                or PurePosixPath(path).is_absolute()
+                or any(part in {"", ".", ".."} for part in path.split("/"))
+                or not (isinstance(source, str) or source is None)):
+            raise DoneCaptureError(f"invalid candidate source entry: {path!r}")
+        normalized[path] = source
+    return dict(sorted(normalized.items()))
 
 
-def artifact_digest(sources: Mapping[str, str]) -> str:
-    """Hash a canonical, path-relative product source map."""
+def artifact_digest(sources: Mapping[str, str | None]) -> str:
+    """Hash canonical writes and tombstones in the versioned product artifact."""
     normalized = _normalized_sources(sources)
-    encoded = json.dumps(normalized, sort_keys=True, ensure_ascii=False,
+    payload = {"schema": "stateframe-done-artifact/2",
+               "writes": {path: source for path, source in normalized.items() if source is not None},
+               "deletes": [path for path, source in normalized.items() if source is None]}
+    encoded = json.dumps(payload, sort_keys=True, ensure_ascii=False,
                          separators=(",", ":")).encode("utf-8")
     return "sha256:" + hashlib.sha256(encoded).hexdigest()
 
@@ -434,17 +443,18 @@ def _write_immutable_snapshot(path: Path, encoded: bytes) -> None:
 
 
 def store_candidate(destination: str | Path, task_id: object,
-                    sources: Mapping[str, str]) -> dict[str, object]:
+                    sources: Mapping[str, str | None]) -> dict[str, object]:
     """Persist one immutable source snapshot, keyed by content digest."""
     try:
         normalized_sources = _normalized_sources(sources)
         if not normalized_sources:
-            raise DoneCaptureError("candidate snapshot contains no product source")
+            raise DoneCaptureError("candidate snapshot contains no product effect")
         digest = artifact_digest(normalized_sources)
         artifact = {
-            "schema": "stateframe-done-artifact/1",
+            "schema": "stateframe-done-artifact/2",
             "artifact_digest": digest,
-            "sources": normalized_sources,
+            "writes": {path: source for path, source in normalized_sources.items() if source is not None},
+            "deletes": [path for path, source in normalized_sources.items() if source is None],
         }
         encoded = (json.dumps(artifact, ensure_ascii=False, sort_keys=True,
                               separators=(",", ":")) + "\n").encode("utf-8")
@@ -509,7 +519,7 @@ def seal_submission(runtime: object, *, source: str, artifact_digest_value: obje
 
 
 def capture_and_seal(runtime: object, *, destination: str | Path, task_id: object,
-                     sources: Mapping[str, str], parent_sources: Mapping[str, str],
+                     sources: Mapping[str, str | None], parent_sources: Mapping[str, str],
                      out_of_scope: bool = False,
                      certification: object = "not_evaluated") -> DoneSeal:
     """Persist current source bytes and seal their digest as the submitted artifact."""
@@ -540,7 +550,7 @@ def capture_and_seal(runtime: object, *, destination: str | Path, task_id: objec
 
 
 def submit_done(runtime: object, *, source: str, destination: str | Path,
-                task_id: object, sources: Mapping[str, str],
+                task_id: object, sources: Mapping[str, str | None],
                 parent_sources: Mapping[str, str], out_of_scope: bool = False,
                 certification: object = "not_evaluated",
                 timeout_seconds: float = MAX_SETTLE_SECONDS) -> DoneSeal:

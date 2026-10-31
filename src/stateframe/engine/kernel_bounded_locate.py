@@ -73,7 +73,7 @@ _TOKEN = re.compile(r"\w+|[^\w\s]", re.UNICODE)
 _READ_TOOLS = frozenset({"read", "grep", "list", "ls", "recall_evidence", "recall",
                          "recall_generated_artifact", "read_ticket"})
 _EDIT_TOOLS = frozenset({
-    "edit", "str_replace", "file_create", "replace_module", "write", "replace",
+    "edit", "str_replace", "file_create", "file_delete", "file_move", "replace_module", "write", "replace",
 })
 
 

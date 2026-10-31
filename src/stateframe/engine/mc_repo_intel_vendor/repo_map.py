@@ -363,17 +363,7 @@ def build_repo_map(
 
 def get_current_commit_sha(workspace_dir: str) -> str:
     """Get HEAD commit SHA for cache key computation. Returns '' on any failure."""
-    import subprocess
-    try:
-        result = subprocess.run(
-            ["git", "rev-parse", "HEAD"],
-            cwd=workspace_dir,
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-        if result.returncode == 0:
-            return result.stdout.strip()[:40]
-    except Exception:
-        pass
-    return ""
+    from pathlib import Path
+    from kernel_git_view import legacy_git_query
+    result = legacy_git_query(Path(workspace_dir), ["rev-parse", "HEAD"])
+    return result.strip()[:40] if result else ""

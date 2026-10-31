@@ -165,6 +165,15 @@ def runner_dispatchable(name: str, *, runtime: object | None = None) -> bool:
     this holds; otherwise it falls through to UNKNOWN_TOOL.  The green-lock menu
     authority consumes the same predicate, so it never offers an undispatchable tool.
     """
+    from kernel_agent_tools import service as agent_tools_service
+    from kernel_agent_schemas import OBSERVATION_NAMES
+    host = agent_tools_service()
+    if name in OBSERVATION_NAMES or (host is not None and name in host.custom):
+        return host is not None and host.offered(name)
+    if name == "shell":
+        from kernel_shell_tool import service
+        shell = service()
+        return shell is not None and shell.settings.shell != "off"
     if name in {"read_ticket", "dispute"}:
         return (getattr(runtime, "stateframe_requirements_ledger_mode", "off") == "on"
                 and tool_allowed(name, runtime=runtime))

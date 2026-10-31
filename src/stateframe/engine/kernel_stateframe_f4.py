@@ -54,7 +54,7 @@ _SOURCE_PAGE_HEADER_LEGACY = re.compile(
 _SOURCE_CITATION_FIELDS = frozenset({
     "path", "file", "filename", "target", "target_path", "query", "search", "symbol",
 })
-_EDIT_TOOL_NAMES = frozenset({"edit", "str_replace", "apply_patch", "edit_file", "write_file"})
+_EDIT_TOOL_NAMES = frozenset({"edit", "str_replace", "file_delete", "file_move", "shell", "apply_patch", "edit_file", "write_file"})
 
 _PUBLIC_CHECK_PATHS = (
     ("verification",),

@@ -631,7 +631,19 @@ def finalize_frame_candidate(
     required_paths = tuple(dict.fromkeys((*required_paths,
         *getattr(capture, "_visibility_required_paths", ()))))
     def trim_optional_candidate() -> int:
+        nonlocal semantic, protected
         from kernel_stateframe_capacity import fit_protected_frame
+        from kernel_execution_reply_budget import fit_execution_replies, project_execution_delivery
+
+        fit_execution_replies(
+            candidate, max_request_bytes=request_byte_limit(meter.measure(candidate)[1]),
+            measure_bytes=lambda: _wire_bytes(candidate),
+            max_request_tokens=(max(1, token_limit - _TOKEN_FIT_RESERVE)
+                                if use_meter_for_frame else token_limit),
+            measure_tokens=effective_tokens,
+        )
+        semantic = project_execution_delivery(semantic, candidate["messages"])
+        protected = project_execution_delivery(protected, candidate["messages"])
 
         def compact_history(*, allow_read_body_eviction: bool = False) -> None:
             method = meter.measure(candidate)[1]

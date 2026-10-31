@@ -11,14 +11,14 @@ flowchart LR
     F --> Q[Qualify: complete, in budget, allowed endpoint]
     Q --> M[Model server]
     M --> C[Tool call]
-    C --> H[Host runs it in the sandbox]
+    C --> H[Host admits and runs it under a tool capability]
     H --> R[Receipts and ledger updated]
     R --> A
     M --> D[done]
     D --> V[Engine checks the result]
 ```
 
-Every turn starts from the engine's typed state, not from a transcript. The engine assembles the frame, fits it to the budget, qualifies the request and sends exactly one sealed body. The model answers with a tool call, the host runs it in a sandbox with no network, and the result lands in the receipts and ledger that the next frame is built from. When the model calls `done`, the engine checks the result instead of taking the model's word for it.
+Every turn starts from the engine's typed state, not from a transcript. The engine assembles the frame, fits it to the budget, qualifies the request and sends exactly one sealed body. Shell, job and custom-command reply delivery shrinks against a measurement of the complete request, with omitted byte counts; the original taped observation remains on disk within collector limits. The model answers with a tool call; the host checks its capability and runs it under the selected filesystem and network policy. Authorized file effects become receipts. Jobs appear as a bounded frame section. When the model calls `done`, the engine checks the result instead of taking the model's word for it. See [Agent tools](docs/guide/tools.md).
 
 ## What a request contains
 
@@ -42,7 +42,7 @@ flowchart TB
     TR --> SND
 ```
 
-Each request has five parts: the system instructions, the tool definitions, the task, a typed state frame and the newest exchange (the model's last action and its result). The frame is a set of named sections carrying what the task needs right now. To stay inside the budget the engine trims lower-priority detail; it never summarizes away the authoritative state and always keeps a ledger of what was read. If a task cannot fit what it needs, the engine stops with a clear reason instead of sending a broken request. Older turns stay in the run's records, where `stateframe inspect` shows them.
+Each request has five parts: the system instructions, the tool definitions, the task, a typed state frame and the newest exchange (the model's last action and its result). The frame is a set of named sections carrying what the task needs right now. To stay inside the budget the engine trims lower-priority detail and can shorten opaque execution output in the newest exchange; it never summarizes away the authoritative state and always keeps a ledger of what was read. If a task cannot fit what it needs, the engine stops with a clear reason instead of sending a broken request. Older turns stay in the run's records, where `stateframe inspect` shows them.
 
 The model server needs a context slot of 65,536 tokens. These sizes (the 33,344-token budget and the 65,536-token slot) are the ones this release is built and measured with, and both can be changed (see docs/guide/running.md, Context size). Only loopback endpoints are allowed by default; a remote endpoint needs an explicit override and prints a warning, because your source code would leave the machine. A loopback address can still forward elsewhere, so a local address alone does not prove the server is local.
 
@@ -77,10 +77,12 @@ flowchart TB
     RP --> CHK{Next request matches its record byte for byte?}
     FULL --> CHK
     CHK -->|yes| LIVE[Continue live]
-    CHK -->|no| DIV[Write resume-divergence.json and continue live]
+    CHK -->|no| DIV[Request divergence: record and continue live]
 ```
 
-Every request and response is recorded. With checkpoints turned on (off by default in this release), the engine also saves a signed checkpoint of its state about every 5 model requests. `stateframe resume` loads the newest usable checkpoint, replays only the recorded exchanges after it (no model calls), and checks that the next request it rebuilds matches the recorded one byte for byte before going live. A missing, damaged or foreign checkpoint falls back to a full replay, which is always correct and just slower.
+Every request and response is recorded. With checkpoints turned on (off by default in this release), the engine also saves a signed checkpoint of its state about every 5 model requests. `stateframe resume` loads the newest usable checkpoint, replays the recorded exchanges after it (no model calls), and checks that the next request it rebuilds matches the recorded one byte for byte before going live. A missing, damaged or foreign checkpoint falls back to a full replay. Tool replay can still refuse an incomplete, divergent or unapproved external operation.
+
+Shell-enabled runs replay from the start. The tool tape serves recorded observations, compares repeated local effects, and refuses an incomplete operation or external effect without `--replay-external`. Native file deletion and moves follow the edit replay path. Tool-tape divergence also refuses resume during checkpoint fallback.
 
 ## History on disk and identical requests
 
@@ -108,7 +110,11 @@ flowchart TB
     CH --> LOOP[engine probes/react_repair.py: agent loop and tools]
     LOOP --> RT[engine kernel_stateframe_runtime.py: build, fit, qualify]
     RT --> FRM[engine kernel_frame_*: frame sections and budget]
-    LOOP --> EX[engine kernel_execution_policy.py: sandbox]
+    LOOP --> EX[engine kernel_exec_session.py: supervised tool execution]
+    EX --> CAP[engine kernel_exec_capability.py: filesystem, network and limits]
+    LOOP --> EFF[engine kernel_effects.py: reconcile workspace effects]
+    RT --> BUD[engine kernel_execution_reply_budget.py: fit execution replies]
+    LOOP --> TAPE[engine kernel_tool_tape.py: replay classes]
     LOOP --> CKP[engine kernel_checkpoint.py: checkpoints]
     RUNNER --> RES[resume.py and replay_tape.py]
     CLI --> INS[inspect_run.py]
@@ -120,7 +126,9 @@ The product package (`src/stateframe/`) is standard library only and owns the co
 
 - **Your repository is not touched** unless you ask. Without `--in-place`, the result stays in the run directory. With `--in-place`, a result is applied only when its checks pass.
 - **Protected tests stay protected.** The agent cannot edit the tests that decide pass or fail; an attempted edit never lands in the result.
-- **Commands run in a sandbox** (`sandbox-exec` on macOS, bubblewrap on Linux), with no network access.
+- **Commands run under a declared policy** (`sandbox-exec` on macOS, bubblewrap on Linux). Shell networking defaults to loopback; full network and host execution require explicit flags. Reconciliation stops without promoting effects beyond 16 MiB per file, 256 MiB aggregate or 20,000 entries. Executable-bit changes are refused and restored. Host PATH discovery admits executables and their symlink and shebang chains without admitting whole parent directories. The [tool guide](docs/guide/tools.md) states the platform limits.
+- **Repository-code diagnostics stay inside the execution sandbox.** Imports before the first request, post-edit imports, obligation checks and optional Git indexing use sandboxed execution. Git history `show` is rooted at a commit, so raw blob and tree IDs are refused.
+- **The shipped profile uses the composed loop.** Lean mode is not supported by the product profile. The plain loop refuses Git, web and custom-tool settings and background jobs before execution.
 - **Chat sessions** keep each attempt on a session copy, where `/diff` shows it, `/undo` drops it, and `/apply` applies it to your repository.
 
 ## License

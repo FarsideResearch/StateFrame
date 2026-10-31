@@ -40,7 +40,6 @@ import os
 import logging
 import re
 import shutil
-import subprocess
 import tempfile
 import threading
 import time
@@ -2286,11 +2285,8 @@ def repo_cache_key(repo_path: str) -> str | None:
     the key changes every session AND a token gets written into a filename.
     """
     try:
-        out = subprocess.run(
-            ["git", "-C", str(repo_path), "config", "--get", "remote.origin.url"],
-            capture_output=True, text=True, timeout=10,
-        )
-        url = (out.stdout or "").strip()
+        from kernel_git_view import legacy_git_query
+        url = (legacy_git_query(Path(repo_path), ["config", "--get", "remote.origin.url"]) or "").strip()
         if not url:
             return None
         parsed = urlsplit(url)
@@ -2826,17 +2822,8 @@ def _git(repo_root: Path, *args: str) -> Optional[str]:
     `merge-base`. A repo that is not a git checkout simply yields None and the
     blast-radius action degrades to an explained empty result.
     """
-    try:
-        proc = subprocess.run(
-            ["git", "-C", str(repo_root), *args],
-            capture_output=True, text=True, timeout=_GIT_TIMEOUT_SECONDS,
-        )
-    except (OSError, subprocess.SubprocessError) as exc:
-        logger.debug("call_graph: git %s failed in %s: %s", args, repo_root, exc)
-        return None
-    if proc.returncode != 0:
-        return None
-    return proc.stdout
+    from kernel_git_view import legacy_git_query
+    return legacy_git_query(repo_root, list(args), timeout=_GIT_TIMEOUT_SECONDS)
 
 
 def resolve_base_ref(repo_root: Path, base_ref: Optional[str] = None) -> tuple[Optional[str], str]:

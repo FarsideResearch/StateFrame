@@ -31,16 +31,17 @@ import ast
 import hashlib
 import json
 import os
-import subprocess
+import tempfile
 import sys
 import re
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Final
 
 from kernel_non_product_paths import is_non_product
 from kernel_test_python import test_python
+from kernel_safe_probe import ProbeCleanupError
 
 
 MODE_ENV: Final = "STATEFRAME_SHIP_TREE_SMOKE"
@@ -49,6 +50,10 @@ BLOCK_HEADER: Final = "[SHIP-TREE SMOKE]"
 DETAIL_ENV: Final = "STATEFRAME_TOKENLAB_SHIP_TREE_DETAIL"
 DETAIL_SCHEMA: Final = "stateframe-v19-ship-tree-detail/1"
 DETAIL_EVENT: Final = "tokenlab_v19_ship_tree_target"
+
+
+class ImportSmokeCleanupError(ProbeCleanupError):
+    """Automatic import execution did not establish process quiescence."""
 
 
 def mode(environ: Mapping[str, str] | None = None) -> str:
@@ -141,8 +146,43 @@ for raw in items:
     except BaseException as error:
         rows.append({"path": raw, "status": "FAIL",
                      "error": type(error).__name__ + ": " + str(error)[:240]})
-print(json.dumps(rows, sort_keys=True))
+print("\nSTATEFRAME_SMOKE_RESULT=" + json.dumps(rows, sort_keys=True))
 '''
+
+
+def _execute_smoke(root: Path, checked: Sequence[str], roots: Sequence[str], timeout: float):
+    """Imports are arbitrary repository code, never host-side introspection.
+
+    Keep both the candidate and selected environment read-only. Only disposable
+    scratch is writable; the session owns descendants and denies networking.
+    """
+    from kernel_exec_capability import shell_capability
+    from kernel_exec_session import ExecSession, ExecSessionError
+    from kernel_test_isolation import _interpreter_roots
+
+    selected = Path(test_python())
+    with tempfile.TemporaryDirectory(prefix="stateframe-smoke-") as temporary:
+        scratch = Path(temporary)
+        home, env = scratch / "home", scratch / "env"
+        home.mkdir()
+        env.mkdir()
+        cap = shell_capability(
+            workspace=root, run_env_dir=env, scratch_home=home,
+            network="none", writable=False,
+            extra_read_roots=(selected, *map(Path, _interpreter_roots(selected))))
+        cap = replace(cap, purpose="probe", limits=replace(cap.limits, wall_seconds=timeout))
+        (scratch / "session").mkdir()
+        session = ExecSession(scratch / "session")
+        try:
+            result = session.run(
+                [str(selected), "-I", "-B", "-c", _CHILD, str(root),
+                 json.dumps(list(checked)), json.dumps(list(roots))], cap)
+        finally:
+            try:
+                session.close()
+            except (ExecSessionError, OSError) as error:
+                raise ImportSmokeCleanupError(str(error)) from error
+        return result
 
 
 def python_paths(root: Path, values: Sequence[object]) -> tuple[str, ...]:
@@ -480,25 +520,21 @@ def run_smoke(root: Path, paths: Sequence[str], *, timeout_s: float = 20.0,
     failures: list[tuple[str, str]] = []
     host_failures: list[tuple[str, str]] = []
     runner_failed = False
+    from kernel_exec_session import ExecSessionError
     try:
-        completed = subprocess.run(
-            [test_python(), "-I", "-c", _CHILD, str(root), json.dumps(list(checked)),
-             json.dumps(list(import_roots))],
-            cwd=str(root), capture_output=True, text=True,
-            timeout=max(0.1, float(timeout_s)), check=False)
-        rows = json.loads(completed.stdout or "[]")
-        if completed.returncode != 0 and not rows:
-            runner_failed = True
-            host_failures = [(path, f"fresh interpreter exited {completed.returncode}")
-                             for path in checked]
-    except subprocess.TimeoutExpired:
+        completed = _execute_smoke(root, checked, import_roots, max(0.1, float(timeout_s)))
+        if not completed.cleanup.ok:
+            raise ImportSmokeCleanupError("import smoke cleanup failed: " + completed.cleanup.detail)
+        if completed.timed_out or completed.exit_code != 0:
+            raise ExecSessionError("import smoke timed out" if completed.timed_out else
+                                   f"import smoke exited {completed.exit_code}")
+        # Repository prints (including setup.py usage) are not the result protocol.
+        payload = completed.output.rsplit(b"\nSTATEFRAME_SMOKE_RESULT=", 1)
+        rows = json.loads(payload[1] if len(payload) == 2 else b"")
+    except (OSError, ValueError, ExecSessionError) as error:
         rows = []
         runner_failed = True
-        host_failures = [(path, "fresh interpreter timed out") for path in checked]
-    except (OSError, json.JSONDecodeError) as error:
-        rows = []
-        runner_failed = True
-        host_failures = [(path, f"fresh interpreter failed: {type(error).__name__}")
+        host_failures = [(path, f"fresh interpreter failed: {type(error).__name__}: {error}")
                          for path in checked]
     seen = set()
     for row in rows if isinstance(rows, list) else ():

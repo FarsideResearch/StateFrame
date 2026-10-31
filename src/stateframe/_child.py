@@ -144,6 +144,9 @@ def install_wire_recorder(run: Path, chat_url: str, replayer: Replayer | None = 
             if replayed is None and replayer.diverged is not None:
                 (run / "resume-divergence.json").write_text(json.dumps(
                     {**replayer.diverged, "send": index, "checkpoint": replayer.strict}, indent=1))
+                if (run / "tool-tape.jsonl").is_file():
+                    from kernel_tool_tape import ToolReplayRefused
+                    raise ToolReplayRefused(f"send {index}: {replayer.diverged['reason']}")
                 if replayer.strict:
                     emit("checkpoint_unfaithful", send=index, **{k: v for k, v in replayer.diverged.items()
                                                                  if k != "first_difference"})
@@ -160,6 +163,13 @@ def install_wire_recorder(run: Path, chat_url: str, replayer: Replayer | None = 
                     and not getattr(replayer, "verified_emitted", False):
                 replayer.verified_emitted = True
                 emit("checkpoint_verified", send=index, replayed=replayer.cursor)
+        elif replayer is not None:
+            from kernel_tool_tape import end_replay
+            end_replay()
+        if (replayer is not None and replayed is None and replayer.diverged is None
+                and not replayer.active and replayer.pending is None):
+            from kernel_tool_tape import end_replay
+            end_replay()
         try:
             response = replayed if replayed is not None else original(wire, endpoint, key, **kwargs)
         except Exception as error:
@@ -390,11 +400,14 @@ def install_compact_capture(parent: Path) -> None:
             data = path.read_bytes()
             if name in declared or parent_bytes(name) != data:
                 files[name] = data
+        deleted = sorted(name for name in declared if parent_bytes(name) is not None
+                         and not (root / name).exists())
         target = str(row.get("path") or "")
         candidate = files.get(target, b"").decode("utf-8", errors="replace")
         before = (parent_bytes(target) or b"").decode("utf-8", errors="replace")
         record = {"proposals": proposals, "target": target, "capture": "stateframe-compact/1",
                   "files_base64": {n: base64.b64encode(d).decode("ascii") for n, d in files.items()},
+                  "deleted_files": deleted,
                   "file_hashes": {n: hashlib.sha256(d).hexdigest() for n, d in files.items()},
                   "patch": "".join(difflib.unified_diff(
                       before.splitlines(keepends=True), candidate.splitlines(keepends=True),
@@ -719,14 +732,48 @@ def main(argv: list[str]) -> int:
     except Exception:  # noqa: BLE001 - repo map AST is optional; the engine falls back to its text scan
         pass
     sys.path.insert(0, str(engine))
+    from kernel_custom_tools import CustomToolError, load_tool_files
+    from kernel_tool_settings import ToolSettingsError, load_tool_settings
+    from kernel_tool_tape import ToolTapeError, configure_replay
+    try:
+        settings = load_tool_settings()
+        if settings is not None:
+            if settings.as_dict() != spec.get("tool_settings"):
+                raise ToolSettingsError("host tool settings file differs from the run spec")
+            builtin_names = frozenset(("grep", "list_files", "read", "edit", "str_replace", "insert_before",
+                "authored_check", "file_create", "run_tests", "read_check_receipt", "recall", "done",
+                "shell", "job_wait", "job_output", "job_stop", "file_delete", "file_move", "git", "web_fetch"))
+            custom = load_tool_files([Path(item["path"]) for item in settings.tools_files],
+                                     builtin_names=builtin_names, shell_network=settings.shell_network)
+            if custom.digest != spec.get("custom_tools_digest"):
+                raise CustomToolError("custom tool definition or executable changed since host validation")
+        configure_replay(run, active=bool(replayer and replayer.tape))
+    except (ToolSettingsError, CustomToolError, ToolTapeError, OSError) as error:
+        emit("engine_error", error=type(error).__name__, detail=str(error)[:300])
+        return 1
     sys.argv[:] = [sys.argv[0]]  # engine modules read argv as legacy CLI input; give them none
     output = run / "worker"
     for name in ("", "results", "scratch"):
         (output / name).mkdir(parents=True, exist_ok=True)
     tempfile.tempdir = str(output / "scratch")
+    from kernel_exec_session import ExecSession
+    from kernel_shell_tool import configure as configure_shell
+    session = ExecSession(run)
+    import signal
+    previous_term = signal.getsignal(signal.SIGTERM)
+
+    def terminate_shell_run(signum, frame):
+        raise KeyboardInterrupt("engine received SIGTERM")
+
+    signal.signal(signal.SIGTERM, terminate_shell_run)
     started = time.monotonic()
     result: object = None
     try:
+        if settings is not None:
+            configure_shell(run, settings, spec, session)
+            from kernel_shell_tool import service as shell_service
+            from kernel_agent_tools import configure as configure_agent_tools
+            configure_agent_tools(shell_service(), custom)
         from probes import react_repair as rr
         from kernel_protocol_spec import publish_public_spec
 
@@ -764,6 +811,21 @@ def main(argv: list[str]) -> int:
         emit("engine_error", error=type(error).__name__, detail=" ".join(str(error).split())[:300])
         result = {"result": "ENGINE_ERROR", "error": type(error).__name__}
         status = 1
+    finally:
+        try:
+            cleanup = session.stop_all()
+            if not cleanup.ok:
+                raise RuntimeError(f"CLEANUP_FAILED: {cleanup.detail}")
+        except (RuntimeError, OSError) as error:
+            emit("engine_error", error="ShellCleanupFailed", detail=str(error)[:300])
+            result, status = {"result": "ENGINE_ERROR", "error": "ShellCleanupFailed"}, 1
+        finally:
+            try:
+                session.close()
+            except (RuntimeError, OSError) as error:
+                emit("engine_error", error="ShellCleanupFailed", detail=str(error)[:300])
+                result, status = {"result": "ENGINE_ERROR", "error": "ShellCleanupFailed"}, 1
+            signal.signal(signal.SIGTERM, previous_term)
     elapsed = time.monotonic() - started
     (run / "engine-result.json").write_text(json.dumps(
         {"result": result, "seconds": round(elapsed, 3)}, default=str, indent=1))

@@ -167,7 +167,7 @@ _EVIDENCE_ROUTE_TOOLS = frozenset({
     "authored_check", "dispute_check", "probe", "read_check_receipt", "run_tests",
 })
 _PRODUCT_EDIT_TOOLS = frozenset({
-    "edit", "file_create", "replace", "replace_module", "str_replace", "write",
+    "edit", "file_create", "file_delete", "file_move", "shell", "replace", "replace_module", "str_replace", "write",
 })
 _ADVISORY_ERROR_KIND = "completion_owner_advisory_gate_error"
 _ADVISORY_FAILURE_CAP = 100_000
@@ -904,7 +904,7 @@ def _progress_key(record: object) -> tuple[str, str] | None:
             for item in changes
             if isinstance(item, Mapping) and item.get("role", "product") == "product"
         ]
-    if tool in {"edit", "str_replace", "file_create", "replace_module", "write", "replace"}:
+    if tool in {"edit", "str_replace", "file_create", "file_delete", "file_move", "shell", "replace_module", "write", "replace"}:
         explicit_byte_change = any(
             record.get(name) is True for name in ("byte_changed", "file_changed", "artifact_change")
         )
@@ -4995,6 +4995,12 @@ def _registry_schemas() -> tuple[tuple[str, dict[str, object]], ...]:
     add("edit", {**string("path", "function_source", "target_ref")}, ("path", "function_source"))
     add("str_replace", {**string("path", "old_str", "new_str"), "edits": {"type": "array"}}, ("path", "old_str", "new_str"))
     add("file_create", {**string("path", "content")}, ("path", "content"))
+    add("file_delete", {**string("path", "why")}, ("path",))
+    add("file_move", {**string("source", "destination", "why")}, ("source", "destination"))
+    from kernel_shell_tool import SHELL_SCHEMA
+    schemas.append(("shell", SHELL_SCHEMA["function"]["parameters"]))
+    from kernel_agent_schemas import BUILTIN_SCHEMAS
+    schemas.extend((tool["function"]["name"], tool["function"]["parameters"]) for tool in BUILTIN_SCHEMAS)
     add("run_tests", {**string("target")})
     add("reproduce", {
         **string("source", "test_name", "rationale"),
@@ -5237,6 +5243,19 @@ def _spec_for_tool(tool: Mapping[str, object], *, probe_modes: Sequence[str] | N
     function = tool.get("function")
     provider = function.get("parameters") if isinstance(function, Mapping) else None
     base = TOOL_SPECS.get(name)
+    from kernel_agent_tools import service as agent_tools_service
+    host_tools = agent_tools_service()
+    if host_tools is not None and name in host_tools.custom:
+        schema = next(item["function"]["parameters"] for item in host_tools.custom_schemas
+                      if item["function"]["name"] == name)
+        return _make_tool_spec(name, copy.deepcopy(schema))
+    if host_tools is not None and name in host_tools.names:
+        from kernel_agent_schemas import BUILTIN_SCHEMAS
+        schema = next(item["function"]["parameters"] for item in BUILTIN_SCHEMAS
+                      if item["function"]["name"] == name)
+        # Per-run jobs own job_output while active; merging the legacy schema
+        # would require both job and job_id and reject every new-API call.
+        return _make_tool_spec(name, copy.deepcopy(schema))
     if base is None:
         schema = (copy.deepcopy(dict(provider)) if isinstance(provider, Mapping)
                   else _object_schema({}, additional=False))
@@ -5315,6 +5334,9 @@ def assert_tool_dispatch_contract(
         properties = parameters.get("properties")
         property_names = set(properties) if isinstance(properties, Mapping) else set()
         expected = TOOL_SPECS.get(name)
+        from kernel_agent_tools import is_registered
+        if is_registered(name):
+            expected = _spec_for_tool(tool)
         actual_variants = _schema_variants(parameters)
         if name == "probe" and not isinstance(parameters.get("oneOf"), Sequence):
             raise RequestActionContractError(

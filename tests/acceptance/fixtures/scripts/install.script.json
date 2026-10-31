@@ -1,0 +1,1 @@
+{"model":"scripted","steps":[{"tool":"shell","arguments":{"command":"pip install --no-index --no-build-isolation ./localpkg && python -c 'import localpkg; print(localpkg.VALUE)'"}},{"tool":"run_tests","required":false,"arguments":{"target":"tests/test_localpkg.py"}},{"tool":"done","arguments":{"summary":"Installed and verified the local package."}}],"tokenize":{"mode":"ok"}}

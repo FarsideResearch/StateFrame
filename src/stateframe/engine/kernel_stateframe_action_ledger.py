@@ -1318,6 +1318,7 @@ def build_action_context(
     future_reads: dict[tuple[str, int], str] = {}
     latest_site_locator: dict[str, object] | None = None
     site_action_seen = False
+    opaque_site_invalidated = False
 
     for group in groups:
         if group.get("standalone"):
@@ -1326,12 +1327,24 @@ def build_action_context(
         facts: list[dict[str, object]] = []
         group_reads: dict[str, tuple[dict[str, object], str]] = {}
         reads_before_group = dict(current_reads)
+        # Shell can replace every byte of a previously read site. Its output is
+        # an observation, never a source anchor, even when the command succeeds.
+        shell_call = any(
+            isinstance(call, Mapping) and _tool_name(call) == "shell"
+            for call in group["messages"][0].get("tool_calls", ())
+        )
         has_site_action, group_site_locator = _open_site_candidate_for_group(
             group, reads_before_group, candidate_revision
         )
         if has_site_action:
             site_action_seen = True
             latest_site_locator = group_site_locator
+            opaque_site_invalidated = False
+        if shell_call:
+            latest_site_locator = None
+            site_action_seen = False
+            opaque_site_invalidated = True
+            current_reads.clear()
         supported = True
         assistant = group["messages"][0]
         # Narration beside a tool call is not itself evidence. Closed calls are
@@ -1512,12 +1525,17 @@ def build_action_context(
         for call_id in group["call_ids"] if isinstance(call_id, str) and call_id
     )
     selected_site_locator = (
-        latest_site_locator if site_action_seen
+        None if opaque_site_invalidated else latest_site_locator if site_action_seen
         else _normalise_open_site_locator(prior_open_edit_site)
     )
     open_edit_site: dict[str, object] | None = None
     refreshed_site_locator: dict[str, object] | None = None
     site_context: dict[str, str] | None = None
+    if opaque_site_invalidated:
+        site_context = {
+            "status": "UNVERIFIABLE",
+            "reason": "shell_execution_requires_current_source_read",
+        }
     if workspace_root is not None and selected_site_locator is not None:
         open_edit_site, refreshed_site_locator = _read_current_open_site(
             workspace_root, selected_site_locator

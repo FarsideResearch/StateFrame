@@ -29,10 +29,22 @@ The engine is a flat package of modules, each owning one mechanism; `release-man
 
 | Module | Owns |
 |---|---|
-| `probes/react_repair.py` | The agent loop and the tool definitions (`TOOLS`: `grep`, `list_files`, `read`, `edit`, `str_replace`, `insert_before`, `authored_check`, `file_create`, `run_tests`, `read_check_receipt`, `recall`, `done`) and their handlers. |
+| `probes/react_repair.py` | The agent loop and the tool definitions (`TOOLS`: `grep`, `list_files`, `read`, `edit`, `str_replace`, `insert_before`, `authored_check`, `file_create`, `file_delete`, `file_move`, `shell`, `run_tests`, `read_check_receipt`, `recall`, `done`) and their handlers. |
+| `kernel_file_ops.py`, `kernel_done_is_submit_authority.py` | Guarded file removal and moves, including refusal of executable moves; versioned sealed candidate writes and deletions. |
 | `kernel_stateframe_runtime.py` | `StateFrameRuntime`: building, fitting and qualifying each request (`prepare`) and recording what each action observed. |
 | `kernel_frame_*.py` | The frame's sections and how they are budgeted. |
 | `kernel_checkpoint.py` | Saving and loading signed checkpoints. |
+| `kernel_shell_tool.py`, `kernel_exec_session.py` | Foreground shell admission, per-run execution, effects, confirmation and replay. |
+| `kernel_execution_reply_budget.py` | Fit shell, job and custom-command reply delivery against the measured whole request without changing the taped observation. |
+| `kernel_shell_policy.py`, `kernel_tool_settings.py` | Command policy, output normalization and host-issued tool settings. |
+| `kernel_exec_capability.py`, `kernel_exec_supervisor.py`, `kernel_exec_tracker.py`, `sf_launch.py` | Per-command authority, executable symlink and shebang chain admission, supervised process lifetime and resource limits. |
+| `kernel_effects.py`, `kernel_run_env.py` | Bounded full workspace effect reconciliation, including executable-bit restoration, and run-local dependency environments. |
+| `kernel_agent_schemas.py`, `kernel_agent_tools.py`, `kernel_agent_jobs.py`, `kernel_job_output.py` | Schemas, per-run tool registration, background jobs and bounded output. |
+| `kernel_custom_tools.py`, `kernel_tool_tape.py` | Trusted command definitions and durable tool replay records. |
 | `kernel_execution_policy.py`, `kernel_test_isolation.py` | Sandboxed command and test execution. |
+| `kernel_git_view.py` | Pinned, sanitized Git history observations, commit-rooted `show`, run-baseline diffs and offline Git queries for repository indexing. |
+| `kernel_plain_host.py`, `kernel_plain_loop.py` | The alternate plain loop: foreground shell only from the new tool set; Git, web and custom settings are refused. |
+| `kernel_safe_probe.py`, `kernel_ship_tree_smoke.py` | Sandboxed repository-code diagnostics, including imports before the first request and after edits. |
+| `kernel_web_fetch.py` | Direct-IP, SSRF-checked web observations with bounded text extraction. |
 | `kernel_release_switch_registry.py` | Which `STATEFRAME_*` switches this engine reads; a setting with no reader is refused. |
 | `mc_repo_intel_vendor/` | The repo map: syntax-aware outlines of functions and classes. |

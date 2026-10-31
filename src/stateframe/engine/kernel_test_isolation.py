@@ -15,11 +15,16 @@ import json
 import os
 from pathlib import Path
 import platform
+import re
 import shutil
 import site
+import subprocess
 import sys
 
-from kernel_test_python import test_python
+if __package__:
+    from .kernel_test_python import test_python
+else:
+    from kernel_test_python import test_python
 
 
 # Host task policy is read LAZILY at sandbox-build time, never frozen at import: a module imported
@@ -47,9 +52,26 @@ def _declared_relay_dir(env: dict[str, str]) -> Path | None:
     return candidate
 
 
+# Standard install locations, used when PATH does not list the sandbox binary (an IDE, cron or a
+# minimal-PATH launcher must still get the sandbox, never a silent "unavailable").
+_SANDBOX_DIRS = ("/usr/bin", "/bin", "/usr/local/bin", "/usr/sbin")
+
+
+def sandbox_executable(name: str) -> str | None:
+    """Resolve sandbox-exec/bwrap from PATH, then from the standard system locations."""
+    found = shutil.which(name)
+    if found:
+        return found
+    for directory in _SANDBOX_DIRS:
+        candidate = os.path.join(directory, name)
+        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            return candidate
+    return None
+
+
 def backend() -> str:
     name = "sandbox-exec" if platform.system() == "Darwin" else "bwrap"
-    executable = shutil.which(name)
+    executable = sandbox_executable(name)
     if executable is None:
         raise RuntimeError(f"restricted information policy requires {name}; no unsandboxed fallback")
     return executable
@@ -80,7 +102,10 @@ def isolated_command(command: list[str], root: Path, env: dict[str, str], *,
     # Second filter layer: keep it in sync with kernel_execution_policy._safe_environment,
     # which also admits host-declared task keys (STATEFRAME_TASK_ENV_KEYS). 10-03: this
     # layer re-stripped DATABASE_URL and every AHA check still died with pytest exit 4.
-    from kernel_execution_policy import _host_task_env_keys
+    if __package__:  # lazy: kernel_execution_policy imports this module at load time
+        from .kernel_execution_policy import _host_task_env_keys
+    else:
+        from kernel_execution_policy import _host_task_env_keys
     allowed = {
         "PATH", "LANG", "LC_ALL", "PYTHONHASHSEED", "PYTEST_DISABLE_PLUGIN_AUTOLOAD",
         "STATEFRAME_TASK_RELAY_SOCKET_DIR",
@@ -155,9 +180,17 @@ def isolated_command(command: list[str], root: Path, env: dict[str, str], *,
     if selected != Path(sys.executable):
         prefixes.update((str(selected), str(resolved_selected)))
         prefixes.update(interpreter_roots)
+    mounted: list[Path] = []
     for value in sorted(prefixes):
-        if not value.startswith("/usr") and value not in {"/", "/home", "/root"}:
-            arguments.extend(["--ro-bind", value, value])
+        if value.startswith("/usr") or value in {"/", "/home", "/root"}:
+            continue
+        # A path inside an already read-only-mounted prefix (a venv's bin/python inside the
+        # venv) is visible already; binding it again makes bwrap create a mount point inside a
+        # read-only mount and fail ("Can't create file at ...").
+        if any(Path(value).is_relative_to(parent) for parent in mounted):
+            continue
+        arguments.extend(["--ro-bind", value, value])
+        mounted.append(Path(value))
     if relay_dir is not None:
         # /tmp is a fresh sandbox tmpfs; expose only this run's relay directory.
         arguments.extend(["--bind", str(relay_dir), str(relay_dir)])
@@ -166,3 +199,119 @@ def isolated_command(command: list[str], root: Path, env: dict[str, str], *,
         arguments.extend(["--bind", str(scratch), str(scratch)])
     arguments.extend(["--chdir", str(root), "--", *command])
     return arguments, clean
+
+
+def _darwin_user_temp_dir() -> Path:
+    """Some Python builds omit Darwin's confstr names; getconf exposes them."""
+    try:
+        directory = os.confstr("CS_DARWIN_USER_TEMP_DIR")
+    except ValueError:
+        try:
+            result = subprocess.run(
+                ["/usr/bin/getconf", "DARWIN_USER_TEMP_DIR"], check=True,
+                capture_output=True, text=True, timeout=5, cwd="/",
+                env={"PATH": os.defpath, "LANG": "C", "LC_ALL": "C"})
+        except (OSError, subprocess.SubprocessError) as error:
+            raise RuntimeError("cannot determine Darwin user temporary directory via getconf") from error
+        directory = result.stdout.strip()
+    if not directory or not Path(directory).is_absolute():
+        raise RuntimeError("cannot determine absolute Darwin user temporary directory")
+    return Path(directory)
+
+
+def _darwin_xcrun_filter() -> str:
+    """Developer shims use confstr's cache directory even with a private TMPDIR."""
+    if sys.platform != "darwin":
+        return ""
+    directory = _darwin_user_temp_dir()
+    # Anchor both ends and exclude slashes: never grant the directory or children
+    # of a cache-named directory. Admit the canonical /private path and its alias.
+    paths = {directory, directory.resolve(strict=True)}
+    return " ".join('(regex #' + json.dumps("^" + re.escape(str(path)) +
+                                          "/xcrun_db-[^/]+$") + ')'
+                    for path in sorted(paths))
+
+
+def capability_command(command, cap, *, platform_backend=None, shared_namespace=False):
+    """Build a shell/job boundary from explicit authority, never host test policy.
+
+    shared_namespace is private to the Linux session supervisor: keep its PID/net
+    namespaces while creating a per-command mount and user namespace. A none
+    capability still gets a fresh, disconnected network namespace.
+    """
+    if not cap.sandboxed:
+        return list(command), dict(cap.env)
+    selected = platform_backend or ("sandbox-exec" if platform.system() == "Darwin" else "bwrap")
+    if selected not in {"sandbox-exec", "bwrap"}:
+        raise ValueError("execution backend must be sandbox-exec or bwrap")
+    executable = sandbox_executable(selected)
+    if executable is None:
+        raise RuntimeError(f"execution capability requires {selected}; no unsandboxed fallback")
+    reads = set(cap.read_roots) | set(cap.write_roots) | {cap.workspace,
+            Path(__file__).with_name("sf_launch.py").resolve()}
+    writes = set(cap.write_roots) | ({cap.workspace} if cap.workspace_writable else set())
+    if selected == "sandbox-exec":
+        cache_filter = _darwin_xcrun_filter()
+        def filters(paths):
+            return " ".join(f"(subpath {json.dumps(str(p))})" for p in sorted(paths))
+        ancestors = {p for root in reads for p in root.parents}
+        metadata = " ".join(f"(literal {json.dumps(str(p))})" for p in sorted(ancestors))
+        devices = '(literal "/dev/null") (literal "/dev/zero") (literal "/dev/random") (literal "/dev/urandom") (literal "/dev/fd")'
+        profile = ("(version 1) (allow default) "
+                   f"(deny file-read* (require-not (require-any {filters(reads)} {metadata} {devices} {cache_filter}))) "
+                   f"(deny file-write* (require-not (require-any {filters(writes)} {cache_filter} (literal \"/dev/null\")))) ")
+        if cap.network != "full":
+            profile += "(deny network*) "
+        if cap.network == "loopback":
+            profile += ('(allow network-inbound (local ip "localhost:*")) '
+                        '(allow network-outbound (remote ip "localhost:*")) ')
+        return [executable, "-p", profile, *command], dict(cap.env)
+    arguments = [executable, "--die-with-parent"]
+    if shared_namespace:
+        arguments += ["--unshare-user", "--unshare-ipc", "--unshare-uts"]
+        if cap.network == "none":
+            arguments += ["--unshare-net"]
+        # Each command gets its own PID namespace and a procfs of only its own processes:
+        # the supervisor's root and fds stay hidden, while tools that read /proc (df, ps,
+        # free, mount) work. The supervisor still sees every nested descendant in its table,
+        # and orphans die with the command's namespace instead of reparenting to it.
+        arguments += ["--unshare-pid", "--proc", "/proc"]
+    else:
+        arguments += ["--unshare-all", "--new-session", "--proc", "/proc"]
+        if cap.network == "full":
+            arguments += ["--share-net"]
+    arguments += ["--dev", "/dev", "--cap-drop", "ALL"]
+    # Merged-/usr distributions make /lib, /bin, ... symlinks. Capability roots are resolved,
+    # so recreate those links or the ELF loader (/lib/ld-linux-*.so) is missing in the sandbox.
+    for link in ("/bin", "/sbin", "/lib", "/lib32", "/lib64", "/libx32"):
+        if os.path.islink(link):
+            arguments += ["--symlink", os.readlink(link), link]
+    # The loader finds libraries outside /lib and /usr/lib (e.g. /usr/local/lib/libpython*.so)
+    # only through its cache; it holds library paths, nothing secret. The rest of /etc stays out.
+    if os.path.isfile("/etc/ld.so.cache"):
+        arguments += ["--ro-bind", "/etc/ld.so.cache", "/etc/ld.so.cache"]
+    # Parent mounts first, narrower mounts last; writable roots are explicit.
+    # Bind resolved targets, then recreate uncovered aliases. Binding a symlink
+    # follows it and can hide a required directory link or create the wrong tree.
+    if __package__:
+        from .kernel_exec_capability import executable_symlinks
+    else:
+        from kernel_exec_capability import executable_symlinks
+    links = executable_symlinks(tuple(reads))
+    mounts = {p.resolve(strict=True): "--ro-bind" for p in reads}
+    mounts.update({p: "--bind" for p in writes})
+    for path in sorted(mounts, key=lambda p: (len(p.parts), str(p))):
+        arguments += [mounts[path], str(path), str(path)]
+    system_links = {Path(p) for p in ("/bin", "/sbin", "/lib", "/lib32", "/lib64", "/libx32")
+                    if os.path.islink(p)}
+    for path, target in sorted(links.items(), key=lambda item: (len(item[0].parts), str(item[0]))):
+        if path not in system_links and not any(parent in mounts for parent in path.parents):
+            arguments += ["--symlink", target, str(path)]
+    # bwrap builds the root as a writable tmpfs and creates missing parents there; without this a
+    # write outside every declared root "succeeds" into throwaway memory. Bind mounts keep their mode.
+    arguments += ["--remount-ro", "/"]
+    command = [os.path.realpath(sys.executable), "-I", str(Path(__file__).with_name("sf_launch.py").resolve()),
+               "--network-none" if cap.network == "none" else "--process-filter",
+               json.dumps(dict(cap.env), separators=(",", ":")), *command]
+    arguments += ["--chdir", str(cap.workspace), "--", *command]
+    return arguments, dict(cap.env)

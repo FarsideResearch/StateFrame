@@ -20,6 +20,15 @@
 - `--max-turns N`, `--timeout S`: optional caps; by default there are none.
 - `--test-env KEY=VALUE`: environment for your tests (not for engine settings).
 - `--pytest-plugins installed`: let pytest load installed plugins.
+- `--shell off|read-only|standard|unrestricted` (default `standard`): command policy. `--shell-network none|loopback|full` defaults to `loopback`.
+- `--shell-ask` / `--no-shell-ask`: confirmation for commands outside the inspection and user allow sets. Default off for `run`, on for `chat`.
+- `--shell-allow PROGRAM`, `--shell-deny PROGRAM`, `--shell-read PATH`: repeatable program and readable-root settings.
+- `--shell-sandbox on|off` (default `on`): `off` requires `--shell unrestricted`, prints a host-access warning and is recorded as host authorization.
+- `--run-env` / `--no-run-env`: run-local dependency environment; default on when shell is enabled, otherwise off.
+- `--git-tool` / `--no-git-tool`: read-only Git tool, on by default when the source has Git metadata.
+- `--web` / `--no-web`: web fetch, off by default. `--web-allow DOMAIN` repeats to restrict hosts.
+- `--tools FILE`: repeatable trusted custom command definitions in `stateframe-tools/1` JSON.
+- On `resume`, `--replay-external` explicitly repeats recorded external operations before continuing.
 
 ## Which Python runs your tests
 
@@ -66,7 +75,7 @@ Only the default 65,536-token slot is measured on long runs; other sizes are tes
 
 ## Profiles and switches
 
-A profile is a JSON file (`"schema": "stateframe-product-profile/1"`) whose `switches` map sets the engine's `STATEFRAME_*` switches for a run. The default is the one profile shipped in `src/stateframe/profiles/`. `--profile NAME_OR_PATH` uses another. Many switches ship disabled; turning one on is a profile edit. Engine settings come only from the profile: the engine child drops inherited `STATEFRAME_*` variables, `--test-env` refuses them, and the engine refuses any switch it has no reader for.
+A profile is a JSON file (`"schema": "stateframe-product-profile/1"`) whose `switches` map sets the engine's `STATEFRAME_*` switches for a run. The default is the one profile shipped in `src/stateframe/profiles/`. `--profile NAME_OR_PATH` uses another. Many switches ship disabled; turning one on is a profile edit. Engine settings come only from the profile: the engine child drops inherited `STATEFRAME_*` variables, `--test-env` refuses them, and the engine refuses any switch it has no reader for. Host-issued shell, network, sandbox, web and custom-tool authority comes from CLI flags, not profile switches. The shipped product profile uses the composed loop; lean mode is not supported by that profile. The plain loop refuses Git, web and custom-tool settings before execution and supports foreground shell only.
 
 ## Checkpoints and resume
 
@@ -75,3 +84,18 @@ Resume replays the recorded run by default. Checkpoints for a faster restore are
 ## Determinism scope
 
 Identical inputs give identical requests on the measured workload apart from three clock fields (the time in the environment panel, how long a job has run, when a navigation handle expires) and an edit-receipt ID. Tool output the engine does not recognize as volatile can still differ. See KNOWN_LIMITATIONS.md.
+
+
+## Agent tools
+
+The default shell mode runs bounded foreground commands and can start read-only
+background jobs in the composed loop. The sandbox and post-command effect checks
+enforce filesystem authority; the standard-mode program filter is a convenience.
+Executable-bit changes are restored, and reconciliation stops if a file exceeds
+16 MiB, aggregate regular-file bytes exceed 256 MiB, or the tree exceeds 20,000
+entries. Shell, job and custom-command output delivery shrinks to fit the measured
+request while the full taped observation remains on disk within collector limits.
+Shell output does not count as a source read or an engine check. Network installs
+need `--shell-network full`, and installs in the run environment last only for that
+run. See [Agent tools and execution safety](tools.md) for each tool, its arguments,
+policy, refusals and resume behavior.

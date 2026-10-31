@@ -15,16 +15,20 @@ import subprocess
 import sys
 import queue
 import threading
+import tempfile
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Callable
 
 from . import cache_metrics, outer_checks, outcomes, preflight, profiles, test_interpreter, workcopy
 from . import resume as resume_module
 from .endpoint import CHAT_SUFFIX, Endpoint, EndpointError
 from .task_row import build_row
+from .engine.kernel_custom_tools import CustomToolError, load_tool_files
+from .engine.kernel_tool_settings import ToolSettings
 
 PACKAGE = Path(__file__).resolve().parent
 ENGINE_DIR = PACKAGE / "engine"
@@ -163,6 +167,8 @@ class RunOptions:
     # settings a project needs to import. Declared to the engine as host task env keys.
     test_env: dict[str, str] = field(default_factory=dict)
     pytest_plugins: str | None = None  # "installed": let pytest load installed plugins
+    tool_settings: ToolSettings = field(default_factory=ToolSettings)
+    shell_confirm: Callable[[str], bool] | None = field(default=None, repr=False)
     _deadline: float | None = field(default=None, init=False, repr=False)
 
 
@@ -200,6 +206,34 @@ def run_test_cmd(command: str, cwd: Path, timeout_s: float = 900,
         raise RunError(str(error)) from error
 
 
+# A cold interpreter importing pytest inside a fresh sandbox can take tens of seconds on a loaded
+# machine (measured: 10 s was exceeded in a busy Linux container); stay bounded but tolerant.
+STARTUP_PROBE_SECONDS = 60
+
+
+def _startup_probe(python: str, code: str, *, label: str) -> bytes:
+    """Contain interpreter startup itself, before importing any project packages."""
+    from .engine.kernel_safe_probe import run_probe
+    from .engine.kernel_exec_session import ExecSessionError
+
+    try:
+        with tempfile.TemporaryDirectory(prefix="stateframe-startup-") as directory:
+            result = run_probe([python, "-I", "-B", "-c", code], Path(directory),
+                               timeout=STARTUP_PROBE_SECONDS)
+    except (OSError, ExecSessionError, ValueError) as error:
+        raise RunError(f"{label} startup probe could not run safely: {error}") from error
+    if result.timed_out:
+        raise RunError(f"{label} startup probe exceeded its {STARTUP_PROBE_SECONDS} second wall limit")
+    if result.output_truncated:
+        raise RunError(f"{label} startup probe exceeded its 65536 byte output limit")
+    if result.exit_code != 0:
+        detail = result.output.decode("utf-8", "replace").strip()[-1000:]
+        raise RunError(f"{label} cannot import pytest in the isolated startup probe "
+                       f"(exit {result.exit_code}); install pytest in that environment; "
+                       f"sandbox restrictions must permit interpreter startup: {detail or 'no diagnostic output'}")
+    return result.output
+
+
 def _check_python(python: str) -> str:
     """Resolve --python to an absolute executable (relative to the caller's cwd, BEFORE any chdir)
     and check it can run the engine and the checks. Returns the absolute path."""
@@ -207,14 +241,17 @@ def _check_python(python: str) -> str:
         python = preflight.resolve_interpreter(python, os.getcwd())
     except preflight.PreflightError as error:
         raise RunError(str(error)) from None
-    probe = subprocess.run([python, "-c", "import sys, pytest; print(sys.version_info[:3])"],
-                           capture_output=True, text=True, check=False)
-    if probe.returncode != 0:
-        raise RunError(f"interpreter {python} cannot import pytest; install pytest there or pass "
-                       "--python with one that can (the engine runs the checks with it)")
-    major, minor, micro = (int(x) for x in probe.stdout.strip().strip("()").split(","))
+    output = _startup_probe(python, "import sys, json, pytest; print(json.dumps(list(sys.version_info[:3])))",
+                            label=f"engine interpreter {python}")
     try:
-        preflight.check_python_version(version=(major, minor, micro))
+        version = json.loads(output)
+        if (not isinstance(version, list) or len(version) != 3
+                or any(type(value) is not int or value < 0 for value in version)):
+            raise ValueError("expected three non-negative version integers")
+    except (ValueError, UnicodeError) as error:
+        raise RunError(f"engine interpreter {python} startup probe returned an invalid Python version") from error
+    try:
+        preflight.check_python_version(version=tuple(version))
     except preflight.PreflightError as error:
         raise RunError(f"interpreter {python}: {error}") from None
     return python
@@ -400,6 +437,19 @@ def _tests_python(options: RunOptions) -> str:
     return options._test_python
 
 
+def use_run_env_python(options: RunOptions, run_env: object) -> None:
+    """Bind both host checks and the engine child to a created run environment.
+
+    The tool-settings owner calls this after ``prepare`` and before ``_execute``;
+    ``drive`` forwards the same selection as ``STATEFRAME_TEST_PYTHON``.
+    """
+    candidate = getattr(run_env, "python", None)
+    if not isinstance(candidate, Path) or not candidate.is_file() or not os.access(candidate, os.X_OK):
+        raise RunError("run environment has no executable Python interpreter")
+    options._test_python = str(candidate)
+    options._capabilities["test_python"] = str(candidate)
+
+
 def _select_test_python(options: RunOptions, printer=print) -> str:
     """Choose and check the interpreter for the repository's tests; never StateFrame's own silently."""
     try:
@@ -408,10 +458,7 @@ def _select_test_python(options: RunOptions, printer=print) -> str:
         python = preflight.resolve_interpreter(chosen, os.getcwd())
     except (test_interpreter.TestInterpreterError, preflight.PreflightError) as error:
         raise RunError(str(error)) from None
-    probe = subprocess.run([python, "-c", "import pytest"], capture_output=True, text=True, check=False)
-    if probe.returncode != 0:
-        raise RunError(f"test interpreter {python} ({reason}) cannot import pytest; install pytest in "
-                       "your project's environment or pass --test-python with one that has it")
+    _startup_probe(python, "import pytest", label=f"test interpreter {python} ({reason})")
     printer(f"test interpreter: {python} ({reason})")
     if not engine_reads_test_python():
         # Honest scope: --test-cmd before/after use it; this engine's own checks do not yet.
@@ -538,6 +585,7 @@ def profile_steps(profile: str) -> int:
 def prepare(options: RunOptions) -> tuple[Path, workcopy.WorkCopy, dict]:
     _validate_timeout(options.timeout_s)
     _remaining(options)
+    environment = profiles.load(options.profile)
     if options.max_turns is None:
         options.max_turns = profile_steps(options.profile)
     if options.max_turns == 0:
@@ -550,6 +598,20 @@ def prepare(options: RunOptions) -> tuple[Path, workcopy.WorkCopy, dict]:
         raise RunError("--max-turns must be 0 (no limit) or between 1 and 500")
     if not ENGINE_DIR.is_dir():
         raise RunError("engine directory missing from the package; reinstall stateframe")
+    settings = options.tool_settings
+    builtin_names = frozenset(("grep", "list_files", "read", "edit", "str_replace", "insert_before",
+        "authored_check", "file_create", "run_tests", "read_check_receipt", "recall", "done",
+        "shell", "job_wait", "job_output", "job_stop", "file_delete", "file_move", "git", "web_fetch"))
+    try:
+        custom = load_tool_files([Path(item["path"]) for item in settings.tools_files],
+                                 builtin_names=builtin_names, shell_network=settings.shell_network)
+    except CustomToolError as error:
+        raise RunError(str(error)) from error
+    files = tuple({"path": str(Path(item["path"]).resolve()),
+                   "digest": hashlib.sha256(Path(item["path"]).read_bytes()).hexdigest()}
+                  for item in settings.tools_files)
+    settings = replace(settings, tools_files=files)
+    options.tool_settings = settings
     run = (options.run_dir or default_run_dir(options.repo)).resolve()
     if run.exists():
         raise RunError(f"run directory already exists: {run}")
@@ -564,7 +626,6 @@ def prepare(options: RunOptions) -> tuple[Path, workcopy.WorkCopy, dict]:
     work.snapshot = run / "parent"
     row = build_row(work, task=options.task, checks=options.checks or None, target=options.target,
                     edit_paths=options.edit_paths or None)
-    environment = profiles.load(options.profile)
     environment.update({
         "DS_URL": options.endpoint.chat_url,
         "DS_MODEL": options.endpoint.model,
@@ -582,10 +643,15 @@ def prepare(options: RunOptions) -> tuple[Path, workcopy.WorkCopy, dict]:
     # processes made resume skip parses the original attempt did, so the rebuilt journal and request
     # bytes diverged and replay went live early. resume archives worker/, so each attempt starts cold.
     environment["STATEFRAME_REPO_CACHE_DIR"] = str(run / "worker" / "repo-intel-cache")
+    settings_file = run / "tool-settings.json"
+    settings_file.write_text(json.dumps(settings.as_dict(), indent=1, sort_keys=True))
+    settings_file.chmod(0o600)
     environment.update(options._context_env)
     opt_in = resolve_opt_in_switches()
     environment.update(opt_in)
     environment.update(options.extra_env)
+    # Host authority wins over every caller-supplied environment overlay.
+    environment["STATEFRAME_TOOL_SETTINGS_FILE"] = str(settings_file)
     # Slot selection is a runner-owned contract. A stale ambient value or an
     # extra environment entry must not pin a slot after discovery found none.
     environment.pop("REACT_SLOT_ID", None)
@@ -602,6 +668,7 @@ def prepare(options: RunOptions) -> tuple[Path, workcopy.WorkCopy, dict]:
             raise RunError("--pytest-plugins only accepts 'installed'")
         environment["STATEFRAME_TASK_PYTEST_PLUGINS"] = "installed"
     environment_sources = {k: "profile:" + options.profile for k in environment}
+    environment_sources["STATEFRAME_TOOL_SETTINGS_FILE"] = "runner:host-tool-settings"
     for name in opt_in:
         environment_sources[name] = ("ambient:" + name if os.environ.get(name, "").strip()
                                      else "runner:default-" + OPT_IN_RUNNER_DEFAULTS[name])
@@ -620,6 +687,9 @@ def prepare(options: RunOptions) -> tuple[Path, workcopy.WorkCopy, dict]:
         "max_turns": options.max_turns,
         "parent_snapshot": str(run / "parent"),
         "public_row": row,
+        "tool_settings": settings.as_dict(),
+        "custom_tools_digest": custom.digest,
+        "custom_executables": {tool.name: tool.executable_digest for tool in custom.tools},
         "environment": environment,
         "environment_sources": environment_sources,
         "prompt_cache_slot": {
@@ -895,6 +965,8 @@ def drive(run: Path, options: RunOptions, printer=print) -> int:
             reader.start()
             drain_until = None
             while True:
+                from .shell_host import answer_pending
+                answer_pending(run, options.shell_confirm)
                 if drain_until is None and process.poll() is not None:
                     drain_until = time.monotonic() + OUTPUT_DRAIN_SECONDS
                 try:
@@ -913,7 +985,8 @@ def drive(run: Path, options: RunOptions, printer=print) -> int:
                     except ValueError:
                         continue
                     rendered = _render_event(event)
-                    if rendered and (not options.quiet or event.get("kind") == "token_counting_unavailable"):
+                    if rendered and (not options.quiet or event.get("kind") in {
+                            "token_counting_unavailable", "engine_error"}):
                         printer(rendered)
             code = process.wait(timeout=60)
             if timed_out.is_set():
@@ -984,18 +1057,22 @@ def _stop_group(process: subprocess.Popen) -> None:
         pass
 
 
-def _artifact_digest(files: dict[str, bytes]) -> str | None:
+def _artifact_digest(files: dict[str, bytes | None]) -> str | None:
     """Use the engine's source-map hash, distinct from the host-check tree hash."""
-    from .engine.kernel_done_is_submit_authority import artifact_digest
+    from .engine.kernel_done_is_submit_authority import DoneCaptureError, artifact_digest
 
     try:
-        sources = {name: data.decode("utf-8") for name, data in files.items()}
+        sources = {name: data.decode("utf-8") if data is not None else None
+                   for name, data in files.items()}
     except UnicodeError:
         return None  # A binary partial capture cannot establish a textual DoneSeal.
-    return artifact_digest(sources)
+    try:
+        return artifact_digest(sources)
+    except DoneCaptureError:
+        return None
 
 
-def final_candidate(run: Path) -> dict[str, bytes] | None:
+def final_candidate(run: Path) -> dict[str, bytes | None] | None:
     """Export the immutable DoneSeal artifact; unsealed captures are partial only."""
     folder = run / "worker" / "candidates"
     captures = sorted(folder.glob("[0-9][0-9][0-9][0-9].json")) if folder.is_dir() else []
@@ -1018,13 +1095,20 @@ def final_candidate(run: Path) -> dict[str, bytes] | None:
                for index in range(1, len(path.relative_to(run).parts) + 1)):
             raise RunError("sealed candidate artifact contains a symlink")
         record = json.loads(path.read_text(encoding="utf-8"))
-        sources = record.get("sources") if isinstance(record, dict) else None
-        if (not isinstance(record, dict) or record.get("schema") != "stateframe-done-artifact/1"
-                or record.get("artifact_digest") != digest or not isinstance(sources, dict)
-                or not sources or not all(isinstance(k, str) and isinstance(v, str)
-                                          for k, v in sources.items())):
+        writes = record.get("writes") if isinstance(record, dict) else None
+        deletes = record.get("deletes") if isinstance(record, dict) else None
+        if (not isinstance(record, dict)
+                or set(record) != {"schema", "artifact_digest", "writes", "deletes"}
+                or record.get("schema") != "stateframe-done-artifact/2"
+                or record.get("artifact_digest") != digest or not isinstance(writes, dict)
+                or not isinstance(deletes, list) or not (writes or deletes)
+                or not all(isinstance(k, str) and isinstance(v, str)
+                           for k, v in writes.items())
+                or not all(isinstance(path, str) for path in deletes)
+                or deletes != sorted(set(deletes)) or set(writes) & set(deletes)):
             raise RunError("malformed sealed candidate artifact")
-        files = {name: source.encode("utf-8") for name, source in sources.items()}
+        files = {name: source.encode("utf-8") for name, source in writes.items()}
+        files.update({name: None for name in deletes})
         if _artifact_digest(files) != digest:
             raise RunError("candidate digest does not match submission seal; candidate remains partial")
         return files
@@ -1035,7 +1119,13 @@ def final_candidate(run: Path) -> dict[str, bytes] | None:
     if not isinstance(files, dict) or not all(isinstance(k, str) and isinstance(v, str)
                                              for k, v in files.items()):
         raise RunError("malformed candidate capture")
-    return {name: base64.b64decode(data, validate=True) for name, data in files.items()}
+    deletes = record.get("deleted_files", [])
+    if not isinstance(deletes, list) or not all(isinstance(path, str) for path in deletes):
+        raise RunError("malformed candidate capture deletions")
+    if set(files) & set(deletes):
+        raise RunError("candidate capture writes and deletes overlap")
+    return {**{name: base64.b64decode(data, validate=True) for name, data in files.items()},
+            **{name: None for name in deletes}}
 
 
 def _read_send_metrics(run: Path, sends: list[dict]) -> list[dict[str, int | None]]:
@@ -1215,7 +1305,8 @@ def run(options: RunOptions, printer=print) -> dict[str, object]:
 
 def resume_run(run_dir: Path, *, endpoint: Endpoint | None = None, max_turns: int | None = None,
                timeout_s: float | None = None, quiet: bool = False, model: str | None = None,
-               keep_checkpoints: bool = False, printer=print) -> dict[str, object]:
+               keep_checkpoints: bool = False, replay_external: bool = False,
+               printer=print) -> dict[str, object]:
     """Continue an interrupted run in place (see ``stateframe.resume``).
 
     ``model`` continues under another model NAME the endpoint serves (the same weights listed differently,
@@ -1226,6 +1317,32 @@ def resume_run(run_dir: Path, *, endpoint: Endpoint | None = None, max_turns: in
     run_dir = run_dir.resolve()
     state = resume_module.assess(run_dir, max_turns=max_turns, model=model)
     spec: dict = state["spec"]  # type: ignore[assignment]
+    if "tool_settings" in spec:
+        try:
+            settings = ToolSettings.from_dict(spec["tool_settings"])
+        except ValueError as error:
+            raise resume_module.ResumeRefused(f"recorded tool settings are invalid: {error}") from error
+        builtin_names = frozenset(("grep", "list_files", "read", "edit", "str_replace", "insert_before",
+            "authored_check", "file_create", "run_tests", "read_check_receipt", "recall", "done",
+            "shell", "job_wait", "job_output", "job_stop", "file_delete", "file_move", "git", "web_fetch"))
+        for item in settings.tools_files:
+            path = Path(item["path"])
+            try:
+                unchanged = path.is_file() and hashlib.sha256(path.read_bytes()).hexdigest() == item["digest"]
+            except OSError:
+                unchanged = False
+            if not unchanged:
+                raise resume_module.ResumeRefused(f"custom tool definition changed: {path}")
+        try:
+            custom = load_tool_files([Path(item["path"]) for item in settings.tools_files],
+                                     builtin_names=builtin_names, shell_network=settings.shell_network)
+        except CustomToolError as error:
+            raise resume_module.ResumeRefused(f"custom tool changed: {error}") from error
+        if custom.digest != spec.get("custom_tools_digest"):
+            raise resume_module.ResumeRefused("custom tool executable or definition changed")
+        settings = replace(settings, replay_external=replay_external)
+    elif replay_external:
+        raise resume_module.ResumeRefused("this run has no tool tape; --replay-external cannot apply")
     environment = spec["environment"]
     keys = [k for k in str(environment.get("STATEFRAME_TASK_ENV_KEYS", "")).split(",") if k]
     base = spec["chat_url"].removesuffix(CHAT_SUFFIX)
@@ -1247,6 +1364,8 @@ def resume_run(run_dir: Path, *, endpoint: Endpoint | None = None, max_turns: in
         python=str((spec.get("capabilities") or {}).get("python") or sys.executable),
         timeout_s=timeout_s, quiet=quiet, test_env={k: environment[k] for k in keys if k in environment},
         pytest_plugins=environment.get("STATEFRAME_TASK_PYTEST_PLUGINS"), keep_checkpoints=keep_checkpoints)
+    if "tool_settings" in spec:
+        options.tool_settings = settings
     options._deadline = started + timeout_s if timeout_s is not None else None
     try:
         with _wall_deadline(options), _sigterm_as_interrupt():
@@ -1275,13 +1394,18 @@ def resume_run(run_dir: Path, *, endpoint: Endpoint | None = None, max_turns: in
                                   "pass --model NAME)"))
             check_slot_context(options, printer)
             lock = resume_module.hold_run_lock(run_dir)  # noqa: F841 - held until this resume returns
+            if "tool_settings" in spec:
+                (run_dir / "tool-settings.json").write_text(json.dumps(settings.as_dict(), indent=1, sort_keys=True))
+                spec["tool_settings"] = settings.as_dict()
+                (run_dir / "spec.json").write_text(json.dumps(spec, indent=1, sort_keys=True))
             # A checkpoint holds the engine's loop limit, endpoint and model name as they were; a resume
             # that changes any of them rebuilds the run by replay instead.
             same_limits = (int(state["max_turns"]) == int(spec["max_turns"])
                            and endpoint.chat_url == spec["chat_url"] and not isinstance(swap, dict))
             if int(state["max_turns"]) != int(spec["max_turns"]):
                 printer(step_limit_restart_warning(int(spec["max_turns"]), int(state["max_turns"])))
-            previous = resume_module.archive_attempt(state, ENGINE_DIR, use_checkpoint=same_limits)
+            previous = resume_module.archive_attempt(
+                state, ENGINE_DIR, use_checkpoint=same_limits and options.tool_settings.shell == "off")
             spec = _resume_spec(run_dir, endpoint)
             # The cache slot stays the one the run started with: it is part of the request bytes.
             slot = spec.get("prompt_cache_slot") or {}
@@ -1303,6 +1427,8 @@ def resume_run(run_dir: Path, *, endpoint: Endpoint | None = None, max_turns: in
             else:
                 printer(f"replay: {state['tape_count']} recorded model exchanges are answered from the run's "
                         "records, then the run continues live")
+            from .shell_host import provision
+            provision(options, run_dir, spec)
             work = resume_module.fresh_workcopy(run_dir, options.repo)
             summary = _execute(options, started, printer, run_dir, work, spec)
             refused = (summary.get("checkpoint_refused") or _checkpoint_refusal(run_dir, summary.get("child_exit_code"))
@@ -1317,6 +1443,8 @@ def resume_run(run_dir: Path, *, endpoint: Endpoint | None = None, max_turns: in
             spec = _resume_spec(run_dir, endpoint)
             spec["resume"]["checkpoint_refused"] = refused
             (run_dir / "spec.json").write_text(json.dumps(spec, indent=1, sort_keys=True))
+            from .shell_host import provision
+            provision(options, run_dir, spec)
             work = resume_module.fresh_workcopy(run_dir, options.repo)
             return _execute(options, started, printer, run_dir, work, spec)
     finally:
@@ -1376,6 +1504,8 @@ def _run(options: RunOptions, started: float, printer=print) -> dict[str, object
     check_slot_context(options, printer)
     _select_prompt_cache_slot(options, printer)
     run_dir, work, spec = prepare(options)
+    from .shell_host import provision
+    provision(options, run_dir, spec)
     printer(f"run directory: {run_dir}")
     lock = resume_module.hold_run_lock(run_dir)  # noqa: F841 - held until this run returns
     return _execute(options, started, printer, run_dir, work, spec)

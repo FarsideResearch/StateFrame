@@ -1,0 +1,14 @@
+{
+ "model": "scripted",
+ "steps": [
+  {"tool": "file_delete", "required": true, "arguments": {"path": "tests/test_consumer.py"}},
+  {"tool": "file_move", "required": true, "arguments": {"source": "tests/test_consumer.py", "destination": "pkg/removed.py"}},
+  {"tool": "file_move", "required": true, "arguments": {"source": "pkg/link.py", "destination": "pkg/linked.py"}},
+  {"tool": "file_move", "required": true, "arguments": {"source": "pkg/consumer.py", "destination": "../escaped.py"}},
+  {"tool": "file_move", "required": true, "arguments": {"source": "pkg/consumer.py", "destination": "pkg/old.py"}},
+  {"tool": "file_delete", "required": true, "arguments": {"path": "pkg/old.py"}},
+  {"tool": "run_tests", "required": true, "arguments": {"target": "tests/test_consumer.py"}},
+  {"tool": "done", "required": true, "arguments": {"summary": "Refused unsafe file operations; code is unchanged."}}
+ ],
+ "tokenize": {"mode": "ok"}
+}

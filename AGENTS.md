@@ -7,11 +7,11 @@ StateFrame is an Open Agent Engine for local OpenAI-compatible model servers, bu
 | Path | What it is |
 |---|---|
 | `src/stateframe/` | The product package: CLI, run driver, working copy, resume, inspect, chat. Standard library only. |
-| `src/stateframe/engine/` | The engine. It builds and qualifies every request, runs the tools, keeps the typed state and decides when a task is done. It runs in its own child process. |
+| `src/stateframe/engine/` | The engine. It builds and qualifies every request, runs the tools, keeps the typed state and decides when a task is done. It runs in its own child process. Shell effects are reconciled with 16 MiB per-file, 256 MiB aggregate and 20,000-entry bounds. |
 | `src/stateframe/profiles/` | Switch profiles: the engine settings a run uses (the one JSON file shipped there is the default). |
 | `examples/` | Small tasks with tests, plus scripted model responses for offline demos. |
 | `install.sh`, `wheelhouse/` | One-command install with pinned, hash-checked dependencies. |
-| `docs/guide/` | The guide: concepts, request lifecycle, code map, running, extending, troubleshooting, design rationale. |
+| `docs/guide/` | The guide: concepts, request lifecycle, code map, running, agent tools, extending, troubleshooting, design rationale. |
 
 ## Install, run, test
 
@@ -29,6 +29,8 @@ No model server? Start `python -m stateframe.scripted_endpoint --script examples
 
 Your repository's tests run with your project's Python (`.venv/`, `venv/`, `env/`, else `python3` on PATH); `--test-python PATH` overrides it.
 
+The shipped product profile uses the composed loop; lean mode is not supported by that profile. The plain loop allows foreground shell but refuses Git, web, custom tools and background jobs. Command replies shrink to the measured request budget, with omitted byte counts and the full taped observation retained within collector limits. Executable-bit effects are refused and restored because the sealed candidate does not transport them.
+
 ## Where to go next
 
 - [ARCHITECTURE.md](ARCHITECTURE.md): diagrams of the request lifecycle, the frame, completion, resume, history and the code map.
@@ -36,6 +38,7 @@ Your repository's tests run with your project's Python (`.venv/`, `venv/`, `env/
 - [How a request is built](docs/guide/request-lifecycle.md), end to end.
 - [Code map](docs/guide/code-map.md): which module owns what.
 - [Running](docs/guide/running.md): CLI, profiles, flags, test interpreter, resume, determinism scope.
+- [Agent tools](docs/guide/tools.md): command, job, file, Git, web and custom tool contracts and safety.
 - [Extending](docs/guide/extending.md): tools, profiles, tests.
 - [Troubleshooting](docs/guide/troubleshooting.md): common errors and what they mean.
 - [Design rationale](docs/guide/design.md): why it is built this way.

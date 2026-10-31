@@ -121,7 +121,7 @@ class Session:
         summary = {}
         try:
             options = replace(self.base, repo=self.copy, task=self.task_text(text),
-                              run_dir=run_dir, in_place=False)
+                              run_dir=run_dir, in_place=False, shell_confirm=confirm_shell)
             summary = run(options, printer=printer)
             projection = outcomes.project(summary, cancelled=summary.get("runtime_outcome") == "cancelled",
                                           timed_out=summary.get("child_exit_code") == 124)
@@ -299,3 +299,18 @@ def repl(session: Session, read=input, printer=print, print_summary=None) -> int
 
 
 __all__ = ["Session", "repl", "default_home", "HELP"]
+
+
+def confirm_shell(command: str) -> bool:
+    """Confirm a shell request only while this chat owns an interactive terminal."""
+    import sys
+    if not sys.stdin.isatty():
+        return False
+    import select
+    print(f"Run shell command {command!r}? [y/N] ", end="", flush=True)
+    if not select.select([sys.stdin], [], [], 115)[0]:
+        return False
+    try:
+        return input().strip().lower() in {"y", "yes"}
+    except EOFError:
+        return False

@@ -1,0 +1,10 @@
+{
+ "model": "scripted",
+ "steps": [
+  {"tool": "file_delete", "required": true, "arguments": {"path": "pkg/stale.py", "why": "Unused module"}},
+  {"tool": "str_replace", "required": true, "arguments": {"path": "pkg/active.py", "old_str": "from pkg import stale  # noqa: F401\n", "new_str": ""}},
+  {"tool": "run_tests", "required": true, "arguments": {"target": "tests/test_active.py"}},
+  {"tool": "done", "required": true, "arguments": {"summary": "Removed the stale module and its import."}}
+ ],
+ "tokenize": {"mode": "ok"}
+}

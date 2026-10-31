@@ -20,7 +20,6 @@ import json
 import os
 from pathlib import Path
 import shlex
-import subprocess
 import sys
 import tempfile
 import time
@@ -87,13 +86,14 @@ def _active_test_run_profile():
 class PlainHost:
     """The seven baseline tools over one sandbox root."""
 
-    SUPPORTED = frozenset({"list_dir", "read_file", "grep", "str_replace", "write_file", "run_tests"})
+    SUPPORTED = frozenset({"list_dir", "read_file", "grep", "str_replace", "write_file", "run_tests", "shell"})
 
     def __init__(self, authority: EditAuthority, *, check_runner: CheckRunner, journal, hooks: PlainHooks,
                  on_product_edit: Callable[[], None] = lambda: None):
         self.authority, self.check_runner, self.journal, self.hooks = authority, check_runner, journal, hooks
         self.on_product_edit = on_product_edit
         self.book = ReceiptBook()
+        self._tool_call_id = ""
         validate_schema_agreement(TOOLS, set(self.SUPPORTED))
 
     @property
@@ -110,6 +110,36 @@ class PlainHost:
         if handler is None:
             return f"error: unknown tool {name}"
         return handler(args)
+
+    def bind_tool_call(self, call_id: str) -> None:
+        self._tool_call_id = call_id
+
+    def _shell(self, args: dict) -> str:
+        if args.get("background"):
+            return "REFUSED PLAIN_UNSUPPORTED: background jobs require the composed or lean loop"
+        from kernel_shell_tool import service
+        shell = service()
+        if shell is None or shell.settings.shell == "off":
+            return "REFUSED SHELL_OFF: shell is disabled by --shell off"
+        if not self._tool_call_id:
+            raise PlainContractError("shell call has no wire identity")
+        reply = shell.execute(args, self._tool_call_id)
+        self.journal.write("shell_effect", observation=reply.observation,
+                           effects=[{"path": e.path, "change": e.change} for e in reply.applied])
+        for effect in reply.applied:
+            self._edit_receipt("shell", effect.path, "product", True,
+                               effect.before.digest if effect.before else "absent",
+                               effect.after.digest if effect.after else "absent", None, "shell effect")
+        if reply.environment_changed:
+            # Plain check receipts bind only product bytes; an environment mutation
+            # retires them explicitly rather than reusing their green status.
+            self.book.checks.clear()
+        if reply.applied:
+            self.book.product_edits += 1
+            self.on_product_edit()
+        if reply.fatal:
+            raise PlainContractError(reply.observation)
+        return reply.observation
 
     def _list_dir(self, a: dict) -> str:
         p = self.authority.resolve(a.get("path", "."))
@@ -137,13 +167,13 @@ class PlainHost:
         target = self.authority.resolve(raw)
         arg = str(target) if str(raw).startswith("/") else (target.relative_to(self.root).as_posix()
                                                           if target != self.root else ".")
-        try:
-            p = subprocess.run(["grep", "-rnE", "--exclude-dir=__pycache__", "--exclude-dir=node_modules",
-                                a["pattern"], arg], cwd=self.root, capture_output=True, text=True,
-                               errors="replace", timeout=GREP_TIMEOUT_S)
-            return self.alias(f"exit={p.returncode}\n{p.stdout}{p.stderr}")
-        except subprocess.TimeoutExpired:
+        from kernel_safe_probe import run_probe
+        process = run_probe(["/usr/bin/grep", "-rnE", "--exclude-dir=__pycache__",
+                             "--exclude-dir=node_modules", "--", a["pattern"], arg],
+                            self.root, timeout=GREP_TIMEOUT_S)
+        if process.timed_out:
             return f"TIMEOUT after {GREP_TIMEOUT_S}s"
+        return self.alias(f"exit={process.exit_code}\n" + process.output.decode("utf-8", "replace"))
 
     def _str_replace(self, a: dict) -> str:
         scope, path, relative = self.authority.classify(a["path"])
@@ -561,6 +591,10 @@ def run_plain(row: Mapping[str, object], output: Path, *,
               before_request: Callable[[dict], None] | None = None,
               environ: Mapping[str, str] | None = None) -> dict[str, object]:
     """One plain episode inside ``output`` (the worker directory); returns the outcome mapping."""
+    from kernel_tool_settings import load_tool_settings, ToolSettingsError
+    tool_settings = load_tool_settings()
+    if tool_settings is not None and (tool_settings.git_tool or tool_settings.web or tool_settings.tools_files):
+        raise ToolSettingsError("plain loop does not support git, web or custom tools; use --git-tool off, --web off and no --tools")
     env = dict(os.environ if environ is None else environ)
     limits = limits_from_env(env)
     settings = HookSettings.from_env(env)
@@ -570,6 +604,17 @@ def run_plain(row: Mapping[str, object], output: Path, *,
     root.mkdir()
     workspace_source = materialize_workspace(root, row)
     authority = EditAuthority(root, list(row["files"]))
+    from kernel_shell_tool import service
+    shell = service()
+    if shell is not None and shell.settings.shell != "off":
+        from kernel_effects import WorkspaceEffectPolicy
+        protected = {p.relative_to(root).as_posix() for pattern in ("test_*.py", "conftest.py")
+                     for p in root.rglob(pattern)}
+        shell.bind(root, dict(row), {str(root / p) for p in protected},
+                   policy=WorkspaceEffectPolicy(
+                       protected=lambda p: p in protected,
+                       edit_scope=lambda p: p in authority.declared,
+                       new_file_allowed=lambda p: False))
     hooks = PlainHooks(settings, authority.declared, journal, out_cap=OUT_CAP)
     exports = {"count": 0, "failures": 0}
 

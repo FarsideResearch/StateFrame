@@ -15,14 +15,13 @@ import platform
 import re
 import resource
 import selectors
-import shutil
 import signal
 import subprocess
 import time
 from collections.abc import Mapping, Sequence
 from typing import Callable
 
-from kernel_test_isolation import isolated_command
+from kernel_test_isolation import isolated_command, sandbox_executable
 
 
 MAX_WALL_SECONDS = 900.0
@@ -88,7 +87,7 @@ def capability_report() -> CapabilityReport:
     """Return the host capability matrix without starting a child process."""
     system = platform.system()
     backend_name = "sandbox-exec" if system == "Darwin" else "bwrap" if system == "Linux" else None
-    executable = shutil.which(backend_name) if backend_name else None
+    executable = sandbox_executable(backend_name) if backend_name else None
     required_limits = (
         "RLIMIT_CPU", "RLIMIT_FSIZE", "RLIMIT_CORE", "RLIMIT_NOFILE",
     )
@@ -215,6 +214,24 @@ def _lowered_limits(current: tuple[int, int], limit: int) -> tuple[int, int]:
     return new_soft, bound
 
 
+def _user_process_count() -> int:
+    """Processes owned by this real uid (Linux /proc); 0 where /proc is unavailable."""
+    uid = os.getuid()
+    count = 0
+    try:
+        entries = os.listdir("/proc")
+    except OSError:
+        return 0
+    for entry in entries:
+        if entry.isdigit():
+            try:
+                if os.stat(f"/proc/{entry}").st_uid == uid:
+                    count += 1
+            except OSError:
+                continue  # exited while scanning
+    return count
+
+
 def _resource_preexec(cpu_seconds: float, memory_bytes: int,
                       file_bytes: int, nofile: int, nproc: int) -> Callable[[], None]:
     cpu = int(math.ceil(_limit_value("cpu_seconds", cpu_seconds, maximum=MAX_WALL_SECONDS)))
@@ -222,6 +239,10 @@ def _resource_preexec(cpu_seconds: float, memory_bytes: int,
     file_limit = int(_limit_value("file_bytes", file_bytes, maximum=64 * 1024 * 1024))
     nofile_limit = int(_limit_value("nofile", nofile, maximum=1024))
     nproc_limit = int(_limit_value("nproc", nproc, maximum=256))
+    # RLIMIT_NPROC counts every process the user owns on Linux as well as macOS, so an absolute
+    # cap of 64 made bwrap itself fail ("Creating new namespace failed") for any user with more than
+    # 64 processes, i.e. most desktop sessions. Budget NEW processes: current count + nproc.
+    nproc_ceiling = _user_process_count() + nproc_limit
 
     def _lower_only(which: int, value: int) -> None:
         # A non-root process may only LOWER a hard limit.  Containers often start
@@ -238,11 +259,11 @@ def _resource_preexec(cpu_seconds: float, memory_bytes: int,
         _lower_only(resource.RLIMIT_CORE, 0)
         resource.setrlimit(resource.RLIMIT_NOFILE,
                            _lowered_limits(resource.getrlimit(resource.RLIMIT_NOFILE), nofile_limit))
-        # minimal fix: on macOS RLIMIT_NPROC counts every process the user owns (~670 on the lab Mac), so lowering it
-        # to 64 made every fork inside a test fail EAGAIN. Linux keeps the per-process cap.
+        # On macOS RLIMIT_NPROC counts every process the user owns (~670 on the lab Mac) and the
+        # count is not cheaply knowable here, so it is not lowered. Linux gets a relative ceiling.
         if hasattr(resource, "RLIMIT_NPROC") and platform.system() != "Darwin":
             resource.setrlimit(resource.RLIMIT_NPROC,
-                               _lowered_limits(resource.getrlimit(resource.RLIMIT_NPROC), nproc_limit))
+                               _lowered_limits(resource.getrlimit(resource.RLIMIT_NPROC), nproc_ceiling))
         if hasattr(resource, "RLIMIT_AS"):
             try:
                 resource.setrlimit(resource.RLIMIT_AS, (memory, memory))

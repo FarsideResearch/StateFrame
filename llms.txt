@@ -12,6 +12,7 @@
 - [Request lifecycle](docs/guide/request-lifecycle.md): how a run and each request are built
 - [Code map](docs/guide/code-map.md): which module owns what
 - [Running](docs/guide/running.md): commands, flags, test interpreter, profiles, resume
+- [Agent tools](docs/guide/tools.md): shell policy, background jobs, file effects, Git, web, custom commands, budget-aware replies, reconciliation limits, replay
 - [Extending](docs/guide/extending.md): profiles, tools, switches, tests
 - [Troubleshooting](docs/guide/troubleshooting.md): errors and fixes
 - [Design rationale](docs/guide/design.md): why it is built this way
@@ -20,4 +21,5 @@
 - [KNOWN_LIMITATIONS.md](KNOWN_LIMITATIONS.md)
 - [ARCHITECTURE.md](ARCHITECTURE.md): Mermaid diagrams of lifecycle, frame, completion, resume, history, code map
 - [CHANGELOG.md](CHANGELOG.md)
+- [0.2.0 security changes](CHANGELOG.md#security): repository-code diagnostics and Git indexing run inside the execution sandbox
 - [CONTRIBUTING.md](CONTRIBUTING.md), [CLA.md](CLA.md), [COMMERCIAL-LICENSE.md](COMMERCIAL-LICENSE.md)

@@ -1,0 +1,1 @@
+{"model":"scripted","steps":[{"tool":"shell","arguments":{"command":"python3 --version"}},{"tool":"shell","arguments":{"command":"df -h"}},{"tool":"shell","arguments":{"command":"uname -a"}},{"tool":"done","arguments":{"summary":"Inspected the environment."}}],"tokenize":{"mode":"ok"}}

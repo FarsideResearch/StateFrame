@@ -1,0 +1,1 @@
+{"model":"scripted","steps":[{"tool":"web_fetch","arguments":{"url":"${URL}"}},{"tool":"done","arguments":{"summary":"Private URL was refused."}}],"tokenize":{"mode":"ok"}}
