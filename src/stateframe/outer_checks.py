@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import re
 import selectors
 import shlex
 import shutil
@@ -221,6 +222,12 @@ def _helper() -> int:
                     policy._kill_group(spawned)
                     spawned.wait(timeout=1)
             sandbox_error = result.completed.stderr
+            missing = re.match(r"bwrap: execvp (\S+): No such file or directory", sandbox_error)
+            if result.completed.returncode and missing:
+                # The sandbox started; the check program itself is absent (for example `make`
+                # not installed). Say so instead of blaming the sandbox.
+                raise OuterCheckError(f"check command not found: {missing.group(1)}; install it "
+                                      "or change the test command")
             if result.completed.returncode and (
                 sandbox_error.startswith("bwrap:") or
                 (sandbox_error.startswith("sandbox-exec:") and "sandbox_apply" in sandbox_error)
