@@ -102,7 +102,10 @@ def isolated_command(command: list[str], root: Path, env: dict[str, str], *,
     # Second filter layer: keep it in sync with kernel_execution_policy._safe_environment,
     # which also admits host-declared task keys (STATEFRAME_TASK_ENV_KEYS). 10-03: this
     # layer re-stripped DATABASE_URL and every AHA check still died with pytest exit 4.
-    from kernel_execution_policy import _host_task_env_keys
+    if __package__:  # lazy: kernel_execution_policy imports this module at load time
+        from .kernel_execution_policy import _host_task_env_keys
+    else:
+        from kernel_execution_policy import _host_task_env_keys
     allowed = {
         "PATH", "LANG", "LC_ALL", "PYTHONHASHSEED", "PYTEST_DISABLE_PLUGIN_AUTOLOAD",
         "STATEFRAME_TASK_RELAY_SOCKET_DIR",
@@ -287,7 +290,10 @@ def capability_command(command, cap, *, platform_backend=None, shared_namespace=
     # Parent mounts first, narrower mounts last; writable roots are explicit.
     # Bind resolved targets, then recreate uncovered aliases. Binding a symlink
     # follows it and can hide a required directory link or create the wrong tree.
-    from kernel_exec_capability import executable_symlinks
+    if __package__:
+        from .kernel_exec_capability import executable_symlinks
+    else:
+        from kernel_exec_capability import executable_symlinks
     links = executable_symlinks(tuple(reads))
     mounts = {p.resolve(strict=True): "--ro-bind" for p in reads}
     mounts.update({p: "--bind" for p in writes})

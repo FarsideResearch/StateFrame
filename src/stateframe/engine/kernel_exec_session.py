@@ -19,8 +19,10 @@ import uuid
 
 if __package__:
     from .kernel_exec_capability import ExecCapability
+    from .kernel_test_isolation import sandbox_executable
 else:
     from kernel_exec_capability import ExecCapability
+    from kernel_test_isolation import sandbox_executable
 
 
 class ExecSessionError(RuntimeError):
@@ -141,7 +143,6 @@ class ExecSession:
         command = [sys.executable, "-I", str(Path(__file__).with_name("kernel_exec_supervisor.py")),
                    str(self._directory), self.backend, "host"]
         if cap.sandboxed and self.backend == "bwrap":
-            from kernel_test_isolation import sandbox_executable
             executable = sandbox_executable("bwrap")
             if executable is None:
                 raise ExecSessionError("execution capability requires bwrap; no unsandboxed fallback")
