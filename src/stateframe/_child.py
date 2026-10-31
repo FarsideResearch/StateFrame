@@ -731,9 +731,10 @@ def main(argv: list[str]) -> int:
             skill_settings = json.loads(skills_file.read_text(encoding="utf-8"))
             if (skill_settings.get("schema") != "stateframe-skill-settings/1"
                     or skill_settings.get("skills") != skill_records
-                    or skill_settings.get("skills_digest") != skill_digest):
+                    or skill_settings.get("skills_digest") != skill_digest
+                    or skill_settings.get("measurements") != spec.get("skills_measurements")):
                 raise SkillError("host skill settings file differs from the run spec")
-        verify_records(skill_records, skill_digest)
+        verify_records(skill_records, skill_digest, spec.get("skills_measurements"))
     except (SkillError, OSError, KeyError, ValueError) as error:
         emit("engine_error", error=type(error).__name__, detail=str(error)[:300])
         return 1

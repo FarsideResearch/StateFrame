@@ -30,9 +30,12 @@ def skill_dir(tmp_path: Path, *, name: str = "edit-app",
     return directory
 
 
-def script(tmp_path: Path, steps: list[dict], *, slots: list[int] | None = None) -> Path:
+def script(tmp_path: Path, steps: list[dict], *, slots: list[int] | None = None,
+           tokenize_mode: str = "ok") -> Path:
     path = tmp_path / "skills.script.json"
-    document = {"model": "scripted", "steps": steps, "tokenize": {"mode": "ok"}}
+    document = {"model": "scripted", "steps": steps}
+    if tokenize_mode != "absent":
+        document["tokenize"] = {"mode": tokenize_mode}
     if slots:
         document["slots"] = slots  # an explicit prompt budget requires a reported server slot
     path.write_text(json.dumps(document))
@@ -137,12 +140,13 @@ def test_changed_skill_refuses_resume_before_attempt_archive(tmp_path):
     assert sorted(run_dir.glob("attempt-*")) == before
 
 
-def test_unchanged_skill_resume_rebuilds_loaded_body(tmp_path):
+@pytest.mark.parametrize("first_mode,resume_mode", [("ok", "absent"), ("absent", "ok")])
+def test_unchanged_skill_resume_rebuilds_loaded_body(tmp_path, first_mode, resume_mode):
     selected = skill_dir(tmp_path)
     repo = copy_repo(tmp_path)
     run_dir = tmp_path / "run"
     marker = tmp_path / "paused"
-    calls = script(tmp_path, standard_steps())
+    calls = script(tmp_path, standard_steps(), tokenize_mode=first_mode)
     endpoint = subprocess.Popen(
         [PYTHON, str(Path(__file__).parent / "fixtures/pause_endpoint.py"),
          "--script", str(calls), "--marker", str(marker)],
@@ -186,7 +190,7 @@ def test_unchanged_skill_resume_rebuilds_loaded_body(tmp_path):
         if endpoint.poll() is None:
             endpoint.terminate()
             endpoint.wait(timeout=5)
-    remaining = script(tmp_path, standard_steps()[1:])
+    remaining = script(tmp_path, standard_steps()[1:], tokenize_mode=resume_mode)
     with Endpoint(remaining) as endpoint:
         resumed = subprocess.run(
             [PYTHON, "-m", "stateframe", "resume", str(run_dir),
@@ -201,6 +205,51 @@ def test_unchanged_skill_resume_rebuilds_loaded_body(tmp_path):
     assert summary["succeeded"] is True
     assert summary["replayed_sends"] == 1
     assert summary["resume"]["faithful"] is True
+
+
+@pytest.mark.parametrize("with_skill", [False, True])
+def test_limit_change_requires_external_consent_with_or_without_skills(tmp_path, with_skill):
+    selected = skill_dir(tmp_path) if with_skill else None
+    repo = copy_repo(tmp_path)
+    run_dir = tmp_path / "run"
+    calls = script(tmp_path, [
+        {"tool": "shell", "arguments": {"command": "echo checked"}},
+        *([standard_steps()[0]] if with_skill else []),
+        *standard_steps()[1:],
+    ])
+    flags = ["--skill", str(selected)] if selected is not None else []
+    with Endpoint(calls) as endpoint:
+        first = subprocess.run(
+            [PYTHON, "-m", "stateframe", "run", "--repo", str(repo), "--task", "Check app value",
+             "--endpoint", endpoint.url, "--model", "scripted", "--run-dir", str(run_dir),
+             "--test-python", PYTHON, "--test-cmd", "python -m unittest discover -s tests -q",
+             "--max-turns", "1", "--shell-network", "full", "--quiet", *flags],
+            capture_output=True, text=True, env=environment(), timeout=240, check=False)
+    assert len(read_requests(run_dir)) == 1, first.stdout + first.stderr
+    old_tape = (run_dir / "tool-tape.jsonl").read_bytes()
+    assert any(row["replay_class"] == "external" for row in
+               (json.loads(line) for line in old_tape.splitlines()) if row["kind"] == "intent")
+    refused = subprocess.run(
+        [PYTHON, "-m", "stateframe", "resume", str(run_dir), "--max-turns", "8", "--quiet"],
+        capture_output=True, text=True, env=environment(), timeout=30, check=False)
+    assert refused.returncode == 2
+    assert "--replay-external" in refused.stderr
+    assert not (run_dir / "attempts").exists()
+    assert (run_dir / "tool-tape.jsonl").read_bytes() == old_tape
+    with Endpoint(calls) as endpoint:
+        approved = subprocess.run(
+            [PYTHON, "-m", "stateframe", "resume", str(run_dir), "--max-turns", "8",
+             "--endpoint", endpoint.url, "--model", "scripted", "--replay-external", "--quiet"],
+            capture_output=True, text=True, env=environment(), timeout=240, check=False)
+    assert approved.returncode == 0, approved.stdout + approved.stderr
+    spec = json.loads((run_dir / "spec.json").read_text())
+    assert spec["resume"]["restart_live"] is True
+    assert spec["resume"]["archived_external_operations"]
+    assert (run_dir / "attempts/1/tool-tape.jsonl").read_bytes() == old_tape
+    assert (run_dir / "tool-tape.jsonl").is_file()
+    if with_skill:
+        assert any("USER-PROVIDED SKILL INSTRUCTIONS: edit-app" in text
+                   for request in read_requests(run_dir) for text in _messages(request))
 
 
 def test_changed_step_limit_restarts_skill_run_live(tmp_path):

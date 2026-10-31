@@ -29,7 +29,7 @@ from .endpoint import CHAT_SUFFIX, Endpoint, EndpointError
 from .task_row import build_row
 from .engine.kernel_custom_tools import CustomToolError, load_tool_files
 from .engine.kernel_tool_settings import ToolSettings
-from .skills import SkillError, resolve_skills, skills_digest, verify_records
+from .skills import SkillError, measured_skills_digest, resolve_skills, skills_digest, verify_records
 
 PACKAGE = Path(__file__).resolve().parent
 ENGINE_DIR = PACKAGE / "engine"
@@ -610,6 +610,21 @@ def prepare(options: RunOptions) -> tuple[Path, workcopy.WorkCopy, dict]:
     if selected_skills and str(options.extra_env.get("STATEFRAME_LEAN", environment.get("STATEFRAME_LEAN", "off"))).lower() == "on":
         raise RunError("--skill requires the composed loop; lean mode does not support skills")
     records = [skill.record(trusted=options.trust_skill_tools) for skill in selected_skills]
+    measurements = None
+    if selected_skills:
+        # Admission is host-owned and recorded before the child builds its first request.
+        sys.path.insert(0, str(ENGINE_DIR))
+        try:
+            from .engine.kernel_request_diet import RequestTokenMeter
+            from .engine.kernel_skills import SkillRuntime, measure_admission
+            meter = RequestTokenMeter(endpoint=options.endpoint.chat_url, template_overhead_tokens=0)
+            measurements = measure_admission(selected_skills, records, meter)
+            digest = measured_skills_digest(records, measurements)
+            SkillRuntime(records, digest, options.endpoint.chat_url, measurements)
+        except SkillError as error:
+            raise RunError(str(error)) from error
+        finally:
+            sys.path.remove(str(ENGINE_DIR))
     settings = options.tool_settings
     if options.trust_skill_tools:
         settings = replace(settings, tools_files=(*settings.tools_files, *(
@@ -664,7 +679,9 @@ def prepare(options: RunOptions) -> tuple[Path, workcopy.WorkCopy, dict]:
     settings_file.chmod(0o600)
     skills_file = run / "skill-settings.json"
     skills_record = {"schema": "stateframe-skill-settings/1", "skills": records,
-                     "skills_digest": skills_digest(records)}
+                     "skills_digest": (measured_skills_digest(records, measurements)
+                                       if measurements is not None else skills_digest(records)),
+                     **({"measurements": measurements} if measurements is not None else {})}
     skills_file.write_text(json.dumps(skills_record, indent=1, sort_keys=True))
     skills_file.chmod(0o600)
     environment.update(options._context_env)
@@ -715,6 +732,7 @@ def prepare(options: RunOptions) -> tuple[Path, workcopy.WorkCopy, dict]:
         "custom_executables": {tool.name: tool.executable_digest for tool in custom.tools},
         "skills": records,
         "skills_digest": skills_record["skills_digest"],
+        **({"skills_measurements": measurements} if measurements is not None else {}),
         "environment": environment,
         "environment_sources": environment_sources,
         "prompt_cache_slot": {
@@ -1340,10 +1358,12 @@ def resume_run(run_dir: Path, *, endpoint: Endpoint | None = None, max_turns: in
     _validate_timeout(timeout_s)
     started = time.monotonic()
     run_dir = run_dir.resolve()
-    state = resume_module.assess(run_dir, max_turns=max_turns, model=model)
+    state = resume_module.assess(run_dir, max_turns=max_turns, model=model,
+                                 replay_external=replay_external)
     spec: dict = state["spec"]  # type: ignore[assignment]
     try:
-        verify_records(spec.get("skills", []), spec.get("skills_digest", skills_digest([])))
+        verify_records(spec.get("skills", []), spec.get("skills_digest", skills_digest([])),
+                       spec.get("skills_measurements"))
     except SkillError as error:
         raise resume_module.ResumeRefused(str(error)) from error
     if "tool_settings" in spec:
@@ -1434,7 +1454,8 @@ def resume_run(run_dir: Path, *, endpoint: Endpoint | None = None, max_turns: in
             if int(state["max_turns"]) != int(spec["max_turns"]):
                 printer(step_limit_restart_warning(int(spec["max_turns"]), int(state["max_turns"])))
             previous = resume_module.archive_attempt(
-                state, ENGINE_DIR, use_checkpoint=same_limits and options.tool_settings.shell == "off")
+                state, ENGINE_DIR, use_checkpoint=same_limits and options.tool_settings.shell == "off",
+                replay_external=replay_external)
             spec = _resume_spec(run_dir, endpoint)
             # The cache slot stays the one the run started with: it is part of the request bytes.
             slot = spec.get("prompt_cache_slot") or {}
@@ -1471,7 +1492,8 @@ def resume_run(run_dir: Path, *, endpoint: Endpoint | None = None, max_turns: in
             # refused attempt's files and replay the interrupted attempt from the start instead.
             printer(f"checkpoint restore refused ({refused}); falling back to replaying the run")
             state["attempt"] = int(state["attempt"]) + 1
-            resume_module.archive_attempt(state, ENGINE_DIR, use_checkpoint=False, tape_from=previous)
+            resume_module.archive_attempt(state, ENGINE_DIR, use_checkpoint=False, tape_from=previous,
+                                          replay_external=replay_external)
             spec = _resume_spec(run_dir, endpoint)
             spec["resume"]["checkpoint_refused"] = refused
             (run_dir / "spec.json").write_text(json.dumps(spec, indent=1, sort_keys=True))

@@ -3,13 +3,14 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from pathlib import Path
 
 import pytest
 
 from stateframe import skills as host
 from stateframe.resume import archive_attempt
-from kernel_skills import SkillRuntime, note_budget_omission
+from kernel_skills import SkillRuntime, measure_admission, note_budget_omission
 from kernel_tool_tape import ToolTape
 from kernel_agent_schemas import OBSERVATION_NAMES
 from kernel_bounded_locate_code import OBSERVATION_TOOLS, READ_TOOLS
@@ -123,6 +124,56 @@ def test_record_identity_and_missing(tmp_path):
         host.verify_records(records, digest)
 
 
+@pytest.mark.parametrize("replacement,fragment", [
+    ("large", "file exceeds"), ("fifo", "regular file"), ("symlink", "symlinks")])
+def test_replaced_skill_file_is_bounded_at_load(tmp_path, replacement, fragment):
+    directory = make_skill(tmp_path)
+    skill = host.parse_skill(directory)
+    record = skill.record(trusted=False)
+    runtime = SkillRuntime([record], host.skills_digest([record]), None)
+    source = directory / "SKILL.md"
+    source.unlink()
+    if replacement == "large":
+        source.write_bytes(b"x" * (host.MAX_BODY_BYTES + 4097))
+    elif replacement == "fifo":
+        os.mkfifo(source)
+    else:
+        source.symlink_to("/dev/zero")
+    with pytest.raises(host.SkillError, match=fragment):
+        runtime.load(skill.name)
+    with pytest.raises(host.SkillError, match="SKILL.md digest or format"):
+        host.verify_records([record], host.skills_digest([record]))
+
+
+@pytest.mark.parametrize("replacement,fragment", [
+    ("large", "file exceeds"), ("fifo", "regular file"), ("symlink", "symlinks")])
+def test_replaced_tools_file_is_bounded_on_verify(tmp_path, replacement, fragment):
+    directory = make_skill(tmp_path, tools={"schema": "stateframe-tools/1", "tools": []})
+    record = host.parse_skill(directory).record(trusted=False)
+    source = directory / "tools.json"
+    source.unlink()
+    if replacement == "large":
+        source.write_bytes(b"x" * (host.MAX_DIRECTORY_BYTES + 1))
+    elif replacement == "fifo":
+        os.mkfifo(source)
+    else:
+        source.symlink_to("/dev/zero")
+    with pytest.raises(host.SkillError, match=fragment):
+        host.parse_skill(directory)
+    with pytest.raises(host.SkillError, match="SKILL.md digest or format"):
+        host.verify_records([record], host.skills_digest([record]))
+
+
+def test_shared_reader_refuses_linked_parent(tmp_path):
+    directory = make_skill(tmp_path)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "extra.txt").write_text("private")
+    (directory / "linked").symlink_to(outside, target_is_directory=True)
+    with pytest.raises(host.SkillError, match="inside the skill directory"):
+        host.read_skill_file(directory / "linked" / "extra.txt", directory, maximum=32)
+
+
 def test_catalog_body_caps_and_eviction(tmp_path):
     names = ["alpha-skill", "beta-skill", "gamma-skill"]
     records = [host.parse_skill(make_skill(tmp_path, name)).record(trusted=False) for name in names]
@@ -153,6 +204,20 @@ def test_catalog_cap_names_selected_skills(tmp_path):
                   description="d" * 300)).record(trusted=False) for i in range(16)]
     with pytest.raises(host.SkillError, match="skills catalog exceeds 1200 tokens.*skill-00"):
         SkillRuntime(records, host.skills_digest(records), None)
+
+
+def test_pinned_admission_measurements_are_digest_checked(tmp_path):
+    skill = host.parse_skill(make_skill(tmp_path))
+    records = [skill.record(trusted=False)]
+    measurements = measure_admission([skill], records, RequestTokenMeter(endpoint=None,
+                                                                           template_overhead_tokens=0))
+    digest = host.measured_skills_digest(records, measurements)
+    runtime = SkillRuntime(records, digest, None, measurements)
+    assert runtime.catalog()["measurement"] == measurements["catalog"]
+    changed = json.loads(json.dumps(measurements))
+    changed["catalog"]["tokens"] += 1
+    with pytest.raises(host.SkillError, match="skill settings digest"):
+        SkillRuntime(records, digest, None, changed)
 
 
 def test_budget_omission_notice_and_protected_state(tmp_path):

@@ -8,9 +8,11 @@ import re
 from pathlib import Path
 
 try:
-    from stateframe.skills import SkillError, verify_records
+    from stateframe.skills import (SkillError, catalog_lines,
+                                   read_skill_file, validate_measurements, verify_records, MAX_BODY_BYTES)
 except ModuleNotFoundError:  # engine child started by path: the host helper is a sibling of _child.py
-    from skills import SkillError, verify_records
+    from skills import (SkillError, catalog_lines,
+                        read_skill_file, validate_measurements, verify_records, MAX_BODY_BYTES)
 from kernel_request_diet import RequestTokenMeter
 
 MAX_CATALOG_TOKENS = 1200
@@ -45,27 +47,25 @@ def note_budget_omission(messages: list[dict[str, object]], removed: object) -> 
 
 
 class SkillRuntime:
-    def __init__(self, records: list[dict[str, object]], digest: str, endpoint: str | None):
-        self.skills = verify_records(records, digest)
+    def __init__(self, records: list[dict[str, object]], digest: str, endpoint: str | None,
+                 measurements: dict[str, object] | None = None):
+        self.skills = verify_records(records, digest, measurements)
         self.records = tuple(records)
         self.by_name = {skill.name: skill for skill in self.skills}
         self.resident: list[str] = []
         self.evicted: list[str] = []
         self.meter = RequestTokenMeter(endpoint=endpoint, template_overhead_tokens=0)
-        self.catalog_lines = tuple(
-            skill.name + ": " + skill.description +
-            ((" (commands: " + ", ".join(skill.tool_names) + ")") if record["tools_trusted"] and skill.tool_names
-             else " (commands not trusted)" if skill.tools_json_sha256 else "")
-            for skill, record in zip(self.skills, self.records)
-        )
-        catalog = "\n".join(self.catalog_lines)
-        count, method = self.meter.measure({"messages": [{"role": "user", "content": catalog}], "tools": []})
-        self.catalog_measurement = {"tokens": count, "method": method}
+        self.catalog_lines = catalog_lines(self.skills, self.records)
+        if measurements is None:
+            measurements = measure_admission(self.skills, self.records, self.meter)
+        self.catalog_measurement = measurements["catalog"]
+        count = self.catalog_measurement["tokens"]
         if count > MAX_CATALOG_TOKENS:
             raise SkillError(f"skills catalog exceeds {MAX_CATALOG_TOKENS} tokens ({count}): " +
                              ", ".join(skill.name for skill in self.skills))
         for skill in self.skills:
-            count, method = self.meter.measure({"messages": [{"role": "user", "content": skill.body}], "tools": []})
+            count = measurements["bodies"][skill.name]["tokens"]
+            method = measurements["bodies"][skill.name]["method"]
             if count > MAX_BODY_TOKENS:
                 raise SkillError(f"SKILL_TOO_LARGE: skill {skill.name} body has {count} {method} tokens; "
                                  f"maximum {MAX_BODY_TOKENS}")
@@ -80,7 +80,7 @@ class SkillRuntime:
             return f"skill {name} already loaded"
         skill = self.by_name[name]
         # Recheck the bytes at every load, including after checkpoint restore.
-        current = Path(skill.path / "SKILL.md").read_bytes()
+        current = read_skill_file(skill.path / "SKILL.md", skill.path, maximum=MAX_BODY_BYTES + 4096)
         if hashlib.sha256(current).hexdigest() != skill.skill_md_sha256:
             raise SkillError(f"skill {name} changed since the run started (SKILL.md digest mismatch)")
         removed = None
@@ -120,17 +120,29 @@ class SkillRuntime:
 _active: SkillRuntime | None = None
 
 
+def measure_admission(skills, records, meter) -> dict[str, object]:
+    def measure(content: str) -> dict[str, object]:
+        count, method = meter.measure({"messages": [{"role": "user", "content": content}], "tools": []})
+        return {"tokens": count, "method": method}
+    return {"catalog": measure("\n".join(catalog_lines(skills, records))),
+            "bodies": {skill.name: measure(skill.body) for skill in skills}}
+
+
 def configure(records: list[dict[str, object]], digest: str, endpoint: str | None) -> None:
     global _active
     settings_path = os.environ.get("STATEFRAME_SKILL_SETTINGS_FILE")
+    measurements = None
     if settings_path:
         document = json.loads(Path(settings_path).read_text(encoding="utf-8"))
         if (document.get("schema") != "stateframe-skill-settings/1"
                 or document.get("skills") != records or document.get("skills_digest") != digest):
             raise SkillError("host skill settings file differs from the run spec")
+        measurements = document.get("measurements")
+        if measurements is not None:
+            validate_measurements(measurements, [str(record["name"]) for record in records])
     elif records:
         raise SkillError("STATEFRAME_SKILL_SETTINGS_FILE missing for selected skills")
-    candidate = SkillRuntime(records, digest, endpoint) if records else None
+    candidate = SkillRuntime(records, digest, endpoint, measurements) if records else None
     _active = candidate
 
 

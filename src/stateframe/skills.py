@@ -46,16 +46,46 @@ def user_skills_dir() -> Path:
     return home / "skills"
 
 
-def _read_regular(path: Path, root: Path, *, maximum: int) -> bytes:
-    if path.is_symlink():
-        raise SkillError(f"{path}: symlinks are not allowed")
+def read_skill_file(path: Path, root: Path, *, maximum: int) -> bytes:
+    """Read a bundle file through bounded descriptors without following links."""
     try:
-        mode = path.stat(follow_symlinks=False).st_mode
-        if not stat.S_ISREG(mode) or not path.resolve().is_relative_to(root.resolve()):
-            raise SkillError(f"{path}: expected a regular file inside the skill directory")
-        if path.stat().st_size > maximum:
-            raise SkillError(f"{path}: file exceeds {maximum} bytes")
-        return path.read_bytes()
+        boundary = root.resolve(strict=True)
+        try:
+            relative = path.absolute().relative_to(boundary)
+        except ValueError as error:
+            raise SkillError(f"{path}: expected a file inside the skill directory") from error
+        if (not relative.parts or ".." in relative.parts
+                or not path.parent.resolve(strict=True).is_relative_to(boundary)):
+            raise SkillError(f"{path}: expected a file inside the skill directory")
+        directory_flags = os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_DIRECTORY", 0)
+        directory_flags |= getattr(os, "O_CLOEXEC", 0)
+        flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | getattr(os, "O_CLOEXEC", 0)
+        directories = [os.open(boundary, directory_flags)]
+        try:
+            for component in relative.parts[:-1]:
+                directories.append(os.open(component, directory_flags, dir_fd=directories[-1]))
+            if path.is_symlink():
+                raise SkillError(f"{path}: symlinks are not allowed")
+            fd = os.open(relative.parts[-1], flags, dir_fd=directories[-1])
+            try:
+                if not stat.S_ISREG(os.fstat(fd).st_mode):
+                    raise SkillError(f"{path}: expected a regular file inside the skill directory")
+                chunks = []
+                remaining = maximum + 1
+                while remaining:
+                    chunk = os.read(fd, remaining)
+                    if not chunk:
+                        break
+                    chunks.append(chunk)
+                    remaining -= len(chunk)
+                if remaining == 0:
+                    raise SkillError(f"{path}: file exceeds {maximum} bytes")
+                return b"".join(chunks)
+            finally:
+                os.close(fd)
+        finally:
+            for fd in reversed(directories):
+                os.close(fd)
     except OSError as error:
         raise SkillError(f"{path}: cannot read: {error}") from error
 
@@ -97,7 +127,7 @@ def parse_skill(path: Path) -> Skill:
     if directory.is_symlink() or not directory.is_dir():
         raise SkillError(f"skill directory missing or linked: {directory}")
     directory = directory.resolve()
-    raw = _read_regular(directory / "SKILL.md", directory, maximum=MAX_BODY_BYTES + 4096)
+    raw = read_skill_file(directory / "SKILL.md", directory, maximum=MAX_BODY_BYTES + 4096)
     try:
         source = raw.decode("utf-8")
     except UnicodeError as error:
@@ -131,7 +161,7 @@ def parse_skill(path: Path) -> Skill:
     if not body.strip() or len(body.encode("utf-8")) > MAX_BODY_BYTES:
         raise SkillError(f"{directory / 'SKILL.md'}: body must be nonempty and at most 32 KiB")
     tools_file = directory / "tools.json"
-    tools_raw = _read_regular(tools_file, directory, maximum=MAX_DIRECTORY_BYTES) if tools_file.exists() or tools_file.is_symlink() else None
+    tools_raw = read_skill_file(tools_file, directory, maximum=MAX_DIRECTORY_BYTES) if tools_file.exists() or tools_file.is_symlink() else None
     return Skill(name, description, fields.get("version"), directory, body,
                  hashlib.sha256(raw).hexdigest(),
                  hashlib.sha256(tools_raw).hexdigest() if tools_raw is not None else None,
@@ -162,7 +192,37 @@ def skills_digest(records: Sequence[dict[str, object]]) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
-def verify_records(records: Sequence[dict[str, object]], digest: str) -> tuple[Skill, ...]:
+def catalog_lines(skills: Sequence[Skill], records: Sequence[dict[str, object]]) -> tuple[str, ...]:
+    return tuple(
+        skill.name + ": " + skill.description +
+        ((" (commands: " + ", ".join(skill.tool_names) + ")") if record["tools_trusted"] and skill.tool_names
+         else " (commands not trusted)" if skill.tools_json_sha256 else "")
+        for skill, record in zip(skills, records)
+    )
+
+
+def measured_skills_digest(records: Sequence[dict[str, object]], measurements: dict[str, object]) -> str:
+    encoded = json.dumps({"skills": records, "measurements": measurements}, ensure_ascii=False,
+                         sort_keys=True, separators=(",", ":")).encode()
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def validate_measurements(measurements: object, names: Sequence[str]) -> dict[str, object]:
+    def valid(value: object) -> bool:
+        return (isinstance(value, dict) and set(value) == {"tokens", "method"}
+                and type(value["tokens"]) is int and value["tokens"] >= 0
+                and isinstance(value["method"], str) and value["method"] in
+                {"tokenize", "calibrated_bytes", "verified_byte_bound"})
+    if (not isinstance(measurements, dict) or set(measurements) != {"catalog", "bodies"}
+            or not valid(measurements["catalog"]) or not isinstance(measurements["bodies"], dict)
+            or set(measurements["bodies"]) != set(names)
+            or any(not valid(item) for item in measurements["bodies"].values())):
+        raise SkillError("recorded skill measurements have invalid fields")
+    return measurements
+
+
+def verify_records(records: Sequence[dict[str, object]], digest: str,
+                   measurements: dict[str, object] | None = None) -> tuple[Skill, ...]:
     if (not isinstance(records, list) or len(records) > MAX_SKILLS
             or any(not isinstance(record, dict)
                    or set(record) != {"name", "path", "skill_md_sha256", "tools_json_sha256", "tools_trusted"}
@@ -178,7 +238,10 @@ def verify_records(records: Sequence[dict[str, object]], digest: str) -> tuple[S
         raise SkillError("recorded skills have invalid fields")
     if len({record["name"] for record in records}) != len(records):
         raise SkillError("recorded skills have duplicate names")
-    if skills_digest(records) != digest:
+    if measurements is not None:
+        validate_measurements(measurements, [str(record["name"]) for record in records])
+    if (measured_skills_digest(records, measurements) if measurements is not None
+            else skills_digest(records)) != digest:
         raise SkillError("skill settings digest differs from the run spec")
     loaded = []
     for record in records:
@@ -229,9 +292,20 @@ def install(path: Path, *, force: bool = False) -> Skill:
         raise SkillError(f"skill {skill.name} is already installed; use --force to replace it")
     temporary = Path(tempfile.mkdtemp(prefix=".skill-install-", dir=home))
     try:
-        shutil.copytree(skill.path, temporary / skill.name, symlinks=True)
+        def copy_file(source: str, target: str) -> str:
+            source_path = Path(source)
+            limit = (MAX_BODY_BYTES + 4096 if source_path == skill.path / "SKILL.md"
+                     else MAX_DIRECTORY_BYTES)
+            Path(target).write_bytes(read_skill_file(source_path, skill.path, maximum=limit))
+            shutil.copystat(source, target, follow_symlinks=False)
+            return target
+
+        shutil.copytree(skill.path, temporary / skill.name, symlinks=True, copy_function=copy_file)
         _check_tree(temporary / skill.name)
-        parse_skill(temporary / skill.name)
+        copied = parse_skill(temporary / skill.name)
+        if (copied.skill_md_sha256 != skill.skill_md_sha256
+                or copied.tools_json_sha256 != skill.tools_json_sha256):
+            raise SkillError(f"skill {skill.name} changed during installation")
         if destination.exists():
             shutil.rmtree(destination)
         (temporary / skill.name).replace(destination)
