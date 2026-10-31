@@ -1,14 +1,25 @@
-"""One bounded MCP stdio conversation. Invoked only inside an ExecCapability."""
+"""Trusted protocol client for one sandboxed, bounded stdio conversation."""
 from __future__ import annotations
 
 import json
 import os
+from dataclasses import asdict
+from pathlib import Path
+import platform
 import select
 import selectors
-import signal
 import subprocess
 import sys
 import time
+
+if __package__:
+    from .kernel_exec_session import CleanupReport, ExecResult, ExecSessionError
+    from .kernel_exec_tracker import ProcessTable
+    from .kernel_test_isolation import capability_command
+else:
+    from kernel_exec_session import CleanupReport, ExecResult, ExecSessionError
+    from kernel_exec_tracker import ProcessTable
+    from kernel_test_isolation import capability_command
 
 MAX_MESSAGE = 4 << 20
 MAX_STDOUT = 8 << 20
@@ -36,7 +47,7 @@ def _json(value: object) -> bytes:
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"), allow_nan=False).encode() + b"\n"
 
 
-def converse(request: dict) -> object:
+def converse(request: dict, cap, cwd: Path) -> object:
     argv = request.get("argv")
     timeout = request.get("timeout_seconds")
     if (not isinstance(argv, list) or not argv or any(not isinstance(v, str) or not v for v in argv)
@@ -45,49 +56,28 @@ def converse(request: dict) -> object:
             or request.get("operation") not in {"list", "call"}):
         raise ProtocolError("invalid driver request")
     deadline = time.monotonic() + timeout
-    process = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                               stderr=subprocess.DEVNULL, start_new_session=True)
+    if platform.system() not in {"Darwin", "Linux"}:
+        raise ProtocolError("MCP containment is unsupported on this platform")
+    if platform.system() == "Linux" and not cap.sandboxed:
+        raise ProtocolError("MCP containment requires a sandboxed Linux PID namespace")
+    launcher = Path(__file__).with_name("sf_launch.py").resolve()
+    spec = {"argv": argv, "cwd": str(cwd), "env": dict(cap.env),
+            "limits": asdict(cap.limits), "memory_supervised": platform.system() == "Darwin",
+            "new_session": False}
+    command = [sys.executable, "-I", str(launcher), json.dumps(spec, separators=(",", ":"))]
+    command, environment = capability_command(command, cap,
+        single_process=platform.system() == "Darwin",
+        private_pid_unit=platform.system() == "Linux")
+    process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                               stderr=subprocess.DEVNULL, env=environment, cwd=cwd,
+                               close_fds=True, start_new_session=True)
     assert process.stdin is not None and process.stdout is not None
-    selector = selectors.DefaultSelector()
-    selector.register(process.stdout, selectors.EVENT_READ)
+    selector = None
     buffer = bytearray()
     total = 0
     counter = 0
-    descendants: dict[int, str] = {}
-    next_scan = 0.0
-
-    def process_table() -> dict[int, tuple[int, str]]:
-        try:
-            listing = subprocess.run(["ps", "-eo", "pid=,ppid=,lstart="], capture_output=True,
-                                     text=True, timeout=1, check=True).stdout
-        except (OSError, subprocess.SubprocessError):
-            return {}
-        table = {}
-        for line in listing.splitlines():
-            fields = line.split()
-            if len(fields) < 7 or not all(field.isdecimal() for field in fields[:2]):
-                continue
-            table[int(fields[0])] = (int(fields[1]), " ".join(fields[2:]))
-        return table
-
-    root_start = process_table().get(process.pid, (0, ""))[1]
-
-    def record_descendants() -> None:
-        # A peer can create a new session before it fails or times out. Retain
-        # observed PIDs and start times while the parent is alive.
-        table = process_table()
-        children: dict[int, list[int]] = {}
-        for pid, (parent, _) in table.items():
-            children.setdefault(parent, []).append(pid)
-        pending = ([process.pid] if root_start and table.get(process.pid, (0, None))[1] == root_start
-                   else [])
-        pending.extend(pid for pid, started in descendants.items()
-                       if table.get(pid, (0, None))[1] == started)
-        while pending:
-            for pid in children.get(pending.pop(), ()):
-                if pid not in descendants:
-                    descendants[pid] = table[pid][1]
-                    pending.append(pid)
+    table = None
+    server_identity = None
 
     def send(value: dict) -> None:
         data = _json(value)
@@ -111,7 +101,7 @@ def converse(request: dict) -> object:
             raise ProtocolError("server exited before accepting a request") from error
 
     def receive(expected: int) -> dict:
-        nonlocal total, next_scan
+        nonlocal total
         while True:
             if b"\n" in buffer:
                 line, _, rest = buffer.partition(b"\n")
@@ -152,10 +142,13 @@ def converse(request: dict) -> object:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 raise TimeoutError("MCP server deadline exceeded")
-            # Scanning spawns ps; bound it to a few times per second, not once per chunk.
-            if time.monotonic() >= next_scan:
-                record_descendants()
-                next_scan = time.monotonic() + .25
+            if table is not None and server_identity is not None:
+                try:
+                    memory = table.resident_bytes(server_identity)
+                except (OSError, RuntimeError) as error:
+                    raise ExecSessionError("cannot supervise MCP server resident memory") from error
+                if memory > cap.limits.memory_bytes:
+                    raise ProtocolError("server resident memory exceeds capability limit")
             if not selector.select(min(remaining, .25)):
                 continue
             chunk = os.read(process.stdout.fileno(), 65536)
@@ -173,6 +166,16 @@ def converse(request: dict) -> object:
         return receive(counter)
 
     try:
+        if platform.system() == "Darwin":
+            try:
+                table = ProcessTable()
+                server_identity = table.identity(process.pid)
+            except (OSError, RuntimeError) as error:
+                raise ExecSessionError("cannot establish MCP server process identity") from error
+            if server_identity is None and process.poll() is None:
+                raise ExecSessionError("cannot establish MCP server process identity")
+        selector = selectors.DefaultSelector()
+        selector.register(process.stdout, selectors.EVENT_READ)
         initialized = call("initialize", {"protocolVersion": "2025-06-18",
             "capabilities": {"roots": {"listChanged": False}},
             "clientInfo": {"name": "StateFrame", "version": request["client_version"]}})
@@ -219,46 +222,47 @@ def converse(request: dict) -> object:
             cursors.add(cursor)
         raise ProtocolError("tools/list exceeds 32 pages")
     finally:
-        selector.close()
-        record_descendants()
+        if selector is not None:
+            selector.close()
         try:
-            os.killpg(process.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
-        except PermissionError:
-            if process.poll() is None:
-                process.kill()
-        current = process_table()
-        for pid, started in descendants.items():
-            if pid not in current or current[pid][1] != started:
-                continue
             try:
-                os.kill(pid, signal.SIGKILL)
+                process.kill()
             except ProcessLookupError:
                 pass
-        process.wait(timeout=2)
+            except PermissionError as error:
+                raise ExecSessionError("MCP server containment unit cannot be killed") from error
+            try:
+                process.wait(timeout=2)
+            except subprocess.TimeoutExpired as error:
+                raise ExecSessionError("MCP server cleanup deadline exceeded") from error
+            if process.poll() is None:
+                raise ExecSessionError("MCP server survived cleanup")
+            if table is not None and server_identity is not None:
+                try:
+                    survivor = table.identity(server_identity.pid)
+                except (OSError, RuntimeError) as error:
+                    raise ExecSessionError("cannot verify MCP server termination") from error
+                if survivor is not None and survivor.start == server_identity.start:
+                    raise ExecSessionError("MCP server survived cleanup")
+        finally:
+            process.stdin.close()
+            process.stdout.close()
 
 
-def main() -> int:
+def exchange(request: dict, cap, cwd: Path) -> ExecResult:
+    """Return a bounded envelope after the server containment unit is dead."""
+    started = time.monotonic()
     try:
-        raw = sys.stdin.buffer.read((1 << 20) + 1)
-        if len(raw) > 1 << 20:
-            raise ProtocolError("driver request exceeds 1 MiB")
-        request = json.loads(raw, parse_constant=_reject_constant,
-                             object_pairs_hook=_json_object)
-        if not isinstance(request, dict):
-            raise ProtocolError("driver request must be an object")
-        value = converse(request)
+        value = converse(request, cap, cwd)
         envelope = {"ok": True, "result": value}
         encoded = _json(envelope)
         if len(encoded) > MAX_MESSAGE:
             raise ProtocolError("driver result exceeds 4 MiB")
-    except (ProtocolError, TimeoutError, OSError, ValueError, TypeError, subprocess.TimeoutExpired) as error:
+    except ExecSessionError:
+        raise
+    except (ProtocolError, TimeoutError, OSError, ValueError, TypeError, RuntimeError) as error:
         encoded = _json({"ok": False, "code": "TIMEOUT" if isinstance(error, TimeoutError)
                          else "MCP_PROTOCOL_ERROR", "error": f"{type(error).__name__}: {error}"[:500]})
-    sys.stdout.buffer.write(encoded)
-    return 0
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())
+    elapsed = time.monotonic() - started
+    return ExecResult(0, False, encoded, False, len(encoded), elapsed,
+                      CleanupReport(True, 0, (), ""))

@@ -3,6 +3,7 @@
 ## Unreleased
 
 - Add opt-in MCP stdio tool servers with sandboxed discovery and calls, bounded schemas and protocol messages, and tape-aware replay.
+- Keep the protocol client in the engine, contain each server through a private Linux PID namespace or macOS process-creation denial, and bound model-facing omission notes to fixed reason codes.
 
 ## 0.2.1 (2026-10-31)
 

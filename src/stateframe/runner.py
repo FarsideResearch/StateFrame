@@ -703,9 +703,6 @@ def prepare(options: RunOptions) -> tuple[Path, workcopy.WorkCopy, dict]:
         "tool_settings": settings.as_dict(),
         "custom_tools_digest": custom.digest,
         "custom_executables": {tool.name: tool.executable_digest for tool in custom.tools},
-        "mcp_tools_digest": mcp.digest if mcp else None,
-        "mcp_omitted": list(mcp.omitted) if mcp else [],
-        "mcp_tools": [tool.name for tool in mcp.tools] if mcp else [],
         "environment": environment,
         "environment_sources": environment_sources,
         "prompt_cache_slot": {
@@ -723,6 +720,9 @@ def prepare(options: RunOptions) -> tuple[Path, workcopy.WorkCopy, dict]:
         "repo": str(options.repo.resolve()),
         "in_place": options.in_place,
     }
+    if mcp is not None:
+        spec.update(mcp_tools_digest=mcp.digest, mcp_omitted=list(mcp.omitted),
+                    mcp_tools=[tool.name for tool in mcp.tools])
     (run / "spec.json").write_text(json.dumps(spec, indent=1, sort_keys=True))
     return run, work, spec
 

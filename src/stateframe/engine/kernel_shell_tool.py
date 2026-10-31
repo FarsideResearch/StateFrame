@@ -236,14 +236,14 @@ class ShellTool:
                 return ShellReply(f"REFUSED TOOL_CHANGED: {error}")
             name, command = custom.name, custom.name
             from kernel_exec_capability import executable_read_roots
-            extra_roots = (executable_read_roots(Path(__file__).with_name("kernel_mcp_driver.py"))
-                           if mcp_server is not None else ())
+            extra_roots = ()
             if mcp_server is not None:
                 import sys
                 extra_roots = (*extra_roots, *executable_read_roots(Path(sys.executable)),
                                *(Path(arg).resolve() for arg in mcp_server.argv[1:]
                                  if Path(arg).is_absolute() and Path(arg).is_file()))
             cap = replace(self.capability, purpose="custom_tool", network=custom.network,
+                          sandboxed=True if mcp_server is not None else self.capability.sandboxed,
                           workspace_writable=custom.writes == "workspace",
                           read_roots=(*self.capability.read_roots, *executable_read_roots(custom.executable),
                                       *extra_roots),
@@ -305,8 +305,11 @@ class ShellTool:
                                   post_manifest_digest=workspace_identity(before), env_identity=identity)
                     return ShellReply(observation)
             stdin = custom.request(tool_args) if custom is not None and mcp_server is not None else None
-            result = (self.session.run(argv, cap, stdin=stdin, cwd=self.root) if stdin is not None
-                      else self.session.run(argv, cap, cwd=self.root))
+            if mcp_server is not None:
+                from kernel_mcp_driver import exchange
+                result = exchange(json.loads(stdin), cap, self.root)
+            else:
+                result = self.session.run(argv, cap, cwd=self.root)
         except (ExecSessionError, OSError) as error:
             if "requires " in str(error) and "no unsandboxed fallback" in str(error):
                 observation = f"REFUSED SANDBOX_UNAVAILABLE: {error}"

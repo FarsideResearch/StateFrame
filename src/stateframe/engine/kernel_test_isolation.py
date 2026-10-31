@@ -232,7 +232,8 @@ def _darwin_xcrun_filter() -> str:
                     for path in sorted(paths))
 
 
-def capability_command(command, cap, *, platform_backend=None, shared_namespace=False):
+def capability_command(command, cap, *, platform_backend=None, shared_namespace=False,
+                       single_process=False, private_pid_unit=False):
     """Build a shell/job boundary from explicit authority, never host test policy.
 
     shared_namespace is private to the Linux session supervisor: keep its PID/net
@@ -260,6 +261,8 @@ def capability_command(command, cap, *, platform_backend=None, shared_namespace=
         profile = ("(version 1) (allow default) "
                    f"(deny file-read* (require-not (require-any {filters(reads)} {metadata} {devices} {cache_filter}))) "
                    f"(deny file-write* (require-not (require-any {filters(writes)} {cache_filter} (literal \"/dev/null\")))) ")
+        if single_process:
+            profile += "(deny process-fork) "
         if cap.network != "full":
             profile += "(deny network*) "
         if cap.network == "loopback":
@@ -278,6 +281,8 @@ def capability_command(command, cap, *, platform_backend=None, shared_namespace=
         arguments += ["--unshare-pid", "--proc", "/proc"]
     else:
         arguments += ["--unshare-all", "--new-session", "--proc", "/proc"]
+        if private_pid_unit:
+            arguments += ["--as-pid-1"]
         if cap.network == "full":
             arguments += ["--share-net"]
     arguments += ["--dev", "/dev", "--cap-drop", "ALL"]

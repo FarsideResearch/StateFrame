@@ -1,15 +1,11 @@
-"""MCP stdio tests use a real child server and the real protocol driver."""
+"""MCP stdio tests use a real peer through the execution boundary."""
 import json
-import subprocess
 import sys
-from pathlib import Path
 
 import pytest
 
-from kernel_mcp_tools import McpError, _schema, discover, load_mcp_files, result_text, validate_arguments
-from stateframe import __version__
+from kernel_mcp_tools import McpError, _schema, discover, load_mcp_files, run_driver, result_text, validate_arguments
 
-DRIVER = Path(__file__).resolve().parents[1] / "src/stateframe/engine/kernel_mcp_driver.py"
 SERVER = r'''#!/usr/bin/env python3
 import json
 import os
@@ -89,26 +85,29 @@ def config(tmp_path, server, **changes):
 
 
 def driver(server, mode, operation="list", **args):
-    request = {"argv": [str(server), mode], "operation": operation, "timeout_seconds": 1,
-               "client_version": __version__, **args}
-    return subprocess.run([sys.executable, "-I", str(DRIVER)], input=json.dumps(request).encode(),
-                          capture_output=True, timeout=5)
+    workspace = server.parent / "workspace"
+    workspace.mkdir(exist_ok=True)
+    definition = config(server.parent, server, argv=[sys.executable, str(server), mode],
+                        timeout_seconds=1).servers[0]
+    return run_driver(definition, operation, workspace, server.parent,
+                      shell_network="none", host_authorization=False,
+                      tool=args.get("tool", ""), arguments=args.get("arguments"))
 
 
 @pytest.mark.parametrize("mode", ["normal", "request", "pages"])
+@pytest.mark.host_sandbox
 def test_driver_lists_real_server(server, mode):
-    envelope = json.loads(driver(server, mode).stdout)
+    envelope = driver(server, mode)
     assert envelope["ok"] is True
-    assert [tool["name"] for tool in envelope["result"]] == ["echo", "add"]
+    assert [tool["name"] for tool in envelope["tools"]] == ["echo", "add"]
 
 
+@pytest.mark.host_sandbox
 def test_driver_calls_and_maps_results(server):
-    envelope = json.loads(driver(server, "normal", "call", tool="echo",
-                                 arguments={"text": "hello"}).stdout)
+    envelope = driver(server, "normal", "call", tool="echo", arguments={"text": "hello"})
     assert envelope["result"]["content"][0]["text"] == "hello"
     assert result_text(envelope["result"]) == "hello"
-    error = json.loads(driver(server, "tool_error", "call", tool="echo",
-                              arguments={"text": "hello"}).stdout)
+    error = driver(server, "tool_error", "call", tool="echo", arguments={"text": "hello"})
     assert error["result"]["isError"] is True
     assert result_text({"content": [{"type": "image"}, {"type": "resource", "uri": "file:///x"}]}) == (
         "[image omitted]\n[resource: file:///x]")
@@ -117,11 +116,11 @@ def test_driver_calls_and_maps_results(server):
 @pytest.mark.parametrize("mode,fragment", [
     ("malformed", "invalid JSON"), ("wrong_id", "response id"), ("early", "exited"),
     ("huge", "exceeds 4 MiB"), ("hang", "deadline exceeded")])
+@pytest.mark.host_sandbox
 def test_driver_fails_closed(server, mode, fragment):
     operation = "call" if mode == "huge" else "list"
-    envelope = json.loads(driver(server, mode, operation, tool="echo",
-                                 arguments={"text": "x"}).stdout)
-    assert envelope["ok"] is False and fragment in envelope["error"]
+    with pytest.raises(McpError, match=fragment):
+        driver(server, mode, operation, tool="echo", arguments={"text": "x"})
 
 
 @pytest.mark.parametrize("field,value", [

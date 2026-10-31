@@ -17,8 +17,8 @@ Large tasks or repositories can require more state and source context than fits.
 
 ## Agent tools
 
-- Shell, delete, move, read-only Git, opt-in web fetch, background jobs, explicitly configured command tools and opt-in MCP stdio tool servers are available. MCP HTTP transport, resources, prompts, sampling and persistent sessions are not. See [Agent tools](docs/guide/tools.md).
-- On macOS, a process deliberately double-forked and orphaned between supervisor sweeps can outlive a run. Its sandbox profile continues to restrict filesystem and network access. Aggregate resident memory is polled rather than enforced as a hard cap, so usage can overshoot between samples.
+- Shell, delete, move, read-only Git, opt-in web fetch, background jobs, explicitly configured command tools and opt-in MCP stdio tool servers are available. MCP HTTP transport, resources, prompts, sampling and persistent sessions are not. On macOS, stdio servers must be single-process programs; wrappers that spawn children need a direct final-program argv. See [Agent tools](docs/guide/tools.md).
+- For shell commands and background jobs on macOS, a process deliberately double-forked and orphaned between supervisor sweeps can outlive a run. Its sandbox profile continues to restrict filesystem and network access. Aggregate resident memory is polled rather than enforced as a hard cap, so usage can overshoot between samples.
 - Linux has one network placement per execution session. A full-network session cannot later use the same shared loopback namespace; a narrower command gets its own loopback namespace and cannot reach a service in the full-network namespace.
 - Background jobs are stopped at completion and are not relaunched on resume. A running job from the stopped attempt appears as `lost on restart` when the run continues.
 - External operations, including full-network shell calls and custom tools marked `external`, are never repeated automatically on resume. `--replay-external` repeats them knowingly; the command may repeat an outside effect. An incomplete tool operation refuses resume because its outside effect cannot be inferred from the run record.

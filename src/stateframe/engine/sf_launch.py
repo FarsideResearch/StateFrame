@@ -65,7 +65,8 @@ def launch(spec: dict) -> None:
     if maximum == resource.RLIM_INFINITY:
         maximum = os.sysconf("SC_OPEN_MAX")
     os.closerange(3, int(maximum))
-    os.setsid()
+    if spec.get("new_session", True):
+        os.setsid()
     os.umask(0o077)
     if sys.platform == "darwin":
         # macOS reserves an address space larger than the physical-memory budget

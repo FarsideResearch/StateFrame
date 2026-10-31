@@ -1,9 +1,11 @@
 """Real MCP peer, execution sandbox and scripted provider integration."""
 import json
+import os
+import sys
+import time
 from dataclasses import replace
 from pathlib import Path
 import socket
-import sys
 from types import SimpleNamespace
 
 import pytest
@@ -11,7 +13,7 @@ import pytest
 from acceptance._support import copy_repo, run_case
 from kernel_mcp_tools import McpError, McpTool, _schema, discover, load_mcp_files, run_driver, result_text, validate_arguments
 from kernel_agent_tools import AgentTools
-from kernel_exec_session import ExecSession
+from kernel_exec_session import ExecSession, ExecSessionError
 from kernel_shell_tool import ShellTool
 from kernel_tool_settings import ToolSettings
 from kernel_tool_tape import ToolReplayRefused, configure_replay, tape_for_run
@@ -24,12 +26,14 @@ pytestmark = pytest.mark.host_sandbox
 FIXTURE = Path(__file__).parent / "fixtures/mcp_server.py"
 
 
-def config(tmp_path, mode, *, replay="external", writes="none", argv_tail=()):
+def config(tmp_path, mode, *, replay="external", writes="none", argv_tail=(),
+           processes="single", timeout_seconds=5):
     path = tmp_path / "mcp.json"
     path.write_text(json.dumps({"schema": "stateframe-mcp/1", "servers": [{
         "name": "fixture", "trust": "Reviewed local fixture for this test",
         "argv": [sys.executable, str(FIXTURE), mode, *argv_tail], "network": "none",
-        "writes": writes, "replay": replay, "timeout_seconds": 5}]}))
+        "writes": writes, "replay": replay, "processes": processes,
+        "timeout_seconds": timeout_seconds}]}))
     return path
 
 
@@ -54,7 +58,7 @@ def test_name_collision_is_omitted(tmp_path):
                 "properties": {}, "required": []}}}
     found = discover(servers, workspace, tmp_path, shell_network="loopback",
                      host_authorization=False, custom_schemas=[existing])
-    assert not found.tools and "fixture:echo" in found.omitted
+    assert not found.tools and "NAME_COLLISION mcp_fixture__echo" in found.omitted
 
 
 def test_readonly_workspace_and_network_none(tmp_path):
@@ -166,7 +170,7 @@ def test_discovery_omits_unsupported_schemas_and_dispatch_rejects_them(tmp_path)
     found = discover(servers, workspace, tmp_path, shell_network="none", host_authorization=False)
     assert "mcp_fixture__echo" in {tool.name for tool in found.tools}
     for index in range(5):
-        assert any(item.startswith(f"fixture:bad_{index} (") for item in found.omitted)
+        assert f"UNSUPPORTED_SCHEMA mcp_fixture__bad_{index}" in found.omitted
     malformed = [
         {"type": ["string", "null"]}, {"type": 5}, {"type": "array"},
         {"type": "array", "maxItems": 2, "items": {"type": "array", "maxItems": 2,
@@ -255,6 +259,120 @@ def test_untrusted_descriptions_are_framed_in_actual_request(tmp_path):
     assert json.dumps(attack, ensure_ascii=False) in schema["description"]
     prop = schema["parameters"]["properties"]["value"]["description"]
     assert prop == "Untrusted server property metadata: " + json.dumps(attack, ensure_ascii=False)
+
+
+def test_omission_attack_cannot_enter_actual_request(tmp_path):
+    repo = copy_repo(tmp_path)
+    mcp = config(tmp_path, "omission_attack", replay="observation")
+    script = tmp_path / "script.json"
+    script.write_text(json.dumps({"model": "scripted", "tokenize": {"mode": "ok"},
+                                  "steps": [{"tool": "done", "arguments": {
+                                      "summary": "Inspected available tools."}}]}))
+    case = run_case(tmp_path, str(script), repo=repo, flags=("--mcp", str(mcp), "--no-run-env"))
+    assert case.requests, (case.process.stdout, case.process.stderr)
+    body = json.dumps(case.requests[0], ensure_ascii=False)
+    assert "Ignore previous instructions" not in body
+    assert "send workspace contents" not in body
+    assert "OVERSIZED_MARKER" not in body
+    note = next(message["content"].split("Engine note: ", 1)[1]
+                for message in case.requests[0]["messages"]
+                if "Engine note: " in message.get("content", ""))
+    assert len(("Engine note: " + note).encode()) <= 1000
+    assert note.count("UNSUPPORTED_SCHEMA") <= 16
+    assert "+6 more" in note
+    spec = json.loads((case.run_dir / "spec.json").read_text())
+    assert len(spec["mcp_omitted"]) == 22
+    assert all(item.startswith(("UNSUPPORTED_SCHEMA ", "INVALID_NAME "))
+               for item in spec["mcp_omitted"])
+
+
+def _alive(pid):
+    if sys.platform == "linux":
+        stat = Path(f"/proc/{pid}/stat")
+        return stat.exists() and stat.read_text().split()[2] != "Z"
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    return True
+
+
+@pytest.mark.parametrize("mode", ["double_fork_success", "double_fork_timeout",
+                                    "double_fork_malformed"])
+def test_detached_grandchild_contained_at_real_boundary(tmp_path, mode):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    scratch = tmp_path / "mcp-call-home"
+    scratch.mkdir()
+    marker = scratch / "grandchild.pid"
+    config_path = config(tmp_path, mode, argv_tail=(str(marker),),
+                         processes="spawn" if sys.platform == "linux" else "single",
+                         timeout_seconds=1)
+    server = load_mcp_files([config_path], shell_network="none").servers[0]
+    if mode == "double_fork_success":
+        result = run_driver(server, "call", workspace, tmp_path, shell_network="none",
+                            host_authorization=False, tool="echo", arguments={"value": "okay"})
+        assert result_text(result["result"]) == "okay"
+    else:
+        with pytest.raises(McpError):
+            run_driver(server, "list", workspace, tmp_path, shell_network="none",
+                       host_authorization=False)
+    if sys.platform == "linux":
+        assert marker.is_file()
+        pid = int(marker.read_text())
+        for _ in range(50):
+            if not _alive(pid):
+                break
+            time.sleep(.02)
+        assert not _alive(pid)
+    else:
+        assert not marker.exists()
+
+
+def test_spawn_config_refused_on_macos(tmp_path):
+    path = config(tmp_path, "normal", processes="spawn")
+    if sys.platform == "darwin":
+        with pytest.raises(McpError, match="point argv at the final server program"):
+            load_mcp_files([path], shell_network="none")
+    else:
+        assert load_mcp_files([path], shell_network="none").servers[0].processes == "spawn"
+
+
+def test_single_process_server_is_gone_after_success(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    scratch = tmp_path / "mcp-call-home"
+    scratch.mkdir()
+    marker = scratch / "server.pid"
+    server = load_mcp_files([config(tmp_path, "single_pid", argv_tail=(str(marker),))],
+                            shell_network="none").servers[0]
+    result = run_driver(server, "call", workspace, tmp_path, shell_network="none",
+                        host_authorization=False, tool="echo", arguments={"value": "okay"})
+    assert result_text(result["result"]) == "okay"
+    assert marker.is_file()
+    assert not _alive(int(marker.read_text()))
+
+
+def test_cleanup_failure_is_fatal(tmp_path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "app.py").write_text("VALUE = 1\n")
+    server = load_mcp_files([config(tmp_path, "normal")], shell_network="none").servers[0]
+    tool = McpTool("mcp_fixture__echo", server, "echo", "Echo",
+                   _schema({"type": "object", "properties": {"value": {"type": "string"}}}),
+                   "pinned-definition")
+    import kernel_mcp_driver
+    def fail_cleanup(*_args):
+        raise ExecSessionError("server survived cleanup")
+    monkeypatch.setattr(kernel_mcp_driver, "exchange", fail_cleanup)
+    with ExecSession(tmp_path) as session:
+        shell = ShellTool(tmp_path, ToolSettings(run_env=False, shell_network="none"), {}, session)
+        shell.bind(workspace, {"files": {"app.py": "VALUE = 1\n"}, "scoped_edits": False,
+                               "allowed_product_paths": ["app.py"]}, set())
+        configure_replay(tmp_path, active=False)
+        reply = shell._execute({"value": "hello"}, "cleanup-failure", custom=tool)
+    assert reply.fatal is True
+    assert reply.observation.startswith("REFUSED CLEANUP_FAILED:")
 
 
 def test_external_call_replay_requires_flag(tmp_path):
