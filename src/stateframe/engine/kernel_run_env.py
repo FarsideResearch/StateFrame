@@ -8,6 +8,7 @@ import os
 import re
 import stat
 import shutil
+import sys
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -80,21 +81,25 @@ def _mapped_path(value: str, source_repo: Path | None, workspace: Path,
     return value
 
 
-def _external_root(value: str, source_repo: Path | None, source_env: Path) -> Path | None:
+def _external_root(value: str, source_repo: Path | None, source_env: Path,
+                   authorized_roots: tuple[Path, ...] = ()) -> Path | None:
     path = Path(value).resolve()
     if path.is_relative_to(source_env) or (source_repo is not None and path.is_relative_to(source_repo)):
         return None
     if path == Path.home() or path in Path.home().parents:
         raise RunEnvError("import metadata cannot grant the home directory or its ancestors")
-    if path.is_dir():
-        return path
-    if path.is_file():
-        return path
-    return None
+    # Metadata requests imports; only independent host policy grants reads.
+    # Validate even missing paths so a later install cannot activate a grant.
+    if not any(path == root or (root.is_dir() and path.is_relative_to(root))
+               for root in authorized_roots):
+        raise RunEnvError(f"external import path lacks host read authorization: {path}; "
+                          "use --shell-read to authorize it")
+    return path if path.exists() else None
 
 
 def _rewrite_finder(path: Path, source_repo: Path | None, workspace: Path,
-                    source_env: Path, destination: Path) -> set[Path]:
+                    source_env: Path, destination: Path,
+                    authorized_roots: tuple[Path, ...] = ()) -> set[Path]:
     if path.is_symlink() or not path.is_file():
         raise RunEnvError(f"editable finder cannot be safely cloned: {path.name}")
     original = _import_text(path)
@@ -138,7 +143,7 @@ def _rewrite_finder(path: Path, source_repo: Path | None, workspace: Path,
                     raise RunEnvError(f"invalid editable finder paths: {path.name}")
                 if not Path(child.value).is_absolute():
                     continue
-                external = _external_root(child.value, source_repo, source_env)
+                external = _external_root(child.value, source_repo, source_env, authorized_roots)
                 if external is not None:
                     roots.add(external)
                 replacement = _mapped_path(child.value, source_repo, workspace,
@@ -158,7 +163,7 @@ def _rewrite_finder(path: Path, source_repo: Path | None, workspace: Path,
 
 
 def _relocate(source: Path, destination: Path, source_repo: Path | None,
-              workspace: Path) -> tuple[Path, ...]:
+              workspace: Path, authorized_roots: tuple[Path, ...] = ()) -> tuple[Path, ...]:
     config = destination / "pyvenv.cfg"
     if not config.is_file():
         raise RunEnvError(f"cloned environment has no pyvenv.cfg: {destination}")
@@ -177,7 +182,7 @@ def _relocate(source: Path, destination: Path, source_repo: Path | None,
                 match = _FINDER_IMPORT.fullmatch(value) if path.suffix == ".pth" else None
                 if match:
                     roots.update(_rewrite_finder(site / (match.group(1) + ".py"),
-                                                 source_repo, workspace, source, destination))
+                                                 source_repo, workspace, source, destination, authorized_roots))
                     revised.append(line)
                 elif not value or value.startswith("#") or value == _SETUPTOOLS_SHIM:
                     revised.append(line)
@@ -187,7 +192,7 @@ def _relocate(source: Path, destination: Path, source_repo: Path | None,
                     # Relative entries are interpreted from the source site before copying.
                     original_site = source / site.relative_to(destination)
                     old_target = (original_site / value).resolve()
-                    external = _external_root(str(old_target), source_repo, source)
+                    external = _external_root(str(old_target), source_repo, source, authorized_roots)
                     if external is not None:
                         roots.add(external)
                     mapped = _mapped_path(str(old_target), source_repo, workspace,
@@ -249,7 +254,8 @@ def _check_clone_paths(source: Path) -> None:
                     raise RunEnvError(f"executable .pth cannot be safely cloned: {path.name}")
 
 
-def create_run_env(run_dir: Path, test_python: Path, *, source_repo: Path | None = None) -> RunEnv:
+def create_run_env(run_dir: Path, test_python: Path, *, source_repo: Path | None = None,
+                   authorized_read_roots: tuple[Path, ...] = ()) -> RunEnv:
     root = Path(run_dir).absolute() / "env"
     interpreter = Path(test_python).absolute()
     source = interpreter.parent.parent if interpreter.parent.name == "bin" else None
@@ -261,10 +267,18 @@ def create_run_env(run_dir: Path, test_python: Path, *, source_repo: Path | None
     root.parent.mkdir(parents=True, exist_ok=True)
     if clone:
         assert source is not None
+        if __package__:
+            from .kernel_test_isolation import _interpreter_roots
+        else:
+            from kernel_test_isolation import _interpreter_roots
         _check_clone_paths(source)
         # Copy links as links; no source interpreter or startup hook is run.
         shutil.copytree(source, root, symlinks=True)
-        external_roots = _relocate(source, root, source_repo, workspace)
+        authorized = tuple(sorted({path.resolve(strict=True) for path in authorized_read_roots} |
+                                  {Path(sys.prefix).resolve(), Path(sys.base_prefix).resolve()} |
+                                  {Path(path).resolve(strict=True) for path in _interpreter_roots(interpreter)} |
+                                  {path.resolve(strict=True) for path in root.glob("lib/python*/site-packages")}))
+        external_roots = _relocate(source.resolve(), root, source_repo, workspace, authorized)
         kind: Literal["clone", "system-site"] = "clone"
     else:
         root.mkdir()

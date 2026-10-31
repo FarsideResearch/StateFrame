@@ -9,16 +9,25 @@ from collections.abc import Callable, Mapping
 import hashlib
 import json
 from pathlib import Path
-import re
 
 
-def record_delivery(run_dir: Path, head: str, output: str, tail: str) -> str:
+def _delivery_path(run_dir: Path, content: str, call_id: str | None) -> Path:
+    identity = content if call_id is None else json.dumps([call_id, content], ensure_ascii=True)
+    return run_dir / "execution-delivery" / (hashlib.sha256(identity.encode()).hexdigest() + ".json")
+
+
+def record_delivery(run_dir: Path, head: str, output: str, tail: str, *,
+                    omitted_bytes: int | None = None, call_id: str | None = None) -> str:
     """Persist engine-owned boundaries separately from untrusted process text."""
     content = head + output + tail
     directory = run_dir / "execution-delivery"
     directory.mkdir(mode=0o700, exist_ok=True)
-    path = directory / (hashlib.sha256(content.encode()).hexdigest() + ".json")
-    payload = json.dumps([head, output, tail], ensure_ascii=True)
+    # Identical text can come from different process deliveries (including a
+    # forged truncation marker). Keep each call's accounting independent.
+    path = _delivery_path(run_dir, content, call_id)
+    if omitted_bytes is not None and (type(omitted_bytes) is not int or omitted_bytes < 0):
+        raise ValueError("invalid execution delivery omitted-byte count")
+    payload = json.dumps({"parts": [head, output, tail], "omitted_bytes": omitted_bytes}, ensure_ascii=True)
     try:
         with path.open("x", encoding="utf-8") as stream:
             stream.write(payload)
@@ -28,15 +37,22 @@ def record_delivery(run_dir: Path, head: str, output: str, tail: str) -> str:
     return content
 
 
-def _parts(content: str, name: str, run_dir: Path | None = None) -> tuple[str, bytes, str]:
+def _parts(content: str, name: str, run_dir: Path | None = None,
+           call_id: str | None = None) -> tuple[str, bytes, str, int | None]:
     if run_dir is not None:
-        path = run_dir / "execution-delivery" / (hashlib.sha256(content.encode()).hexdigest() + ".json")
+        path = _delivery_path(run_dir, content, call_id)
+        if not path.is_file() and call_id is not None:
+            path = _delivery_path(run_dir, content, None)
         if path.is_file():
-            parts = json.loads(path.read_text(encoding="utf-8"))
+            metadata = json.loads(path.read_text(encoding="utf-8"))
+            parts = metadata.get("parts") if isinstance(metadata, dict) else metadata
+            omitted = metadata.get("omitted_bytes") if isinstance(metadata, dict) else None
+            if omitted is not None and (type(omitted) is not int or omitted < 0):
+                raise ValueError("invalid execution delivery omitted-byte count")
             if (not isinstance(parts, list) or len(parts) != 3
                     or not all(isinstance(item, str) for item in parts) or "".join(parts) != content):
                 raise ValueError("invalid execution delivery metadata")
-            return parts[0], parts[1].encode(), parts[2]
+            return parts[0], parts[1].encode(), parts[2], omitted
     # Legacy/taped replies without structured metadata get no protected suffix.
     # Preserve only status lines, never infer authority from process text.
     lines = content.splitlines(keepends=True)
@@ -44,8 +60,8 @@ def _parts(content: str, name: str, run_dir: Path | None = None) -> tuple[str, b
     if content.startswith("REFUSED TIMEOUT:"):
         header_lines = 3 if name == "shell" else 2
     elif content.startswith("REFUSED "):
-        return content, b"", ""
-    return "".join(lines[:header_lines]), "".join(lines[header_lines:]).encode(), ""
+        return content, b"", "", None
+    return "".join(lines[:header_lines]), "".join(lines[header_lines:]).encode(), "", None
 
 
 def fit_execution_replies(
@@ -100,24 +116,23 @@ def fit_execution_replies(
             if record is None or not record.completed or record.tool != name:
                 continue
             content = record.observation
-        head, output, tail = _parts(content, name, host.shell.run_dir if host is not None else None)
+        head, output, tail, prior_omitted = _parts(
+            content, name, host.shell.run_dir if host is not None else None, call_id)
         if len(output) > 512:
-            rows.append((message, call_id, content, head, output, tail))
+            rows.append((message, call_id, content, head, output, tail, prior_omitted))
     if not rows:
         return ()
 
     def render(keep: int) -> None:
-        for message, call_id, original, head, output, tail in rows:
+        for message, call_id, original, head, output, tail, prior_omitted in rows:
             if len(output) <= keep:
                 message["content"] = original
                 continue
             left = output[:keep // 2].decode("utf-8", "ignore")
             right = output[-(keep // 2):].decode("utf-8", "ignore") if keep // 2 else ""
             omitted = len(output) - len(left.encode()) - len(right.encode())
-            prior_omitted = sum(int(value) for value in re.findall(
-                r"\[\.\.\. (\d+) bytes omitted \.\.\.\]", original))
             marker = (f"\n[execution output delivery: {omitted} observation bytes omitted; "
-                      f"process output bytes already omitted: {prior_omitted}; "
+                      f"process output bytes already omitted: {prior_omitted if prior_omitted is not None else 'unknown'}; "
                       f"full observation in tool-tape.jsonl call {call_id}; "
                       f"sha256 {hashlib.sha256(original.encode()).hexdigest()}]\n")
             message["content"] = head + left + marker + right + "\n" + tail

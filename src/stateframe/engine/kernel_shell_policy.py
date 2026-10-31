@@ -148,13 +148,19 @@ def admit_shell(command: object, settings: ToolSettings) -> ShellAdmission:
 def normalize_output(raw: bytes, *, replacements: Mapping[str, str] | None = None,
                      total_bytes: int | None = None) -> str:
     """Bound opaque observations without inventing source-read or test evidence."""
+    return normalize_output_delivery(raw, replacements=replacements, total_bytes=total_bytes)[0]
+
+
+def normalize_output_delivery(raw: bytes, *, replacements: Mapping[str, str] | None = None,
+                              total_bytes: int | None = None) -> tuple[str, int]:
+    """Return presentation text and the engine's omitted-byte count separately."""
     total = len(raw) if total_bytes is None else total_bytes
     if b"\0" in raw:
-        return f"[binary output, {total} bytes]"
+        return f"[binary output, {total} bytes]", total
     try:
         decoded = raw.decode("utf-8")
     except UnicodeDecodeError:
-        return f"[binary output, {total} bytes]"
+        return f"[binary output, {total} bytes]", total
     text = _ANSI.sub("", decoded)
     text = "\n".join(line.split("\r")[-1] for line in text.replace("\r\n", "\n").split("\n"))
     for source, replacement in sorted((replacements or {}).items(), key=lambda pair: -len(pair[0])):
@@ -163,8 +169,9 @@ def normalize_output(raw: bytes, *, replacements: Mapping[str, str] | None = Non
     encoded = text.encode("utf-8")
     omitted = max(0, total - len(raw)) + max(0, len(encoded) - 12288)
     if not omitted:
-        return text
+        return text, 0
     split = min(6144, (len(encoded) + 1) // 2)
-    return (encoded[:split].decode("utf-8", errors="ignore") +
-            f"\n[... {omitted} bytes omitted ...]\n" +
-            encoded[max(split, len(encoded) - 6144):].decode("utf-8", errors="ignore"))
+    left = encoded[:split].decode("utf-8", errors="ignore")
+    right = encoded[max(split, len(encoded) - 6144):].decode("utf-8", errors="ignore")
+    omitted = max(0, total - len(raw)) + len(encoded) - len(left.encode()) - len(right.encode())
+    return left + f"\n[... {omitted} bytes omitted ...]\n" + right, omitted
