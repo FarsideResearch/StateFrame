@@ -1,0 +1,1 @@
+{"model":"scripted","steps":[{"tool":"shell","arguments":{"command":"python -m pytest -q tests/test_app.py"}},{"tool":"done","arguments":{"summary":"Shell test completed."}},{"tool":"run_tests","arguments":{"target":"tests/test_app.py"}},{"tool":"done","arguments":{"summary":"Engine check completed."}}],"tokenize":{"mode":"ok"}}

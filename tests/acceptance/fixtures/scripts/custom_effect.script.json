@@ -1,0 +1,1 @@
+{"model":"scripted","steps":[{"tool":"generate_tool","arguments":{}},{"tool":"run_tests","arguments":{"target":"tests/test_app.py"}},{"tool":"done","arguments":{"summary":"Custom tool generated the file."}}],"tokenize":{"mode":"ok"}}

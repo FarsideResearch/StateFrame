@@ -1,0 +1,1 @@
+{"model":"scripted","steps":[{"tool":"read","arguments":{"path":"app.py"}},{"tool":"run_tests","arguments":{"target":"tests/test_app.py"}},{"tool":"done","arguments":{"summary":"Mutation survived resume."}}],"tokenize":{"mode":"ok"}}
