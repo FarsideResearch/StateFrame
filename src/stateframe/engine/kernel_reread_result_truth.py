@@ -11,6 +11,7 @@ from collections.abc import Mapping, Sequence
 ENV = "STATEFRAME_REREAD_RESULT_TRUTH"
 EVICTION_NOTICE = "[not shown] {path} @rev {rev}: re-read to see it"
 _SEEN_LIMIT = 256
+_REPLAY_SCHEMA = "stateframe-code-bookmark-read-replay/1"
 
 
 def enabled() -> bool:
@@ -60,15 +61,138 @@ def result_note(measurement: object, identity: str, generation: str | None,
             return None  # Optional identity tracking must never deny a read.
     previous = seen.get(identity)
     key = (generation, revision)
+    failure = getattr(measurement, "_latest_check_receipt", None)
+    active = getattr(measurement, "_code_bookmarks_active", False) is True
+    assertion = (str(failure.get("assertion_context_preview") or "").strip()
+                 if active and isinstance(failure, Mapping)
+                 and str(failure.get("status") or "").upper() in {"FAIL", "FAILED", "BEHAVIOR_FAIL"}
+                 else "")
+    assertion = " ".join(assertion.split())[:200]
+    failure_key = (
+        str(failure.get("receipt_id") or "")[:160],
+        str(failure.get("revision") or "")[:128],
+        str(failure.get("status") or "")[:64],
+        str(failure.get("outcome") or "")[:64],
+        str(failure.get("failure_phase") or "")[:64],
+        str(failure.get("runner_tail_digest") or hashlib.sha256(
+            str(failure.get("runner_tail") or "").encode("utf-8")).hexdigest()),
+        assertion,
+    ) if isinstance(failure, Mapping) else None
+    if not assertion:
+        failure_key = None
+    request_id = getattr(measurement, "current_request_id", None)
+    request_id = request_id if isinstance(request_id, str) and 0 < len(request_id) <= 120 else None
     if previous is not None and previous[:2] == key:
         seen.move_to_end(identity)
+        if failure_key is not None and len(previous) > 3 and previous[3] == failure_key:
+            prior = (f"request {previous[4]}" if len(previous) > 4 and previous[4]
+                     else f"action {previous[2]}")
+            return (f"[read] requested bytes are unchanged since {prior}; "
+                    f"current failing assertion: {assertion}. "
+                    "Current requested content is in this result; "
+                    "the next useful action is an edit or a test run.")
+        seen[identity] = (*key, action, failure_key, request_id)
         return (f"[read] unchanged since action {previous[2]} @rev {generation}; "
                 "current requested content is in this result.")
-    seen[identity] = (*key, action)
+    seen[identity] = (*key, action, failure_key, request_id)
     seen.move_to_end(identity)
     while len(seen) > _SEEN_LIMIT:
         seen.popitem(last=False)
     return None
+
+
+def checkpoint_replay(measurement: object) -> dict[str, object]:
+    """Persist only bounded identities needed for the next unchanged read."""
+    from kernel_code_bookmarks import MAX_BOOKMARKS
+
+    seen = getattr(measurement, "_reread_result_truth", None)
+    rows = [[identity, [entry[0], entry[1], entry[2],
+                        list(entry[3]) if isinstance(entry[3], tuple) else None,
+                        entry[4]]]
+            for identity, entry in seen.items()
+            if isinstance(identity, str) and len(identity) <= 2048
+            and isinstance(entry, tuple) and len(entry) == 5
+            ] if isinstance(seen, OrderedDict) else []
+    latest = getattr(measurement, "_latest_check_receipt", None)
+    failure = {}
+    if isinstance(latest, Mapping):
+        for key in ("receipt_id", "revision", "status", "outcome", "failure_phase",
+                    "assertion_context_preview"):
+            failure[key] = str(latest.get(key) or "")[:512]
+        failure["runner_tail_digest"] = str(latest.get("runner_tail_digest") or hashlib.sha256(
+            str(latest.get("runner_tail") or "").encode("utf-8")).hexdigest())
+    carry = getattr(measurement, "_code_bookmark_carry", ())
+    bookmarks = [
+        {"path": row["path"], "symbol": row["symbol"],
+         "read_only": row.get("read_only") is True}
+        for row in carry[:MAX_BOOKMARKS]
+        if isinstance(row, Mapping) and isinstance(row.get("path"), str)
+        and isinstance(row.get("symbol"), str)
+    ] if isinstance(carry, list) else []
+    return {"schema": _REPLAY_SCHEMA, "active": True,
+            "seen": rows[-_SEEN_LIMIT:], "latest_check": failure,
+            "bookmarks": bookmarks}
+
+
+def restore_replay(measurement: object, snapshot: object) -> None:
+    """Restore the same read-note decision after a validated checkpoint."""
+    from kernel_code_bookmarks import MAX_BOOKMARKS
+    from kernel_public_localization import public_path
+
+    if (not isinstance(snapshot, Mapping) or snapshot.get("schema") != _REPLAY_SCHEMA
+            or snapshot.get("active") is not True):
+        raise ValueError("invalid bookmark read replay")
+    rows, latest = snapshot.get("seen"), snapshot.get("latest_check")
+    bookmarks = snapshot.get("bookmarks", [])
+    if (not isinstance(rows, list) or len(rows) > _SEEN_LIMIT
+            or not isinstance(latest, Mapping)
+            or not isinstance(bookmarks, list) or len(bookmarks) > MAX_BOOKMARKS):
+        raise ValueError("invalid bookmark read replay")
+    restored_bookmarks = []
+    for bookmark in bookmarks:
+        if (not isinstance(bookmark, Mapping)
+                or set(bookmark) != {"path", "symbol", "read_only"}
+                or not isinstance(bookmark["path"], str)
+                or public_path(bookmark["path"]) != bookmark["path"]
+                or not bookmark["path"].endswith(".py")
+                or not isinstance(bookmark["symbol"], str)
+                or not 0 < len(bookmark["symbol"]) <= 256
+                or type(bookmark["read_only"]) is not bool):
+            raise ValueError("invalid bookmark read replay")
+        restored_bookmarks.append(dict(bookmark))
+    restored: OrderedDict[str, tuple[object, ...]] = OrderedDict()
+    for row in rows:
+        if (not isinstance(row, list) or len(row) != 2
+                or not isinstance(row[0], str) or len(row[0]) > 2048
+                or not isinstance(row[1], list) or len(row[1]) != 5):
+            raise ValueError("invalid bookmark read replay")
+        if row[0] in restored:
+            raise ValueError("invalid bookmark read replay")
+        generation, revision, action, failure_key, request_id = row[1]
+        if (not isinstance(generation, str) or len(generation) > 512
+                or not isinstance(revision, str) or len(revision) > 128
+                or type(action) is not int or action < 0
+                or (failure_key is not None and (not isinstance(failure_key, list)
+                    or len(failure_key) != 7 or any(not isinstance(value, str)
+                                                    or len(value) > 200 for value in failure_key)))
+                or (request_id is not None and (not isinstance(request_id, str)
+                                                or len(request_id) > 120))):
+            raise ValueError("invalid bookmark read replay")
+        restored[row[0]] = (generation, revision, action,
+                            tuple(failure_key) if failure_key is not None else None,
+                            request_id)
+    allowed = {"receipt_id", "revision", "status", "outcome", "failure_phase",
+               "assertion_context_preview", "runner_tail_digest"}
+    if (set(latest) - allowed or any(not isinstance(value, str) or len(value) > 512
+                                    for value in latest.values())):
+        raise ValueError("invalid bookmark read replay")
+    digest = latest.get("runner_tail_digest")
+    if digest is not None and re.fullmatch(r"[0-9a-f]{64}", digest) is None:
+        raise ValueError("invalid bookmark read replay")
+    measurement._reread_result_truth = restored
+    measurement._latest_check_receipt = dict(latest)
+    measurement._code_bookmarks_active = True
+    measurement._code_bookmark_carry = restored_bookmarks
 
 
 def _complete_body(path: str, revision: object,
@@ -120,6 +244,9 @@ def reconcile_frame(frame: dict[str, object],
             segments.append({"path": path, "revision": revisions[path],
                              "start_line": start, "end_line": end, "text": text})
     notices: dict[str, str | None] = {}
+    bookmarks = frame.get("code_bookmarks")
+    bookmarks = bookmarks if isinstance(bookmarks, list) else []
+    from kernel_stateframe_capacity import _delivered
     for fact in facts:
         if not isinstance(fact, dict):
             continue
@@ -130,14 +257,40 @@ def reconcile_frame(frame: dict[str, object],
         if not read_is_owed(fact):
             fact["body_delivery"] = "not_owed"
             fact.pop("delivery_notice", None)
+            fact.pop("visible_symbols", None)
             notices[path] = None
             continue
         present = _complete_body(path, revision, segments)
-        fact["body_delivery"] = "present" if present else "not_shown"
+        visible = []
+        if not present:
+            for bookmark in bookmarks:
+                if (not isinstance(bookmark, Mapping) or bookmark.get("path") != path
+                        or bookmark.get("revision") != revision):
+                    continue
+                for prefix in ("shown", "compact"):
+                    start, end = (bookmark.get(prefix + suffix)
+                                  for suffix in ("_start_line", "_end_line"))
+                    if type(start) is not int or type(end) is not int:
+                        continue
+                    row = {"path": path, "revision": revision,
+                           "lines": {"start": start, "end": end},
+                           "content_sha256": bookmark.get(prefix + "_sha256")}
+                    if _delivered(row, segments):
+                        visible.append(str(bookmark.get("symbol")))
+                        break
+        fact["body_delivery"] = ("present" if present else
+                                 "bookmarked" if visible else "not_shown")
         if present:
             fact.pop("delivery_notice", None)
+            fact.pop("visible_symbols", None)
             notices[path] = "fresh"
+        elif visible:
+            fact["visible_symbols"] = sorted(set(visible))
+            notice = "[bookmark shown] " + path + "::" + ", ".join(fact["visible_symbols"])
+            fact["delivery_notice"] = notice
+            notices[path] = notice
         else:
+            fact.pop("visible_symbols", None)
             notice = eviction_notice(path, revision)
             fact["delivery_notice"] = notice
             notices[path] = notice
@@ -161,7 +314,7 @@ def reconcile_frame(frame: dict[str, object],
             for path, notice in sorted(notices.items(), key=lambda item: -len(item[0])):
                 if not line.startswith((f"- {path} ", f"- {path}::")):
                     continue
-                label = r" \| (?:fresh|\[not shown\].*?: re-read to see it) \| (read@\d+)"
+                label = r" \| (?:fresh|\[not shown\].*?: re-read to see it|\[bookmark shown\][^|]*) \| (read@\d+)"
                 if notice is None:
                     if re.search(label, line):
                         lines[index] = ""

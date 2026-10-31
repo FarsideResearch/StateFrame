@@ -428,7 +428,7 @@ def fit_protected_frame(body: dict[str, object], *,
     from kernel_stateframe_envelope import STATE_HEADER
     from kernel_request_budget import _wire_bytes
     from kernel_stateframe_framefit5 import (
-        FrameFit5Error, _state_payload,
+        FrameFit5Error, _state_payload, _serialize_state_message,
         _is_framefit5_source_notice, _framefit5_deferred_paths,
     )
     from kernel_reread_result_truth import (
@@ -508,6 +508,20 @@ def fit_protected_frame(body: dict[str, object], *,
         return audit
     payload, state = _state_payload(states[0])
     frame = state["framefit5"]
+    if pressure and frame.get("code_bookmarks"):
+        # Bookmarks are optional source selection advice. Shed their typed
+        # metadata before historical receipt compaction or minimum refusal.
+        frame.pop("code_bookmarks", None)
+        states[0]["content"] = _serialize_state_message(payload)
+        # A prior reconciliation may have credited a bookmark as visible.
+        # Recompute that claim after shedding its digest proof.
+        refresh_messages(body["messages"], required_deferred_paths=known_deferred_paths)
+        payload, state = _state_payload(states[0])
+        frame = state["framefit5"]
+        before = protected_bytes(body, protected_messages)
+        pressure = under_pressure(before)
+        audit["after"] = before
+        audit["changed"] = body != target
     ledger = frame["action_ledger"]
     # Row identity fields stay stable while the fitter removes or repairs rows.
     # Retain references, not another copy of potentially large read bodies.

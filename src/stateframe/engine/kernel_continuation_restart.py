@@ -872,6 +872,11 @@ def checkpoint(runtime, messages, worker_state):
         "conversation": checkpoint_conversation(messages),
         "owner_restore": capture_owner_restore(runtime),
     }
+    if getattr(runtime, "_code_bookmarks_active", False) is True:
+        from kernel_code_bookmarks import enabled as bookmarks_enabled
+        from kernel_reread_result_truth import checkpoint_replay
+        if bookmarks_enabled():
+            state["code_bookmark_replay"] = checkpoint_replay(runtime)
     policy = first_green_checkpoint_section(runtime)
     if policy is not None:
         state[FIRST_GREEN_CHECKPOINT_KEY] = policy
@@ -1047,6 +1052,14 @@ def restore_runtime(runtime):
     restore_notes(runtime, replay_saved, records, event)
     runtime.resume_worker_state = copy.deepcopy(saved["worker"])
     restore_runtime_field_values(runtime, saved["runtime"])
+    if "code_bookmark_replay" in saved:
+        from kernel_code_bookmarks import enabled as bookmarks_enabled
+        from kernel_reread_result_truth import restore_replay
+        if bookmarks_enabled():
+            try:
+                restore_replay(runtime, saved["code_bookmark_replay"])
+            except ValueError as error:
+                raise WorkerResumeError("invalid bookmark read replay") from error
     reconcile_environment_notice_tail(runtime, tail, event["sequence"])
     if getattr(runtime, "stateframe_challenge_budget", None) is not None:
         from kernel_challenge_budget import restore_state

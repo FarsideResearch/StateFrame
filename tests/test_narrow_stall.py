@@ -323,7 +323,8 @@ def _runtime_projection(runtime, frame, *, baseline, monkeypatch):
     return projection
 
 
-def _qualified_fixture_request(runtime, frame, messages, context, *, baseline, monkeypatch):
+def _qualified_fixture_request(runtime, frame, messages, context, *, baseline, monkeypatch,
+                               state_transform=None, validate=True):
     import kernel_stateframe_framefit5
 
     with monkeypatch.context() as patch:
@@ -332,6 +333,8 @@ def _qualified_fixture_request(runtime, frame, messages, context, *, baseline, m
             patch.setattr(kernel_stateframe_framefit5, "_editable_site",
                           lambda *_args: True)
         state = build_typed_state(messages, context, runtime)
+    if state_transform is not None:
+        state_transform(state)
     projection = _runtime_projection(runtime, frame, baseline=baseline,
                                      monkeypatch=monkeypatch)
     projection["state"]["framefit5"] = state
@@ -358,11 +361,12 @@ def _qualified_fixture_request(runtime, frame, messages, context, *, baseline, m
         _request_source_closure_override=plan,
     )
     result = finalize_frame_candidate(runtime, capture, body, frame_counter=token_estimate)
-    validation = validate_final_product_boundary(
-        runtime, result["messages"], result["tools"],
-        refresh_sources=False, refresh_headcarry=False,
-    )
-    assert validation["checked_before_provider"] is True
+    if validate:
+        validation = validate_final_product_boundary(
+            runtime, result["messages"], result["tools"],
+            refresh_sources=False, refresh_headcarry=False,
+        )
+        assert validation["checked_before_provider"] is True
     return result
 
 
@@ -472,3 +476,172 @@ def test_portable_differential_changes_only_checks_and_protected_advice(
                for path in differences), differences
     if case == "near_budget":
         assert token_estimate(patched) >= runtime.frame_ceiling * 0.8
+
+
+def test_small_request_bookmark_switch_is_byte_identical(tmp_path, monkeypatch):
+    root = tmp_path / "workspace"
+    (root / "pkg").mkdir(parents=True)
+    (root / "tests").mkdir()
+    root = root.resolve()
+    entry = root / "pkg/__init__.py"
+    entry.write_text("VALUE = 1\n")
+    (root / "tests/test_app.py").write_text("assert True\n")
+    runtime = _runtime_with_product(root)
+    revision = runtime.binding()["product_revision"]
+    frame = {
+        "artifact_revisions": {"pkg/__init__.py": "sha256:" + hashlib.sha256(entry.read_bytes()).hexdigest()},
+        "verification": {"revision": revision, "status": "FAIL"},
+        "readiness": {"revision": revision, "public_check_status": "FAIL"},
+        "test_receipts": [{"revision": revision, "result_class": "RED",
+                           "receipt_id": "current-failure"}],
+    }
+    messages = [{"role": "user", "content": "Task: Fix value."},
+                *_read("pkg/__init__.py", entry.read_text(), "read-1")]
+    context = build_action_context(messages, workspace_root=root)
+    context["journal_receipt_records"] = []
+    runtime._framefit_action_context = context
+    monkeypatch.setenv("STATEFRAME_CODE_BOOKMARKS", "off")
+    baseline = _qualified_fixture_request(runtime, frame, messages, context,
+                                          baseline=False, monkeypatch=monkeypatch)
+    monkeypatch.setenv("STATEFRAME_CODE_BOOKMARKS", "on")
+    enabled = _qualified_fixture_request(runtime, frame, messages, context,
+                                         baseline=False, monkeypatch=monkeypatch)
+    assert json.dumps(enabled, sort_keys=True) == json.dumps(baseline, sort_keys=True)
+
+
+def test_pressured_bookmarks_pass_final_allocation_and_validation(tmp_path, monkeypatch):
+    root = tmp_path / "workspace"
+    (root / "pkg").mkdir(parents=True)
+    (root / "tests").mkdir()
+    (root / "pkg/__init__.py").write_text("VALUE = 1\n")
+    (root / "tests/test_app.py").write_text("assert True\n")
+    names = [f"pkg/module_{index}.py" for index in range(10)]
+    for index, name in enumerate(names):
+        (root / name).write_text(f"def target(): return {index}\n")
+    root = root.resolve()
+    runtime = _runtime_with_product(root)
+    runtime.edit_contract = {"edit_authority": {"editable_paths": ["pkg/__init__.py", *names]}}
+    revision = runtime.binding()["product_revision"]
+    frame = {
+        "artifact_revisions": {"pkg/__init__.py": "sha256:" + hashlib.sha256(
+            (root / "pkg/__init__.py").read_bytes()).hexdigest()},
+        "verification": {"revision": revision, "status": "FAIL"},
+        "readiness": {"revision": revision, "public_check_status": "FAIL"},
+        "test_receipts": [{"revision": revision, "result_class": "RED",
+                           "receipt_id": "current-failure"}],
+    }
+    messages = [{"role": "user", "content": "Task: Fix the modules."}]
+    for index, name in enumerate(names):
+        messages += _read(name, (root / name).read_text(), f"read-{index}")
+    context = build_action_context(messages, workspace_root=root)
+    context["journal_receipt_records"] = [{
+        "kind": "action_receipt",
+        "receipt": {"kind": "read", "target_path": name, "result_class": "OK",
+                    "receipt_id": f"read-receipt:{index}", "workspace_revision": "1"},
+    } for index, name in enumerate(names)]
+    runtime._framefit_action_context = context
+    receipt_id = "check-receipt:bookmark-fixture"
+    runtime._check_output_receipts = {receipt_id: {
+        "status": "FAIL", "revision": revision,
+        "stdout": "Traceback (most recent call last):\n" + "".join(
+            f'  File "{name}", line 1, in target\n'
+            for name in names[:3]) + "AssertionError: wrong result\n",
+    }}
+
+    def mark_failure(state):
+        assert len(state["read_facts"]) >= 10
+        for fact in state["read_facts"]:
+            fact["body_delivery"] = "not_shown"
+        state["last_verdict"] = {
+            "status": "FAIL", "tested_revision": revision,
+            "current_revision": revision, "check_receipt_id": receipt_id,
+            "line": f"LAST FAIL at rev {revision}",
+        }
+        state["action_ledger"]["journal_verdict"] = copy.deepcopy(state["last_verdict"])
+
+    monkeypatch.setenv("STATEFRAME_CODE_BOOKMARKS", "on")
+    result = _qualified_fixture_request(
+        runtime, frame, messages, context, baseline=False, monkeypatch=monkeypatch,
+        state_transform=mark_failure, validate=False,
+    )
+    assert token_estimate(result) <= runtime.frame_ceiling
+    state_message = next(message for message in result["messages"]
+                         if str(message.get("content") or "").startswith("[StateFrame]\n"))
+    projected = json.loads(state_message["content"].split("\n", 1)[1])["state"]["framefit5"]
+    from kernel_reread_result_truth import reconcile_frame
+    expected = copy.deepcopy(projected)
+    reconcile_frame(expected, result["messages"])
+    assert expected["read_facts"] == projected["read_facts"], [
+        (before["path"], before.get("body_delivery"), after.get("body_delivery"))
+        for before, after in zip(projected["read_facts"], expected["read_facts"])
+        if before != after
+    ]
+    validate_final_product_boundary(
+        runtime, result["messages"], result["tools"],
+        refresh_sources=False, refresh_headcarry=False,
+    )
+    assert set(names[:3]) <= {row["path"] for row in projected["code_bookmarks"]
+                              if row["rank"] == 1}
+    delivery = {row["path"]: row["body_delivery"] for row in projected["read_facts"]}
+    assert all(delivery[name] in {"present", "bookmarked"} for name in names[:3])
+    assert runtime._code_bookmarks_active is True
+    runtime.frame_ceiling = token_estimate(result) + 200
+    near = _qualified_fixture_request(
+        runtime, frame, messages, context, baseline=False, monkeypatch=monkeypatch,
+        state_transform=mark_failure,
+    )
+    assert 0.9 * runtime.frame_ceiling <= token_estimate(near) <= runtime.frame_ceiling
+    restarted = _runtime_with_product(root)
+    restarted.edit_contract = copy.deepcopy(runtime.edit_contract)
+    restarted.frame_ceiling = runtime.frame_ceiling
+    restarted._framefit_action_context = context
+    restarted._check_output_receipts = copy.deepcopy(runtime._check_output_receipts)
+    replayed = _qualified_fixture_request(
+        restarted, frame, messages, context, baseline=False, monkeypatch=monkeypatch,
+        state_transform=mark_failure,
+    )
+    assert json.dumps(replayed, sort_keys=True) == json.dumps(near, sort_keys=True)
+
+    # The old check is stale after an edit, but the qualified identity follows
+    # its function into the next frame and remains checkpointable.
+    changed = root / names[0]
+    changed.write_text("\n" * 5 + changed.read_text())
+    runtime._workspace_view_store.note_mutation((names[0],), "edit")
+    runtime._invalidate_binding_cache()
+    updated_revision = runtime.binding()["product_revision"]
+    runtime.frame_ceiling = 10_000
+
+    def mark_stale(state):
+        state["last_verdict"] = {
+            "status": "STALE", "tested_revision": revision,
+            "current_revision": updated_revision,
+            "check_receipt_id": receipt_id, "line": "STALE after edit",
+        }
+        state["action_ledger"]["journal_verdict"] = copy.deepcopy(state["last_verdict"])
+
+    after_edit = _qualified_fixture_request(
+        runtime, frame, messages, context, baseline=False, monkeypatch=monkeypatch,
+        state_transform=mark_stale,
+    )
+    state_message = next(message for message in after_edit["messages"]
+                         if str(message.get("content") or "").startswith("[StateFrame]\n"))
+    current = json.loads(state_message["content"].split("\n", 1)[1])["state"]["framefit5"]
+    assert any(row["path"] == names[0] and row["symbol"] == "target"
+               and row["start_line"] == 6 for row in current["code_bookmarks"])
+    assert runtime._code_bookmarks_active is True
+    from kernel_reread_result_truth import checkpoint_replay, restore_replay
+    checkpoint = checkpoint_replay(runtime)
+    resumed = _runtime_with_product(root)
+    resumed.edit_contract = copy.deepcopy(runtime.edit_contract)
+    resumed.frame_ceiling = runtime.frame_ceiling
+    resumed._framefit_action_context = context
+    resumed._check_output_receipts = copy.deepcopy(runtime._check_output_receipts)
+    restore_replay(resumed, checkpoint)
+    resumed_request = _qualified_fixture_request(
+        resumed, frame, messages, context, baseline=False, monkeypatch=monkeypatch,
+        state_transform=mark_stale,
+    )
+    assert json.dumps(resumed_request, sort_keys=True) == json.dumps(after_edit, sort_keys=True), (
+        [".".join(map(str, path)) for path in _different_paths(
+            _materialized_request(resumed_request), _materialized_request(after_edit))]
+    )

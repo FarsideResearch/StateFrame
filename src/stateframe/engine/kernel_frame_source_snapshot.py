@@ -440,7 +440,8 @@ def fit_recent_read_windows(body: Mapping[str, object], windows: Sequence[Mappin
     messages[:] = [message for message in messages if not (
         isinstance(message, Mapping) and isinstance(message.get("content"), str)
         and (str(message["content"]).startswith("kept ")
-             and " recent reads; about " in str(message["content"])
+             and (" recent reads; about " in str(message["content"])
+                  or " selected source windows; about " in str(message["content"]))
              or (meta := parse_model_source_window(message["content"])) is not None
              and meta.get("owner") in {"recent_editable_read", "required_public_check"}))]
     def window_key(content: object) -> tuple[object, ...] | None:
@@ -518,27 +519,52 @@ def fit_recent_read_windows(body: Mapping[str, object], windows: Sequence[Mappin
         additions = [{"role": "user", "content": content}
                      for content in [*(str(row["content"]) for row in reads), *checks]
                      if content and window_key(content) not in existing]
-        additions.append({"role": "user", "content":
-                          f"kept {len(reads)} recent reads; about {source_chars} chars of source fit"})
+        summary = (f"kept {len(reads)} selected source windows; about {source_chars} chars of source fit"
+                   if any(row.get("bookmark") is True for row in reads)
+                   else f"kept {len(reads)} recent reads; about {source_chars} chars of source fit")
+        additions.append({"role": "user", "content": summary})
         rows[position:position] = additions
         return trial
     check_levels = ("full", "excerpt", "assertions") if public_checks else ("full",)
-    for count in range(min(3, len(windows)), -1, -1):
+    limit = len(windows) if any(row.get("bookmark") for row in windows) else min(3, len(windows))
+    rank_one_count = sum(1 for row in windows
+                         if row.get("bookmark") is True and row.get("rank") == 1)
+
+    def variants(reads: Sequence[Mapping[str, object]]) -> Iterator[list[dict[str, object]]]:
+        selected = [dict(row) for row in reads]
+        yield selected
+        # Keep all selected identities while replacing lower-priority bodies
+        # with their exact smaller slice. Every proposal is measured normally.
+        for index in range(len(selected) - 1, -1, -1):
+            compact = selected[index].get("compact_content")
+            if not isinstance(compact, str):
+                continue
+            selected[index]["content"] = compact
+            selected[index]["source_chars"] = int(selected[index]["compact_source_chars"])
+            yield [dict(row) for row in selected]
+
+    for count in range(limit, -1, -1):
         for release_deferred in ((False, True) if deferred_paths and count else (False,)):
             for level in check_levels:
                 checks = [str(row.get(level) or "") for row in public_checks]
                 check_chars = sum(int(row.get(level + "_chars", 0)) for row in public_checks)
-                trial = candidate(
-                    windows[:count], checks, check_chars,
-                    release_deferred=release_deferred,
-                )
+                proposals = (variants(windows[:count]) if count <= rank_one_count
+                             else ([dict(row) for row in windows[:count]],))
+                for selection in proposals:
+                    trial = candidate(
+                        selection, checks, check_chars,
+                        release_deferred=release_deferred,
+                    )
+                    if fits(trial):
+                        return trial
+    for count in range(limit, -1, -1):
+        for release_deferred in ((False, True) if deferred_paths and count else (False,)):
+            proposals = (variants(windows[:count]) if count <= rank_one_count
+                         else ([dict(row) for row in windows[:count]],))
+            for selection in proposals:
+                trial = candidate(selection, (), release_deferred=release_deferred)
                 if fits(trial):
                     return trial
-    for count in range(min(3, len(windows)), -1, -1):
-        for release_deferred in ((False, True) if deferred_paths and count else (False,)):
-            trial = candidate(windows[:count], (), release_deferred=release_deferred)
-            if fits(trial):
-                return trial
     return base
 
 
