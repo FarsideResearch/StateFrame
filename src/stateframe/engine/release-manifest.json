@@ -337,7 +337,7 @@
   "kernel_lane4_fixes.py": "569e3a72f801396f880173fda9dc7da81fd0168eba7e0e56802669c9fe6e961d",
   "kernel_latest_exchange.py": "f75dcf5c6aff54d02063e35db3f73beb388f68f1c85501e06bc6d7e037cd4b07",
   "kernel_launch_identity_cost.py": "b65822c458e499e70b3165b82a7e12a3cac4ddf623563ff6c897f270fd617bac",
-  "kernel_lean.py": "da03fb962d62794b810e76f5df6acb38559a4095a5bcff42cd480cd43d5bdbf7",
+  "kernel_lean.py": "caf53db4e5eb30f63094c8fa5a76b1260dac52eb780bcc00cbbe9ac80bf856a0",
   "kernel_lean_presentation.py": "39edb5a76230bccc2dfe9d7c51ed4d81ef3c9f97fb0ea617731bcb5eac315903",
   "kernel_ledger_bindings.py": "1933dfe82ff41e2916987630175ff99abe98d0c1ba31f613ff12e98c8a0ae897",
   "kernel_ledger_schema.py": "a17b51c34af2eb4009c2415e7f89be157d1f1b50fe11c3399d15be99de7db5d0",

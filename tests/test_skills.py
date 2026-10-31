@@ -204,7 +204,7 @@ def test_diet_sheds_body_at_33344_edge_and_preserves_authority(tmp_path):
     assert meter.measure(body)[0] <= 33344
 
 
-def test_body_does_not_modify_system_or_task_messages(tmp_path):
+def test_body_does_not_modify_system_or_task_messages(tmp_path, monkeypatch):
     from kernel_stateframe_framefit5 import compose_frame_only, STATE_HEADER, PRODUCT_MODE
     import kernel_skills
 
@@ -218,6 +218,10 @@ def test_body_does_not_modify_system_or_task_messages(tmp_path):
         without = compose_frame_only(prepared, source)
         skill = host.parse_skill(make_skill(tmp_path))
         record = skill.record(trusted=False)
+        settings = tmp_path / "skill-settings.json"
+        settings.write_text(json.dumps({"schema": "stateframe-skill-settings/1", "skills": [record],
+                                        "skills_digest": host.skills_digest([record])}))
+        monkeypatch.setenv("STATEFRAME_SKILL_SETTINGS_FILE", str(settings))
         kernel_skills.configure([record], host.skills_digest([record]), None)
         kernel_skills.service().load(skill.name)
         with_skill = compose_frame_only(prepared, source)
