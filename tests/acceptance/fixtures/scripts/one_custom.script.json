@@ -1,0 +1,1 @@
+{"model":"scripted","steps":[{"tool":"sample_tool","arguments":{"value":"ready"}},{"tool":"done","arguments":{"summary":"Custom policy checked."}}],"tokenize":{"mode":"ok"}}

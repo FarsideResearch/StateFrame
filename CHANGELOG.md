@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.2.0 (2026-10-31)
+
+- Add bounded foreground shell commands and read-only background jobs with explicit command and network policy. Host execution needs a CLI flag and prints a warning.
+- Add guarded file deletion and moves, read-only sanitized Git history, opt-in public web fetch and explicitly trusted JSON command tools.
+- Record tool intents and results for resume. Reproducible local effects are compared on replay; external effects require explicit replay authorization. Run-local dependency environments keep installs out of the source environment.
+- Fit shell, job and custom-command reply delivery to the measured request budget while retaining the full taped observation within collector limits. Bound workspace reconciliation to 16 MiB per file, 256 MiB of regular-file data and 20,000 entries.
+- Refuse and restore executable-bit changes, which the sealed candidate does not carry. Restrict the plain loop to foreground shell from the new tool set.
+- On Linux, each shell command gets its own process namespace and `/proc`, so `df`, `ps`, `free` and `mount` work while the supervising process stays hidden.
+- Document the sandbox limits and tool contracts in [Agent tools](docs/guide/tools.md). Live checks for this release are in the README.
+
+### Security
+
+Earlier releases ran some repository code outside the execution sandbox: imports before the first request, post-edit import checks, obligation checks, the startup check of the selected test interpreter, and host Git calls that consulted repository configuration. In 0.2.0 these operations run inside the execution sandbox. Repository indexing Git queries use a sanitized, offline Git view.
+
+### Fixes
+
+- Linux: runs no longer stop at their first check when the user already owns more than 64 processes (most desktop sessions). The check sandbox capped the user's total process count instead of the processes it creates.
+- Linux: the check sandbox no longer fails to start when the test interpreter lives inside a mounted environment directory.
+- The sandbox binary is found in its standard location when PATH does not list it (for example when started from an IDE or a scheduler).
+- A transient fork failure while starting the check sandbox on a loaded machine is retried briefly instead of stopping the run.
+- macOS: shell commands that use developer tools (make, git, cc) run inside the sandbox instead of opening the Command Line Tools installer.
+- A check command whose program is not installed (for example `make`) now stops the run with "check command not found" instead of "sandbox unavailable".
+
 ## 0.1.0 preview
 
 First preview release.

@@ -549,7 +549,7 @@ def _lean_no_host_recovery_tools(runtime: object, tools: object) -> list[dict[st
         return current
     preferred_names = (
         "done", "run_tests", "edit", "str_replace", "read",
-        "grep", "list_files", "file_create", "read_check_receipt",
+        "grep", "list_files", "file_create", "file_delete", "file_move", "shell", "read_check_receipt",
         "where_defined", "who_calls", "references", "decide",
         "launch_job", "job_status", "job_output", "job_kill",
         "note_update", "note_retrieve", "recall_evidence", "recall",
@@ -6396,7 +6396,7 @@ class StateFrameRuntime:
     def _bind_target_from_action(self, kind: str, arguments: Mapping[str, object]) -> str | None:
         """Bind the first admitted edit path when no explicit localize was used."""
         if getattr(self, "target", None) is not None or kind not in {
-                "edit", "str_replace", "file_create", "replace_module", "write", "replace",
+                "edit", "str_replace", "file_create", "shell", "replace_module", "write", "replace",
                 "edit_file", "create_file", "delete_file", "rename_file"}:
             return None
         return self._bind_target(
@@ -9157,9 +9157,13 @@ class StateFrameRuntime:
             already = any(item.get("tool_call_id") == message.get("tool_call_id")
                           and item.get("content") == content for item in sequence)
             if not already:
-                if assistant is not None:
+                from kernel_shell_tool import attach_shell_verification
+                attached = (assistant is not None and attach_shell_verification(
+                    sequence, call_id, assistant, message))
+                if assistant is not None and not attached:
                     sequence.append(copy.deepcopy(assistant))
-                sequence.append(copy.deepcopy(message))
+                if not attached:
+                    sequence.append(copy.deepcopy(message))
             if getattr(self, "stateframe_tokenlab_host_result_guard_mode", "off") == "on":
                 from kernel_tokenlab_host_result_guard import ensure_sequence
                 ensure_sequence(self, sequence)
@@ -11470,7 +11474,7 @@ class StateFrameRuntime:
 
     def completion_mutation_guard(self, tool: str, *, evidence: object = None) -> str | None:
         """Return typed feedback when a mutation arrives after accepted done."""
-        if tool not in {"edit", "str_replace", "file_create", "replace_module", "write", "replace"}:
+        if tool not in {"edit", "str_replace", "file_create", "file_delete", "file_move", "shell", "replace_module", "write", "replace"}:
             return None
         if getattr(self, "stateframe_completion_v2_mode", "off") == "on":
             authority = self._sync_completion_authority()
@@ -11759,6 +11763,17 @@ class StateFrameRuntime:
         return tool_allowed(name, runtime=self)
 
     def tool_menu(self, tools: list[dict], messages: Sequence[dict]) -> list[dict]:
+        from kernel_agent_tools import service, project_menu
+        host = service()
+        if host is not None:
+            host.jobs.next_request(getattr(self.owner, "current_step", 0))
+            if host.jobs.jobs:
+                host.snapshot()
+        selected = project_menu(self._base_tool_menu(tools, messages))
+        self.completion_menu = tuple(tool["function"]["name"] for tool in selected)
+        return selected
+
+    def _base_tool_menu(self, tools: list[dict], messages: Sequence[dict]) -> list[dict]:
         from kernel_lean import enabled as lean_enabled, plain_tool_surface
         if lean_enabled():
             selected = plain_tool_surface(tools)
@@ -12701,7 +12716,7 @@ class StateFrameRuntime:
         if session is None:
             return None
         if str(name or "").strip().lower() in {
-                "edit", "str_replace", "file_create", "replace_module", "write", "replace"
+                "edit", "str_replace", "file_create", "shell_effect", "file_delete", "file_move", "shell", "replace_module", "write", "replace"
         } and getattr(getattr(session, "phase", None), "value", "") == "locate":
             try:
                 from kernel_bounded_locate_code import hypothesis_from_edit_arguments
@@ -12723,6 +12738,12 @@ class StateFrameRuntime:
             raw_path = receipt.get("target_path")
             if isinstance(raw_path, str) and raw_path:
                 changed_paths.append(raw_path)
+            changed_files = receipt.get("changed_files")
+            if isinstance(changed_files, Sequence) and not isinstance(changed_files, (str, bytes)):
+                for item in changed_files:
+                    value = item.get("path") if isinstance(item, Mapping) else item
+                    if isinstance(value, str):
+                        changed_paths.append(value)
             action = getattr(self, "current_action", None)
             if not changed_paths and isinstance(action, Mapping):
                 arguments = action.get("arguments")
@@ -12887,6 +12908,12 @@ class StateFrameRuntime:
 
     def job_operation(self, name: str, arguments: dict) -> str | None:
         """Dispatch one typed background-job operation in the opt-in organ."""
+        from kernel_agent_tools import service
+        agent_tools = service()
+        if agent_tools is not None and name in agent_tools.names:
+            # The per-run adapter owns this name, including its intent/completion
+            # tape. In particular job_output also exists in the legacy organ.
+            return None
         job_watch = getattr(self, "job_watch", None)
         from kernel_frame_diet import JOB_TOOL_NAME, enabled as frame_diet_enabled, job_call
         if job_watch is not None and name == JOB_TOOL_NAME and frame_diet_enabled():
@@ -13705,7 +13732,10 @@ class StateFrameRuntime:
             self.journal.emit("ripple_preview_unavailable", payload_schema="stateframe-ripple-preview/1",
                               reason="text_mode_dispatch", advisory_only=True, dispatch=False)
         if engine is None or kind not in {
-                "edit", "str_replace", "file_create", "replace_module", "write", "replace"}:
+                "edit", "str_replace", "file_create", "file_delete", "file_move", "shell", "replace_module", "write", "replace"}:
+            return
+        if kind in {"file_delete", "file_move", "shell"}:
+            # A source-only overlay cannot represent a deletion or paired rename.
             return
         path_arg = arguments.get("path")
         if not isinstance(path_arg, str) or not path_arg:
@@ -13918,7 +13948,7 @@ class StateFrameRuntime:
 
     @_host_phase("pre_dispatch")
     def start_action(self, kind: str, arguments: dict, *, charge_dispatch: bool = True) -> str | None:
-        if kind in {"edit", "str_replace", "file_create", "replace_module", "write", "replace"}:
+        if kind in {"edit", "str_replace", "file_create", "file_delete", "file_move", "shell", "replace_module", "write", "replace"}:
             # Do this before any pre-dispatch binding read.  Non-mutating
             # actions deliberately retain the current revision cache.
             self._invalidate_binding_cache()
@@ -13972,7 +14002,7 @@ class StateFrameRuntime:
                 fuel_key = (
                     "verifications" if action_name in {"test", "run_tests", "pytest"}
                     else "repairs" if action_name in {
-                        "edit", "str_replace", "file_create", "replace_module", "write", "replace"
+                        "edit", "str_replace", "file_create", "shell", "replace_module", "write", "replace"
                     }
                     else "model_calls"
                 )
@@ -14073,7 +14103,7 @@ class StateFrameRuntime:
         """Advance the bounded repair episode for every non-edit action."""
         if getattr(self, "stateframe_host_closure_mode", "off") != "on":
             return
-        if kind in {"done", "edit", "str_replace", "file_create", "replace_module",
+        if kind in {"done", "edit", "str_replace", "file_create", "shell", "shell_effect", "replace_module",
                     "write", "replace"}:
             # done is advanced by completion_decision; edits are advanced by
             # the focused post-edit host checks.
@@ -14213,7 +14243,7 @@ class StateFrameRuntime:
         if getattr(self, "stateframe_other_end_contract_mode", "off") != "on":
             return
         kind = str(receipt.get("kind", "")).lower()
-        if kind not in {"edit", "str_replace", "file_create", "replace_module", "write", "replace"}:
+        if kind not in {"edit", "str_replace", "file_create", "shell_effect", "file_delete", "file_move", "shell", "replace_module", "write", "replace"}:
             return
         if str(receipt.get("result_class", "")).upper() != "APPLIED":
             return
@@ -14393,7 +14423,7 @@ class StateFrameRuntime:
             result_class = str(receipt.get("result_class", receipt.get("status", ""))).upper()
             if kind in {"read", "grep"} and result_class not in {"REFUSED", "REFUSED_PREDISPATCH", "ERROR"}:
                 budget.request("read_completed", tool=kind, result=result_class)
-            elif kind in {"edit", "str_replace", "file_create", "replace_module", "write", "replace"} \
+            elif kind in {"edit", "str_replace", "file_create", "shell_effect", "replace_module", "write", "replace"} \
                     and result_class == "APPLIED":
                 budget.request("edit_applied", tool=kind, result=result_class)
             elif kind in {"test", "run_tests", "pytest", "probe"}:
@@ -14467,7 +14497,7 @@ class StateFrameRuntime:
                     reason="work_carry_action", step=receipt.get("turn"))
         if (getattr(self, "where_used_mode", "off") == "on"
                 and getattr(self, "where_used_ledger", None) is not None
-                and receipt.get("kind") in {"edit", "str_replace", "file_create", "replace_module",
+                and receipt.get("kind") in {"edit", "str_replace", "file_create", "shell_effect", "replace_module",
                                              "write", "replace"}
                 and receipt.get("result_class") == "APPLIED"
                 and self._post_edit_before is not None):
@@ -14502,7 +14532,7 @@ class StateFrameRuntime:
         if (
             getattr(self, "stateframe_project_registries_mode", "off") == "on"
             and receipt.get("kind") in {
-                "edit", "str_replace", "file_create", "replace_module",
+                "edit", "str_replace", "file_create", "shell_effect", "replace_module",
                 "write", "replace",
             }
             and receipt.get("result_class") == "APPLIED"
@@ -14521,7 +14551,7 @@ class StateFrameRuntime:
         if intent_carry is not None:
             kind = receipt.get("kind")
             result_class = receipt.get("result_class")
-            if kind in {"edit", "str_replace", "file_create", "replace_module", "write", "replace"}:
+            if kind in {"edit", "str_replace", "file_create", "shell_effect", "replace_module", "write", "replace"}:
                 if result_class == "APPLIED":
                     intent_carry.clear_for_edit(
                         receipt.get("target_path") or (self.current_action or {}).get("arguments", {}).get("path", ""),
@@ -14553,7 +14583,7 @@ class StateFrameRuntime:
                 self._refresh_decision_cache(receipt=receipt)
             return
         if (getattr(self, "post_edit_tracker", None) is not None
-                and receipt.get("kind") in {"edit", "str_replace", "file_create", "replace_module"}
+                and receipt.get("kind") in {"edit", "str_replace", "file_create", "shell_effect", "replace_module"}
                 and receipt.get("result_class") == "APPLIED"
                 and self._post_edit_before is not None):
             path, before = self._post_edit_before
@@ -14579,7 +14609,7 @@ class StateFrameRuntime:
                                   error_type=type(error).__name__, dispatch=False)
             self.last_completed_receipt = dict(receipt)
         if (getattr(self, "structure_facts_mode", "off") == "on"
-                and receipt.get("kind") in {"edit", "str_replace", "file_create", "replace_module",
+                and receipt.get("kind") in {"edit", "str_replace", "file_create", "shell_effect", "replace_module",
                                              "write", "replace"}
                 and receipt.get("result_class") == "APPLIED"
                 and self._post_edit_before is not None):
@@ -14611,13 +14641,13 @@ class StateFrameRuntime:
                     "before_sha": before_sha, "after_sha": after_sha})
                 self.lifecycle('integrity_violation')
         if (getattr(self, "test_integrity", None) is not None
-                and receipt.get("kind") in {"edit", "str_replace", "file_create",
+                and receipt.get("kind") in {"edit", "str_replace", "file_create", "shell_effect",
                                              "replace_module", "write", "replace"}
                 and receipt.get("result_class") == "APPLIED"):
             integrity_report = self._audit_test_integrity()
             receipt["test_integrity"] = integrity_report.to_dict()
             self.amend_receipt(receipt)
-        if (receipt.get("kind") in {"edit", "str_replace", "file_create", "replace_module",
+        if (receipt.get("kind") in {"edit", "str_replace", "file_create", "shell_effect", "replace_module",
                                      "write", "replace"}
                 and receipt.get("result_class") != "APPLIED"):
             self._count_host_repair_action(
@@ -14629,7 +14659,7 @@ class StateFrameRuntime:
         before = (dict(self.step_ledger.pending['before'].get('product_files', {}))
                   if self.step_ledger is not None and self.step_ledger.pending is not None
                   else dict(self.artifact_hashes))
-        if (receipt.get("kind") in {"edit", "str_replace", "file_create", "replace_module",
+        if (receipt.get("kind") in {"edit", "str_replace", "file_create", "shell_effect", "replace_module",
                                      "write", "replace"}
                 and receipt.get("result_class") == "APPLIED"):
             changed_paths: list[str] = []
@@ -14673,7 +14703,7 @@ class StateFrameRuntime:
         self.journal.emit("completed_action", action=record, receipt_id=receipt["receipt_id"],
                           artifact_snapshot_before=before, current_binding=current,
                           diagnostics=self.actions.diagnose())
-        if (receipt.get("kind") in {"edit", "str_replace", "file_create", "replace_module", "write", "replace"}
+        if (receipt.get("kind") in {"edit", "str_replace", "file_create", "shell_effect", "replace_module", "write", "replace"}
                 and receipt.get("result_class") == "APPLIED"):
             from kernel_green_lock import note_applied_product_edit
             note_applied_product_edit(receipt.get("target_path", ""))
@@ -15092,7 +15122,7 @@ class StateFrameRuntime:
         tool = str(record.get("tool", "")).strip().lower()
         result_value = str(record.get("result", record.get("result_class", ""))).strip().upper()
         product_progress = tool in {
-            "edit", "str_replace", "file_create", "replace_module", "write", "replace",
+            "edit", "str_replace", "file_create", "shell_effect", "file_delete", "file_move", "shell", "replace_module", "write", "replace",
         } and result_value in {"APPLIED", "PASS", "SUCCESS", "OK"}
         gating_check_closed = tool in {
             "run_tests", "test", "pytest",
@@ -17283,8 +17313,14 @@ class StateFrameRuntime:
             grounding_frame = self.claim_grounding.frame_projection()
             frame["claim_grounding"] = grounding_frame
             frame["ungrounded_claims"] = list(grounding_frame.get("facts", ()))[:3]
+        from kernel_agent_tools import service as agent_tools_service
+        host_tools = agent_tools_service()
         job_watch = getattr(self, "job_watch", None)
-        if job_watch is not None:
+        if host_tools is not None and host_tools.jobs.frozen is not None:
+            # Receipt-side frame inspection must not freeze a partial tool batch.
+            # Only the logical request boundary samples new job observations.
+            frame["jobs"] = host_tools.snapshot()
+        elif job_watch is not None:
             frame["jobs"] = job_watch.frame()
         if getattr(self, "stateframe_completion_v2_mode", "off") == "on":
             authority = self._sync_completion_authority()
@@ -17888,7 +17924,7 @@ class StateFrameRuntime:
             kind = str(row.get("kind", row.get("tool", ""))).lower()
             result = str(row.get("result_class", row.get("observed_result",
                                                             row.get("result", "")))).upper()
-            if ((kind and kind not in {"edit", "str_replace", "file_create", "replace_module"})
+            if ((kind and kind not in {"edit", "str_replace", "file_create", "shell_effect", "replace_module"})
                     or result != "APPLIED"):
                 continue
             path = row.get("target_path", row.get("path", ""))
@@ -18101,8 +18137,8 @@ class StateFrameRuntime:
                 "decision_continuity", Priority.REQUIRED_CONTROL_CONTEXT,
                 "decision_continuity", continuity_message["content"],
                 token_estimate(continuity_message), action_required=True))
-        if (getattr(self, "job_watch", None) is not None
-                and getattr(self, "environment_state", None) is None):
+        if ("jobs" in frame and ("sequence" in frame["jobs"]
+                or getattr(self, "environment_state", None) is None)):
             from kernel_job_watch import render_jobs_block
             jobs_block = render_jobs_block(frame.get("jobs", ()))
             messages["jobs"] = {"role": "user", "content": jobs_block}
@@ -19648,8 +19684,8 @@ class StateFrameRuntime:
                 "decision_continuity", Priority.REQUIRED_CONTROL_CONTEXT,
                 "decision_continuity", continuity_message["content"],
                 token_estimate(continuity_message), action_required=True))
-        if (getattr(self, "job_watch", None) is not None
-                and self.unified_mode != "on"):
+        if ("jobs" in frame and ("sequence" in frame["jobs"]
+                or self.unified_mode != "on")):
             from kernel_job_watch import render_jobs_block
             jobs_block = render_jobs_block(frame.get("jobs", ()))
             messages["jobs"] = {"role": "user", "content": jobs_block}
@@ -24161,7 +24197,7 @@ class StateFrameRuntime:
                 )
                 raise RuntimeError("frame-only request projection failed") from error
         def emit_request_prepared_event() -> dict[str, object]:
-            return self.journal.emit("request_prepared", request_id=capture.request_id,
+            event = self.journal.emit("request_prepared", request_id=capture.request_id,
                               **({"continuation_source": source_delivery}
                                  if self.continuation_source_refresh else {}),
                               **({"cache_layout": cache_layout_audit}
@@ -24209,6 +24245,11 @@ class StateFrameRuntime:
                                     if cache_layout_audit is not None
                                    else ("stateframe-render/1" if self.latest_exchange_mode == 'off'
                                            else "stateframe-render-latest-exchange/1"))))))
+            from kernel_agent_tools import service as agent_tools_service
+            host_tools = agent_tools_service()
+            if host_tools is not None:
+                host_tools.jobs.commit(self.journal)
+            return event
 
         if (provider_request and not framefit_on
                 and evictfix_enabled()):

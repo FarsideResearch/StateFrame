@@ -28,6 +28,7 @@ import threading
 import time
 
 from kernel_plain_contracts import PlainContractError, validate_pairing
+from kernel_shell_tool import SHELL_SCHEMA
 from kernel_tool_reply import Outcome, record_and_strip_receipts, tool_reply
 
 OUT_CAP = 12000  # chars of any single tool result returned to the model
@@ -57,6 +58,8 @@ TOOLS = [
      "parameters": {"type": "object", "properties": {"summary": {"type": "string"}}, "required": ["summary"]}}},
 ]
 
+
+TOOLS.append(SHELL_SCHEMA)
 
 def cap(text: str) -> str:
     text = text.replace("\x00", "").replace("\\u0000", "<NUL>")  # server re-parses tool text as JSON
@@ -158,7 +161,16 @@ Executor = Callable[[str, dict], str]
 
 
 def build_body(messages: list, limits: Limits) -> dict:
-    body = {"model": limits.model, "messages": messages, "tools": TOOLS, "temperature": limits.temperature,
+    from kernel_shell_tool import service
+    shell = service()
+    tools = [t for t in TOOLS if t["function"]["name"] != "shell"
+             or (shell is not None and shell.settings.shell != "off")]
+    import copy
+    tools = copy.deepcopy(tools)
+    for tool in tools:
+        if tool["function"]["name"] == "shell":
+            tool["function"]["parameters"]["properties"].pop("background", None)
+    body = {"model": limits.model, "messages": messages, "tools": tools, "temperature": limits.temperature,
             "max_tokens": limits.max_tokens, **dict(limits.sampler)}
     if limits.reasoning_budget:
         body["reasoning_budget_tokens"] = limits.reasoning_budget
@@ -310,6 +322,9 @@ def run_loop(task_text: str, *, provider: Provider, execute: Executor, limits: L
                         output = "finished"
                         result.summary = str(args.get("summary", "")) if isinstance(args, dict) else ""
                     else:
+                        bind_call = getattr(getattr(execute, "__self__", None), "bind_tool_call", None)
+                        if bind_call is not None:
+                            bind_call(call.get("id", ""))
                         output = execute(name, args)
                 except PlainContractError:  # a broken host boundary is never a model observation
                     raise
@@ -319,7 +334,7 @@ def run_loop(task_text: str, *, provider: Provider, execute: Executor, limits: L
                     reply_receipt = {"code": "tool_error"}
                 if name == "done":
                     finished = True
-                content = cap(output)
+                content = output if name == "shell" else cap(output)
                 reply = tool_reply(
                     call.get("id", ""), name, reply_outcome, content,
                     receipt=reply_receipt,

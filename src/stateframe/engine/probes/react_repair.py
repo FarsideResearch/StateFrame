@@ -28,6 +28,8 @@ from dataclasses import dataclass, field
 from types import SimpleNamespace
 from typing import Callable
 
+from kernel_shell_tool import SHELL_SCHEMA
+
 if __package__:
     from .decoy_tools import (
         build_tool_surface,
@@ -813,7 +815,7 @@ def _capture_done_candidate_after_exception(
         current_sources = fallback_sources if isinstance(fallback_sources, Mapping) else {}
     source_map = {
         str(path): source for path, source in current_sources.items()
-        if isinstance(path, str) and isinstance(source, str)
+        if isinstance(path, str) and (isinstance(source, str) or source is None)
     } if isinstance(current_sources, Mapping) else {}
     parent_sources: dict[str, str] = {}
     parent = getattr(fileset, "parent", None)
@@ -933,6 +935,7 @@ def _product_roots(row: Mapping[str, object]) -> tuple[str, ...]:
 
 def _is_product_path(relative: str, row: Mapping[str, object]) -> bool:
     """Keep product snapshots out of tests, probes, scratch, and cache trees."""
+    from stateframe.workcopy import _ignored
     try:
         from build_tasks.multifile_row import normalize_repo_path
         path = normalize_repo_path(relative, field="product snapshot path")
@@ -945,7 +948,21 @@ def _is_product_path(relative: str, row: Mapping[str, object]) -> bool:
         return False
     if pathlib.PurePosixPath(path).suffix in {".pyc", ".pyo"}:
         return False
+    if any(_ignored(part, True) for part in parts[:-1]) or _ignored(parts[-1], False):
+        return False
+    if (parts[-1].startswith("test_") or parts[-1].endswith("_test.py")
+            or parts[-1] == "conftest.py"):
+        return False
+    # Ordinary unscoped user repositories admit new product roots as well as
+    # files present at startup. Exclusions and test guards above still apply.
+    if row.get("tier") == "USER-REPO" and row.get("scoped_edits") is False:
+        return True
     return any(path == root or path.startswith(root + "/") for root in _product_roots(row))
+
+
+# The run loop imports kernel_green_lock.is_product_path under the same local name, so tool
+# handlers inside it must call the row-aware check through this alias.
+_row_is_product_path = _is_product_path
 
 
 def _product_source_paths(root: pathlib.Path, fileset: FileSet,
@@ -2288,6 +2305,19 @@ TOOLS = [
             "content": {"type": "string"}},
             "required": ["path", "content"]}}},
     {"type": "function", "function": {
+        "name": "file_delete",
+        "description": "Delete one existing product file. Refuses protected tests, directories, symlinks, and paths outside the editable scope.",
+        "parameters": {"type": "object", "properties": {
+            "path": {"type": "string"}, "why": {"type": "string"}},
+            "required": ["path"]}}},
+    {"type": "function", "function": {
+        "name": "file_move",
+        "description": "Move one existing product file to a new path, creating destination directories. Refuses collisions and unauthorized paths.",
+        "parameters": {"type": "object", "properties": {
+            "source": {"type": "string"}, "destination": {"type": "string"},
+            "why": {"type": "string"}},
+            "required": ["source", "destination"]}}},
+    {"type": "function", "function": {
         "name": "run_tests",
         "description": "Run pytest. target may be a file, file::node, or a bare "
                        "test function name.",
@@ -2410,6 +2440,10 @@ _PROBE_TOOL = {"type": "function", "function": {
         "expected": {"type": "string", "description": "your expectation from the brief, not source"}},
         "required": ["obligation", "code"]}}}
 
+TOOLS.append(SHELL_SCHEMA)
+from kernel_agent_schemas import BUILTIN_SCHEMAS
+TOOLS.extend(BUILTIN_SCHEMAS)
+
 # Tool calls accept an optional `why`: one declared line
 # of intent per action. The model narrates its plan as it works (a commitment device that
 # measurably keeps small models on track), the receipt tape records intent alongside
@@ -2496,6 +2530,12 @@ def _tools_for_probe_modes(*, probe_gate_on: bool,
                            observation_probe_on: bool,
                            dependency_fact_on: bool = False) -> list[dict]:
     """Select the per-request probe surface without changing the OFF base list."""
+    from kernel_shell_tool import service as shell_service
+    shell = shell_service()
+    base_tools = [tool for tool in TOOLS if tool["function"]["name"] != "shell"
+                  or (shell is not None and shell.settings.shell != "off")]
+    from kernel_agent_tools import project_menu
+    base_tools = project_menu(base_tools)
     boundary_aliases = os.environ.get("STATEFRAME_BOUNDARY_CHECKS", "off").lower() == "on"
     probe_modes = ["python"]
     if not observation_probe_on:
@@ -2539,9 +2579,9 @@ def _tools_for_probe_modes(*, probe_gate_on: bool,
                 "{clause_ref, entrypoint, input, expected_relation} case, or use "
                 "the clause review modes for the existing bounded packet flow; the "
                 "host owns execution, provenance, comparison, and bounds.")
-        selected = [tool for tool in TOOLS if tool is not _PROBE_TOOL] + [observation_tool]
+        selected = [tool for tool in base_tools if tool is not _PROBE_TOOL] + [observation_tool]
     else:
-        selected = ([tool for tool in TOOLS if tool is not _PROBE_TOOL]
+        selected = ([tool for tool in base_tools if tool is not _PROBE_TOOL]
                     + ([_PROBE_TOOL] if probe_gate_on else []))
     from kernel_where_used import mode as where_used_mode
     if where_used_mode() == "on":
@@ -2593,7 +2633,7 @@ def _parse_r1_tool_calls(content: str) -> list:
     the real args sometimes split into a following ```json fence. Merge every JSON
     object in the reply that carries a "function" key (fenced or bare); later objects'
     keys fill earlier gaps. Never raises; [] when nothing matches."""
-    _TOOLS = ("grep", "read", "edit", "str_replace", "insert_before", "authored_check", "file_create",
+    _TOOLS = ("grep", "read", "edit", "str_replace", "insert_before", "authored_check", "file_create", "file_delete", "file_move", "shell",
                "replace_module", "run_tests", "reproduce", "test", "probe", "done",
                "where_defined", "who_calls", "references")
     # Fix round (rv_figure_it_out_REPORT.md finding 3): the three figure_it_out
@@ -4807,11 +4847,12 @@ def _run_tests_impl(root: pathlib.Path, fn: str, explicit: str | None,
         # precise rule: run normally; ONLY when the repo's conftest itself fails to
         # IMPORT (exit 4, AHA's Settings/DB-at-import world) retry oracle targets
         # without conftests — the conftest was unusable anyway, so nothing is lost.
+        from kernel_test_python import test_python
         executable = (
             row.get("python")
             if isinstance(row, dict) and isinstance(row.get("python"), str)
             and row.get("python")
-            else sys.executable
+            else test_python()
         )
         _cmd = ([executable, "-m", "pytest", "-x", "-q", "--no-header"]
                 + (["-k", kexpr] if kexpr else []) + ["-p", "no:cacheprovider"]
@@ -6136,6 +6177,15 @@ def work(d, *, resume=None):
         # CREATES this run (file_create) stay editable: that is legitimate repro work.
         baseline_tests = {str(p) for p in root.rglob("test_*.py")} \
             | {str(p) for p in root.rglob("conftest.py")}
+        from kernel_shell_tool import service as shell_service
+        _shell = shell_service()
+        if _shell is not None:
+            _shell.bind(root, d, baseline_tests)
+            os.environ["REACT_ENVIRONMENT_REVISION"] = _shell.identity()
+        from kernel_agent_tools import service as agent_tools_service
+        _agent_tools = agent_tools_service()
+        if _agent_tools is not None:
+            _agent_tools.bind()
         created_this_run: set = set()
         action_anchor = len(msgs)     # conversation index just after the last real ACTION
         last_surgery_step = -99       # cooldown so back-to-back surgeries cannot thrash
@@ -7934,7 +7984,7 @@ def work(d, *, resume=None):
                         from kernel_measurement import start_turn_timing_step
                         start_turn_timing_step("tool_execution")
                         if (_edit_nturn_request_active
-                                and _name not in {"edit", "file_create", "str_replace",
+                                and _name not in {"edit", "file_create", "file_delete", "file_move", "shell", "str_replace",
                                                   "insert_before", "replace_module"}):
                             _finish_edit_nturn()
                         try:
@@ -8056,6 +8106,27 @@ def work(d, *, resume=None):
                                                            "name": _name,
                                                            "arguments": _fn.get("arguments")
                                                            or "{}"}}]})
+                        if _agent_tools is not None and _name == "git" and not _agent_tools.offered("git"):
+                            _obs = "REFUSED NOT_A_GIT_REPO: source is not a Git repository or Git is disabled"
+                            bolt.receipt("git", "git", "unavailable", "REFUSED", _obs)
+                            measurement.observe("git", _obs)
+                            msgs.append(_tool_reply_for_call(msgs, tool_call_id, _obs))
+                            continue
+                        if _name == "shell" and (_shell is None or _shell.settings.shell == "off"):
+                            _obs = "REFUSED SHELL_OFF: shell is disabled by --shell off"
+                            bolt.receipt("shell", "shell", "off", "REFUSED", _obs)
+                            measurement.observe("shell", _obs)
+                            msgs.append(_tool_reply_for_call(msgs, tool_call_id, _obs))
+                            continue
+                        if (_schema_errors and _agent_tools is not None and _name in _agent_tools.names):
+                            _code = ("BAD_ARGUMENTS" if _name in _agent_tools.custom else
+                                     "BAD_CONDITION" if _name.startswith("job_") else
+                                     "BAD_ARGUMENT" if _name == "git" else "WEB_HTTP_ERROR")
+                            _obs = f"REFUSED {_code}: " + "; ".join(_schema_errors[:3])
+                            bolt.receipt(_name, _name, "arguments", "REFUSED", _obs)
+                            measurement.observe(_name, _obs)
+                            msgs.append(_tool_reply_for_call(msgs, tool_call_id, _obs))
+                            continue
                         _active_menu_capture = getattr(measurement, "_active_capture", None)
                         _menu_request_id = getattr(_active_menu_capture, "request_id", None)
                         from kernel_completion_owner import request_menu_action_admissible
@@ -8362,6 +8433,104 @@ def work(d, *, resume=None):
                             line = "edit " + str(_args.get("path") or "")
                             tool_edit_src = str(_args.get("function_source") or "")
                             tool_target_ref = _args.get("target_ref")
+                        elif _name == "shell" or (_agent_tools is not None and _name in _agent_tools.names):
+                            from kernel_shell_tool import ShellCleanupFailed, ShellExecutionFailed, publish_effects
+                            if _name == "shell" and (_shell is None or _shell.settings.shell == "off"):
+                                _obs = "REFUSED SHELL_OFF: shell is disabled by --shell off"
+                                bolt.receipt("shell", "shell", "off", "REFUSED", _obs)
+                            else:
+                                _reply = (_shell.execute(_args, tool_call_id) if _name == "shell" else
+                                          _agent_tools.execute(_name, _args, tool_call_id))
+                                _obs = _reply.observation
+                                try:
+                                    _rebound = publish_effects(_reply, measurement, bolt, created_this_run, name=_name)
+                                except Exception as _error:
+                                    raise ShellExecutionFailed(
+                                        f"shell receipt publication failed: {type(_error).__name__}: {_error}") from _error
+                                if _rebound is not None:
+                                    target = _rebound
+                                if _reply.applied:
+                                    edits += 1
+                                    edits_since_test += 1
+                                    if first_edit_step is None:
+                                        first_edit_step = step
+                            msgs.append(_tool_reply_for_call(msgs, tool_call_id, _obs))
+                            measurement.observe(_name, _obs)
+                            _edit_nturn_after_action(_name, _obs, step, model_action_args=_args)
+                            if _shell is not None and _reply.fatal:
+                                raise ShellCleanupFailed(_obs)
+                            continue
+                        elif _name in {"file_delete", "file_move"}:
+                            from kernel_file_ops import FileOperationRefused, FileOperationReplay, file_delete, file_move
+                            from kernel_tool_surface import new_files_forbidden
+
+                            _source_arg = _args.get("path") if _name == "file_delete" else _args.get("source")
+                            _dest_arg = _args.get("destination") if _name == "file_move" else None
+                            _paths = ()
+                            _file_replay = FileOperationReplay(
+                                root, _name, _args, tool_call_id,
+                                authority={"editable": sorted(fileset.paths),
+                                           "created": sorted(str(pathlib.Path(p).relative_to(root))
+                                                             for p in created_this_run),
+                                           "protected": sorted(str(pathlib.Path(p).relative_to(root))
+                                                               for p in baseline_tests),
+                                           "new_files_forbidden": new_files_forbidden(measurement),
+                                           "allowed_product_paths": d.get("allowed_product_paths"),
+                                           "new_file_roots": d.get("new_file_roots")},
+                                environment_identity=_shell.identity() if _shell is not None else "disabled")
+                            try:
+                                def _protected(path):
+                                    return protected_test_path(path, baseline_tests)
+
+                                def _editable(relative):
+                                    return (relative in fileset.paths
+                                            or str(root / relative) in created_this_run)
+                                if _name == "file_delete":
+                                    _effect = file_delete(root, _source_arg, protected=_protected,
+                                                          editable=_editable)
+                                else:
+                                    _effect = file_move(
+                                        root, _source_arg, _dest_arg, protected=_protected,
+                                        editable=_editable,
+                                        new_file_allowed=lambda relative: (
+                                            not new_files_forbidden(measurement)
+                                            and _row_is_product_path(relative, d)),
+                                    )
+                                _paths = _effect.changed_paths
+                                _obs = f"{_name} applied. {', '.join(_paths)}"
+                                from kernel_post_edit_refresh import rebind_after_file_operation
+                                _rebound_target = rebind_after_file_operation(
+                                    measurement, _effect.source, _effect.destination)
+                                if _rebound_target is not None:
+                                    target = _rebound_target
+                                if _name == "file_move":
+                                    created_this_run.discard(str(root / _effect.source))
+                                    created_this_run.add(str(root / _effect.destination))
+                                else:
+                                    created_this_run.discard(str(root / _effect.source))
+                                if first_edit_step is None:
+                                    first_edit_step = step
+                                edits += 1
+                                _result = "APPLIED"
+                            except FileOperationRefused as _error:
+                                _obs = _error.reply()
+                                _result = "REFUSED"
+                            except OSError as _error:
+                                _obs = f"{_name} FAILED: {type(_error).__name__}: {_error}"
+                                _result = "FAILED"
+                            _obs = _file_replay.complete(_result, _obs)
+                            bolt.receipt(
+                                "edit", f"{_name} {_source_arg}",
+                                f"{_source_arg}|{_dest_arg or ''}", _result, _obs,
+                                target_path=(_effect.destination if _name == "file_move"
+                                             else _paths[0]) if _paths else None,
+                                changed_paths=_paths,
+                            )
+                            _obs = _append_structure_fact_observation(measurement, bolt, _obs, "edit")
+                            msgs.append(_tool_reply_for_call(msgs, tool_call_id, _obs))
+                            _edit_nturn_after_action(
+                                f"{_name} {_source_arg}", _obs, step, model_action_args=_args)
+                            continue
                         elif _name == "file_create":
                             # E298 graft #1 (coding.py _code_file_create's contract): both
                             # 4B lanes burned 25+ steps retrying edits on files they were
@@ -9722,6 +9891,10 @@ def work(d, *, resume=None):
                         break
                     continue
             if line.startswith("done"):
+                _jobs_stopped = (_agent_tools.stop_jobs(str(tool_call_id or f"done-{step}"))
+                                 if _agent_tools is not None else "")
+                if _jobs_stopped:
+                    measurement.observe("job_stop", _jobs_stopped)
                 from kernel_done_is_submit_authority import (
                     enabled as done_submit_enabled,
                     ownerless_early_done_refusal,
@@ -9736,7 +9909,7 @@ def work(d, *, resume=None):
                         ),
                     )
                     if refusal is not None:
-                        observation = str(refusal["detail"])
+                        observation = str(refusal["detail"]) + ("\n" + _jobs_stopped if _jobs_stopped else "")
                         bolt.receipt(
                             "done", line, "current candidate", "NEEDS_WORK",
                             detail=observation,
@@ -9753,7 +9926,7 @@ def work(d, *, resume=None):
                         "done", line, "current candidate",
                         "SUBMIT_PENDING", detail="model done routed to host artifact capture",
                     )
-                    observation = "Submission requested; capturing the current candidate."
+                    observation = "Submission requested; capturing the current candidate." + ("\n" + _jobs_stopped if _jobs_stopped else "")
                     measurement.observe(line, observation)
                     msgs.append(_tool_reply_for_call(msgs, tool_call_id, observation, no_id_role="user"))
                     break
@@ -10346,6 +10519,8 @@ def work(d, *, resume=None):
                         _unresolved_questions)
                 if _decisive_factor_advisory:
                     _done_receipt_detail += "\n" + _decisive_factor_advisory[:360]
+                if _jobs_stopped:
+                    _done_receipt_detail += "\n" + _jobs_stopped
                 bolt.receipt("done", bolt.last_done_summary[:100] or "done",
                              bolt.last_done_summary,
                              "ACCEPTED" if ok_finish else "CHALLENGED",
@@ -10364,6 +10539,8 @@ def work(d, *, resume=None):
                         before=_done_snapshot, after=_done_snapshot,
                         selectors=tuple(getattr(bolt, "f2p_ids", ())),
                         failure_tail=why if not ok_finish else "")
+                if _jobs_stopped:
+                    why = (why + "\n" if why else "") + _jobs_stopped
                 if not ok_finish:
                     measurement.observe("done", why)
                     if (getattr(measurement, "portfolio", None) is not None
@@ -12394,7 +12571,7 @@ def work(d, *, resume=None):
             try:
                 current_sources = {
                     str(path): source for path, source in final_sources.items()
-                    if isinstance(path, str) and isinstance(source, str)
+                    if isinstance(path, str) and (isinstance(source, str) or source is None)
                 }
                 if multifile:
                     parent_sources = dict(fileset.parent)

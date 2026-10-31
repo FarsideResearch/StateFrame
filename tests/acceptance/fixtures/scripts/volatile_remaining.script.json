@@ -1,0 +1,1 @@
+{"model":"scripted","steps":[{"tool":"read","arguments":{"path":"app.py"}},{"tool":"file_create","arguments":{"path":"created.py","content":"CREATED = True\n"}},{"tool":"run_tests","arguments":{"target":"tests/test_app.py"}},{"tool":"done","arguments":{"summary":"Volatile observation was replayed."}}],"tokenize":{"mode":"ok"}}

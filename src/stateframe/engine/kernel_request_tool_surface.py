@@ -12,7 +12,7 @@ _MISSING = object()
 SURFACE_SCHEMA = "stateframe-final-tool-surface/1"
 REQUEST_TOOL_FLOOR_ENV = "STATEFRAME_REQUEST_TOOL_FLOOR"
 TOOL_MENU_MEMO_ENV = "STATEFRAME_TOOL_MENU_MEMO"
-_REQUEST_TOOL_FLOOR = ("read", "grep", "edit", "str_replace", "run_tests", "done")
+_REQUEST_TOOL_FLOOR = ("read", "grep", "edit", "str_replace", "file_delete", "file_move", "shell", "run_tests", "done")
 _REQUEST_TOOL_FLOOR_MAX_SCHEMA_BYTES = 131072
 _RUNTIME_FIELDS = (
     "_greenlock_frozen_menu",

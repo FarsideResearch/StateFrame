@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import re
 import selectors
 import shlex
 import shutil
@@ -20,6 +21,7 @@ from pathlib import Path
 
 CHECK_TIMEOUT = 900.0
 OUTPUT_LIMIT = 256 * 1024
+SANDBOX_FORK_RETRIES = 2  # extra attempts after a transient bwrap fork EAGAIN
 # JSON may escape each retained byte as six ASCII characters.
 WIRE_LIMIT = OUTPUT_LIMIT * 6 + 16384
 PASS_ENV = ("PATH", "LANG", "LC_ALL", "LC_CTYPE", "SYSTEMROOT")
@@ -197,10 +199,22 @@ def _helper() -> int:
             # bounded result and removing the copy, not an extra check allowance.
             check_budget = remaining - min(0.1, remaining / 2)
             try:
-                result = policy.run_sandboxed(shlex.split(spec["command"]), copy,
-                                              env=env, timeout=min(CHECK_TIMEOUT, check_budget),
-                                              cpu_seconds=min(CHECK_TIMEOUT, remaining),
-                                              output_limit=OUTPUT_LIMIT)
+                for attempt in range(SANDBOX_FORK_RETRIES + 1):
+                    result = policy.run_sandboxed(shlex.split(spec["command"]), copy,
+                                                  env=env, timeout=min(CHECK_TIMEOUT, check_budget),
+                                                  cpu_seconds=min(CHECK_TIMEOUT, remaining),
+                                                  output_limit=OUTPUT_LIMIT)
+                    # bwrap's own clone() can hit a transient EAGAIN on a loaded host; that is
+                    # "try again", not "no sandbox". Retry briefly within the same deadline only.
+                    stderr = result.completed.stderr
+                    transient = (result.completed.returncode and stderr.startswith("bwrap:")
+                                 and "Resource temporarily unavailable" in stderr)
+                    if not transient or attempt == SANDBOX_FORK_RETRIES:
+                        break
+                    pause = 0.5 * (attempt + 1)
+                    if spec["deadline"] - time.monotonic() <= pause + 1:
+                        break
+                    time.sleep(pause)
             finally:
                 # Reap surviving descendants before deleting their writable root,
                 # including a check whose leader exited successfully.
@@ -208,6 +222,12 @@ def _helper() -> int:
                     policy._kill_group(spawned)
                     spawned.wait(timeout=1)
             sandbox_error = result.completed.stderr
+            missing = re.match(r"bwrap: execvp (\S+): No such file or directory", sandbox_error)
+            if result.completed.returncode and missing:
+                # The sandbox started; the check program itself is absent (for example `make`
+                # not installed). Say so instead of blaming the sandbox.
+                raise OuterCheckError(f"check command not found: {missing.group(1)}; install it "
+                                      "or change the test command")
             if result.completed.returncode and (
                 sandbox_error.startswith("bwrap:") or
                 (sandbox_error.startswith("sandbox-exec:") and "sandbox_apply" in sandbox_error)

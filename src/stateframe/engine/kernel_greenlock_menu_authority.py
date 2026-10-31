@@ -46,12 +46,12 @@ EMPTY_EVENT = "green_lock_menu_authority_empty"
 EMPTY_OUTCOME = "green_lock_no_permitted_action"
 EMPTY_OVERFLOW_KIND = "GREEN_LOCK_NO_PERMITTED_ACTION"
 EDIT_ACTIONS = frozenset({
-    "edit", "str_replace", "file_create", "replace_module", "write", "replace",
+    "edit", "str_replace", "file_create", "file_delete", "file_move", "shell", "replace_module", "write", "replace",
 })
 VERIFY_ACTIONS = frozenset({"run_tests", "test", "pytest", "predict"})
 WINDOW_ACTIONS = frozenset({"read", "probe"})
 # Product capabilities the readiness disposition never removes under hard-budget-only terminals (b1393).
-_READINESS_NEVER_STRIPS = frozenset({"edit", "str_replace", "file_create", "run_tests", "read_check_receipt"})
+_READINESS_NEVER_STRIPS = frozenset({"edit", "str_replace", "file_create", "file_delete", "file_move", "shell", "run_tests", "read_check_receipt"})
 UPSTREAM_REFUSAL = "MENU: {action} is not offered on this request; use an offered tool."
 
 
@@ -720,6 +720,12 @@ def decide(lock: object, action: object, arguments: Mapping[str, object] | None 
         return Decision(name, False, "runner_capability_unavailable")
     if name in OBSERVATION_TOOLS:
         return Decision(name, True, "observation_authority")
+    from kernel_agent_tools import service as agent_tools_service
+    host_tools = agent_tools_service()
+    if host_tools is not None and name in host_tools.custom:
+        # These commands have explicit host trust and reconcile their effects.
+        # Any mutation retires green evidence through the shell_effect receipt.
+        return Decision(name, True, "custom_tool_capability")
     if name in EDIT_ACTIONS and not _repro_first_edit_allowed(
             lock.runtime, args, for_menu=for_menu):
         return Decision(name, False, "repro_first_required")

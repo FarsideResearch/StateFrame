@@ -1,0 +1,1 @@
+{"model":"scripted","steps":[{"tool":"git","arguments":{"action":"log"}},{"tool":"done","arguments":{"summary":"Handled non-Git repository."}}],"tokenize":{"mode":"ok"}}

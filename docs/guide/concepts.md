@@ -16,15 +16,17 @@ Older turns are not sent. Their content already lives in the typed state, and th
 
 ## What decides what goes in the frame
 
-The engine, not the model. Before each send it fits the frame and the selected source code into the prompt budget (33,344 tokens by default, the size it was built and measured with; see [Context size](running.md#context-size)). When something has to give, it trims lower-priority detail; it never summarizes away the authoritative state, and it always keeps a ledger of what was read. If a task cannot fit what it needs, the engine stops with a clear reason instead of sending a broken request.
+The engine, not the model. Before each send it fits the frame and the selected source code into the prompt budget (33,344 tokens by default, the size it was built and measured with; see [Context size](running.md#context-size)). When something has to give, it trims lower-priority detail; it never summarizes away the authoritative state, and it always keeps a ledger of what was read. Shell, job and custom-command reply delivery can shrink against a measurement of the complete request; the taped observation remains on disk within the command collector's output limit, and the delivered reply states omitted byte counts. If a task cannot fit what it needs, the engine stops with a clear reason instead of sending a broken request.
 
 ## Receipts and ledgers
 
 Every action the engine runs (a read, an edit, a test run) produces a host-recorded result. Facts the engine measured, such as which tests pass, which files were read and what is still owed, are handed to the model plainly in the frame. The model decides what to do; the engine owns the bookkeeping. The task ledger is schema-validated.
 
+Shell and workspace-writing custom tools produce effect receipts for authorized file changes. These changes invalidate earlier reads and checks; forbidden effects are restored before the next request. Executable-bit changes are refused and restored because the sealed result does not carry them. Reconciliation stops without promoting effects beyond 16 MiB per file, 256 MiB of regular-file data or 20,000 entries. Job states and bounded new output appear in a sequenced `jobs` section. Opaque shell, Git and web output is not source-read or check evidence. See [Agent tools](tools.md).
+
 ## Behavior is controlled by code
 
-The engine owns the tool menu, the guards, the decision that a task is done, the test requirements and exactly what the model sees each turn. The model cannot step outside those rails. You change behavior the way you change software: with profiles and switches that are versioned and testable (see [running.md](running.md)). Many switches ship disabled by default; they are still part of the engine.
+The engine owns the tool menu, the guards, the decision that a task is done, the test requirements and exactly what the model sees each turn. The model cannot step outside those rails. You change behavior the way you change software: with profiles and switches that are versioned and testable (see [running.md](running.md)). Many switches ship disabled by default; they are still part of the engine. The shipped product profile uses the composed loop; lean mode is unsupported, and the plain loop refuses Git, web, custom commands and background jobs before execution.
 
 ## Done means checked
 
@@ -37,6 +39,8 @@ The run's history lives in the run directory on disk, not in process memory, and
 ## Checkpoints and resume
 
 `stateframe resume <run-dir>` replays the recorded model responses (no model calls) up to where the run stopped, checks that the next request it rebuilds matches the recorded one byte for byte, and continues live. The engine can also save signed checkpoints of its state for a faster restore (`STATEFRAME_CHECKPOINT=save`); they are off by default in this release because a checkpoint restore was not faithful in our tests. Resume checks every restore, and anything wrong with a checkpoint falls back to the full replay, which is always correct and just slower.
+
+The tool tape records intent before execution and completion afterward for shell, job, Git, web and custom calls. Native file operations follow the existing edit replay path. Read-only observations are served from the tape. Reproducible taped local effects are repeated and compared with their recorded exit, workspace and environment state. Outside effects require `--replay-external`; an incomplete taped operation or mismatch refuses resume, including during checkpoint fallback. Running background jobs are not relaunched.
 
 ## Determinism
 

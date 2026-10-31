@@ -24,6 +24,8 @@ from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from pathlib import Path
 
+from kernel_continuation_menu_authority import EDIT_TOOLS
+
 from kernel_measurement import (
     AuditJournal, HostSpanRecorder, canonical_bytes, digest,
     externalize_journal_fields, profile_host_span, profiled_journal_span,
@@ -403,9 +405,7 @@ def _scan_blocker_cycles(path: str | os.PathLike[str], *, minimum: int) -> list[
 _REFUSAL_RESULTS = frozenset({
     "REFUSED", "REFUSED_PREDISPATCH", "CHALLENGED", "BLOCKED", "STALLED",
 })
-_EDIT_TOOL_NAMES = frozenset({
-    "edit", "str_replace", "replace_module", "write", "replace", "file_create",
-})
+_EDIT_TOOL_NAMES = EDIT_TOOLS | frozenset({"replace_module", "write", "replace"})
 _SOURCE_MARKER_RE = re.compile(
     r"\[(?:Working|Current) source:\s*([^\]]+)\]\s*\n?(.*?)(?=\n\[(?:Working|Current|Retained) source:|\n\[StateFrame\]|\Z)",
     re.DOTALL,

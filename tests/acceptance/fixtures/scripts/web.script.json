@@ -1,0 +1,1 @@
+{"model":"scripted","steps":[{"tool":"web_fetch","arguments":{"url":"http://127.0.0.1/"}},{"tool":"done","arguments":{"summary":"Checked a private address refusal."}}],"tokenize":{"mode":"ok"}}

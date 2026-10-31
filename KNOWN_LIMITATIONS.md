@@ -2,7 +2,9 @@
 
 ## Supported environment
 
-This preview is supported on macOS on Apple silicon and on Linux x86_64 (tested on Ubuntu 22.04.5, kernel 6.8, Python 3.11: install, the three demos, the bubblewrap sandbox with no network and no writes outside the run, and `kill -9` then resume all pass). Long runs (200-300 requests) and the speed and memory numbers were measured on macOS only; Linux is tested end to end on short runs. Checkpoints were measured on macOS; on Linux, resume is verified through full replay. Linux arm64 is untested. Ubuntu 24.04 and later restrict unprivileged user namespaces, which bubblewrap needs; that release is untested, and if the sandbox cannot start there the usual setting is `sudo sysctl kernel.apparmor_restrict_unprivileged_userns=0` (or an AppArmor profile that allows `bwrap`). Docker is not supported. Use Python 3.11 or newer with venv and ensurepip (Python 3.14.1 is not supported: the pinned networkx 3.6.1 excludes that one release; other 3.14.x releases work). The installer downloads pinned, hash-checked dependencies from PyPI; `./install.sh --offline` uses the bundled wheelhouse instead, without schema validation or the syntax-aware repo map.
+This preview is supported on macOS on Apple silicon and on Linux x86_64 (tested on Ubuntu 22.04.5, kernel 6.8, Python 3.11: install, the three demos, the bubblewrap sandbox with no network and no writes outside the run, and `kill -9` then resume all pass). Long runs (200-300 requests) and the speed and memory numbers were measured on macOS only; Linux is tested end to end on short runs. Checkpoints were measured on macOS; on Linux, resume is verified through full replay. Linux arm64 preview runs are untested. Ubuntu 24.04 and later restrict unprivileged user namespaces, which bubblewrap needs; that release is untested, and if the sandbox cannot start there the usual setting is `sudo sysctl kernel.apparmor_restrict_unprivileged_userns=0` (or an AppArmor profile that allows `bwrap`). Docker is not supported. Use Python 3.11 or newer with venv and ensurepip (Python 3.14.1 is not supported: the pinned networkx 3.6.1 excludes that one release; other 3.14.x releases work). The installer downloads pinned, hash-checked dependencies from PyPI; `./install.sh --offline` uses the bundled wheelhouse instead, without schema validation or the syntax-aware repo map.
+
+The new command containment path was exercised in a Linux aarch64 container. Its x86_64 path has not been verified for this tool release. That is separate from the earlier Linux x86_64 preview checks above.
 
 ## Request and model capacity
 
@@ -11,6 +13,22 @@ The engine has a **33,344-token prompt budget** and requires a model server cont
 Large tasks or repositories can require more state and source context than fits. In that case, the engine may stop before completing the task.
 
 - Very long tasks (roughly 25 or more model turns) and larger multi-file changes (around 10 files or more) can stop with a refusal when the task state no longer fits the prompt budget. Nothing is lost: the partial result is saved.
+- Shell, job and custom-command reply delivery shrinks against the measured whole request when a populated frame nears the prompt limit. The full taped observation remains on disk, subject to the command collector's output cap. If the authoritative minimum still cannot fit, the request is refused.
+
+## Agent tools
+
+- Shell, delete, move, read-only Git, opt-in web fetch, background jobs and explicitly configured command tools are available. MCP clients and general plug-in protocols are not. See [Agent tools](docs/guide/tools.md).
+- On macOS, a process deliberately double-forked and orphaned between supervisor sweeps can outlive a run. Its sandbox profile continues to restrict filesystem and network access. Aggregate resident memory is polled rather than enforced as a hard cap, so usage can overshoot between samples.
+- Linux has one network placement per execution session. A full-network session cannot later use the same shared loopback namespace; a narrower command gets its own loopback namespace and cannot reach a service in the full-network namespace.
+- Background jobs are stopped at completion and are not relaunched on resume. A running job from the stopped attempt appears as `lost on restart` when the run continues.
+- External operations, including full-network shell calls and custom tools marked `external`, are never repeated automatically on resume. `--replay-external` repeats them knowingly; the command may repeat an outside effect. An incomplete tool operation refuses resume because its outside effect cannot be inferred from the run record.
+- Network package installs need `--shell-network full`. The default loopback mode cannot reach package indexes. A run-local install does not update the project's dependency declaration. If a selected virtual environment cannot be safely cloned or remapped, the run environment is disabled with a message.
+- Web fetch is off by default, accepts public HTTP(S) text only and blocks private addresses, including redirects to them. Its untrusted-content label is not a prompt-injection security boundary.
+- Shell output is neither revision-bound source-read evidence nor engine check evidence. Use `read` and `run_tests` respectively. A command that exits zero or runs pytest itself does not complete a task.
+- Custom command definitions require a finite positive timeout no greater than 600 seconds; larger values fail at load.
+- Executable-bit changes are refused and restored, including creation of executable files. Shell deletion of an executable is refused; `file_delete` supports intentional removal, while `file_move` refuses executable sources. The sealed candidate does not carry executable-mode changes.
+- Workspace reconciliation stops without promoting command effects when any regular file exceeds 16 MiB, aggregate regular-file bytes exceed 256 MiB, or the tree exceeds 20,000 entries. These bounds also apply before execution when the snapshot is captured.
+- The shipped product profile uses the composed loop. The plain loop accepts foreground shell but refuses background jobs and Git, web or custom tool settings before execution. Lean mode is not supported by the product profile.
 
 ## Checks
 
@@ -34,7 +52,7 @@ To stay inside the prompt budget, the engine evicts file contents the model read
 
 ## Models
 
-This release is tested with Qwen3.6-35B-A3B on a local server and DeepSeek V4 Flash. On this build both solved our two live acceptance tasks: a small multi-file fix (all 14 tests passing) and an HTTP transport task (graded as a correct candidate). That is one run per model and task, so treat it as a smoke test, not a success rate. Very long multi-file tasks can still need many more turns (see "Re-reading on very long, hard tasks"). On DeepSeek V4 Flash, the release build solved the harder multi-step task in 1 of 2 runs (hidden tests); the other run ran out of its request budget mid-fix. On a larger single-file task Flash can still get stuck re-reading without editing; a fix is planned. Other models are untested.
+This release is tested with Qwen3.6-35B-A3B on a local server and DeepSeek V4 Flash. On this build, Qwen3.6-35B-A3B solved the HTTP transport task (graded as a correct candidate), and DeepSeek V4 Flash solved the 8-file batch refactor (all 14 tests passing) in 2 of 2 runs. On the same refactor, Qwen3.6-35B-A3B ended in a no-progress stop, as the previous release also did on the same day; see "Re-reading on very long, hard tasks". These are one or two runs per model and task, so treat them as smoke tests, not success rates. On the previous release, Flash also solved the HTTP transport task, and solved the harder multi-step task in 1 of 2 runs (hidden tests); the other run ran out of its request budget mid-fix. On a larger single-file task Flash can still get stuck re-reading without editing; a fix is planned. Other models are untested.
 
 ## Re-reading on very long, hard tasks
 
@@ -95,8 +113,8 @@ There is no step limit by default either. Pass `--max-turns N` to stop after N m
 ## Resuming a stopped run
 
 - On this release resume replays the whole recorded run, and checkpoints are off by default: in our tests a checkpoint restore did not rebuild the next request faithfully (resume refused it and replayed, which gave the correct result). The replay takes time in proportion to the run's length.
-- Catch-up re-runs the host's tool work for every replayed request (applying edits, running checks, building each request), so it takes time in proportion to the run's length, though it takes no model time.
-- Replay is strict: if the rebuilt request differs from the recorded one, resume writes `resume-divergence.json` in the run directory and continues live from that point. On an earlier preview engine we saw divergence from hash-seed-dependent ordering (fixed in this release) and from journal event-id drift (fixed in later engines).
+- Catch-up re-runs reproducible local tool work and checks, but serves recorded observations for Git, web and jobs. It takes time in proportion to the run's length, though it takes no model time. Shell-enabled resumes rebuild the run environment and replay from the beginning.
+- A rebuilt request that differs from its record may write `resume-divergence.json` and continue live. A tool-tape mismatch, incomplete operation or external operation without `--replay-external` instead refuses resume. On an earlier preview engine we saw request divergence from hash-seed-dependent ordering (fixed in this release) and from journal event-id drift (fixed in later engines).
 - Resume needs the same StateFrame version that started the run, and the same model name (or `--model` with the name the server now lists). It refuses a run made by another version, a run that already submitted its result, and a run whose records were changed or damaged.
 - Resume keeps the run's original `--max-turns`: passing a different value is refused, except for a run that stopped at its step limit.
 - A run that stopped at its step limit resumes only with a larger `--max-turns`, and then restarts live from request 1: the step limit is part of the first request, so neither the checkpoint nor the recorded requests can be reused. `stateframe resume` prints a WARNING when this happens.

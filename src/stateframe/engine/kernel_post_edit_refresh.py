@@ -7,7 +7,7 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 
 
-_EDIT_KINDS = frozenset({"edit", "str_replace", "file_create", "replace_module", "write", "replace"})
+_EDIT_KINDS = frozenset({"edit", "str_replace", "file_create", "file_delete", "file_move", "shell_effect", "replace_module", "write", "replace"})
 _CHECK_KINDS = frozenset({"test", "run_tests", "pytest", "check", "verification"})
 
 
@@ -35,6 +35,24 @@ def _changed_paths(root: Path, receipt: Mapping[str, object], changed_paths: obj
     elif isinstance(changed_paths, str):
         values.append(changed_paths)
     return {relative for value in values if (relative := _relative(root, value)) is not None}
+
+
+def rebind_after_file_operation(runtime: object, source: str,
+                                destination: str | None) -> Path | None:
+    """Retire old source proof and move or retire an affected bound target."""
+    target = getattr(runtime, "target", None)
+    root = Path(runtime.owner.root).resolve()
+    # A closure selected before the operation still names the old file. It
+    # cannot be used as source proof for the next request.
+    runtime._request_source_closure = None
+    runtime._request_source_closure_cache = {}
+    if not isinstance(target, Path) or _relative(root, str(target)) != source:
+        return target
+    runtime.target = root / destination if destination is not None else None
+    refresh_target = getattr(runtime, "_refresh_bound_edit_target", None)
+    if callable(refresh_target):
+        refresh_target()
+    return runtime.target
 
 
 def _current_source(root: Path, path: str, binding: Mapping[str, object]) -> tuple[str, str] | None:

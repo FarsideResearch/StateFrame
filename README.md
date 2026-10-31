@@ -88,19 +88,28 @@ stateframe chat --repo path/to/your-repo
 ## What the agent can do
 
 - **Find and read:** search the code, list files, read files, and recall what it found earlier in the run.
-- **Change code:** make a targeted edit, replace an exact string, insert code at a spot, create a new file, or rewrite a whole module.
+- **Change code:** make a targeted edit, replace an exact string, insert code at a spot, create, delete, or move a file, or rewrite a whole module.
+- **Run commands:** foreground shell commands and read-only background jobs with bounded, budget-aware replies, per-run dependencies, protected-test restoration and replay verification. See [agent tools](docs/guide/tools.md).
+- **Inspect and organize:** read sanitized Git history, fetch public documentation when enabled, and delete or move files within the task's edit scope. Explicitly trusted command tools can be supplied with `--tools`.
 - **Check its work:** run your tests, try code in a sandboxed probe, write and run its own checks, and read the check results.
 - **Finish:** a run counts as done only after its checks pass. The engine makes that call, not the model.
 - **Around that:** a map of your repository's code (12 languages, plus structure for HTML, CSS, JSON, TOML and YAML), an interactive chat with diff, undo and apply, resume after a stop, and inspect to see exactly what the model was sent.
 
 **Not yet:**
 
-- No general shell: the agent runs your tests and sandboxed probes, nothing else.
-- No plug-in or MCP tool interface: adding a tool means editing engine code (see [docs/guide/extending.md](docs/guide/extending.md)).
-- No web or documentation lookup.
-- No deleting or renaming files, and no git beyond the chat's diff and apply.
+- No MCP client or plug-in protocol beyond explicitly configured command tools. A new engine-owned tool still needs code (see [docs/guide/extending.md](docs/guide/extending.md)).
+- No persistent background jobs across resume. A stopped run records their observations but does not relaunch them.
+- No executable-bit changes in the sealed result. Such command effects are refused and restored; executable files can be removed with `file_delete` but cannot be moved with `file_move`.
 
-Planned next: a plug-in tool interface and a safe shell tool, plus long-horizon work.
+**Live checks on this release** (single runs unless noted, so treat them as smoke tests, not success rates):
+
+- Qwen3.6-35B-A3B (4-bit, llama.cpp, one 48 GB GPU): the HTTP transport task in a production Python codebase was graded a correct candidate. The 7-file feature submitted with all of its public tests passing and 11 of 18 independent edge-case tests; the previous release, run on the same GPU the same day, reached 17 of 18 (the two runs made different edits from the second request on). The 8-file batch refactor ended in a no-progress stop, as the previous release did on the same task the same day (see "Re-reading on very long, hard tasks" in KNOWN_LIMITATIONS.md).
+- DeepSeek V4 Flash: the 8-file batch refactor passed all 14 tests (public and hidden) in 2 of 2 runs, in 9 and 12 requests.
+- The largest prompt in any of these runs was 31,834 tokens, inside the 33,344-token budget, with no FrameFit refusals.
+
+## Tools and safety
+
+The [agent tools guide](docs/guide/tools.md) lists the tool arguments, command policies, sandbox boundaries and replay rules. Shell is sandboxed by default. Web fetch is opt-in, and host shell execution requires an explicit flag that prints a warning. Shell and workspace-writing custom commands are reconciled within limits of 16 MiB per file, 256 MiB in aggregate and 20,000 entries. The shipped product profile uses the composed loop; lean mode is not supported. The plain loop only supports foreground shell from this tool set.
 
 ## What works today
 
@@ -108,7 +117,7 @@ Planned next: a plug-in tool interface and a safe shell tool, plus long-horizon 
 - **Install:** one command. Dependencies are pinned and hash-checked from PyPI, with an offline fallback.
 - **Demos on this build:** a small bug fix, building a multi-file static site from a short spec, and an interactive chat session with diff, undo and apply all pass.
 - **Real repositories** (measured on the preview engine before the final build; re-measure on the final engine pending): 13 of 14 recorded real tasks complete, with no crashes. The 14th is a long task that stops with a clear refusal once its task state no longer fits the prompt budget (see KNOWN_LIMITATIONS.md). A real multi-file bug fix in a production Python codebase was solved live with a local model and passed hidden tests. The refusal on some large files from the previous build is fixed.
-- **A bigger task** (measured on the preview engine before the final build; re-measure on the final engine pending): with a local model, a 7-file feature passed all of its protected tests and 17 of 18 independent edge-case tests. Changes of around 10 files or more can still stop with a refusal (see KNOWN_LIMITATIONS.md).
+- **A bigger task** (measured on the preview engine before the final build; this release's live check of the same task is under "Live checks on this release" above): with a local model, a 7-file feature passed all of its protected tests and 17 of 18 independent edge-case tests. Changes of around 10 files or more can still stop with a refusal (see KNOWN_LIMITATIONS.md).
 - **Bounded requests:** every request is system instructions, tools, the task, typed task state and the newest exchange, inside a 33,344-token prompt budget on a 65,536-token server slot. No chat history is resent.
 - **No time or step limit:** a run continues until it is done or you stop it with Ctrl-C. `--max-turns N` caps the model turns and `--timeout <seconds>` caps the time, if you want either.
 - **Resume:** `stateframe resume <run-dir>` continues a run stopped by Ctrl-C, `kill`, `kill -9`, a crash or power loss, or a lost model server. It replays the recorded model responses (no model calls) up to where the run stopped, checks that the next request it rebuilds matches the recorded one byte for byte, then continues live in the same run directory; the stopped attempt's files are kept under `<run-dir>/attempts/`. A resume that is itself killed during its catch-up resumes again. *Measured on this release:* a killed long run resumed this way with its next request byte-identical and then continued live. Catch-up takes time in proportion to the run's length (on an earlier preview engine, a run killed at request 118 caught up in about 37 min; the original took about 2 h). Resume refuses with a reason when the run already finished, its records are damaged, or a different engine version is installed. If the server now lists the same model under a different name, add `--model <name it lists>`; replay still checks every recorded request byte for byte, with only the model name swapped. The engine can also save checkpoints for a faster restore, but they are off by default in this release because a checkpoint restore did not rebuild requests faithfully in our tests; see "Checkpoint settings" below. On the previous engine, where checkpoint restore was faithful, a run killed at request 150 restored in 31 s.

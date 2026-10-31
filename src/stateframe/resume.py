@@ -23,13 +23,16 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from . import outcomes, profiles, replay_tape, workcopy
+from .engine.kernel_tool_tape import ToolTape, ToolTapeError
 
 ENGINE_LOCK = ".engine.lock"
 RUN_LOCK = ".run.lock"
 # Per-attempt files: moved to attempts/<n>/ on resume, so the resumed attempt writes its own.
 ATTEMPT_FILES = ("worker", "wire", "requests", "sends.jsonl", "engine.log", "engine-result.json",
                  "child-traceback.txt", "summary.json", "final.diff", "tests-after.txt",
-                 "resume-divergence.json", "workspace", "checks", "checkpoint-refused.json")
+                 "resume-divergence.json", "workspace", "checks", "checkpoint-refused.json",
+                 "env", "env-sites.json", "shell-home", "shell-cache",
+                 "shell-ask.json", "shell-answer.json")
 
 
 CHECKPOINT_SCHEMA = "stateframe-engine-checkpoint/1"
@@ -150,6 +153,13 @@ def assess(run: Path, *, max_turns: int | None = None, model: str | None = None)
     for key in ("environment", "public_row", "parent_snapshot", "chat_url", "model", "max_turns", "repo"):
         if key not in spec:
             raise ResumeRefused(f"spec.json lacks {key!r}; this run was made by an older stateframe")
+    try:
+        pending = ToolTape(run).pending()
+    except ToolTapeError as error:
+        raise ResumeRefused(f"tool tape is damaged: {error}") from error
+    if pending:
+        calls = ", ".join(item.call_id for item in pending)
+        raise ResumeRefused(f"operation {calls} may or may not have happened; reconcile and start a new run")
     recorded = (spec.get("engine_source") or {}).get("shipped_hash")
     installed = profiles.engine_source_summary().get("shipped_hash")
     if not recorded or not installed or recorded != installed:

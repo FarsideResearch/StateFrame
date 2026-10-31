@@ -48,7 +48,7 @@ RULE_IDENTICAL_RERUN = "post_green_identical_rerun"
 RULE_NO_EVIDENCE = "postgreen_no_new_evidence"
 V15_IDENTICAL_EVENT = "tokenlab_v15_postgreen_identical_rerun"
 # Canonical names (the authority maps every edit alias onto ``edit``).
-WORK_ACTIONS = frozenset({"edit", "read", "probe", "run_tests"})
+WORK_ACTIONS = frozenset({"edit", "file_delete", "file_move", "shell", "read", "probe", "run_tests"})
 UNVERIFIED_DONE_REFUSAL = (
     "done refused: a product edit was made after public tests passed and has not been "
     "re-tested yet. Next action: run_tests (edit/str_replace/read/probe stay available).")

@@ -1,0 +1,1 @@
+{"model":"scripted","steps":[{"tool":"shell","arguments":{"command":"${COMMAND}"}},{"tool":"done","arguments":{"summary":"Inspected the command result."}}],"tokenize":{"mode":"ok"}}

@@ -91,6 +91,10 @@ def result_class_disposition(producer: str, result: object) -> str:
     """
     producer = str(producer or "")
     result = str(result or "")
+    from kernel_agent_tools import is_registered
+    if is_registered(producer):
+        return {"NO_OP": "settled_applied", "APPLIED": "settled_applied",
+                "REFUSED": "settled_not_applied"}.get(result, "unknown")
     if producer in READ_RESULT_CLASSES:
         if result in READ_OUTCOMES.get(producer, frozenset()):
             return "settled_applied"
@@ -122,6 +126,7 @@ def classify_run_test_exit(exit_code: object) -> str:
         return RUN_TEST_RESULT_CLASSES_BY_EXIT.get(exit_code, "NO_VERDICT")
     return "NO_VERDICT"
 READ_ONLY = frozenset({
+    "job_wait", "job_output", "git", "web_fetch",
     "read", "text", "grep", "ls", "list_files", "where_defined",
     "who_calls", "references", "recall", "recall_evidence",
     "recall_generated_artifact", "read_check_receipt", "probe",
@@ -131,6 +136,7 @@ READ_ONLY = frozenset({
 # An observed empty search or missing file finishes an acquisition attempt.
 # It does not prove that a source-read contract or root task was satisfied.
 READ_OUTCOMES = {
+    **{name: frozenset({"NO_OP"}) for name in ("job_wait", "job_output", "git", "web_fetch")},
     # ALREADY_PRESENT (empirical read dedup): the exact source is already in the frame at the
     # current revision -- a settled, successful read-only outcome. The registry guard below
     # keeps any future producer class from falling through to an unknown effect.
@@ -152,6 +158,7 @@ READ_OUTCOMES = {
 # not grant source credit, but they must settle the current effect.
 READ_NOT_APPLIED_RESULTS = frozenset({"ERROR", "OUT_OF_RANGE"})
 READ_NOT_APPLIED_RESULTS_BY_TOOL = {
+    **{name: frozenset({"REFUSED"}) for name in ("job_wait", "job_output", "git", "web_fetch")},
     # These host producers have distinct refusal classes; keep each vocabulary
     # scoped to its producer instead of broadening shared read/search results.
     "list_files": frozenset({"REJECTED"}),
@@ -161,6 +168,7 @@ READ_NOT_APPLIED_RESULTS_BY_TOOL = {
     "recall_generated_artifact": frozenset({"RECALL_REJECTED"}),
 }
 READ_RESULT_CLASSES = {
+    **{name: frozenset({"NO_OP", "REFUSED"}) for name in ("job_wait", "job_output", "git", "web_fetch")},
     "read": frozenset(READ_OUTCOMES["read"]) | READ_NOT_APPLIED_RESULTS,
     "text": frozenset(READ_OUTCOMES["text"]) | READ_NOT_APPLIED_RESULTS,
     "grep": frozenset(READ_OUTCOMES["grep"]) | READ_NOT_APPLIED_RESULTS,
@@ -191,6 +199,10 @@ EXECUTION_RECEIPT_CONTRACTS = {
     "edit": "edit_action_receipt",
     "str_replace": "edit_action_receipt",
     "file_create": "edit_action_receipt",
+    "file_delete": "edit_action_receipt",
+    "file_move": "edit_action_receipt",
+    "shell": "shell_effect_receipt",
+    "job_stop": "job_lifecycle_receipt",
     "insert_before": "edit_action_receipt",
     "run_tests": "test_action_receipt",
     "authored_check": "authored_check_receipt",
@@ -202,6 +214,9 @@ def has_execution_receipt_contract(tool: object) -> bool:
     name = str(tool or "").strip().lower()
     if not name:
         return False
+    from kernel_agent_tools import is_registered
+    if is_registered(name):
+        return True
     if name == "probe":
         outcomes = READ_OUTCOMES.get(name)
         return (name in READ_ONLY and bool(outcomes and outcomes.issubset(PROBE_RESULT_CLASSES))

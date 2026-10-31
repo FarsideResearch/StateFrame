@@ -21,7 +21,7 @@ from kernel_verdict import (
 
 CONTROL_TOOLS = frozenset({"done", "continuation_detour", "work_update", "note_update", "work"})
 EFFECT_TOOLS = READ_ONLY | {
-    "edit", "str_replace", "file_create", "insert_before", "run_tests",
+    "job_stop", *EDIT_TOOLS, "run_tests",
 } | AUTHORED_CHECK_TOOLS
 # A witness is a host-owned evidence action, not a continuation effect.  It is
 # nevertheless a valid way to clear a read-only unknown effect: the old read
@@ -764,12 +764,13 @@ class LiveContinuation:
         authoring = tool in CHECK_AUTHORING_TOOLS and authoring_open(runtime)
         if not has_execution_receipt_contract(tool):
             return "[continuation] Tool has no implemented execution receipt contract."
-        if tool not in CONTROL_TOOLS | EFFECT_TOOLS | WITNESS_TOOLS and not authoring:
+        from kernel_agent_tools import is_registered
+        if tool not in CONTROL_TOOLS | EFFECT_TOOLS | WITNESS_TOOLS and not authoring and not is_registered(tool):
             return "[continuation] Tool has no continuation dispatch contract."
         from kernel_tool_surface import dispatch_admissible
         if not dispatch_admissible(tool, runtime=runtime):
             return "[continuation] Tool is not dispatchable in this frame."
-        if tool in {"edit", "str_replace", "file_create", "insert_before"}:
+        if tool in EDIT_TOOLS:
             guard = getattr(runtime, "completion_mutation_guard", None)
             if callable(guard):
                 feedback = guard(tool)

@@ -1,0 +1,1 @@
+{"model":"scripted","steps":[{"tool":"done","arguments":{"summary":"This request should never be sent."}}],"tokenize":{"mode":"ok"}}

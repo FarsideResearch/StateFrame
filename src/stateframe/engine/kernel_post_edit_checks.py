@@ -9,7 +9,6 @@ from __future__ import annotations
 import ast
 import builtins
 import os
-import subprocess
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -451,39 +450,30 @@ def import_status(checkout: Path, path: Path, *, source: str | None = None) -> I
     module = module_name_for_path(path, checkout)
     if module is None:
         return None
-    env = dict(os.environ)
-    env["PYTHONNOUSERSITE"] = "1"
-    pythonpath = str(checkout.resolve())
-    existing = env.get("PYTHONPATH")
-    env["PYTHONPATH"] = pythonpath if not existing else pythonpath + os.pathsep + existing
+    from kernel_safe_probe import run_probe
+    from kernel_exec_session import ExecSessionError
+    prefix = "import sys; sys.path.insert(0, sys.argv[1]); "
     if source is None:
-        command = [test_python(), "-c", f"import {module}"]
-        run_kwargs = {}
+        code = prefix + "import importlib; importlib.import_module(sys.argv[2])"
     else:
-        # A direct check_edit call may be made after the caller has already
-        # written ``after`` to disk.  Execute the old bytes in a throwaway
-        # module namespace so an import failure that predates the edit is not
-        # attributed to the new bytes.  The post-edit path above remains the
-        # required literal ``python -c import <module>`` check.
-        command = [test_python(), "-c", (
-            "import importlib.util, sys; "
-            "name, filename = sys.argv[1], sys.argv[2]; "
+        code = prefix + (
+            "import importlib.util; "
+            "name, filename = sys.argv[2], sys.argv[3]; "
             "spec = importlib.util.spec_from_file_location(name, filename); "
             "module = importlib.util.module_from_spec(spec); "
             "sys.modules[name] = module; "
             "exec(compile(sys.stdin.read(), filename, 'exec'), module.__dict__)"
-        ), module, str(path)]
-        run_kwargs = {"input": source}
-    try:
-        result = subprocess.run(
-            command, cwd=str(checkout), env=env, capture_output=True, text=True,
-            timeout=10, **run_kwargs,
         )
-    except (OSError, subprocess.SubprocessError) as error:
+    command = [test_python(), "-I", "-B", "-c", code, str(checkout), module, str(path)]
+    try:
+        result = run_probe(command, checkout, timeout=10,
+                           stdin=source.encode() if source is not None else None)
+    except (OSError, ExecSessionError) as error:
         return ImportStatus(module, True, f"{type(error).__name__}: {error}")
-    if result.returncode == 0:
+    if result.exit_code == 0 and not result.timed_out:
         return ImportStatus(module, False, "")
-    detail = (result.stderr or result.stdout or f"exit {result.returncode}").strip()
+    detail = ("import timed out" if result.timed_out else
+              result.output.decode("utf-8", "replace").strip() or f"exit {result.exit_code}")
     return ImportStatus(module, True, detail[:900])
 
 
