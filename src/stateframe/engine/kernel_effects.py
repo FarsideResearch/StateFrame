@@ -186,12 +186,16 @@ class WorkspaceEffectPolicy:
     edit_scope: Callable[[str], bool] | None
     new_file_allowed: Callable[[str], bool]
     baseline_manifest: Manifest | None = None
+    directory_allowed: Callable[[str], bool] | None = None
 
     def authorize(self, effect: Effect) -> tuple[bool, str]:
         if self.protected(effect.path):
             return False, "protected test or inode alias"
         if effect.after and effect.after.kind in {"symlink", "other"}:
             return False, "symlinks, hardlinks, and special files are not allowed"
+        if effect.before is None and effect.after and effect.after.kind == "dir":
+            allowed = self.directory_allowed is not None and self.directory_allowed(effect.path)
+            return allowed, "structural product directory" if allowed else "new directory is not allowed"
         if self.edit_scope is not None and not self.edit_scope(effect.path):
             return False, "outside edit scope"
         if effect.before is None and not self.new_file_allowed(effect.path):
@@ -232,10 +236,15 @@ def effect_policy_for_run(workspace: Path, row: Mapping[str, object],
 
     return WorkspaceEffectPolicy(
         protected=is_protected,
-        edit_scope=lambda path: path in editable or (path not in original_paths and
-                                                     _is_product_path(path, row)),
+        edit_scope=(None if row.get("scoped_edits") is False else
+                    lambda path: path in editable or (path not in original_paths and
+                                                       _is_product_path(path, row))),
         new_file_allowed=lambda path: _is_product_path(path, row),
         baseline_manifest=baseline_manifest,
+        directory_allowed=lambda path: any(
+            path == str(base).rstrip("/") or path.startswith(str(base).rstrip("/") + "/")
+            for base in row.get("allowed_product_paths", ())
+            if (root / str(base)).is_dir()),
     )
 
 
@@ -330,13 +339,30 @@ def reconcile(workspace: Path, before: Manifest, after: Manifest, policy: Effect
               store: ContentStore, baseline_store: ContentStore | None) -> Reconciliation:
     effects = diff(before, after)
     decisions = [(effect, *policy.authorize(effect)) for effect in effects]
+    # A new directory is structural authority, not a product-file extension.
+    # Keep it when an admitted descendant needs it, but never override protection.
+    if isinstance(policy, WorkspaceEffectPolicy):
+        admitted = {effect.path for effect, allowed, _ in decisions if allowed}
+        decisions = [
+            (effect, True, "parent of authorized effect")
+            if (not allowed and effect.before is None and effect.after is not None
+                and effect.after.kind == "dir" and not policy.protected(effect.path)
+                and any(path.startswith(effect.path + "/") for path in admitted))
+            else (effect, allowed, reason)
+            for effect, allowed, reason in decisions]
     denied = [(effect, reason) for effect, allowed, reason in decisions if not allowed]
-    changed_paths = {effect.path for effect in effects}
+    # Only restore an ancestor when its current type prevents reaching the child,
+    # or that ancestor is itself denied. Restoring an authorized new directory
+    # would discard authorized siblings of a denied child.
+    denied_paths = {effect.path for effect, _ in denied}
     roots = []
     for effect, _ in sorted(denied, key=lambda item: (item[0].path.count("/"), item[0].path)):
         candidate = effect.path
         for parent in PurePosixPath(effect.path).parents:
-            if str(parent) in changed_paths:
+            ancestor = str(parent)
+            if ancestor in denied_paths or (ancestor in before and
+                    before[ancestor].kind == "dir" and
+                    (ancestor not in after or after[ancestor].kind != "dir")):
                 candidate = str(parent)
         if candidate not in roots and not any(candidate.startswith(parent + "/") for parent in roots):
             roots.append(candidate)

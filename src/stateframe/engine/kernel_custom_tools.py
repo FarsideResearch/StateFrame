@@ -7,7 +7,6 @@ import math
 import os
 import re
 import shutil
-import sre_parse
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Mapping, Sequence
@@ -59,30 +58,59 @@ def _pattern(value: str, where: str) -> None:
     if len(value) > 256 or "(?" in value or re.search(r"\\[1-9]", value):
         _fail(where, "pattern", "must use a bounded, timeout-free expression")
     try:
-        parsed = sre_parse.parse(value)
+        re.compile(value)
         repetitions = 0
-        def walk(items: object, depth: int = 0, repeated: bool = False) -> None:
-            nonlocal repetitions
+        position = 0
+
+        def walk(depth: int = 0) -> bool:
+            nonlocal repetitions, position
             if depth > 8:
                 _fail(where, "pattern", "nesting exceeds 8")
-            for op, arg in items:
-                if op in (sre_parse.MAX_REPEAT, sre_parse.MIN_REPEAT):
+            contains_repeat = False
+            while position < len(value) and value[position] != ")":
+                char = value[position]
+                position += 1
+                child_repeats = False
+                if char == "(":
+                    child_repeats = walk(depth + 1)
+                    position += 1  # closing parenthesis, validated by re.compile
+                elif char == "[":
+                    if value[position:position + 1] == "^":
+                        position += 1
+                    if value[position:position + 1] == "]":
+                        position += 1
+                    while value[position] != "]":
+                        position += 2 if value[position] == "\\" else 1
+                    position += 1
+                elif char == "\\":
+                    escaped = value[position]
+                    if escaped not in r"AbBdDsSwWZ\\.^$*+?{}[]()|-":
+                        _fail(where, "pattern", "unsupported expression")
+                    position += 1
+                elif char == "|":
+                    _fail(where, "pattern", "alternation is not supported")
+                quantifier = re.match(r"\{(\d+)(?:,(\d*))?\}|[?*+]", value[position:])
+                if quantifier:
                     repetitions += 1
                     if repetitions > 2:
                         _fail(where, "pattern", "more than 2 repetitions")
-                    lower, upper, child = arg
-                    if repeated or upper == sre_parse.MAXREPEAT or upper > 100 or lower > 100:
+                    token = quantifier.group()
+                    if token == "?":
+                        upper = 1
+                    elif token in {"*", "+"} or quantifier.group(2) == "":
+                        upper = 101
+                    else:
+                        upper = int(quantifier.group(2) or quantifier.group(1))
+                    if child_repeats or upper > 100:
                         _fail(where, "pattern", "repetition must be bounded at 100")
-                    walk(child, depth + 1, True)
-                elif op == sre_parse.SUBPATTERN:
-                    walk(arg[-1], depth + 1, repeated)
-                elif op == sre_parse.BRANCH:
-                    _fail(where, "pattern", "alternation is not supported")
-                elif op not in (sre_parse.LITERAL, sre_parse.NOT_LITERAL, sre_parse.IN,
-                                sre_parse.ANY, sre_parse.AT, sre_parse.CATEGORY, sre_parse.RANGE):
-                    _fail(where, "pattern", "unsupported expression")
-        walk(parsed)
-        re.compile(value)
+                    position += len(token)
+                    if value[position:position + 1] in {"?", "+"}:
+                        position += 1
+                    child_repeats = True
+                contains_repeat |= child_repeats
+            return contains_repeat
+
+        walk()
     except re.error as error:
         _fail(where, "pattern", f"invalid expression: {error}")
 

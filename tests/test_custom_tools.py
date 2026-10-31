@@ -4,6 +4,7 @@ from pathlib import Path
 import pytest
 
 from kernel_custom_tools import CustomToolError, load_tool_files
+from kernel_custom_tools import _pattern
 
 
 def definition():
@@ -133,3 +134,16 @@ def test_noncanonical_json_refused(tmp_path, body, fragment):
     path.write_text(body)
     with pytest.raises(CustomToolError, match=fragment):
         load_tool_files([path], builtin_names=frozenset(), shell_network="none")
+
+
+@pytest.mark.parametrize("expression", [r"^[a-z]{1,40}$", r"(ab){1,10}c?", r"\[{2}\]",
+    r"[(){}+*?]{1,8}", r"[^]a]{0,5}", r"\d{1,3}\.\w{1,20}", r"a{1,2}?b{1,2}"])
+def test_bounded_public_regex_subset(expression):
+    _pattern(expression, "test")
+
+
+@pytest.mark.parametrize("expression", [r"(a{1,2}){1,2}", r"a|b", r"a{1,}",
+    r"a{101}", r"(a?){1,2}", r"(((((((((a)))))))))", r"\x61+", r"a*b+"])
+def test_regex_rejects_unbounded_or_ambiguous_work(expression):
+    with pytest.raises(CustomToolError):
+        _pattern(expression, "test")

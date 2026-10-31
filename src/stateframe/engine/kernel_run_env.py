@@ -46,6 +46,11 @@ def _relocate(source: Path, destination: Path) -> None:
     if not config.is_file():
         raise RunEnvError(f"cloned environment has no pyvenv.cfg: {destination}")
     config.write_bytes(_replace_root(config.read_bytes(), source, destination))
+    for path in destination.glob("lib/python*/site-packages/*.pth"):
+        data = path.read_bytes()
+        changed = _replace_root(data, source, destination)
+        if data != changed:
+            path.write_bytes(changed)
     bin_dir = destination / "bin"
     for script in bin_dir.iterdir():
         if not script.is_file() or script.is_symlink():
@@ -63,6 +68,41 @@ def _relocate(source: Path, destination: Path) -> None:
             changed = _replace_root(data, source, destination)
             if changed != data:
                 script.write_bytes(changed)
+
+
+def _check_clone_paths(source: Path) -> None:
+    """Reject source-tree imports before copying or executing the cloned Python."""
+    if (source / "pyvenv.cfg").is_symlink() or (source / "bin").is_symlink():
+        raise RunEnvError("symlinked environment configuration or bin directory cannot be cloned")
+    for site in sorted(source.glob("lib/python*/site-packages")):
+        if any(parent.is_symlink() for parent in (site, *site.parents)
+               if parent != source and source in parent.parents):
+            raise RunEnvError(f"symlinked site-packages directory cannot be cloned: {site}")
+        for path in sorted(site.iterdir()):
+            if path.suffix == ".egg-link":
+                raise RunEnvError(f"editable install cannot be cloned: {path.name}")
+            if path.suffix != ".pth":
+                continue
+            if path.is_symlink():
+                raise RunEnvError(f"symlinked .pth cannot be cloned: {path.name}")
+            for line in path.read_text(encoding="utf-8").splitlines():
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                if line.startswith(("import ", "import\t")):
+                    # The standard setuptools shim selects its installed distutils.
+                    # Other executable .pth files can import editable finders whose
+                    # source mappings cannot safely be relocated without executing.
+                    setuptools_shim = (
+                        "import os; var = 'SETUPTOOLS_USE_DISTUTILS'; enabled = "
+                        "os.environ.get(var, 'local') == 'local'; enabled and "
+                        "__import__('_distutils_hack').add_shim();")
+                    if line == setuptools_shim:
+                        continue
+                    raise RunEnvError(f"executable .pth cannot be safely cloned: {path.name}")
+                target = (site / line).resolve()
+                if not target.is_relative_to(source.resolve()):
+                    raise RunEnvError(f"external import path cannot be cloned: {path.name}: {line}")
 
 
 def _import_probe(python: Path) -> str:
@@ -91,6 +131,7 @@ def create_run_env(run_dir: Path, test_python: Path) -> RunEnv:
     root.parent.mkdir(parents=True, exist_ok=True)
     if clone:
         assert source is not None
+        _check_clone_paths(source)
         if sys.platform == "darwin":
             command = ["cp", "-a", "-c", str(source), str(root)]
         elif sys.platform.startswith("linux"):

@@ -3,9 +3,10 @@ import subprocess
 import sys
 import time
 import zipfile
+import pytest
 from pathlib import Path
 
-from kernel_run_env import create_run_env, env_identity
+from kernel_run_env import create_run_env, env_identity, RunEnvError
 from stateframe.runner import RunOptions, _tests_python, use_run_env_python
 
 
@@ -32,9 +33,13 @@ def test_clone_relocates_pip_and_installed_packages(tmp_path, record_property):
     command(sys.executable, "-m", "venv", str(source))
     first = wheel(tmp_path, "sf_local_one")
     command(str(source / "bin/python"), "-m", "pip", "install", "--no-index", "--no-deps", str(first))
+    site = next(source.glob("lib/python*/site-packages"))
+    (site / "internal.pth").write_text(str(site) + "\n")
     started = time.perf_counter()
     run_env = create_run_env(tmp_path / "run", source / "bin/python")
     assert run_env.kind == "clone"
+    cloned_site = next(run_env.root.glob("lib/python*/site-packages"))
+    assert (cloned_site / "internal.pth").read_text() == str(cloned_site) + "\n"
     assert str(run_env.root) in command(str(run_env.python), "-m", "pip", "--version")
     assert command(str(run_env.python), "-c", "import sf_local_one; print(sf_local_one.IDENTITY)") == "sf_local_one"
     initial = env_identity(run_env)
@@ -75,3 +80,37 @@ def test_runner_hook_uses_same_python_for_host_and_child(tmp_path):
     use_run_env_python(options, run_env)
     assert _tests_python(options) == str(run_env.python)
     assert options._capabilities["test_python"] == str(run_env.python)
+
+
+@pytest.mark.parametrize("name,content", [
+    ("source.pth", "/original/repository\n"),
+    ("source.pth", "../../../../original/repository\n"),
+    ("__editable__.pth", "import __editable___finder; __editable___finder.install()\n"),
+    ("source.egg-link", "/original/repository\n"),
+])
+def test_clone_refuses_external_source_imports_before_copy(tmp_path, name, content):
+    source = tmp_path / "source"
+    site = source / "lib/python3.11/site-packages"
+    site.mkdir(parents=True)
+    (source / "bin").mkdir()
+    (source / "pyvenv.cfg").write_text("home = /usr/bin\n")
+    (site / name).write_text(content)
+    with pytest.raises(RunEnvError, match="cannot be.*cloned"):
+        create_run_env(tmp_path / "run", source / "bin/python")
+    assert not (tmp_path / "run/env").exists()
+
+
+def test_clone_never_relocates_through_source_pth_symlink(tmp_path):
+    source = tmp_path / "source"
+    site = source / "lib/python3.11/site-packages"
+    site.mkdir(parents=True)
+    (source / "bin").mkdir()
+    (source / "pyvenv.cfg").write_text("home = /usr/bin\n")
+    original = tmp_path / "original.pth"
+    content = str(site) + "\n"
+    original.write_text(content)
+    (site / "linked.pth").symlink_to(original)
+    with pytest.raises(RunEnvError, match="symlinked .pth cannot be cloned"):
+        create_run_env(tmp_path / "run", source / "bin/python")
+    assert original.read_text() == content
+    assert not (tmp_path / "run/env").exists()

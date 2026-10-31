@@ -250,3 +250,68 @@ def test_large_tree_scan_timing(tmp_path, record_property):
     record_property("scan_2000_files_50mb_ms", round(elapsed_ms, 2))
     assert len(manifest) == 2_000
     assert sum(entry.size for entry in manifest.values()) == 50_000_000
+
+
+def test_new_directory_keeps_authorized_child_when_sibling_denied(tmp_path):
+    root = tmp_path / "workspace"
+    root.mkdir()
+    store = ContentStore(tmp_path / "run")
+    before = snapshot(root, store)
+    (root / "src/new").mkdir(parents=True)
+    (root / "src/new/code.py").write_text("authorized")
+    (root / "src/new/secret").write_text("denied")
+    result = reconcile(root, before, scan(root, exclude=lambda _: False),
+        policy(new=lambda path: path.endswith(".py")), store, None)
+    assert (root / "src/new/code.py").read_text() == "authorized"
+    assert not (root / "src/new/secret").exists()
+    assert {e.path for e in result.applied} == {"src", "src/new", "src/new/code.py"}
+    assert {e.path for e, _ in result.restored} == {"src/new/secret"}
+
+
+@pytest.mark.parametrize("scoped", [False, True])
+def test_explicit_scope_flag_controls_existing_non_row_files(tmp_path, scoped):
+    root = tmp_path / "workspace"
+    (root / "src").mkdir(parents=True)
+    (root / "src/code.py").write_text("old")
+    (root / "src/data.bin").write_bytes(b"old")
+    store = ContentStore(tmp_path / "run")
+    before = snapshot(root, store)
+    row = {"files": {"src/code.py": {}}, "allowed_product_paths": ["src"],
+           "scoped_edits": scoped}
+    adapted = effect_policy_for_run(root, row, set(), baseline_manifest=before)
+    assert (adapted.edit_scope is None) is (not scoped)
+    (root / "src/data.bin").write_bytes(b"new")
+    reconcile(root, before, scan(root, exclude=lambda _: False), adapted, store, None)
+    assert (root / "src/data.bin").read_bytes() == (b"old" if scoped else b"new")
+
+
+def test_empty_product_directory_is_structurally_allowed(tmp_path):
+    root = tmp_path / "workspace"
+    (root / "src").mkdir(parents=True)
+    store = ContentStore(tmp_path / "run")
+    before = snapshot(root, store)
+    row = {"files": {}, "allowed_product_paths": ["src"], "scoped_edits": False}
+    adapted = effect_policy_for_run(root, row, set(), baseline_manifest=before)
+    (root / "src/empty").mkdir()
+    result = reconcile(root, before, scan(root, exclude=lambda _: False), adapted, store, None)
+    assert not result.restored
+    assert (root / "src/empty").is_dir()
+
+
+@pytest.mark.parametrize("count,edits,target,scoped", [
+    (2, None, None, False), (2, None, "code0.py", False),
+    (2, ["code0.py"], None, True), (201, None, "code0.py", True),
+])
+def test_task_row_records_actual_scope_decision(tmp_path, count, edits, target, scoped):
+    from stateframe.task_row import build_row
+    from stateframe.workcopy import create
+
+    original = tmp_path / "repo"
+    original.mkdir()
+    for index in range(count):
+        (original / f"code{index}.py").write_text("VALUE = 1\n")
+    (original / "test_code.py").write_text("from code0 import VALUE\ndef test_value(): assert VALUE == 1\n")
+    work = create(original, tmp_path / "copy")
+    row = build_row(work, task="Check the code", edit_paths=edits, target=target)
+    assert row["scoped_edits"] is scoped
+    assert len(row["files"]) == (1 if scoped else count)

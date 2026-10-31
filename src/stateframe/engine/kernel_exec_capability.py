@@ -108,8 +108,10 @@ def shell_capability(*, workspace, run_env_dir, scratch_home, network, writable,
     paths = [run_env / "bin", *(Path(p).resolve(strict=True) for p in path_dirs),
              Path("/usr/bin"), Path("/bin"), Path("/usr/sbin"), Path("/sbin")]
     # Runtime libraries are explicit authority in the resulting capability/hash.
+    # /private/var/select holds macOS's /bin/sh selection link (sh -> bash|dash); without it
+    # every /bin/sh start prints "Error opening /private/var/select/sh".
     roots = [Path(p) for p in ("/usr", "/bin", "/sbin", "/lib", "/lib64",
-                              "/System", "/Library/Apple") if Path(p).exists()]
+                              "/System", "/Library/Apple", "/private/var/select") if Path(p).exists()]
     roots += [Path(sys.base_prefix).resolve(), Path(sys.prefix).resolve(),
               Path(sys.executable).resolve(), *extra_read_roots, *path_dirs]
     if network == "full":
