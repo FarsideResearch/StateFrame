@@ -85,9 +85,14 @@ engine finished: SUBMITTED in 100.7s
 stateframe chat --repo path/to/your-repo
 ```
 
+## Skills
+
+Install a reusable instruction bundle with `stateframe skill install path/to/skill`, then select it with `--skill NAME` on `run` or `chat`. The run shows a small catalog and loads the body only when it calls `skill_load`. Optional commands need `--trust-skill-tools`. The [skills guide](docs/guide/skills.md) covers the format, limits and resume rules.
+
 ## What the agent can do
 
 - **Find and read:** search the code, list files, read files, and recall what it found earlier in the run.
+- **Use selected skills:** see a bounded catalog of explicitly selected instruction bundles and load one by name. See [Skills](docs/guide/skills.md).
 - **Change code:** make a targeted edit, replace an exact string, insert code at a spot, create, delete, or move a file, or rewrite a whole module.
 - **Run commands:** foreground shell commands and read-only background jobs with bounded, budget-aware replies, per-run dependencies, protected-test restoration and replay verification. See [agent tools](docs/guide/tools.md).
 - **Inspect and organize:** read sanitized Git history, fetch public documentation when enabled, and delete or move files within the task's edit scope. Explicitly trusted command tools can be supplied with `--tools`.

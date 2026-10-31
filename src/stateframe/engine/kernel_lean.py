@@ -44,7 +44,7 @@ _KNOWN_TOOL_NAMES = frozenset({
     *PLAIN_TOOL_NAMES, "insert_before", "authored_check", "read_check_receipt",
     "recall", "work", "work_update", "note_update", "probe", "reproduce",
     "test", "replace_module", "decide", "where_defined", "who_calls",
-    "references", "outline", "dependency_fact", "read_pointer", "abstain",
+    "references", "outline", "dependency_fact", "read_pointer", "abstain", "skill_load",
 })
 _EVIDENCE_PIN_RE = re.compile(
     r"\[EVIDENCEPIN\].*?(?:\[/EVIDENCEPIN\]|$)", re.DOTALL,

@@ -721,6 +721,24 @@ def main(argv: list[str]) -> int:
         os.environ[CHECKPOINT_RESTORE_ENV] = str(checkpoint["dir"])
     install_run_identity(spec.get("run_identity_seed"))  # before any engine import
     key = os.environ.get(spec["api_key_env"], "") if spec.get("api_key_env") else ""
+    try:
+        try:
+            from .skills import SkillError, verify_records, skills_digest
+        except ImportError:
+            from stateframe.skills import SkillError, verify_records, skills_digest
+        skill_records = spec.get("skills", [])
+        skill_digest = spec.get("skills_digest", skills_digest([]))
+        if "skills" in spec:
+            skills_file = Path(spec["environment"]["STATEFRAME_SKILL_SETTINGS_FILE"])
+            skill_settings = json.loads(skills_file.read_text(encoding="utf-8"))
+            if (skill_settings.get("schema") != "stateframe-skill-settings/1"
+                    or skill_settings.get("skills") != skill_records
+                    or skill_settings.get("skills_digest") != skill_digest):
+                raise SkillError("host skill settings file differs from the run spec")
+        verify_records(skill_records, skill_digest)
+    except (SkillError, OSError, KeyError, ValueError) as error:
+        emit("engine_error", error=type(error).__name__, detail=str(error)[:300])
+        return 1
     engine = Path(spec["engine_dir"]).resolve(strict=True)
     # Repo intel asks tree_sitter_language_pack for parsers; serve them from the per-language grammar packages.
     try:
@@ -742,13 +760,13 @@ def main(argv: list[str]) -> int:
                 raise ToolSettingsError("host tool settings file differs from the run spec")
             builtin_names = frozenset(("grep", "list_files", "read", "edit", "str_replace", "insert_before",
                 "authored_check", "file_create", "run_tests", "read_check_receipt", "recall", "done",
-                "shell", "job_wait", "job_output", "job_stop", "file_delete", "file_move", "git", "web_fetch"))
+                "shell", "job_wait", "job_output", "job_stop", "file_delete", "file_move", "git", "web_fetch", "skill_load"))
             custom = load_tool_files([Path(item["path"]) for item in settings.tools_files],
                                      builtin_names=builtin_names, shell_network=settings.shell_network)
             if custom.digest != spec.get("custom_tools_digest"):
                 raise CustomToolError("custom tool definition or executable changed since host validation")
         configure_replay(run, active=bool(replayer and replayer.tape))
-    except (ToolSettingsError, CustomToolError, ToolTapeError, OSError) as error:
+    except (ToolSettingsError, CustomToolError, ToolTapeError, SkillError, OSError, KeyError, ValueError) as error:
         emit("engine_error", error=type(error).__name__, detail=str(error)[:300])
         return 1
     sys.argv[:] = [sys.argv[0]]  # engine modules read argv as legacy CLI input; give them none
@@ -774,6 +792,8 @@ def main(argv: list[str]) -> int:
             from kernel_shell_tool import service as shell_service
             from kernel_agent_tools import configure as configure_agent_tools
             configure_agent_tools(shell_service(), custom)
+        from kernel_skills import configure as configure_skills
+        configure_skills(skill_records, skill_digest, spec.get("chat_url"))
         from probes import react_repair as rr
         from kernel_protocol_spec import publish_public_spec
 

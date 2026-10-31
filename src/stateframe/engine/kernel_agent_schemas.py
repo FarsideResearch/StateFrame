@@ -8,8 +8,11 @@ def schema(name, description, properties, required):
 
 
 JOB_NAMES = frozenset({"job_wait", "job_output", "job_stop"})
-OBSERVATION_NAMES = JOB_NAMES | {"git", "web_fetch"}
+OBSERVATION_NAMES = JOB_NAMES | {"git", "web_fetch", "skill_load"}
 BUILTIN_SCHEMAS = (
+    schema("skill_load", "Load one selected skill's instructions into the current user facts. "
+           "At most two bodies remain resident; loading another evicts the oldest.", {
+        "name": {"type": "string"}, "why": {"type": "string"}}, ["name"]),
     schema("job_wait", "Wait for exit, literal output, or a reachable loopback endpoint. Not check evidence.", {
         "job": {"type": "string"}, "until": {"type": "string", "enum": ["exit", "output", "endpoint"]},
         "text": {"type": "string", "maxLength": 65536},

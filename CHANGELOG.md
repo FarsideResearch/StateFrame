@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- Add explicitly selected reusable skills, a bounded catalog and on-demand instruction loading. Optional command definitions require separate trust and use the existing sandbox and replay path.
+- Pin selected skill bytes for resume and refuse changed or missing bundles before replay.
+
 ## 0.2.0 (2026-10-31)
 
 - Add bounded foreground shell commands and read-only background jobs with explicit command and network policy. Host execution needs a CLI flag and prints a warning.

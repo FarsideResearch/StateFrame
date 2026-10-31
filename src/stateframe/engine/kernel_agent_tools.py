@@ -75,6 +75,9 @@ class AgentTools:
             return bool(self.jobs.jobs)
         if name == "git":
             return self.git is not None and self.shell.settings.git_tool
+        if name == "skill_load":
+            from kernel_skills import service as skills_service
+            return skills_service() is not None
         if name == "web_fetch":
             return self.shell.settings.web
         return name in self.custom
@@ -174,6 +177,18 @@ class AgentTools:
             return ShellReply(str(error), fatal=True)
 
     def _execute(self, name, args, call_id):
+        if name == "skill_load":
+            from kernel_skills import service as skills_service
+            skills = skills_service()
+            if skills is None:
+                return ShellReply("REFUSED SKILL_UNKNOWN: no skills configured")
+            def operation():
+                return skills.load(args.get("name"))
+            observation = self.observation(name, args, call_id, operation,
+                                           definition=self.shell.spec.get("skills_digest"))
+            if replay_mode_active() and operation() != observation:
+                raise ToolReplayRefused("skill load observation diverged on replay")
+            return ShellReply(observation)
         if name in self.custom:
             from kernel_effects import EffectError
             from kernel_run_env import RunEnvError

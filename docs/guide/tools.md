@@ -4,6 +4,8 @@ StateFrame offers a tool only when its run settings and the current request allo
 
 The existing file and check tools are `grep`, `list_files`, `read`, `edit`, `str_replace`, `insert_before`, `authored_check`, `file_create`, `run_tests`, `read_check_receipt`, `recall` and `done`. Some runs also offer probe and whole-module operations. The following tools add command execution, file housekeeping and outside observations. Each accepts an optional `why` string.
 
+When a run selects a [skill](skills.md), `skill_load(name)` is also offered. It loads a bounded user-role instruction body and creates a settled observation. It grants no source-read or check evidence. Skill command definitions are offered only with `--trust-skill-tools` and follow the custom command rules below.
+
 ## Shell and jobs
 
 `shell(command, timeout_seconds?, background?)` runs `/bin/sh -c` in the run's execution session. `command` is required, nonempty text of at most 16,384 characters. A foreground call defaults to 120 seconds; `timeout_seconds` accepts 1 through 600. `background: true` starts a job, with a 600-second default and the same 1 through 600 range. At most four jobs may run at once. The shell tool is offered unless `--shell off` is set.

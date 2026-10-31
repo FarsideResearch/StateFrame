@@ -29,6 +29,7 @@ from .endpoint import CHAT_SUFFIX, Endpoint, EndpointError
 from .task_row import build_row
 from .engine.kernel_custom_tools import CustomToolError, load_tool_files
 from .engine.kernel_tool_settings import ToolSettings
+from .skills import SkillError, resolve_skills, skills_digest, verify_records
 
 PACKAGE = Path(__file__).resolve().parent
 ENGINE_DIR = PACKAGE / "engine"
@@ -168,6 +169,8 @@ class RunOptions:
     test_env: dict[str, str] = field(default_factory=dict)
     pytest_plugins: str | None = None  # "installed": let pytest load installed plugins
     tool_settings: ToolSettings = field(default_factory=ToolSettings)
+    skills: tuple[str, ...] = ()
+    trust_skill_tools: bool = False
     shell_confirm: Callable[[str], bool] | None = field(default=None, repr=False)
     _deadline: float | None = field(default=None, init=False, repr=False)
 
@@ -598,10 +601,23 @@ def prepare(options: RunOptions) -> tuple[Path, workcopy.WorkCopy, dict]:
         raise RunError("--max-turns must be 0 (no limit) or between 1 and 500")
     if not ENGINE_DIR.is_dir():
         raise RunError("engine directory missing from the package; reinstall stateframe")
+    try:
+        selected_skills = resolve_skills(options.skills, trusted=options.trust_skill_tools)
+    except SkillError as error:
+        raise RunError(str(error)) from error
+    if selected_skills and str(options.extra_env.get("STATEFRAME_AGENT_LOOP", environment.get("STATEFRAME_AGENT_LOOP", "full"))).lower() == "plain":
+        raise RunError("--skill requires the composed loop; plain loop does not support skills")
+    if selected_skills and str(options.extra_env.get("STATEFRAME_LEAN", environment.get("STATEFRAME_LEAN", "off"))).lower() == "on":
+        raise RunError("--skill requires the composed loop; lean mode does not support skills")
+    records = [skill.record(trusted=options.trust_skill_tools) for skill in selected_skills]
     settings = options.tool_settings
+    if options.trust_skill_tools:
+        settings = replace(settings, tools_files=(*settings.tools_files, *(
+            {"path": str(skill.path / "tools.json"), "digest": "pending"}
+            for skill in selected_skills if skill.tools_json_sha256)))
     builtin_names = frozenset(("grep", "list_files", "read", "edit", "str_replace", "insert_before",
         "authored_check", "file_create", "run_tests", "read_check_receipt", "recall", "done",
-        "shell", "job_wait", "job_output", "job_stop", "file_delete", "file_move", "git", "web_fetch"))
+        "shell", "job_wait", "job_output", "job_stop", "file_delete", "file_move", "git", "web_fetch", "skill_load"))
     try:
         custom = load_tool_files([Path(item["path"]) for item in settings.tools_files],
                                  builtin_names=builtin_names, shell_network=settings.shell_network)
@@ -646,12 +662,18 @@ def prepare(options: RunOptions) -> tuple[Path, workcopy.WorkCopy, dict]:
     settings_file = run / "tool-settings.json"
     settings_file.write_text(json.dumps(settings.as_dict(), indent=1, sort_keys=True))
     settings_file.chmod(0o600)
+    skills_file = run / "skill-settings.json"
+    skills_record = {"schema": "stateframe-skill-settings/1", "skills": records,
+                     "skills_digest": skills_digest(records)}
+    skills_file.write_text(json.dumps(skills_record, indent=1, sort_keys=True))
+    skills_file.chmod(0o600)
     environment.update(options._context_env)
     opt_in = resolve_opt_in_switches()
     environment.update(opt_in)
     environment.update(options.extra_env)
     # Host authority wins over every caller-supplied environment overlay.
     environment["STATEFRAME_TOOL_SETTINGS_FILE"] = str(settings_file)
+    environment["STATEFRAME_SKILL_SETTINGS_FILE"] = str(skills_file)
     # Slot selection is a runner-owned contract. A stale ambient value or an
     # extra environment entry must not pin a slot after discovery found none.
     environment.pop("REACT_SLOT_ID", None)
@@ -669,6 +691,7 @@ def prepare(options: RunOptions) -> tuple[Path, workcopy.WorkCopy, dict]:
         environment["STATEFRAME_TASK_PYTEST_PLUGINS"] = "installed"
     environment_sources = {k: "profile:" + options.profile for k in environment}
     environment_sources["STATEFRAME_TOOL_SETTINGS_FILE"] = "runner:host-tool-settings"
+    environment_sources["STATEFRAME_SKILL_SETTINGS_FILE"] = "runner:host-skill-settings"
     for name in opt_in:
         environment_sources[name] = ("ambient:" + name if os.environ.get(name, "").strip()
                                      else "runner:default-" + OPT_IN_RUNNER_DEFAULTS[name])
@@ -690,6 +713,8 @@ def prepare(options: RunOptions) -> tuple[Path, workcopy.WorkCopy, dict]:
         "tool_settings": settings.as_dict(),
         "custom_tools_digest": custom.digest,
         "custom_executables": {tool.name: tool.executable_digest for tool in custom.tools},
+        "skills": records,
+        "skills_digest": skills_record["skills_digest"],
         "environment": environment,
         "environment_sources": environment_sources,
         "prompt_cache_slot": {
@@ -1317,6 +1342,10 @@ def resume_run(run_dir: Path, *, endpoint: Endpoint | None = None, max_turns: in
     run_dir = run_dir.resolve()
     state = resume_module.assess(run_dir, max_turns=max_turns, model=model)
     spec: dict = state["spec"]  # type: ignore[assignment]
+    try:
+        verify_records(spec.get("skills", []), spec.get("skills_digest", skills_digest([])))
+    except SkillError as error:
+        raise resume_module.ResumeRefused(str(error)) from error
     if "tool_settings" in spec:
         try:
             settings = ToolSettings.from_dict(spec["tool_settings"])
@@ -1324,7 +1353,7 @@ def resume_run(run_dir: Path, *, endpoint: Endpoint | None = None, max_turns: in
             raise resume_module.ResumeRefused(f"recorded tool settings are invalid: {error}") from error
         builtin_names = frozenset(("grep", "list_files", "read", "edit", "str_replace", "insert_before",
             "authored_check", "file_create", "run_tests", "read_check_receipt", "recall", "done",
-            "shell", "job_wait", "job_output", "job_stop", "file_delete", "file_move", "git", "web_fetch"))
+            "shell", "job_wait", "job_output", "job_stop", "file_delete", "file_move", "git", "web_fetch", "skill_load"))
         for item in settings.tools_files:
             path = Path(item["path"])
             try:
