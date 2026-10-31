@@ -91,8 +91,9 @@ def test_refusals_are_typed_and_run_continues(tmp_path):
     assert (repo / "pkg" / "old.py").exists()
     assert not (tmp_path / "escaped.py").exists()
     assert summary["files_changed"] == []
+    # The refusals must reach the model: check the recorded request bodies, not a debug log.
     log = "\n".join(path.read_text(errors="replace")
-                    for path in (run_dir / "worker" / "results").rglob("react_live*.log"))
+                    for path in sorted((run_dir / "requests").glob("*.json")))
     for code in ("PROTECTED_TEST", "PATH_NOT_FOUND", "OUTSIDE_WORKSPACE",
                  "DESTINATION_EXISTS", "NOT_EDITABLE"):
         assert code in log

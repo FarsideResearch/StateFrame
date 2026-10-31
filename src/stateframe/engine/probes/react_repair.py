@@ -954,6 +954,11 @@ def _is_product_path(relative: str, row: Mapping[str, object]) -> bool:
     return any(path == root or path.startswith(root + "/") for root in _product_roots(row))
 
 
+# The run loop imports kernel_green_lock.is_product_path under the same local name, so tool
+# handlers inside it must call the row-aware check through this alias.
+_row_is_product_path = _is_product_path
+
+
 def _product_source_paths(root: pathlib.Path, fileset: FileSet,
                           row: Mapping[str, object]) -> tuple[str, ...]:
     """Merge declared product files with product files created during the run."""
@@ -8404,19 +8409,18 @@ def work(d, *, resume=None):
                                         editable=_editable,
                                         new_file_allowed=lambda relative: (
                                             not new_files_forbidden(measurement)
-                                            and _is_product_path(relative, {
-                                                **d, "allowed_product_paths":
-                                                [relative.split("/", 1)[0]]})),
+                                            and _row_is_product_path(relative, d)),
                                     )
                                 _paths = _effect.changed_paths
                                 _obs = f"{_name} applied. {', '.join(_paths)}"
+                                from kernel_post_edit_refresh import rebind_after_file_operation
+                                _rebound_target = rebind_after_file_operation(
+                                    measurement, _effect.source, _effect.destination)
+                                if _rebound_target is not None:
+                                    target = _rebound_target
                                 if _name == "file_move":
                                     created_this_run.discard(str(root / _effect.source))
                                     created_this_run.add(str(root / _effect.destination))
-                                    _destination_root = _effect.destination.split("/", 1)[0]
-                                    _allowed_roots = d.get("allowed_product_paths")
-                                    if isinstance(_allowed_roots, list) and _destination_root not in _allowed_roots:
-                                        _allowed_roots.append(_destination_root)
                                 else:
                                     created_this_run.discard(str(root / _effect.source))
                                 if first_edit_step is None:

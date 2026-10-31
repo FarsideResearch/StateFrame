@@ -1,4 +1,5 @@
 import json
+from types import SimpleNamespace
 
 import pytest
 
@@ -7,6 +8,11 @@ from stateframe.chat import Session, TaskRecord
 from stateframe.inspect_run import overview
 from kernel_done_is_submit_authority import artifact_digest, store_candidate
 from kernel_file_ops import FileOperationRefused, file_delete, file_move
+from kernel_frame_optional_allocation import FrameAllocationReplanNeeded
+from kernel_frame_source_snapshot import frame_source_snapshot
+from kernel_post_edit_refresh import rebind_after_file_operation, refresh_after_applied_edit
+from kernel_request_evidence_closure import build_source_closure
+from kernel_request_source_window import editable_product_paths, source_revision
 
 
 def _allow(_path):
@@ -15,6 +21,69 @@ def _allow(_path):
 
 def _unprotected(_path):
     return False
+
+
+@pytest.mark.parametrize("operation", ["move", "delete"])
+def test_file_operation_rebinds_source_proof_for_next_request(tmp_path, operation):
+    root = tmp_path / "repo"
+    source = root / "pkg" / "old.py"
+    source.parent.mkdir(parents=True)
+    source.write_text("VALUE = 42\n")
+    owner = SimpleNamespace(root=root, task_row={"files": {"pkg/old.py": {}}})
+    runtime = SimpleNamespace(owner=owner, target=source,
+                              _request_source_closure_cache={})
+    old_plan = build_source_closure(
+        root, editable_product_paths(runtime), "Rename pkg/old.py",
+        target_path="pkg/old.py").as_dict()
+    runtime._request_source_closure = old_plan
+    assert frame_source_snapshot(runtime, old_plan)["pkg/old.py"] == "VALUE = 42\n"
+
+    if operation == "move":
+        effect = file_move(root, "pkg/old.py", "pkg/new.py",
+                           protected=_unprotected, editable=_allow,
+                           new_file_allowed=_allow)
+    else:
+        effect = file_delete(root, "pkg/old.py", protected=_unprotected,
+                             editable=_allow)
+    with pytest.raises(FrameAllocationReplanNeeded,
+                       match="source proof workspace revision unavailable"):
+        frame_source_snapshot(runtime, old_plan)
+
+    target = rebind_after_file_operation(runtime, effect.source, effect.destination)
+    assert target == (root / "pkg/new.py" if operation == "move" else None)
+    assert runtime._request_source_closure is None
+    current_paths = editable_product_paths(runtime)
+    assert current_paths == (("pkg/new.py",) if operation == "move" else ())
+    fresh_plan = build_source_closure(
+        root, current_paths, "Rename pkg/old.py",
+        target_path=target.relative_to(root).as_posix() if target else None).as_dict()
+    sources = frame_source_snapshot(runtime, fresh_plan)
+    assert sources == ({"pkg/new.py": "VALUE = 42\n"} if target else {})
+
+    revision = source_revision("VALUE = 42\n")
+    binding = {"product_files": {"pkg/new.py": revision} if target else {},
+               "product_revision": "current"}
+    receipt = {"kind": "edit", "result_class": "APPLIED",
+               "target_path": effect.destination or effect.source,
+               "changed_files": [{"path": path} for path in effect.changed_paths]}
+    refreshed = refresh_after_applied_edit(runtime, receipt, binding)
+    assert refreshed == ({"pkg/new.py": revision} if target else {})
+    assert runtime._post_edit_refresh["paths"]["pkg/old.py"] == "UNAVAILABLE"
+
+
+def test_file_operation_retires_closure_when_source_is_not_target(tmp_path):
+    root = tmp_path / "repo"
+    root.mkdir()
+    target = root / "active.py"
+    target.write_text("ACTIVE = True\n")
+    runtime = SimpleNamespace(
+        owner=SimpleNamespace(root=root), target=target,
+        _request_source_closure={"units": [{"path": "stale.py"}]},
+        _request_source_closure_cache={"old": object()},
+    )
+    assert rebind_after_file_operation(runtime, "stale.py", None) == target
+    assert runtime._request_source_closure is None
+    assert runtime._request_source_closure_cache == {}
 
 
 def test_delete_and_move_guard_paths_and_collisions(tmp_path):

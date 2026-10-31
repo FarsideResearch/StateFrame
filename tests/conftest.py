@@ -4,6 +4,7 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
+collect_ignore_glob = ["e2e/*"]
 for path in (ROOT / "src", ROOT / "src" / "stateframe" / "engine"):
     sys.path.insert(0, str(path))
 
