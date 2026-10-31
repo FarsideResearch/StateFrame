@@ -28,7 +28,7 @@ BUILTIN_SCHEMAS = (
 )
 
 
-def measure_schemas(custom_schemas=(), *, endpoint=None, tokenizer=None):
+def measure_schemas(custom_schemas=(), *, mcp_schemas=(), endpoint=None, tokenizer=None):
     """Use the request meter's tokenizer transport, recording fallback explicitly."""
     from kernel_request_diet import RequestTokenMeter
     from kernel_shell_tool import SHELL_SCHEMA
@@ -41,8 +41,8 @@ def measure_schemas(custom_schemas=(), *, endpoint=None, tokenizer=None):
         result[item["function"]["name"]] = {"tokens": count, "method": method}
         if count > 1200:
             raise CustomToolError(f"built-in {item['function']['name']} schema exceeds 1200 tokens: {count}")
-    if custom_schemas:
-        count, method = meter.measure({"messages": [], "tools": list(custom_schemas)})
+    if custom_schemas or mcp_schemas:
+        count, method = meter.measure({"messages": [], "tools": [*custom_schemas, *mcp_schemas]})
         result["custom_total"] = {"tokens": count, "method": method}
         if count > 1500:
             raise CustomToolError(f"custom tool schemas: {count} tokens exceeds 1500")

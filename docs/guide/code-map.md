@@ -40,7 +40,7 @@ The engine is a flat package of modules, each owning one mechanism; `release-man
 | `kernel_exec_capability.py`, `kernel_exec_supervisor.py`, `kernel_exec_tracker.py`, `sf_launch.py` | Per-command authority, executable symlink and shebang chain admission, supervised process lifetime and resource limits. |
 | `kernel_effects.py`, `kernel_run_env.py` | Bounded full workspace effect reconciliation, including executable-bit restoration, and run-local dependency environments. |
 | `kernel_agent_schemas.py`, `kernel_agent_tools.py`, `kernel_agent_jobs.py`, `kernel_job_output.py` | Schemas, per-run tool registration, background jobs and bounded output. |
-| `kernel_custom_tools.py`, `kernel_tool_tape.py` | Trusted command definitions and durable tool replay records. |
+| `kernel_custom_tools.py`, `kernel_mcp_tools.py`, `kernel_mcp_driver.py`, `kernel_tool_tape.py` | Trusted command and MCP stdio definitions, bounded server exchanges and durable tool replay records. |
 | `kernel_execution_policy.py`, `kernel_test_isolation.py` | Sandboxed command and test execution. |
 | `kernel_git_view.py` | Pinned, sanitized Git history observations, commit-rooted `show`, run-baseline diffs and offline Git queries for repository indexing. |
 | `kernel_plain_host.py`, `kernel_plain_loop.py` | The alternate plain loop: foreground shell only from the new tool set; Git, web and custom settings are refused. |

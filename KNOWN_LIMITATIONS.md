@@ -17,7 +17,7 @@ Large tasks or repositories can require more state and source context than fits.
 
 ## Agent tools
 
-- Shell, delete, move, read-only Git, opt-in web fetch, background jobs and explicitly configured command tools are available. MCP clients and general plug-in protocols are not. See [Agent tools](docs/guide/tools.md).
+- Shell, delete, move, read-only Git, opt-in web fetch, background jobs, explicitly configured command tools and opt-in MCP stdio tool servers are available. MCP HTTP transport, resources, prompts, sampling and persistent sessions are not. See [Agent tools](docs/guide/tools.md).
 - On macOS, a process deliberately double-forked and orphaned between supervisor sweeps can outlive a run. Its sandbox profile continues to restrict filesystem and network access. Aggregate resident memory is polled rather than enforced as a hard cap, so usage can overshoot between samples.
 - Linux has one network placement per execution session. A full-network session cannot later use the same shared loopback namespace; a narrower command gets its own loopback namespace and cannot reach a service in the full-network namespace.
 - Background jobs are stopped at completion and are not relaunched on resume. A running job from the stopped attempt appears as `lost on restart` when the run continues.

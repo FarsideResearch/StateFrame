@@ -593,8 +593,8 @@ def run_plain(row: Mapping[str, object], output: Path, *,
     """One plain episode inside ``output`` (the worker directory); returns the outcome mapping."""
     from kernel_tool_settings import load_tool_settings, ToolSettingsError
     tool_settings = load_tool_settings()
-    if tool_settings is not None and (tool_settings.git_tool or tool_settings.web or tool_settings.tools_files):
-        raise ToolSettingsError("plain loop does not support git, web or custom tools; use --git-tool off, --web off and no --tools")
+    if tool_settings is not None and (tool_settings.git_tool or tool_settings.web or tool_settings.tools_files or tool_settings.mcp_files):
+        raise ToolSettingsError("plain loop does not support git, web, custom or MCP tools")
     env = dict(os.environ if environ is None else environ)
     limits = limits_from_env(env)
     settings = HookSettings.from_env(env)

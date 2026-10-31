@@ -111,7 +111,7 @@ def _add_task_arguments(command: argparse.ArgumentParser, *, for_run: bool = Fal
     command.add_argument("--shell-ask", action=argparse.BooleanOptionalAction,
                          default=not for_run)
     command.add_argument("--shell-network", choices=("none", "loopback", "full"), default="loopback")
-    for flag in ("shell-allow", "shell-deny", "shell-read", "web-allow", "tools"):
+    for flag in ("shell-allow", "shell-deny", "shell-read", "web-allow", "tools", "mcp"):
         command.add_argument("--" + flag, action="append", default=[])
     command.add_argument("--shell-sandbox", choices=("on", "off"), default="on")
     for flag in ("run-env", "git-tool", "web"):
@@ -184,7 +184,9 @@ def _run_options(args: argparse.Namespace, endpoint: Endpoint) -> RunOptions:
                             web=args.web if args.web is not None else False,
                             web_allow=tuple(args.web_allow),
                             tools_files=tuple({"path": str(Path(path).expanduser().resolve()), "digest": "pending"}
-                                              for path in args.tools))
+                                              for path in args.tools),
+                            mcp_files=tuple({"path": str(Path(path).expanduser().resolve()), "digest": "pending"}
+                                            for path in args.mcp))
     return RunOptions(repo=args.repo, task=getattr(args, "task", ""), endpoint=endpoint,
                       max_turns=args.max_turns, test_cmd=args.test_cmd, checks=args.check,
                       target=args.target, edit_paths=args.edit,

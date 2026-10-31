@@ -91,6 +91,30 @@ Run with `stateframe run ... --tools path/to/tools.json`. Names must match `^[a-
 
 `network` defaults to `none` and cannot exceed `--shell-network`. `writes` defaults to `none`, which mounts the working copy read-only; `workspace` allows reconciled effects. `replay` defaults to `external`; use `local` only for a reproducible command. A full-network tool must use external replay. `timeout_seconds` is required and must be finite, greater than zero and at most 600; invalid values fail at load before execution. Custom replies have bounded shell-style output and shrink further when the whole request approaches its budget. Invalid arguments use `BAD_ARGUMENTS`; a changed executable uses `TOOL_CHANGED`. Invalid definitions fail at load before a model request. With no tokenizer, schema admission uses a recorded byte estimate rather than a measured token count.
 
+## MCP servers
+
+`--mcp FILE` is a repeatable opt-in for trusted local MCP stdio servers. The file is strict JSON. For example:
+
+```json
+{
+  "schema": "stateframe-mcp/1",
+  "servers": [{
+    "name": "local_docs",
+    "trust": "I reviewed this local server and its executable.",
+    "argv": ["/absolute/path/to/server", "--fixed-option"],
+    "network": "none",
+    "writes": "none",
+    "replay": "external",
+    "timeout_seconds": 30,
+    "tools": ["search"]
+  }]
+}
+```
+
+Each server needs a unique name, a nonempty trust statement, fixed argv and a finite timeout of at most 600 seconds. The optional `tools` list limits discovery; without it, all listed tools are considered. The executable and definition are hashed before the run and checked again on resume. StateFrame initializes the server and lists its tools inside an execution sandbox before offering any to the model. Invalid tool names, collisions, unsupported schemas and tools beyond the shared 1,500-token custom plus MCP schema allowance are omitted. The run records the offered and omitted names. Server descriptions and results are untrusted content.
+
+Each discovery and tool call starts a fresh server child in a per-call sandbox session. `network` defaults to `none` and cannot exceed `--shell-network`; `writes` defaults to `none`, making the working copy read-only. Workspace writes use the same effect reconciliation as custom commands. `replay` defaults to `external`, so resume requires `--replay-external` before repeating a call. `local` re-executes and compares workspace state; `observation` serves the tape and is allowed only with no network and no workspace writes. A full-network server must use external replay. Host execution is available only through the explicit `--shell unrestricted --shell-sandbox off` authorization. Stateful servers that need a persistent session are unsupported. Only stdio tools/list and tools/call are supported; server requests cannot direct the client to execute other work.
+
 ## Run environment, resume and prompt budget
 
 `--run-env` is on by default when shell is enabled; `--no-run-env` disables it. StateFrame clones a selected project virtual environment or creates a run-local system-site environment from the selected base interpreter. Python and package caches for this run live under the run directory. Editable installs pointing into the source repository are remapped to the working copy. If safe remapping or cloning fails, StateFrame reports the problem and continues with run environment off. Installs affect this run only: add dependencies to the project declaration to keep them. Engine and final host checks use the run environment when it is available. A changed environment identity makes earlier check evidence stale. Network installs need `--shell-network full`.

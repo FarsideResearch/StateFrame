@@ -28,6 +28,7 @@ from . import resume as resume_module
 from .endpoint import CHAT_SUFFIX, Endpoint, EndpointError
 from .task_row import build_row
 from .engine.kernel_custom_tools import CustomToolError, load_tool_files
+from .engine.kernel_mcp_tools import load_mcp_files, discover as discover_mcp
 from .engine.kernel_tool_settings import ToolSettings
 
 PACKAGE = Path(__file__).resolve().parent
@@ -605,12 +606,17 @@ def prepare(options: RunOptions) -> tuple[Path, workcopy.WorkCopy, dict]:
     try:
         custom = load_tool_files([Path(item["path"]) for item in settings.tools_files],
                                  builtin_names=builtin_names, shell_network=settings.shell_network)
+        mcp_servers = load_mcp_files([Path(item["path"]) for item in settings.mcp_files],
+                                     shell_network=settings.shell_network)
     except CustomToolError as error:
         raise RunError(str(error)) from error
     files = tuple({"path": str(Path(item["path"]).resolve()),
                    "digest": hashlib.sha256(Path(item["path"]).read_bytes()).hexdigest()}
                   for item in settings.tools_files)
-    settings = replace(settings, tools_files=files)
+    mcp_files = tuple({"path": str(Path(item["path"]).resolve()),
+                       "digest": hashlib.sha256(Path(item["path"]).read_bytes()).hexdigest()}
+                      for item in settings.mcp_files)
+    settings = replace(settings, tools_files=files, mcp_files=mcp_files)
     options.tool_settings = settings
     run = (options.run_dir or default_run_dir(options.repo)).resolve()
     if run.exists():
@@ -626,6 +632,13 @@ def prepare(options: RunOptions) -> tuple[Path, workcopy.WorkCopy, dict]:
     work.snapshot = run / "parent"
     row = build_row(work, task=options.task, checks=options.checks or None, target=options.target,
                     edit_paths=options.edit_paths or None)
+    try:
+        mcp = discover_mcp(mcp_servers, work.copy, run,
+                           shell_network=settings.shell_network,
+                           host_authorization=settings.host_authorization is not None,
+                           custom_schemas=custom.schemas(), endpoint=options.endpoint.chat_url) if mcp_servers else None
+    except (CustomToolError, OSError, ValueError) as error:
+        raise RunError(f"MCP discovery failed: {error}") from error
     environment.update({
         "DS_URL": options.endpoint.chat_url,
         "DS_MODEL": options.endpoint.model,
@@ -690,6 +703,9 @@ def prepare(options: RunOptions) -> tuple[Path, workcopy.WorkCopy, dict]:
         "tool_settings": settings.as_dict(),
         "custom_tools_digest": custom.digest,
         "custom_executables": {tool.name: tool.executable_digest for tool in custom.tools},
+        "mcp_tools_digest": mcp.digest if mcp else None,
+        "mcp_omitted": list(mcp.omitted) if mcp else [],
+        "mcp_tools": [tool.name for tool in mcp.tools] if mcp else [],
         "environment": environment,
         "environment_sources": environment_sources,
         "prompt_cache_slot": {
@@ -1325,7 +1341,7 @@ def resume_run(run_dir: Path, *, endpoint: Endpoint | None = None, max_turns: in
         builtin_names = frozenset(("grep", "list_files", "read", "edit", "str_replace", "insert_before",
             "authored_check", "file_create", "run_tests", "read_check_receipt", "recall", "done",
             "shell", "job_wait", "job_output", "job_stop", "file_delete", "file_move", "git", "web_fetch"))
-        for item in settings.tools_files:
+        for item in (*settings.tools_files, *settings.mcp_files):
             path = Path(item["path"])
             try:
                 unchanged = path.is_file() and hashlib.sha256(path.read_bytes()).hexdigest() == item["digest"]
@@ -1336,10 +1352,22 @@ def resume_run(run_dir: Path, *, endpoint: Endpoint | None = None, max_turns: in
         try:
             custom = load_tool_files([Path(item["path"]) for item in settings.tools_files],
                                      builtin_names=builtin_names, shell_network=settings.shell_network)
+            mcp_servers = load_mcp_files([Path(item["path"]) for item in settings.mcp_files],
+                                         shell_network=settings.shell_network)
         except CustomToolError as error:
             raise resume_module.ResumeRefused(f"custom tool changed: {error}") from error
         if custom.digest != spec.get("custom_tools_digest"):
             raise resume_module.ResumeRefused("custom tool executable or definition changed")
+        if mcp_servers:
+            try:
+                mcp = discover_mcp(mcp_servers, run_dir / "workspace", run_dir,
+                                   shell_network=settings.shell_network,
+                                   host_authorization=settings.host_authorization is not None,
+                                   custom_schemas=custom.schemas(), endpoint=spec.get("chat_url"))
+            except (CustomToolError, OSError, ValueError) as error:
+                raise resume_module.ResumeRefused(f"MCP discovery changed or failed: {error}") from error
+            if mcp.digest != spec.get("mcp_tools_digest") or [t.name for t in mcp.tools] != spec.get("mcp_tools") or list(mcp.omitted) != spec.get("mcp_omitted"):
+                raise resume_module.ResumeRefused("MCP tool list or schema changed")
         settings = replace(settings, replay_external=replay_external)
     elif replay_external:
         raise resume_module.ResumeRefused("this run has no tool tape; --replay-external cannot apply")

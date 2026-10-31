@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Add opt-in MCP stdio tool servers with sandboxed discovery and calls, bounded schemas and protocol messages, and tape-aware replay.
+
 ## 0.2.0 (2026-10-31)
 
 - Add bounded foreground shell commands and read-only background jobs with explicit command and network policy. Host execution needs a CLI flag and prints a warning.
