@@ -820,6 +820,11 @@ def _workspace_root(runtime: object) -> Path:
 
 
 def _editable_site(runtime: object, root: Path, path: str) -> bool:
+    """Whether edit advice may name ``path``: never a protected test or a path outside the workspace.
+
+    Advice only. Edit authority (including files created or moved during the run) is enforced
+    where edits execute, so this deliberately does not consult the startup edit contract.
+    """
     try:
         candidate = (root / path).resolve()
     except (OSError, RuntimeError, ValueError):
@@ -827,20 +832,7 @@ def _editable_site(runtime: object, root: Path, path: str) -> bool:
     if not candidate.is_relative_to(root):
         return False
     protected = getattr(runtime, "protected_tests", ()) or ()
-    if candidate in protected:
-        return False
-    contract = getattr(runtime, "edit_contract", None)
-    if contract is None:
-        return True
-    if not isinstance(contract, Mapping):
-        return False
-    authority = contract.get("edit_authority", contract)
-    if not isinstance(authority, Mapping):
-        return False
-    paths = authority.get("editable_paths")
-    if not isinstance(paths, Sequence) or isinstance(paths, (str, bytes, bytearray)):
-        return False
-    return path in paths
+    return candidate not in protected
 
 
 def _render_next_site(
