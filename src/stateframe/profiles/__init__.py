@@ -6,6 +6,10 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 DEFAULT = "r2hc3"
+PRIVILEGED_PREFIXES = ("STATEFRAME_SHELL", "STATEFRAME_WEB", "STATEFRAME_TOOLS",
+                       "STATEFRAME_HOST_MODE", "STATEFRAME_HOST_AUTHORIZATION",
+                       "STATEFRAME_HOST_SANDBOX", "STATEFRAME_RUN_ENV", "STATEFRAME_GIT_TOOL",
+                       "STATEFRAME_TOOL_SETTINGS")
 
 
 def available() -> list[str]:
@@ -22,7 +26,14 @@ def load(name: str) -> dict[str, str]:
     document = json.loads(path.read_text())
     if document.get("schema") != "stateframe-product-profile/1":
         raise ValueError(f"{path.name} is not a StateFrame product profile")
-    return {str(k): str(v) for k, v in document["switches"].items()}
+    switches = document["switches"]
+    if not isinstance(switches, dict):
+        raise ValueError(f"{path.name}: switches must be an object")
+    privileged = [key for key in switches if isinstance(key, str) and key.startswith(PRIVILEGED_PREFIXES)]
+    if privileged:
+        raise ValueError(f"{path.name}: privileged tool settings belong on the host CLI, not in profiles: "
+                         + ", ".join(sorted(privileged)))
+    return {str(k): str(v) for k, v in switches.items()}
 
 
 def engine_source_summary() -> dict[str, object]:

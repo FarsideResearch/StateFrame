@@ -25,6 +25,8 @@ from . import cache_metrics, outer_checks, outcomes, preflight, profiles, test_i
 from . import resume as resume_module
 from .endpoint import CHAT_SUFFIX, Endpoint, EndpointError
 from .task_row import build_row
+from .engine.kernel_custom_tools import CustomToolError, load_tool_files
+from .engine.kernel_tool_settings import ToolSettings
 
 PACKAGE = Path(__file__).resolve().parent
 ENGINE_DIR = PACKAGE / "engine"
@@ -163,6 +165,7 @@ class RunOptions:
     # settings a project needs to import. Declared to the engine as host task env keys.
     test_env: dict[str, str] = field(default_factory=dict)
     pytest_plugins: str | None = None  # "installed": let pytest load installed plugins
+    tool_settings: ToolSettings = field(default_factory=ToolSettings)
     _deadline: float | None = field(default=None, init=False, repr=False)
 
 
@@ -550,6 +553,20 @@ def prepare(options: RunOptions) -> tuple[Path, workcopy.WorkCopy, dict]:
         raise RunError("--max-turns must be 0 (no limit) or between 1 and 500")
     if not ENGINE_DIR.is_dir():
         raise RunError("engine directory missing from the package; reinstall stateframe")
+    settings = options.tool_settings
+    builtin_names = frozenset(("grep", "list_files", "read", "edit", "str_replace", "insert_before",
+        "authored_check", "file_create", "run_tests", "read_check_receipt", "recall", "done",
+        "shell", "job_wait", "job_output", "job_stop", "file_delete", "file_move", "git", "web_fetch"))
+    try:
+        custom = load_tool_files([Path(item["path"]) for item in settings.tools_files],
+                                 builtin_names=builtin_names, shell_network=settings.shell_network)
+    except CustomToolError as error:
+        raise RunError(str(error)) from error
+    files = tuple({"path": str(Path(item["path"]).resolve()),
+                   "digest": hashlib.sha256(Path(item["path"]).read_bytes()).hexdigest()}
+                  for item in settings.tools_files)
+    settings = replace(settings, tools_files=files)
+    options.tool_settings = settings
     run = (options.run_dir or default_run_dir(options.repo)).resolve()
     if run.exists():
         raise RunError(f"run directory already exists: {run}")
@@ -582,10 +599,15 @@ def prepare(options: RunOptions) -> tuple[Path, workcopy.WorkCopy, dict]:
     # processes made resume skip parses the original attempt did, so the rebuilt journal and request
     # bytes diverged and replay went live early. resume archives worker/, so each attempt starts cold.
     environment["STATEFRAME_REPO_CACHE_DIR"] = str(run / "worker" / "repo-intel-cache")
+    settings_file = run / "tool-settings.json"
+    settings_file.write_text(json.dumps(settings.as_dict(), indent=1, sort_keys=True))
+    settings_file.chmod(0o600)
     environment.update(options._context_env)
     opt_in = resolve_opt_in_switches()
     environment.update(opt_in)
     environment.update(options.extra_env)
+    # Host authority wins over every caller-supplied environment overlay.
+    environment["STATEFRAME_TOOL_SETTINGS_FILE"] = str(settings_file)
     # Slot selection is a runner-owned contract. A stale ambient value or an
     # extra environment entry must not pin a slot after discovery found none.
     environment.pop("REACT_SLOT_ID", None)
@@ -602,6 +624,7 @@ def prepare(options: RunOptions) -> tuple[Path, workcopy.WorkCopy, dict]:
             raise RunError("--pytest-plugins only accepts 'installed'")
         environment["STATEFRAME_TASK_PYTEST_PLUGINS"] = "installed"
     environment_sources = {k: "profile:" + options.profile for k in environment}
+    environment_sources["STATEFRAME_TOOL_SETTINGS_FILE"] = "runner:host-tool-settings"
     for name in opt_in:
         environment_sources[name] = ("ambient:" + name if os.environ.get(name, "").strip()
                                      else "runner:default-" + OPT_IN_RUNNER_DEFAULTS[name])
@@ -620,6 +643,9 @@ def prepare(options: RunOptions) -> tuple[Path, workcopy.WorkCopy, dict]:
         "max_turns": options.max_turns,
         "parent_snapshot": str(run / "parent"),
         "public_row": row,
+        "tool_settings": settings.as_dict(),
+        "custom_tools_digest": custom.digest,
+        "custom_executables": {tool.name: tool.executable_digest for tool in custom.tools},
         "environment": environment,
         "environment_sources": environment_sources,
         "prompt_cache_slot": {
@@ -1215,7 +1241,8 @@ def run(options: RunOptions, printer=print) -> dict[str, object]:
 
 def resume_run(run_dir: Path, *, endpoint: Endpoint | None = None, max_turns: int | None = None,
                timeout_s: float | None = None, quiet: bool = False, model: str | None = None,
-               keep_checkpoints: bool = False, printer=print) -> dict[str, object]:
+               keep_checkpoints: bool = False, replay_external: bool = False,
+               printer=print) -> dict[str, object]:
     """Continue an interrupted run in place (see ``stateframe.resume``).
 
     ``model`` continues under another model NAME the endpoint serves (the same weights listed differently,
@@ -1226,6 +1253,32 @@ def resume_run(run_dir: Path, *, endpoint: Endpoint | None = None, max_turns: in
     run_dir = run_dir.resolve()
     state = resume_module.assess(run_dir, max_turns=max_turns, model=model)
     spec: dict = state["spec"]  # type: ignore[assignment]
+    if "tool_settings" in spec:
+        try:
+            settings = ToolSettings.from_dict(spec["tool_settings"])
+        except ValueError as error:
+            raise resume_module.ResumeRefused(f"recorded tool settings are invalid: {error}") from error
+        builtin_names = frozenset(("grep", "list_files", "read", "edit", "str_replace", "insert_before",
+            "authored_check", "file_create", "run_tests", "read_check_receipt", "recall", "done",
+            "shell", "job_wait", "job_output", "job_stop", "file_delete", "file_move", "git", "web_fetch"))
+        for item in settings.tools_files:
+            path = Path(item["path"])
+            try:
+                unchanged = path.is_file() and hashlib.sha256(path.read_bytes()).hexdigest() == item["digest"]
+            except OSError:
+                unchanged = False
+            if not unchanged:
+                raise resume_module.ResumeRefused(f"custom tool definition changed: {path}")
+        try:
+            custom = load_tool_files([Path(item["path"]) for item in settings.tools_files],
+                                     builtin_names=builtin_names, shell_network=settings.shell_network)
+        except CustomToolError as error:
+            raise resume_module.ResumeRefused(f"custom tool changed: {error}") from error
+        if custom.digest != spec.get("custom_tools_digest"):
+            raise resume_module.ResumeRefused("custom tool executable or definition changed")
+        settings = replace(settings, replay_external=replay_external)
+    elif replay_external:
+        raise resume_module.ResumeRefused("this run has no tool tape; --replay-external cannot apply")
     environment = spec["environment"]
     keys = [k for k in str(environment.get("STATEFRAME_TASK_ENV_KEYS", "")).split(",") if k]
     base = spec["chat_url"].removesuffix(CHAT_SUFFIX)
@@ -1247,6 +1300,8 @@ def resume_run(run_dir: Path, *, endpoint: Endpoint | None = None, max_turns: in
         python=str((spec.get("capabilities") or {}).get("python") or sys.executable),
         timeout_s=timeout_s, quiet=quiet, test_env={k: environment[k] for k in keys if k in environment},
         pytest_plugins=environment.get("STATEFRAME_TASK_PYTEST_PLUGINS"), keep_checkpoints=keep_checkpoints)
+    if "tool_settings" in spec:
+        options.tool_settings = settings
     options._deadline = started + timeout_s if timeout_s is not None else None
     try:
         with _wall_deadline(options), _sigterm_as_interrupt():
@@ -1275,6 +1330,10 @@ def resume_run(run_dir: Path, *, endpoint: Endpoint | None = None, max_turns: in
                                   "pass --model NAME)"))
             check_slot_context(options, printer)
             lock = resume_module.hold_run_lock(run_dir)  # noqa: F841 - held until this resume returns
+            if "tool_settings" in spec:
+                (run_dir / "tool-settings.json").write_text(json.dumps(settings.as_dict(), indent=1, sort_keys=True))
+                spec["tool_settings"] = settings.as_dict()
+                (run_dir / "spec.json").write_text(json.dumps(spec, indent=1, sort_keys=True))
             # A checkpoint holds the engine's loop limit, endpoint and model name as they were; a resume
             # that changes any of them rebuilds the run by replay instead.
             same_limits = (int(state["max_turns"]) == int(spec["max_turns"])

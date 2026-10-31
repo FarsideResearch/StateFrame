@@ -144,6 +144,9 @@ def install_wire_recorder(run: Path, chat_url: str, replayer: Replayer | None = 
             if replayed is None and replayer.diverged is not None:
                 (run / "resume-divergence.json").write_text(json.dumps(
                     {**replayer.diverged, "send": index, "checkpoint": replayer.strict}, indent=1))
+                if (run / "tool-tape.jsonl").is_file():
+                    from kernel_tool_tape import ToolReplayRefused
+                    raise ToolReplayRefused(f"send {index}: {replayer.diverged['reason']}")
                 if replayer.strict:
                     emit("checkpoint_unfaithful", send=index, **{k: v for k, v in replayer.diverged.items()
                                                                  if k != "first_difference"})
@@ -160,6 +163,9 @@ def install_wire_recorder(run: Path, chat_url: str, replayer: Replayer | None = 
                     and not getattr(replayer, "verified_emitted", False):
                 replayer.verified_emitted = True
                 emit("checkpoint_verified", send=index, replayed=replayer.cursor)
+        elif replayer is not None:
+            from kernel_tool_tape import end_replay
+            end_replay()
         try:
             response = replayed if replayed is not None else original(wire, endpoint, key, **kwargs)
         except Exception as error:
@@ -719,6 +725,25 @@ def main(argv: list[str]) -> int:
     except Exception:  # noqa: BLE001 - repo map AST is optional; the engine falls back to its text scan
         pass
     sys.path.insert(0, str(engine))
+    from kernel_custom_tools import CustomToolError, load_tool_files
+    from kernel_tool_settings import ToolSettingsError, load_tool_settings
+    from kernel_tool_tape import ToolTapeError, configure_replay
+    try:
+        settings = load_tool_settings()
+        if settings is not None:
+            if settings.as_dict() != spec.get("tool_settings"):
+                raise ToolSettingsError("host tool settings file differs from the run spec")
+            builtin_names = frozenset(("grep", "list_files", "read", "edit", "str_replace", "insert_before",
+                "authored_check", "file_create", "run_tests", "read_check_receipt", "recall", "done",
+                "shell", "job_wait", "job_output", "job_stop", "file_delete", "file_move", "git", "web_fetch"))
+            custom = load_tool_files([Path(item["path"]) for item in settings.tools_files],
+                                     builtin_names=builtin_names, shell_network=settings.shell_network)
+            if custom.digest != spec.get("custom_tools_digest"):
+                raise CustomToolError("custom tool definition or executable changed since host validation")
+        configure_replay(run, active=bool(replayer and replayer.tape))
+    except (ToolSettingsError, CustomToolError, ToolTapeError, OSError) as error:
+        emit("engine_error", error=type(error).__name__, detail=str(error)[:300])
+        return 1
     sys.argv[:] = [sys.argv[0]]  # engine modules read argv as legacy CLI input; give them none
     output = run / "worker"
     for name in ("", "results", "scratch"):
