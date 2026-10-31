@@ -177,9 +177,17 @@ def isolated_command(command: list[str], root: Path, env: dict[str, str], *,
     if selected != Path(sys.executable):
         prefixes.update((str(selected), str(resolved_selected)))
         prefixes.update(interpreter_roots)
+    mounted: list[Path] = []
     for value in sorted(prefixes):
-        if not value.startswith("/usr") and value not in {"/", "/home", "/root"}:
-            arguments.extend(["--ro-bind", value, value])
+        if value.startswith("/usr") or value in {"/", "/home", "/root"}:
+            continue
+        # A path inside an already read-only-mounted prefix (a venv's bin/python inside the
+        # venv) is visible already; binding it again makes bwrap create a mount point inside a
+        # read-only mount and fail ("Can't create file at ...").
+        if any(Path(value).is_relative_to(parent) for parent in mounted):
+            continue
+        arguments.extend(["--ro-bind", value, value])
+        mounted.append(Path(value))
     if relay_dir is not None:
         # /tmp is a fresh sandbox tmpfs; expose only this run's relay directory.
         arguments.extend(["--bind", str(relay_dir), str(relay_dir)])
