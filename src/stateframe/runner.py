@@ -400,6 +400,19 @@ def _tests_python(options: RunOptions) -> str:
     return options._test_python
 
 
+def use_run_env_python(options: RunOptions, run_env: object) -> None:
+    """Bind both host checks and the engine child to a created run environment.
+
+    The tool-settings owner calls this after ``prepare`` and before ``_execute``;
+    ``drive`` forwards the same selection as ``STATEFRAME_TEST_PYTHON``.
+    """
+    candidate = getattr(run_env, "python", None)
+    if not isinstance(candidate, Path) or not candidate.is_file() or not os.access(candidate, os.X_OK):
+        raise RunError("run environment has no executable Python interpreter")
+    options._test_python = str(candidate)
+    options._capabilities["test_python"] = str(candidate)
+
+
 def _select_test_python(options: RunOptions, printer=print) -> str:
     """Choose and check the interpreter for the repository's tests; never StateFrame's own silently."""
     try:
