@@ -1,0 +1,1 @@
+{"model":"scripted","steps":[{"tool":"sample_tool","arguments":{"value":"accepted"}},{"tool":"sample_tool","arguments":{"value":7}},{"tool":"done","arguments":{"summary":"Exercised custom command validation."}}],"tokenize":{"mode":"ok"}}

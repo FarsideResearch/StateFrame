@@ -1,0 +1,1 @@
+{"model":"scripted","steps":[{"tool":"shell","arguments":{"command":"python3 scripts/format.py"}},{"tool":"read","arguments":{"path":"app.py"}},{"tool":"run_tests","arguments":{"target":"tests/test_app.py"}},{"tool":"done","arguments":{"summary":"External replay approved."}}],"tokenize":{"mode":"ok"}}

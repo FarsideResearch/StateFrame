@@ -1,0 +1,1 @@
+{"model":"scripted","steps":[{"tool":"shell","arguments":{"command":"python3 -m http.server ${PORT}","background":true}},{"tool":"done","arguments":{"summary":"Finish while a server remains running."}}],"tokenize":{"mode":"ok"}}
