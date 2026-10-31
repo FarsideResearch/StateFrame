@@ -571,7 +571,8 @@ def _claim(name: str, *, state: str, revision: str, ran: Sequence[str], evidence
 
 def project_f4_state(frame: Mapping[str, object] | None, *,
                      active_decisions: object = None, tools: object = None,
-                     selectors: Sequence[str] = (), path: str | None = None) -> dict[str, object]:
+                     selectors: Sequence[str] = (), path: str | None = None,
+                     current_product_revision: str | None = None) -> dict[str, object]:
     """Project the allowlisted, revision-bound agent-facing state.
 
     Raw host fields deliberately never pass through this function.  The output
@@ -579,17 +580,23 @@ def project_f4_state(frame: Mapping[str, object] | None, *,
     the same predicate become ``CONFLICT`` evidence rather than parallel labels.
     """
     source = dict(frame or {})
+    if current_product_revision is not None and not (
+            isinstance(current_product_revision, str)
+            and current_product_revision.strip()):
+        raise ValueError("current_product_revision must be a nonempty string")
     revision = _revision(source, path)
+    check_revision = (current_product_revision.strip() if current_product_revision is not None
+                      else revision)
     selector_values = _selector_values(source, selectors)
     check_candidates = _candidate_statuses(
-        source, _PUBLIC_CHECK_PATHS, revision, include_receipts=True)
-    check_state, check_evidence, check_sources = _reduce_status(check_candidates, revision)
+        source, _PUBLIC_CHECK_PATHS, check_revision, include_receipts=True)
+    check_state, check_evidence, check_sources = _reduce_status(check_candidates, check_revision)
     public_check_state = (
-        check_state if _has_current_check_execution(source, check_candidates, revision)
+        check_state if _has_current_check_execution(source, check_candidates, check_revision)
         else "NOT_RUN"
     )
     check_claim = _claim(
-        "public_checks", state=public_check_state, revision=revision,
+        "public_checks", state=public_check_state, revision=check_revision,
         ran=selector_values or check_sources,
         evidence=check_evidence,
         establishes=F4_PREDICATE_GLOSSARY["public_checks"],
@@ -701,7 +708,7 @@ def project_f4_state(frame: Mapping[str, object] | None, *,
         "step": _copy_json(source.get("step")),
         "public_checks": {
             "state": public_check_state, "selectors": selector_values or ["not recorded"],
-            "revision": revision, "evidence": check_evidence,
+            "revision": check_revision, "evidence": check_evidence,
             "establishes": check_claim["establishes"],
         },
         "blockers": bind_rows(

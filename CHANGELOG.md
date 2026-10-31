@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.2.1 (2026-10-31)
+
+Correctness fixes in what the model is shown. This release does not fix the re-reading stall on large multi-file tasks described in KNOWN_LIMITATIONS.md; that work continues.
+
+- Public-check status is tied to the current state of the whole product. Earlier, a run whose checks failed after edits to files other than the starting file could be shown "not run" instead of "failed".
+- Edit suggestions never name a protected test, which the agent cannot edit. Files created or moved during the run stay eligible.
+- A red-test confrontation without a target symbol is skipped instead of raising an error.
+
 ## 0.2.0 (2026-10-31)
 
 - Add bounded foreground shell commands and read-only background jobs with explicit command and network policy. Host execution needs a CLI flag and prints a warning.
