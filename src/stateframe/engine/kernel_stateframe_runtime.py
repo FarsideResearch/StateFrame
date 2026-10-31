@@ -19006,6 +19006,7 @@ class StateFrameRuntime:
             tools=tools,
             selectors=getattr(self.owner, "f2p_ids", ()) if hasattr(self, "owner") else (),
             path=path,
+            current_product_revision=self.binding().get("product_revision"),
         )
         try:
             from kernel_stateframe_frame_continuity import (

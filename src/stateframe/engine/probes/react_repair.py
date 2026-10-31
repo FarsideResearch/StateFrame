@@ -5514,6 +5514,14 @@ def _attach_env_receipt(result: Mapping[str, object], measurement: object) -> di
     return {**result_payload, "env_receipt": payload}
 
 
+def _red_confrontation_target(symbol: object, path: object) -> tuple[str, str] | None:
+    if not isinstance(symbol, str) or not symbol.strip():
+        return None
+    if not isinstance(path, str) or not path.strip():
+        return None
+    return path.strip(), symbol.strip()
+
+
 def work(d, *, resume=None):
     # Workers and scripted tapes may assign MAX_STEPS after import.
     step_cap = parse_step_limit(MAX_STEPS)
@@ -12080,15 +12088,18 @@ def work(d, *, resume=None):
                 # polarity/window/default) from the failing output + test source and
                 # confront: "the test demands X, your code does Y at <span>". Bounded
                 # (<=3 atoms, fingerprint-deduped inside the organ), advisory.
-                if getattr(bolt, "nit", None) is not None and bolt.last_test_exit not in (0, None):
+                _red_target = _red_confrontation_target(fn, d["rel"])
+                if (getattr(bolt, "nit", None) is not None
+                        and bolt.last_test_exit not in (0, None)
+                        and _red_target is not None):
                     try:
                         from kernel_nitpicker import NitEvidence, TestRunEvidence
                         _tsel = line.split(None, 1)[1].strip() if " " in line else ""
                         _tpath0 = _tsel.split("::", 1)[0]
                         _tfile = root / _tpath0 if _tpath0.endswith(".py") else None
                         _nev = NitEvidence(
-                            task_id=d["sha"][:8], target_file=d["rel"],
-                            target_symbol=fn,
+                            task_id=d["sha"][:8], target_file=_red_target[0],
+                            target_symbol=_red_target[1],
                             target_source=(target.read_text() if target.exists() else ""),
                             test_run=TestRunEvidence(
                                 output=obs, exit_code=bolt.last_test_exit or 1,

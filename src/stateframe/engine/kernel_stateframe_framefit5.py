@@ -819,6 +819,22 @@ def _workspace_root(runtime: object) -> Path:
     return Path(root_value).resolve(strict=True)
 
 
+def _editable_site(runtime: object, root: Path, path: str) -> bool:
+    """Whether edit advice may name ``path``: never a protected test or a path outside the workspace.
+
+    Advice only. Edit authority (including files created or moved during the run) is enforced
+    where edits execute, so this deliberately does not consult the startup edit contract.
+    """
+    try:
+        candidate = (root / path).resolve()
+    except (OSError, RuntimeError, ValueError):
+        return False
+    if not candidate.is_relative_to(root):
+        return False
+    protected = getattr(runtime, "protected_tests", ()) or ()
+    return candidate not in protected
+
+
 def _render_next_site(
     root: Path,
     path: str,
@@ -883,6 +899,8 @@ def _next_sites(runtime: object, action_context: Mapping[str, object]) -> list[d
             if fallback is None:
                 return []
             path, line = fallback
+            if not _editable_site(runtime, root, path):
+                return []
             try:
                 site = _render_next_site(
                     root, path, line, source="last_read_or_edit_region")
@@ -895,6 +913,8 @@ def _next_sites(runtime: object, action_context: Mapping[str, object]) -> list[d
         retry = False
         for candidate in inventory:
             path = _safe_relative_path(candidate.get("path"))
+            if not _editable_site(runtime, root, path):
+                continue
             line = candidate.get("line")
             expected_text = candidate.get("text")
             expected_revision = candidate.get("revision")
@@ -2464,6 +2484,8 @@ def _refresh_framefit5_sources(
             and current_frame.get("site_inventory_encoding") == LOCATION_MODE):
         sites = expand_location_inventory(current_frame, root)
     current_frame.pop("site_inventory_encoding", None)
+    sites = [site for site in sites if isinstance(site.get("path"), str)
+             and _editable_site(runtime, root, site["path"])]
     for site in sites:
         _verify_next_site_bytes(site, root)
     next_site = sites[0] if sites else None
