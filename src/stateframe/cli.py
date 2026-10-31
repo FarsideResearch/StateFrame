@@ -14,6 +14,8 @@ from .resume import ResumeRefused
 from .runner import RunError, RunOptions, resume_run, run
 from .task_row import TaskRowError
 from .workcopy import WorkCopyError
+from .engine.kernel_tool_settings import ToolSettings, ToolSettingsError
+from datetime import datetime, timezone
 
 
 def _task_text(value: str) -> str:
@@ -104,6 +106,16 @@ def _add_task_arguments(command: argparse.ArgumentParser, *, for_run: bool = Fal
     command.add_argument("--slot", type=int, help="llama.cpp server slot to pin (optional)")
     command.add_argument("--timeout", type=float, default=None,
                          help="optional wall-clock limit in seconds (default: no limit; stop with Ctrl-C)")
+    command.add_argument("--shell", choices=("off", "read-only", "standard", "unrestricted"),
+                         default="standard")
+    command.add_argument("--shell-ask", action=argparse.BooleanOptionalAction,
+                         default=not for_run)
+    command.add_argument("--shell-network", choices=("none", "loopback", "full"), default="loopback")
+    for flag in ("shell-allow", "shell-deny", "shell-read", "web-allow", "tools"):
+        command.add_argument("--" + flag, action="append", default=[])
+    command.add_argument("--shell-sandbox", choices=("on", "off"), default="on")
+    for flag in ("run-env", "git-tool", "web"):
+        command.add_argument("--" + flag, action=argparse.BooleanOptionalAction, default=None)
     if for_run:
         command.add_argument("--quiet", action="store_true", help="no live turn log")
     if for_run:
@@ -133,6 +145,8 @@ def build_parser() -> argparse.ArgumentParser:
                             help="raise the step limit (0 = no limit; default: the run's)")
     resume_cmd.add_argument("--timeout", type=float, default=None,
                             help="optional wall-clock limit in seconds for this resume")
+    resume_cmd.add_argument("--replay-external", action="store_true",
+                            help="explicitly repeat external tool operations and verify their results")
     resume_cmd.add_argument("--keep-checkpoints", action="store_true",
                             help="keep the run's checkpoints after it finishes (default: removed once finished)")
     resume_cmd.add_argument("--quiet", action="store_true", help="no live turn log")
@@ -154,6 +168,23 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def _run_options(args: argparse.Namespace, endpoint: Endpoint) -> RunOptions:
+    if args.shell_sandbox == "off" and args.shell != "unrestricted":
+        raise ToolSettingsError("--shell-sandbox off requires --shell unrestricted")
+    host_authorization = None
+    if args.shell_sandbox == "off":
+        print("WARNING: SHELL SANDBOX OFF; COMMANDS CAN ACCESS THE HOST", file=sys.stderr)
+        host_authorization = {"granted_at": datetime.now(timezone.utc).isoformat(),
+                              "flags": ["--shell unrestricted", "--shell-sandbox off"]}
+    settings = ToolSettings(shell=args.shell, shell_ask=args.shell_ask,
+                            shell_network=args.shell_network, shell_allow=tuple(args.shell_allow),
+                            shell_deny=tuple(args.shell_deny), shell_read=tuple(args.shell_read),
+                            host_authorization=host_authorization,
+                            run_env=args.run_env if args.run_env is not None else args.shell != "off",
+                            git_tool=args.git_tool if args.git_tool is not None else True,
+                            web=args.web if args.web is not None else False,
+                            web_allow=tuple(args.web_allow),
+                            tools_files=tuple({"path": str(Path(path).expanduser().resolve()), "digest": "pending"}
+                                              for path in args.tools))
     return RunOptions(repo=args.repo, task=getattr(args, "task", ""), endpoint=endpoint,
                       max_turns=args.max_turns, test_cmd=args.test_cmd, checks=args.check,
                       target=args.target, edit_paths=args.edit,
@@ -164,7 +195,8 @@ def _run_options(args: argparse.Namespace, endpoint: Endpoint) -> RunOptions:
                       python_explicit=args.python is not None, test_python=args.test_python,
                       slot=args.slot, keep_checkpoints=args.keep_checkpoints,
                       timeout_s=args.timeout,
-                      quiet=getattr(args, "quiet", False) or getattr(args, "json", False))
+                      quiet=getattr(args, "quiet", False) or getattr(args, "json", False),
+                      tool_settings=settings)
 
 
 def _print_summary(summary: dict) -> None:
@@ -250,7 +282,8 @@ def main(argv: list[str] | None = None) -> int:
                     args.api_key_env or spec.get("api_key_env"))
             summary = resume_run(args.run_dir, endpoint=endpoint, max_turns=args.max_turns, model=args.model,
                                  timeout_s=args.timeout, quiet=args.quiet or args.json,
-                                 keep_checkpoints=args.keep_checkpoints, printer=(lambda *_: None) if args.json else print)
+                                 keep_checkpoints=args.keep_checkpoints, replay_external=args.replay_external,
+                                 printer=(lambda *_: None) if args.json else print)
             if args.json:
                 print(json.dumps(summary, indent=1))
             else:

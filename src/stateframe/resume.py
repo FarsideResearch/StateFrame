@@ -23,6 +23,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from . import outcomes, profiles, replay_tape, workcopy
+from .engine.kernel_tool_tape import ToolTape, ToolTapeError
 
 ENGINE_LOCK = ".engine.lock"
 RUN_LOCK = ".run.lock"
@@ -150,6 +151,13 @@ def assess(run: Path, *, max_turns: int | None = None, model: str | None = None)
     for key in ("environment", "public_row", "parent_snapshot", "chat_url", "model", "max_turns", "repo"):
         if key not in spec:
             raise ResumeRefused(f"spec.json lacks {key!r}; this run was made by an older stateframe")
+    try:
+        pending = ToolTape(run).pending()
+    except ToolTapeError as error:
+        raise ResumeRefused(f"tool tape is damaged: {error}") from error
+    if pending:
+        calls = ", ".join(item.call_id for item in pending)
+        raise ResumeRefused(f"operation {calls} may or may not have happened; reconcile and start a new run")
     recorded = (spec.get("engine_source") or {}).get("shipped_hash")
     installed = profiles.engine_source_summary().get("shipped_hash")
     if not recorded or not installed or recorded != installed:
