@@ -1,5 +1,6 @@
 """Small real stdio peer for MCP client tests."""
 import json
+import fcntl
 import os
 import socket
 import signal
@@ -8,8 +9,10 @@ import time
 
 mode = sys.argv[1] if len(sys.argv) > 1 else "normal"
 if mode == "hang" and len(sys.argv) > 2:
-    with open(sys.argv[2], "w", encoding="utf-8") as marker:
-        marker.write(str(os.getpid()))
+    held_marker = open(sys.argv[2], "w", encoding="utf-8")
+    fcntl.flock(held_marker, fcntl.LOCK_EX)
+    held_marker.write("server started\n")
+    held_marker.flush()
 
 
 def send(value):
@@ -26,8 +29,10 @@ while line := sys.stdin.readline():
     method = request.get("method")
     if method == "initialize":
         if mode == "single_pid":
-            with open(sys.argv[2], "w", encoding="utf-8") as marker:
-                marker.write(str(os.getpid()))
+            held_marker = open(sys.argv[2], "w", encoding="utf-8")
+            fcntl.flock(held_marker, fcntl.LOCK_EX)
+            held_marker.write("server started\n")
+            held_marker.flush()
         if mode.startswith("double_fork_"):
             try:
                 child = os.fork()
@@ -40,12 +45,20 @@ while line := sys.stdin.readline():
                     for descriptor in range(3):
                         os.close(descriptor)
                     with open(sys.argv[2], "w", encoding="utf-8") as marker:
-                        marker.write(str(os.getpid()))
-                    time.sleep(3600)
-                    os._exit(0)
+                        fcntl.flock(marker, fcntl.LOCK_EX)
+                        marker.write("grandchild started\n")
+                        marker.flush()
+                        time.sleep(3600)
                 os._exit(0)
             if child is not None:
                 os.waitpid(child, 0)
+                until = time.monotonic() + 1
+                while time.monotonic() < until:
+                    if os.path.exists(sys.argv[2]):
+                        with open(sys.argv[2], encoding="utf-8") as marker:
+                            if marker.read() == "grandchild started\n":
+                                break
+                    time.sleep(.01)
             if mode == "double_fork_timeout":
                 time.sleep(3600)
         if mode == "init_effect":
@@ -75,12 +88,20 @@ while line := sys.stdin.readline():
     elif method == "notifications/initialized":
         if mode == "server_request":
             send({"jsonrpc": "2.0", "id": 70, "method": "roots/list"})
+        if mode == "blocked_send_memory":
+            blocks = []
+            for _ in range(12):
+                blocks.append(bytearray(12 << 20))
+                time.sleep(.04)
+            time.sleep(3600)
     elif method == "tools/list":
         if mode in {"malformed", "double_fork_malformed"}:
             # In double_fork_malformed the marker belongs to the detached grandchild.
             if len(sys.argv) > 2 and mode == "malformed":
-                with open(sys.argv[2], "w", encoding="utf-8") as marker:
-                    marker.write(str(os.getpid()))
+                held_marker = open(sys.argv[2], "w", encoding="utf-8")
+                fcntl.flock(held_marker, fcntl.LOCK_EX)
+                held_marker.write("server started\n")
+                held_marker.flush()
             sys.stdout.write("{oops\n")
             sys.stdout.flush()
             if len(sys.argv) > 2:
@@ -138,7 +159,22 @@ while line := sys.stdin.readline():
                     "inputSchema": {"type": "object", "properties": {}}})
             response(request["id"], {"tools": tools})
     elif method == "tools/call":
-        if mode == "huge":
+        if mode in {"memory_fanout", "process_fanout"}:
+            with open(sys.argv[2], "w", encoding="utf-8") as marker:
+                fcntl.flock(marker, fcntl.LOCK_EX)
+                marker.write("children started\n")
+                marker.flush()
+                for _ in range(4 if mode == "memory_fanout" else 8):
+                    if os.fork() == 0:
+                        if mode == "memory_fanout":
+                            blocks = []
+                            for _ in range(4):
+                                blocks.append(bytearray(18 << 20))
+                                time.sleep(.04)
+                        time.sleep(3600)
+                        os._exit(0)
+                time.sleep(3600)
+        elif mode == "huge":
             response(request["id"], {"content": [{"type": "text", "text": "x" * (5 << 20)}]})
         elif mode == "is_error":
             response(request["id"], {"content": [{"type": "text", "text": "tool rejected"}], "isError": True})

@@ -10,15 +10,16 @@ import select
 import selectors
 import subprocess
 import sys
+import threading
 import time
 
 if __package__:
     from .kernel_exec_session import CleanupReport, ExecResult, ExecSessionError
-    from .kernel_exec_tracker import ProcessTable
+    from .kernel_exec_tracker import Descendants, ProcessTable
     from .kernel_test_isolation import capability_command
 else:
     from kernel_exec_session import CleanupReport, ExecResult, ExecSessionError
-    from kernel_exec_tracker import ProcessTable
+    from kernel_exec_tracker import Descendants, ProcessTable
     from kernel_test_isolation import capability_command
 
 MAX_MESSAGE = 4 << 20
@@ -28,6 +29,103 @@ VERSIONS = {"2025-06-18", "2025-03-26", "2024-11-05"}
 
 class ProtocolError(ValueError):
     pass
+
+
+class _ContainmentMonitor:
+    """Sample the complete server unit while protocol I/O may be blocked."""
+
+    def __init__(self, process, cap):
+        self.process = process
+        self.cap = cap
+        self.table = ProcessTable()
+        self.family = Descendants(process.pid, self.table)
+        self.started = time.monotonic()
+        self.host_namespace = self.table.pid_namespace(os.getpid()) if sys.platform == "linux" else None
+        if sys.platform == "linux" and self.host_namespace is None:
+            raise ExecSessionError("cannot identify host PID namespace for MCP supervision")
+        self.namespace = None
+        self.namespace_ready = threading.Event()
+        self.failure: tuple[str, str] | None = None
+        self.stopped = threading.Event()
+        self.thread = threading.Thread(target=self._run, name="mcp-containment", daemon=True)
+
+    def start(self):
+        self.thread.start()
+
+    def stop(self):
+        self.stopped.set()
+        self.thread.join(timeout=2)
+        if self.thread.is_alive():
+            raise ExecSessionError("MCP resource monitor did not stop")
+
+    def check(self):
+        if self.failure is not None:
+            kind, detail = self.failure
+            if kind == "supervision":
+                raise ExecSessionError(detail)
+            if kind == "timeout":
+                raise TimeoutError(detail)
+            raise ProtocolError(detail)
+
+    def require_namespace(self, deadline):
+        if sys.platform == "linux":
+            self.namespace_ready.wait(max(0, min(.2, deadline - time.monotonic())))
+            self.check()
+            if self.namespace is None:
+                raise ExecSessionError("cannot identify private MCP PID namespace for supervision")
+
+    def _sample(self):
+        if time.monotonic() - self.started >= self.cap.limits.wall_seconds:
+            return "wall limit exceeded"
+        rows = self.table.snapshot()
+        if not self.family.members and self.process.pid in rows:
+            self.family.members[self.process.pid] = rows[self.process.pid]
+        family = self.family.update(rows)
+        if sys.platform == "linux":
+            if self.namespace is None:
+                for row in family:
+                    namespace = self.table.pid_namespace(row.pid)
+                    if namespace is not None and namespace != self.host_namespace:
+                        self.namespace = namespace
+                        self.namespace_ready.set()
+                        break
+            if self.namespace is not None:
+                live = []
+                for row in rows.values():
+                    if row.zombie:
+                        continue
+                    try:
+                        if self.table.pid_namespace(row.pid) == self.namespace:
+                            live.append(row)
+                    except PermissionError:
+                        # An unrelated user's process is not in our private unit.
+                        continue
+            else:
+                live = family
+        else:
+            live = family
+        return self.table.limit_breach(live, self.cap.limits)
+
+    def _run(self):
+        while not self.stopped.is_set():
+            try:
+                breach = self._sample()
+            except (OSError, RuntimeError, ValueError) as error:
+                self.failure = ("supervision", f"cannot supervise MCP server resources: {error}")
+                breach = True
+            if breach:
+                if self.failure is None:
+                    self.failure = ("timeout" if breach == "wall limit exceeded" else "resource", breach)
+                try:
+                    self.process.kill()
+                except ProcessLookupError:
+                    pass
+                except OSError as error:
+                    self.failure = ("supervision", f"cannot stop MCP server after resource breach: {error}")
+                return
+            if self.process.poll() is not None:
+                return
+            self.stopped.wait(.02)
 
 
 def _reject_constant(value: str) -> object:
@@ -61,8 +159,13 @@ def converse(request: dict, cap, cwd: Path) -> object:
     if platform.system() == "Linux" and not cap.sandboxed:
         raise ProtocolError("MCP containment requires a sandboxed Linux PID namespace")
     launcher = Path(__file__).with_name("sf_launch.py").resolve()
+    launch_limits = asdict(cap.limits)
+    if platform.system() == "Linux":
+        # RLIMIT_NPROC is per UID, not per server. The monitor applies the
+        # capability's process count to this call's private PID namespace.
+        launch_limits["nproc"] = max(launch_limits["nproc"], 256)
     spec = {"argv": argv, "cwd": str(cwd), "env": dict(cap.env),
-            "limits": asdict(cap.limits), "memory_supervised": platform.system() == "Darwin",
+            "limits": launch_limits, "memory_supervised": platform.system() == "Darwin",
             "new_session": False}
     command = [sys.executable, "-I", str(launcher), json.dumps(spec, separators=(",", ":"))]
     command, environment = capability_command(command, cap,
@@ -76,8 +179,7 @@ def converse(request: dict, cap, cwd: Path) -> object:
     buffer = bytearray()
     total = 0
     counter = 0
-    table = None
-    server_identity = None
+    monitor = None
 
     def send(value: dict) -> None:
         data = _json(value)
@@ -88,9 +190,12 @@ def converse(request: dict, cap, cwd: Path) -> object:
             os.set_blocking(fd, False)
             offset = 0
             while offset < len(data):
+                monitor.check()
                 remaining = deadline - time.monotonic()
-                if remaining <= 0 or not select.select([], [fd], [], remaining)[1]:
+                if remaining <= 0:
                     raise TimeoutError("MCP server deadline exceeded")
+                if not select.select([], [fd], [], min(remaining, .02))[1]:
+                    continue
                 try:
                     offset += os.write(fd, data[offset:])
                 except BlockingIOError:
@@ -103,6 +208,7 @@ def converse(request: dict, cap, cwd: Path) -> object:
     def receive(expected: int) -> dict:
         nonlocal total
         while True:
+            monitor.check()
             if b"\n" in buffer:
                 line, _, rest = buffer.partition(b"\n")
                 buffer[:] = rest
@@ -142,15 +248,9 @@ def converse(request: dict, cap, cwd: Path) -> object:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 raise TimeoutError("MCP server deadline exceeded")
-            if table is not None and server_identity is not None:
-                try:
-                    memory = table.resident_bytes(server_identity)
-                except (OSError, RuntimeError) as error:
-                    raise ExecSessionError("cannot supervise MCP server resident memory") from error
-                if memory > cap.limits.memory_bytes:
-                    raise ProtocolError("server resident memory exceeds capability limit")
-            if not selector.select(min(remaining, .25)):
+            if not selector.select(min(remaining, .02)):
                 continue
+            monitor.check()
             chunk = os.read(process.stdout.fileno(), 65536)
             if not chunk:
                 raise ProtocolError("server exited before responding")
@@ -166,19 +266,14 @@ def converse(request: dict, cap, cwd: Path) -> object:
         return receive(counter)
 
     try:
-        if platform.system() == "Darwin":
-            try:
-                table = ProcessTable()
-                server_identity = table.identity(process.pid)
-            except (OSError, RuntimeError) as error:
-                raise ExecSessionError("cannot establish MCP server process identity") from error
-            if server_identity is None and process.poll() is None:
-                raise ExecSessionError("cannot establish MCP server process identity")
+        monitor = _ContainmentMonitor(process, cap)
+        monitor.start()
         selector = selectors.DefaultSelector()
         selector.register(process.stdout, selectors.EVENT_READ)
         initialized = call("initialize", {"protocolVersion": "2025-06-18",
             "capabilities": {"roots": {"listChanged": False}},
             "clientInfo": {"name": "StateFrame", "version": request["client_version"]}})
+        monitor.require_namespace(deadline)
         if (not isinstance(initialized, dict) or initialized.get("protocolVersion") not in VERSIONS
                 or not isinstance(initialized.get("capabilities"), dict)):
             raise ProtocolError("server negotiated an unsupported protocol version")
@@ -237,14 +332,12 @@ def converse(request: dict, cap, cwd: Path) -> object:
                 raise ExecSessionError("MCP server cleanup deadline exceeded") from error
             if process.poll() is None:
                 raise ExecSessionError("MCP server survived cleanup")
-            if table is not None and server_identity is not None:
-                try:
-                    survivor = table.identity(server_identity.pid)
-                except (OSError, RuntimeError) as error:
-                    raise ExecSessionError("cannot verify MCP server termination") from error
-                if survivor is not None and survivor.start == server_identity.start:
-                    raise ExecSessionError("MCP server survived cleanup")
+            if monitor is not None:
+                monitor.stop()
+                monitor.check()
         finally:
+            if monitor is not None and monitor.thread.is_alive():
+                monitor.stop()
             process.stdin.close()
             process.stdout.close()
 

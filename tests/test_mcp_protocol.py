@@ -1,8 +1,9 @@
 import json
-import os
+import fcntl
 from dataclasses import replace
 from pathlib import Path
 import sys
+import time
 
 import pytest
 
@@ -51,38 +52,62 @@ def test_normal_pagination_and_server_request(tmp_path):
 
 @pytest.mark.host_sandbox
 def test_timeout_kills_child(tmp_path):
-    pidfile = tmp_path / "home" / "pid"
-    # Long enough for a sandboxed interpreter to start and record its pid before hanging.
-    response = call(tmp_path, "hang", timeout=3, extra=(str(pidfile),))
+    marker = tmp_path / "home" / "server.lock"
+    response = call(tmp_path, "hang", timeout=3, extra=(str(marker),))
     assert response["code"] == "TIMEOUT"
-    pid = int(pidfile.read_text())
-    with pytest.raises(ProcessLookupError):
-        os.kill(pid, 0)
+    assert marker.read_text() == "server started\n"
+    assert lock_released(marker)
 
 
 @pytest.mark.host_sandbox
 def test_driver_cleans_malformed_peer(tmp_path):
-    pidfile = tmp_path / "home" / "pid"
-    response = call(tmp_path, "malformed", timeout=.3, extra=(str(pidfile),))
+    marker = tmp_path / "home" / "server.lock"
+    response = call(tmp_path, "malformed", timeout=.3, extra=(str(marker),))
     assert response["ok"] is False
-    assert not alive(int(pidfile.read_text()))
+    assert marker.read_text() == "server started\n"
+    assert lock_released(marker)
 
 
-def alive(pid):
-    """True for a running process; a killed orphan left unreaped by a container init counts as dead."""
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    stat = Path(f"/proc/{pid}/stat")
-    if stat.exists():
-        return stat.read_text().rsplit(")", 1)[1].split()[0] != "Z"
-    return True
+def lock_released(marker):
+    deadline = time.monotonic() + 1
+    while time.monotonic() < deadline:
+        with marker.open("r+") as handle:
+            try:
+                fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                time.sleep(.02)
+                continue
+            fcntl.flock(handle, fcntl.LOCK_UN)
+            return True
+    return False
 
 
 @pytest.mark.host_sandbox
 def test_driver_uses_product_version(tmp_path):
     assert call(tmp_path, "version", extra=(__version__,))["ok"] is True
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="macOS send monitoring")
+def test_memory_monitor_interrupts_blocked_send(tmp_path):
+    workspace = tmp_path / "workspace"
+    home = tmp_path / "home"
+    cache = tmp_path / "cache"
+    for path in (workspace, home, cache):
+        path.mkdir()
+    cap = shell_capability(workspace=workspace, run_env_dir=cache, scratch_home=home,
+                           network="none", writable=False,
+                           extra_read_roots=executable_read_roots(FIXTURE))
+    cap = replace(cap, sandboxed=False, limits=replace(cap.limits,
+                  memory_bytes=96 << 20, wall_seconds=4))
+    request = {"argv": [sys.executable, str(FIXTURE), "blocked_send_memory"],
+               "operation": "call", "timeout_seconds": 4,
+               "client_version": __version__, "tool": "echo",
+               "arguments": {"value": "x" * (3 << 20)}}
+    started = time.monotonic()
+    response = json.loads(exchange(request, cap, workspace).output)
+    assert response["code"] == "MCP_PROTOCOL_ERROR"
+    assert "aggregate resident-memory limit exceeded" in response["error"]
+    assert time.monotonic() - started < 4
 
 
 def definition():

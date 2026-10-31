@@ -1,6 +1,6 @@
 """Real MCP peer, execution sandbox and scripted provider integration."""
+import fcntl
 import json
-import os
 import sys
 import time
 from dataclasses import replace
@@ -14,6 +14,8 @@ from acceptance._support import copy_repo, run_case
 from kernel_mcp_tools import McpError, McpTool, _schema, discover, load_mcp_files, run_driver, result_text, validate_arguments
 from kernel_agent_tools import AgentTools
 from kernel_exec_session import ExecSession, ExecSessionError
+from kernel_exec_capability import executable_read_roots, shell_capability
+from kernel_mcp_driver import exchange
 from kernel_shell_tool import ShellTool
 from kernel_tool_settings import ToolSettings
 from kernel_tool_tape import ToolReplayRefused, configure_replay, tape_for_run
@@ -21,6 +23,7 @@ from kernel_request_diet import RequestTokenMeter
 from stateframe.endpoint import Endpoint
 from stateframe.runner import RunOptions, prepare, resume_run
 from stateframe.resume import ResumeRefused
+from stateframe import __version__
 
 pytestmark = pytest.mark.host_sandbox
 FIXTURE = Path(__file__).parent / "fixtures/mcp_server.py"
@@ -286,15 +289,19 @@ def test_omission_attack_cannot_enter_actual_request(tmp_path):
                for item in spec["mcp_omitted"])
 
 
-def _alive(pid):
-    if sys.platform == "linux":
-        stat = Path(f"/proc/{pid}/stat")
-        return stat.exists() and stat.read_text().split()[2] != "Z"
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    return True
+def _lock_released(marker):
+    assert marker.is_file(), "server descendant did not start"
+    deadline = time.monotonic() + 1
+    while time.monotonic() < deadline:
+        with marker.open("r+") as handle:
+            try:
+                fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                time.sleep(.02)
+                continue
+            fcntl.flock(handle, fcntl.LOCK_UN)
+            return True
+    return False
 
 
 @pytest.mark.parametrize("mode", ["double_fork_success", "double_fork_timeout",
@@ -304,7 +311,7 @@ def test_detached_grandchild_contained_at_real_boundary(tmp_path, mode):
     workspace.mkdir()
     scratch = tmp_path / "mcp-call-home"
     scratch.mkdir()
-    marker = scratch / "grandchild.pid"
+    marker = scratch / "grandchild.lock"
     config_path = config(tmp_path, mode, argv_tail=(str(marker),),
                          processes="spawn" if sys.platform == "linux" else "single",
                          timeout_seconds=1)
@@ -318,15 +325,53 @@ def test_detached_grandchild_contained_at_real_boundary(tmp_path, mode):
             run_driver(server, "list", workspace, tmp_path, shell_network="none",
                        host_authorization=False)
     if sys.platform == "linux":
-        assert marker.is_file()
-        pid = int(marker.read_text())
-        for _ in range(50):
-            if not _alive(pid):
-                break
-            time.sleep(.02)
-        assert not _alive(pid)
+        assert marker.read_text() == "grandchild started\n"
+        assert _lock_released(marker), "detached grandchild still holds the lock"
     else:
         assert not marker.exists()
+
+
+def _limited_exchange(tmp_path, mode, *, memory_bytes, nproc=32, arguments=None):
+    workspace = tmp_path / "workspace"
+    scratch = tmp_path / "mcp-call-home"
+    cache = tmp_path / "cache"
+    for path in (workspace, scratch, cache):
+        path.mkdir(exist_ok=True)
+    marker = scratch / "unit.lock"
+    cap = shell_capability(workspace=workspace, run_env_dir=cache, scratch_home=scratch,
+                           network="none", writable=False,
+                           extra_read_roots=executable_read_roots(FIXTURE))
+    cap = replace(cap, limits=replace(cap.limits, memory_bytes=memory_bytes,
+                                      nproc=nproc, wall_seconds=4))
+    request = {"argv": [sys.executable, str(FIXTURE), mode, str(marker)],
+               "operation": "call", "timeout_seconds": 4,
+               "client_version": __version__, "tool": "echo",
+               "arguments": arguments or {"value": "x"}}
+    started = time.monotonic()
+    result = json.loads(exchange(request, cap, workspace).output)
+    return result, marker, time.monotonic() - started
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="private PID unit requires Linux")
+@pytest.mark.parametrize("mode,limit,processes,reason", [
+    ("memory_fanout", 256 << 20, 32, "aggregate resident-memory limit exceeded"),
+    ("process_fanout", 256 << 20, 4, "process limit exceeded"),
+])
+def test_private_server_unit_enforces_aggregate_limits(tmp_path, mode, limit, processes, reason):
+    result, marker, elapsed = _limited_exchange(tmp_path, mode, memory_bytes=limit,
+                                                 nproc=processes)
+    assert result["code"] == "MCP_PROTOCOL_ERROR" and reason in result["error"]
+    assert elapsed < 4
+    assert _lock_released(marker), "server unit survived the limit breach"
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="blocked send requires macOS")
+def test_blocked_send_still_enforces_memory_limit(tmp_path):
+    result, _, elapsed = _limited_exchange(tmp_path, "blocked_send_memory",
+        memory_bytes=96 << 20, arguments={"value": "x" * (3 << 20)})
+    assert result["code"] == "MCP_PROTOCOL_ERROR"
+    assert "aggregate resident-memory limit exceeded" in result["error"]
+    assert elapsed < 4
 
 
 def test_spawn_config_refused_on_macos(tmp_path):
@@ -343,14 +388,14 @@ def test_single_process_server_is_gone_after_success(tmp_path):
     workspace.mkdir()
     scratch = tmp_path / "mcp-call-home"
     scratch.mkdir()
-    marker = scratch / "server.pid"
+    marker = scratch / "server.lock"
     server = load_mcp_files([config(tmp_path, "single_pid", argv_tail=(str(marker),))],
                             shell_network="none").servers[0]
     result = run_driver(server, "call", workspace, tmp_path, shell_network="none",
                         host_authorization=False, tool="echo", arguments={"value": "okay"})
     assert result_text(result["result"]) == "okay"
-    assert marker.is_file()
-    assert not _alive(int(marker.read_text()))
+    assert marker.read_text() == "server started\n"
+    assert _lock_released(marker)
 
 
 def test_cleanup_failure_is_fatal(tmp_path, monkeypatch):
