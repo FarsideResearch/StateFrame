@@ -6,8 +6,6 @@ import hashlib
 import inspect
 import json
 import textwrap
-import zlib
-from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -15,20 +13,18 @@ import pytest
 from kernel_stateframe_action_ledger import build_action_context
 from kernel_stateframe_f4 import project_f4_state
 from kernel_stateframe_framefit5 import (
-    _next_sites, _serialize_state_message, assemble_framefit5_request,
+    _editable_site, _next_sites, _serialize_state_message, assemble_framefit5_request,
     build_typed_state, validate_final_product_boundary,
 )
 from kernel_stateframe_runtime import StateFrameRuntime
+from kernel_context import token_estimate
+from kernel_frame_allocation_capture import finalize_frame_candidate
+from kernel_live_projection import WorkspaceViewStore
+from kernel_request_evidence_closure import SpanNeed, build_source_closure
 
 
 PRODUCT_REVISION = "sha256:changed-product"
 ENTRY_REVISION = "sha256:unchanged-entry"
-RUN = Path(
-    "/Users/marida/Repos/learning-ai/.luna/product/_lab_evidence/a10_runs/"
-    "a10_t2_sf020_t2_1031084555_65802"
-)
-
-
 def _failing_frame():
     return {
         "artifact_revisions": {"pkg/__init__.py": ENTRY_REVISION,
@@ -150,10 +146,12 @@ def _frame_request(tmp_path, path, allowed):
 
 @pytest.mark.parametrize("path,allowed,expected", [
     ("tests/test_app.py", ["tests/test_app.py", "pkg/app.py"], None),
-    ("pkg/other.py", ["pkg/app.py"], None),
+    # Advice is not an edit authorization check; the frozen startup contract
+    # cannot exclude a file created or moved later in the run.
+    ("pkg/other.py", ["pkg/app.py"], "pkg/other.py"),
     ("pkg/app.py", ["pkg/app.py"], "pkg/app.py"),
 ])
-def test_frame_construction_and_final_validation_obey_host_edit_scope(
+def test_frame_construction_and_final_validation_obey_protected_scope(
         tmp_path, monkeypatch, path, allowed, expected):
     import kernel_stateframe_framefit5 as framefit5
 
@@ -189,12 +187,12 @@ def test_frame_construction_and_final_validation_obey_host_edit_scope(
         assert validation == old_validation
 
 
-def test_missing_host_edit_scope_recommends_no_site(tmp_path):
+def test_missing_startup_edit_scope_still_recommends_site(tmp_path):
     messages, context, runtime = _frame_request(tmp_path, "pkg/app.py", ["pkg/app.py"])
     runtime.edit_contract = {"edit_authority": {}}
     state = build_typed_state(messages, context, runtime)
-    assert state["next_site"] is None
-    assert state["open_sites"] == []
+    assert state["next_site"]["path"] == "pkg/app.py"
+    assert [site["path"] for site in state["open_sites"]] == ["pkg/app.py"]
 
 
 def test_inventory_uses_next_original_candidate_after_forbidden(tmp_path, monkeypatch):
@@ -211,71 +209,266 @@ def test_inventory_uses_next_original_candidate_after_forbidden(tmp_path, monkey
     monkeypatch.setattr(kernel_remaining_sites, "remaining_site_inventory",
                         lambda _runtime: candidates)
     sites = _next_sites(runtime, context)
-    assert [site["path"] for site in sites] == ["pkg/app.py"]
+    assert [site["path"] for site in sites] == ["pkg/other.py", "pkg/app.py"]
 
 
-def test_recorded_t2_frames_change_only_public_checks_and_forbidden_advice(monkeypatch):
-    if not RUN.is_dir():
-        pytest.skip("recorded T2 evidence is unavailable")
-    journal_dir = next((RUN / "worker/measurement-runs").iterdir())
-    events = [json.loads(line) for line in (journal_dir / "events.jsonl").read_text().splitlines()]
-    snapshots = [event for event in events if event.get("kind") == "snapshot_committed"]
-    submissions = {event["request_id"]: event["sequence"] for event in events
-                   if event.get("kind") == "request_submitted"}
-    monkeypatch.setenv("STATEFRAME_REMAINING_SITES", "off")
-    checked = 0
-    removed = 0
-    changed = 0
-    for request_path in sorted((RUN / "requests").glob("*.json")):
-        request = json.loads(request_path.read_text())
-        state_messages = [row for row in request["messages"]
-                          if isinstance(row.get("content"), str)
-                          and row["content"].startswith("[StateFrame]\n")]
-        assert len(state_messages) == 1
-        saved = json.loads(state_messages[0]["content"].split("\n", 1)[1])
-        old_state = saved["state"]
-        before = [row for row in snapshots
-                  if row["sequence"] < submissions[request["request_id"]]]
-        assert before
-        digest = before[-1]["frame"]["$blob"]
-        raw = zlib.decompress((journal_dir / "blobs" / (digest + ".zlib")).read_bytes())
-        frame = json.loads(raw)
-        revision = frame["readiness"]["revision"]
-        old_projection = project_f4_state(frame, path="pkg/__init__.py")
-        new_projection = project_f4_state(
-            frame, path="pkg/__init__.py", current_product_revision=revision)
-        assert old_state["public_checks"]["state"] == old_projection["state"]["public_checks"]["state"]
-        old_without_checks = copy.deepcopy(old_projection)
-        new_without_checks = copy.deepcopy(new_projection)
-        old_without_checks["claims"][0] = new_without_checks["claims"][0]
-        old_without_checks["state"]["public_checks"] = new_without_checks["state"]["public_checks"]
-        assert old_without_checks == new_without_checks
-        if old_projection["state"]["public_checks"] != new_projection["state"]["public_checks"]:
-            changed += 1
+def test_outside_workspace_symlink_is_not_edit_advice(tmp_path):
+    root = tmp_path / "workspace"
+    root.mkdir()
+    (root / "pkg").mkdir()
+    outside = tmp_path / "external.py"
+    outside.write_text("VALUE = 1\n")
+    (root / "pkg/escape.py").symlink_to(outside)
+    runtime = SimpleNamespace(owner=SimpleNamespace(root=root), protected_tests={})
+    assert _editable_site(runtime, root.resolve(), "pkg/escape.py") is False
+    assert _next_sites(runtime, {"open_edit_site": {"path": "pkg/escape.py", "line": 1}}) == []
 
-        after = copy.deepcopy(old_state)
-        site = after["framefit5"].get("next_site")
-        authority = after["edit_authority"]["editable_paths"]
-        runtime = SimpleNamespace(
-            owner=SimpleNamespace(root=RUN / "workspace"),
-            edit_contract={"edit_authority": {"editable_paths": authority}},
-            protected_tests={RUN / "workspace" / path for path in
-                             ("tests/test_batch_contract.py", "tests/test_consumers.py",
-                              "tests/test_preservation.py",
-                              "tests/test_registration_serialization.py")},
-        )
-        candidates = _next_sites(runtime, {"open_edit_site": site}) if site else []
-        forbidden = site is not None and not candidates
-        if candidates:
-            assert candidates[0]["path"] == site["path"]
-        if forbidden:
-            after["framefit5"]["next_site"] = None
-            after["framefit5"]["open_work"]["next_site_available"] = False
-            removed += 1
-        assert (after["framefit5"].get("next_site") is None or
-                after["framefit5"]["next_site"]["path"] in authority)
-        assert old_state["framefit5"]["action_ledger"] == after["framefit5"]["action_ledger"]
-        checked += 1
-    assert checked == 15
-    assert changed > 0
-    assert removed > 0
+
+def _operation(name, arguments, receipt, call_id):
+    return [
+        {"role": "assistant", "tool_calls": [{"id": call_id, "type": "function",
+            "function": {"name": name, "arguments": json.dumps(arguments)}}]},
+        {"role": "tool", "tool_call_id": call_id, "content": receipt},
+    ]
+
+
+@pytest.mark.parametrize("operation", ["create", "move"])
+def test_created_or_moved_destination_remains_edit_advice_after_resume(
+        tmp_path, monkeypatch, operation):
+    from kernel_file_ops import file_move
+    import kernel_stateframe_framefit5
+
+    root = tmp_path / "workspace"
+    (root / "pkg").mkdir(parents=True)
+    content = "VALUE = 1\n"
+    destination = "pkg/new.py"
+    created_this_run = set()
+    messages = [{"role": "user", "content": "Task: Correct the new module."}]
+    if operation == "create":
+        (root / destination).write_text(content)
+        messages += _operation("file_create", {"path": destination, "content": content},
+                               f"created {destination}\n", "create-1")
+        created_this_run.add(str(root / destination))
+    else:
+        source = root / "pkg/original.py"
+        source.write_text(content)
+        effect = file_move(root, "pkg/original.py", destination,
+                           protected=lambda _path: False, editable=lambda _path: True,
+                           new_file_allowed=lambda _path: True)
+        assert effect.source == "pkg/original.py"
+        assert effect.destination == destination
+        created_this_run.add(str(root / effect.destination))
+    messages += _read(destination, content, "read-1")
+    context = build_action_context(messages, workspace_root=root)
+    context["journal_receipt_records"] = []
+    assert str(root / destination) in created_this_run
+    if operation == "create":
+        assert any(row.get("operation") == "create" for row in context["ledger"]["rows"])
+    for resumed in (False, True):
+        # Resume constructs a new runtime view over the retained workspace.
+        restored = set(json.loads(json.dumps(sorted(created_this_run)))) if resumed else created_this_run
+        runtime = _runtime_with_product(root)
+        runtime.edit_contract = {"edit_authority": {"editable_paths": ["pkg/original.py"]}}
+        runtime._framefit_action_context = context
+        runtime.created_this_run = restored
+        if resumed:
+            assert destination in runtime.current_view("resume").product_files
+            assert destination in runtime.binding()["product_files"]
+        with monkeypatch.context() as patch:
+            patch.setattr(kernel_stateframe_framefit5, "_editable_site",
+                          lambda *_args: True)
+            baseline = build_typed_state(messages, context, runtime)
+        state = build_typed_state(messages, context, runtime)
+        assert state == baseline
+        assert state["next_site"]["path"] == destination
+        assert [site["path"] for site in state["open_sites"]] == [destination]
+
+
+def _runtime_with_product(root):
+    runtime = StateFrameRuntime.__new__(StateFrameRuntime)
+    runtime.owner = SimpleNamespace(root=root, task_row={}, f2p_ids=("tests/test_app.py",))
+    runtime.journal = SimpleNamespace(manifest={"environment_revision": "fixture"},
+                                      emit=lambda *_args, **_kwargs: None)
+    runtime.projector_kind = "rich"
+    runtime.context_scope = "fixture"
+    runtime._workspace_view_store = WorkspaceViewStore(root, "fixture")
+    runtime._binding_cache = None
+    runtime._binding_epoch = 0
+    runtime.frame_ceiling = 10_000
+    runtime.edit_contract = {"edit_authority": {"editable_paths": ["pkg/__init__.py"]}}
+    runtime.protected_tests = {root / "tests/test_app.py": "baseline"}
+    runtime._empirical_frame_sources = {}
+    return runtime
+
+
+def _runtime_projection(runtime, frame, *, baseline, monkeypatch):
+    import kernel_stateframe_f4
+
+    class Captured(Exception):
+        pass
+
+    projection = {}
+    original = kernel_stateframe_f4.project_f4_state
+
+    def capture(*args, **kwargs):
+        if baseline:
+            kwargs.pop("current_product_revision", None)
+        projection.update(original(*args, **kwargs))
+        raise Captured
+
+    with monkeypatch.context() as patch:
+        patch.setattr(kernel_stateframe_f4, "project_f4_state", capture)
+        with pytest.raises(Captured):
+            StateFrameRuntime._f4_view(runtime, [], frame, "", "pkg/__init__.py", [])
+    return projection
+
+
+def _qualified_fixture_request(runtime, frame, messages, context, *, baseline, monkeypatch):
+    import kernel_stateframe_framefit5
+
+    with monkeypatch.context() as patch:
+        if baseline:
+            # Released selection did not filter edit advice at this boundary.
+            patch.setattr(kernel_stateframe_framefit5, "_editable_site",
+                          lambda *_args: True)
+        state = build_typed_state(messages, context, runtime)
+    projection = _runtime_projection(runtime, frame, baseline=baseline,
+                                     monkeypatch=monkeypatch)
+    projection["state"]["framefit5"] = state
+    root = runtime.owner.root
+    plan = build_source_closure(root, ["pkg/__init__.py"], "Fix value",
+                                target_path="pkg/__init__.py").as_dict()
+    unit = SpanNeed("pkg/__init__.py", 1, 1, "target", "fixture", 1).as_dict()
+    plan["units"] = [{**unit, "unit_handle": "entry:1"}]
+    plan["bounded_delivery"] = {"retained_handles": ["entry:1"],
+                                "omitted_handles": []}
+    runtime._request_source_closure = plan
+    prepared = [
+        {"role": "system", "content": "rules"}, messages[0],
+        {"role": "user", "content": _serialize_state_message(projection)},
+    ]
+    assembled = assemble_framefit5_request(
+        prepared, messages, source_plan=plan, sources=plan["source_contents"],
+        runtime=runtime,
+    )
+    body = {"messages": assembled, "tools": []}
+    capture = SimpleNamespace(
+        request_id="fixture-1", journal=runtime.journal,
+        _framefit5_semantic_messages=messages, _framefit5_task_message=messages[0],
+        _request_source_closure_override=plan,
+    )
+    result = finalize_frame_candidate(runtime, capture, body, frame_counter=token_estimate)
+    validation = validate_final_product_boundary(
+        runtime, result["messages"], result["tools"],
+        refresh_sources=False, refresh_headcarry=False,
+    )
+    assert validation["checked_before_provider"] is True
+    return result
+
+
+def _materialized_request(body):
+    result = copy.deepcopy(body)
+    state_messages = [message for message in result["messages"]
+                      if isinstance(message.get("content"), str)
+                      and message["content"].startswith("[StateFrame]\n")]
+    assert len(state_messages) == 1
+    state_messages[0]["content"] = json.loads(state_messages[0]["content"].split("\n", 1)[1])
+    return result
+
+
+def _different_paths(before, after, prefix=()):
+    if isinstance(before, dict) and isinstance(after, dict):
+        assert before.keys() == after.keys()
+        return [path for key in before
+                for path in _different_paths(before[key], after[key], (*prefix, key))]
+    if isinstance(before, list) and isinstance(after, list) and len(before) == len(after):
+        return [path for index in range(len(before))
+                for path in _different_paths(before[index], after[index], (*prefix, index))]
+    return [] if before == after else [prefix]
+
+
+@pytest.mark.parametrize("case", ["allowed", "protected", "near_budget", "multi_file"])
+def test_portable_differential_changes_only_checks_and_protected_advice(
+        tmp_path, monkeypatch, case):
+    root = tmp_path / "workspace"
+    (root / "pkg").mkdir(parents=True)
+    (root / "tests").mkdir()
+    root = root.resolve()
+    entry = root / "pkg/__init__.py"
+    entry.write_text("VALUE = 1\n")
+    sibling = root / "pkg/sibling.py"
+    sibling.write_text("SIBLING = 1\n")
+    protected = root / "tests/test_app.py"
+    protected.write_text("assert True\n")
+    runtime = _runtime_with_product(root)
+    initial = runtime.binding()["product_revision"]
+    entry_revision = "sha256:" + hashlib.sha256(entry.read_bytes()).hexdigest()
+    sibling.write_text("SIBLING = 2\n")
+    runtime._workspace_view_store.note_mutation(("pkg/sibling.py",), "edit")
+    runtime._invalidate_binding_cache()
+    current = runtime.binding()["product_revision"]
+    assert current != initial
+    assert runtime.binding()["product_files"]["pkg/__init__.py"] == entry_revision
+    frame = {
+        "artifact_revisions": {"pkg/__init__.py": entry_revision,
+                               "pkg/sibling.py": runtime.binding()["product_files"]["pkg/sibling.py"]},
+        "verification": {"revision": current, "status": "FAIL"},
+        "readiness": {"revision": current, "public_check_status": "FAIL"},
+        "test_receipts": [{"revision": current, "result_class": "RED",
+                           "receipt_id": "current-failure"}],
+    }
+    path = "tests/test_app.py" if case in {"protected", "near_budget"} else "pkg/__init__.py"
+    content = (root / path).read_text()
+    messages = [{"role": "user", "content": "Task: Fix value."},
+                *_read(path, content, "read-1")]
+    context = build_action_context(messages, workspace_root=root)
+    context["journal_receipt_records"] = []
+    runtime._framefit_action_context = context
+    if case == "near_budget":
+        runtime.frame_ceiling = 2_200
+    baseline = _qualified_fixture_request(runtime, frame, messages, context,
+                                          baseline=True, monkeypatch=monkeypatch)
+    patched = _qualified_fixture_request(runtime, frame, messages, context,
+                                         baseline=False, monkeypatch=monkeypatch)
+    old_request = _materialized_request(baseline)
+    new_request = _materialized_request(patched)
+    state_index = next(index for index, message in enumerate(old_request["messages"])
+                       if isinstance(message.get("content"), dict)
+                       and message["content"].get("schema") == "stateframe-f4/1")
+    old_state = old_request["messages"][state_index]["content"]
+    new_state = new_request["messages"][state_index]["content"]
+    old_checks = old_state["state"]["public_checks"]
+    new_checks = new_state["state"]["public_checks"]
+    assert old_checks["state"] == "NOT_RUN"
+    assert new_checks["state"] == "FAILED"
+    assert new_checks["revision"] == current
+    site = old_state["state"]["framefit5"]["next_site"]
+    forbidden = (root / path).resolve() in {
+        protected_path.resolve() for protected_path in runtime.protected_tests
+    }
+    assert site["path"] == path
+    assert forbidden == (case in {"protected", "near_budget"})
+    assert (new_state["state"]["framefit5"]["next_site"] is None) == forbidden
+    checks = ("messages", state_index, "content")
+    permitted = [
+        (*checks, "claims", 0, "evidence"),
+        (*checks, "claims", 0, "revision"),
+        (*checks, "claims", 0, "state"),
+        (*checks, "state", "public_checks", "evidence"),
+        (*checks, "state", "public_checks", "revision"),
+        (*checks, "state", "public_checks", "state"),
+    ]
+    if forbidden:
+        permitted += [
+            (*checks, "state", "framefit5", "next_site"),
+            (*checks, "state", "framefit5", "open_sites"),
+            (*checks, "state", "framefit5", "open_work", "next_site_available"),
+            (*checks, "state", "framefit5", "open_work", "next_site_source"),
+            (*checks, "state", "framefit5", "open_work", "open_edit_site_count"),
+        ]
+    differences = _different_paths(old_request, new_request)
+    assert differences
+    assert all(any(path[:len(allowed)] == allowed for allowed in permitted)
+               for path in differences), differences
+    if case == "near_budget":
+        assert token_estimate(patched) >= runtime.frame_ceiling * 0.8
