@@ -30,9 +30,12 @@ def skill_dir(tmp_path: Path, *, name: str = "edit-app",
     return directory
 
 
-def script(tmp_path: Path, steps: list[dict]) -> Path:
+def script(tmp_path: Path, steps: list[dict], *, slots: list[int] | None = None) -> Path:
     path = tmp_path / "skills.script.json"
-    path.write_text(json.dumps({"model": "scripted", "steps": steps, "tokenize": {"mode": "ok"}}))
+    document = {"model": "scripted", "steps": steps, "tokenize": {"mode": "ok"}}
+    if slots:
+        document["slots"] = slots  # an explicit prompt budget requires a reported server slot
+    path.write_text(json.dumps(document))
     return path
 
 
@@ -168,9 +171,10 @@ def test_unchanged_skill_resume_rebuilds_loaded_body(tmp_path):
         assert any("USER-PROVIDED SKILL INSTRUCTIONS: edit-app" in text for text in _messages(original[1]))
         recorded_next = (run_dir / "wire/0002.request.json").read_bytes()
         tape = [json.loads(line) for line in (run_dir / "tool-tape.jsonl").read_text().splitlines()]
-        assert [(row["kind"], row["tool"], row["replay_class"]) for row in tape
-                if row["tool"] == "skill_load"] == [
-            ("intent", "skill_load", "observation"), ("complete", "skill_load", "observation")]
+        intents = [row for row in tape if row["kind"] == "intent" and row["tool"] == "skill_load"]
+        assert [row["replay_class"] for row in intents] == ["observation"]
+        # Completion records carry only the call id; match them to the skill_load intent.
+        assert [row["kind"] for row in tape if row["call_id"] == intents[0]["call_id"]] == ["intent", "complete"]
         child = _engine_child(runner.pid)
         assert child is not None
         os.kill(child, signal.SIGKILL)
@@ -239,7 +243,7 @@ def test_budget_edge_sheds_body_and_run_completes(tmp_path, monkeypatch):
     second = skill_dir(tmp_path, name="audit-app", body=body)
     steps = [standard_steps()[0], {"tool": "skill_load", "arguments": {"name": "audit-app"}},
              *standard_steps()[1:]]
-    case = run_case(tmp_path, str(script(tmp_path, steps)), task="Change app.py and verify it.",
+    case = run_case(tmp_path, str(script(tmp_path, steps, slots=[65536])), task="Change app.py and verify it.",
                     flags=("--skill", str(selected), "--skill", str(second), "--shell", "off"))
     assert case.summary is not None and case.summary["succeeded"] is True, case.process.stdout + case.process.stderr
     wire = [json.loads(path.read_bytes()) for path in sorted((case.run_dir / "wire").glob("*.request.json"))]
