@@ -12,6 +12,7 @@ fallback.
 from __future__ import annotations
 
 import json
+from functools import lru_cache
 import os
 from pathlib import Path
 import platform
@@ -75,6 +76,20 @@ def backend() -> str:
     if executable is None:
         raise RuntimeError(f"restricted information policy requires {name}; no unsandboxed fallback")
     return executable
+
+
+@lru_cache(maxsize=16)
+def _bwrap_userns_guard_supported(executable: str) -> bool:
+    """Probe one installed binary, not each command, for the paired guard flags."""
+    try:
+        result = subprocess.run([executable, "--help"], capture_output=True, text=True,
+                                timeout=5, check=False,
+                                env={"PATH": os.defpath, "LANG": "C", "LC_ALL": "C"})
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise RuntimeError("cannot inspect bubblewrap namespace protections") from error
+    if result.returncode != 0:
+        raise RuntimeError("cannot inspect bubblewrap namespace protections")
+    return "--disable-userns" in result.stdout and "--assert-userns-disabled" in result.stdout
 
 
 def _interpreter_roots(selected: Path) -> set[str]:
@@ -285,6 +300,10 @@ def capability_command(command, cap, *, platform_backend=None, shared_namespace=
             arguments += ["--as-pid-1"]
         if cap.network == "full":
             arguments += ["--share-net"]
+    # Both paths created a user namespace above; refuse further user namespaces
+    # when this binary provides the guard. Older binaries keep their existing contract.
+    if _bwrap_userns_guard_supported(executable):
+        arguments += ["--disable-userns", "--assert-userns-disabled"]
     arguments += ["--dev", "/dev", "--cap-drop", "ALL"]
     # Merged-/usr distributions make /lib, /bin, ... symlinks. Capability roots are resolved,
     # so recreate those links or the ELF loader (/lib/ld-linux-*.so) is missing in the sandbox.

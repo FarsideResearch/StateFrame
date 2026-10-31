@@ -77,11 +77,13 @@ def test_launcher_file_is_explicit_readable(cap):
 
 @pytest.mark.parametrize("network", ["none", "loopback", "full"])
 def test_linux_builder_network_and_mount_contract(cap, monkeypatch, network):
+    monkeypatch.setattr("kernel_test_isolation._bwrap_userns_guard_supported", lambda path: True)
     monkeypatch.setattr("kernel_test_isolation.shutil.which", lambda name: "/usr/bin/bwrap")
     cap = replace(cap, network=network, workspace_writable=False)
     command, env = capability_command(["/bin/true"], cap, platform_backend="bwrap")
     assert "--unshare-all" in command and "--die-with-parent" in command
     assert "--new-session" in command
+    assert "--disable-userns" in command and "--assert-userns-disabled" in command
     assert ("--share-net" in command) is (network == "full")
     index = command.index(str(cap.workspace))
     assert command[index - 1] == "--ro-bind"
@@ -93,11 +95,46 @@ def test_linux_builder_network_and_mount_contract(cap, monkeypatch, network):
     # parent namespace, and escaped children die with the command's namespace (test_exec_session heartbeat test).
     assert "--unshare-all" not in nested
     assert "--unshare-pid" in nested
+    assert "--unshare-user" in nested
+    assert "--disable-userns" in nested and "--assert-userns-disabled" in nested
     proc = nested.index("/proc")
     assert nested[proc - 1] == "--proc", "nested /proc must be a real procfs, not a tmpfs"
     assert ("--unshare-net" in nested) is (network == "none")
     assert "--cap-drop" in nested
     assert ("--network-none" in nested) is (network == "none")
+
+
+def test_bwrap_namespace_guard_support_is_cached_per_binary(cap, monkeypatch):
+    import kernel_test_isolation as isolation
+    calls = []
+
+    def help_text(command, **kwargs):
+        calls.append(command)
+        assert command[1] == "--help" and kwargs["timeout"] == 5
+        options = ("--disable-userns --assert-userns-disabled"
+                   if command[0] == "/new/bwrap" else "--unshare-user")
+        return SimpleNamespace(returncode=0, stdout=options)
+
+    isolation._bwrap_userns_guard_supported.cache_clear()
+    monkeypatch.setattr(isolation.subprocess, "run", help_text)
+    try:
+        assert isolation._bwrap_userns_guard_supported("/new/bwrap")
+        assert isolation._bwrap_userns_guard_supported("/new/bwrap")
+        assert not isolation._bwrap_userns_guard_supported("/old/bwrap")
+        assert calls == [["/new/bwrap", "--help"], ["/old/bwrap", "--help"]]
+    finally:
+        isolation._bwrap_userns_guard_supported.cache_clear()
+
+
+def test_old_bwrap_keeps_shell_boundary_without_guard(cap, monkeypatch):
+    monkeypatch.setattr("kernel_test_isolation.shutil.which", lambda name: "/old/bwrap")
+    monkeypatch.setattr("kernel_test_isolation._bwrap_userns_guard_supported", lambda path: False)
+    for shared in (False, True):
+        command, _ = capability_command(["/bin/true"], cap, platform_backend="bwrap",
+                                        shared_namespace=shared)
+        assert "--disable-userns" not in command
+        assert "--assert-userns-disabled" not in command
+        assert "--unshare-user" in command or "--unshare-all" in command
 
 
 def test_equal_numeric_limits_hash_identically(cap):
@@ -126,6 +163,7 @@ def test_executable_directory_and_shebang_hops(cap, tmp_path, monkeypatch):
         restored = capability_from_dict(authority.as_dict())
         assert restored.digest() == authority.digest()
         monkeypatch.setattr("kernel_test_isolation.shutil.which", lambda name: "/usr/bin/" + name)
+        monkeypatch.setattr("kernel_test_isolation._bwrap_userns_guard_supported", lambda path: True)
         command, _ = capability_command([str(script)], authority, platform_backend="sandbox-exec")
         assert str(first) in command[2] and str(alias) in command[2]
         command, _ = capability_command([str(script)], authority, platform_backend="bwrap")

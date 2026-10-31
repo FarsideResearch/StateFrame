@@ -4,16 +4,46 @@ from dataclasses import replace
 from pathlib import Path
 import sys
 import time
+from types import SimpleNamespace
 
 import pytest
 
 from kernel_custom_tools import CustomToolError
 from kernel_exec_capability import executable_read_roots, shell_capability
 from kernel_mcp_driver import exchange
+from kernel_exec_tracker import ProcessIdentity
 from kernel_mcp_tools import load_mcp_files, _schema, omission_note, result_text
 from stateframe import __version__
 
 FIXTURE = Path(__file__).parent / "fixtures/mcp_server.py"
+
+
+def test_monitor_counts_private_namespace_and_nested_family_union(monkeypatch):
+    import kernel_mcp_driver as driver
+
+    rows = {pid: ProcessIdentity(pid, parent, pid, pid, (pid, 0), False)
+            for pid, parent in ((100, 1), (101, 100), (102, 1), (103, 101))}
+
+    class Table:
+        def identity(self, pid):
+            return rows.get(pid)
+
+        def snapshot(self):
+            return rows
+
+        def pid_namespace(self, pid):
+            return {100: "host", 101: "private", 102: "private", 103: "nested"}.get(pid, "host")
+
+        def limit_breach(self, live, limits):
+            assert {row.pid for row in live} == {100, 101, 102, 103}
+            return "aggregate resident-memory limit exceeded"
+
+    monkeypatch.setattr(driver, "ProcessTable", Table)
+    monkeypatch.setattr(driver, "sys", SimpleNamespace(platform="linux"))
+    monitor = driver._ContainmentMonitor(SimpleNamespace(pid=100),
+                                         SimpleNamespace(limits=SimpleNamespace(wall_seconds=4)))
+    monitor.namespace = "private"
+    assert monitor._sample() == "aggregate resident-memory limit exceeded"
 
 
 def call(tmp_path, mode, *, action="list", timeout=2, extra=()):

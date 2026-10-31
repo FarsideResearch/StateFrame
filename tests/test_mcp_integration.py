@@ -1,4 +1,5 @@
 """Real MCP peer, execution sandbox and scripted provider integration."""
+import errno
 import fcntl
 import json
 import sys
@@ -16,6 +17,7 @@ from kernel_agent_tools import AgentTools
 from kernel_exec_session import ExecSession, ExecSessionError
 from kernel_exec_capability import executable_read_roots, shell_capability
 from kernel_mcp_driver import exchange
+from kernel_test_isolation import _bwrap_userns_guard_supported, sandbox_executable
 from kernel_shell_tool import ShellTool
 from kernel_tool_settings import ToolSettings
 from kernel_tool_tape import ToolReplayRefused, configure_replay, tape_for_run
@@ -363,6 +365,24 @@ def test_private_server_unit_enforces_aggregate_limits(tmp_path, mode, limit, pr
     assert result["code"] == "MCP_PROTOCOL_ERROR" and reason in result["error"]
     assert elapsed < 4
     assert _lock_released(marker), "server unit survived the limit breach"
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="nested PID namespace requires Linux")
+def test_nested_server_children_count_toward_aggregate_limit(tmp_path):
+    result, marker, elapsed = _limited_exchange(tmp_path, "nested_memory_fanout",
+                                                memory_bytes=96 << 20, nproc=4096)
+    status = (Path(str(marker) + ".status")).read_text().strip()
+    executable = sandbox_executable("bwrap")
+    assert executable is not None
+    if _bwrap_userns_guard_supported(executable):
+        assert status.startswith("refused:"), status
+    else:
+        assert status == "nested" or status in {
+            f"refused:{errno.EPERM}", f"refused:{errno.ENOSPC}"}, status
+    assert result["code"] == "MCP_PROTOCOL_ERROR"
+    assert "aggregate resident-memory limit exceeded" in result["error"]
+    assert elapsed < 4
+    assert _lock_released(marker), "nested server unit survived the limit breach"
 
 
 @pytest.mark.skipif(sys.platform != "darwin", reason="blocked send requires macOS")

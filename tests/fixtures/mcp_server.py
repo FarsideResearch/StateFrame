@@ -1,5 +1,6 @@
 """Small real stdio peer for MCP client tests."""
 import json
+import ctypes
 import fcntl
 import os
 import socket
@@ -22,6 +23,32 @@ def send(value):
 
 def response(ident, result):
     send({"jsonrpc": "2.0", "id": ident, "result": result})
+
+
+def nested_memory_worker(marker):
+    flags = 0x10000000 | 0x20000000  # CLONE_NEWUSER | CLONE_NEWPID
+    result = ctypes.CDLL(None, use_errno=True).unshare(flags)
+    with open(marker + ".status", "w", encoding="utf-8") as status:
+        status.write("nested\n" if result == 0 else f"refused:{ctypes.get_errno()}\n")
+    if result == 0:
+        if os.fork():
+            time.sleep(3600)
+            os._exit(0)
+    for _ in range(4):
+        if os.fork() == 0:
+            blocks = [bytearray(16 << 20)]
+            blocks[0][::4096] = b"x" * 4096
+            time.sleep(3600)
+            os._exit(0)
+    time.sleep(3600)
+
+
+if mode == "nested_worker":
+    with open(sys.argv[2], "w", encoding="utf-8") as marker:
+        fcntl.flock(marker, fcntl.LOCK_EX)
+        marker.write("children started\n")
+        marker.flush()
+        nested_memory_worker(sys.argv[2])
 
 
 while line := sys.stdin.readline():
@@ -159,7 +186,15 @@ while line := sys.stdin.readline():
                     "inputSchema": {"type": "object", "properties": {}}})
             response(request["id"], {"tools": tools})
     elif method == "tools/call":
-        if mode in {"memory_fanout", "process_fanout"}:
+        if mode == "nested_memory_fanout":
+            with open(sys.argv[2], "w", encoding="utf-8") as marker:
+                fcntl.flock(marker, fcntl.LOCK_EX)
+                marker.write("children started\n")
+                marker.flush()
+                if os.fork() == 0:
+                    nested_memory_worker(sys.argv[2])
+                time.sleep(3600)
+        elif mode in {"memory_fanout", "process_fanout"}:
             with open(sys.argv[2], "w", encoding="utf-8") as marker:
                 fcntl.flock(marker, fcntl.LOCK_EX)
                 marker.write("children started\n")

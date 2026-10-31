@@ -90,16 +90,17 @@ class _ContainmentMonitor:
                         self.namespace_ready.set()
                         break
             if self.namespace is not None:
-                live = []
+                live = {row.pid: row for row in family}
                 for row in rows.values():
                     if row.zombie:
                         continue
                     try:
                         if self.table.pid_namespace(row.pid) == self.namespace:
-                            live.append(row)
+                            live[row.pid] = row
                     except PermissionError:
                         # An unrelated user's process is not in our private unit.
                         continue
+                live = list(live.values())
             else:
                 live = family
         else:
