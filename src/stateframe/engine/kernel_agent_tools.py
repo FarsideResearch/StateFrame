@@ -21,7 +21,7 @@ from kernel_web_fetch import WebPolicy, fetch
 
 
 class AgentTools:
-    def __init__(self, shell, custom, mcp_servers=()):
+    def __init__(self, shell, custom, mcp_servers=(), *, resume_active=False):
         from kernel_completion_owner import TOOL_SPECS
         from kernel_lean import _KNOWN_TOOL_NAMES
         from kernel_custom_tools import CustomToolError
@@ -32,6 +32,7 @@ class AgentTools:
         self.shell = shell
         self.custom = {tool.name: tool for tool in custom.tools}
         self.mcp_servers = tuple(mcp_servers)
+        self.resume_active = resume_active
         self.custom_schemas = copy.deepcopy(custom.schemas())
         for schema in self.custom_schemas:
             schema["function"]["parameters"]["properties"].setdefault("why", {"type": "string"})
@@ -71,6 +72,11 @@ class AgentTools:
         if self.mcp_servers:
             from kernel_mcp_tools import discover
             from kernel_custom_tools import CustomToolError
+            if self.resume_active and not self.shell.settings.replay_external:
+                external = [server.name for server in self.mcp_servers if server.replay == "external"]
+                if external:
+                    raise ToolReplayRefused(
+                        "MCP discovery requires --replay-external for servers: " + ", ".join(external))
             found = discover(self.mcp_servers, self.shell.root, self.shell.run_dir,
                              shell_network=self.shell.settings.shell_network,
                              host_authorization=self.shell.settings.host_authorization is not None,
@@ -290,9 +296,9 @@ class AgentTools:
 _active: AgentTools | None = None
 
 
-def configure(shell, custom, mcp_servers=()):
+def configure(shell, custom, mcp_servers=(), *, resume_active=False):
     global _active
-    candidate = AgentTools(shell, custom, mcp_servers)
+    candidate = AgentTools(shell, custom, mcp_servers, resume_active=resume_active)
     # Publish only after all definitions and the source view validate. Dynamic
     # dispatch and schema consumers resolve this same per-run object.
     _active = candidate

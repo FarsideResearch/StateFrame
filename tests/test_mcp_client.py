@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from kernel_mcp_tools import McpError, _schema, discover, load_mcp_files, result_text, validate_arguments
+from stateframe import __version__
 
 DRIVER = Path(__file__).resolve().parents[1] / "src/stateframe/engine/kernel_mcp_driver.py"
 SERVER = r'''#!/usr/bin/env python3
@@ -89,7 +90,7 @@ def config(tmp_path, server, **changes):
 
 def driver(server, mode, operation="list", **args):
     request = {"argv": [str(server), mode], "operation": operation, "timeout_seconds": 1,
-               **args}
+               "client_version": __version__, **args}
     return subprocess.run([sys.executable, "-I", str(DRIVER)], input=json.dumps(request).encode(),
                           capture_output=True, timeout=5)
 
@@ -144,10 +145,12 @@ def test_duplicate_and_noncanonical_json_rejected(tmp_path, server):
 
 def test_schema_sanitizer_and_argument_validation():
     schema = _schema({"type": "object", "properties": {
-        "text": {"type": "string", "description": "x" * 1000, "unknown": True}},
-        "required": ["text"], "unknown": True})
-    assert len(schema["properties"]["text"]["description"]) == 200
+        "text": {"type": "string", "description": "x" * 1000}},
+        "required": ["text"]})
+    assert schema["properties"]["text"]["description"].startswith("Untrusted server property metadata: ")
     assert "unknown" not in schema
+    with pytest.raises(McpError, match="unsupported constraint"):
+        _schema({"type": "object", "properties": {"text": {"type": "string", "unknown": True}}})
     validate_arguments(schema, {"text": "okay"})
     with pytest.raises(McpError, match="wrong type"):
         validate_arguments(schema, {"text": 3})

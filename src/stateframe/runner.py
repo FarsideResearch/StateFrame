@@ -1359,6 +1359,10 @@ def resume_run(run_dir: Path, *, endpoint: Endpoint | None = None, max_turns: in
         if custom.digest != spec.get("custom_tools_digest"):
             raise resume_module.ResumeRefused("custom tool executable or definition changed")
         if mcp_servers:
+            external = [server.name for server in mcp_servers.servers if server.replay == "external"]
+            if external and not replay_external:
+                raise resume_module.ResumeRefused(
+                    "MCP discovery requires --replay-external for servers: " + ", ".join(external))
             try:
                 mcp = discover_mcp(mcp_servers, run_dir / "workspace", run_dir,
                                    shell_network=settings.shell_network,

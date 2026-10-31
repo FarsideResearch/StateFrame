@@ -8,6 +8,7 @@ import pytest
 
 from kernel_custom_tools import CustomToolError
 from kernel_mcp_tools import DRIVER, load_mcp_files, _schema, result_text
+from stateframe import __version__
 
 FIXTURE = Path(__file__).parent / "fixtures/mcp_server.py"
 
@@ -15,6 +16,7 @@ FIXTURE = Path(__file__).parent / "fixtures/mcp_server.py"
 def call(mode, *, action="list", timeout=2, extra=()):
     request = {"argv": [sys.executable, str(FIXTURE), mode, *extra],
                "operation": action, "timeout_seconds": timeout,
+               "client_version": __version__,
                "tool": "echo", "arguments": {"value": "hello"}}
     result = subprocess.run([sys.executable, "-I", str(DRIVER)], input=json.dumps(request),
                             capture_output=True, text=True, timeout=10)
@@ -44,6 +46,21 @@ def test_timeout_kills_child(tmp_path):
     pid = int(pidfile.read_text())
     with pytest.raises(ProcessLookupError):
         os.kill(pid, 0)
+
+
+@pytest.mark.host_sandbox
+@pytest.mark.parametrize("mode", ["detached_hang", "malformed"])
+def test_driver_cleans_detached_or_malformed_peer(tmp_path, mode):
+    pidfile = tmp_path / "pid"
+    response = call(mode, timeout=.3, extra=(str(pidfile),))
+    assert response["ok"] is False
+    pid = int(pidfile.read_text())
+    with pytest.raises(ProcessLookupError):
+        os.kill(pid, 0)
+
+
+def test_driver_uses_product_version():
+    assert call("version", extra=(__version__,))["ok"] is True
 
 
 def definition():
@@ -83,10 +100,9 @@ def test_config_replay_constraints_and_json(tmp_path):
 
 
 def test_schema_sanitizer_and_result_mapping():
-    result = _schema({"type": "object", "unknown": 1, "properties": {
-        "value": {"type": "string", "description": "a" * 500, "pattern": "(a+)+"},
+    result = _schema({"type": "object", "properties": {
+        "value": {"type": "string", "description": "a" * 500},
         "nested": {"type": "object"}}, "required": ["value"]})
-    assert len(result["properties"]["value"]["description"]) == 200
-    assert "pattern" not in result["properties"]["value"]
+    assert result["properties"]["value"]["description"].startswith("Untrusted server property metadata: ")
     assert result["properties"]["nested"]["type"] == "object"
     assert result_text({"content": [{"type": "image"}, {"type": "resource", "resource": {"uri": "x"}}]}) == "[image omitted]\n[resource: x]"

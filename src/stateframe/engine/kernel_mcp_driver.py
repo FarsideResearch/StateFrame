@@ -41,6 +41,7 @@ def converse(request: dict) -> object:
     timeout = request.get("timeout_seconds")
     if (not isinstance(argv, list) or not argv or any(not isinstance(v, str) or not v for v in argv)
             or type(timeout) not in (int, float) or not 0 < timeout <= 600
+            or not isinstance(request.get("client_version"), str) or not request["client_version"]
             or request.get("operation") not in {"list", "call"}):
         raise ProtocolError("invalid driver request")
     deadline = time.monotonic() + timeout
@@ -52,6 +53,40 @@ def converse(request: dict) -> object:
     buffer = bytearray()
     total = 0
     counter = 0
+    descendants: dict[int, str] = {}
+
+    def process_table() -> dict[int, tuple[int, str]]:
+        try:
+            listing = subprocess.run(["ps", "-eo", "pid=,ppid=,lstart="], capture_output=True,
+                                     text=True, timeout=1, check=True).stdout
+        except (OSError, subprocess.SubprocessError):
+            return {}
+        table = {}
+        for line in listing.splitlines():
+            fields = line.split()
+            if len(fields) < 7 or not all(field.isdecimal() for field in fields[:2]):
+                continue
+            table[int(fields[0])] = (int(fields[1]), " ".join(fields[2:]))
+        return table
+
+    root_start = process_table().get(process.pid, (0, ""))[1]
+
+    def record_descendants() -> None:
+        # A peer can create a new session before it fails or times out. Retain
+        # observed PIDs and start times while the parent is alive.
+        table = process_table()
+        children: dict[int, list[int]] = {}
+        for pid, (parent, _) in table.items():
+            children.setdefault(parent, []).append(pid)
+        pending = ([process.pid] if root_start and table.get(process.pid, (0, None))[1] == root_start
+                   else [])
+        pending.extend(pid for pid, started in descendants.items()
+                       if table.get(pid, (0, None))[1] == started)
+        while pending:
+            for pid in children.get(pending.pop(), ()):
+                if pid not in descendants:
+                    descendants[pid] = table[pid][1]
+                    pending.append(pid)
 
     def send(value: dict) -> None:
         data = _json(value)
@@ -116,8 +151,9 @@ def converse(request: dict) -> object:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 raise TimeoutError("MCP server deadline exceeded")
-            if not selector.select(remaining):
-                raise TimeoutError("MCP server deadline exceeded")
+            record_descendants()
+            if not selector.select(min(remaining, .25)):
+                continue
             chunk = os.read(process.stdout.fileno(), 65536)
             if not chunk:
                 raise ProtocolError("server exited before responding")
@@ -135,7 +171,7 @@ def converse(request: dict) -> object:
     try:
         initialized = call("initialize", {"protocolVersion": "2025-06-18",
             "capabilities": {"roots": {"listChanged": False}},
-            "clientInfo": {"name": "StateFrame", "version": "0.2.0"}})
+            "clientInfo": {"name": "StateFrame", "version": request["client_version"]}})
         if (not isinstance(initialized, dict) or initialized.get("protocolVersion") not in VERSIONS
                 or not isinstance(initialized.get("capabilities"), dict)):
             raise ProtocolError("server negotiated an unsupported protocol version")
@@ -180,6 +216,7 @@ def converse(request: dict) -> object:
         raise ProtocolError("tools/list exceeds 32 pages")
     finally:
         selector.close()
+        record_descendants()
         try:
             os.killpg(process.pid, signal.SIGKILL)
         except ProcessLookupError:
@@ -187,6 +224,14 @@ def converse(request: dict) -> object:
         except PermissionError:
             if process.poll() is None:
                 process.kill()
+        current = process_table()
+        for pid, started in descendants.items():
+            if pid not in current or current[pid][1] != started:
+                continue
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
         process.wait(timeout=2)
 
 

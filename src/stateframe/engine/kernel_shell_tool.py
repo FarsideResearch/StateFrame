@@ -223,8 +223,11 @@ class ShellTool:
                 replay_class = "observation"
         else:
             from kernel_custom_tools import CustomToolError
+            mcp_server = getattr(custom, "server", None)
+            # MCP owns its declared arguments. Only command tools receive an engine-added rationale.
+            tool_args = args if mcp_server is not None else {k: v for k, v in args.items() if k != "why"}
             try:
-                argv = custom.build_argv({k: v for k, v in args.items() if k != "why"})
+                argv = custom.build_argv(tool_args)
             except CustomToolError as error:
                 return ShellReply(f"REFUSED BAD_ARGUMENTS: {error}")
             try:
@@ -233,7 +236,6 @@ class ShellTool:
                 return ShellReply(f"REFUSED TOOL_CHANGED: {error}")
             name, command = custom.name, custom.name
             from kernel_exec_capability import executable_read_roots
-            mcp_server = getattr(custom, "server", None)
             extra_roots = (executable_read_roots(Path(__file__).with_name("kernel_mcp_driver.py"))
                            if mcp_server is not None else ())
             if mcp_server is not None:
@@ -302,7 +304,7 @@ class ShellTool:
                     tape.complete(call_id=call_id, exit_code=None, observation=observation,
                                   post_manifest_digest=workspace_identity(before), env_identity=identity)
                     return ShellReply(observation)
-            stdin = custom.request({k: v for k, v in args.items() if k != "why"}) if custom is not None and mcp_server is not None else None
+            stdin = custom.request(tool_args) if custom is not None and mcp_server is not None else None
             result = (self.session.run(argv, cap, stdin=stdin, cwd=self.root) if stdin is not None
                       else self.session.run(argv, cap, cwd=self.root))
         except (ExecSessionError, OSError) as error:
