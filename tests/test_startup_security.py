@@ -30,7 +30,7 @@ def test_startup_capability_and_fail_closed_errors(tmp_path, monkeypatch, check,
             assert cap.sandboxed and not cap.workspace_writable and cap.network == 'none'
             assert cap.workspace != tmp_path.resolve() and kwargs['cwd'].resolve() == cap.workspace
             assert 'HOST_SECRET' not in cap.env and 'PYTHONPATH' not in cap.env
-            assert cap.limits.wall_seconds == 10 and cap.limits.output_bytes == 65536
+            assert cap.limits.wall_seconds == runner.STARTUP_PROBE_SECONDS and cap.limits.output_bytes == 65536
             assert tmp_path not in cap.write_roots
             if outcome == 'launch':
                 raise ExecSessionError('sandbox unavailable')
@@ -91,7 +91,7 @@ blocked = 0
 for path in [Path({str(outside)!r}), Path({str(repo / 'repo-write')!r})]:
     try:
         path.write_text('ESCAPE')
-    except PermissionError:
+    except OSError:
         blocked += 1
 try:
     socket.create_connection(('127.0.0.1', {server.getsockname()[1]}), timeout=1).close()

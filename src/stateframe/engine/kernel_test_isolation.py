@@ -52,9 +52,26 @@ def _declared_relay_dir(env: dict[str, str]) -> Path | None:
     return candidate
 
 
+# Standard install locations, used when PATH does not list the sandbox binary (an IDE, cron or a
+# minimal-PATH launcher must still get the sandbox, never a silent "unavailable").
+_SANDBOX_DIRS = ("/usr/bin", "/bin", "/usr/local/bin", "/usr/sbin")
+
+
+def sandbox_executable(name: str) -> str | None:
+    """Resolve sandbox-exec/bwrap from PATH, then from the standard system locations."""
+    found = shutil.which(name)
+    if found:
+        return found
+    for directory in _SANDBOX_DIRS:
+        candidate = os.path.join(directory, name)
+        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            return candidate
+    return None
+
+
 def backend() -> str:
     name = "sandbox-exec" if platform.system() == "Darwin" else "bwrap"
-    executable = shutil.which(name)
+    executable = sandbox_executable(name)
     if executable is None:
         raise RuntimeError(f"restricted information policy requires {name}; no unsandboxed fallback")
     return executable
@@ -216,7 +233,7 @@ def capability_command(command, cap, *, platform_backend=None, shared_namespace=
     selected = platform_backend or ("sandbox-exec" if platform.system() == "Darwin" else "bwrap")
     if selected not in {"sandbox-exec", "bwrap"}:
         raise ValueError("execution backend must be sandbox-exec or bwrap")
-    executable = shutil.which(selected)
+    executable = sandbox_executable(selected)
     if executable is None:
         raise RuntimeError(f"execution capability requires {selected}; no unsandboxed fallback")
     reads = set(cap.read_roots) | set(cap.write_roots) | {cap.workspace,

@@ -1,5 +1,6 @@
 from dataclasses import replace
 import json
+import os
 import re
 import subprocess
 import sys
@@ -59,7 +60,9 @@ def test_host_test_environment_never_inherited(cap, monkeypatch):
 
 
 def test_missing_backend_fails_closed(cap, monkeypatch):
+    # Truly absent: not on PATH and not in any standard location.
     monkeypatch.setattr("kernel_test_isolation.shutil.which", lambda name: None)
+    monkeypatch.setattr("kernel_test_isolation._SANDBOX_DIRS", ())
     with pytest.raises(RuntimeError, match="no unsandboxed fallback"):
         capability_command(["/bin/true"], cap)
 
@@ -233,3 +236,15 @@ def test_system_git_config_readonly_or_disabled_when_absent(cap):
         assert cap.env['GIT_CONFIG_NOSYSTEM'] == '1'
     assert config.parent not in cap.read_roots
     assert not any(config.resolve().is_relative_to(root) for root in cap.write_roots)
+
+
+def test_sandbox_binary_resolves_without_path(monkeypatch):
+    # Regression: a minimal PATH (IDE, cron, a test planting a fake PATH) must not lose the sandbox.
+    import kernel_test_isolation
+    name = "sandbox-exec" if sys.platform == "darwin" else "bwrap"
+    expected = kernel_test_isolation.sandbox_executable(name)
+    if expected is None:
+        pytest.skip(f"{name} not installed on this host")
+    monkeypatch.setenv("PATH", "/nonexistent")
+    assert kernel_test_isolation.sandbox_executable(name) == expected or \
+        os.path.realpath(kernel_test_isolation.sandbox_executable(name)) == os.path.realpath(expected)

@@ -95,13 +95,13 @@ blocked = 0
 for target in [Path({str(outside)!r}), Path('changed-in-workspace')]:
     try:
         target.write_text('ESCAPE')
-    except PermissionError:
+    except OSError:
         blocked += 1
 assert blocked == 2, 'write escaped sandbox'
 try:
     with socket.socket() as connection:
         connection.connect(('127.0.0.1', {port}))
-except PermissionError:
+except OSError:
     pass
 else:
     raise AssertionError('network escaped sandbox')

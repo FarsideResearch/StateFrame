@@ -15,14 +15,13 @@ import platform
 import re
 import resource
 import selectors
-import shutil
 import signal
 import subprocess
 import time
 from collections.abc import Mapping, Sequence
 from typing import Callable
 
-from kernel_test_isolation import isolated_command
+from kernel_test_isolation import isolated_command, sandbox_executable
 
 
 MAX_WALL_SECONDS = 900.0
@@ -88,7 +87,7 @@ def capability_report() -> CapabilityReport:
     """Return the host capability matrix without starting a child process."""
     system = platform.system()
     backend_name = "sandbox-exec" if system == "Darwin" else "bwrap" if system == "Linux" else None
-    executable = shutil.which(backend_name) if backend_name else None
+    executable = sandbox_executable(backend_name) if backend_name else None
     required_limits = (
         "RLIMIT_CPU", "RLIMIT_FSIZE", "RLIMIT_CORE", "RLIMIT_NOFILE",
     )

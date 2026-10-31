@@ -206,6 +206,11 @@ def run_test_cmd(command: str, cwd: Path, timeout_s: float = 900,
         raise RunError(str(error)) from error
 
 
+# A cold interpreter importing pytest inside a fresh sandbox can take tens of seconds on a loaded
+# machine (measured: 10 s was exceeded in a busy Linux container); stay bounded but tolerant.
+STARTUP_PROBE_SECONDS = 60
+
+
 def _startup_probe(python: str, code: str, *, label: str) -> bytes:
     """Contain interpreter startup itself, before importing any project packages."""
     from .engine.kernel_safe_probe import run_probe
@@ -213,11 +218,12 @@ def _startup_probe(python: str, code: str, *, label: str) -> bytes:
 
     try:
         with tempfile.TemporaryDirectory(prefix="stateframe-startup-") as directory:
-            result = run_probe([python, "-I", "-B", "-c", code], Path(directory), timeout=10)
+            result = run_probe([python, "-I", "-B", "-c", code], Path(directory),
+                               timeout=STARTUP_PROBE_SECONDS)
     except (OSError, ExecSessionError, ValueError) as error:
         raise RunError(f"{label} startup probe could not run safely: {error}") from error
     if result.timed_out:
-        raise RunError(f"{label} startup probe exceeded its 10 second wall limit")
+        raise RunError(f"{label} startup probe exceeded its {STARTUP_PROBE_SECONDS} second wall limit")
     if result.output_truncated:
         raise RunError(f"{label} startup probe exceeded its 65536 byte output limit")
     if result.exit_code != 0:
