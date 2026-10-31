@@ -123,7 +123,11 @@ class ReceiptHistory:
             })
             summary["receipt_count"] += 1
         elif event.get("kind") == "check_receipt":
-            key = ("check",)
+            # Keep the latest outcome for each selector. A
+            # multi-selector check can leave several current failures, and the
+            # final selector must not erase the earlier failure's evidence.
+            # The frontier stays bounded by selectors across revisions.
+            key = ("check", str(event.get("selector") or ""))
         elif (edit := _applied_edit_receipt(event)) is not None:
             key = ("edit", _sha(edit.get("target_path")))
 

@@ -24463,6 +24463,9 @@ class StateFrameRuntime:
                 raise RuntimeError("frame-only final menu binding failed") from error
         if provider_request:
             self._record_empirical_serialized_sources(prepared, tools)
+            from kernel_read_exec import record_serialized_read_pages
+            record_serialized_read_pages(
+                self, prepared, self._frame_budget_request_count)
         if provider_request and self.stateframe_trailing_panels_mode == "on":
             from kernel_cache_layout import track_tool_menu
             track_tool_menu(self, tools, request_id=capture.request_id)

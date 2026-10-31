@@ -385,6 +385,123 @@ def _materialized_request(body):
     return result
 
 
+def test_recorded_t2_request14_state_activates_current_failure_bookmarks(
+        tmp_path, monkeypatch):
+    from kernel_framefit_receipt_history import ReceiptHistory
+
+    monkeypatch.setenv("STATEFRAME_CODE_BOOKMARKS", "on")
+    root = tmp_path / "workspace"
+    (root / "pkg/batch").mkdir(parents=True)
+    (root / "tests").mkdir()
+    product = {
+        "pkg/__init__.py": "from .batch import run_batch\n",
+        "pkg/batch/__init__.py": "from .runner import run_batch\n",
+        "pkg/batch/contracts.py": "class BatchResult: pass\n",
+        "pkg/batch/runner.py": "def run_batch(items, work): return []\n",
+        "pkg/service.py": "def run_batch(items, work): return []\n",
+        "pkg/worker.py": ("class Worker:\n"
+                          "    def process_batch(self, items, work): return []\n"),
+        "pkg/cli.py": "def run_batch(items, work): return []\n",
+        "pkg/registry.py": "def lookup(name): return None\n",
+        "pkg/serializers.py": "def serialize(value): return value\n",
+        "pkg/config.py": "STOP_ON_ERROR = False\n",
+        "pkg/legacy_batch.py": "def legacy_batch(): return None\n",
+    }
+    tests = {
+        "tests/test_batch_contract.py": "def test_batch(): assert True\n",
+        "tests/test_preservation.py": "def test_preservation(): assert True\n",
+        "tests/test_consumers.py": (
+            "from pkg import service, worker\n"
+            "def test_consumers():\n"
+            "    assert service.run_batch([1], str) == []\n"
+            "    assert worker.Worker().process_batch([2], str) == []\n"
+            "    assert calls == [(1,), (2,)]\n"),
+        "tests/test_registration_serialization.py": (
+            "from pkg import registry\n"
+            "def test_registry():\n"
+            "    assert registry.lookup('batch') is not None\n"),
+    }
+    for name, source in {**product, **tests}.items():
+        (root / name).write_text(source)
+    runtime = _runtime_with_product(root)
+    runtime.edit_contract = {"edit_authority": {"editable_paths": list(product)}}
+    runtime.protected_tests = {root / name: "baseline" for name in tests}
+    emitted = []
+    runtime.journal.emit = lambda kind, **fields: emitted.append({"kind": kind, **fields})
+    revision = runtime.binding()["product_revision"]
+    messages = [{"role": "user", "content": "Task: wire the batch runner."},
+                *_read("pkg/__init__.py", product["pkg/__init__.py"], "read-1")]
+    context = build_action_context(messages, workspace_root=root)
+    history = ReceiptHistory()
+    for selector, identity, line in (
+            ("tests/test_consumers.py", "consumer", 5),
+            ("tests/test_registration_serialization.py", "registry", 3)):
+        history.observe({"kind": "check_receipt", "selector": selector,
+                         "receipt_id": f"check-receipt:{identity}", "revision": revision,
+                         "status": "FAIL",
+                         "summary": f"CHECK_FAILURE_SUMMARY\\n{selector}:{line}: AssertionError"})
+    context.update(history.context())
+    runtime._framefit_action_context = context
+    frame = {"verification": {"revision": revision, "status": "FAIL"},
+             "readiness": {"revision": revision, "public_check_status": "FAIL"},
+             "test_receipts": [{"revision": revision, "result_class": "RED",
+                                "receipt_id": "check-receipt:registry"}]}
+
+    def recorded_state(state):
+        state["last_verdict"] = {"status": "FAIL", "tested_revision": revision,
+                                 "current_revision": revision,
+                                 "check_receipt_id": "check-receipt:registry"}
+        state["read_facts"] = [
+            {"path": name,
+             "read_revision": "sha256:" + hashlib.sha256((root / name).read_bytes()).hexdigest(),
+             "current_revision": "sha256:" + hashlib.sha256((root / name).read_bytes()).hexdigest(),
+             "status": "UNCHANGED", "unchanged_since_read": True,
+             "body_delivery": "present" if name in tests or name in {
+                 "pkg/batch/__init__.py", "pkg/config.py"} else "not_shown"}
+            for name in [*tests, *product]
+        ]
+
+    result, capture = _qualified_fixture_request(
+        runtime, frame, messages, context, baseline=False,
+        monkeypatch=monkeypatch, state_transform=recorded_state,
+        validate=False, return_capture=True)
+    final = _materialized_request(result)["messages"][2]["content"]["state"]["framefit5"]
+    symbols = {(row["path"], row["symbol"]) for row in final["code_bookmarks"]}
+    assert {("pkg/registry.py", "lookup"), ("pkg/service.py", "run_batch"),
+            ("pkg/worker.py", "Worker.process_batch")} <= symbols
+    assert capture._code_bookmark_transition[0] is True
+    decisions = [row for row in emitted if row["kind"] == "code_bookmark_activation_decision"]
+    assert len(decisions) == 1
+    assert decisions[0]["reason"] == "activated"
+    assert decisions[0]["collected_count"] >= 3
+    emitted.clear()
+    monkeypatch.setenv("STATEFRAME_CODE_BOOKMARKS", "off")
+    disabled = _qualified_fixture_request(
+        runtime, frame, messages, context, baseline=False,
+        monkeypatch=monkeypatch, state_transform=recorded_state,
+        validate=False)
+    disabled_frame = next(
+        message for message in _materialized_request(disabled)["messages"]
+        if isinstance(message.get("content"), dict)
+        and message["content"].get("schema") == "stateframe-f4/1")
+    assert "code_bookmarks" not in disabled_frame["content"]["state"]["framefit5"]
+    assert [row["reason"] for row in emitted
+            if row["kind"] == "code_bookmark_activation_decision"] == ["disabled"]
+    emitted.clear()
+    monkeypatch.setenv("STATEFRAME_CODE_BOOKMARKS", "on")
+    missing = dict(context)
+    missing.pop("journal_receipt_history", None)
+    missing["journal_receipt_records"] = []
+    missing["journal_receipt_count"] = 0
+    runtime._framefit_action_context = missing
+    _qualified_fixture_request(
+        runtime, frame, messages, missing, baseline=False,
+        monkeypatch=monkeypatch, state_transform=recorded_state,
+        validate=False)
+    assert [row["reason"] for row in emitted
+            if row["kind"] == "code_bookmark_activation_decision"] == ["no_failed_receipt"]
+
+
 def _different_paths(before, after, prefix=()):
     if isinstance(before, dict) and isinstance(after, dict):
         assert before.keys() == after.keys()
@@ -628,8 +745,8 @@ def test_pressured_bookmarks_pass_final_allocation_and_validation(tmp_path, monk
     monkeypatch.setenv("STATEFRAME_CODE_BOOKMARKS", "on")
     import kernel_code_bookmarks
     original_collect = kernel_code_bookmarks.collect
-    def padded_optional_metadata(bookmark_runtime, bookmark_frame):
-        rows = original_collect(bookmark_runtime, bookmark_frame)
+    def padded_optional_metadata(bookmark_runtime, bookmark_frame, *, decision=None):
+        rows = original_collect(bookmark_runtime, bookmark_frame, decision=decision)
         for row in rows:
             row["origin"] += "x" * 2000
         return rows

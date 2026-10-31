@@ -722,9 +722,12 @@ def finalize_frame_candidate(
         for row in frame.get("read_facts", ())
     )
     bookmarks = []
+    bookmark_decision: dict[str, str] = {"reason": "no_owed_reads"}
+    collected_bookmark_count = 0
     if needs_bookmarks:
         from kernel_code_bookmarks import collect as collect_code_bookmarks
-        bookmarks = collect_code_bookmarks(runtime, frame)
+        bookmarks = collect_code_bookmarks(runtime, frame, decision=bookmark_decision)
+        collected_bookmark_count = len(bookmarks)
         if bookmarks:
             from kernel_stateframe_framefit5 import _serialize_state_message
             frame["code_bookmarks"] = bookmarks
@@ -1093,6 +1096,18 @@ def finalize_frame_candidate(
         and fact.get("body_delivery") in {"present", "bookmarked"}
         for fact in final_state.get("read_facts", ())
     )
+    reason = ("activated" if active else
+              "capacity_dropped" if collected_bookmark_count and not final_bookmarks else
+              "no_delivery" if collected_bookmark_count else bookmark_decision["reason"])
+    journal = getattr(capture, "journal", getattr(runtime, "journal", None))
+    emit = getattr(journal, "emit", None)
+    if callable(emit):
+        emit("code_bookmark_activation_decision",
+             request_id=getattr(capture, "request_id", None),
+             reason=reason, activated=active,
+             collected_count=collected_bookmark_count,
+             final_count=len(final_bookmarks) if isinstance(final_bookmarks, list) else 0,
+             dispatch=False)
     capture._code_bookmark_transition = (
         active, copy.deepcopy(final_bookmarks) if active
         and isinstance(final_bookmarks, list) else []

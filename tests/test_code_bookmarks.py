@@ -49,7 +49,8 @@ def _workspace(tmp_path: Path):
     runtime = SimpleNamespace(
         owner=SimpleNamespace(root=root, task_row={}),
         edit_contract={"edit_authority": {"editable_paths": names}},
-        _check_output_receipts={receipt_id: {"status": "FAIL", "stdout": failure}},
+        _check_output_receipts={receipt_id: {"status": "FAIL", "revision": "current",
+                                            "stdout": failure}},
         _framefit_action_context={"ledger": {"rows": []}},
     )
     frame = {
@@ -323,6 +324,32 @@ def test_capacity_shedding_reconciles_partial_delivery_truth(tmp_path, monkeypat
     final = _state_payload(body["messages"][0])[1]["framefit5"]
     assert "code_bookmarks" not in final
     assert final["read_facts"][0]["body_delivery"] == "not_shown"
+
+
+def test_capacity_reduces_old_read_facts_before_current_bookmark(tmp_path, monkeypatch):
+    from kernel_stateframe_capacity import fit_protected_frame, protected_bytes
+    from kernel_stateframe_framefit5 import _serialize_state_message, _state_payload
+
+    monkeypatch.setenv("STATEFRAME_CODE_BOOKMARKS", "on")
+    root, runtime, frame, _names = _workspace(tmp_path)
+    bookmark = collect(runtime, frame)[0]
+    frame["code_bookmarks"] = [bookmark]
+    frame["mode"] = "FRAME_ONLY"
+    frame["action_ledger"] = {"reads": [], "edits": []}
+    bookmarked_fact = next(row for row in frame["read_facts"]
+                           if row["path"] == bookmark["path"])
+    frame["read_facts"].remove(bookmarked_fact)
+    frame["read_facts"].append(bookmarked_fact)
+    source_window = windows(root, [bookmark])[0]["content"]
+    body = {"messages": [
+        {"role": "user", "content": _serialize_state_message({"state": {"framefit5": frame}})},
+        {"role": "user", "content": source_window},
+    ], "tools": []}
+    before = protected_bytes(body)
+    fit_protected_frame(body, max_request_bytes=before - 150)
+    final = _state_payload(body["messages"][0])[1]["framefit5"]
+    assert final["code_bookmarks"][0]["path"] == bookmark["path"]
+    assert len(final["read_facts"]) < 10
 
 
 def test_bookmark_follows_shift_and_deleted_symbol_degrades(tmp_path, monkeypatch):
@@ -833,3 +860,124 @@ def test_worker_checkpoint_writes_restorable_bookmark_section(monkeypatch):
     restore_replay(resumed, section)
     assert result_note(resumed, "module.py", "1", "sha256:abc", 2) == result_note(
         runtime, "module.py", "1", "sha256:abc", 2)
+
+
+def test_current_multi_selector_failure_rebuilds_t2_bookmarks(tmp_path, monkeypatch):
+    from kernel_framefit_receipt_history import ReceiptHistory
+
+    monkeypatch.setenv("STATEFRAME_CODE_BOOKMARKS", "on")
+    root, runtime, frame, _names = _workspace(tmp_path)
+    product = {
+        "pkg/service.py": "def run_batch(items, work):\n    return []\n",
+        "pkg/worker.py": ("class Worker:\n"
+                          "    def process_batch(self, items, work):\n"
+                          "        return []\n"),
+        "pkg/registry.py": "def lookup(name):\n    return None\n",
+    }
+    tests = {
+        "tests/test_consumers.py": (
+            "from pkg import service, worker\n"
+            "def test_consumers():\n"
+            "    assert service.run_batch([1], str) == []\n"
+            "    assert worker.Worker().process_batch([2], str) == []\n"
+            "    assert calls == [(1,), (2,)]\n"),
+        "tests/test_registration_serialization.py": (
+            "from pkg import registry\n"
+            "def test_registry():\n"
+            "    assert registry.lookup('batch') is not None\n"),
+    }
+    for name, source in {**product, **tests}.items():
+        path = root / name
+        path.write_text(source)
+        frame["read_facts"].append({"path": name, "read_revision": _revision(path),
+                                    "current_revision": _revision(path),
+                                    "body_delivery": "not_shown" if name in product else "present"})
+    runtime.edit_contract["edit_authority"]["editable_paths"].extend(product)
+    history = ReceiptHistory()
+    failures = [
+        ("tests/test_consumers.py", "consumer", 5),
+        ("tests/test_registration_serialization.py", "registry", 3),
+    ]
+    for selector, identity, line in failures:
+        history.observe({"kind": "check_receipt", "selector": selector,
+                         "receipt_id": f"check-receipt:{identity}", "revision": "current",
+                         "status": "FAIL",
+                         "summary": f"CHECK_FAILURE_SUMMARY\\n{selector}:{line}: AssertionError"})
+    runtime._check_output_receipts = {}
+    runtime._framefit_action_context = history.context()
+    frame["last_verdict"]["check_receipt_id"] = "check-receipt:registry"
+    decision = {}
+    bookmarks = collect(runtime, frame, decision=decision)
+    symbols = {(row["path"], row["symbol"]) for row in bookmarks}
+    assert decision == {"reason": "activated"}
+    assert {("pkg/registry.py", "lookup"), ("pkg/service.py", "run_batch"),
+            ("pkg/worker.py", "Worker.process_batch")} <= symbols
+    assert len(bookmarks) == 6
+    history.observe({"kind": "check_receipt", "selector": "tests/test_consumers.py",
+                     "receipt_id": "check-receipt:consumer-green", "revision": "current",
+                     "status": "PASS"})
+    runtime._framefit_action_context = history.context()
+    superseded = {(row["path"], row["symbol"]) for row in collect(runtime, frame)}
+    assert ("pkg/registry.py", "lookup") in superseded
+    assert ("pkg/service.py", "run_batch") not in superseded
+    assert ("pkg/worker.py", "Worker.process_batch") not in superseded
+    frame["last_verdict"]["current_revision"] = "later"
+    assert collect(runtime, frame, decision=decision) == []
+    assert decision == {"reason": "stale_revision"}
+
+
+def test_ten_file_batch_reuses_only_unchanged_delivered_default_pages(
+        tmp_path, monkeypatch):
+    from kernel_read_exec import record_serialized_read_pages
+
+    monkeypatch.setenv("STATEFRAME_DELIVER_REQUESTED_BYTES", "on")
+    files = [tmp_path / f"module_{index}.py" for index in range(10)]
+    for index, path in enumerate(files):
+        path.write_text(f"VALUE = {index}\n")
+    measurement = SimpleNamespace(
+        owner=SimpleNamespace(workspace_revision=1), retained=None,
+        step_ledger=None, _code_bookmarks_active=False,
+        _frame_budget_request_count=13,
+        journal=SimpleNamespace(emit=lambda *_args, **_kwargs: None),
+    )
+    previous = []
+    for index, path in enumerate(files):
+        status, observation, _ = execute_read(
+            tmp_path, path, path.name, path.name, 0,
+            args={"path": path.name}, measurement=measurement, step=index + 1,
+            visible_messages=[], delivery={})
+        assert status == "OK" and f"VALUE = {index}" in observation
+        previous.append({"role": "tool", "content": observation})
+    for index in range(4):
+        rendered = _current_window(tmp_path, files[index].name, 1, 1,
+                                   _revision(files[index]))
+        assert rendered is not None
+        previous[index] = {"role": "user", "content": rendered[0]}
+    record_serialized_read_pages(measurement, previous, 13)
+    measurement._frame_budget_request_count = 14
+    for index in (8, 9):
+        files[index].write_text(f"VALUE = {index + 100}\n")
+    notices = 0
+    bodies = 0
+    for index, path in enumerate(files):
+        delivery = {}
+        status, observation, _ = execute_read(
+            tmp_path, path, path.name, path.name, 0,
+            args={"path": path.name}, measurement=measurement, step=index + 11,
+            visible_messages=previous, delivery=delivery)
+        assert status == "OK"
+        if index < 8:
+            notices += 1
+            assert "unchanged since request 13" in observation
+            assert "VALUE = " not in observation
+            assert delivery["requested_bytes_delivered"] == 0
+        else:
+            bodies += 1
+            assert f"VALUE = {index + 100}" in observation
+            assert delivery["requested_bytes_delivered"] > 0
+    assert (notices, bodies) == (8, 2)
+    status, observation, _ = execute_read(
+        tmp_path, files[0], files[0].name, files[0].name, 0,
+        args={"path": files[0].name, "start_line": 1, "end_line": 1},
+        measurement=measurement, step=21, visible_messages=previous, delivery={})
+    assert status == "OK" and "VALUE = 0" in observation

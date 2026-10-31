@@ -11,7 +11,7 @@ import hashlib
 import os
 import re
 import stat
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping, MutableMapping, Sequence
 from pathlib import Path
 
 
@@ -169,16 +169,44 @@ def _failure_receipt(runtime: object, verdict: Mapping[str, object]) -> Mapping[
     private = getattr(runtime, "_check_output_receipts", None)
     if isinstance(private, Mapping) and isinstance(private.get(receipt_id), Mapping):
         receipt = private[receipt_id]
-        if (receipt.get("revision") in {None, verdict.get("tested_revision")}
+        if (receipt.get("revision") == verdict.get("tested_revision")
                 and str(receipt.get("status") or "").upper()
                 in {"FAIL", "FAILED", "BEHAVIOR_FAIL"}):
             return receipt
     latest = getattr(runtime, "_latest_check_receipt", None)
     if (isinstance(latest, Mapping) and latest.get("receipt_id") == receipt_id
-            and latest.get("revision") in {None, verdict.get("tested_revision")}
-            and str(latest.get("status") or "").upper() in {"FAIL", "FAILED", "BEHAVIOR_FAIL"}):
+            and latest.get("revision") == verdict.get("tested_revision")
+            and str(latest.get("status") or "").upper() in {"FAIL", "FAILED", "BEHAVIOR_FAIL"}
+            and isinstance(getattr(runtime, "host_check_receipts", None), list)
+            and any(isinstance(row, Mapping) and row == latest
+                    for row in runtime.host_check_receipts)):
         return latest
     return None
+
+
+def _failure_receipts(runtime: object, verdict: Mapping[str, object]) -> list[Mapping[str, object]]:
+    latest = _failure_receipt(runtime, verdict)
+    if latest is None:
+        return []
+    context = getattr(runtime, "_framefit_action_context", None)
+    records = context.get("journal_receipt_records") if isinstance(context, Mapping) else None
+    if not isinstance(records, Sequence) or isinstance(records, (str, bytes, bytearray)):
+        return [latest]
+    current = verdict["tested_revision"]
+    by_selector: dict[str, Mapping[str, object]] = {}
+    for row in records:
+        if not isinstance(row, Mapping) or row.get("kind") != "check_receipt":
+            continue
+        if row.get("revision") != current or not isinstance(row.get("receipt_id"), str):
+            continue
+        selector = row.get("selector")
+        key = selector if isinstance(selector, str) and selector else row["receipt_id"]
+        by_selector[key] = row
+    failures = [row for row in by_selector.values()
+                if str(row.get("status") or "").upper() in {"FAIL", "FAILED", "BEHAVIOR_FAIL"}]
+    if not any(row.get("receipt_id") == latest.get("receipt_id") for row in failures):
+        failures.append(latest)
+    return failures
 
 
 def _failure_text(receipt: Mapping[str, object]) -> str:
@@ -314,12 +342,32 @@ def _assertion_targets(root: Path, paths: Sequence[str],
                                     if isinstance(node, ast.Name))
                     if len(expressions) >= 8:
                         break
+                # A final assertion may verify calls recorded by earlier
+                # assertions in the same test (for example three consumers
+                # delegating to one package runner). Those call sites are
+                # evidence from the failed test, bounded to this function.
+                earlier = [node for node in parent.body
+                           if isinstance(node, (ast.Assert, ast.Assign))
+                           and node.lineno < assertion.lineno
+                           and any(isinstance(child, ast.Name) and child.id in imports
+                                   for child in ast.walk(node))]
+                expressions.extend(earlier[-8:])
             for expression in (node for root_node in expressions
-                               for node in ast.walk(root_node)):
+                                for node in ast.walk(root_node)):
                 if (isinstance(expression, ast.Call)
                         and isinstance(expression.func, ast.Name)
                         and expression.func.id in imports):
                     names.append(imports[expression.func.id])
+                elif (isinstance(expression, ast.Call)
+                      and isinstance(expression.func, ast.Attribute)
+                      and isinstance(expression.func.value, ast.Call)
+                      and isinstance(expression.func.value.func, ast.Attribute)
+                      and isinstance(expression.func.value.func.value, ast.Name)
+                      and expression.func.value.func.value.id in imports):
+                    owner = expression.func.value.func
+                    path, imported = imports[owner.value.id]
+                    symbol = imported + "." if imported else ""
+                    names.append((path, symbol + owner.attr + "." + expression.func.attr))
                 elif (isinstance(expression, ast.Attribute)
                       and isinstance(expression.value, ast.Name)
                       and expression.value.id in imports):
@@ -391,29 +439,39 @@ def _calls_in(node: ast.FunctionDef | ast.AsyncFunctionDef) -> set[str]:
     return result
 
 
-def collect(runtime: object, frame: Mapping[str, object]) -> list[dict[str, object]]:
+def collect(runtime: object, frame: Mapping[str, object],
+            decision: MutableMapping[str, str] | None = None) -> list[dict[str, object]]:
     """Use only current failed checks and authenticated read/edit receipts."""
+    def finish(rows: list[dict[str, object]], reason: str) -> list[dict[str, object]]:
+        if decision is not None:
+            decision["reason"] = reason
+        return rows
+
     if not enabled():
-        return []
+        return finish([], "disabled")
     from kernel_public_localization import public_path
     from kernel_read_reuse_visibility import editable_read_paths
     from kernel_stateframe_framefit5 import _workspace_root
 
     read_facts = frame.get("read_facts")
     if not isinstance(read_facts, list):
-        return []
+        return finish([], "no_read_facts")
     editable = editable_read_paths(runtime)
     read_paths = {row["path"] for row in read_facts if isinstance(row, Mapping)
                   and isinstance(row.get("path"), str) and row["path"] in editable}
     # This boundary preserves the released request byte for byte on small work.
     if len(read_paths) <= 3:
-        return []
+        return finish([], "small_read_set")
     prior = getattr(runtime, "_code_bookmark_carry", ())
     prior = prior[:MAX_BOOKMARKS] if isinstance(prior, list) else ()
     verdict = frame.get("last_verdict")
-    receipt = _failure_receipt(runtime, verdict) if isinstance(verdict, Mapping) else None
-    if receipt is None and not prior:
-        return []
+    receipts = _failure_receipts(runtime, verdict) if isinstance(verdict, Mapping) else []
+    if not receipts and not prior:
+        reason = ("stale_revision" if isinstance(verdict, Mapping)
+                  and verdict.get("status") == "FAIL"
+                  and verdict.get("tested_revision") != verdict.get("current_revision")
+                  else "no_failed_receipt")
+        return finish([], reason)
     root = _workspace_root(runtime)
     protected_tests = getattr(runtime, "protected_tests", None)
     protected_tests = protected_tests if isinstance(protected_tests, Mapping) else {}
@@ -421,9 +479,9 @@ def collect(runtime: object, frame: Mapping[str, object]) -> list[dict[str, obje
                     if isinstance(row, Mapping) and isinstance(row.get("path"), str)}
     paths = sorted(path for path in public_paths if _source(root, path) is not None)
     if not paths:
-        return []
-    failure = _failure_text(receipt) if receipt is not None else ""
-    locations = _evidence_locations(failure, paths)
+        return finish([], "no_paths")
+    locations = [location for receipt in receipts
+                 for location in _evidence_locations(_failure_text(receipt), paths)]
     records: dict[tuple[str, str], dict[str, object]] = {}
     age = 0
 
@@ -495,7 +553,7 @@ def collect(runtime: object, frame: Mapping[str, object]) -> list[dict[str, obje
         add(path, line, name, 1, "failed_check")
     # Carry only identities already qualified into a prior request. A stale
     # check no longer grants rank one, but the symbol follows shifted lines.
-    for old in prior if receipt is None else ():
+    for old in prior if not receipts else ():
         if not isinstance(old, Mapping):
             continue
         path, symbol = old.get("path"), old.get("symbol")
@@ -546,7 +604,8 @@ def collect(runtime: object, frame: Mapping[str, object]) -> list[dict[str, obje
     ))
     # Age decides bounded selection, but a candidate's discovery sequence is
     # not part of its identity and must not change resumed request bytes.
-    return [{key: value for key, value in row.items() if key != "age"} for row in ordered]
+    return finish([{key: value for key, value in row.items() if key != "age"}
+                   for row in ordered], "activated" if ordered else "no_symbols")
 
 
 def resolve(root: Path, bookmark: Mapping[str, object]) -> dict[str, object] | None:
