@@ -140,7 +140,8 @@ def test_finder_mapping_and_namespace_paths_are_remapped(tmp_path):
                       "def install(): pass\n")
     (site / "__editable__.sf_editable_pkg.pth").write_text(
         "import __editable___sf_editable_pkg_1_0_finder; __editable___sf_editable_pkg_1_0_finder.install()\n")
-    run_env = create_run_env(tmp_path / "run", source / "bin/python", source_repo=repository)
+    run_env = create_run_env(tmp_path / "run", source / "bin/python", source_repo=repository,
+                             authorized_read_roots=(external,))
     copied = next(run_env.root.glob("lib/python*/site-packages/__editable___sf_editable_pkg_1_0_finder.py"))
     text = copied.read_text()
     assert str(workspace / "src/sf_editable_pkg") in text
@@ -161,7 +162,8 @@ def test_legacy_egg_link_and_external_path(tmp_path):
     (site / "project.egg-link").write_text(str(repository) + "\n.\n")
     (site / "external.pth").write_text(str(external) + "\n")
     (site / "relative_external.pth").write_text(os.path.relpath(external, site) + "\n")
-    run_env = create_run_env(tmp_path / "run", source / "bin/python", source_repo=repository)
+    run_env = create_run_env(tmp_path / "run", source / "bin/python", source_repo=repository,
+                             authorized_read_roots=(external,))
     cloned_site = next(run_env.root.glob("lib/python*/site-packages"))
     assert (cloned_site / "project.egg-link").read_text().splitlines()[0] == str(workspace)
     assert (cloned_site / "external.pth").read_text() == str(external) + "\n"
@@ -195,7 +197,7 @@ def test_host_provision_records_external_import_root(tmp_path):
     next(source.glob("lib/python*/site-packages")).joinpath("external.pth").write_text(str(external) + "\n")
     run = tmp_path / "run"
     selected = str(source / "bin/python")
-    settings = ToolSettings()
+    settings = ToolSettings(shell_read=(str(external),))
     options = SimpleNamespace(tool_settings=settings, _test_python=selected,
                               _capabilities={"test_python": selected})
     spec = {"repo": str(repository), "capabilities": options._capabilities,

@@ -40,7 +40,9 @@ def provision(options, run_dir: Path, spec: dict) -> None:
     if settings.run_env and settings.shell != "off":
         source = spec.setdefault("run_env_source_python", options._test_python)
         try:
-            environment = create_run_env(run_dir, Path(source), source_repo=Path(spec["repo"]))
+            environment = create_run_env(
+                run_dir, Path(source), source_repo=Path(spec["repo"]),
+                authorized_read_roots=tuple(Path(path).resolve(strict=True) for path in settings.shell_read))
         except RunEnvError as error:
             print(f"run environment off: {error}; dependency installs will not persist for checks")
             settings = replace(settings, run_env=False)

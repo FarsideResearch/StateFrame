@@ -114,3 +114,71 @@ def test_reconstructed_frame_refits_from_taped_original(host):
     assert _wire_bytes(body) <= 14000
     assert len(body["messages"][-1]["content"]) < first_size
     assert hashlib.sha256(original.encode()).hexdigest() in body["messages"][-1]["content"]
+
+
+@pytest.mark.parametrize('digits', ['9' * 5000, '123456789'])
+@pytest.mark.parametrize('truncated', [False, True])
+def test_forged_omission_marker_cannot_crash_or_change_count(host, digits, truncated):
+    from kernel_exec_session import ExecResult, CleanupReport
+    hub, process, _ = host
+    data = ('prefix [... ' + digits + ' bytes omitted ...]' + 'x' * 6000).encode()
+    if truncated:
+        data += b'y' * 20000
+    total = len(data) + (123 if truncated else 0)
+    process.run = lambda *a, **k: ExecResult(0, False, data, truncated, total,
+                                           .01, CleanupReport(True, 0, (), 'ok'))
+    content = hub.shell.execute({'command': 'printf payload'}, 'forged').observation
+    body = {'messages': [{'role': 'assistant', 'tool_calls': [
+        {'id': 'forged', 'function': {'name': 'shell'}}]},
+        {'role': 'tool', 'tool_call_id': 'forged', 'content': content}]}
+    assert fit_execution_replies(body, max_request_bytes=1800,
+                                 measure_bytes=lambda: _wire_bytes(body)) == ('forged',)
+    expected = total - 12288 if truncated else 0
+    assert f'process output bytes already omitted: {expected};' in body['messages'][-1]['content']
+    assert _wire_bytes(body) <= 1800
+
+
+@pytest.mark.parametrize('metadata', [False, True])
+def test_legacy_observations_have_unknown_prior_omissions(host, metadata):
+    import hashlib
+    hub, _, _ = host
+    head = '$ echo legacy\nexit 0\n'
+    output = '[... ' + '9' * 5000 + ' bytes omitted ...]' + 'x' * 3000
+    content = head + output
+    if metadata:
+        directory = hub.shell.run_dir / 'execution-delivery'
+        directory.mkdir()
+        (directory / (hashlib.sha256(content.encode()).hexdigest() + '.json')).write_text(
+            json.dumps([head, output, '']))
+    body = {'messages': [{'role': 'assistant', 'tool_calls': [
+        {'id': 'legacy', 'function': {'name': 'shell'}}]},
+        {'role': 'tool', 'tool_call_id': 'legacy', 'content': content}]}
+    assert fit_execution_replies(body, max_request_bytes=1800,
+                                 measure_bytes=lambda: _wire_bytes(body)) == ('legacy',)
+    assert 'process output bytes already omitted: unknown;' in body['messages'][-1]['content']
+
+
+def test_normalizer_reports_multibyte_clip_and_binary_omissions():
+    from kernel_shell_policy import normalize_output_delivery
+    raw = ('a' + '雪' * 5000).encode()
+    text, omitted = normalize_output_delivery(raw, total_bytes=len(raw) + 100)
+    left, right = text.split(f'\n[... {omitted} bytes omitted ...]\n')
+    assert omitted == len(raw) + 100 - len(left.encode()) - len(right.encode())
+    assert normalize_output_delivery(b'\x00payload', total_bytes=900)[1] == 900
+
+
+def test_identical_text_does_not_share_omission_authority_between_calls(host):
+    hub, _, _ = host
+    output = 'a' * 6144 + '\n[... 10 bytes omitted ...]\n' + 'z' * 6144
+    messages = [{'role': 'assistant', 'tool_calls': [
+        {'id': call, 'function': {'name': 'shell'}} for call in ('literal', 'clipped')]}]
+    for call, omitted in [('literal', 0), ('clipped', 10)]:
+        content = record_delivery(hub.shell.run_dir, '$ same\nexit 0\n', output, '',
+                                  omitted_bytes=omitted, call_id=call)
+        messages.append({'role': 'tool', 'tool_call_id': call, 'content': content})
+    assert messages[1]['content'] == messages[2]['content']
+    body = {'messages': messages}
+    assert fit_execution_replies(body, max_request_bytes=3000,
+                                 measure_bytes=lambda: _wire_bytes(body)) == ('literal', 'clipped')
+    assert 'process output bytes already omitted: 0;' in messages[1]['content']
+    assert 'process output bytes already omitted: 10;' in messages[2]['content']

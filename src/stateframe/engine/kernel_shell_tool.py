@@ -13,7 +13,7 @@ from kernel_effects import ContentStore, EffectError, Manifest, effect_policy_fo
 from kernel_exec_capability import shell_capability
 from kernel_exec_session import ExecSession, ExecSessionError
 from kernel_run_env import RunEnv, RunEnvError, env_identity
-from kernel_shell_policy import ShellPolicyRefused, admit_shell, normalize_output
+from kernel_shell_policy import ShellPolicyRefused, admit_shell, normalize_output_delivery
 from kernel_tool_settings import ToolSettings
 from kernel_tool_tape import (ToolReplayRefused, ToolTapeError, replay_decision, replay_mode_active,
                               tape_for_run, verify_intent, verify_reexecution)
@@ -320,7 +320,7 @@ class ShellTool:
         effects = reconcile(self.root, before, self._scan(), self.policy,
                             self.store, self.baseline_store)
         after_identity = self.identity()
-        output = normalize_output(result.output, total_bytes=result.output_total_bytes,
+        output, omitted_bytes = normalize_output_delivery(result.output, total_bytes=result.output_total_bytes,
             replacements={str(self.run_dir / "shell-home"): "<scratch>",
                           str(self.run_dir): "<run>", str(Path.home()): "<home>"})
         observation = (f"$ {command[:200]}\nexit {'timeout' if result.timed_out else result.exit_code} | "
@@ -345,7 +345,8 @@ class ShellTool:
         if after_identity != identity:
             observation += f"\nenvironment changed: {after_identity[:12]} (check results from before are stale)"
         from kernel_execution_reply_budget import record_delivery
-        observation = record_delivery(self.run_dir, head, output, observation)
+        observation = record_delivery(self.run_dir, head, output, observation,
+                                      omitted_bytes=omitted_bytes, call_id=call_id)
         completion = dict(exit_code=result.exit_code, post_manifest_digest=workspace_identity(effects.manifest),
                           env_identity=after_identity)
         if record is not None:

@@ -15,6 +15,7 @@ import subprocess
 import sys
 import queue
 import threading
+import tempfile
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
@@ -205,6 +206,28 @@ def run_test_cmd(command: str, cwd: Path, timeout_s: float = 900,
         raise RunError(str(error)) from error
 
 
+def _startup_probe(python: str, code: str, *, label: str) -> bytes:
+    """Contain interpreter startup itself, before importing any project packages."""
+    from .engine.kernel_safe_probe import run_probe
+    from .engine.kernel_exec_session import ExecSessionError
+
+    try:
+        with tempfile.TemporaryDirectory(prefix="stateframe-startup-") as directory:
+            result = run_probe([python, "-I", "-B", "-c", code], Path(directory), timeout=10)
+    except (OSError, ExecSessionError, ValueError) as error:
+        raise RunError(f"{label} startup probe could not run safely: {error}") from error
+    if result.timed_out:
+        raise RunError(f"{label} startup probe exceeded its 10 second wall limit")
+    if result.output_truncated:
+        raise RunError(f"{label} startup probe exceeded its 65536 byte output limit")
+    if result.exit_code != 0:
+        detail = result.output.decode("utf-8", "replace").strip()[-1000:]
+        raise RunError(f"{label} cannot import pytest in the isolated startup probe "
+                       f"(exit {result.exit_code}); install pytest in that environment; "
+                       f"sandbox restrictions must permit interpreter startup: {detail or 'no diagnostic output'}")
+    return result.output
+
+
 def _check_python(python: str) -> str:
     """Resolve --python to an absolute executable (relative to the caller's cwd, BEFORE any chdir)
     and check it can run the engine and the checks. Returns the absolute path."""
@@ -212,14 +235,17 @@ def _check_python(python: str) -> str:
         python = preflight.resolve_interpreter(python, os.getcwd())
     except preflight.PreflightError as error:
         raise RunError(str(error)) from None
-    probe = subprocess.run([python, "-c", "import sys, pytest; print(sys.version_info[:3])"],
-                           capture_output=True, text=True, check=False)
-    if probe.returncode != 0:
-        raise RunError(f"interpreter {python} cannot import pytest; install pytest there or pass "
-                       "--python with one that can (the engine runs the checks with it)")
-    major, minor, micro = (int(x) for x in probe.stdout.strip().strip("()").split(","))
+    output = _startup_probe(python, "import sys, json, pytest; print(json.dumps(list(sys.version_info[:3])))",
+                            label=f"engine interpreter {python}")
     try:
-        preflight.check_python_version(version=(major, minor, micro))
+        version = json.loads(output)
+        if (not isinstance(version, list) or len(version) != 3
+                or any(type(value) is not int or value < 0 for value in version)):
+            raise ValueError("expected three non-negative version integers")
+    except (ValueError, UnicodeError) as error:
+        raise RunError(f"engine interpreter {python} startup probe returned an invalid Python version") from error
+    try:
+        preflight.check_python_version(version=tuple(version))
     except preflight.PreflightError as error:
         raise RunError(f"interpreter {python}: {error}") from None
     return python
@@ -426,10 +452,7 @@ def _select_test_python(options: RunOptions, printer=print) -> str:
         python = preflight.resolve_interpreter(chosen, os.getcwd())
     except (test_interpreter.TestInterpreterError, preflight.PreflightError) as error:
         raise RunError(str(error)) from None
-    probe = subprocess.run([python, "-c", "import pytest"], capture_output=True, text=True, check=False)
-    if probe.returncode != 0:
-        raise RunError(f"test interpreter {python} ({reason}) cannot import pytest; install pytest in "
-                       "your project's environment or pass --test-python with one that has it")
+    _startup_probe(python, "import pytest", label=f"test interpreter {python} ({reason})")
     printer(f"test interpreter: {python} ({reason})")
     if not engine_reads_test_python():
         # Honest scope: --test-cmd before/after use it; this engine's own checks do not yet.
