@@ -3,14 +3,16 @@
 from __future__ import annotations
 
 import hashlib
+import importlib.util
 import os
 import copy
+import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
-from kernel_code_bookmarks import collect, resolve, windows
+from kernel_code_bookmarks import _source, collect, resolve, windows
 from kernel_context import token_estimate
 from kernel_frame_source_snapshot import _current_window, fit_recent_read_windows
 from kernel_read_exec import execute_read
@@ -465,13 +467,14 @@ def test_unchanged_read_keeps_requested_bytes_and_current_failure(tmp_path):
     path = tmp_path / "module.py"
     path.write_text("VALUE = 3\n")
     measurement = SimpleNamespace(
-        owner=SimpleNamespace(workspace_revision=1),
+        owner=SimpleNamespace(workspace_revision=1), current_product_revision="rev1",
         journal=SimpleNamespace(emit=lambda *_args, **_kwargs: None),
         retained=None, step_ledger=None, _code_bookmarks_active=True,
         current_request_id="request-one",
         _latest_check_receipt={"receipt_id": "one", "revision": "rev1",
-                               "status": "FAIL", "assertion_context_preview": "assert value == 4"},
+                                "status": "FAIL", "assertion_context_preview": "assert value == 4"},
     )
+    measurement.host_check_receipts = [measurement._latest_check_receipt]
     arguments = {"path": "module.py", "start_line": 1, "end_line": 1}
     first_delivery: dict[str, object] = {}
     first = execute_read(tmp_path, path, "module.py", "module.py", 0,
@@ -485,7 +488,7 @@ def test_unchanged_read_keeps_requested_bytes_and_current_failure(tmp_path):
     assert "VALUE = 3" in first[1] and "VALUE = 3" in second[1]
     assert "unchanged since request request-one" in second[1]
     assert "current failing assertion: assert value == 4" in second[1]
-    assert "next useful action is an edit or a test run" in second[1]
+    assert "next useful action" not in second[1]
     assert second_delivery["requested_bytes_delivered"] > 0
     measurement._latest_check_receipt["assertion_context_preview"] = "assert value == 5"
     changed = execute_read(tmp_path, path, "module.py", "module.py", 0,
@@ -497,12 +500,13 @@ def test_same_assertion_with_changed_failure_phase_is_not_reused(tmp_path):
     from kernel_reread_result_truth import result_note
 
     measurement = SimpleNamespace(
-        owner=SimpleNamespace(workspace_revision=1),
+        owner=SimpleNamespace(workspace_revision=1), current_product_revision="rev1",
         _code_bookmarks_active=True, current_request_id="request-one",
         _latest_check_receipt={"receipt_id": "one", "revision": "rev1",
                                "status": "FAIL", "failure_phase": "assertion",
                                "assertion_context_preview": "assert value == 4"},
     )
+    measurement.host_check_receipts = [measurement._latest_check_receipt]
     assert result_note(measurement, "module.py", "generation", "sha256:abc", 1) is None
     measurement._latest_check_receipt["failure_phase"] = "collection"
     note = result_note(measurement, "module.py", "generation", "sha256:abc", 2)
@@ -518,17 +522,18 @@ def test_bookmark_read_note_checkpoint_roundtrip_is_identical(outcome):
     from kernel_reread_result_truth import checkpoint_replay, restore_replay, result_note
 
     original = SimpleNamespace(
-        owner=SimpleNamespace(workspace_revision=1),
+        owner=SimpleNamespace(workspace_revision=1), current_product_revision="rev1",
         _code_bookmarks_active=True, current_request_id="request-one",
         _latest_check_receipt={"receipt_id": "one", "revision": "rev1",
                                "status": "FAIL", "outcome": outcome,
                                "failure_phase": "OBSERVATION", "runner_tail": "1 failed",
                                "assertion_context_preview": "assert value == 4"},
     )
+    original.host_check_receipts = [original._latest_check_receipt]
     assert result_note(original, "module.py", "generation", "sha256:abc", 1) is None
     snapshot = checkpoint_replay(original)
     resumed = SimpleNamespace(owner=SimpleNamespace(workspace_revision=1),
-                              current_request_id="request-two")
+                              current_product_revision="rev1", current_request_id="request-two")
     restore_replay(resumed, snapshot)
     assert result_note(resumed, "module.py", "generation", "sha256:abc", 2) == result_note(
         original, "module.py", "generation", "sha256:abc", 2)
@@ -536,3 +541,228 @@ def test_bookmark_read_note_checkpoint_roundtrip_is_identical(outcome):
     malformed["seen"].append(malformed["seen"][0])
     with pytest.raises(ValueError, match="invalid bookmark read replay"):
         restore_replay(SimpleNamespace(), malformed)
+
+
+@pytest.mark.parametrize("active", [False, True])
+def test_three_execute_reads_match_parent_when_inactive_or_off(tmp_path, monkeypatch, active):
+    import kernel_reread_result_truth as current_truth
+    current_note = current_truth.result_note
+
+    parent_source = subprocess.check_output([
+        "git", "show", "a0ce931:src/stateframe/engine/kernel_reread_result_truth.py"
+    ], cwd=Path(__file__).resolve().parents[1])
+    parent_path = tmp_path / "parent_reread_result_truth.py"
+    parent_path.write_bytes(parent_source)
+    spec = importlib.util.spec_from_file_location("parent_reread_result_truth", parent_path)
+    assert spec is not None and spec.loader is not None
+    parent = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(parent)
+    path = tmp_path / "module.py"
+    path.write_text("VALUE = 3\n")
+    args = {"path": "module.py", "start_line": 1, "end_line": 1}
+
+    def three(note):
+        monkeypatch.setattr(current_truth, "result_note", note)
+        measurement = SimpleNamespace(owner=SimpleNamespace(workspace_revision=1),
+                                      _code_bookmarks_active=active, retained=None,
+                                      step_ledger=None,
+                                      journal=SimpleNamespace(emit=lambda *_args, **_kwargs: None))
+        return [execute_read(tmp_path, path, "module.py", "module.py", 0,
+                             args=args, measurement=measurement, step=step)
+                for step in (1, 2, 3)]
+
+    monkeypatch.setenv("STATEFRAME_CODE_BOOKMARKS", "off" if active else "on")
+    expected = three(parent.result_note)
+    actual = three(current_note)
+    assert actual == expected
+    assert "unchanged since action 1" in actual[2][1]
+
+
+def test_stale_or_unauthenticated_failure_never_names_current_assertion(tmp_path):
+    path = tmp_path / "module.py"
+    path.write_text("VALUE = 3\n")
+    receipt = {"receipt_id": "check-one", "revision": "rev1", "status": "FAIL",
+               "assertion_context_preview": "assert value == 4"}
+    measurement = SimpleNamespace(owner=SimpleNamespace(workspace_revision=1),
+                                  current_product_revision="rev1",
+                                  current_request_id="request-one",
+                                  _code_bookmarks_active=True,
+                                  _latest_check_receipt=receipt,
+                                  host_check_receipts=[], retained=None, step_ledger=None,
+                                  journal=SimpleNamespace(emit=lambda *_args, **_kwargs: None))
+    args = {"path": "module.py", "start_line": 1, "end_line": 1}
+    def read(step):
+        return execute_read(tmp_path, path, "module.py", "module.py", 0,
+                            args=args, measurement=measurement, step=step)[1]
+
+    assert "VALUE = 3" in read(1)
+    assert "current failing assertion" not in read(2)
+    measurement.host_check_receipts = [receipt]
+    assert "current failing assertion" not in read(3)
+    assert "current failing assertion" in read(4)
+    measurement.current_product_revision = "rev2"
+    measurement.owner.workspace_revision = 2
+    assert "current failing assertion" not in read(5)
+    note = read(6)
+    assert "current failing assertion" not in note and "next useful action" not in note
+
+
+def test_replay_normalizes_before_bounding_and_never_replaces_check_receipt():
+    from kernel_reread_result_truth import checkpoint_replay, restore_replay, result_note
+
+    receipt = {"receipt_id": "one", "revision": "rev1", "status": "FAIL",
+               "assertion_context_preview": "assert" + " \n" * 600 + "value == 4"}
+    original = SimpleNamespace(owner=SimpleNamespace(workspace_revision=1),
+                               current_product_revision="rev1", current_request_id="one",
+                               _code_bookmarks_active=True, _latest_check_receipt=receipt,
+                               host_check_receipts=[receipt], _code_bookmark_carry=[])
+    assert result_note(original, "module.py", "1", "sha256:abc", 1) is None
+    snapshot = checkpoint_replay(original)
+    sentinel = {"receipt_id": "canonical", "revision": "rev1", "status": "PASS"}
+    resumed = SimpleNamespace(owner=SimpleNamespace(workspace_revision=1),
+                              current_product_revision="rev1", current_request_id="one",
+                              _latest_check_receipt=sentinel)
+    restore_replay(resumed, snapshot)
+    assert resumed._latest_check_receipt is sentinel
+    # A newer canonical PASS makes the replayed failure historical.
+    assert "current failing assertion" not in result_note(
+        resumed, "module.py", "1", "sha256:abc", 2)
+    del resumed._latest_check_receipt
+    assert result_note(resumed, "module.py", "1", "sha256:abc", 3) == result_note(
+        original, "module.py", "1", "sha256:abc", 3)
+
+
+def test_long_symbol_is_omitted_before_checkpoint(tmp_path, monkeypatch):
+    from kernel_reread_result_truth import checkpoint_replay, restore_replay
+
+    root, runtime, frame, names = _workspace(tmp_path)
+    symbol = "a" * 257
+    (root / names[0]).write_text(f"def {symbol}(): return 1\n")
+    runtime._check_output_receipts["check-receipt:one"]["stdout"] = (
+        f'Traceback (most recent call last):\n  File "{names[0]}", line 1, in {symbol}\n')
+    bookmarks = collect(runtime, frame)
+    assert all(row["path"] != names[0] for row in bookmarks)
+    runtime._code_bookmarks_active = True
+    runtime._code_bookmark_carry = bookmarks
+    restore_replay(SimpleNamespace(), checkpoint_replay(runtime))
+
+
+def test_bookmark_source_rejects_swapped_parent_and_fifo(tmp_path, monkeypatch):
+    import kernel_code_bookmarks
+
+    root = tmp_path / "work"
+    outside = tmp_path / "outside"
+    (root / "pkg").mkdir(parents=True)
+    outside.mkdir()
+    (root / "pkg/source.py").write_text("SAFE = 1\n")
+    (outside / "source.py").write_text("SECRET = 1\n")
+    native_open = os.open
+    swapped = False
+
+    def replace_parent(path, flags, *args, **kwargs):
+        nonlocal swapped
+        if path == "pkg" and not swapped:
+            swapped = True
+            (root / "pkg").rename(root / "old_pkg")
+            (root / "pkg").symlink_to(outside, target_is_directory=True)
+        return native_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(kernel_code_bookmarks.os, "open", replace_parent)
+    assert _source(root, "pkg/source.py") is None
+    monkeypatch.setattr(kernel_code_bookmarks.os, "open", native_open)
+    (root / "pkg").unlink()
+    (root / "pkg").mkdir()
+    os.mkfifo(root / "pkg/source.py")
+    assert _source(root, "pkg/source.py") is None
+
+
+def test_outline_recursion_degrades_to_current_unresolved_source(tmp_path, monkeypatch):
+    import kernel_paged_source
+
+    root, runtime, frame, _names = _workspace(tmp_path)
+    def fail(_source_text):
+        raise RecursionError("pathological syntax tree")
+    monkeypatch.setattr(kernel_paged_source, "symbol_outline", fail)
+    bookmarks = collect(runtime, frame)
+    assert bookmarks
+    selected = windows(root, bookmarks)
+    assert selected and "not resolved in current source" in selected[0]["content"]
+
+
+def test_file_move_does_not_guess_bookmark_identity(tmp_path):
+    root, runtime, frame, names = _workspace(tmp_path)
+    prior = collect(runtime, frame)
+    runtime._code_bookmark_carry = prior
+    runtime._code_bookmarks_active = True
+    moved = "pkg/renamed.py"
+    (root / names[0]).rename(root / moved)
+    frame["read_facts"][0]["path"] = moved
+    frame["read_facts"][0]["current_revision"] = _revision(root / moved)
+    frame["last_verdict"]["current_revision"] = "after-move"
+    runtime.edit_contract["edit_authority"]["editable_paths"].append(moved)
+    current = collect(runtime, frame)
+    assert all(row["path"] != moved or row["origin"] != "carried" for row in current)
+
+
+def test_disjoint_ordinary_window_survives_bookmark_in_same_revision(tmp_path):
+    path = tmp_path / "module.py"
+    path.write_text("def target():\n    return 1\nOTHER = 2\n")
+    revision = _revision(path)
+    first = _current_window(tmp_path, "module.py", 1, 2, revision)
+    third = _current_window(tmp_path, "module.py", 3, 3, revision)
+    assert first is not None and third is not None
+    bookmark = {"path": "module.py", "content": first[0], "start_line": 1,
+                "end_line": 2, "source_chars": len(first[1]), "bookmark": True, "rank": 1}
+    ordinary = {"path": "module.py", "content": third[0], "start_line": 3,
+                "end_line": 3, "source_chars": len(third[1])}
+    merged = [bookmark, ordinary]
+    fitted = fit_recent_read_windows(
+        {"messages": [{"role": "system", "content": "rules"}], "tools": []}, merged,
+        fits=lambda _body: True)
+    assert {bookmark["content"], ordinary["content"]} <= {
+        row["content"] for row in fitted["messages"]}
+
+
+def test_worker_checkpoint_writes_restorable_bookmark_section(monkeypatch):
+    import kernel_continuation_restart as restart
+    import kernel_frame_series_replay
+    import kernel_native_restart
+    import kernel_working_notes_restart
+    from kernel_reread_result_truth import restore_replay, result_note
+
+    receipt = {"receipt_id": "one", "revision": "rev1", "status": "FAIL",
+               "assertion_context_preview": "assert" + " \n" * 600 + "value == 4"}
+    events = []
+    runtime = SimpleNamespace(
+        owner=SimpleNamespace(workspace_revision=1, current_step=1),
+        current_product_revision="rev1", current_request_id="request-one",
+        _code_bookmarks_active=True, _code_bookmark_carry=[],
+        _latest_check_receipt=receipt, host_check_receipts=[receipt],
+        step_ledger=SimpleNamespace(pending=None), live_projection=None,
+        frame_series=None, decision_state=None, native_batch=None,
+        generated=None, retained=None, actions=SimpleNamespace(actions=[]),
+        _trimmed=set(), binding=lambda: {"product_revision": "rev1"},
+        journal=SimpleNamespace(emit=lambda kind, **fields: events.append(
+            {"kind": kind, **fields}) or events[-1]),
+    )
+    assert result_note(runtime, "module.py", "1", "sha256:abc", 1) is None
+    monkeypatch.setenv("KERNEL_CONTINUATION_RESTART", "1")
+    monkeypatch.setattr(restart, "_valid_worker_state_fields", lambda _value: True)
+    monkeypatch.setattr(restart, "runtime_fields", lambda _value: ())
+    monkeypatch.setattr(restart, "_checkpoint_ledger", lambda _value: {})
+    monkeypatch.setattr(restart, "checkpoint_conversation", lambda _value: {})
+    monkeypatch.setattr(restart, "capture_owner_restore", lambda _value: {})
+    monkeypatch.setattr(restart, "_register_checkpoint", lambda *_args: None)
+    for name in ("first_green_checkpoint_section", "post_green_checkpoint_section",
+                 "resume_work_checkpoint_section"):
+        monkeypatch.setattr(restart, name, lambda _value: None)
+    monkeypatch.setattr(kernel_native_restart, "snapshot", lambda _value: None)
+    monkeypatch.setattr(kernel_frame_series_replay, "snapshot_series", lambda _value: None)
+    monkeypatch.setattr(kernel_working_notes_restart, "snapshot", lambda _value: None)
+    restart.checkpoint(runtime, [], {})
+    section = events[-1]["checkpoint"]["code_bookmark_replay"]
+    resumed = SimpleNamespace(owner=SimpleNamespace(workspace_revision=1),
+                              current_product_revision="rev1", current_request_id="request-one")
+    restore_replay(resumed, section)
+    assert result_note(resumed, "module.py", "1", "sha256:abc", 2) == result_note(
+        runtime, "module.py", "1", "sha256:abc", 2)

@@ -267,6 +267,8 @@ def build_qualified_request(capture, runtime, body, *, endpoint, key, deadline=N
         "_qualified_request_gate_passed": False,
         "final_submitted_bytes_hash": "sha256:" + record.body_digest,
         "_request_measurement": record.measurement,
+        "_code_bookmark_transition": copy.deepcopy(
+            getattr(candidate, "_code_bookmark_transition", (False, []))),
         "_tokenize_endpoint": candidate._tokenize_endpoint,
         "_tokenize_deadline": candidate._tokenize_deadline,
     }
@@ -285,6 +287,9 @@ def build_qualified_request(capture, runtime, body, *, endpoint, key, deadline=N
     # Internal candidate construction may have no enclosing adapter. It does
     # not grant transport admission; physical send requires a bound gate.
     capture._qualified_request_gate_passed = callable(gate)
+    active, carry = capture._code_bookmark_transition
+    runtime._code_bookmarks_active = active
+    runtime._code_bookmark_carry = carry
     return record
 
 

@@ -734,8 +734,10 @@ def finalize_frame_candidate(
         recent_editable_read_windows,
     )
     recent_windows = recent_editable_read_windows(runtime, frame)
+    ordinary_recent_windows = recent_windows
     public_windows = public_check_source_windows(runtime, frame)
     bookmarks = frame.get("code_bookmarks")
+    bookmark_reconciliation = isinstance(bookmarks, list) and bool(bookmarks)
     if isinstance(bookmarks, list) and bookmarks:
         from kernel_code_bookmarks import resolve as resolve_bookmark, windows as bookmark_windows
         from kernel_frame_optional_allocation import FrameAllocationReplanNeeded
@@ -748,9 +750,11 @@ def finalize_frame_candidate(
                 raise FrameAllocationReplanNeeded("bookmarked source changed before allocation")
         selected = bookmark_windows(root, bookmarks)
         if selected:
-            selected_paths = {row["path"] for row in selected}
-            recent_windows = [*selected, *(row for row in recent_windows
-                                           if row["path"] not in selected_paths)]
+            # Keep ordinary ranges even where they overlap: if fitting demotes
+            # a bookmark, its earlier read is still a fallback candidate.
+            # The fitter deduplicates exact carriers and delivery truth merges
+            # coverage by path, revision and range on the final wire.
+            recent_windows = [*selected, *recent_windows]
     plan = getattr(capture, "_request_source_closure_override", None)
     if not isinstance(plan, Mapping):
         plan = getattr(runtime, "_request_source_closure", None)
@@ -799,7 +803,7 @@ def finalize_frame_candidate(
     from kernel_stateframe_capacity import within_protected_capacity
 
     def source_windows_fit(trial: Mapping[str, object]) -> bool:
-        if bookmarks and isinstance(trial.get("messages"), list):
+        if bookmark_reconciliation and isinstance(trial.get("messages"), list):
             # The selected source windows and the typed visibility claim are
             # one measured proposal. Reconcile before admission, never after.
             from kernel_reread_result_truth import refresh_messages
@@ -921,6 +925,26 @@ def finalize_frame_candidate(
             )
             if without_excess_reads != candidate:
                 candidate = without_excess_reads
+                continue
+            if bookmarks:
+                # No optional source selection may create a new minimum. Retry
+                # the measured base with ordinary reads and no bookmark state.
+                state_message = next(message for message in candidate["messages"]
+                                     if str(message.get("content") or "").startswith(STATE_HEADER + "\n"))
+                payload, state = _state_payload(state_message)
+                state["framefit5"].pop("code_bookmarks", None)
+                state_message["content"] = _serialize_state_message(payload)
+                bookmarks = []
+                recent_windows = ordinary_recent_windows
+                from kernel_reread_result_truth import refresh_messages
+                refresh_messages(candidate["messages"],
+                                 required_deferred_paths=tuple(plan.get("deferred_paths", ())))
+                candidate = fit_recent_read_windows(
+                    candidate, recent_windows, protected_messages=protected,
+                    newest_user_suffix=getattr(capture, "_framefit5_newest_user_suffix", ()),
+                    deferred_source_paths=tuple(plan.get("deferred_paths", ())),
+                    fits=source_windows_fit,
+                )
                 continue
         current = tuple(plan.get("deferred_paths", ()))
         if not base_fits and current:
@@ -1064,13 +1088,13 @@ def finalize_frame_candidate(
         if (parsed := parse_model_source_window(message["content"])) is not None
         and isinstance(parsed.get("path"), str)
     }
-    runtime._code_bookmarks_active = bool(bookmarked_paths & carried_source_paths) or any(
+    active = bool(bookmarked_paths & carried_source_paths) or any(
         isinstance(fact, Mapping) and fact.get("path") in bookmarked_paths
         and fact.get("body_delivery") in {"present", "bookmarked"}
         for fact in final_state.get("read_facts", ())
     )
-    runtime._code_bookmark_carry = (
-        copy.deepcopy(final_bookmarks) if runtime._code_bookmarks_active
+    capture._code_bookmark_transition = (
+        active, copy.deepcopy(final_bookmarks) if active
         and isinstance(final_bookmarks, list) else []
     )
     return candidate

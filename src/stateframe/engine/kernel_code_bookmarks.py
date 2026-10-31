@@ -10,6 +10,7 @@ import ast
 import hashlib
 import os
 import re
+import stat
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 
@@ -33,19 +34,13 @@ def enabled() -> bool:
 
 def _source(root: Path, path: str) -> tuple[str, str] | None:
     from kernel_public_localization import public_path
-    from kernel_stateframe_headcarry import _read_source
 
     if (public_path(path) != path or not path.endswith(".py")
             or any(ord(char) < 32 or char in "\u202a\u202b\u202c\u202d\u202e"
                    for char in path)):
         return None
-    try:
-        if (root / path).lstat().st_size > MAX_SOURCE_BYTES:
-            return None
-    except OSError:
-        return None
-    raw = _read_source(root, path)
-    if raw is None or len(raw) > MAX_SOURCE_BYTES:
+    raw = _confined_source_bytes(root, path)
+    if raw is None:
         return None
     try:
         source = raw.decode("utf-8")
@@ -54,10 +49,58 @@ def _source(root: Path, path: str) -> tuple[str, str] | None:
     return source, "sha256:" + hashlib.sha256(raw).hexdigest()
 
 
-def _symbol_at(source: str, line: int, name: str = "") -> dict[str, object] | None:
+def _confined_source_bytes(root: Path, path: str) -> bytes | None:
+    """Open each admitted component relative to its parent, without following links."""
+    directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    file_flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
+    opened: list[int] = []
+    try:
+        root = Path(root)
+        if not root.is_absolute():
+            return None
+        parent = os.open(root.anchor, directory_flags)
+        opened.append(parent)
+        for part in root.parts[1:]:
+            parent = os.open(part, directory_flags, dir_fd=parent)
+            opened.append(parent)
+        parts = path.split("/")
+        for part in parts[:-1]:
+            parent = os.open(part, directory_flags, dir_fd=parent)
+            opened.append(parent)
+        source_fd = os.open(parts[-1], file_flags, dir_fd=parent)
+        opened.append(source_fd)
+        if not stat.S_ISREG(os.fstat(source_fd).st_mode):
+            return None
+        chunks: list[bytes] = []
+        remaining = MAX_SOURCE_BYTES + 1
+        while remaining:
+            chunk = os.read(source_fd, remaining)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        raw = b"".join(chunks)
+        return raw if len(raw) <= MAX_SOURCE_BYTES else None
+    except OSError:
+        return None
+    finally:
+        for descriptor in reversed(opened):
+            os.close(descriptor)
+
+
+def _outline(source: str) -> list[dict[str, object]]:
+    """Optional syntax discovery must never prevent ordinary source selection."""
     from kernel_paged_source import symbol_outline
 
-    rows = symbol_outline(source)
+    try:
+        return symbol_outline(source)
+    except Exception:
+        # Parser and outline visitor implementations are advisory here.
+        return []
+
+
+def _symbol_at(source: str, line: int, name: str = "") -> dict[str, object] | None:
+    rows = _outline(source)
     matching = [row for row in rows
                 if int(row["start_line"]) <= line <= int(row["end_line"])]
     if name:
@@ -76,7 +119,7 @@ def _symbol_at(source: str, line: int, name: str = "") -> dict[str, object] | No
 def _decorated_start(source: str, definition_line: int, end_line: int) -> int:
     try:
         tree = ast.parse(source)
-    except (SyntaxError, ValueError, RecursionError):
+    except (SyntaxError, ValueError, RecursionError, MemoryError, OverflowError):
         return definition_line
     nodes = [node for node in ast.walk(tree)
              if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
@@ -194,8 +237,6 @@ def _read_locations(frame: Mapping[str, object], runtime: object,
 def _assertion_targets(root: Path, paths: Sequence[str],
                        locations: Sequence[tuple[str, int, str]]) -> list[tuple[str, int, str]]:
     """Resolve direct Python imports used by a failing public assertion."""
-    from kernel_paged_source import symbol_outline
-
     admitted = set(paths)
     result: list[tuple[str, int, str]] = []
     for test_path, line, _name in locations[:MAX_EVIDENCE_FRAMES]:
@@ -206,7 +247,7 @@ def _assertion_targets(root: Path, paths: Sequence[str],
             continue
         try:
             tree = ast.parse(current[0])
-        except (SyntaxError, ValueError, RecursionError):
+        except (SyntaxError, ValueError, RecursionError, MemoryError, OverflowError):
             continue
         imports: dict[str, tuple[str, str]] = {}
         def module_path(module: str) -> str | None:
@@ -289,7 +330,7 @@ def _assertion_targets(root: Path, paths: Sequence[str],
                 source = _source(root, path)
                 if source is None:
                     continue
-                matches = [row for row in symbol_outline(source[0])
+                matches = [row for row in _outline(source[0])
                            if row["qualified_name"] == name or row["name"] == name]
                 if len(matches) == 1:
                     result.append((path, int(matches[0]["start_line"]), name))
@@ -302,8 +343,6 @@ def _direct_neighbors(
     root: Path, roots: Sequence[Mapping[str, object]],
 ) -> list[tuple[str, int, str]]:
     """Bound direct calls within the admitted file; uncertain calls add nothing."""
-    from kernel_paged_source import symbol_outline
-
     result: list[tuple[str, int, str]] = []
     for bookmark in roots[:MAX_BOOKMARKS]:
         path = str(bookmark["path"])
@@ -312,9 +351,9 @@ def _direct_neighbors(
             continue
         try:
             tree = ast.parse(current[0])
-        except (SyntaxError, ValueError, RecursionError):
+        except (SyntaxError, ValueError, RecursionError, MemoryError, OverflowError):
             continue
-        rows = symbol_outline(current[0])
+        rows = _outline(current[0])
         target = [row for row in rows if row["qualified_name"] == bookmark["symbol"]]
         if len(target) != 1:
             continue
@@ -356,6 +395,7 @@ def collect(runtime: object, frame: Mapping[str, object]) -> list[dict[str, obje
     """Use only current failed checks and authenticated read/edit receipts."""
     if not enabled():
         return []
+    from kernel_public_localization import public_path
     from kernel_read_reuse_visibility import editable_read_paths
     from kernel_stateframe_framefit5 import _workspace_root
 
@@ -389,7 +429,7 @@ def collect(runtime: object, frame: Mapping[str, object]) -> list[dict[str, obje
 
     def add(path: str, line: int, name: str, rank: int, origin: str) -> None:
         nonlocal age
-        if path not in public_paths:
+        if path not in public_paths or len(name) > 256:
             return
         current = _source(root, path)
         if current is None:
@@ -413,6 +453,8 @@ def collect(runtime: object, frame: Mapping[str, object]) -> list[dict[str, obje
                 }
             return
         symbol = str(row["qualified_name"]) if row is not None else "<module>"
+        if len(symbol) > 256 or public_path(path) != path:
+            return
         key = (path, symbol)
         old = records.get(key)
         if old is not None and int(old["rank"]) <= rank:
@@ -509,8 +551,6 @@ def collect(runtime: object, frame: Mapping[str, object]) -> list[dict[str, obje
 
 def resolve(root: Path, bookmark: Mapping[str, object]) -> dict[str, object] | None:
     """Rebind by qualified name on current bytes; never transfer identity by similarity."""
-    from kernel_paged_source import symbol_outline
-
     path, symbol = bookmark.get("path"), bookmark.get("symbol")
     if not isinstance(path, str) or not isinstance(symbol, str):
         return None
@@ -530,11 +570,12 @@ def resolve(root: Path, bookmark: Mapping[str, object]) -> dict[str, object] | N
                 "evidence_line": bookmark.get("evidence_line"),
                 "unit_sha256": hashlib.sha256(unit.encode()).hexdigest(),
                 "source": source}
-    rows = [row for row in symbol_outline(source) if row["qualified_name"] == symbol]
+    outline = _outline(source)
+    rows = [row for row in outline if row["qualified_name"] == symbol]
     if len(rows) != 1:
         return {"path": path, "symbol": symbol, "status": "unresolved",
                 "revision": revision, "outline": [row["qualified_name"]
-                                                 for row in symbol_outline(source)[:24]],
+                                                 for row in outline[:24]],
                 "source": source}
     row = rows[0]
     start, end = int(row["start_line"]), int(row["end_line"])
@@ -563,7 +604,7 @@ def _context_ranges(source: str, symbol: str, start: int, end: int) -> list[tupl
     """Bounded static context from the same Python syntax tree as the outline."""
     try:
         tree = ast.parse(source)
-    except (SyntaxError, ValueError, RecursionError):
+    except (SyntaxError, ValueError, RecursionError, MemoryError, OverflowError):
         return []
     nodes = [node for node in ast.walk(tree)
              if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
@@ -588,8 +629,7 @@ def _context_ranges(source: str, symbol: str, start: int, end: int) -> list[tupl
                 ranges.append((item.lineno, item.end_lineno or item.lineno))
     if "." in symbol:
         class_name = symbol.rsplit(".", 1)[0]
-        from kernel_paged_source import symbol_outline
-        classes = [row for row in symbol_outline(source)
+        classes = [row for row in _outline(source)
                    if row["qualified_name"] == class_name and row["kind"] == "class"
                    and int(row["start_line"]) < start <= int(row["end_line"])]
         if len(classes) == 1:

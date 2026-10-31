@@ -3,8 +3,12 @@
 import ast
 import copy
 import hashlib
+import importlib.util
 import inspect
 import json
+from pathlib import Path
+import subprocess
+import sys
 import textwrap
 from types import SimpleNamespace
 
@@ -113,11 +117,12 @@ def test_live_red_dispatch_skips_blank_symbol_and_dispatches_valid_one(tmp_path,
 
 def _read(path, content, call_id):
     revision = "sha256:" + hashlib.sha256(content.encode()).hexdigest()
+    line_count = len(content.splitlines())
     return [
         {"role": "assistant", "tool_calls": [{"id": call_id, "type": "function",
             "function": {"name": "read", "arguments": json.dumps({"path": path})}}]},
         {"role": "tool", "tool_call_id": call_id,
-         "content": f"[read page] path={path} revision={revision} lines=1-1/1 "
+         "content": f"[read page] path={path} revision={revision} lines=1-{line_count}/{line_count} "
                     f"chars={len(content)} clip=none\ncurrent source\n{content}"},
     ]
 
@@ -324,7 +329,7 @@ def _runtime_projection(runtime, frame, *, baseline, monkeypatch):
 
 
 def _qualified_fixture_request(runtime, frame, messages, context, *, baseline, monkeypatch,
-                               state_transform=None, validate=True):
+                               state_transform=None, validate=True, return_capture=False):
     import kernel_stateframe_framefit5
 
     with monkeypatch.context() as patch:
@@ -367,7 +372,7 @@ def _qualified_fixture_request(runtime, frame, messages, context, *, baseline, m
             refresh_sources=False, refresh_headcarry=False,
         )
         assert validation["checked_before_provider"] is True
-    return result
+    return (result, capture) if return_capture else result
 
 
 def _materialized_request(body):
@@ -505,8 +510,23 @@ def test_small_request_bookmark_switch_is_byte_identical(tmp_path, monkeypatch):
                                           baseline=False, monkeypatch=monkeypatch)
     monkeypatch.setenv("STATEFRAME_CODE_BOOKMARKS", "on")
     enabled = _qualified_fixture_request(runtime, frame, messages, context,
-                                         baseline=False, monkeypatch=monkeypatch)
+                                          baseline=False, monkeypatch=monkeypatch)
     assert json.dumps(enabled, sort_keys=True) == json.dumps(baseline, sort_keys=True)
+    parent_source = subprocess.check_output([
+        "git", "show", "a0ce931:src/stateframe/engine/kernel_frame_allocation_capture.py"
+    ], cwd=Path(__file__).resolve().parents[1])
+    parent_path = tmp_path / "parent_frame_allocation_capture.py"
+    parent_path.write_bytes(parent_source)
+    spec = importlib.util.spec_from_file_location("parent_frame_allocation_capture", parent_path)
+    assert spec is not None and spec.loader is not None
+    parent = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(parent)
+    with monkeypatch.context() as patch:
+        patch.setattr(sys.modules[__name__], "finalize_frame_candidate",
+                      parent.finalize_frame_candidate)
+        parent_request = _qualified_fixture_request(
+            runtime, frame, messages, context, baseline=False, monkeypatch=monkeypatch)
+    assert json.dumps(enabled, sort_keys=True) == json.dumps(parent_request, sort_keys=True)
 
 
 def test_pressured_bookmarks_pass_final_allocation_and_validation(tmp_path, monkeypatch):
@@ -517,7 +537,8 @@ def test_pressured_bookmarks_pass_final_allocation_and_validation(tmp_path, monk
     (root / "tests/test_app.py").write_text("assert True\n")
     names = [f"pkg/module_{index}.py" for index in range(10)]
     for index, name in enumerate(names):
-        (root / name).write_text(f"def target(): return {index}\n")
+        (root / name).write_text(f"def target(): return {index}\n" +
+                                 ("OTHER = 42\n" if index == 0 else ""))
     root = root.resolve()
     runtime = _runtime_with_product(root)
     runtime.edit_contract = {"edit_authority": {"editable_paths": ["pkg/__init__.py", *names]}}
@@ -533,6 +554,7 @@ def test_pressured_bookmarks_pass_final_allocation_and_validation(tmp_path, monk
     messages = [{"role": "user", "content": "Task: Fix the modules."}]
     for index, name in enumerate(names):
         messages += _read(name, (root / name).read_text(), f"read-{index}")
+    messages += _read(names[0], (root / names[0]).read_text(), "read-extra")
     context = build_action_context(messages, workspace_root=root)
     context["journal_receipt_records"] = [{
         "kind": "action_receipt",
@@ -560,9 +582,9 @@ def test_pressured_bookmarks_pass_final_allocation_and_validation(tmp_path, monk
         state["action_ledger"]["journal_verdict"] = copy.deepcopy(state["last_verdict"])
 
     monkeypatch.setenv("STATEFRAME_CODE_BOOKMARKS", "on")
-    result = _qualified_fixture_request(
+    result, capture = _qualified_fixture_request(
         runtime, frame, messages, context, baseline=False, monkeypatch=monkeypatch,
-        state_transform=mark_failure, validate=False,
+        state_transform=mark_failure, validate=False, return_capture=True,
     )
     assert token_estimate(result) <= runtime.frame_ceiling
     state_message = next(message for message in result["messages"]
@@ -584,7 +606,58 @@ def test_pressured_bookmarks_pass_final_allocation_and_validation(tmp_path, monk
                               if row["rank"] == 1}
     delivery = {row["path"]: row["body_delivery"] for row in projected["read_facts"]}
     assert all(delivery[name] in {"present", "bookmarked"} for name in names[:3])
-    assert runtime._code_bookmarks_active is True
+    from kernel_request_source_window import parse_model_source_window
+    same_path_ranges = [metadata.get("ranges") for message in result["messages"]
+                        if (metadata := parse_model_source_window(message.get("content")))
+                        and metadata.get("path") == names[0]]
+    assert any(any(span.get("end_line") == 2 for span in ranges)
+               for ranges in same_path_ranges)
+    assert capture._code_bookmark_transition[0] is True
+    assert getattr(runtime, "_code_bookmarks_active", False) is False
+    monkeypatch.setenv("STATEFRAME_CODE_BOOKMARKS", "off")
+    disabled = _qualified_fixture_request(
+        runtime, frame, messages, context, baseline=False, monkeypatch=monkeypatch,
+        state_transform=mark_failure, validate=False)
+    from kernel_reread_result_truth import refresh_messages
+    refresh_messages(disabled["messages"])
+    validate_final_product_boundary(
+        runtime, disabled["messages"], disabled["tools"],
+        refresh_sources=False, refresh_headcarry=False)
+    baseline_ceiling = token_estimate(disabled)
+    runtime.frame_ceiling = baseline_ceiling
+    monkeypatch.setenv("STATEFRAME_CODE_BOOKMARKS", "on")
+    import kernel_code_bookmarks
+    original_collect = kernel_code_bookmarks.collect
+    def padded_optional_metadata(bookmark_runtime, bookmark_frame):
+        rows = original_collect(bookmark_runtime, bookmark_frame)
+        for row in rows:
+            row["origin"] += "x" * 2000
+        return rows
+
+    with monkeypatch.context() as patch:
+        patch.setattr(kernel_code_bookmarks, "collect", padded_optional_metadata)
+        tight, tight_capture = _qualified_fixture_request(
+            runtime, frame, messages, context, baseline=False, monkeypatch=monkeypatch,
+            state_transform=mark_failure, return_capture=True)
+    assert token_estimate(tight) <= baseline_ceiling
+    assert tight_capture._code_bookmark_transition[0] is False
+    runtime.frame_ceiling = 10_000
+    def reject_validation(*_args, **_kwargs):
+        raise ValueError("reprepare")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(sys.modules[__name__], "validate_final_product_boundary",
+                      reject_validation)
+        with pytest.raises(ValueError, match="reprepare"):
+            _qualified_fixture_request(
+                runtime, frame, messages, context, baseline=False, monkeypatch=monkeypatch,
+                state_transform=mark_failure)
+    assert getattr(runtime, "_code_bookmark_carry", None) is None
+    retry = _qualified_fixture_request(
+        runtime, frame, messages, context, baseline=False, monkeypatch=monkeypatch,
+        state_transform=mark_failure)
+    assert json.dumps(retry, sort_keys=True) == json.dumps(result, sort_keys=True)
+    runtime._code_bookmarks_active, runtime._code_bookmark_carry = capture._code_bookmark_transition
     runtime.frame_ceiling = token_estimate(result) + 200
     near = _qualified_fixture_request(
         runtime, frame, messages, context, baseline=False, monkeypatch=monkeypatch,
