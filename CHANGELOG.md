@@ -4,7 +4,7 @@
 
 - Multi-file requests now offer current product code before repeated-read and navigation bookkeeping. Coverage lines show which source ranges are in view and whether a file changed since its last read when that comparison is available. Small files of at most 60 lines and 2 KiB can be shown whole when the request budget allows. Code bookmarks keep the failing test and related product source in view when the current check has a usable source location.
 - A completed batch of proved unchanged reads costs one no-progress watch unit instead of one per file; repeated unchanged batches still end `STALLED`. `STATEFRAME_CODE_BOOKMARKS` is on by default; setting it off restores 0.2.1 behavior byte for byte. `STATEFRAME_READ_LOCKOUT` remains an independent, default-off switch with a two-request maximum. See the running guide and known limitations.
-- Measured so far: both of two live runs of the previously stalled multi-file task completed and were submitted, with all 14 tests passing in 2 to 4 requests per run. This is an early two-run sample. An offline rebuild showed all 11 product files whole, up from 1 of 11, while the request fell from 85,664 to 77,017 bytes under the 82,026-byte ceiling.
+- Measured so far: all three live runs of the previously stalled multi-file task completed and were submitted, with all 14 tests passing; two finished in 2 and 4 requests, the third in 26. This is a small sample on one task. An offline rebuild showed all 11 product files whole, up from 1 of 11, while the request fell from 85,664 to 77,017 bytes under the 82,026-byte ceiling.
 
 ## 0.2.1 (2026-10-31)
 
