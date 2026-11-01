@@ -531,6 +531,7 @@ def _child() -> None:
     identity, identity_headers = encode_request(wire, gzip_enabled=False)
     tracker = _AbortiveConnectionTracker()
     opener = urllib.request.build_opener(
+        urllib.request.ProxyHandler({}),
         _AbortiveHTTPHandler(tracker), _AbortiveHTTPSHandler(tracker))
     response_complete = False
     attempts: list[dict[str, object]] = []

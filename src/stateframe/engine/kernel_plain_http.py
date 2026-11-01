@@ -138,6 +138,7 @@ class AbortiveHTTPTransport:
 
     def opener(self, tracker_id: int):
         return urllib.request.build_opener(
+            urllib.request.ProxyHandler({}),
             _TrackedHTTPHandler(self, tracker_id),
             _TrackedHTTPSHandler(self, tracker_id),
         )
