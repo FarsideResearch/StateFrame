@@ -2,8 +2,12 @@
 
 ## Unreleased
 
-- Linux checks now count same-uid threads before setting a relative process limit, with headroom for tasks outside the visible PID namespace. This prevents ordinary desktop threads from stopping bubblewrap before a check starts.
-- Sandboxed commands use the execution supervisor's descendant budget without a uid-wide process limit. The public probe still denies forks through seccomp.
+- On Linux, a busy desktop (hundreds of threads owned by the same user, for example a browser) could make every sandboxed check fail with "Creating new namespace failed: Resource temporarily unavailable". The process limit is now set after the sandbox starts, relative to the real user's current thread count, so other programs' threads no longer block it. Sandboxed commands keep a hard task limit.
+
+## 0.2.3 (2026-11-01)
+
+- Requests to a stock llama-server failed with HTTP 415 once they reached 32 KiB; compression is now off by default. If compression is enabled for a compatible relay and a server refuses it, the request is sent once more without compression.
+- Resume now tells releases apart: the engine fingerprint it compares is refreshed for this release (0.2.1 and 0.2.2 carried the 0.2.0 value, so a run started on an older release was admitted and then fell back to replaying its recorded requests).
 
 ## 0.2.2 (2026-11-01)
 
