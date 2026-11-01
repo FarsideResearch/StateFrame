@@ -702,9 +702,9 @@
   "protected_tree_guard.py": "4e7df88f540471a6b09329a8e026acf0d832d34dcd34e702505aef28c77e7879",
   "realtask_benchmark.py": "ed68f59f3334ba2eebbf776f322310a4f16d18443bf9995f216e4fc49b1a42d0",
   "realtask_worker_receipts.py": "7f358362d2b839957f2541961ce11b6e65bcb26fa60e5f3d28de22144d47421f",
-  "release-manifest.json": "4911ebece658debe63bddbb33afe604754b05ba6d871fb23730a9da443e60c3f",
+  "release-manifest.json": "7cabe101cc6135441a916d8df11fbd46ddc6d161122b249298b1cc6213123a95",
   "sampler_config.py": "1549b3a60e0ebc8fbbad8ed5256f52477cd1bb2491a8da350c64c01e01c81b2d",
-  "sf_launch.py": "ca8cf9379737b97efbfdf2a85e0aee22019921f225ef73688fd9b475acafc5f9",
+  "sf_launch.py": "689040e5eca182f32233a559577408eb96d1f0b70d71c4f96d71bced1cdb1f0c",
   "sidekick.py": "e07b5979271a5477cdb870fa42fa05baf5e5b463c5208562cbb8eaeb1b9b6d1e",
   "spec_exec.py": "91a65156dba5016d09f0d4d8d1d94daf03114a6bb2d784ff26fc23558f156035",
   "swarm/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -4666,7 +4666,7 @@
  "release_listed_but_absent_in_source": [],
  "release_manifest": "37f11a29d4ceccbc5ea3aa95d1e60249e41b93974fe1da74e347ccfad28f1374",
  "schema": "stateframe-engine-source/1",
- "shipped_hash": "21c564dd89e26e753d8c7e1d3635537c414b6446f0123085041d51a91942f1f5",
+ "shipped_hash": "715bd52eb466e50c38ebe90e394fb324ed7fa2a486b811adf78642db0086f3b3",
  "source_hash": "1a75f27c6197deed9df5acd441902846aced5fd358729dab308577e184a077c4",
  "source_tree": "37f11a29d4ceccbc5ea3aa95d1e60249e41b93974fe1da74e347ccfad28f1374"
 }

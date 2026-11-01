@@ -168,6 +168,17 @@ def launch(spec: dict) -> None:
     os.execvpe(argv[0], argv, spec["env"])
 
 
+def _exec_wrapped(argv: list[str], environment) -> None:
+    """Exec the command this wrapper stands in front of, reporting a missing program exactly
+    as bubblewrap does when it execs the command itself. Callers (outer checks) parse that
+    line to say "check command not found: NAME" instead of reporting a failing check."""
+    try:
+        os.execvpe(argv[0], argv, environment)
+    except FileNotFoundError:
+        print(f"bwrap: execvp {argv[0]}: No such file or directory", file=sys.stderr)
+        raise SystemExit(1)
+
+
 def main() -> int:
     try:
         if len(sys.argv) >= 4 and sys.argv[1] == "--nproc-budget":
@@ -175,18 +186,18 @@ def main() -> int:
             if not 1 <= budget <= 256:
                 raise ValueError("NPROC budget is outside the execution policy bound")
             _set_relative_nproc_limit(_user_task_count() + budget + _NPROC_HEADROOM)
-            os.execvpe(sys.argv[3], sys.argv[3:], os.environ)
+            _exec_wrapped(sys.argv[3:], os.environ)
         if len(sys.argv) >= 4 and sys.argv[1] == "--cgroup-enter":
             try:
                 with open(os.path.join(sys.argv[2], "cgroup.procs"), "w", encoding="ascii") as stream:
                     stream.write(str(os.getpid()))
             except OSError:
                 pass  # RLIMIT_NPROC remains the mandatory fallback.
-            os.execvpe(sys.argv[3], sys.argv[3:], os.environ)
+            _exec_wrapped(sys.argv[3:], os.environ)
         if len(sys.argv) >= 4 and sys.argv[1] in {"--network-none", "--process-filter"}:
             environment = json.loads(sys.argv[2])
             install_syscall_filter(network_none=sys.argv[1] == "--network-none")
-            os.execvpe(sys.argv[3], sys.argv[3:], environment)
+            _exec_wrapped(sys.argv[3:], environment)
         if len(sys.argv) == 3 and sys.argv[1] == "--fd":
             with os.fdopen(int(sys.argv[2]), "rb") as stream:
                 data = stream.read((1 << 20) + 1)

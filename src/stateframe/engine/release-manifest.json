@@ -701,7 +701,7 @@
   "realtask_benchmark.py": "ed68f59f3334ba2eebbf776f322310a4f16d18443bf9995f216e4fc49b1a42d0",
   "realtask_worker_receipts.py": "7f358362d2b839957f2541961ce11b6e65bcb26fa60e5f3d28de22144d47421f",
   "sampler_config.py": "1549b3a60e0ebc8fbbad8ed5256f52477cd1bb2491a8da350c64c01e01c81b2d",
-  "sf_launch.py": "ca8cf9379737b97efbfdf2a85e0aee22019921f225ef73688fd9b475acafc5f9",
+  "sf_launch.py": "689040e5eca182f32233a559577408eb96d1f0b70d71c4f96d71bced1cdb1f0c",
   "sidekick.py": "e07b5979271a5477cdb870fa42fa05baf5e5b463c5208562cbb8eaeb1b9b6d1e",
   "spec_exec.py": "91a65156dba5016d09f0d4d8d1d94daf03114a6bb2d784ff26fc23558f156035",
   "swarm/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
