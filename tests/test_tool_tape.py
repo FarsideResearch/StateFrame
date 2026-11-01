@@ -134,4 +134,4 @@ def test_limit_restart_allows_completed_local_and_observation_ops(tmp_path):
         state = assess(run, max_turns=8)
         archive = archive_attempt(state, tmp_path)
         assert ToolTape(archive).lookup("same-id").replay_class == replay_class
-        assert spec["resume"]["archived_external_operations"] == []
+        assert state["spec"]["resume"]["archived_external_operations"] == []
