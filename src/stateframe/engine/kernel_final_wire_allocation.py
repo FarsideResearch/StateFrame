@@ -11,6 +11,18 @@ from collections.abc import Mapping
 from kernel_request_seal import QualifiedRequest, OwnerPresentation, RequestSealError, freeze
 
 
+def _prepare_qualified_hook_body(context, body, request_id):
+    """Preserve typed classification until the qualified wire is ready to seal."""
+    wiring = getattr(context, "_hook_wiring", None)
+    if wiring is None:
+        return body
+    from kernel_measurement import _without_private_message_keys
+
+    wire_body = _without_private_message_keys(body)
+    wiring.admit_panel(body, json.dumps(wire_body).encode(), request_id)
+    return wire_body
+
+
 def build_qualified_request(capture, runtime, body, *, endpoint, key, deadline=None):
     """Complete, fit and prove detached state, then publish one coherent record."""
     from kernel_request_kind import classify, gate_required, validate_adapter, RequestKindError
@@ -147,6 +159,10 @@ def build_qualified_request(capture, runtime, body, *, endpoint, key, deadline=N
     # Output normalization can change body identity and prompt reserves. It
     # precedes the final receipt, whose measurement is carried into the seal.
     enforce_context_capacity(candidate, body, endpoint=endpoint, key=key)
+    # The qualified path seals its own wire and bypasses RequestCapture's final
+    # serializer. Keep typed panel metadata through classification and fitting,
+    # then remove private fields from the body that final measurement seals.
+    body = _prepare_qualified_hook_body(context, body, candidate.request_id)
     budget = dict(getattr(candidate, "request_budget_final_wire", None) or {})
     budget["max_request_bytes"] = candidate._frame_candidate_inputs["byte_ceiling"]
     candidate.request_budget_final_wire = budget

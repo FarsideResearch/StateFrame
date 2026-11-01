@@ -84,7 +84,13 @@ def project(summary: dict[str, object], *, cancelled: bool = False,
     child = summary.get("child_exit_code")
     recovered = (status == "SUBMITTED" and terminal.get("reason_code") == RECOVERED_FROM_JOURNAL
                  and not summary.get("candidate_error"))
-    if cancelled or child in (130, -2) or status in ("CANCELLED", "CANCELED"):
+    if summary.get("runtime_outcome") == "hook_containment" or summary.get("hook_containment"):
+        runtime = "hook_containment"
+    elif status == "HOOK_CONTAINMENT":
+        runtime = "hook_containment"
+    elif status == "HOOK_BLOCKED":
+        runtime = "hook_blocked"
+    elif cancelled or child in (130, -2) or status in ("CANCELLED", "CANCELED"):
         runtime = "cancelled"
     elif recovered:
         # The engine sealed and stored its submission before it was stopped: that is a submission.
@@ -142,6 +148,10 @@ def exit_code(summary: dict[str, object]) -> int:
     runtime = summary.get("runtime_outcome")
     if runtime == "cancelled":
         return 130
+    if runtime == "hook_containment":
+        return 2
+    if runtime == "hook_blocked":
+        return 1
     if summary.get("apply_error"):
         return 2
     if runtime in ("engine_error", "missing_result") or runtime is None:

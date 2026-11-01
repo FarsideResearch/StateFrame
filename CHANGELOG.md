@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.2.6 (2026-11-01)
+
+- Add opt-in lifecycle hooks for start context, tool guards and notes, submission gates, and terminal notifications. Hooks run in the sandbox, use explicit configuration or digest-trusted project files, and replay completed results from the run tape. See [Hooks](docs/guide/hooks.md).
+- `pre_tool` and `post_tool` hooks also see `skill_load` and MCP tool calls. An MCP call is checked against the arguments it will actually send, including a `why` field the server declares.
+- With no hooks configured, the request bytes, tool tape and journal event kinds match 0.2.5; the child does not import the hook modules.
+- On Linux, hook network mode `loopback` is a private network namespace, as it is for shell commands. A hook that must reach a service on the host's loopback needs `full`.
+- Measured so far: two live runs on Qwen3.6-35B-A3B from a clean install, with hooks on all six events, were each submitted in 4 requests with their checks passing. In both, every event fired and the stop hook's one veto reached the model. This is a small sample on one small task.
+
 ## 0.2.5 (2026-11-01)
 
 - Model requests never go through an HTTP proxy. A proxy set in a profile, or a macOS system proxy, could receive a local run's requests, including the task and API key.

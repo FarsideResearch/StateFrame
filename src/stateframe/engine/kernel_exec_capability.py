@@ -117,7 +117,7 @@ class ExecLimits:
 
 @dataclass(frozen=True)
 class ExecCapability:
-    purpose: Literal["shell", "job", "git", "custom_tool", "probe"]
+    purpose: Literal["shell", "job", "git", "custom_tool", "probe", "hook"]
     workspace: Path
     workspace_writable: bool
     read_roots: tuple[Path, ...]
@@ -128,7 +128,7 @@ class ExecCapability:
     sandboxed: bool = True
 
     def __post_init__(self) -> None:
-        if self.purpose not in {"shell", "job", "git", "custom_tool", "probe"}:
+        if self.purpose not in {"shell", "job", "git", "custom_tool", "probe", "hook"}:
             raise ValueError("invalid execution purpose")
         if self.network not in {"none", "loopback", "full"}:
             raise ValueError("network must be none, loopback or full")

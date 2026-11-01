@@ -6187,8 +6187,15 @@ def work(d, *, resume=None):
             | {str(p) for p in root.rglob("conftest.py")}
         from kernel_shell_tool import service as shell_service
         _shell = shell_service()
+        _hook_wiring_for_run = globals().get("_hook_wiring")
         if _shell is not None:
-            _shell.bind(root, d, baseline_tests)
+            if _hook_wiring_for_run is None:
+                _shell.bind(root, d, baseline_tests)
+            else:
+                from kernel_effects import effect_policy_for_run
+                _shell.bind(root, d, baseline_tests, policy=effect_policy_for_run(
+                    root, d, baseline_tests,
+                    hook_paths=_hook_wiring_for_run.protected_paths))
             os.environ["REACT_ENVIRONMENT_REVISION"] = _shell.identity()
         from kernel_agent_tools import service as agent_tools_service
         _agent_tools = agent_tools_service()
@@ -6726,6 +6733,9 @@ def work(d, *, resume=None):
                 invalidate_binding()
             measurement.prepared_binding = measurement.binding()
         _wiring_journal.flush(measurement.journal)
+        if _hook_wiring_for_run is not None:
+            _hook_wiring_for_run.bind(root, d, baseline_tests, _shell, measurement)
+            _hook_wiring_for_run.agent_tools = _agent_tools
         _edit_nturn_session = None
         _edit_nturn_request_active = False
         _edit_nturn_model_sites: list[object] = []
@@ -7524,10 +7534,97 @@ def work(d, *, resume=None):
             queue_advisory(measurement, trigger)
             return True
 
+        def _hook_gate(name, arguments, call_id):
+            if _hook_wiring_for_run is None:
+                return False
+            if name in {"file_delete", "file_move"}:
+                from kernel_file_ops import (FileOperationRefused, admit_file_delete,
+                                             admit_file_move)
+                from kernel_tool_surface import new_files_forbidden
+
+                def _hook_file_protected(path):
+                    if _hook_wiring_for_run.protected(path):
+                        raise FileOperationRefused(
+                            "HOOK_FILE", "hook definition or bundled input is read-only")
+                    return protected_test_path(path, baseline_tests)
+
+                def _hook_file_editable(relative):
+                    return (relative in fileset.paths or str(root / relative) in created_this_run)
+
+                try:
+                    if name == "file_delete":
+                        admit_file_delete(root, arguments.get("path"),
+                                          protected=_hook_file_protected,
+                                          editable=_hook_file_editable)
+                    else:
+                        admit_file_move(
+                            root, arguments.get("source"), arguments.get("destination"),
+                            protected=_hook_file_protected, editable=_hook_file_editable,
+                            new_file_allowed=lambda relative: (
+                                not new_files_forbidden(measurement)
+                                and _row_is_product_path(relative, d)),
+                        )
+                except FileOperationRefused:
+                    return False
+            if name in {"edit", "str_replace", "insert_before", "replace_module",
+                        "file_create", "file_delete", "file_move"}:
+                paths = [arguments.get(key) for key in ("path", "source", "destination")]
+                if any(isinstance(path, str) and _hook_wiring_for_run.protected(root / path)
+                       for path in paths):
+                    refusal = "REFUSED HOOK_FILE: hook definition or bundled input is read-only"
+                else:
+                    refusal = _hook_wiring_for_run.pre_action(name, arguments, call_id)
+            else:
+                refusal = _hook_wiring_for_run.pre_action(name, arguments, call_id)
+            if refusal is None:
+                return False
+            bolt.receipt("gate", name, name, "REFUSED_PREDISPATCH", refusal)
+            measurement.observe(name, refusal)
+            msgs.append(_tool_reply_for_call(msgs, call_id, refusal) if toolcall_mode
+                        else {"role": "user", "content": refusal})
+            return True
+
+        def _hook_gate_current():
+            if _hook_wiring_for_run is None or _pending_hook_action is None:
+                return False
+            _name, _arguments, _call_id, _toolcall = _pending_hook_action
+            return _hook_gate(_name, _arguments, _call_id)
+
+        def _hook_gate_route(name, arguments=None):
+            nonlocal _pending_hook_action
+            if _hook_wiring_for_run is None:
+                return False
+            if toolcall_mode:
+                return _hook_gate(_name, _args, tool_call_id)
+            route_arguments = arguments if isinstance(arguments, Mapping) else {}
+            call_id = f"text-{step}"
+            _pending_hook_action = (name, dict(route_arguments), call_id, False)
+            return _hook_gate(name, route_arguments, call_id)
+
+        _pending_hook_action = None
+
         # True save/load resume (kernel_checkpoint): restore before the loop, snapshot at each boundary.
         import kernel_checkpoint as _kernel_checkpoint
         _kernel_checkpoint.restore_point(sys._getframe(), POC)
         for step in step_indices(step + 1, _loop_limit):
+            if _hook_wiring_for_run is not None and _pending_hook_action is not None:
+                _hook_name, _hook_args, _hook_call_id, _hook_toolcall = _pending_hook_action
+                if _hook_toolcall:
+                    _hook_reply = next((str(message.get("content") or "")
+                                        for message in reversed(msgs)
+                                        if message.get("role") == "tool"
+                                        and message.get("tool_call_id") == _hook_call_id), None)
+                else:
+                    _hook_reply = str(msgs[-1].get("content") or "") if msgs else None
+                if _hook_reply is not None:
+                    _hook_outcome = _hook_wiring_for_run.dispatch_outcome(
+                        _hook_name, _hook_call_id, measurement,
+                    )
+                    _hook_wiring_for_run.finalize_action(
+                        _hook_name, _hook_args, _hook_call_id, _hook_reply,
+                        measurement, bolt, created_this_run,
+                        outcome=_hook_outcome)
+                _pending_hook_action = None
             _kernel_checkpoint.save_point(sys._getframe(), step, POC)
             _kernel_checkpoint.freeze_warm_heap(step)
             if (_progress_watch is not None
@@ -8072,6 +8169,8 @@ def work(d, *, resume=None):
                                 content=content, action={"tool": _name,
                                                          "arguments": _args}, step=step)
                         tool_call_id = c0.get("id") or f"call_{step}"
+                        if _hook_wiring_for_run is not None and _name != "done":
+                            _pending_hook_action = (_name, _args, tool_call_id, True)
                         measurement.current_tool_call_id = tool_call_id
                         _grounding_feedback = measurement.start_action(
                             _name, _args, charge_dispatch=not contract_enabled())
@@ -8083,6 +8182,16 @@ def work(d, *, resume=None):
                             measurement.system_outcome = "tool_call_cap"
                             if native_batch is not None:
                                 native_batch.skip_inflight("tool_call_cap")
+                            if _pending_hook_action is not None:
+                                from kernel_hook_wiring import DispatchOutcome
+
+                                _hook_wiring_for_run.finalize_action(
+                                    _name, _args, tool_call_id,
+                                    "REFUSED TOOL_CALL_CAP: tool-call limit reached",
+                                    measurement, bolt, created_this_run,
+                                    outcome=DispatchOutcome("refused", False, None, ()),
+                                )
+                                _pending_hook_action = None
                             break
                         # A host refusal still closes a real model action.  Keep
                         # its bounded model patch independent from dispatch so
@@ -8173,30 +8282,6 @@ def work(d, *, resume=None):
                             measurement.observe(_name, _idealpath_feedback)
                             msgs.append(_tool_reply_for_call(msgs, tool_call_id, _idealpath_feedback))
                             continue
-                        _idealpath_dispatch = getattr(measurement, "idealpath_operation", None)
-                        _idealpath_feedback = (
-                            _idealpath_dispatch(_name, _args)
-                            if callable(_idealpath_dispatch) else None
-                        )
-                        if _idealpath_feedback is not None:
-                            measurement.observe(_name, _idealpath_feedback)
-                            msgs.append(_tool_reply_for_call(msgs, tool_call_id, _idealpath_feedback))
-                            continue
-                        if _name == "reproduce":
-                            _reproduce_feedback(_args, tool_call_id)
-                            continue
-                        if _name == "restore_candidate":
-                            from kernel_candidate_preservation import restore_candidate_for_runtime
-                            _restore_feedback = restore_candidate_for_runtime(
-                                measurement,
-                                _args.get("checkpoint_id", ""),
-                                _args.get("expected_current_revision", ""),
-                            )
-                            _restore_text = json.dumps(
-                                _restore_feedback, ensure_ascii=False, sort_keys=True, default=str)
-                            measurement.observe(_name, _restore_text)
-                            msgs.append(_tool_reply_for_call(msgs, tool_call_id, _restore_text))
-                            continue
                         if _grounding_feedback is not None:
                             # Claim grounding is a host pre-dispatch refusal.  Keep it on
                             # the normal typed edit receipt rail so the complete JSON
@@ -8242,6 +8327,9 @@ def work(d, *, resume=None):
                         if _series_feedback is not None:
                             # Q8: a navigation lookup answers first; the gate text is an advisory.
                             from kernel_navigation_receipt import answer_despite_gate as _nav_answer
+                            from kernel_navigation_receipt import is_navigation as _nav_is
+                            if _nav_is(_name) and _hook_gate(_name, _args, tool_call_id):
+                                continue
                             _series_feedback = _nav_answer(
                                 _name, _args, _series_feedback,
                                 getattr(measurement, "repo_intel_operation", None)) or _series_feedback
@@ -8278,6 +8366,9 @@ def work(d, *, resume=None):
                             # Q8: never substitute a completion/green-lock refusal for a
                             # where_defined/who_calls/references answer (read-only lookup).
                             from kernel_navigation_receipt import answer_despite_gate as _nav_answer
+                            from kernel_navigation_receipt import is_navigation as _nav_is
+                            if _nav_is(_name) and _hook_gate(_name, _args, tool_call_id):
+                                continue
                             _nav_feedback = _nav_answer(
                                 _name, _args, _green_refusal,
                                 getattr(measurement, "repo_intel_operation", None))
@@ -8293,7 +8384,10 @@ def work(d, *, resume=None):
                         # Like predict it is served BEFORE continuation authorization, so
                         # KERNEL_CONTINUATION_EXECUTIVE=1 cannot refuse it for lacking an
                         # execution receipt contract or strand an open effect.
-                        if _name == "decide":
+                        if (_name == "decide"
+                                and getattr(measurement, "decisive_factor", None) is not None):
+                            if _hook_gate(_name, _args, tool_call_id):
+                                continue
                             _decisive_factor_feedback = measurement.decisive_factor_operation(
                                 _name, tool_decisive_factor_args or _args)
                             if _decisive_factor_feedback is not None:
@@ -8310,6 +8404,8 @@ def work(d, *, resume=None):
                         if (_name == "predict"
                                 and (getattr(measurement, "stateframe_get_sure_mode", "off") == "on"
                                      or _hstate_plus_predict)):
+                            if _hook_gate(_name, _args, tool_call_id):
+                                continue
                             from kernel_stateframe_get_sure import predict_runtime
                             _prediction = predict_runtime(
                                 measurement, tool_predict_args or _args)
@@ -8324,6 +8420,8 @@ def work(d, *, resume=None):
                             msgs.append(_tool_reply_for_call(msgs, tool_call_id, _prediction_text))
                             continue
                         if _name == "recall":
+                            if _hook_gate(_name, _args, tool_call_id):
+                                continue
                             _recall_feedback = measurement.recall_operation(_name, _args)
                             if _recall_feedback is not None:
                                 measurement.observe(_name, _recall_feedback)
@@ -8332,6 +8430,9 @@ def work(d, *, resume=None):
                         _continuation_feedback = measurement.continuation_before_dispatch(_name, _args)
                         if _continuation_feedback is not None:
                             from kernel_navigation_receipt import answer_despite_gate as _nav_answer
+                            from kernel_navigation_receipt import is_navigation as _nav_is
+                            if _nav_is(_name) and _hook_gate(_name, _args, tool_call_id):
+                                continue
                             _nav_feedback = _nav_answer(
                                 _name, _args, _continuation_feedback,
                                 getattr(measurement, "repo_intel_operation", None))
@@ -8342,18 +8443,89 @@ def work(d, *, resume=None):
                             measurement.observe(_name, _continuation_feedback)
                             msgs.append(_tool_reply_for_call(msgs, tool_call_id, _continuation_feedback))
                             continue
+                        _idealpath_dispatch = getattr(measurement, "idealpath_operation", None)
+                        _idealpath_owner_getter = getattr(measurement, "_idealpath_owner", None)
+                        _idealpath_owner = (
+                            _idealpath_owner_getter()
+                            if callable(_idealpath_owner_getter) else None
+                        )
+                        _idealpath_names = {
+                            "localize", "localization_frontier", "question_gate",
+                            "requirement_table", "abstain", "backtrack", "typed_check_spec",
+                            "localization_alternative", "typed_test_writer", "reproduce",
+                            "contrastive_check",
+                        }
+                        if (
+                            _name in _idealpath_names
+                            and (_name in {"localize", "localization_frontier"}
+                                 or _idealpath_owner is not None)
+                        ):
+                            if _hook_gate(_name, _args, tool_call_id):
+                                continue
+                            _idealpath_feedback = (
+                                _idealpath_dispatch(_name, _args)
+                                if callable(_idealpath_dispatch) else None
+                            )
+                            if _idealpath_feedback is not None:
+                                measurement.observe(_name, _idealpath_feedback)
+                                msgs.append(_tool_reply_for_call(
+                                    msgs, tool_call_id, _idealpath_feedback))
+                                continue
+                        if _name == "reproduce":
+                            if _hook_gate(_name, _args, tool_call_id):
+                                continue
+                            _reproduce_feedback(_args, tool_call_id)
+                            continue
+                        if _name == "restore_candidate":
+                            if _hook_gate(_name, _args, tool_call_id):
+                                continue
+                            from kernel_candidate_preservation import restore_candidate_for_runtime
+                            _restore_feedback = restore_candidate_for_runtime(
+                                measurement,
+                                _args.get("checkpoint_id", ""),
+                                _args.get("expected_current_revision", ""),
+                            )
+                            _restore_text = json.dumps(
+                                _restore_feedback, ensure_ascii=False, sort_keys=True, default=str)
+                            measurement.observe(_name, _restore_text)
+                            msgs.append(_tool_reply_for_call(msgs, tool_call_id, _restore_text))
+                            continue
                         if action_schema_mode or contract_enabled():
                             measurement.accept_action()
                         if _has_memory_sidecar:
                             measurement.ingest_decision_sidecar(_memory_sidecar)
+                        _retained_route = (
+                            (getattr(measurement, "project_registries", None) is not None
+                             and _name == "registry_lookup")
+                            or (getattr(measurement, "continuation", None) is not None
+                                and _name == "continuation_detour")
+                            or (getattr(measurement, "working_sets", None) is not None
+                                and _name == "working_set")
+                            or (getattr(measurement, "generated", None) is not None
+                                and _name == "recall_generated_artifact")
+                            or (getattr(measurement, "retained", None) is not None
+                                and _name == "recall_evidence")
+                        )
+                        if _retained_route and _hook_gate(_name, _args, tool_call_id):
+                            continue
                         _state_feedback = measurement.retained_operation(_name, _args)
                         if _state_feedback is None:
+                            _state_route = (
+                                getattr(measurement, "decision_state", None) is not None
+                                and _name in {"work_update", "note_update", "note_retrieve"}
+                            )
+                            if _state_route and _hook_gate(_name, _args, tool_call_id):
+                                continue
                             _state_feedback = measurement.state_operation(_name, _args)
                         if _state_feedback is not None:
                             measurement.observe(_name, _state_feedback)
                             msgs.append(_tool_reply_for_call(msgs, tool_call_id, _state_feedback))
                             continue
                         _repo_intel_dispatch = getattr(measurement, "repo_intel_operation", None)
+                        if _name in {
+                            "where_defined", "who_calls", "references", "outline",
+                        } and _hook_gate(_name, _args, tool_call_id):
+                            continue
                         _repo_intel_feedback = (
                             _repo_intel_dispatch(_name, _args)
                             if callable(_repo_intel_dispatch) else None)
@@ -8377,12 +8549,22 @@ def work(d, *, resume=None):
                         if _working_note is not None:
                             measurement.stage_working_note(
                                 _working_note, tool=_name, arguments=_args)
+                        if (_name == "work"
+                                and getattr(measurement, "work_record", None) is not None
+                                and _hook_gate(_name, _args, tool_call_id)):
+                            continue
                         _work_feedback = measurement.work_operation(_name, _args)
                         if _work_feedback is not None:
                             measurement.observe(_name, _work_feedback)
                             msgs.append(_tool_reply_for_call(msgs, tool_call_id, _work_feedback))
                             continue
                         _job_dispatch = getattr(measurement, "job_operation", None)
+                        _job_route = (
+                            getattr(measurement, "job_watch", None) is not None
+                            and _name in {"job", "launch_job", "job_status", "job_output", "job_kill"}
+                        )
+                        if _job_route and _hook_gate(_name, _args, tool_call_id):
+                            continue
                         _job_feedback = (_job_dispatch(_name, _args)
                                          if callable(_job_dispatch) else None)
                         if _job_feedback is not None:
@@ -8392,6 +8574,8 @@ def work(d, *, resume=None):
                         if getattr(measurement, "figure_it_out_enabled", False):
                             from kernel_figure_it_out import is_operator
                             if is_operator(_name):
+                                if _hook_gate(_name, _args, tool_call_id):
+                                    continue
                                 _figure_feedback = measurement.figure_it_out_operation(
                                     _name, _args)
                                 if _figure_feedback is not None:
@@ -8408,6 +8592,8 @@ def work(d, *, resume=None):
                                     msgs.append(_tool_reply_for_call(msgs, tool_call_id, _figure_feedback))
                                     continue
                         if _name in active_decoy_names and is_decoy_name(_name):
+                            if _hook_gate(_name, _args, tool_call_id):
+                                continue
                             decoy_call_names.append(_name)
                             _first_edit_seen = (
                                 _progress_facts().first_edit_step is not None
@@ -8453,7 +8639,16 @@ def work(d, *, resume=None):
                             if _name == "shell" and (_shell is None or _shell.settings.shell == "off"):
                                 _obs = "REFUSED SHELL_OFF: shell is disabled by --shell off"
                                 bolt.receipt("shell", "shell", "off", "REFUSED", _obs)
+                            elif (_hook_wiring_for_run is not None
+                                  and not _hook_wiring_for_run.admitted(
+                                      _name, _args, _shell, _agent_tools)):
+                                _reply = (_shell.execute(_args, tool_call_id)
+                                          if _name == "shell" else
+                                          _agent_tools.execute(_name, _args, tool_call_id))
+                                _obs = _reply.observation
                             else:
+                                if _hook_gate(_name, _args, tool_call_id):
+                                    continue
                                 _reply = (_shell.execute(_args, tool_call_id) if _name == "shell" else
                                           _agent_tools.execute(_name, _args, tool_call_id))
                                 _obs = _reply.observation
@@ -8469,6 +8664,16 @@ def work(d, *, resume=None):
                                     edits_since_test += 1
                                     if first_edit_step is None:
                                         first_edit_step = step
+                                if _hook_wiring_for_run is not None:
+                                    _applied_effects = tuple(_reply.applied)
+                                    _hook_wiring_for_run.note_applied(
+                                        tool_call_id,
+                                        (effect.path for effect in _applied_effects),
+                                        deleted_paths=(
+                                            effect.path for effect in _applied_effects
+                                            if getattr(effect, "change", None) == "deleted"
+                                        ),
+                                    )
                             msgs.append(_tool_reply_for_call(msgs, tool_call_id, _obs))
                             measurement.observe(_name, _obs)
                             _edit_nturn_after_action(_name, _obs, step, model_action_args=_args)
@@ -8479,6 +8684,9 @@ def work(d, *, resume=None):
                             from kernel_file_ops import FileOperationRefused, FileOperationReplay, file_delete, file_move
                             from kernel_tool_surface import new_files_forbidden
 
+                            if _hook_gate(_name, _args, tool_call_id):
+                                continue
+
                             _source_arg = _args.get("path") if _name == "file_delete" else _args.get("source")
                             _dest_arg = _args.get("destination") if _name == "file_move" else None
                             _paths = ()
@@ -8487,14 +8695,21 @@ def work(d, *, resume=None):
                                 authority={"editable": sorted(fileset.paths),
                                            "created": sorted(str(pathlib.Path(p).relative_to(root))
                                                              for p in created_this_run),
-                                           "protected": sorted(str(pathlib.Path(p).relative_to(root))
-                                                               for p in baseline_tests),
+                                           "protected": sorted(
+                                               {str(pathlib.Path(p).relative_to(root))
+                                                for p in baseline_tests}
+                                               | (set(_hook_wiring_for_run.protected_paths)
+                                                  if _hook_wiring_for_run is not None else set())),
                                            "new_files_forbidden": new_files_forbidden(measurement),
                                            "allowed_product_paths": d.get("allowed_product_paths"),
                                            "new_file_roots": d.get("new_file_roots")},
                                 environment_identity=_shell.identity() if _shell is not None else "disabled")
                             try:
                                 def _protected(path):
+                                    if (_hook_wiring_for_run is not None
+                                            and _hook_wiring_for_run.protected(path)):
+                                        raise FileOperationRefused(
+                                            "HOOK_FILE", "hook definition or bundled input is read-only")
                                     return protected_test_path(path, baseline_tests)
 
                                 def _editable(relative):
@@ -8534,6 +8749,14 @@ def work(d, *, resume=None):
                                 _obs = f"{_name} FAILED: {type(_error).__name__}: {_error}"
                                 _result = "FAILED"
                             _obs = _file_replay.complete(_result, _obs)
+                            if _hook_wiring_for_run is not None:
+                                _hook_wiring_for_run.note_applied(
+                                    tool_call_id, _paths,
+                                    deleted_paths=(
+                                        (_effect.source,) if _result == "APPLIED"
+                                        and _effect.source is not None else ()
+                                    ),
+                                )
                             bolt.receipt(
                                 "edit", f"{_name} {_source_arg}",
                                 f"{_source_arg}|{_dest_arg or ''}", _result, _obs,
@@ -8589,8 +8812,30 @@ def work(d, *, resume=None):
                                     _content = str(_args.get("content") or "")
                                     _v21_rejection, _v21_warning = _validate_v21_candidate(
                                         _fc, _content, "file_create")
+                                    _create_refused = _v21_rejection is not None
                                     if _v21_rejection is not None:
                                         _obs = _v21_rejection
+                                    elif (not _nonpy_edit_applies(_fc)
+                                          and os.environ.get(
+                                              "STATEFRAME_JQ_FINISH", "off") != "on"):
+                                        from kernel_destructive_edit_guard import guard_write
+                                        _shrink_refusal = guard_write(
+                                            _fc, _content, root=root,
+                                            public_brief=_task_public_brief(d))
+                                        if _shrink_refusal is not None:
+                                            _obs = _shrink_refusal
+                                            _create_refused = True
+                                        else:
+                                            from kernel_green_lock import guard_product_mutation
+                                            _green_refusal = guard_product_mutation(_fc)
+                                            if _green_refusal is not None:
+                                                _obs = "file_create REJECTED: " + _green_refusal
+                                                _create_refused = True
+                                    if (not _create_refused
+                                            and _hook_gate(_name, _args, tool_call_id)):
+                                        continue
+                                    if _create_refused:
+                                        pass
                                     elif _nonpy_edit_applies(_fc):
                                         _v21_published = _publish_nonpy_candidate(
                                             _fc, _content.encode("utf-8"),
@@ -8644,18 +8889,6 @@ def work(d, *, resume=None):
                                             _obs = (f"created {_args.get('path')}"
                                                     if " applied." in _published else _published)
                                     else:
-                                        from kernel_destructive_edit_guard import guard_write
-                                        _shrink_refusal = guard_write(
-                                            _fc, _content, root=root,
-                                            public_brief=_task_public_brief(d))
-                                        if _shrink_refusal is not None:
-                                            _obs = _shrink_refusal
-                                            raise _GreenLockRefused
-                                        from kernel_green_lock import guard_product_mutation
-                                        _green_refusal = guard_product_mutation(_fc)
-                                        if _green_refusal is not None:
-                                            _obs = "file_create REJECTED: " + _green_refusal
-                                            raise _GreenLockRefused
                                         _fc_applied, _fc_rendered = _effect_write(
                                             _fc, _content, operation="file_create",
                                             prepare=lambda: _fc.parent.mkdir(
@@ -8665,6 +8898,10 @@ def work(d, *, resume=None):
                                                 (_fc_rendered or
                                                  "file_create SHADOW: effect withheld"))
                                     if _obs.startswith("created "):
+                                        if _hook_wiring_for_run is not None:
+                                            _hook_wiring_for_run.note_applied(
+                                                tool_call_id, (str(_fc),),
+                                            )
                                         from kernel_green_lock import note_applied_product_edit
                                         note_applied_product_edit(_fc)
                                         from kernel_rejection_template_restrict import (
@@ -8757,6 +8994,8 @@ def work(d, *, resume=None):
                             line = "reproduce"
                             tool_repro_args = dict(_args)
                         elif _name == "read_check_receipt":
+                            if _hook_gate_route("read_check_receipt", _args):
+                                continue
                             from kernel_check_receipts import observe_check_output
                             _receipt_text = observe_check_output(
                                 measurement, bolt,
@@ -8873,6 +9112,10 @@ def work(d, *, resume=None):
                     measurement.start_action("text", {})
                     msgs.append({"role": "assistant", "content": reply})
             except Exception as e:                              # noqa: BLE001
+                if _hook_wiring_for_run is not None:
+                    from kernel_hook_exec import HookContainmentError
+                    if isinstance(e, HookContainmentError):
+                        raise
                 _finish_edit_nturn()
                 if getattr(e, "boundary_recovery_stop", False):
                     raise
@@ -9156,6 +9399,11 @@ def work(d, *, resume=None):
             # A parsed command breaks the streak — only CONSECUTIVE refusals mean dialect
             # mismatch; occasional prose-only replies are normal model behaviour.
             unparsed_streak = 0
+            if (_hook_wiring_for_run is not None and not toolcall_mode
+                    and not line.startswith("done")):
+                _pending_hook_action = (
+                    line.split()[0], {"command": line}, f"text-{step}", False,
+                )
             # FIXED-POINT DETECTION (defect #37): identical QUERY 6x in a row -> raise the
             # temperature for the rest of the attempt. Queries only — repeated edits/tests
             # are iteration (the payload differs) and must never be treated as stalling.
@@ -9230,6 +9478,10 @@ def work(d, *, resume=None):
             _mash = line.split(" ", 2)
             if len(_mash) >= 2 and _mash[0] == "test" and _mash[1] in ("read", "grep", "edit"):
                 line = line.split(" ", 1)[1].strip()
+                if _hook_wiring_for_run is not None and not toolcall_mode:
+                    _pending_hook_action = (
+                        line.split()[0], {"command": line}, f"text-{step}", False,
+                    )
             from kernel_destructive_edit_guard import command_receipt
             _destructive_refusal = command_receipt(line, root=root)
             if _destructive_refusal is not None:
@@ -9365,6 +9617,8 @@ def work(d, *, resume=None):
                     msgs.append(_tool_reply_for_call(msgs, tool_call_id, _surface_feedback) if tool_call_id else
                                 {"role": "user", "content": _surface_feedback})
                     continue
+                if _hook_gate_route(line, _args):
+                    continue
                 _ledger_action = getattr(measurement, line)
                 _ledger_result = _ledger_action(_args if isinstance(_args, Mapping) else {})
                 bolt.receipt("test", line, json.dumps(_args, sort_keys=True),
@@ -9374,6 +9628,8 @@ def work(d, *, resume=None):
                             {"role": "user", "content": _ledger_result})
                 continue
             if line == "dispute_check":
+                if _hook_gate_route("dispute_check", _args):
+                    continue
                 _dispute = measurement.dispute_check(_args if isinstance(_args, Mapping) else {})
                 bolt.receipt("test", "dispute_check", json.dumps(_args, sort_keys=True),
                              "DISPUTE_RETIRED" if '"status": "RETIRED"' in _dispute else
@@ -9383,6 +9639,9 @@ def work(d, *, resume=None):
                             {"role": "user", "content": _dispute})
                 continue
             if line == "decide" or line.startswith("decide "):
+                if _hook_gate_route(
+                        "decide", tool_decisive_factor_args or _args):
+                    continue
                 if tool_decisive_factor_args is None:
                     raw_decision = line[len("decide"):].strip()
                     try:
@@ -9414,6 +9673,8 @@ def work(d, *, resume=None):
             if (line == "predict" or line.startswith("predict ")) \
                     and (getattr(measurement, "stateframe_get_sure_mode", "off") == "on"
                          or _hstate_plus_predict):
+                if _hook_gate_route("predict", tool_predict_args or _args):
+                    continue
                 if tool_predict_args is None:
                     raw_predict = line[len("predict"):].strip()
                     try:
@@ -9444,6 +9705,9 @@ def work(d, *, resume=None):
                 if not _dependency_fact_on:
                     obs = "dependency_fact unavailable — STATEFRAME_DEPENDENCY_FACT is off"
                 else:
+                    if _hook_gate_route(
+                            "dependency_fact", tool_dependency_fact_args or _args):
+                        continue
                     if tool_dependency_fact_args is None:
                         raw_dependency = line[len("dependency_fact"):].strip()
                         try:
@@ -9499,6 +9763,8 @@ def work(d, *, resume=None):
                             {"role": "user", "content": obs})
                 continue
             if line == "authored_check" or line.startswith("authored_check "):
+                if _hook_gate_route("authored_check", tool_authored_check_args or _args):
+                    continue
                 if tool_authored_check_args is None:
                     raw_authored = line[len("authored_check"):].strip()
                     try:
@@ -9601,6 +9867,8 @@ def work(d, *, resume=None):
                 continue
             if line == "probe" or line.startswith("probe "):
                 if _observation_probe_on:
+                    if _hook_gate_route("probe", tool_probe_args or _args):
+                        continue
                     if tool_probe_args is None:
                         raw_probe = line[5:].strip()
                         try:
@@ -9811,6 +10079,8 @@ def work(d, *, resume=None):
                             {"role": "user", "content": obs})
                 continue
             if line == "reproduce" or line.startswith("reproduce "):
+                if _hook_gate_route("reproduce", tool_repro_args or _args):
+                    continue
                 if tool_repro_args is None:
                     raw_repro = line[len("reproduce"):].strip()
                     try:
@@ -9831,6 +10101,9 @@ def work(d, *, resume=None):
                 _reproduce_feedback(tool_repro_args or {}, tool_call_id)
                 continue
             if line.startswith('test'):
+                # Tool-call mode reaches this branch too, where the text-protocol arguments are never bound.
+                if _hook_gate_route("test", None if toolcall_mode else _legacy_grounding_args):
+                    continue
                 _public_probe = measurement.public_probe_operation(line[4:].strip())
                 if _public_probe is not None:
                     from kernel_probe_validity_gate import public_probe_result_class
@@ -9934,6 +10207,47 @@ def work(d, *, resume=None):
                             msgs, tool_call_id, observation, no_id_role="user",
                         ))
                         continue
+                    if _hook_wiring_for_run is not None:
+                        from kernel_done_is_submit_authority import (
+                            _ownerless_progress_tool_names, artifact_digest,
+                        )
+                        _hook_sources = _source_snapshot(
+                            root, _product_source_paths(root, fileset, d) if multifile
+                            else (target.relative_to(root).as_posix(),))
+                        _hook_candidate_digest = artifact_digest(_hook_sources)
+                        _hook_parent_sources = (fileset.parent if multifile else {
+                            target.relative_to(root).as_posix(): str(d.get("parent_src") or "")})
+                        _hook_stop, _hook_limit = _hook_wiring_for_run.stop(
+                            measurement, source="model", call_id=tool_call_id,
+                            candidate_digest=_hook_candidate_digest,
+                            changed_paths=tuple(sorted(
+                                path for path, value in _hook_sources.items()
+                                if value != _hook_parent_sources.get(path))),
+                        )
+                        if _hook_stop.decision == "deny":
+                            stop_code = ("HOOK_STOP" if _hook_stop.deny_code == "HOOK_DENIED"
+                                         else _hook_stop.deny_code or "HOOK_STOP")
+                            observation = (f"REFUSED {stop_code}: "
+                                           f"{_hook_stop.deny_hook}: "
+                                           f"{_hook_stop.reason}")
+                            recovery = _ownerless_progress_tool_names(getattr(
+                                measurement, "_stateframe_current_request_tool_names", ()))
+                            if _hook_limit or not recovery:
+                                measurement.system_outcome = "hook_blocked"
+                                measurement.journal.emit(
+                                    "hook_blocked", hook=_hook_stop.deny_hook,
+                                    blocks=_hook_wiring_for_run.state["block_counts"].get(
+                                        _hook_stop.deny_hook, 0), dispatch=False)
+                                measurement.journal.emit(
+                                    "v2_terminal", terminal="HOOK_BLOCKED",
+                                    reason="stop hook veto could not continue", dispatch=False)
+                                break
+                            bolt.receipt("done", line, "current candidate", "NEEDS_WORK",
+                                         detail=observation)
+                            measurement.observe(line, observation)
+                            msgs.append(_tool_reply_for_call(
+                                msgs, tool_call_id, observation, no_id_role="user"))
+                            continue
                     request_submission(measurement, source="model")
                     pending_mutations = wait_for_pending_mutations(measurement)
                     measurement._done_submit_pending_mutation_count = len(pending_mutations)
@@ -10668,6 +10982,8 @@ def work(d, *, resume=None):
                     resolved_scope = resolve_scope(root, scope, journal=measurement.journal)
                     if not information.check_path(root, str(resolved_scope)):
                         raise ValueError("[information-policy] Path outside workspace denied.")
+                    if _hook_gate_route("list_files", {"path": str(resolved_scope)}):
+                        continue
                     obs = render_file_tree(root, resolved_scope, depth=depth, limit=limit)
                     outcome = "HOST_OBSERVED"
                 except (OSError, TypeError, ValueError) as error:
@@ -10704,6 +11020,8 @@ def work(d, *, resume=None):
                                     {"role": "user", "content": obs})
                         continue
                     scope = str(resolved_scope)
+                if _hook_gate_route("file_list", {"path": str(scope or root)}):
+                    continue
                 from kernel_where_used import render_file_list
                 obs = render_file_list(root, scope, limit=limit)
                 bolt.receipt("file_list", line, line, "HOST_OBSERVED", detail=f"n={len(obs.splitlines())}")
@@ -10785,6 +11103,8 @@ def work(d, *, resume=None):
                                 "[information-policy] Path outside workspace denied."})
                     continue
                 _grep_args = _args if isinstance(_args, Mapping) else {}
+                if _hook_gate_route("grep", _grep_args or {"pattern": pat, "path": scope}):
+                    continue
                 _grep_error = None
                 _grep_page = None
                 try:
@@ -10916,6 +11236,8 @@ def work(d, *, resume=None):
                                 if tool_call_id else {"role": "user", "content":
                                 _denied})
                     continue
+                if _hook_gate_route("read", {"path": str(p), "line": start + 1}):
+                    continue
                 _read_before = (_source_snapshot(root, fileset.paths)
                                 if multifile else {})
                 # The executor owns file caching, exact-range reuse, and its
@@ -11019,6 +11341,8 @@ def work(d, *, resume=None):
                         event_schema=APPLY_SCHEMA, dispatch=False, action="preflight",
                         status="REJECTED", batch_id=_batch_result.batch_id,
                         failures=[_batch_guard_failure.to_dict()])
+                elif _hook_gate_route("str_replace", tool_batch_args):
+                    continue
                 else:
                     _batch_result = atomic_apply(
                         root, tool_batch_args, journal=measurement.journal,
@@ -11048,6 +11372,10 @@ def work(d, *, resume=None):
                             pass
                     measurement.amend_receipt(_batch_receipt)
                 if _batch_status == "APPLIED":
+                    if _hook_wiring_for_run is not None:
+                        _hook_wiring_for_run.note_applied(
+                            tool_call_id, _batch_result.changed_paths,
+                        )
                     if first_edit_step is None:
                         first_edit_step = step
                     edits += len(_batch_result.changed_paths)
@@ -11075,6 +11403,8 @@ def work(d, *, resume=None):
                         "NOT_EDITABLE", p, root=root,
                         hint="replace_module cannot edit a protected pre-existing test file")
                 else:
+                    if _hook_gate_route("replace_module", {"path": str(p)}):
+                        continue
                     expected, source, candidate_id = tool_replace_module_args
                     obs = replace_module(
                         p, expected, source=source, candidate_id=candidate_id,
@@ -11094,6 +11424,8 @@ def work(d, *, resume=None):
                         after=_source_snapshot(root, fileset.paths),
                         selectors=tuple(getattr(bolt, "f2p_ids", ())), failure_tail=obs)
                 if " applied." in obs:
+                    if _hook_wiring_for_run is not None:
+                        _hook_wiring_for_run.note_applied(tool_call_id, (str(p),))
                     if first_edit_step is None:
                         first_edit_step = step
                     edits += 1
@@ -11123,6 +11455,8 @@ def work(d, *, resume=None):
                             "NOT_EDITABLE", p, root=root,
                             hint="insert_before cannot modify a protected pre-existing test file")
                     else:
+                        if _hook_gate_route("insert_before", {"path": str(p)}):
+                            continue
                         obs = _apply_revision_bound_insertion(
                             p, str(tool_insert_args.get("new_str") or ""),
                             tool_insert_args.get("target_ref"), root=root,
@@ -11157,6 +11491,8 @@ def work(d, *, resume=None):
                         })
                         measurement.amend_receipt(_insert_receipt)
                     if " applied." in obs:
+                        if _hook_wiring_for_run is not None:
+                            _hook_wiring_for_run.note_applied(tool_call_id, (str(p),))
                         if first_edit_step is None:
                             first_edit_step = step
                         edits += 1
@@ -11228,6 +11564,11 @@ def work(d, *, resume=None):
                               (_pd_outcome.decision.message or
                                "retry denied before dispatch."))
                     else:
+                        if _hook_gate_route(
+                                "str_replace" if toolcall_mode else "edit",
+                                {"path": str(p), "old_str": tool_str_args[0],
+                                 "new_str": tool_str_args[1]}):
+                            continue
                         if os.environ.get("STATEFRAME_JQ_FINISH", "off") == "on":
                             from kernel_jq_finish import validated_str_replace
                             def _validated_str_replace():
@@ -11284,6 +11625,8 @@ def work(d, *, resume=None):
                         "REJECTED" if "REJECTED" in obs else "FAILED",
                         obs, attempt=_edit_attempt,
                         target_path=receipt_target_path(root, p))
+                    if "applied." in obs and _hook_wiring_for_run is not None:
+                        _hook_wiring_for_run.note_applied(tool_call_id, (str(p),))
                     if multifile:
                         _annotate_receipt(
                             bolt, paths=fileset.paths, scope=(resolved_path,),
@@ -11435,17 +11778,23 @@ def work(d, *, resume=None):
                                     "INVALID_FUNCTION_SOURCE", p, root=root,
                                     hint=_definition_error)
                             else:
+                                if _hook_gate_route("edit", {"path": str(p)}):
+                                    continue
                                 obs = replace_fn(p, _definition_name, blocks[-1].strip(),
                                                   multi_file=True,
                                                   target_ref=tool_target_ref, root=root,
                                                   public_brief=_task_public_brief(d),
                                                   journal=measurement.journal)
                         else:
+                            if _hook_gate_route("edit", {"path": str(p)}):
+                                continue
                             obs = _replace_file(
                                 p, blocks[-1].strip(), root=root,
                                 public_brief=_task_public_brief(d),
                                 journal=measurement.journal)
                     else:
+                        if _hook_gate_route("edit", {"path": str(p)}):
+                            continue
                         obs = replace_fn(p, fn, blocks[-1].strip(),
                                          target_ref=tool_target_ref, root=root,
                                          public_brief=_task_public_brief(d),
@@ -11453,6 +11802,8 @@ def work(d, *, resume=None):
                     obs = _normalize_edit_rejection(
                         obs, p, root=root,
                         symbol=(fileset.entry_fn if multifile and fileset.entry_fn else fn))
+                    if "applied." in obs and _hook_wiring_for_run is not None:
+                        _hook_wiring_for_run.note_applied(tool_call_id, (str(p),))
                     if (_pdg2 is not None and _bound_reason2 is None
                             and _pd_outcome2.advice and not _predispatch_blocked2):
                         obs += "\n[kernel-retry] " + _pd_outcome2.advice
@@ -11469,6 +11820,8 @@ def work(d, *, resume=None):
                                  "REJECTED" if "REJECTED" in obs else "FAILED",
                                  obs, attempt=_edit_attempt2,
                                  target_path=receipt_target_path(root, p))
+                    if "applied." in obs and _hook_wiring_for_run is not None:
+                        _hook_wiring_for_run.note_applied(tool_call_id, (str(p),))
                     if multifile:
                         _annotate_receipt(
                             bolt, paths=fileset.paths, scope=(resolved_path,),
@@ -12426,6 +12779,22 @@ def work(d, *, resume=None):
                            f"-> {obs[:90].splitlines()[0] if obs.strip() else '(empty)'}\n")
                 live.flush()
 
+        if _hook_wiring_for_run is not None and _pending_hook_action is not None:
+            _hook_name, _hook_args, _hook_call_id, _hook_toolcall = _pending_hook_action
+            _hook_reply = (next((str(message.get("content") or "") for message in reversed(msgs)
+                                 if message.get("role") == "tool"
+                                 and message.get("tool_call_id") == _hook_call_id), None)
+                           if _hook_toolcall else
+                           str(msgs[-1].get("content") or "") if msgs else None)
+            if _hook_reply is not None:
+                _hook_outcome = _hook_wiring_for_run.dispatch_outcome(
+                    _hook_name, _hook_call_id, measurement,
+                )
+                _hook_wiring_for_run.finalize_action(
+                    _hook_name, _hook_args, _hook_call_id, _hook_reply,
+                    measurement, bolt, created_this_run,
+                    outcome=_hook_outcome)
+            _pending_hook_action = None
         _finish_edit_nturn()
         if (_budget_mode == "response" and _budget.tool_call_cap is not None
                 and _budget.tool_calls_used >= _budget.tool_call_cap
@@ -12613,6 +12982,11 @@ def work(d, *, resume=None):
                 )
                 behaviour = "not_evaluated"
             except Exception as capture_error:  # any capture/storage failure is the sole done error
+                if _hook_wiring_for_run is not None:
+                    from kernel_hook_exec import HookContainmentError
+                    from kernel_hook_wiring import HookBlockedError
+                    if isinstance(capture_error, (HookBlockedError, HookContainmentError)):
+                        raise
                 measurement._done_capture_error_class = "DONE_CAPTURE_ERROR"
                 measurement._done_capture_error_type = type(capture_error).__name__
                 measurement._done_submit_pending = None
@@ -12844,7 +13218,12 @@ def work(d, *, resume=None):
         # #41: a dialect abort with a graded WIN is still a win — the evidence outranks the
         # conversation's ending. Without a win it stays HARNESS_SUSPECT (uncharged).
         finish_native_batch_transcript(msgs)
-        measurement.finish({"result": _finish_result, "steps": _reported_steps(),
+        _hook_terminal = (str(measurement.system_outcome).upper()
+                          if _hook_wiring_for_run is not None
+                          and measurement.system_outcome in {"hook_blocked", "hook_containment"}
+                          else None)
+        measurement.finish({"result": _hook_terminal or _finish_result,
+                            "steps": _reported_steps(),
                             "edits": _finish_progress.edits,
                             "tests": _finish_progress.checks,
                             "behaviour": behaviour,
@@ -12923,6 +13302,20 @@ def work(d, *, resume=None):
                  behaviour=behaviour, **_done_facts_fields,
                  **_done_submit_fields, **_multi_result), measurement)
     except Exception as exc:
+        if locals().get("_hook_wiring_for_run") is not None:
+            from kernel_hook_exec import HookContainmentError
+            from kernel_hook_wiring import HookBlockedError
+            if isinstance(exc, (HookContainmentError, HookBlockedError)):
+                code = ("HOOK_CONTAINMENT" if isinstance(exc, HookContainmentError)
+                        else "HOOK_BLOCKED")
+                if measurement is not None:
+                    measurement.system_outcome = code.lower()
+                    outcome = {"fn": fn, "result": code,
+                               "steps": locals().get("step", -1),
+                               "error_detail": str(exc)[:600]}
+                    measurement.finish(outcome, messages=locals().get("msgs"))
+                    return _attach_env_receipt(outcome, measurement)
+                raise
         if resume is not None and measurement is None:
             raise  # Recovery refusal must remain visible; do not finalize the original run.
         if measurement is not None:
@@ -12936,6 +13329,18 @@ def work(d, *, resume=None):
                     _capture_done_candidate_after_exception(measurement, locals())
                     done_terminal = terminal_from_seal(measurement)
                 except Exception as capture_error:
+                    if locals().get("_hook_wiring_for_run") is not None:
+                        from kernel_hook_exec import HookContainmentError
+                        from kernel_hook_wiring import HookBlockedError
+                        if isinstance(capture_error, (HookContainmentError, HookBlockedError)):
+                            code = ("HOOK_CONTAINMENT" if isinstance(
+                                capture_error, HookContainmentError) else "HOOK_BLOCKED")
+                            measurement.system_outcome = code.lower()
+                            outcome = {"fn": fn, "result": code,
+                                       "steps": locals().get("step", -1),
+                                       "error_detail": str(capture_error)[:600]}
+                            measurement.finish(outcome, messages=locals().get("msgs"))
+                            return _attach_env_receipt(outcome, measurement)
                     capture_failed = True
                     measurement._done_capture_error_class = "DONE_CAPTURE_ERROR"
                     measurement._done_capture_error_type = type(capture_error).__name__

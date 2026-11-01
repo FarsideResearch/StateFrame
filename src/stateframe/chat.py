@@ -15,11 +15,15 @@ import tempfile
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from . import outcomes, workcopy
 from .endpoint import EndpointError
-from .runner import RunError, RunOptions, run, succeeded
+from .runner import HookContainmentRunError, HookRefusedRunError, RunError, RunOptions, run, succeeded
 from .task_row import TaskRowError
+
+if TYPE_CHECKING:
+    from .engine.kernel_hooks import HookSet
 
 HELP = """commands:
   <text>      run a task on the session copy (follow-ups build on earlier results)
@@ -57,11 +61,15 @@ class TaskRecord:
 class Session:
     repo: Path
     home: Path
-    base: RunOptions
+    base: RunOptions | None
     history: list[TaskRecord] = field(default_factory=list)
     snapshots: list[Path] = field(default_factory=list)
     baseline: dict[str, str] = field(default_factory=dict)  # original's sha256 per file at session start
     attempts: int = 0
+    _project_hooks: HookSet | None = field(default=None, init=False, repr=False)
+    _project_hooks_digest: str | None = field(default=None, init=False, repr=False)
+    _project_hooks_resolved: bool = field(default=False, init=False, repr=False)
+    _stopped: bool = field(default=False, init=False, repr=False)
     _active_copy: Path | None = field(default=None, init=False, repr=False)
     _baseline_snapshot: Path | None = field(default=None, init=False, repr=False)
 
@@ -73,7 +81,8 @@ class Session:
     def start_snapshot(self) -> Path:
         return self._baseline_snapshot or self.home / "start"
 
-    def start(self) -> None:
+    def start(self, printer=print) -> None:
+        self._resolve_project_hooks(printer)
         self.home.mkdir(parents=True)
         work = workcopy.create(self.repo, self.copy)
         self.baseline = dict(work.baseline)
@@ -111,6 +120,11 @@ class Session:
         return f"{text}\n\nSESSION FACTS:\n{json.dumps(facts, indent=1, sort_keys=True)}"
 
     def run_task(self, text: str, printer=print) -> TaskRecord:
+        if self._stopped:
+            raise RunError("this chat session stopped after HOOK_CONTAINMENT; start a new session")
+        if self.base is None:
+            raise RunError("chat run options are required to run a task")
+        self._resolve_project_hooks(printer)
         # Reserve identity before facts/setup can fail. Undo never rewinds this counter.
         self.attempts += 1
         n = self.attempts
@@ -121,7 +135,10 @@ class Session:
         summary = {}
         try:
             options = replace(self.base, repo=self.copy, task=self.task_text(text),
-                              run_dir=run_dir, in_place=False, shell_confirm=confirm_shell)
+                              run_dir=run_dir, in_place=False, shell_confirm=confirm_shell,
+                              hooks_repo=self.repo.resolve(), project_hooks=self._project_hooks,
+                              project_hooks_digest=self._project_hooks_digest,
+                              project_hooks_resolved=True)
             summary = run(options, printer=printer)
             projection = outcomes.project(summary, cancelled=summary.get("runtime_outcome") == "cancelled",
                                           timed_out=summary.get("child_exit_code") == 124)
@@ -132,8 +149,21 @@ class Session:
             record.tests_passed = record.check_outcome == "pass"
             record.files = list(summary.get("files_changed") or [])
             record.diff = (run_dir / "final.diff").read_text()
-            if record.files and succeeded(summary):
+            if record.runtime_outcome == "hook_containment":
+                self._stopped = True
+            if (record.files and succeeded(summary)
+                    and record.runtime_outcome not in {"hook_blocked", "hook_containment"}
+                    and record.result not in {"HOOK_BLOCKED", "HOOK_CONTAINMENT"}):
                 self._promote(record)
+        except HookContainmentRunError as error:
+            record.runtime_outcome = "hook_containment"
+            record.result = "HOOK_CONTAINMENT"
+            record.error = f"task error: {_one_line(error)}"
+            self._stopped = True
+        except HookRefusedRunError as error:
+            record.runtime_outcome = "hook_refused"
+            record.result = error.result
+            record.error = f"task error: {_one_line(error)}"
         except (KeyboardInterrupt, *EXPECTED_ERRORS) as error:
             cancelled = isinstance(error, KeyboardInterrupt)
             # Preserve check/artifact evidence, but the attempt did not finish successfully.
@@ -145,6 +175,24 @@ class Session:
             record.tests_passed = record.check_outcome == "pass"
             record.error = "task cancelled" if cancelled else f"task error: {_one_line(error)}"
         return record
+
+    def _resolve_project_hooks(self, printer=print) -> None:
+        if self._project_hooks_resolved:
+            return
+        if self.base is None:
+            self._project_hooks_resolved = True
+            return
+        from .hook_host import resolve_project_hooks
+        selection = resolve_project_hooks(
+            self.repo,
+            shell_network=self.base.tool_settings.shell_network,
+            no_project_hooks=self.base.no_project_hooks,
+        )
+        self._project_hooks = selection.hooks
+        self._project_hooks_digest = selection.digest
+        self._project_hooks_resolved = True
+        if selection.message:
+            printer(selection.message)
 
     def _promote(self, record: TaskRecord) -> None:
         """Stage the entire next state before changing the active copy; retain both as artifacts."""
@@ -183,8 +231,13 @@ class Session:
     def apply(self) -> list[str]:
         """Write session changes into the repository, refusing any file that changed there since
         the session started (the same guarded path as --in-place)."""
-        changes = {rel: ((self.copy / rel).read_bytes() if (self.copy / rel).is_file() else None)
-                   for rel in _changed(self.start_snapshot, self.copy)}
+        if (self.base is not None and self.base.hooks_files) or self._project_hooks is not None:
+            session_work = workcopy.WorkCopy(self.repo, self.copy, self.baseline)
+            changes = {rel: (None if kind == "deleted" else (self.copy / rel).read_bytes())
+                       for rel, kind in workcopy.changed_files(session_work).items()}
+        else:
+            changes = {rel: ((self.copy / rel).read_bytes() if (self.copy / rel).is_file() else None)
+                       for rel in _changed(self.start_snapshot, self.copy)}
         if not changes:
             return []
         # Prepare the next baseline before writing the original. Failed staging leaves both intact.
@@ -232,7 +285,7 @@ def default_home(repo: Path) -> Path:
 
 
 def repl(session: Session, read=input, printer=print, print_summary=None) -> int:
-    session.start()
+    session.start(printer=printer)
     printer(f"stateframe chat (preview) on {session.repo}  [session copy: {session.copy}]")
     printer(HELP)
     while True:
@@ -293,9 +346,12 @@ def repl(session: Session, read=input, printer=print, print_summary=None) -> int
                     f"{record.outcome_label()}; "
                     f"{'kept on the session copy' if record.kept else 'session copy unchanged; attempt path ' + record.run_dir}"
                     f" (/diff, /undo, /apply)")
+            if record.runtime_outcome == "hook_containment":
+                printer("chat stopped after HOOK_CONTAINMENT; start a new session to continue")
+                break
     printer(f"session dir {session.home} holds inspectable artifacts and is NOT resumable; "
             "your repo changes only through /apply")
-    return 0
+    return 2 if session._stopped else 0
 
 
 __all__ = ["Session", "repl", "default_home", "HELP"]

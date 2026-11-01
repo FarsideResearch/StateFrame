@@ -41,6 +41,8 @@ DEADLINE_EXCEEDED = "DEADLINE_EXCEEDED"
 RUN_FAILED = "RUN_FAILED"
 RUN_INCOMPLETE = "RUN_INCOMPLETE"
 AUTHORITY_FAILURE = "AUTHORITY_FAILURE"
+HOOK_BLOCKED = "HOOK_BLOCKED"
+HOOK_CONTAINMENT = "HOOK_CONTAINMENT"
 UNKNOWN = "UNKNOWN"
 
 BUDGET_STOP_REASONS = frozenset({
@@ -63,6 +65,8 @@ STOP_REASONS = frozenset({
     RUN_FAILED,
     RUN_INCOMPLETE,
     AUTHORITY_FAILURE,
+    HOOK_BLOCKED,
+    HOOK_CONTAINMENT,
     UNKNOWN,
 })
 
@@ -206,6 +210,8 @@ def _reason_from_value(value: object) -> str | None:
         "HARDEN8_CONTRACT_ERROR": AUTHORITY_FAILURE,
         "HARDEN8_EVIDENCE_PIN_ERROR": AUTHORITY_FAILURE,
         "HARDEN8_OWNER_FINALIZATION_ERROR": AUTHORITY_FAILURE,
+        "HOOK_BLOCKED": HOOK_BLOCKED,
+        "HOOK_CONTAINMENT": HOOK_CONTAINMENT,
         "REQUEST_ACTION_CONTRACT_ERROR": AUTHORITY_FAILURE,
         "INCOMPLETE": RUN_INCOMPLETE,
         "NEEDS_WORK": RUN_INCOMPLETE,
@@ -243,6 +249,10 @@ def _status_values(result: Mapping[str, object]) -> tuple[object, ...]:
 
 def _event_reason(event: Mapping[str, object]) -> str | None:
     kind = _normalise(event.get("kind"))
+    if kind == "V2_TERMINAL":
+        terminal = _reason_from_value(event.get("terminal"))
+        if terminal in {HOOK_BLOCKED, HOOK_CONTAINMENT}:
+            return terminal
     direct = _reason_from_value(kind)
     if direct is not None and direct != DONE_ACCEPTED:
         return direct

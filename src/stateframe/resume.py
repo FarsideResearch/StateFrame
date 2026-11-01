@@ -32,7 +32,7 @@ ATTEMPT_FILES = ("worker", "wire", "requests", "sends.jsonl", "engine.log", "eng
                  "child-traceback.txt", "summary.json", "final.diff", "tests-after.txt",
                  "resume-divergence.json", "workspace", "checks", "checkpoint-refused.json",
                  "env", "env-sites.json", "shell-home", "shell-cache",
-                 "shell-ask.json", "shell-answer.json")
+                 "shell-ask.json", "shell-answer.json", "hooks")
 
 
 CHECKPOINT_SCHEMA = "stateframe-engine-checkpoint/1"
@@ -196,7 +196,28 @@ def assess(run: Path, *, max_turns: int | None = None, model: str | None = None,
     for key in ("environment", "public_row", "parent_snapshot", "chat_url", "model", "max_turns", "repo"):
         if key not in spec:
             raise ResumeRefused(f"spec.json lacks {key!r}; this run was made by an older stateframe")
+    terminal = outcomes.terminal_receipt(run)
+    status = terminal.get("result")
+    summary_path = run / "summary.json"
+    try:
+        summary = json.loads(summary_path.read_text()) if summary_path.is_file() else {}
+    except (OSError, ValueError):
+        summary = {}
+    if (isinstance(summary, dict) and (summary.get("runtime_outcome") == "hook_refused"
+                                       or summary.get("engine_result") in {"HOOK_DENIED", "HOOK_FAILED"})):
+        raise ResumeRefused("hook refused prompt submission; start a new run")
+    if (status == "HOOK_CONTAINMENT"
+            or isinstance(summary, dict) and summary.get("runtime_outcome") == "hook_containment"):
+        raise ResumeRefused("HOOK_CONTAINMENT run cannot be resumed; start a new run")
+    if status == "HOOK_BLOCKED":
+        raise ResumeRefused("HOOK_BLOCKED run cannot be resumed; start a new run")
     external = _tool_safety(run, spec, replay_external=True)
+    if "hooks" in spec:
+        from .hook_host import verify_resume_hooks
+        try:
+            verify_resume_hooks(run, spec["hooks"], run_seed=str(spec.get("run_identity_seed", "")))
+        except (ValueError, OSError) as error:
+            raise ResumeRefused(str(error)) from error
     recorded = (spec.get("engine_source") or {}).get("shipped_hash")
     installed = profiles.engine_source_summary().get("shipped_hash")
     if not recorded or not installed or recorded != installed:
@@ -218,8 +239,6 @@ def assess(run: Path, *, max_turns: int | None = None, model: str | None = None,
         raise ResumeRefused(f"this run directory was moved: it was created at {original}, and its records "
                             f"use that path. Move it back to {original} (or copy it there) and resume from there")
 
-    terminal = outcomes.terminal_receipt(run)
-    status = terminal.get("result")
     if status == "SUBMITTED":
         raise ResumeRefused("this run already finished: the engine submitted its result "
                             "(see summary.json and final.diff); start a new run for more work")

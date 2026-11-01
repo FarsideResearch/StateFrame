@@ -77,7 +77,8 @@ DEFAULT_STAGE_EXIT_ACTIONS = {
 
 _TRUTHY = frozenset({"on", "1", "true", "yes"})
 _OPTIONAL_SECTIONS = frozenset({
-    "optional", "advice", "playbook", "history", "history_ledger", "diagnostic", "scratch", "skill_bodies",
+    "optional", "user_hooks", "advice", "playbook", "history", "history_ledger", "diagnostic", "scratch",
+    "skill_bodies",
 })
 _PROTECTED_SECTIONS = frozenset({"required", "completion", "contract", "terminal"})
 _LOW_RELEVANCE_TOOLS = frozenset({
