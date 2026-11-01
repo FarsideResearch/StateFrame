@@ -123,11 +123,16 @@ def carry_forward_records(spec: dict, own_tape: list[dict[str, object]],
         return own_tape, own_pending, []
     if len(own_tape) < len(previous):
         return own_tape + previous[len(own_tape):], prior_pending, prior_route_changes
-    later_send = (isinstance(prior_pending, dict) and type(prior_pending.get("send")) is int
-                  and any(int(path.name[:4]) >= prior_pending["send"]
-                          for path in wire_dir.glob("[0-9][0-9][0-9][0-9].request.json")))
-    if own_pending is None and prior_pending is not None and not later_send:
-        return own_tape, prior_pending, prior_route_changes
+    prior_send = prior_pending.get("send") if isinstance(prior_pending, dict) else None
+    if type(prior_send) is int:
+        sends = {int(path.name[:4]) for path in wire_dir.glob("[0-9][0-9][0-9][0-9].request.json")}
+        own_send = own_pending.get("send") if isinstance(own_pending, dict) else None
+        if not any(send > prior_send for send in sends):
+            # No send yet: the earlier check still stands. A rebuilt copy of the same in-flight request
+            # with no response is unverified (the child writes it before the check runs), so the
+            # original stays authoritative. Only a finished send at that number retires it.
+            if own_send == prior_send or (own_pending is None and prior_send not in sends):
+                return own_tape, prior_pending, prior_route_changes
     return own_tape, own_pending, []
 
 

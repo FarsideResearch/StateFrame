@@ -126,6 +126,32 @@ def test_equal_length_replay_keeps_prior_pending_and_route_changes(tmp_path):
     assert resumed["route_changes"] == [move]
 
 
+def test_unverified_rebuilt_pending_does_not_replace_the_original_check(tmp_path):
+    # Killed after the child wrote its rebuilt request 2 but before the replayer checked it against the
+    # carried pending send: the rebuilt copy is unverified, so the original check and its moves stay.
+    run, spec = _interrupted_routed_run(tmp_path)
+    old_wire = run / "attempts" / "1" / "wire"
+    _write_send(old_wire, 1)
+    _write_send(old_wire, 2, completed=False)
+    _write_send(run / "wire", 1)
+    _write_send(run / "wire", 2, completed=False)
+    (run / "wire" / "0002.request.json").write_bytes(b'{"changed": "request bytes"}')
+    move = {"role": "read", "field": "endpoint", "from": "http://127.0.0.1:8090/v1",
+            "to": "http://127.0.0.1:9000/v1"}
+    spec["resume"] = {"tape": replay_tape.build(old_wire, run / "attempts" / "1" / "sends.jsonl"),
+                      "pending": replay_tape.pending_request(old_wire), "route_changes": [move]}
+    prior_pending = spec["resume"]["pending"]
+    assert replay_tape.pending_request(run / "wire", routes_required=True)["send"] == prior_pending["send"]
+    (run / "spec.json").write_text(json.dumps(spec))
+
+    resume.archive_attempt({"run": run, "spec": spec, "attempt": 2, "max_turns": 8}, tmp_path,
+                           use_checkpoint=False)
+
+    resumed = json.loads((run / "spec.json").read_text())["resume"]
+    assert resumed["pending"] == prior_pending
+    assert resumed["route_changes"] == [move]
+
+
 def test_equal_length_replay_drops_prior_pending_after_later_failed_send(tmp_path):
     run, spec = _interrupted_routed_run(tmp_path)
     old_wire = run / "attempts" / "1" / "wire"
