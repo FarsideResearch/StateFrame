@@ -22,30 +22,7 @@ from kernel_exec_capability import capability_from_dict
 from kernel_exec_tracker import Descendants, ProcessTable
 from kernel_job_output import JobOutputCollector
 from kernel_test_isolation import capability_command
-from sf_launch import _current_cgroup
-
-
-def _command_cgroup(ident: str, nproc: int) -> Path | None:
-    """Use delegated pids.max when available; RLIMIT_NPROC remains the fallback."""
-    parent = _current_cgroup()
-    if parent is None:
-        return None
-    group = parent / f"stateframe-{os.getpid()}-{ident}"
-    try:
-        group.mkdir()
-        try:
-            if not (group / "pids.max").is_file():
-                group.rmdir()
-                return None
-            # Allow a few bubblewrap setup tasks; the supervisor enforces the
-            # exact command-descendant budget after the kernel bound.
-            (group / "pids.max").write_text(str(nproc + 8), encoding="ascii")
-        except OSError:
-            group.rmdir()
-            return None
-    except OSError:
-        return None
-    return group
+from sf_launch import _command_cgroup
 
 
 class ManagedProcess:

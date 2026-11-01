@@ -13,6 +13,7 @@ import kernel_execution_policy as policy
 from kernel_exec_capability import shell_capability
 from kernel_exec_capability import ExecLimits
 from kernel_exec_session import ExecSession
+from sf_launch import _NPROC_HEADROOM
 
 pytestmark = [pytest.mark.host_sandbox,
               pytest.mark.skipif(not sys.platform.startswith("linux"), reason="Linux RLIMIT_NPROC semantics")]
@@ -31,7 +32,8 @@ THREAD_STORM_SCRIPT = ("import threading\n"
                        "    for thread in threads: thread.join()\n")
 
 
-def test_check_sandbox_starts_with_many_user_threads(tmp_path):
+@pytest.fixture
+def busy_same_uid():
     helper = subprocess.Popen(
         [sys.executable, "-c", "import sys, threading\n"
          "event = threading.Event()\n"
@@ -45,29 +47,40 @@ def test_check_sandbox_starts_with_many_user_threads(tmp_path):
         assert ready, "same-uid thread helper did not start"
         assert helper.stdout.readline() == b"ready\n", helper.stderr.read() if helper.poll() is not None else ""
         assert len(os.listdir(f"/proc/{helper.pid}/task")) >= 401
-        result = policy.run_sandboxed(["/bin/sh", "-c", "echo ok"], tmp_path, timeout=60)
-        assert result.completed.returncode == 0, result.completed.stderr
-        assert "ok" in result.completed.stdout
-        for name in ("workspace", "env", "home", "run"):
-            (tmp_path / name).mkdir()
-        cap = shell_capability(workspace=tmp_path / "workspace", run_env_dir=tmp_path / "env",
-                               scratch_home=tmp_path / "home", network="none", writable=True)
-        with ExecSession(tmp_path / "run") as session:
-            command = session.run(["/bin/sh", "-c", "echo session-ok"], cap)
-        assert command.exit_code == 0 and b"session-ok" in command.output, command
+        yield helper
     finally:
         helper.terminate()
         helper.communicate(timeout=10)
 
 
-def test_check_sandbox_still_bounds_new_processes(tmp_path):
+def test_check_sandbox_starts_with_many_user_threads(tmp_path, busy_same_uid):
+    assert busy_same_uid.poll() is None
+    result = policy.run_sandboxed(["/bin/sh", "-c", "echo ok"], tmp_path, timeout=60)
+    assert result.completed.returncode == 0, result.completed.stderr
+    assert "ok" in result.completed.stdout
+    for name in ("workspace", "env", "home", "run"):
+        (tmp_path / name).mkdir()
+    cap = shell_capability(workspace=tmp_path / "workspace", run_env_dir=tmp_path / "env",
+                           scratch_home=tmp_path / "home", network="none", writable=True)
+    with ExecSession(tmp_path / "run") as session:
+        command = session.run(["/bin/sh", "-c", "echo session-ok"], cap)
+    assert command.exit_code == 0 and b"session-ok" in command.output, command
+
+
+def test_check_sandbox_still_bounds_new_processes(tmp_path, busy_same_uid, monkeypatch):
     # The budget applies to processes the check creates: a fork loop beyond it must be refused.
+    # Force the mandatory RLIMIT fallback so a delegated cgroup cannot mask a host-count regression.
+    monkeypatch.setattr(policy, "_command_cgroup", lambda ident, nproc: None)
     script = ("import os,sys\nn=0\ntry:\n    for _ in range(400):\n        if os.fork()==0:\n"
               "            import time; time.sleep(5); os._exit(0)\n        n+=1\nexcept OSError:\n"
               "    print('bounded', n)\n    sys.exit(0)\nprint('unbounded', n)\n")
     result = policy.run_sandboxed([sys.executable, "-c", script], tmp_path, timeout=60, nproc=64)
     marker, count = result.completed.stdout.strip().split()
-    assert marker == "bounded" and 0 < int(count) < 400, result.completed.stdout + result.completed.stderr
+    assert busy_same_uid.poll() is None
+    assert marker == "bounded" and 0 < int(count) <= 64 + _NPROC_HEADROOM, (
+        result.completed.stdout + result.completed.stderr)
+    normal = policy.run_sandboxed(["/bin/sh", "-c", "echo ok"], tmp_path, timeout=60)
+    assert normal.completed.returncode == 0 and normal.completed.stdout.strip() == "ok", normal
 
 
 def test_session_launcher_bounds_thread_creation(tmp_path):

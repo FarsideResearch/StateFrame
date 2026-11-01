@@ -30,6 +30,29 @@ def _current_cgroup() -> Path | None:
         return None
 
 
+def _command_cgroup(ident: str, nproc: int) -> Path | None:
+    """Use delegated pids.max when available; RLIMIT_NPROC remains the fallback."""
+    parent = _current_cgroup()
+    if parent is None:
+        return None
+    group = parent / f"stateframe-{os.getpid()}-{ident}"
+    try:
+        group.mkdir()
+        try:
+            if not (group / "pids.max").is_file():
+                group.rmdir()
+                return None
+            # Allow a few bubblewrap setup tasks. The in-namespace limit
+            # independently bounds the check's tasks when delegation is absent.
+            (group / "pids.max").write_text(str(nproc + 8), encoding="ascii")
+        except OSError:
+            group.rmdir()
+            return None
+    except OSError:
+        return None
+    return group
+
+
 def _user_task_count() -> int:
     """Count readable threads charged to our real UID, not procfs owners."""
     uid = os.getuid()
@@ -146,11 +169,11 @@ def launch(spec: dict) -> None:
 
 def main() -> int:
     try:
-        if len(sys.argv) >= 4 and sys.argv[1] == "--nproc-ceiling":
-            ceiling = int(sys.argv[2])
-            if ceiling < 1:
-                raise ValueError("NPROC ceiling must be positive")
-            _set_relative_nproc_limit(ceiling)
+        if len(sys.argv) >= 4 and sys.argv[1] == "--nproc-budget":
+            budget = int(sys.argv[2])
+            if not 1 <= budget <= 256:
+                raise ValueError("NPROC budget is outside the execution policy bound")
+            _set_relative_nproc_limit(_user_task_count() + budget + _NPROC_HEADROOM)
             os.execvpe(sys.argv[3], sys.argv[3:], os.environ)
         if len(sys.argv) >= 4 and sys.argv[1] == "--cgroup-enter":
             try:

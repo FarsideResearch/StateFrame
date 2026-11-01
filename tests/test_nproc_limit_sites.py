@@ -7,7 +7,6 @@ import sys
 import pytest
 
 import kernel_execution_policy as policy
-import kernel_exec_supervisor as supervisor
 import kernel_test_isolation as isolation
 import sf_launch
 
@@ -81,7 +80,6 @@ def test_planted_embedded_runner_limit_is_caught():
 def test_outer_preexec_never_lowers_nproc_before_bwrap(monkeypatch):
     calls = []
     monkeypatch.setattr(policy.platform, "system", lambda: "Linux")
-    monkeypatch.setattr(policy, "_user_task_count", lambda: 400)
     monkeypatch.setattr(policy.resource, "getrlimit",
                         lambda kind: (policy.resource.RLIM_INFINITY, policy.resource.RLIM_INFINITY))
     monkeypatch.setattr(policy.resource, "setrlimit", lambda kind, limits: calls.append((kind, limits)))
@@ -89,29 +87,30 @@ def test_outer_preexec_never_lowers_nproc_before_bwrap(monkeypatch):
     assert all(kind != policy.resource.RLIMIT_NPROC for kind, _ in calls)
 
 
-def test_outer_policy_passes_relative_ceiling_to_builder(monkeypatch, tmp_path):
+def test_outer_policy_passes_budget_to_builder_without_host_count(monkeypatch, tmp_path):
     received = {}
     monkeypatch.setattr(policy.platform, "system", lambda: "Linux")
-    monkeypatch.setattr(policy, "_user_task_count", lambda: 400)
     monkeypatch.setattr(policy, "require_capabilities", lambda: object())
+    monkeypatch.setattr(sf_launch, "_user_task_count",
+                        lambda: pytest.fail("host task count must not be sampled"))
 
     def build(command, root, env, **kwargs):
         received.update(kwargs)
         return command, env
 
     policy._prepared(["/bin/true"], tmp_path, {}, None, False, 64, isolation_builder=build)
-    assert received["nproc_ceiling"] == 592
+    assert received["nproc_budget"] == 64
 
 
 def test_outer_command_installs_nproc_after_bwrap(monkeypatch, tmp_path):
     monkeypatch.setattr(isolation, "backend", lambda: "/usr/bin/bwrap")
     monkeypatch.setattr(isolation.platform, "system", lambda: "Linux")
     command, _ = isolation.isolated_command(["/bin/echo", "ok"], tmp_path, {},
-                                             nproc_ceiling=592)
+                                             nproc_budget=64)
     boundary = command.index("--")
     assert command[boundary + 1:boundary + 5] == [
-        sys.executable, "-I", "/tmp/sf_launch.py", "--nproc-ceiling"]
-    assert command[boundary + 5:] == ["592", "/bin/echo", "ok"]
+        sys.executable, "-I", "/tmp/sf_launch.py", "--nproc-budget"]
+    assert command[boundary + 5:] == ["64", "/bin/echo", "ok"]
     assert ["--ro-bind", str(ENGINE / "sf_launch.py"), "/tmp/sf_launch.py"] == command[
         command.index(str(ENGINE / "sf_launch.py")) - 1:
         command.index(str(ENGINE / "sf_launch.py")) + 2]
@@ -157,8 +156,8 @@ def test_task_count_ignores_non_ascii_name(monkeypatch):
 
 
 def test_command_cgroup_uses_writable_pids_max_or_falls_back(monkeypatch, tmp_path):
-    monkeypatch.setattr(supervisor, "_current_cgroup", lambda: tmp_path)
-    assert supervisor._command_cgroup("missing", 8) is None
+    monkeypatch.setattr(sf_launch, "_current_cgroup", lambda: tmp_path)
+    assert sf_launch._command_cgroup("missing", 8) is None
     assert not list(tmp_path.iterdir())
 
     mkdir = Path.mkdir
@@ -167,6 +166,53 @@ def test_command_cgroup_uses_writable_pids_max_or_falls_back(monkeypatch, tmp_pa
         if path.parent == tmp_path:
             (path / "pids.max").touch()
     monkeypatch.setattr(Path, "mkdir", with_pids_file)
-    group = supervisor._command_cgroup("delegated", 8)
+    group = sf_launch._command_cgroup("delegated", 8)
     assert group is not None
     assert (group / "pids.max").read_text() == "16"
+
+
+def test_outer_launcher_counts_inside_namespace_before_exec(monkeypatch):
+    calls = []
+    monkeypatch.setattr(sf_launch, "_user_task_count", lambda: 2)
+    monkeypatch.setattr(sf_launch, "_set_relative_nproc_limit", calls.append)
+
+    def stop_exec(*args):
+        raise RuntimeError("exec reached")
+
+    monkeypatch.setattr(sf_launch.os, "execvpe", stop_exec)
+    monkeypatch.setattr(sys, "argv", ["sf_launch.py", "--nproc-budget", "64", "/bin/true"])
+    assert sf_launch.main() == 125
+    assert calls == [2 + 64 + sf_launch._NPROC_HEADROOM]
+
+
+def test_outer_preexec_enters_optional_cgroup_before_exec(monkeypatch, tmp_path):
+    calls = []
+    monkeypatch.setattr(policy.resource, "getrlimit",
+                        lambda kind: (policy.resource.RLIM_INFINITY, policy.resource.RLIM_INFINITY))
+    monkeypatch.setattr(policy.resource, "setrlimit", lambda kind, limits: calls.append(kind))
+    policy._resource_preexec(30, 512 * 1024 * 1024, 1024 * 1024, 128, 64, tmp_path)()
+    assert (tmp_path / "cgroup.procs").read_text() == str(policy.os.getpid())
+    assert calls
+
+
+def test_outer_check_uses_and_cleans_up_optional_cgroup(monkeypatch, tmp_path):
+    group = tmp_path / "delegated"
+    group.mkdir()
+    seen = []
+    monkeypatch.setattr(policy.platform, "system", lambda: "Linux")
+    monkeypatch.setattr(policy, "_command_cgroup", lambda ident, nproc: group)
+
+    class Process:
+        pid = 123
+        returncode = 0
+
+    def spawn(command, root, **kwargs):
+        seen.append(kwargs["cgroup"])
+        return Process(), object()
+
+    monkeypatch.setattr(policy, "sandboxed_popen", spawn)
+    monkeypatch.setattr(policy, "_collect", lambda *args, **kwargs: ("ok", "", False, False, False))
+    result = policy.run_sandboxed(["/bin/true"], tmp_path)
+    assert result.completed.stdout == "ok"
+    assert seen == [group]
+    assert not group.exists()
