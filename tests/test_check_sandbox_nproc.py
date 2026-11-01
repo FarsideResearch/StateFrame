@@ -3,15 +3,32 @@ import os
 import select
 import subprocess
 import sys
+from dataclasses import asdict, replace
+import json
+from pathlib import Path
 
 import pytest
 
 import kernel_execution_policy as policy
 from kernel_exec_capability import shell_capability
+from kernel_exec_capability import ExecLimits
 from kernel_exec_session import ExecSession
 
 pytestmark = [pytest.mark.host_sandbox,
               pytest.mark.skipif(not sys.platform.startswith("linux"), reason="Linux RLIMIT_NPROC semantics")]
+
+THREAD_STORM_SCRIPT = ("import threading\n"
+                       "threading.stack_size(65536)\n"
+                       "event = threading.Event()\nthreads = []\n"
+                       "try:\n"
+                       "    for _ in range(200):\n"
+                       "        thread = threading.Thread(target=event.wait)\n"
+                       "        thread.start()\n        threads.append(thread)\n"
+                       "except RuntimeError:\n    print('bounded', len(threads), flush=True)\n"
+                       "else:\n    print('unbounded', len(threads), flush=True)\n"
+                       "finally:\n"
+                       "    event.set()\n"
+                       "    for thread in threads: thread.join()\n")
 
 
 def test_check_sandbox_starts_with_many_user_threads(tmp_path):
@@ -49,4 +66,27 @@ def test_check_sandbox_still_bounds_new_processes(tmp_path):
               "            import time; time.sleep(5); os._exit(0)\n        n+=1\nexcept OSError:\n"
               "    print('bounded', n)\n    sys.exit(0)\nprint('unbounded', n)\n")
     result = policy.run_sandboxed([sys.executable, "-c", script], tmp_path, timeout=60, nproc=64)
-    assert "bounded" in result.completed.stdout, result.completed.stdout + result.completed.stderr
+    marker, count = result.completed.stdout.strip().split()
+    assert marker == "bounded" and 0 < int(count) < 400, result.completed.stdout + result.completed.stderr
+
+
+def test_session_launcher_bounds_thread_creation(tmp_path):
+    for name in ("workspace", "env", "home", "run"):
+        (tmp_path / name).mkdir()
+    cap = shell_capability(workspace=tmp_path / "workspace", run_env_dir=tmp_path / "env",
+                           scratch_home=tmp_path / "home", network="none", writable=True)
+    cap = replace(cap, limits=replace(cap.limits, nproc=8, wall_seconds=15))
+    with ExecSession(tmp_path / "run") as session:
+        result = session.run([sys.executable, "-c", THREAD_STORM_SCRIPT], cap)
+    marker, count = result.output.decode().strip().split()
+    assert result.exit_code == 0 and marker == "bounded" and 0 < int(count) < 200, result
+
+
+def test_launcher_relative_limit_bounds_threads_without_cgroup(tmp_path):
+    launcher = Path(policy.__file__).with_name("sf_launch.py")
+    spec = {"argv": [sys.executable, "-c", THREAD_STORM_SCRIPT], "cwd": str(tmp_path), "env": {},
+            "limits": asdict(ExecLimits(nproc=8)), "memory_supervised": True}
+    result = subprocess.run([sys.executable, "-I", str(launcher), json.dumps(spec)],
+                            capture_output=True, text=True, timeout=10)
+    marker, count = result.stdout.strip().split()
+    assert result.returncode == 0 and marker == "bounded" and 0 < int(count) < 200, result

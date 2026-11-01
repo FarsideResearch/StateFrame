@@ -1,21 +1,31 @@
 """Prevent another uid-wide process limit from bypassing the relative policy."""
 import ast
+import io
 from pathlib import Path
 
 import pytest
 
 import kernel_execution_policy as policy
+import kernel_exec_supervisor as supervisor
+import sf_launch
 
 
 SOURCE = Path(__file__).resolve().parents[1] / "src"
 ENGINE = SOURCE / "stateframe" / "engine"
-ALLOWED = (ENGINE / "kernel_execution_policy.py", "_set_relative_nproc_limit")
+ALLOWED = (ENGINE / "sf_launch.py", "_set_relative_nproc_limit")
 
 
 def _nproc_sites(path: Path, source: str):
     if "RLIMIT_NPROC" not in source:
         return
     tree = ast.parse(source, filename=str(path))
+    for node in ast.walk(tree):
+        if (isinstance(node, ast.Assign)
+                and any(isinstance(target, ast.Name) and target.id.endswith("SOURCE")
+                        for target in node.targets)
+                and isinstance(node.value, ast.Constant) and isinstance(node.value.value, str)
+                and "RLIMIT_NPROC" in node.value.value):
+            yield from _nproc_sites(path, node.value.value)
     parents = {child: node for node in ast.walk(tree) for child in ast.iter_child_nodes(node)}
     for node in ast.walk(tree):
         if not isinstance(node, ast.Attribute) or node.attr != "RLIMIT_NPROC":
@@ -33,6 +43,12 @@ def _assert_single_site(sources):
 
 def test_only_relative_helper_sets_nproc():
     _assert_single_site((path, path.read_text()) for path in sorted(SOURCE.rglob("*.py")))
+    tree = ast.parse((ENGINE / "sf_launch.py").read_text())
+    setters = [node for node in ast.walk(tree) if isinstance(node, ast.Call)
+               and isinstance(node.func, ast.Attribute) and node.func.attr == "setrlimit"
+               and node.args and any(isinstance(arg, ast.Attribute) and arg.attr == "RLIMIT_NPROC"
+                                     for arg in ast.walk(node.args[0]))]
+    assert len(setters) == 1
 
 
 def test_planted_absolute_limit_is_caught():
@@ -51,6 +67,15 @@ def test_planted_launcher_list_limit_is_caught():
         _assert_single_site(sources)
 
 
+def test_planted_embedded_runner_limit_is_caught():
+    sources = [(path, path.read_text()) for path in sorted(SOURCE.rglob("*.py"))]
+    sources.append((ENGINE / "planted_violation.py",
+                    'RUNNER_SOURCE = """def run():\n'
+                    '    resource.setrlimit(resource.RLIMIT_NPROC, (256, 256))\n"""\n'))
+    with pytest.raises(AssertionError, match="planted_violation"):
+        _assert_single_site(sources)
+
+
 def test_outer_limit_uses_task_count_and_headroom(monkeypatch):
     calls = []
     monkeypatch.setattr(policy.platform, "system", lambda: "Linux")
@@ -60,3 +85,40 @@ def test_outer_limit_uses_task_count_and_headroom(monkeypatch):
     monkeypatch.setattr(policy.resource, "setrlimit", lambda kind, limits: calls.append((kind, limits)))
     policy._resource_preexec(30, 512 * 1024 * 1024, 1024 * 1024, 128, 64)()
     assert (policy.resource.RLIMIT_NPROC, (592, 592)) in calls
+
+
+def test_task_count_uses_real_uid_and_threads(monkeypatch):
+    monkeypatch.setattr(sf_launch.os, "getuid", lambda: 1001)
+    monkeypatch.setattr(sf_launch.os, "listdir", lambda path: ["11", "12", "13"])
+    statuses = {
+        "/proc/11/status": "Uid:\t1001\t0\t0\t0\nThreads:\t401\n",
+        "/proc/12/status": "Uid:\t1002\t1001\t1001\t1001\nThreads:\t50\n",
+        "/proc/13/status": "Uid:\t1001\t1002\t1002\t1002\nThreads:\t2\n",
+    }
+    monkeypatch.setattr(sf_launch, "open", lambda path, **kwargs: io.StringIO(statuses[path]), raising=False)
+    assert sf_launch._user_task_count() == 403
+
+
+def test_task_count_refuses_unreadable_status(monkeypatch):
+    monkeypatch.setattr(sf_launch.os, "listdir", lambda path: ["11"])
+    def denied(path, **kwargs):
+        raise PermissionError(path)
+    monkeypatch.setattr(sf_launch, "open", denied, raising=False)
+    with pytest.raises(RuntimeError, match="cannot count visible Linux tasks"):
+        sf_launch._user_task_count()
+
+
+def test_command_cgroup_uses_writable_pids_max_or_falls_back(monkeypatch, tmp_path):
+    monkeypatch.setattr(supervisor, "_current_cgroup", lambda: tmp_path)
+    assert supervisor._command_cgroup("missing", 8) is None
+    assert not list(tmp_path.iterdir())
+
+    mkdir = Path.mkdir
+    def with_pids_file(path, *args, **kwargs):
+        mkdir(path, *args, **kwargs)
+        if path.parent == tmp_path:
+            (path / "pids.max").touch()
+    monkeypatch.setattr(Path, "mkdir", with_pids_file)
+    group = supervisor._command_cgroup("delegated", 8)
+    assert group is not None
+    assert (group / "pids.max").read_text() == "16"

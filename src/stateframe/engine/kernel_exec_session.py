@@ -20,9 +20,11 @@ import uuid
 if __package__:
     from .kernel_exec_capability import ExecCapability
     from .kernel_test_isolation import sandbox_executable
+    from .sf_launch import _current_cgroup
 else:
     from kernel_exec_capability import ExecCapability
     from kernel_test_isolation import sandbox_executable
+    from sf_launch import _current_cgroup
 
 
 class ExecSessionError(RuntimeError):
@@ -152,8 +154,17 @@ class ExecSession:
             # Only the trusted supervisor sees this read-only host tree. Every
             # target gets a fresh mount/user namespace with capability-only binds.
             wrapper = [executable, "--unshare-all", "--die-with-parent", "--new-session", "--as-pid-1",
-                       "--ro-bind", "/", "/", "--proc", "/proc", "--dev", "/dev",
-                       "--bind", str(self.run_dir), str(self.run_dir)]
+                        "--ro-bind", "/", "/", "--proc", "/proc", "--dev", "/dev",
+                        "--bind", str(self.run_dir), str(self.run_dir)]
+            cgroup = _current_cgroup()
+            try:
+                pids_delegated = cgroup is not None and "pids" in (cgroup / "cgroup.subtree_control").read_text().split()
+            except OSError:
+                pids_delegated = False
+            if pids_delegated and os.access(cgroup, os.W_OK):
+                # Only the trusted supervisor can write this delegated subtree.
+                # The nested command's mount envelope does not include it.
+                wrapper += ["--bind", str(cgroup), "/sys/fs/cgroup"]
             if network == "full":
                 wrapper += ["--share-net"]
             for root in sorted(set(self._write_envelope), key=lambda p: (len(p.parts), str(p))):

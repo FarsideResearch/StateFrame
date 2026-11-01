@@ -9,6 +9,62 @@ import os
 import platform
 import resource
 import sys
+from pathlib import Path
+
+_NPROC_HEADROOM = 128
+
+
+def _current_cgroup() -> Path | None:
+    """Return our delegated v2 cgroup, if its mount is visible."""
+    if not sys.platform.startswith("linux"):
+        return None
+    try:
+        with open("/proc/self/cgroup", encoding="ascii") as stream:
+            relative = next(line.split(":", 2)[2].strip() for line in stream
+                            if line.startswith("0::"))
+        root = Path("/sys/fs/cgroup").resolve()
+        path = (root / relative.lstrip("/")).resolve()
+        path.relative_to(root)
+        return path if (path / "cgroup.controllers").is_file() else None
+    except (OSError, RuntimeError, StopIteration, ValueError):
+        return None
+
+
+def _user_task_count() -> int:
+    """Count visible threads charged to our real UID, not procfs directory owners."""
+    uid = os.getuid()
+    try:
+        entries = os.listdir("/proc")
+    except OSError as error:
+        raise RuntimeError("cannot count Linux tasks for process limit") from error
+    count = 0
+    for entry in entries:
+        if not entry.isdigit():
+            continue
+        try:
+            with open(f"/proc/{entry}/status", encoding="ascii") as status:
+                fields = {line.split(":", 1)[0]: line.split(":", 1)[1].split()
+                          for line in status if line.startswith(("Uid:", "Threads:"))}
+            real_uid = int(fields["Uid"][0])
+            threads = int(fields["Threads"][0])
+            if threads < 1:
+                raise ValueError("invalid thread count")
+        except FileNotFoundError:
+            continue  # The process exited while scanning.
+        except (OSError, KeyError, IndexError, ValueError) as error:
+            raise RuntimeError("cannot count visible Linux tasks for process limit") from error
+        if real_uid == uid:
+            count += threads
+    return count
+
+
+def _set_relative_nproc_limit(ceiling: int) -> None:
+    """Apply the single uid-wide NPROC setter without raising an inherited hard cap."""
+    soft, hard = resource.getrlimit(resource.RLIMIT_NPROC)
+    infinity = resource.RLIM_INFINITY
+    bound = ceiling if hard == infinity else min(ceiling, hard)
+    new_soft = bound if soft == infinity else min(bound, soft)
+    resource.setrlimit(resource.RLIMIT_NPROC, (new_soft, bound))
 
 
 def install_syscall_filter(*, network_none: bool) -> None:
@@ -77,9 +133,6 @@ def launch(spec: dict) -> None:
     process_limits = [(resource.RLIMIT_CPU, math.ceil(limits["cpu_seconds"])),
                       (resource.RLIMIT_FSIZE, limits["file_bytes"]),
                       (resource.RLIMIT_NOFILE, limits["nofile"])]
-    # The supervisor bounds tracked descendants in the command's PID namespace.
-    # RLIMIT_NPROC is uid-wide on Linux and can refuse a safe command when unrelated
-    # same-uid threads exist, including tasks hidden in another PID namespace.
     for kind, value in process_limits:
         # Never silently keep a weaker limit if the OS refuses this request.
         hard = resource.getrlimit(kind)[1]
@@ -87,11 +140,22 @@ def launch(spec: dict) -> None:
         resource.setrlimit(kind, (value, value))
     resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
     os.chdir(spec["cwd"])
+    if sys.platform.startswith("linux"):
+        # Count immediately before exec; the optional cgroup and supervisor provide
+        # independent bounds when namespace visibility or concurrent tasks race us.
+        _set_relative_nproc_limit(_user_task_count() + limits["nproc"] + _NPROC_HEADROOM)
     os.execvpe(argv[0], argv, spec["env"])
 
 
 def main() -> int:
     try:
+        if len(sys.argv) >= 4 and sys.argv[1] == "--cgroup-enter":
+            try:
+                with open(os.path.join(sys.argv[2], "cgroup.procs"), "w", encoding="ascii") as stream:
+                    stream.write(str(os.getpid()))
+            except OSError:
+                pass  # RLIMIT_NPROC remains the mandatory fallback.
+            os.execvpe(sys.argv[3], sys.argv[3:], os.environ)
         if len(sys.argv) >= 4 and sys.argv[1] in {"--network-none", "--process-filter"}:
             environment = json.loads(sys.argv[2])
             install_syscall_filter(network_none=sys.argv[1] == "--network-none")

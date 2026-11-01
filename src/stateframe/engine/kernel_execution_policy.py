@@ -22,6 +22,7 @@ from collections.abc import Mapping, Sequence
 from typing import Callable
 
 from kernel_test_isolation import isolated_command, sandbox_executable
+from sf_launch import _set_relative_nproc_limit, _user_task_count, _NPROC_HEADROOM
 
 
 MAX_WALL_SECONDS = 900.0
@@ -31,7 +32,6 @@ DEFAULT_MEMORY_BYTES = 512 * 1024 * 1024
 DEFAULT_FILE_BYTES = 8 * 1024 * 1024
 DEFAULT_NOFILE = 128
 DEFAULT_NPROC = 64
-_NPROC_HEADROOM = 128
 MAX_OUTPUT_BYTES = 256 * 1024
 MAX_PROFILE_OUTPUT_BYTES = 16 * 1024
 _PROFILE_FD_ENV = "STATEFRAME_TEST_RUN_SPANS_FD"
@@ -215,35 +215,6 @@ def _lowered_limits(current: tuple[int, int], limit: int) -> tuple[int, int]:
     return new_soft, bound
 
 
-def _user_task_count() -> int:
-    """Visible Linux tasks owned by this real uid, including every thread."""
-    uid = os.getuid()
-    count = 0
-    try:
-        entries = os.listdir("/proc")
-    except OSError as error:
-        raise ExecutionPolicyError("cannot count Linux tasks for process limit") from error
-    for entry in entries:
-        if entry.isdigit():
-            try:
-                if os.stat(f"/proc/{entry}").st_uid == uid:
-                    with open(f"/proc/{entry}/status", encoding="ascii") as status:
-                        count += next(int(line.split()[1]) for line in status
-                                      if line.startswith("Threads:"))
-            except OSError:
-                continue  # exited while scanning
-    return count
-
-
-def _set_relative_nproc_limit(ceiling: int) -> None:
-    # RLIMIT_NPROC counts threads for the host uid, even outside this PID namespace.
-    # The outer check has no descendant supervisor, so count visible tasks and leave
-    # room for hidden namespace tasks and concurrent desktop activity. The ceiling
-    # remains finite and limits a fork bomb; inherited lower hard limits still win.
-    resource.setrlimit(resource.RLIMIT_NPROC,
-                       _lowered_limits(resource.getrlimit(resource.RLIMIT_NPROC), ceiling))
-
-
 def _resource_preexec(cpu_seconds: float, memory_bytes: int,
                       file_bytes: int, nofile: int, nproc: int) -> Callable[[], None]:
     cpu = int(math.ceil(_limit_value("cpu_seconds", cpu_seconds, maximum=MAX_WALL_SECONDS)))
@@ -251,8 +222,12 @@ def _resource_preexec(cpu_seconds: float, memory_bytes: int,
     file_limit = int(_limit_value("file_bytes", file_bytes, maximum=64 * 1024 * 1024))
     nofile_limit = int(_limit_value("nofile", nofile, maximum=1024))
     nproc_limit = int(_limit_value("nproc", nproc, maximum=256))
-    nproc_ceiling = (_user_task_count() + nproc_limit + _NPROC_HEADROOM
-                     if platform.system() == "Linux" else None)
+    nproc_ceiling = None
+    if platform.system() == "Linux":
+        try:
+            nproc_ceiling = _user_task_count() + nproc_limit + _NPROC_HEADROOM
+        except RuntimeError as error:
+            raise ExecutionPolicyError("cannot count Linux tasks for process limit") from error
 
     def _lower_only(which: int, value: int) -> None:
         # A non-root process may only LOWER a hard limit.  Containers often start
