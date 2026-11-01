@@ -62,6 +62,7 @@ This release has an early five-run result on the previously stalled multi-file r
 ## Per-step models
 
 - Roles are assigned mechanically. The engine cannot tell reading from editing before the reply, because the tools it offers do not depend on what the step is for. So an edit step first goes to the model of the role it was assigned, usually `read` (or `plan` on the first request and after a failed test run); if that reply writes files it is thrown away unrun and the step is asked again of the `edit` model. Each edit step costs one extra request on that first model.
+- Shell commands are not escalated. A `shell` call counts as a reading step and runs on whichever role's model asked for it, even when the command writes files, so a `read` model can change the working copy through `shell`. The sandbox and effect checks still apply and record every change. Use `--shell read-only` to prevent this.
 - Switching models between requests resets the server's prompt cache for that request, so a routed run reuses less cache than a single-model run.
 - The token allowance for chat-template overhead is calibrated on Qwen3.6-35B-A3B. Each role's tokens are counted on its own server, but a model with a much larger template can come close to its slot on the largest frames.
 - Every role's server slot must be at least the run's context size (65,536 tokens by default). A small model served with a smaller slot is refused at start when its server reports the slot size; a server that reports none is not checked.

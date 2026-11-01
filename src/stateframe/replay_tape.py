@@ -342,7 +342,12 @@ class Replayer:
     def _route_model_swap(self, route: object) -> dict | None:
         if not isinstance(route, dict):
             return self.model_swap
+        recorded = route.get("model")
+        served = recorded
         for change in self.route_changes:
-            if change.get("role") == route.get("role") and change.get("field") == "model":
-                return {"served": change.get("to"), "recorded": [change.get("from")]}
+            if (change.get("role") == route.get("role") and change.get("field") == "model"
+                    and change.get("from") == served):
+                served = change.get("to")
+        if served != recorded:
+            return {"served": served, "recorded": [recorded]}
         return self.model_swap

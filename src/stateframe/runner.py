@@ -1732,6 +1732,15 @@ def _compare_resume_routes(recorded: object, current: routes.RouteTable | None,
     return changes
 
 
+def _compose_resume_route_changes(spec: dict, changes: list[dict[str, object]]) -> None:
+    """Keep moves needed by carried tape, then apply this resume's moves in order."""
+    if not changes or spec["resume"].get("restart_live"):
+        return
+    prior = spec["resume"].get("route_changes", [])
+    if prior[-len(changes):] != changes:
+        spec["resume"]["route_changes"] = [*prior, *changes]
+
+
 def resume_run(run_dir: Path, *, endpoint: Endpoint | None = None, max_turns: int | None = None,
                 timeout_s: float | None = None, quiet: bool = False, model: str | None = None,
                 keep_checkpoints: bool = False, replay_external: bool = False,
@@ -1883,8 +1892,7 @@ def resume_run(run_dir: Path, *, endpoint: Endpoint | None = None, max_turns: in
             spec = _resume_spec(run_dir, endpoint)
             if options._routes is not None:
                 spec["routes"] = options._routes.public()
-            if route_changes:
-                spec["resume"]["route_changes"] = route_changes
+            _compose_resume_route_changes(spec, route_changes)
             (run_dir / "spec.json").write_text(json.dumps(spec, indent=1, sort_keys=True))
             # The cache slot stays the one the run started with: it is part of the request bytes.
             slot = spec.get("prompt_cache_slot") or {}
@@ -1926,8 +1934,7 @@ def resume_run(run_dir: Path, *, endpoint: Endpoint | None = None, max_turns: in
             spec = _resume_spec(run_dir, endpoint)
             if options._routes is not None:
                 spec["routes"] = options._routes.public()
-            if route_changes:
-                spec["resume"]["route_changes"] = route_changes
+            _compose_resume_route_changes(spec, route_changes)
             spec["resume"]["checkpoint_refused"] = refused
             (run_dir / "spec.json").write_text(json.dumps(spec, indent=1, sort_keys=True))
             from .shell_host import provision

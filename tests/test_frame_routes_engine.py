@@ -118,6 +118,23 @@ def test_every_call_classified_before_dispatch():
     assert frame_routes.unclassified_dispatcher({"new_dispatcher_tool"}) == {"new_dispatcher_tool"}
 
 
+def test_shell_is_a_read_step_and_never_escalates():
+    # Accepted, documented decision (running.md "Shell commands are not escalated", KNOWN_LIMITATIONS
+    # "Per-step models"): shell runs sandboxed on the run's copy and its writes are reconciled by the
+    # effect checks, so a shell call runs on whichever role asked, even when it writes files.
+    # Changing this changes what users were told; update both documents with it.
+    assert "shell" in frame_routes.READ and "shell" not in frame_routes.WRITE
+    frame_routes.install(table("read.model=reader"))
+    reader = frame_routes.resolve("read")
+    write_command = [{"function": {"name": "shell",
+                                   "arguments": json.dumps({"command": "sed -i s/a/b/ app.py"})}}]
+    assert frame_routes.classify_calls(write_command) == "read"
+    assert frame_routes.escalation_target(reader, write_command) is None
+    docs = Path(__file__).resolve().parents[1]
+    assert "Shell commands are not escalated" in (docs / "docs/guide/running.md").read_text()
+    assert "Shell commands are not escalated" in (docs / "KNOWN_LIMITATIONS.md").read_text()
+
+
 def test_workspace_writing_mcp_and_custom_tools_escalate_to_edit(tmp_path):
     # A read-model reply that calls a writing MCP or custom tool must be re-asked of the edit model.
     from types import SimpleNamespace

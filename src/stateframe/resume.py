@@ -248,8 +248,11 @@ def assess(run: Path, *, max_turns: int | None = None, model: str | None = None,
     if problem:
         raise ResumeRefused(f"the engine journal is damaged ({problem}); this run cannot be resumed")
     try:
-        tape = carry_forward(spec, replay_tape.build(run / "wire", run / "sends.jsonl"),
-                             (run / "resume-divergence.json").exists())
+        tape = carry_forward(spec, replay_tape.build(run / "wire", run / "sends.jsonl",
+                                                    routes_required=bool(spec.get("routes"))),
+                              (run / "resume-divergence.json").exists())
+        if spec.get("routes"):
+            replay_tape.pending_request(run / "wire", routes_required=True)
     except (OSError, replay_tape.TapeError) as error:
         raise ResumeRefused(f"the recorded model exchanges are damaged ({error}); "
                             "this run cannot be resumed") from None
@@ -370,13 +373,16 @@ def archive_attempt(state: dict[str, object], engine_dir: Path, *, use_checkpoin
     # a live restart must archive it so fresh calls can reuse their original ids.
     if restart_live and (run / "tool-tape.jsonl").exists():
         os.replace(run / "tool-tape.jsonl", folder / "tool-tape.jsonl")
+    own_tape = ([] if restart_live else replay_tape.build(
+        source / "wire", source / "sends.jsonl", routes_required=bool(spec.get("routes"))))
     tape = ([] if restart_live else carry_forward(
-        spec, replay_tape.build(source / "wire", source / "sends.jsonl",
-                                routes_required=bool(spec.get("routes"))),
-        (source / "resume-divergence.json").exists()))
+        spec, own_tape, (source / "resume-divergence.json").exists()))
+    carried = bool(spec.get("routes")) and len(tape) > len(own_tape)
     # A live restart replays nothing, so there is no recorded pending request to verify.
-    pending = (replay_tape.pending_request(source / "wire", routes_required=True)
+    pending = ((spec.get("resume") or {}).get("pending") if carried else
+               replay_tape.pending_request(source / "wire", routes_required=True)
                if spec.get("routes") and not restart_live else None)
+    prior_route_changes = ((spec.get("resume") or {}).get("route_changes") if carried else None)
     checkpoint = select_checkpoint(run, tape, source / "wire") if use_checkpoint and not restart_live else None
     spec["max_turns"] = int(state["max_turns"])
     spec["environment"]["REACT_STEPS"] = str(spec["max_turns"])
@@ -392,6 +398,7 @@ def archive_attempt(state: dict[str, object], engine_dir: Path, *, use_checkpoin
                       "resumed": datetime.now(timezone.utc).isoformat(timespec="seconds"),
                       "tape": tape,
                       **({"pending": pending} if pending is not None else {}),
+                      **({"route_changes": prior_route_changes} if prior_route_changes else {}),
                       **({"restart_live": True} if restart_live else {}),
                       "archived_external_operations": (external if restart_live else
                           (spec.get("resume") or {}).get("archived_external_operations", [])),
