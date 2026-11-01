@@ -5,11 +5,13 @@ from __future__ import annotations
 import hashlib
 import os
 from collections.abc import Mapping, Sequence
+from functools import lru_cache
 from pathlib import Path
 
 
-_PURE_SOURCE_TOOLS = frozenset({
+_BUILTIN_SOURCE_READERS = frozenset({
     "read", "grep", "shell", "list_files", "where_defined", "who_calls", "references",
+    "git",
 })
 _MAX_LOCKED_REQUESTS = 2
 _MAX_LOCKED_PATHS = 64
@@ -145,6 +147,41 @@ def _repair_route(runtime: object, tools: Sequence[dict], paths: Mapping[str, st
             and bool(names & {"run_tests", "authored_check"}))
 
 
+@lru_cache(maxsize=1)
+def _builtin_tool_names() -> frozenset[str]:
+    from kernel_agent_schemas import BUILTIN_SCHEMAS
+    from kernel_completion_owner import TOOL_SPECS
+    from kernel_lean import _KNOWN_TOOL_NAMES
+    return frozenset(set(TOOL_SPECS) | _KNOWN_TOOL_NAMES
+                     | {row["function"]["name"] for row in BUILTIN_SCHEMAS}
+                     | {"file_create", "file_delete", "file_move", "read_check_receipt",
+                        "authored_check", "run_tests", "done"})
+
+
+def _source_access(runtime: object, tool: Mapping[str, object]) -> str | None:
+    """Return source-reader, other, or unknown for a request tool."""
+    function = tool.get("function")
+    name = function.get("name") if isinstance(function, Mapping) else None
+    if not isinstance(name, str):
+        return None
+    if name in _BUILTIN_SOURCE_READERS:
+        return "source_reader"
+    declared = getattr(runtime, "_workspace_tool_capabilities", {})
+    if isinstance(declared, Mapping) and name in declared:
+        value = declared[name]
+        return value if isinstance(value, str) and value in {"source_reader", "other"} else None
+    if name in _builtin_tool_names():
+        return "other"
+    # Dynamic tools must declare capability out of band. Unknown tools can
+    # read workspace source, so a lockout cannot truthfully engage with them.
+    return None
+
+
+def _classifiable(runtime: object, tools: Sequence[dict]) -> bool:
+    return all(isinstance(tool, Mapping) and _source_access(runtime, tool) is not None
+               for tool in tools)
+
+
 def final_source_visible(runtime: object, visible_bookmarks: Sequence[Mapping[str, object]],
                          tools: Sequence[dict]) -> bool:
     """Validate that a locked request actually carries its repair source."""
@@ -242,13 +279,15 @@ def project(runtime: object, tools: Sequence[dict]) -> list[dict]:
             state["streak"] = 0
             state["paths"] = {}
         if (state["streak"] >= 1 and not state["remaining"] and not capped
-                and _repair_route(runtime, tools, state["paths"])):
+                 and _repair_route(runtime, tools, state["paths"])
+                 and _classifiable(runtime, tools)):
             state["remaining"] = _MAX_LOCKED_REQUESTS
             _emit(runtime, "UNCHANGED_READ_REQUEST", state)
     if (not state["remaining"] or _failure(runtime) != state["failure"]
             or not _fresh(runtime, state["paths"])
             or getattr(runtime, "_request_deferred_source_paths", ())
-            or (state["remaining"] and not _repair_route(runtime, tools, state["paths"]))):
+             or (state["remaining"] and (not _repair_route(runtime, tools, state["paths"])
+                                          or not _classifiable(runtime, tools)))):
         if state["remaining"]:
             state["remaining"] = 0
             _emit(runtime, "FRESH_READ_REQUIRED", state)
@@ -271,8 +310,10 @@ def filter_tools(runtime: object, tools: Sequence[dict]) -> list[dict]:
     if getattr(runtime, "_request_deferred_source_paths", ()):
         release(runtime, "FRESH_READ_REQUIRED")
         return list(tools)
-    selected = [tool for tool in tools
-                if tool.get("function", {}).get("name") not in _PURE_SOURCE_TOOLS]
+    if not _classifiable(runtime, tools):
+        release(runtime, "FRESH_READ_REQUIRED")
+        return list(tools)
+    selected = [tool for tool in tools if _source_access(runtime, tool) != "source_reader"]
     state = getattr(runtime, "_read_lockout_state", None)
     paths = state.get("paths", {}) if isinstance(state, Mapping) else {}
     if not selected or not _repair_route(runtime, tools, paths):

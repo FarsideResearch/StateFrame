@@ -11,6 +11,7 @@ from collections.abc import Iterator, Mapping, Sequence
 from pathlib import Path
 
 from kernel_frame_optional_allocation import FrameAllocationReplanNeeded
+from stateframe.workcopy import frame_source_path_allowed
 
 
 def _current_window(root: Path, path: str, start: int, end: int,
@@ -22,7 +23,8 @@ def _current_window(root: Path, path: str, start: int, end: int,
     )
     from kernel_stateframe_headcarry import _read_source
 
-    if _safe_framefit_path(path) != path or not 1 <= start <= end:
+    if (_safe_framefit_path(path) != path or not frame_source_path_allowed(path)
+            or not 1 <= start <= end):
         return None
     raw = _read_source(root, path)
     if raw is None or "sha256:" + hashlib.sha256(raw).hexdigest() != revision:
@@ -284,7 +286,7 @@ def recent_editable_read_windows(runtime: object, frame: Mapping[str, object]) -
         if not isinstance(row, Mapping):
             continue
         path, revision = row.get("path"), row.get("revision")
-        if (not isinstance(path, str) or path not in editable
+        if (not isinstance(path, str) or not frame_source_path_allowed(path) or path not in editable
                 or not isinstance(revision, str)):
             continue
         for start, end in _read_spans(row):
@@ -349,12 +351,13 @@ def editable_product_windows(runtime: object, frame: Mapping[str, object],
     for edit in frame.get("applied_edits", ()):
         if (isinstance(edit, Mapping) and edit.get("result_class") == "APPLIED"
                 and isinstance(edit.get("file"), str)
-                and _safe_framefit_path(edit["file"]) == edit["file"]):
+                and _safe_framefit_path(edit["file"]) == edit["file"]
+                and frame_source_path_allowed(edit["file"])):
             editable.add(edit["file"])
     source_suffixes = {".py", ".js", ".jsx", ".ts", ".tsx", ".vue", ".go",
                        ".rs", ".java", ".rb", ".php", ".css", ".html", ".sql", ".sh"}
     editable = sorted(path for path in editable
-                      if not path.startswith("tests/")
+                      if frame_source_path_allowed(path) and not path.startswith("tests/")
                       and Path(path).suffix in source_suffixes)
     root = _workspace_root(runtime)
     facts = {row.get("path"): row for row in frame.get("read_facts", ())
@@ -432,7 +435,8 @@ def public_check_source_windows(runtime: object, state: Mapping[str, object]) ->
         if not isinstance(selector, str):
             continue
         path, _, name = selector.partition("::")
-        if _safe_framefit_path(path) != path or path in seen:
+        if (_safe_framefit_path(path) != path or not frame_source_path_allowed(path)
+                or path in seen):
             continue
         matching = next(((row, start, end) for row in _read_rows(state, runtime)
                          if row.get("path") == path and isinstance(row.get("revision"), str)
@@ -530,7 +534,8 @@ def _source_coverage_line_items(messages: Sequence[Mapping[str, object]],
             break
         if isinstance(frame, Mapping):
             facts = {row["path"]: row for row in frame.get("read_facts", ())
-                     if isinstance(row, Mapping) and isinstance(row.get("path"), str)}
+                     if isinstance(row, Mapping) and isinstance(row.get("path"), str)
+                     and frame_source_path_allowed(row["path"])}
         break
 
     shown: dict[tuple[str, str, int], list[tuple[int, int]]] = {}
@@ -540,7 +545,8 @@ def _source_coverage_line_items(messages: Sequence[Mapping[str, object]],
             continue
         path, revision, total = (metadata.get("path"), metadata.get("revision"),
                                  metadata.get("total_lines"))
-        if not isinstance(path, str) or not isinstance(revision, str) or type(total) is not int:
+        if (not isinstance(path, str) or not frame_source_path_allowed(path)
+                or not isinstance(revision, str) or type(total) is not int):
             continue
         ranges = shown.setdefault((path, revision, total), [])
         for span in metadata.get("ranges", ()):
@@ -575,7 +581,8 @@ def _source_coverage_line_items(messages: Sequence[Mapping[str, object]],
             visibility = "partial source shown below; complete line coverage unverified."
         lines.append(f"{path} ({total} {noun}, {change}): {visibility}")
     shown_paths = {path for path, _revision, _total in shown}
-    for path in sorted((set(editable_paths) | set(facts)) - shown_paths):
+    for path in sorted(path for path in (set(editable_paths) | set(facts)) - shown_paths
+                       if frame_source_path_allowed(path)):
         lines.append(f"{path}: not shown; read this path to see current source.")
     return sorted(lines)
 
@@ -697,6 +704,7 @@ def _prune_redundant_source_metadata(messages: list[dict[str, object]]) -> None:
 
 def fit_recent_read_windows(body: Mapping[str, object], windows: Sequence[Mapping[str, object]],
                             *, public_checks: Sequence[Mapping[str, object]] = (),
+                            product_windows: Sequence[Mapping[str, object]] = (),
                             protected_messages: Sequence[Mapping[str, object]] = (),
                             newest_user_suffix: Sequence[Mapping[str, object]] = (),
                             deferred_source_paths: Sequence[str] = (),
@@ -708,6 +716,14 @@ def fit_recent_read_windows(body: Mapping[str, object], windows: Sequence[Mappin
     from kernel_stateframe_framefit5 import _is_volatile_tail_message
 
     show_coverage = bookmarks_enabled()
+    windows = [row for row in windows if frame_source_path_allowed(row.get("path"))]
+    product_windows = [row for row in product_windows
+                       if frame_source_path_allowed(row.get("path"))]
+    public_checks = [row for row in public_checks
+                     if all((meta := parse_model_source_window(row.get(level))) is None
+                            or frame_source_path_allowed(meta.get("path"))
+                            for level in ("full", "excerpt", "assertions"))]
+    editable_paths = [path for path in editable_paths if frame_source_path_allowed(path)]
     base = copy.deepcopy(dict(body))
     messages = base.get("messages")
     if not isinstance(messages, list):
@@ -718,8 +734,9 @@ def fit_recent_read_windows(body: Mapping[str, object], windows: Sequence[Mappin
              and (" recent reads; about " in str(message["content"])
                   or " selected source windows; about " in str(message["content"]))
               or show_coverage and str(message["content"]).startswith("[Source coverage]\n")
-             or (meta := parse_model_source_window(message["content"])) is not None
-             and meta.get("owner") in {"recent_editable_read", "required_public_check"}))]
+              or (meta := parse_model_source_window(message["content"])) is not None
+              and (meta.get("owner") in {"recent_editable_read", "required_public_check"}
+                   or not frame_source_path_allowed(meta.get("path")))))]
     def window_key(content: object) -> tuple[object, ...] | None:
         metadata = parse_model_source_window(content) or parse_window(content)
         if not isinstance(metadata, Mapping):
@@ -734,7 +751,8 @@ def fit_recent_read_windows(body: Mapping[str, object], windows: Sequence[Mappin
     deferred_paths = frozenset(deferred_source_paths)
 
     def candidate(reads: Sequence[Mapping[str, object]], checks: Sequence[tuple[str, int]],
-                  *, release_deferred: bool = False) -> dict[str, object]:
+                  *, release_deferred: bool = False,
+                  with_coverage: bool = True) -> dict[str, object]:
         trial = copy.deepcopy(base)
         rows = trial["messages"]
         selected = []
@@ -794,9 +812,8 @@ def fit_recent_read_windows(body: Mapping[str, object], windows: Sequence[Mappin
             position = suffix_start
         additions = []
         emitted_keys = set(existing)
-        emitted_reads = 0
-        source_chars = 0
-        bookmark_emitted = False
+        source_chars = sum(int(row.get("source_chars", 0)) for row in reads)
+        bookmark_emitted = any(row.get("bookmark") is True for row in reads)
         for row in reads:
             content = str(row["content"])
             key = window_key(content)
@@ -805,24 +822,21 @@ def fit_recent_read_windows(body: Mapping[str, object], windows: Sequence[Mappin
             additions.append({"role": "user", "content": content})
             if key is not None:
                 emitted_keys.add(key)
-            emitted_reads += 1
-            source_chars += int(row.get("source_chars", 0))
-            bookmark_emitted |= row.get("bookmark") is True
         for content, chars in checks:
+            source_chars += chars
             key = window_key(content)
             if not content or key in emitted_keys:
                 continue
             additions.append({"role": "user", "content": content})
             if key is not None:
                 emitted_keys.add(key)
-            source_chars += chars
-        summary = (f"kept {emitted_reads} selected source windows; about {source_chars} chars of source fit"
+        summary = (f"kept {len(reads)} selected source windows; about {source_chars} chars of source fit"
                    if bookmark_emitted
-                   else f"kept {emitted_reads} recent reads; about {source_chars} chars of source fit")
+                   else f"kept {len(reads)} recent reads; about {source_chars} chars of source fit")
         if reads or checks or not show_coverage:
             additions.append({"role": "user", "content": summary})
         rows[position:position] = additions
-        if show_coverage:
+        if show_coverage and with_coverage:
             _prune_redundant_source_metadata(rows)
             coverage = _source_coverage_line_items(rows, editable_paths)
             if coverage:
@@ -851,28 +865,52 @@ def fit_recent_read_windows(body: Mapping[str, object], windows: Sequence[Mappin
             selected[index]["source_chars"] = int(selected[index]["compact_source_chars"])
             yield [dict(row) for row in selected]
 
+    def upgrade(reads: list[dict[str, object]], checks: Sequence[tuple[str, int]],
+                release_deferred: bool, with_coverage: bool,
+                baseline: dict[str, object]) -> dict[str, object]:
+        # Whole files spend only budget left after the selected read/bookmark
+        # windows and failing-check sites. A non-fitting file cannot block a
+        # later, smaller file; selected windows are never displaced.
+        if not show_coverage or not product_windows:
+            return baseline
+        upgraded = list(reads)
+        result = baseline
+        for whole in product_windows:
+            proposal = [*upgraded, dict(whole)]
+            trial = candidate(proposal, checks, release_deferred=release_deferred,
+                              with_coverage=with_coverage)
+            if fits(trial):
+                upgraded = proposal
+                result = trial
+        return result
+
     for count in range(limit, -1, -1):
         for release_deferred in ((False, True) if deferred_paths and count else (False,)):
             for level in check_levels:
-                checks = [(str(row.get(level) or ""), int(row.get(level + "_chars", 0)))
-                          for row in public_checks]
+                for with_coverage in ((True, False) if show_coverage else (False,)):
+                    checks = [(str(row.get(level) or ""), int(row.get(level + "_chars", 0)))
+                              for row in public_checks]
+                    proposals = (variants(windows[:count]) if show_coverage or count <= rank_one_count
+                                  else ([dict(row) for row in windows[:count]],))
+                    for selection in proposals:
+                        trial = candidate(
+                            selection, checks, release_deferred=release_deferred,
+                            with_coverage=with_coverage,
+                        )
+                        if fits(trial):
+                            return upgrade(selection, checks, release_deferred,
+                                           with_coverage, trial)
+    for count in range(limit, -1, -1):
+        for release_deferred in ((False, True) if deferred_paths and count else (False,)):
+            for with_coverage in ((True, False) if show_coverage else (False,)):
                 proposals = (variants(windows[:count]) if show_coverage or count <= rank_one_count
                               else ([dict(row) for row in windows[:count]],))
                 for selection in proposals:
-                    trial = candidate(
-                        selection, checks,
-                        release_deferred=release_deferred,
-                    )
+                    trial = candidate(selection, (), release_deferred=release_deferred,
+                                      with_coverage=with_coverage)
                     if fits(trial):
-                        return trial
-    for count in range(limit, -1, -1):
-        for release_deferred in ((False, True) if deferred_paths and count else (False,)):
-            proposals = (variants(windows[:count]) if show_coverage or count <= rank_one_count
-                          else ([dict(row) for row in windows[:count]],))
-            for selection in proposals:
-                trial = candidate(selection, (), release_deferred=release_deferred)
-                if fits(trial):
-                    return trial
+                        return upgrade(selection, (), release_deferred,
+                                       with_coverage, trial)
     return base
 
 
@@ -912,7 +950,7 @@ def frame_source_snapshot(
         str(path): row["content"]
         for path, row in getattr(runtime, "_empirical_frame_sources", {}).items()
         if isinstance(row, Mapping) and isinstance(row.get("content"), str)
-        and public_path(path) == str(path)
+        and public_path(path) == str(path) and frame_source_path_allowed(str(path))
     }
     if not isinstance(plan, Mapping):
         return sources
@@ -925,7 +963,7 @@ def frame_source_snapshot(
     for unit in plan.get("units", ()):
         path = unit.get("path") if isinstance(unit, Mapping) else None
         if (not isinstance(path, str) or _safe_framefit_path(path) != path
-                or public_path(path) != path):
+                or public_path(path) != path or not frame_source_path_allowed(path)):
             raise FrameAllocationReplanNeeded("source proof has an unsafe selected path")
         if path in checked:
             continue

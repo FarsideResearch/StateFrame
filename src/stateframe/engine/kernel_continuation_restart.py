@@ -871,6 +871,8 @@ def checkpoint(runtime, messages, worker_state):
         "trimmed": sorted(runtime._trimmed),
         "conversation": checkpoint_conversation(messages),
         "owner_restore": capture_owner_restore(runtime),
+        # This clock advances even when no read/bookmark state exists.
+        "provider_request_count": getattr(runtime, "_frame_budget_request_count", 0),
     }
     from kernel_code_bookmarks import enabled as bookmarks_enabled
     if bookmarks_enabled() and (
@@ -936,6 +938,16 @@ def _keyed_done_tail(runtime, tail):
         else:
             return None
     return covered if started else None
+
+
+def restore_provider_request_count(runtime: object, saved: Mapping[str, object]) -> int | None:
+    """Restore the provider clock even when no bookmark replay was recorded."""
+    request_count = saved.get("provider_request_count")
+    if "provider_request_count" in saved:
+        if type(request_count) is not int or not 0 <= request_count <= 1_000_000_000:
+            raise WorkerResumeError("invalid provider request count")
+        runtime._frame_budget_request_count = request_count
+    return request_count
 
 
 def restore_runtime(runtime):
@@ -1056,12 +1068,17 @@ def restore_runtime(runtime):
     restore_notes(runtime, replay_saved, records, event)
     runtime.resume_worker_state = copy.deepcopy(saved["worker"])
     restore_runtime_field_values(runtime, saved["runtime"])
+    request_count = restore_provider_request_count(runtime, saved)
     if "code_bookmark_replay" in saved:
         from kernel_code_bookmarks import enabled as bookmarks_enabled
         from kernel_reread_result_truth import restore_replay
         if bookmarks_enabled():
             try:
-                restore_replay(runtime, saved["code_bookmark_replay"])
+                replay = saved["code_bookmark_replay"]
+                if (request_count is not None and isinstance(replay, Mapping)
+                        and replay.get("request_number") != request_count):
+                    raise ValueError("provider request count differs from bookmark replay")
+                restore_replay(runtime, replay)
             except ValueError as error:
                 raise WorkerResumeError("invalid bookmark read replay") from error
     reconcile_environment_notice_tail(runtime, tail, event["sequence"])
