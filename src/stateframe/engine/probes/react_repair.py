@@ -6194,6 +6194,13 @@ def work(d, *, resume=None):
         _agent_tools = agent_tools_service()
         if _agent_tools is not None:
             _agent_tools.bind()
+            omitted = _agent_tools.shell.spec.get("mcp_omitted", ())
+            if omitted:
+                from kernel_mcp_tools import omission_note
+                note = omission_note(omitted)
+                if note:
+                    msgs[1]["content"] += "\n\n" + note
+                    baseline_messages[1]["content"] += "\n\n" + note
         created_this_run: set = set()
         action_anchor = len(msgs)     # conversation index just after the last real ACTION
         last_surgery_step = -99       # cooldown so back-to-back surgeries cannot thrash

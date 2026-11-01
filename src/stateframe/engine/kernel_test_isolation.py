@@ -12,6 +12,7 @@ fallback.
 from __future__ import annotations
 
 import json
+from functools import lru_cache
 import os
 from pathlib import Path
 import platform
@@ -75,6 +76,23 @@ def backend() -> str:
     if executable is None:
         raise RuntimeError(f"restricted information policy requires {name}; no unsandboxed fallback")
     return executable
+
+
+@lru_cache(maxsize=16)
+def _bwrap_userns_guard_supported(executable: str) -> bool:
+    """Launch once per binary to learn whether the guard works here, not each command.
+
+    Advertised flags are not enough: the guard also needs a user namespace, which hosts
+    may forbid. Any failure keeps the existing launch contract instead of breaking it.
+    """
+    probe = [executable, "--unshare-user", "--disable-userns", "--assert-userns-disabled",
+             "--ro-bind", "/", "/", "--", "/bin/sh", "-c", "exit 0"]
+    try:
+        result = subprocess.run(probe, capture_output=True, timeout=5, check=False,
+                                env={"PATH": os.defpath, "LANG": "C", "LC_ALL": "C"})
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return result.returncode == 0
 
 
 def _interpreter_roots(selected: Path) -> set[str]:
@@ -232,7 +250,8 @@ def _darwin_xcrun_filter() -> str:
                     for path in sorted(paths))
 
 
-def capability_command(command, cap, *, platform_backend=None, shared_namespace=False):
+def capability_command(command, cap, *, platform_backend=None, shared_namespace=False,
+                       single_process=False, private_pid_unit=False):
     """Build a shell/job boundary from explicit authority, never host test policy.
 
     shared_namespace is private to the Linux session supervisor: keep its PID/net
@@ -260,6 +279,8 @@ def capability_command(command, cap, *, platform_backend=None, shared_namespace=
         profile = ("(version 1) (allow default) "
                    f"(deny file-read* (require-not (require-any {filters(reads)} {metadata} {devices} {cache_filter}))) "
                    f"(deny file-write* (require-not (require-any {filters(writes)} {cache_filter} (literal \"/dev/null\")))) ")
+        if single_process:
+            profile += "(deny process-fork) "
         if cap.network != "full":
             profile += "(deny network*) "
         if cap.network == "loopback":
@@ -278,8 +299,17 @@ def capability_command(command, cap, *, platform_backend=None, shared_namespace=
         arguments += ["--unshare-pid", "--proc", "/proc"]
     else:
         arguments += ["--unshare-all", "--new-session", "--proc", "/proc"]
+        if private_pid_unit:
+            arguments += ["--as-pid-1"]
         if cap.network == "full":
             arguments += ["--share-net"]
+    # Refuse further user namespaces when this binary and host can enforce it. The guard
+    # needs a user namespace of its own: --unshare-all only tries one, and running as root
+    # skips it, so request it explicitly. Otherwise keep the existing contract.
+    if _bwrap_userns_guard_supported(executable):
+        if not shared_namespace:
+            arguments += ["--unshare-user"]
+        arguments += ["--disable-userns", "--assert-userns-disabled"]
     arguments += ["--dev", "/dev", "--cap-drop", "ALL"]
     # Merged-/usr distributions make /lib, /bin, ... symlinks. Capability roots are resolved,
     # so recreate those links or the ELF loader (/lib/ld-linux-*.so) is missing in the sandbox.

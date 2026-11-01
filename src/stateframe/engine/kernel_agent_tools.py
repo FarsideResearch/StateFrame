@@ -21,7 +21,7 @@ from kernel_web_fetch import WebPolicy, fetch
 
 
 class AgentTools:
-    def __init__(self, shell, custom):
+    def __init__(self, shell, custom, mcp_servers=(), *, resume_active=False):
         from kernel_completion_owner import TOOL_SPECS
         from kernel_lean import _KNOWN_TOOL_NAMES
         from kernel_custom_tools import CustomToolError
@@ -31,6 +31,8 @@ class AgentTools:
             raise CustomToolError("custom tools duplicate built-in capabilities: " + ", ".join(collisions))
         self.shell = shell
         self.custom = {tool.name: tool for tool in custom.tools}
+        self.mcp_servers = tuple(mcp_servers)
+        self.resume_active = resume_active
         self.custom_schemas = copy.deepcopy(custom.schemas())
         for schema in self.custom_schemas:
             schema["function"]["parameters"]["properties"].setdefault("why", {"type": "string"})
@@ -64,8 +66,31 @@ class AgentTools:
         with tempfile.NamedTemporaryFile(mode="w", prefix="tool-schema-budget-", suffix=".json",
                                          dir=shell.run_dir, delete=False) as report:
             json.dump(self.schema_budget, report, sort_keys=True)
+            self.schema_budget_path = Path(report.name)
 
     def bind(self):
+        if self.mcp_servers:
+            from kernel_mcp_tools import discover
+            from kernel_custom_tools import CustomToolError
+            if self.resume_active and not self.shell.settings.replay_external:
+                external = [server.name for server in self.mcp_servers if server.replay == "external"]
+                if external:
+                    raise ToolReplayRefused(
+                        "MCP discovery requires --replay-external for servers: " + ", ".join(external))
+            found = discover(self.mcp_servers, self.shell.root, self.shell.run_dir,
+                             shell_network=self.shell.settings.shell_network,
+                             host_authorization=self.shell.settings.host_authorization is not None,
+                             custom_schemas=self.custom_schemas, endpoint=self.shell.spec.get("chat_url"))
+            if (found.digest != self.shell.spec.get("mcp_tools_digest")
+                    or [t.name for t in found.tools] != self.shell.spec.get("mcp_tools")
+                    or list(found.omitted) != self.shell.spec.get("mcp_omitted")):
+                raise CustomToolError("MCP tool list or schema changed since host validation")
+            self.custom.update({tool.name: tool for tool in found.tools})
+            self.custom_schemas.extend(copy.deepcopy(found.schemas()))
+            self.names = OBSERVATION_NAMES | self.custom.keys()
+            from kernel_agent_schemas import measure_schemas
+            self.schema_budget = measure_schemas(self.custom_schemas, endpoint=self.shell.spec.get("chat_url"))
+            self.schema_budget_path.write_text(json.dumps(self.schema_budget, sort_keys=True))
         if self.git is not None:
             self.git.workspace = self.shell.root
             self.git.baseline = Path(self.shell.spec.get("parent_snapshot", self.shell.root))
@@ -286,9 +311,9 @@ class AgentTools:
 _active: AgentTools | None = None
 
 
-def configure(shell, custom):
+def configure(shell, custom, mcp_servers=(), *, resume_active=False):
     global _active
-    candidate = AgentTools(shell, custom)
+    candidate = AgentTools(shell, custom, mcp_servers, resume_active=resume_active)
     # Publish only after all definitions and the source view validate. Dynamic
     # dispatch and schema consumers resolve this same per-run object.
     _active = candidate

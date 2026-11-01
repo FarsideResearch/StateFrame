@@ -760,6 +760,7 @@ def main(argv: list[str]) -> int:
         pass
     sys.path.insert(0, str(engine))
     from kernel_custom_tools import CustomToolError, load_tool_files
+    from kernel_mcp_tools import load_mcp_files
     from kernel_tool_settings import ToolSettingsError, load_tool_settings
     from kernel_tool_tape import ToolTapeError, configure_replay
     try:
@@ -774,6 +775,8 @@ def main(argv: list[str]) -> int:
                                      builtin_names=builtin_names, shell_network=settings.shell_network)
             if custom.digest != spec.get("custom_tools_digest"):
                 raise CustomToolError("custom tool definition or executable changed since host validation")
+            mcp_servers = load_mcp_files([Path(item["path"]) for item in settings.mcp_files],
+                                         shell_network=settings.shell_network)
         configure_replay(run, active=bool(replayer and replayer.tape))
     except (ToolSettingsError, CustomToolError, ToolTapeError, SkillError, OSError, KeyError, ValueError) as error:
         emit("engine_error", error=type(error).__name__, detail=str(error)[:300])
@@ -800,7 +803,8 @@ def main(argv: list[str]) -> int:
             configure_shell(run, settings, spec, session)
             from kernel_shell_tool import service as shell_service
             from kernel_agent_tools import configure as configure_agent_tools
-            configure_agent_tools(shell_service(), custom)
+            configure_agent_tools(shell_service(), custom, mcp_servers,
+                                  resume_active=resume is not None)
         from kernel_skills import configure as configure_skills
         configure_skills(skill_records, skill_digest, spec.get("chat_url"))
         from probes import react_repair as rr

@@ -1,13 +1,17 @@
 # Changelog
 
-## 0.2.3 (2026-11-01)
-
-- Requests to a stock llama-server failed with HTTP 415 once they reached 32 KiB; compression is now off by default. If compression is enabled for a compatible relay and a server refuses it, the request is sent once more without compression.
-- Resume now tells releases apart: the engine fingerprint it compares is refreshed for this release (0.2.1 and 0.2.2 carried the 0.2.0 value, so a run started on an older release was admitted and then fell back to replaying its recorded requests).
 ## Unreleased
 
 - Add explicitly selected reusable skills, a bounded catalog and on-demand instruction loading. Optional command definitions require separate trust and use the existing sandbox and replay path.
 - Pin selected skill bytes for resume and refuse changed or missing bundles before replay.
+- Add opt-in MCP stdio tool servers with sandboxed discovery and calls, bounded schemas and protocol messages, and tape-aware replay.
+- Keep the protocol client in the engine, contain each server through a private Linux PID namespace or macOS process-creation denial, and bound model-facing omission notes to fixed reason codes.
+- Harden Linux namespace isolation when supported by bubblewrap and account for nested PID namespace descendants in server resource limits.
+
+## 0.2.3 (2026-11-01)
+
+- Requests to a stock llama-server failed with HTTP 415 once they reached 32 KiB; compression is now off by default. If compression is enabled for a compatible relay and a server refuses it, the request is sent once more without compression.
+- Resume now tells releases apart: the engine fingerprint it compares is refreshed for this release (0.2.1 and 0.2.2 carried the 0.2.0 value, so a run started on an older release was admitted and then fell back to replaying its recorded requests).
 
 ## 0.2.2 (2026-11-01)
 

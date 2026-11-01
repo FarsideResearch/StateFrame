@@ -92,6 +92,21 @@ class ProcessTable:
             return 0
         return int(fields[1]) * os.sysconf("SC_PAGE_SIZE")
 
+    def limit_breach(self, live: list[ProcessIdentity], limits) -> str:
+        """Apply the same aggregate limits to every supervised containment unit."""
+        if sum(self.resident_bytes(row) for row in live) > limits.memory_bytes:
+            return "aggregate resident-memory limit exceeded"
+        if len(live) > limits.nproc:
+            return "process limit exceeded"
+        return ""
+
+    @staticmethod
+    def pid_namespace(pid: int) -> str | None:
+        try:
+            return os.readlink(f"/proc/{pid}/ns/pid")
+        except FileNotFoundError:
+            return None
+
     def snapshot(self) -> dict[int, ProcessIdentity]:
         if self._lib is not None:
             count = self._lib.proc_listallpids(None, 0)

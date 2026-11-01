@@ -64,9 +64,9 @@ class ManagedProcess:
                 self.process.stdout.close()
                 self.stop(0)
         live = self.family.update(rows)
-        if (sum(self.family.table.resident_bytes(row) for row in live) > self.cap.limits.memory_bytes
-                or len(live) > self.cap.limits.nproc):
-            self.limit_detail = "aggregate resident-memory or process limit exceeded"
+        breach = self.family.table.limit_breach(live, self.cap.limits)
+        if breach:
+            self.limit_detail = breach
             self.stop(0)
         self.exit_code = self.process.poll()
         if self.exit_code is not None:
