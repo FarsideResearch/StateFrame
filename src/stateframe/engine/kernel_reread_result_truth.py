@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import json
 import os
 import re
 from collections import OrderedDict
@@ -11,6 +12,102 @@ from collections.abc import Mapping, Sequence
 ENV = "STATEFRAME_REREAD_RESULT_TRUTH"
 EVICTION_NOTICE = "[not shown] {path} @rev {rev}: re-read to see it"
 _SEEN_LIMIT = 256
+_REPLAY_SCHEMA = "stateframe-code-bookmark-read-replay/3"
+
+
+def _current_product_revision(measurement: object) -> str | None:
+    binding = getattr(measurement, "binding", None)
+    if callable(binding):
+        try:
+            value = binding()
+        except Exception:
+            # A failed optional freshness lookup must not deny the exact read.
+            return None
+        if isinstance(value, Mapping) and isinstance(value.get("product_revision"), str):
+            return value["product_revision"]
+    value = getattr(measurement, "current_product_revision", None)
+    return value if isinstance(value, str) else None
+
+
+def _canonical_failure(receipt: object) -> dict[str, str] | None:
+    if not isinstance(receipt, Mapping) or receipt.get("status") != "FAIL":
+        return None
+    receipt_id, revision = receipt.get("receipt_id"), receipt.get("revision")
+    if (not isinstance(receipt_id, str) or not 0 < len(receipt_id) <= 160
+            or not isinstance(revision, str) or not 0 < len(revision) <= 128):
+        return None
+    fields = {key: str(receipt.get(key) or "") for key in ("outcome", "failure_phase")}
+    if any(len(value) > 64 for value in fields.values()):
+        return None
+    if (fields["outcome"].upper() in {"INVALID_CHECK", "ENVIRONMENT", "NOT_RUN", "UNKNOWN"}
+            or fields["failure_phase"].upper() in {
+                "COLLECTION", "IMPORT", "SETUP", "HOST", "EXECUTION", "TIMEOUT"}):
+        return None
+    assertion = " ".join(str(receipt.get("assertion_context_preview") or "").split())[:200].rstrip()
+    if not assertion:
+        return None
+    # The runner tail is private on the live path and absent from the compact
+    # journal projection. Bind both paths to the same public assertion instead.
+    digest = hashlib.sha256(assertion.encode("utf-8")).hexdigest()
+    return {"receipt_id": receipt_id, "revision": revision, "status": "FAIL",
+            **fields, "runner_tail_digest": digest, "assertion": assertion}
+
+
+def _current_failure(measurement: object) -> dict[str, str] | None:
+    revision = _current_product_revision(measurement)
+    context = getattr(measurement, "_framefit_action_context", None)
+    frame = context.get("framefit5") if isinstance(context, Mapping) else None
+    verdict = frame.get("last_verdict") if isinstance(frame, Mapping) else None
+    if revision is None and isinstance(verdict, Mapping):
+        candidate = verdict.get("current_revision")
+        revision = candidate if isinstance(candidate, str) else None
+    if revision is None:
+        return None
+    latest = getattr(measurement, "_latest_check_receipt", None)
+    failure = _canonical_failure(latest)
+    if failure is not None:
+        receipts = getattr(measurement, "host_check_receipts", ())
+        authenticated = isinstance(receipts, list) and any(
+            _canonical_failure(row) == failure
+            for row in receipts)
+        if authenticated and failure["revision"] == revision:
+            return failure
+    if (isinstance(latest, Mapping) and latest.get("revision") == revision
+            and latest.get("status") != "FAIL"):
+        return None
+    if (isinstance(verdict, Mapping) and verdict.get("status") == "FAIL"
+            and verdict.get("tested_revision") == revision
+            and verdict.get("current_revision") == revision):
+        # The compact journal projection is durable; the runtime's public
+        # receipt list can be absent after resume. A later edit invalidates
+        # this frame until the next capture rebuilds its verdict.
+        edits = frame.get("applied_edits", ())
+        frame_edits = [row for row in edits if isinstance(row, Mapping)] if isinstance(
+            edits, (list, tuple)) else []
+        latest_edit_turn = max((row["turn"] for row in frame_edits
+                                if type(row.get("turn")) is int), default=-1)
+        latest_edit_ids = {row.get("edit_receipt") for row in frame_edits
+                           if row.get("turn") == latest_edit_turn}
+        owner_receipts = getattr(getattr(measurement, "owner", None), "_receipts", ())
+        if not any(isinstance(row, Mapping) and row.get("kind") == "edit"
+                   and row.get("result_class") == "APPLIED"
+                   and (type(row.get("turn")) is not int
+                        or row["turn"] > latest_edit_turn
+                        or (row["turn"] == latest_edit_turn
+                            and row.get("receipt_id") not in latest_edit_ids))
+                   for row in owner_receipts):
+            records = context.get("journal_receipt_records", ())
+            for row in reversed(records):
+                if (isinstance(row, Mapping)
+                        and row.get("receipt_id") == verdict.get("check_receipt_id")
+                        and row.get("revision") == revision):
+                    failure = _canonical_failure(row)
+                    if failure is not None:
+                        return failure
+    replayed = getattr(measurement, "_bookmark_failure_data", None)
+    if isinstance(replayed, Mapping) and replayed.get("revision") == revision:
+        return _canonical_failure({**replayed, "assertion_context_preview": replayed.get("assertion")})
+    return None
 
 
 def enabled() -> bool:
@@ -42,8 +139,9 @@ def read_is_owed(fact: Mapping[str, object] | object,
 
 
 def result_note(measurement: object, identity: str, generation: str | None,
-                revision: object, action: object) -> str | None:
-    """Remember only the latest read identity per file, never source text."""
+                revision: object, action: object, *,
+                requested_range: object = None, effective_range: object = None) -> str | None:
+    """Remember bounded page identities, never source text."""
     owner = getattr(measurement, "owner", None)
     if owner is not None:
         generation = str(getattr(owner, "workspace_revision", 0))
@@ -51,6 +149,18 @@ def result_note(measurement: object, identity: str, generation: str | None,
         return None
     if type(action) is not int or action < 0:
         return None
+    from kernel_code_bookmarks import enabled as bookmarks_enabled
+    active = bookmarks_enabled()
+    if active and (not isinstance(generation, str) or not isinstance(identity, str)
+                   or len(identity) > 2048 or len(generation) > 512
+                   or len(revision) > 128):
+        return None
+    if active:
+        # A read of a new interval is new evidence even when the file revision
+        # matches a previous request. Hash coordinates to bound checkpoint size.
+        coordinates = json.dumps([requested_range, effective_range], sort_keys=True,
+                                 separators=(",", ":"), default=str)
+        identity = hashlib.sha256((identity + "\0" + coordinates).encode()).hexdigest()
     seen = getattr(measurement, "_reread_result_truth", None)
     if not isinstance(seen, OrderedDict):
         seen = OrderedDict()
@@ -60,15 +170,168 @@ def result_note(measurement: object, identity: str, generation: str | None,
             return None  # Optional identity tracking must never deny a read.
     previous = seen.get(identity)
     key = (generation, revision)
+    failure = _current_failure(measurement) if active else None
+    failure_key = tuple(failure.values()) if failure is not None else None
+    request_number = getattr(measurement, "_frame_budget_request_count", None)
+    has_provider_number = type(request_number) is int and request_number > 0
+    request_id = (str(request_number) if has_provider_number
+                  else getattr(measurement, "current_request_id", None))
+    request_id = request_id if isinstance(request_id, str) and 0 < len(request_id) <= 120 else None
     if previous is not None and previous[:2] == key:
         seen.move_to_end(identity)
+        prior_request = previous[4] if len(previous) > 4 else None
+        if active and (failure_key is not None or len(previous) < 4
+                       or previous[3] is None):
+            seen[identity] = (*key, previous[2], failure_key, request_id)
+        if active and prior_request and (prior_request != request_id
+                                         or not has_provider_number):
+            assertion = (f" current failing assertion: {failure['assertion']}."
+                         if failure_key is not None and len(previous) > 3
+                         and previous[3] == failure_key else "")
+            return (f"[read] requested bytes are unchanged since request {prior_request};"
+                    f"{assertion} Current requested content is in this result.")
         return (f"[read] unchanged since action {previous[2]} @rev {generation}; "
                 "current requested content is in this result.")
-    seen[identity] = (*key, action)
+    seen[identity] = (*key, action, failure_key, request_id) if active else (*key, action)
     seen.move_to_end(identity)
     while len(seen) > _SEEN_LIMIT:
         seen.popitem(last=False)
     return None
+
+
+def checkpoint_replay(measurement: object) -> dict[str, object]:
+    """Persist only bounded identities needed for the next unchanged read."""
+    from kernel_code_bookmarks import MAX_BOOKMARKS
+    from kernel_public_localization import public_path
+
+    seen = getattr(measurement, "_reread_result_truth", None)
+    rows = [[identity, [entry[0], entry[1], entry[2],
+                        list(entry[3]) if len(entry) == 5 and isinstance(entry[3], tuple) else None,
+                        entry[4] if len(entry) == 5 else None]]
+            for identity, entry in seen.items()
+            if isinstance(identity, str) and len(identity) <= 2048
+            and isinstance(entry, tuple) and len(entry) in {3, 5}
+            and isinstance(entry[0], str) and len(entry[0]) <= 512
+            and isinstance(entry[1], str) and len(entry[1]) <= 128
+            and type(entry[2]) is int and entry[2] >= 0
+            ] if isinstance(seen, OrderedDict) else []
+    failure = _current_failure(measurement)
+    carry = getattr(measurement, "_code_bookmark_carry", ())
+    bookmarks = [
+        {"path": row["path"], "symbol": row["symbol"],
+         "read_only": row.get("read_only") is True}
+        for row in carry[:MAX_BOOKMARKS]
+        if isinstance(row, Mapping) and isinstance(row.get("path"), str)
+        and isinstance(row.get("symbol"), str) and len(row["symbol"]) <= 256
+        and public_path(row["path"]) == row["path"] and row["path"].endswith(".py")
+    ] if isinstance(carry, list) else []
+    snapshot = {"schema": _REPLAY_SCHEMA,
+                "active": getattr(measurement, "_code_bookmarks_active", False) is True,
+                "seen": rows[-_SEEN_LIMIT:], "failure": failure,
+                "bookmarks": bookmarks,
+                "request_number": getattr(measurement, "_frame_budget_request_count", 0)}
+    from kernel_read_exec import delivered_page_snapshot
+    snapshot["pages"] = delivered_page_snapshot(measurement)
+    from kernel_read_lockout import checkpoint as lockout_checkpoint
+    lockout = lockout_checkpoint(measurement)
+    if lockout is not None:
+        snapshot["read_lockout"] = lockout
+    restore_replay(_ReplayValidationTarget(), snapshot)
+    return snapshot
+
+
+class _ReplayValidationTarget:
+    pass
+
+
+def restore_replay(measurement: object, snapshot: object) -> None:
+    """Restore the same read-note decision after a validated checkpoint."""
+    from kernel_code_bookmarks import MAX_BOOKMARKS
+    from kernel_public_localization import public_path
+
+    if (not isinstance(snapshot, Mapping)
+            or snapshot.get("schema") not in {_REPLAY_SCHEMA, "stateframe-code-bookmark-read-replay/2"}
+            or type(snapshot.get("active")) is not bool):
+        raise ValueError("invalid bookmark read replay")
+    rows, failure = snapshot.get("seen"), snapshot.get("failure")
+    bookmarks = snapshot.get("bookmarks", [])
+    if (not isinstance(rows, list) or len(rows) > _SEEN_LIMIT
+            or (failure is not None and not isinstance(failure, Mapping))
+            or not isinstance(bookmarks, list) or len(bookmarks) > MAX_BOOKMARKS):
+        raise ValueError("invalid bookmark read replay")
+    pages = snapshot.get("pages", [])
+    if (not isinstance(pages, list) or len(pages) > 128
+            or (snapshot["schema"] == _REPLAY_SCHEMA and "pages" not in snapshot)):
+        raise ValueError("invalid bookmark read replay")
+    request_number = snapshot.get("request_number", 0)
+    if (type(request_number) is not int or not 0 <= request_number <= 1_000_000_000
+            or (snapshot["schema"] == _REPLAY_SCHEMA and "request_number" not in snapshot)):
+        raise ValueError("invalid bookmark read replay")
+    restored_pages: OrderedDict[str, int] = OrderedDict()
+    for row in pages:
+        if (not isinstance(row, list) or len(row) != 2
+                or not isinstance(row[0], str)
+                or re.fullmatch(r"[0-9a-f]{64}", row[0]) is None
+                or row[0] in restored_pages
+                or type(row[1]) is not int or not 1 <= row[1] <= 1_000_000_000
+                or (snapshot["schema"] == _REPLAY_SCHEMA and row[1] > request_number)):
+            raise ValueError("invalid bookmark read replay")
+        restored_pages[row[0]] = row[1]
+    restored_bookmarks = []
+    for bookmark in bookmarks:
+        if (not isinstance(bookmark, Mapping)
+                or set(bookmark) != {"path", "symbol", "read_only"}
+                or not isinstance(bookmark["path"], str)
+                or public_path(bookmark["path"]) != bookmark["path"]
+                or not bookmark["path"].endswith(".py")
+                or not isinstance(bookmark["symbol"], str)
+                or not 0 < len(bookmark["symbol"]) <= 256
+                or type(bookmark["read_only"]) is not bool):
+            raise ValueError("invalid bookmark read replay")
+        restored_bookmarks.append(dict(bookmark))
+    restored: OrderedDict[str, tuple[object, ...]] = OrderedDict()
+    for row in rows:
+        if (not isinstance(row, list) or len(row) != 2
+                or not isinstance(row[0], str) or len(row[0]) > 2048
+                or not isinstance(row[1], list) or len(row[1]) != 5):
+            raise ValueError("invalid bookmark read replay")
+        if row[0] in restored:
+            raise ValueError("invalid bookmark read replay")
+        generation, revision, action, failure_key, request_id = row[1]
+        if (not isinstance(generation, str) or len(generation) > 512
+                or not isinstance(revision, str) or len(revision) > 128
+                or type(action) is not int or action < 0
+                or (failure_key is not None and (not isinstance(failure_key, list)
+                    or len(failure_key) != 7 or any(not isinstance(value, str)
+                                                    or len(value) > 200 for value in failure_key)))
+                or (request_id is not None and (not isinstance(request_id, str)
+                                                or len(request_id) > 120))):
+            raise ValueError("invalid bookmark read replay")
+        restored[row[0]] = (generation, revision, action,
+                            (tuple(failure_key[:5]) + (
+                                hashlib.sha256(failure_key[6].encode("utf-8")).hexdigest(),
+                                failure_key[6]) if failure_key is not None else None),
+                            request_id)
+    if failure is not None:
+        if (set(failure) != {"receipt_id", "revision", "status", "outcome",
+                            "failure_phase", "runner_tail_digest", "assertion"}
+                or not isinstance(failure.get("runner_tail_digest"), str)
+                or re.fullmatch(r"[0-9a-f]{64}", failure["runner_tail_digest"]) is None):
+            raise ValueError("invalid bookmark read replay")
+        failure = _canonical_failure({**failure,
+                                      "assertion_context_preview": failure.get("assertion")})
+        if failure is None:
+            raise ValueError("invalid bookmark read replay")
+    measurement._reread_result_truth = restored
+    measurement._bookmark_failure_data = dict(failure) if failure is not None else None
+    measurement._code_bookmarks_active = snapshot["active"]
+    measurement._code_bookmark_carry = restored_bookmarks
+    measurement._read_page_delivery_replay = restored_pages
+    if snapshot["schema"] == _REPLAY_SCHEMA:
+        measurement._frame_budget_request_count = request_number
+    if "read_lockout" in snapshot:
+        from kernel_read_lockout import restore as restore_lockout
+        restore_lockout(measurement, snapshot["read_lockout"])
 
 
 def _complete_body(path: str, revision: object,
@@ -120,6 +383,9 @@ def reconcile_frame(frame: dict[str, object],
             segments.append({"path": path, "revision": revisions[path],
                              "start_line": start, "end_line": end, "text": text})
     notices: dict[str, str | None] = {}
+    bookmarks = frame.get("code_bookmarks")
+    bookmarks = bookmarks if isinstance(bookmarks, list) else []
+    from kernel_stateframe_capacity import _delivered
     for fact in facts:
         if not isinstance(fact, dict):
             continue
@@ -130,14 +396,40 @@ def reconcile_frame(frame: dict[str, object],
         if not read_is_owed(fact):
             fact["body_delivery"] = "not_owed"
             fact.pop("delivery_notice", None)
+            fact.pop("visible_symbols", None)
             notices[path] = None
             continue
         present = _complete_body(path, revision, segments)
-        fact["body_delivery"] = "present" if present else "not_shown"
+        visible = []
+        if not present:
+            for bookmark in bookmarks:
+                if (not isinstance(bookmark, Mapping) or bookmark.get("path") != path
+                        or bookmark.get("revision") != revision):
+                    continue
+                for prefix in ("shown", "compact"):
+                    start, end = (bookmark.get(prefix + suffix)
+                                  for suffix in ("_start_line", "_end_line"))
+                    if type(start) is not int or type(end) is not int:
+                        continue
+                    row = {"path": path, "revision": revision,
+                           "lines": {"start": start, "end": end},
+                           "content_sha256": bookmark.get(prefix + "_sha256")}
+                    if _delivered(row, segments):
+                        visible.append(str(bookmark.get("symbol")))
+                        break
+        fact["body_delivery"] = ("present" if present else
+                                 "bookmarked" if visible else "not_shown")
         if present:
             fact.pop("delivery_notice", None)
+            fact.pop("visible_symbols", None)
             notices[path] = "fresh"
+        elif visible:
+            fact["visible_symbols"] = sorted(set(visible))
+            notice = "[bookmark shown] " + path + "::" + ", ".join(fact["visible_symbols"])
+            fact["delivery_notice"] = notice
+            notices[path] = notice
         else:
+            fact.pop("visible_symbols", None)
             notice = eviction_notice(path, revision)
             fact["delivery_notice"] = notice
             notices[path] = notice
@@ -161,7 +453,7 @@ def reconcile_frame(frame: dict[str, object],
             for path, notice in sorted(notices.items(), key=lambda item: -len(item[0])):
                 if not line.startswith((f"- {path} ", f"- {path}::")):
                     continue
-                label = r" \| (?:fresh|\[not shown\].*?: re-read to see it) \| (read@\d+)"
+                label = r" \| (?:fresh|\[not shown\].*?: re-read to see it|\[bookmark shown\][^|]*) \| (read@\d+)"
                 if notice is None:
                     if re.search(label, line):
                         lines[index] = ""

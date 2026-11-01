@@ -872,6 +872,20 @@ def checkpoint(runtime, messages, worker_state):
         "conversation": checkpoint_conversation(messages),
         "owner_restore": capture_owner_restore(runtime),
     }
+    from kernel_code_bookmarks import enabled as bookmarks_enabled
+    from kernel_read_lockout import enabled as lockout_enabled
+    if bookmarks_enabled() or lockout_enabled():
+        # This clock advances even when no read/bookmark state exists. Only the mechanisms that number
+        # repeated reads need it; with both switches off the checkpoint stays byte-identical to 0.2.1.
+        state["provider_request_count"] = getattr(runtime, "_frame_budget_request_count", 0)
+    if bookmarks_enabled() and (
+             getattr(runtime, "_code_bookmarks_active", False) is True
+             or getattr(runtime, "_reread_result_truth", None)
+             or getattr(runtime, "_read_contract_source_cache", None)
+             or getattr(runtime, "_read_page_delivery_replay", None)
+             or getattr(runtime, "_read_lockout_state", None)):
+        from kernel_reread_result_truth import checkpoint_replay
+        state["code_bookmark_replay"] = checkpoint_replay(runtime)
     policy = first_green_checkpoint_section(runtime)
     if policy is not None:
         state[FIRST_GREEN_CHECKPOINT_KEY] = policy
@@ -927,6 +941,16 @@ def _keyed_done_tail(runtime, tail):
         else:
             return None
     return covered if started else None
+
+
+def restore_provider_request_count(runtime: object, saved: Mapping[str, object]) -> int | None:
+    """Restore the provider clock even when no bookmark replay was recorded."""
+    request_count = saved.get("provider_request_count")
+    if "provider_request_count" in saved:
+        if type(request_count) is not int or not 0 <= request_count <= 1_000_000_000:
+            raise WorkerResumeError("invalid provider request count")
+        runtime._frame_budget_request_count = request_count
+    return request_count
 
 
 def restore_runtime(runtime):
@@ -1047,6 +1071,19 @@ def restore_runtime(runtime):
     restore_notes(runtime, replay_saved, records, event)
     runtime.resume_worker_state = copy.deepcopy(saved["worker"])
     restore_runtime_field_values(runtime, saved["runtime"])
+    request_count = restore_provider_request_count(runtime, saved)
+    if "code_bookmark_replay" in saved:
+        from kernel_code_bookmarks import enabled as bookmarks_enabled
+        from kernel_reread_result_truth import restore_replay
+        if bookmarks_enabled():
+            try:
+                replay = saved["code_bookmark_replay"]
+                if (request_count is not None and isinstance(replay, Mapping)
+                        and replay.get("request_number") != request_count):
+                    raise ValueError("provider request count differs from bookmark replay")
+                restore_replay(runtime, replay)
+            except ValueError as error:
+                raise WorkerResumeError("invalid bookmark read replay") from error
     reconcile_environment_notice_tail(runtime, tail, event["sequence"])
     if getattr(runtime, "stateframe_challenge_budget", None) is not None:
         from kernel_challenge_budget import restore_state

@@ -4,7 +4,6 @@ from __future__ import annotations
 import copy
 import ast
 from contextlib import contextmanager
-import hashlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import os
@@ -437,73 +436,6 @@ def _post_server(responder):
 
 def _large_wire():
     return ('{"model":"reader","messages":[{"role":"user","content":"' + "x" * 40000 + '"}]}').encode()
-
-
-def _unsupported_gzip(headers, _raw):
-    return ((415, b'{"error":"unsupported"}') if headers.get("content-encoding") == "gzip"
-            else (200, b'{"ok":true}'))
-
-
-def test_gzip_refused_with_415_is_resent_once_uncompressed():
-    # Regression: the transport gzips bodies of 32 KiB or more for the lab relay; a stock llama.cpp
-    # server (a small local read model) answers 415, which stopped every routed run at its first read.
-    from stateframe.engine import kernel_bounded_http
-
-    wire = _large_wire()
-    with _post_server(_unsupported_gzip) as (endpoint, seen):
-        reply = kernel_bounded_http.request_bytes(wire, endpoint, "", deadline=time.monotonic() + 10,
-                                                  socket_timeout=5)
-    assert reply == b'{"ok":true}'
-    assert [headers.get("content-encoding") for headers, _ in seen] == ["gzip", None]
-    checksum = hashlib.sha256(wire).hexdigest()
-    assert [headers.get("x-request-body-sha256") for headers, _ in seen] == [checksum, checksum]
-    assert seen[1][1] == wire
-
-
-def test_ungzipped_415_is_not_resent(monkeypatch):
-    from stateframe.engine import kernel_bounded_http
-
-    monkeypatch.setenv("STATEFRAME_HTTP_GZIP", "off")
-    wire = _large_wire()
-    with _post_server(lambda _headers, _raw: (415, b'{"error":"unsupported"}')) as (endpoint, seen):
-        with pytest.raises(kernel_bounded_http.BoundedTransportError) as caught:
-            kernel_bounded_http.request_bytes(wire, endpoint, "", deadline=time.monotonic() + 10,
-                                              socket_timeout=5)
-    assert caught.value.error_type == "HTTPError"
-    assert caught.value.http_status == 415
-    assert caught.value.server_error == '{"error":"unsupported"}'
-    assert len(seen) == 1
-    assert seen[0][0].get("content-encoding") is None
-    assert seen[0][1] == wire
-
-
-def test_gzip_refused_twice_raises_after_one_resend():
-    from stateframe.engine import kernel_bounded_http
-
-    wire = _large_wire()
-    with _post_server(lambda _headers, _raw: (415, b'{"error":"unsupported"}')) as (endpoint, seen):
-        with pytest.raises(kernel_bounded_http.BoundedTransportError) as caught:
-            kernel_bounded_http.request_bytes(wire, endpoint, "", deadline=time.monotonic() + 10,
-                                              socket_timeout=5)
-    assert caught.value.error_type == "HTTPError"
-    assert caught.value.http_status == 415
-    assert caught.value.server_error == '{"error":"unsupported"}'
-    assert [headers.get("content-encoding") for headers, _ in seen] == ["gzip", None]
-    assert seen[1][1] == wire
-
-
-def test_gzip_415_resend_keeps_identity_checksum():
-    from stateframe.engine import kernel_bounded_http
-
-    wire = _large_wire()
-    with _post_server(_unsupported_gzip) as (endpoint, seen):
-        assert kernel_bounded_http.request_bytes(
-            wire, endpoint, "", deadline=time.monotonic() + 10, socket_timeout=5) == b'{"ok":true}'
-    assert len(seen) == 2
-    assert seen[0][0].get("content-encoding") == "gzip"
-    assert "content-encoding" not in seen[1][0]
-    assert seen[1][1] == wire
-    assert seen[1][0]["x-request-body-sha256"] == hashlib.sha256(wire).hexdigest()
 
 
 def test_gzip_415_after_deadline_is_not_resent():

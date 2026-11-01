@@ -9,7 +9,7 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 # Fixture repositories under tests/e2e carry their own tests; they run inside engine runs only.
-collect_ignore_glob = ["e2e/*"]
+collect_ignore_glob = ["e2e/*", "fixtures/*"]  # recorded repo copies in fixtures/ are data, never tests
 for path in (ROOT / "src", ROOT / "src" / "stateframe" / "engine"):
     sys.path.insert(0, str(path))
 

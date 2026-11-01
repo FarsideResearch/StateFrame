@@ -5,6 +5,7 @@ uses provider-origin health probes during the wait instead of a first-byte timeo
 """
 from __future__ import annotations
 
+from collections.abc import Callable
 import functools
 import ipaddress
 import http.client
@@ -21,6 +22,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from typing import TypeVar
 
 MAX_RESPONSE_BYTES = 16 * 1024 * 1024
 MAX_ERROR_BYTES = 8 * 1024
@@ -277,7 +279,8 @@ def request_bytes(wire: bytes, endpoint: str, key: str, *,
                   deadline: float, socket_timeout: float,
                   liveness_timeout: float | None = None,
                   route_meta: dict[str, object] | None = None,
-                  route_allow_remote: bool = False) -> bytes:
+                  route_allow_remote: bool = False,
+                  record_attempts: Callable[[list[dict[str, object]]], None] | None = None) -> bytes:
     """Bound the full HTTP operation and abort it after provider liveness is lost."""
     if not math.isfinite(deadline) or not math.isfinite(socket_timeout) or socket_timeout <= 0:
         raise ValueError("invalid HTTP deadline or socket timeout")
@@ -293,10 +296,10 @@ def request_bytes(wire: bytes, endpoint: str, key: str, *,
     if route_meta is not None:
         _require_routed_local(endpoint, route_allow_remote)
     packet = json.dumps({"wire": wire.decode("utf-8"), "endpoint": endpoint, "key": key,
-                          "deadline": deadline,
-                          "socket_timeout": min(socket_timeout, remaining),
-                          "gzip": request_gzip_enabled(),
-                          **({"route_allow_remote": route_allow_remote} if route_meta is not None else {})}).encode()
+                         "deadline": deadline,
+                         "socket_timeout": min(socket_timeout, remaining),
+                         "gzip": request_gzip_enabled(),
+                         **({"route_allow_remote": route_allow_remote} if route_meta is not None else {})}).encode()
     process = subprocess.Popen(
         [sys.executable, "-I", "-B", str(Path(__file__).resolve()), "--http-child"],
         stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
@@ -304,6 +307,13 @@ def request_bytes(wire: bytes, endpoint: str, key: str, *,
         output, diagnostic = _communicate_with_liveness(
             process, packet, endpoint, key, deadline=deadline,
             liveness_timeout=float(liveness_timeout))
+        if record_attempts is not None and diagnostic:
+            try:
+                attempts = json.loads(diagnostic).get("transport_attempts")
+            except (ValueError, AttributeError):
+                attempts = None
+            if isinstance(attempts, list):
+                record_attempts(attempts)
         if process.returncode != 0:
             raise _child_transport_error(diagnostic, key)
         return output
@@ -313,11 +323,27 @@ def request_bytes(wire: bytes, endpoint: str, key: str, *,
 
 REQUEST_GZIP_ENV = "STATEFRAME_HTTP_GZIP"
 REQUEST_GZIP_MIN_BYTES = 32 * 1024
+_Response = TypeVar("_Response")
+
+
+def send_with_gzip_fallback(
+        send: Callable[[bytes, dict[str, str]], _Response],
+        body: bytes, headers: dict[str, str], identity: bytes,
+        identity_headers: dict[str, str],
+        on_refused: Callable[[urllib.error.HTTPError], bool]) -> _Response:
+    """Retry only the first HTTP 415 to a request actually encoded as gzip."""
+    try:
+        return send(body, headers)
+    except urllib.error.HTTPError as error:
+        if (error.code != 415 or headers.get("Content-Encoding") != "gzip"
+                or not on_refused(error)):
+            raise
+    return send(identity, identity_headers)
 
 
 def request_gzip_enabled(environ: dict[str, str] | None = None) -> bool:
-    """``STATEFRAME_HTTP_GZIP`` on (default) | off; anything else fails closed."""
-    mode = str((environ if environ is not None else os.environ).get(REQUEST_GZIP_ENV, "on")).strip().lower()
+    """``STATEFRAME_HTTP_GZIP`` off (default) | on; anything else fails closed."""
+    mode = str((environ if environ is not None else os.environ).get(REQUEST_GZIP_ENV, "off")).strip().lower()
     if mode not in {"on", "off"}:
         raise ValueError(f"{REQUEST_GZIP_ENV} must be 'on' or 'off'")
     return mode == "on"
@@ -529,8 +555,7 @@ def _child() -> None:
     packet = json.load(sys.stdin)
     wire = packet["wire"].encode()
     body, encoding = encode_request(wire, gzip_enabled=packet.get("gzip") is True)
-    gzipped = encoding.get("Content-Encoding") == "gzip"
-    first_attempt = True
+    identity, identity_headers = encode_request(wire, gzip_enabled=False)
     tracker = _AbortiveConnectionTracker()
     handlers = [_AbortiveHTTPHandler(tracker), _AbortiveHTTPSHandler(tracker)]
     if "route_allow_remote" in packet:
@@ -538,42 +563,57 @@ def _child() -> None:
         handlers.append(_RoutedRedirects(packet["route_allow_remote"]))
     opener = urllib.request.build_opener(*handlers)
     response_complete = False
+    attempts: list[dict[str, object]] = []
+
+    def send(data: bytes, headers: dict[str, str]) -> bytes:
+        import hashlib
+        request = urllib.request.Request(packet["endpoint"], data=data,
+            headers={"Content-Type": "application/json", **headers,
+                     "Authorization": "Bearer " + packet["key"]})
+        attempt = {"content_encoding": headers.get("Content-Encoding"),
+                   "body_bytes": len(data), "body_sha256": hashlib.sha256(data).hexdigest(),
+                   "http_status": None}
+        attempts.append(attempt)
+        try:
+            with opener.open(request, timeout=packet["socket_timeout"]) as response:
+                attempt["http_status"] = response.status
+                if response.length is not None and response.length > MAX_RESPONSE_BYTES:
+                    raise ValueError("HTTP response exceeds bounded transport limit")
+                result = _read_response_body(
+                    response, tracker, deadline=packet["deadline"],
+                    socket_timeout=packet["socket_timeout"], max_bytes=MAX_RESPONSE_BYTES)
+                if len(result) > MAX_RESPONSE_BYTES:
+                    raise ValueError("HTTP response exceeds bounded transport limit")
+                tracker.finish_all()
+            return result
+        except urllib.error.HTTPError as error:
+            attempt["http_status"] = error.code
+            error_body = _read_response_body(
+                error, tracker, deadline=packet["deadline"],
+                socket_timeout=packet["socket_timeout"], max_bytes=MAX_ERROR_BYTES)
+            error.relay_error = _relay_error_label(error_body)
+            error.server_error = safe_server_error(error_body, packet["key"])
+            raise
+
+    def on_refused(_error: urllib.error.HTTPError) -> bool:
+        if time.monotonic() >= packet["deadline"]:
+            return False
+        tracker.finish_all()
+        return True
+
     try:
-        while True:
-            request = urllib.request.Request(packet["endpoint"], data=body,
-                headers={"Content-Type": "application/json", **encoding,
-                         "Authorization": "Bearer " + packet["key"]})
-            try:
-                with opener.open(request, timeout=packet["socket_timeout"]) as response:
-                    if response.length is not None and response.length > MAX_RESPONSE_BYTES:
-                        raise ValueError("HTTP response exceeds bounded transport limit")
-                    data = _read_response_body(
-                        response, tracker, deadline=packet["deadline"],
-                        socket_timeout=packet["socket_timeout"], max_bytes=MAX_RESPONSE_BYTES)
-                    if len(data) > MAX_RESPONSE_BYTES:
-                        raise ValueError("HTTP response exceeds bounded transport limit")
-                    tracker.finish_all()
-                response_complete = True
-                break
-            except urllib.error.HTTPError as error:
-                error_body = _read_response_body(
-                    error, tracker, deadline=packet["deadline"],
-                    socket_timeout=packet["socket_timeout"], max_bytes=MAX_ERROR_BYTES)
-                if (error.code == 415 and gzipped and first_attempt
-                        and time.monotonic() < packet["deadline"]):
-                    # A stock llama.cpp server refuses gzip bodies (only the lab relay inflates them);
-                    # the request was not processed, so send the same JSON once uncompressed.
-                    tracker.finish_all()  # close the refused attempt's connection gracefully first
-                    body = wire
-                    encoding.pop("Content-Encoding")
-                    first_attempt = False
-                    continue
-                error.relay_error = _relay_error_label(error_body)
-                error.server_error = safe_server_error(error_body, packet["key"])
-                raise
+        data = send_with_gzip_fallback(
+            send, body, encoding, identity, identity_headers, on_refused)
+        response_complete = True
+    except Exception as error:
+        if len(attempts) > 1:
+            error.transport_attempts = attempts
+        raise
     finally:
         if not response_complete:
             tracker.abort_all()
+    if len(attempts) > 1:
+        sys.stderr.write(json.dumps({"transport_attempts": attempts}))
     sys.stdout.buffer.write(data)
 
 
@@ -594,5 +634,7 @@ if __name__ == "__main__":
                                      if isinstance(relay_error, str)
                                      and relay_error in RELAY_ERROR_LABELS else None,
                                      "server_error": server_error
-                                     if isinstance(server_error, str) else None}))
+                                     if isinstance(server_error, str) else None,
+                                     **({"transport_attempts": error.transport_attempts}
+                                        if hasattr(error, "transport_attempts") else {})}))
         raise SystemExit(1) from None

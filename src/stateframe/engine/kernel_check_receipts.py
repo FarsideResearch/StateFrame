@@ -581,6 +581,10 @@ def _emit(runtime: object, receipt: Mapping[str, object]) -> None:
     journal = getattr(runtime, "journal", None)
     emit = getattr(journal, "emit", None)
     if callable(emit):
+        from kernel_code_bookmarks import enabled as bookmarks_enabled
+        bookmark_fields = ({"assertion_context_preview": receipt.get(
+            "assertion_context_preview", "")}
+                           if bookmarks_enabled() and receipt["status"] == "FAIL" else {})
         emit(
             "check_receipt",
             producer="kernel_check_receipts",
@@ -599,6 +603,7 @@ def _emit(runtime: object, receipt: Mapping[str, object]) -> None:
             execution_complete=receipt.get("execution_complete", False),
             termination_reason=receipt.get("termination_reason", "UNKNOWN"),
             revision=receipt["revision"],
+            **bookmark_fields,
             summary=receipt["summary"],
             stdout_bytes=receipt["stdout_bytes"],
             stderr_bytes=receipt["stderr_bytes"],

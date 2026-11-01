@@ -428,7 +428,7 @@ def fit_protected_frame(body: dict[str, object], *,
     from kernel_stateframe_envelope import STATE_HEADER
     from kernel_request_budget import _wire_bytes
     from kernel_stateframe_framefit5 import (
-        FrameFit5Error, _state_payload,
+        FrameFit5Error, _state_payload, _serialize_state_message,
         _is_framefit5_source_notice, _framefit5_deferred_paths,
     )
     from kernel_reread_result_truth import (
@@ -833,6 +833,14 @@ def fit_protected_frame(body: dict[str, object], *,
     digest = ledger.get("history_digest")
     if (under_pressure(size) and coverage is not None and isinstance(digest, dict)
             and coverage.minimize_frontier(digest)):
+        size = publish()
+
+    if under_pressure(size) and frame.get("code_bookmarks"):
+        # Preserve current failed-check locations while historical receipts
+        # can still make the request fit. Only the minimum fallback sheds them.
+        frame.pop("code_bookmarks", None)
+        states[0]["content"] = _serialize_state_message(payload)
+        refresh_messages(messages, required_deferred_paths=known_deferred_paths)
         size = publish()
 
     covered = ledger_ids(ledger) | (coverage.covered_ids if coverage else set())

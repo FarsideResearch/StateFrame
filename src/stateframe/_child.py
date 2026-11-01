@@ -208,12 +208,19 @@ def install_wire_recorder(run: Path, chat_url: str, replayer: Replayer | None = 
                 and not replayer.active and replayer.pending is None):
             from kernel_tool_tape import end_replay
             end_replay()
+        transport_attempts: list[dict[str, object]] = []
         try:
             response = (replayed if replayed is not None else original(
-                wire, endpoint, key,
+                wire, endpoint, key, record_attempts=transport_attempts.extend,
                 **({**kwargs, "route_meta": route} if routed_endpoints is not None else kwargs)))
         except Exception as error:
             (wire_dir / f"{index:04d}.error.txt").write_text(type(error).__name__ + "\n")
+            if transport_attempts:
+                with (run / "sends.jsonl").open("a") as stream:
+                    stream.write(json.dumps({"send": index, "request_bytes": len(wire),
+                                             "request_sha256": hashlib.sha256(wire).hexdigest(),
+                                             "transport_attempts": transport_attempts,
+                                             "error": type(error).__name__}) + "\n")
             emit("send_error", send=index, error=type(error).__name__)
             raise
         elapsed = time.monotonic() - started
@@ -234,6 +241,8 @@ def install_wire_recorder(run: Path, chat_url: str, replayer: Replayer | None = 
                   "seconds": round(elapsed, 3), **usage, "actions": _actions(parsed)}
         if replayed is not None:
             record.update(replayed=True, replay_position=replayer.cursor, replay_total=len(replayer.tape))
+        if transport_attempts:
+            record["transport_attempts"] = transport_attempts
         with (run / "sends.jsonl").open("a") as stream:
             stream.write(json.dumps(record) + "\n")
         emit("send", **record)
