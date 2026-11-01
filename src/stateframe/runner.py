@@ -23,9 +23,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
 
-from . import cache_metrics, outer_checks, outcomes, preflight, profiles, test_interpreter, workcopy
+from . import cache_metrics, outer_checks, outcomes, preflight, profiles, routes, test_interpreter, workcopy
 from . import resume as resume_module
-from .endpoint import CHAT_SUFFIX, Endpoint, EndpointError
+from .endpoint import CHAT_SUFFIX, Endpoint, EndpointError, _is_loopback
 from .task_row import build_row
 from .engine.kernel_custom_tools import CustomToolError, load_tool_files
 from .engine.kernel_tool_settings import ToolSettings
@@ -170,6 +170,9 @@ class RunOptions:
     tool_settings: ToolSettings = field(default_factory=ToolSettings)
     shell_confirm: Callable[[str], bool] | None = field(default=None, repr=False)
     _deadline: float | None = field(default=None, init=False, repr=False)
+    route_cli: list[str] = field(default_factory=list)
+    routes_file: Path | None = None
+    _routes: routes.RouteTable | None = field(default=None, init=False, repr=False)
 
 
 TEST_ENV_KEY = re.compile(r"^[A-Z][A-Z0-9_]{0,63}$")
@@ -339,13 +342,16 @@ def resolve_opt_in_switches(engine_dir: Path = ENGINE_DIR) -> dict[str, str]:
 # reaches the engine (the child drops inherited ones), so the runner says so instead of ignoring it silently.
 SHELL_SETTINGS = frozenset({
     "STATEFRAME_ENDPOINT", "STATEFRAME_MODEL", "STATEFRAME_ALLOW_REMOTE_ENDPOINT", "STATEFRAME_KEEP_CHECKPOINTS",
-    "STATEFRAME_CONTEXT_TOKENS", "STATEFRAME_PROMPT_BUDGET", *CHECKPOINT_ENV, *OPT_IN_SWITCHES,
+    "STATEFRAME_CONTEXT_TOKENS", "STATEFRAME_PROMPT_BUDGET", "STATEFRAME_ROUTES",
+    *CHECKPOINT_ENV, *OPT_IN_SWITCHES,
 })
 
 
 def ignored_shell_settings(environ=None) -> list[str]:
     environ = os.environ if environ is None else environ
-    return sorted(name for name in environ if name.startswith("STATEFRAME_") and name not in SHELL_SETTINGS)
+    return sorted(name for name in environ if name.startswith("STATEFRAME_") and name not in SHELL_SETTINGS
+                  and not (name.startswith("STATEFRAME_ROUTE_") and name not in
+                           {"STATEFRAME_ROUTE_SCOPE", "STATEFRAME_ROUTE_UNIT_CLASS", "STATEFRAME_ROUTE_SLOT"}))
 
 
 def derived_prompt_budget(context_tokens: int) -> int:
@@ -707,6 +713,8 @@ def prepare(options: RunOptions) -> tuple[Path, workcopy.WorkCopy, dict]:
         "repo": str(options.repo.resolve()),
         "in_place": options.in_place,
     }
+    if options._routes is not None:
+        spec["routes"] = options._routes.public()
     (run / "spec.json").write_text(json.dumps(spec, indent=1, sort_keys=True))
     return run, work, spec
 
@@ -716,6 +724,11 @@ def _child_env(options: RunOptions) -> dict[str, str]:
     env.update({k: v for k, v in os.environ.items() if k in USER_ENV and v.strip()})
     if options.endpoint is not None and options.endpoint.api_key_env:
         env[options.endpoint.api_key_env] = options.endpoint.api_key()
+    if options._routes is not None:
+        for settings in options._routes.roles.values():
+            name = settings.get("api_key_env")
+            if isinstance(name, str):
+                env[name] = os.environ[name]
     selected_slot = options._cache_slot if options._cache_slot_selection is not None else options.slot
     if selected_slot is not None:
         env["REACT_SLOT_ID"] = str(selected_slot)
@@ -822,6 +835,138 @@ def _select_prompt_cache_slot(options: RunOptions, printer=print) -> None:
     cache_mode = environment.get("STATEFRAME_PROMPT_CACHE", "off")
     cache_label = "on" if cache_mode == "on" else "off"
     printer(f"cache: pinned slot {slot} (cache_prompt {cache_label})")
+
+
+def _route_defaults(options: RunOptions) -> dict[str, object]:
+    assert options.endpoint is not None
+    switches = profiles.load(options.profile)
+    return {
+        "endpoint": options.endpoint.base_url, "model": options.endpoint.model,
+        "api_key_env": options.endpoint.api_key_env,
+        "temperature": float(switches.get("REACT_TEMP", "1.0")),
+        "max_tokens": int(switches.get("REACT_MAX_OUTPUT_TOKENS", "24000")),
+        "timeout_s": float(switches.get("REACT_REQUEST_TIMEOUT_S", "1800")),
+        "slot": options._cache_slot,
+        "context_tokens": options._context_tokens,
+        "allow_remote": not _is_loopback(options.endpoint.base_url),
+    }
+
+
+def _resolve_routes(options: RunOptions) -> routes.RouteTable:
+    return routes.resolve(_route_defaults(options), cli=options.route_cli, file=options.routes_file,
+                          profile=profiles.load_routes(options.profile))
+
+
+def _routed_endpoint(settings: dict[str, object]) -> Endpoint:
+    return Endpoint(str(settings["endpoint"]), str(settings["model"]),
+                    settings.get("api_key_env") or None,
+                    min(float(settings.get("timeout_s") or 10), 10),
+                    bool(settings.get("allow_remote")))
+
+
+def _probe_routes(options: RunOptions, printer=print, *, resume_roles: dict | None = None) -> None:
+    table = _resolve_routes(options)
+    if not table.active:
+        options._routes = None
+        return
+    assert options.endpoint is not None
+    if os.environ.get("LLAMA_CPP_TOKENIZE_URL") and any(
+            settings["model"] != options.endpoint.model and table.sources[role].get("tokenizer", "default") == "default"
+            for role, settings in table.roles.items()):
+        raise RunError("LLAMA_CPP_TOKENIZE_URL is set while a route uses another model; set that role's tokenizer "
+                       "or unset LLAMA_CPP_TOKENIZE_URL")
+    checked: set[tuple[str, str]] = set()
+    slots_by_endpoint: dict[str, object] = {}
+    for role, settings in table.roles.items():
+        endpoint = _routed_endpoint(settings)
+        if (endpoint.base_url != options.endpoint.base_url
+                and table.sources[role].get("slot") == "default"):
+            # A pin discovered on the default server is not a pin on this one.
+            settings["slot"] = None
+        identity = (endpoint.base_url, endpoint.model)
+        if identity not in checked:
+            try:
+                probe = endpoint.probe()
+            except EndpointError as error:
+                raise RunError(f"route {role} {error}; change {role}.endpoint or {role}.model") from None
+            if probe.get("model_found") is False and not (
+                    role == "decide2" and table.sources[role].get("model") == "default"):
+                raise RunError(f"route {role} endpoint does not serve model {endpoint.model!r}; "
+                               f"change {role}.model or {role}.endpoint")
+            checked.add(identity)
+        if endpoint.base_url not in slots_by_endpoint:
+            slots_by_endpoint[endpoint.base_url] = endpoint.get_slots()
+        slots = slots_by_endpoint[endpoint.base_url]
+        selected = settings.get("slot")
+        if selected == "auto":
+            recorded = (resume_roles or {}).get(role, {})
+            selected = recorded.get("slot") if type(recorded.get("slot")) is int else None
+            if selected is None:
+                selected, _ = _idle_slot(slots)
+            if selected is None:
+                raise RunError(f"route {role}.slot = auto found no idle slot at {endpoint.base_url}; "
+                               "choose a slot number or free a server slot")
+            settings["slot"] = selected
+        if selected is not None and isinstance(slots, list) and slots and not any(
+                isinstance(entry, dict) and entry.get("id", entry.get("id_slot")) == selected
+                for entry in slots):
+            raise RunError(f"route {role}.slot {selected} is not reported by {endpoint.base_url}; "
+                           "choose a slot this server reports or use slot = 'auto'")
+        slot_entries = [entry for entry in slots or [] if isinstance(entry, dict) and
+                        (selected is None or entry.get("id", entry.get("id_slot")) == selected)]
+        sizes = [entry["n_ctx"] for entry in slot_entries if type(entry.get("n_ctx")) is int]
+        configured_context = int(settings.get("context_tokens") or options._context_tokens)
+        if configured_context < options._context_tokens:
+            raise RunError(f"route {role}.context_tokens={configured_context} is smaller than this run's "
+                           f"{options._context_tokens:,}-token frame; raise it or lower STATEFRAME_CONTEXT_TOKENS")
+        need = configured_context
+        explicit = bool(options._context_env.get(CONTEXT_TOKENS_ENV))
+        if sizes and (min(sizes) < need or explicit and any(size != need for size in sizes)):
+            size = min(sizes)
+            raise RunError(f"route {role} model {endpoint.model} has a {size:,}-token slot; this run's frames "
+                           f"need {need:,} ({options._prompt_budget:,} prompt + reply). Give {role} a model "
+                           f"with a {need:,}-token slot, or run with {CONTEXT_TOKENS_ENV}={size}")
+        if not _is_loopback(endpoint.base_url):
+            print(f"WARNING: route {role} uses remote endpoint {endpoint.base_url}; "
+                  "source code will leave the machine", file=sys.stderr)
+        tokenizer = settings.get("tokenizer")
+        if tokenizer:
+            try:
+                tokenizer_endpoint = Endpoint(str(tokenizer), endpoint.model, endpoint.api_key_env,
+                                              endpoint.timeout_s, bool(settings.get("allow_remote")))
+                result = tokenizer_endpoint.probe()
+            except EndpointError as error:
+                raise RunError(f"route {role}.tokenizer cannot be used: {error}; change {role}.tokenizer") from None
+            if result.get("model_found") is not True:
+                raise RunError(f"route {role}.tokenizer does not list model {endpoint.model!r}; "
+                               f"change {role}.tokenizer to a server for that model")
+    # An auto slot is an effective setting: hash the resolved table the engine receives.
+    baseline = _route_defaults(options)
+    active = False
+    for role, settings in table.roles.items():
+        expected = dict(baseline)
+        if role == "decide2":
+            expected.update(model="decision-tier", temperature=0.0, max_tokens=384)
+        if any(settings.get(field) != expected.get(field) for field in settings
+               if field not in ("allow_remote", "cost_input_per_mtok", "cost_cached_input_per_mtok",
+                                "cost_output_per_mtok")):
+            active = True
+            break
+    if not active:
+        options._routes = None
+        return
+    table = routes.with_effective_roles(routes.RouteTable(table.roles, table.sources, True, ""))
+    options._routes = table
+    for role, settings in table.roles.items():
+        from urllib.parse import urlsplit
+        host = urlsplit(str(settings["endpoint"])).netloc
+        locality = "local" if _is_loopback(str(settings["endpoint"])) else "remote"
+        slot = f", slot {settings['slot']}" if settings.get("slot") is not None else ""
+        inherited = all(source == "default" for source in table.sources[role].values())
+        if inherited:
+            printer(f"route {role}: default ({settings['model']} at {host}, {locality}{slot})")
+        else:
+            printer(f"route {role}: {settings['model']} at {host} ({locality}{slot})")
 
 
 # Plain-language CLI text for known engine refusals whose engine wording is consumed by engine code
@@ -1172,6 +1317,90 @@ def _cache_share_line(summary: dict[str, object]) -> str:
     return f"cached share: {share:.1%} ({cached}/{total}, normalized)" + suffix
 
 
+def _route_costs(run: Path, route_spec: dict, sends: list[dict],
+                 metrics: list[dict[str, int | None]]) -> dict[str, object]:
+    """Price recorded sends only; missing usage stays unknown rather than becoming zero."""
+    rates = route_spec["roles"]
+    rows: dict[str, dict[str, object]] = {
+        role: {"requests": 0, "escalated": 0, "prompt_tokens": 0, "cached_tokens": 0,
+               "completion_tokens": 0, "estimated_cost": None}
+        for role in rates}
+    incomplete: set[str] = set()
+    request_roles: dict[str, str] = {}
+    escalated_from: list[tuple[str, int]] = []
+    for fallback, (send, usage) in enumerate(zip(sends, metrics), start=1):
+        index = send.get("send") if type(send.get("send")) is int else fallback
+        path = run / "wire" / f"{index:04d}.route.json"
+        if not path.is_file():
+            continue
+        try:
+            route = json.loads(path.read_text())
+        except (OSError, UnicodeError, ValueError):
+            continue
+        role = route.get("role") if isinstance(route, dict) else None
+        if role not in rows:
+            continue
+        row = rows[role]
+        row["requests"] += 1
+        request_id = send.get("request_id")
+        if isinstance(request_id, str):
+            request_roles[request_id] = role
+        source = route.get("escalated_from")
+        if source:
+            escalated_from.append((str(source), fallback))
+        completion = send.get("completion_tokens")
+        if type(completion) is not int:
+            response_path = run / "wire" / f"{index:04d}.response.json"
+            if response_path.is_file():
+                try:
+                    response = json.loads(response_path.read_text())
+                    completion = (response.get("usage") or {}).get("completion_tokens")
+                except (OSError, UnicodeError, ValueError, AttributeError):
+                    completion = None
+        if type(completion) is not int and isinstance(send.get("usage"), dict):
+            completion = send["usage"].get("completion_tokens")
+        for key, value in (("prompt_tokens", usage["total"]), ("cached_tokens", usage["cached"]),
+                           ("completion_tokens", completion)):
+            if type(value) is int and value >= 0:
+                row[key] += value
+            else:
+                incomplete.add(role)
+    for source, fallback in escalated_from:
+        role = request_roles.get(source)
+        if role is None and fallback > 1:
+            previous = sends[fallback - 2]
+            prior_index = previous.get("send") if type(previous.get("send")) is int else fallback - 1
+            prior_path = run / "wire" / f"{prior_index:04d}.route.json"
+            if prior_path.is_file():
+                try:
+                    role = json.loads(prior_path.read_text()).get("role")
+                except (OSError, UnicodeError, ValueError, AttributeError):
+                    pass
+        if role in rows:
+            rows[role]["escalated"] += 1
+    keys = ("cost_input_per_mtok", "cost_cached_input_per_mtok", "cost_output_per_mtok")
+    for role, row in rows.items():
+        prices = rates[role]
+        if role not in incomplete and all(type(prices.get(key)) in (int, float) for key in keys):
+            uncached = row["prompt_tokens"] - row["cached_tokens"]
+            row["estimated_cost"] = round((uncached * prices[keys[0]] +
+                                            row["cached_tokens"] * prices[keys[1]] +
+                                            row["completion_tokens"] * prices[keys[2]]) / 1_000_000, 8)
+    total = {key: sum(int(row[key]) for row in rows.values()) for key in
+             ("requests", "escalated", "prompt_tokens", "cached_tokens", "completion_tokens")}
+    costs = [row["estimated_cost"] for row in rows.values() if row["requests"]]
+    total["estimated_cost"] = round(sum(costs), 8) if len(costs) == sum(bool(row["requests"]) for row in rows.values()) else None
+    edit = rates.get("edit", {})
+    as_edit = None
+    if total["estimated_cost"] is not None and all(type(edit.get(key)) in (int, float) for key in keys):
+        as_edit = round(((total["prompt_tokens"] - total["cached_tokens"]) * edit[keys[0]] +
+                         total["cached_tokens"] * edit[keys[1]] +
+                         total["completion_tokens"] * edit[keys[2]]) / 1_000_000, 8)
+    return {"roles": rows, "total": total, "all_at_edit_rates": as_edit,
+            "estimated_savings": round(as_edit - total["estimated_cost"], 8)
+            if as_edit is not None and total["estimated_cost"] is not None else None}
+
+
 def summarize(run: Path, started: float) -> dict[str, object]:
     sends = []
     path = run / "sends.jsonl"
@@ -1189,6 +1418,7 @@ def summarize(run: Path, started: float) -> dict[str, object]:
     slot_info: dict[str, object] = {"slot": None, "selection": "not_recorded",
                                    "reason": "run did not record slot selection"}
     capabilities: dict[str, object] = {}
+    spec: dict = {}
     spec_path = run / "spec.json"
     if spec_path.is_file():
         try:
@@ -1221,6 +1451,8 @@ def summarize(run: Path, started: float) -> dict[str, object]:
         "wall_seconds": round(time.monotonic() - started, 1),
     }
     summary["cached_share_display"] = _cache_share_line(summary)
+    if isinstance(spec.get("routes"), dict) and isinstance(spec["routes"].get("roles"), dict):
+        summary["route_costs"] = _route_costs(run, spec["routes"], sends, metrics)
     result = outcomes.terminal_receipt(run)
     summary["engine_result"] = result.get("result")
     summary["engine_terminal"] = {key: result[key] for key in (
@@ -1303,10 +1535,47 @@ def run(options: RunOptions, printer=print) -> dict[str, object]:
         options._deadline = None
 
 
+def _compare_resume_routes(recorded: object, current: routes.RouteTable | None,
+                           cli: list[str], *, old_default: tuple[str, str] | None = None,
+                           new_default: tuple[str, str] | None = None,
+                           unresolved_auto: bool = False) -> list[dict[str, object]]:
+    allowed: set[tuple[str, str]] = set()
+    for entry in cli:
+        left = entry.partition("=")[0]
+        role, _, field = left.rpartition(".")
+        if field not in ("endpoint", "model") or not routes.valid_role(role):
+            raise resume_module.ResumeRefused(
+                f"--route {entry!r} can only change ROLE.endpoint or ROLE.model; remove it to resume")
+        allowed.add((role, field))
+    old_roles = recorded.get("roles", {}) if isinstance(recorded, dict) else {}
+    new_roles = current.roles if current is not None else {}
+    changes: list[dict[str, object]] = []
+    for role in sorted(set(old_roles) | set(new_roles)):
+        old = old_roles.get(role, {})
+        new = new_roles.get(role, {})
+        for field in sorted(set(old) | set(new)):
+            before, after = old.get(field), new.get(field)
+            if before == after:
+                continue
+            if unresolved_auto and field == "slot" and after == "auto" and type(before) is int:
+                continue
+            inherited_move = (old_default is not None and new_default is not None and
+                              field in ("endpoint", "model") and
+                              before == old_default[0 if field == "endpoint" else 1] and
+                              after == new_default[0 if field == "endpoint" else 1])
+            if (role, field) in allowed or inherited_move:
+                changes.append({"role": role, "field": field, "from": before, "to": after})
+                continue
+            raise resume_module.ResumeRefused(
+                f"route {role}.{field} changed (run: {before}, now: {after}); unset it to resume")
+    return changes
+
+
 def resume_run(run_dir: Path, *, endpoint: Endpoint | None = None, max_turns: int | None = None,
-               timeout_s: float | None = None, quiet: bool = False, model: str | None = None,
-               keep_checkpoints: bool = False, replay_external: bool = False,
-               printer=print) -> dict[str, object]:
+                timeout_s: float | None = None, quiet: bool = False, model: str | None = None,
+                keep_checkpoints: bool = False, replay_external: bool = False,
+                route_cli: list[str] | None = None, routes_file: Path | None = None,
+                printer=print) -> dict[str, object]:
     """Continue an interrupted run in place (see ``stateframe.resume``).
 
     ``model`` continues under another model NAME the endpoint serves (the same weights listed differently,
@@ -1363,7 +1632,9 @@ def resume_run(run_dir: Path, *, endpoint: Endpoint | None = None, max_turns: in
         in_place=bool(spec.get("in_place")), profile=str(spec.get("profile") or profiles.DEFAULT),
         python=str((spec.get("capabilities") or {}).get("python") or sys.executable),
         timeout_s=timeout_s, quiet=quiet, test_env={k: environment[k] for k in keys if k in environment},
-        pytest_plugins=environment.get("STATEFRAME_TASK_PYTEST_PLUGINS"), keep_checkpoints=keep_checkpoints)
+         pytest_plugins=environment.get("STATEFRAME_TASK_PYTEST_PLUGINS"), keep_checkpoints=keep_checkpoints)
+    options.route_cli = route_cli or []
+    options.routes_file = routes_file
     if "tool_settings" in spec:
         options.tool_settings = settings
     options._deadline = started + timeout_s if timeout_s is not None else None
@@ -1393,6 +1664,16 @@ def resume_run(run_dir: Path, *, endpoint: Endpoint | None = None, max_turns: in
                                + ("" if model else " (if it is the same model under another name, "
                                   "pass --model NAME)"))
             check_slot_context(options, printer)
+            slot = spec.get("prompt_cache_slot") or {}
+            if isinstance(slot.get("slot"), int):
+                options._cache_slot, options._cache_slot_selection = slot["slot"], "resumed"
+            old_default = (base, str(spec["model"]))
+            new_default = (options.endpoint.base_url, options.endpoint.model)
+            _compare_resume_routes(spec.get("routes"), _resolve_routes(options), options.route_cli,
+                                   old_default=old_default, new_default=new_default, unresolved_auto=True)
+            _probe_routes(options, printer, resume_roles=(spec.get("routes") or {}).get("roles"))
+            route_changes = _compare_resume_routes(spec.get("routes"), options._routes, options.route_cli,
+                                                   old_default=old_default, new_default=new_default)
             lock = resume_module.hold_run_lock(run_dir)  # noqa: F841 - held until this resume returns
             if "tool_settings" in spec:
                 (run_dir / "tool-settings.json").write_text(json.dumps(settings.as_dict(), indent=1, sort_keys=True))
@@ -1401,12 +1682,18 @@ def resume_run(run_dir: Path, *, endpoint: Endpoint | None = None, max_turns: in
             # A checkpoint holds the engine's loop limit, endpoint and model name as they were; a resume
             # that changes any of them rebuilds the run by replay instead.
             same_limits = (int(state["max_turns"]) == int(spec["max_turns"])
-                           and endpoint.chat_url == spec["chat_url"] and not isinstance(swap, dict))
+                           and endpoint.chat_url == spec["chat_url"] and not isinstance(swap, dict)
+                           and not route_changes)
             if int(state["max_turns"]) != int(spec["max_turns"]):
                 printer(step_limit_restart_warning(int(spec["max_turns"]), int(state["max_turns"])))
             previous = resume_module.archive_attempt(
                 state, ENGINE_DIR, use_checkpoint=same_limits and options.tool_settings.shell == "off")
             spec = _resume_spec(run_dir, endpoint)
+            if options._routes is not None:
+                spec["routes"] = options._routes.public()
+            if route_changes:
+                spec["resume"]["route_changes"] = route_changes
+            (run_dir / "spec.json").write_text(json.dumps(spec, indent=1, sort_keys=True))
             # The cache slot stays the one the run started with: it is part of the request bytes.
             slot = spec.get("prompt_cache_slot") or {}
             if isinstance(slot.get("slot"), int):
@@ -1441,6 +1728,10 @@ def resume_run(run_dir: Path, *, endpoint: Endpoint | None = None, max_turns: in
             state["attempt"] = int(state["attempt"]) + 1
             resume_module.archive_attempt(state, ENGINE_DIR, use_checkpoint=False, tape_from=previous)
             spec = _resume_spec(run_dir, endpoint)
+            if options._routes is not None:
+                spec["routes"] = options._routes.public()
+            if route_changes:
+                spec["resume"]["route_changes"] = route_changes
             spec["resume"]["checkpoint_refused"] = refused
             (run_dir / "spec.json").write_text(json.dumps(spec, indent=1, sort_keys=True))
             from .shell_host import provision
@@ -1503,6 +1794,7 @@ def _run(options: RunOptions, started: float, printer=print) -> dict[str, object
                        + ", ".join(probe.get("served_models") or []))
     check_slot_context(options, printer)
     _select_prompt_cache_slot(options, printer)
+    _probe_routes(options, printer)
     run_dir, work, spec = prepare(options)
     from .shell_host import provision
     provision(options, run_dir, spec)
