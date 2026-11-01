@@ -453,15 +453,15 @@ GZIP_MIN_BYTES = 32 * 1024
 
 
 def encode_request_body(body: dict, environ: Mapping[str, str] | None = None) -> tuple[bytes, dict]:
-    """Serialize the request; gzip it when large (the lab relay inflates ``Content-Encoding: gzip``).
+    """Serialize the request; opt-in gzip for relays that inflate ``Content-Encoding: gzip``.
 
     10-13: the container -> socat sidecar -> host.docker.internal path truncates request bodies at
     a fixed ~149,326 bytes (relay_short_body expected=162765 received=149326, 5x identical), so a
     transcript past that size could never be sent. gzip keeps the wire well under the cap.
-    ``STATEFRAME_PLAIN_GZIP=off`` restores identity bodies for endpoints without the relay.
+    ``STATEFRAME_PLAIN_GZIP=on`` enables compression for a compatible relay.
     """
     raw = json.dumps(body).encode()
-    mode = str((environ if environ is not None else os.environ).get(GZIP_ENV, "on")).strip().lower()
+    mode = str((environ if environ is not None else os.environ).get(GZIP_ENV, "off")).strip().lower()
     if mode not in {"on", "off"}:
         raise ValueError(f"{GZIP_ENV} must be 'on' or 'off'")
     # End-to-end integrity header over the IDENTITY body: the lab relay verifies it after any

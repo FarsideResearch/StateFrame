@@ -8,6 +8,8 @@ The new command containment path was exercised in a Linux aarch64 container. Its
 
 ## Request and model capacity
 
+Request body compression is off by default because stock llama-server does not accept gzip request bodies. Enable `STATEFRAME_HTTP_GZIP=on` or `STATEFRAME_PLAIN_GZIP=on` only in a custom profile for a relay that inflates them. In the default run mode, a compressed request refused with HTTP 415 is resent once without compression within the same deadline.
+
 The engine has a **33,344-token prompt budget** and requires a model server context slot that supports **65,536 tokens**. The slot is server capacity, not a recommendation for cache RAM. Set cache RAM sized to your machine. These are the sizes we built and measured with: a single 48 GB GPU (RTX A6000 class) running Qwen3.6-35B-A3B, a mixture-of-experts model (35B total, about 3B active per token), 4-bit UD-Q4_K_XL, under llama.cpp, with one server sharing a 262,144-token cache across 4 slots (`-np 4 -c 262144 --kv-unified`), so 65,536 tokens per run. A stock 24 GB card was not tested. They are the defaults; both can be changed (see Context size in docs/guide/running.md). Only the default 65,536-token slot is measured on long runs; other sizes (32,768 and 131,072 included) are tested on short scripted runs only.
 
 Large tasks or repositories can require more state and source context than fits. In that case, the engine may stop before completing the task.
