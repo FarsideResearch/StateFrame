@@ -297,6 +297,120 @@ def test_resume_reuses_resolved_auto_slot(servers, monkeypatch):
     assert options._routes.roles["read"]["slot"] == 0
 
 
+def _started_read_route(servers, monkeypatch):
+    default, small = servers
+    monkeypatch.delenv("LLAMA_CPP_TOKENIZE_URL", raising=False)
+    monkeypatch.setattr(Endpoint, "get_slots", lambda self: [{"id": 0, "n_ctx": 65536}])
+    started = runner.RunOptions(repo=None, task="task", endpoint=Endpoint(default, "base"),
+                                route_cli=[f"read.endpoint={small}", "read.model=small",
+                                           "read.slot=0", f"read.tokenizer={small}"])
+    runner._probe_routes(started, lambda *_: None)
+    recorded = started._routes.public()
+    resumed = runner.RunOptions(repo=None, task="task", endpoint=Endpoint(default, "base"))
+    resumed._recorded_routes = recorded
+    resumed._recorded_route_default = runner._route_defaults(started)
+    return recorded, resumed
+
+
+def test_resume_uses_recorded_read_route_without_cli_and_with_tokenize_env(servers, monkeypatch):
+    recorded, resumed = _started_read_route(servers, monkeypatch)
+    monkeypatch.setenv("LLAMA_CPP_TOKENIZE_URL", servers[0] + "/tokenize")
+    current = runner._resolve_routes(resumed)
+    assert runner._compare_resume_routes(recorded, current, []) == []
+    runner._probe_routes(resumed, lambda *_: None, resume_roles=recorded["roles"])
+    assert resumed._routes.public() == recorded
+    assert resumed._routes.sources["read"]["tokenizer"] == "recorded"
+
+
+def test_resume_default_endpoint_move_keeps_explicit_read_route(servers, monkeypatch):
+    recorded, resumed = _started_read_route(servers, monkeypatch)
+    old_endpoint = servers[0]
+    moved_endpoint = "http://127.0.0.1:18501/v1"
+    resumed.endpoint = Endpoint(moved_endpoint, "base")
+    current = runner._resolve_routes(resumed)
+    changes = runner._compare_resume_routes(recorded, current, [],
+                                            old_default=(old_endpoint, "base"),
+                                            new_default=(moved_endpoint, "base"))
+    assert current.roles["read"] == recorded["roles"]["read"]
+    assert current.roles["edit"]["endpoint"] == moved_endpoint
+    assert {change["role"] for change in changes} == {"plan", "edit", "finish", "decide2", "unit"}
+
+
+def test_resume_refuses_conflicting_route_env_model(servers, monkeypatch):
+    recorded, resumed = _started_read_route(servers, monkeypatch)
+    monkeypatch.setenv("STATEFRAME_ROUTE_READ_MODEL", "other")
+    with pytest.raises(runner.resume_module.ResumeRefused, match="route read.model changed"):
+        runner._compare_resume_routes(recorded, runner._resolve_routes(resumed), [])
+
+
+def test_resume_unrouted_run_accepts_inactive_current_routes():
+    current = routes.resolve({"endpoint": "http://127.0.0.1:8080/v1", "model": "base"},
+                             environ={"STATEFRAME_ROUTE_READ_MODEL": "base"})
+    assert not current.active
+    assert runner._compare_resume_routes(None, current, []) == []
+
+
+def test_resume_unrouted_run_refuses_env_route_model(monkeypatch):
+    monkeypatch.setenv("STATEFRAME_ROUTE_READ_MODEL", "small")
+    current = routes.resolve({"endpoint": "http://127.0.0.1:8080/v1", "model": "base"},
+                             environ={"STATEFRAME_ROUTE_READ_MODEL": "small"})
+    assert current.active
+    with pytest.raises(runner.resume_module.ResumeRefused,
+                       match="this run started without per-step models; route read.model is set now"):
+        runner._compare_resume_routes(None, current, [])
+
+
+def test_resume_unrouted_run_names_effective_change_after_inactive_settings():
+    current = routes.resolve({"endpoint": "http://127.0.0.1:8080/v1", "model": "base"},
+                             cli=["read.allow_remote=true", "read.model=base", "plan.model=small"],
+                             environ={})
+    assert current.first_change == ("plan", "model")
+    with pytest.raises(runner.resume_module.ResumeRefused, match="route plan.model is set now"):
+        runner._compare_resume_routes(None, current, [])
+
+
+def test_resume_unrouted_run_refuses_cli_route_endpoint():
+    setting = "read.endpoint=http://127.0.0.1:8081/v1"
+    current = routes.resolve({"endpoint": "http://127.0.0.1:8080/v1", "model": "base"},
+                             cli=[setting], environ={})
+    with pytest.raises(runner.resume_module.ResumeRefused,
+                       match="this run started without per-step models; --route read.endpoint is set now"):
+        runner._compare_resume_routes(None, current, [setting])
+
+
+def test_resume_without_recorded_tokenizer_still_refuses_tokenize_env(servers, monkeypatch):
+    default, small = servers
+    monkeypatch.delenv("LLAMA_CPP_TOKENIZE_URL", raising=False)
+    started = runner.RunOptions(repo=None, task="task", endpoint=Endpoint(default, "base"),
+                                route_cli=[f"read.endpoint={small}", "read.model=small"])
+    runner._probe_routes(started, lambda *_: None)
+    resumed = runner.RunOptions(repo=None, task="task", endpoint=Endpoint(default, "base"))
+    resumed._recorded_routes = started._routes.public()
+    resumed._recorded_route_default = runner._route_defaults(started)
+    monkeypatch.setenv("LLAMA_CPP_TOKENIZE_URL", default + "/tokenize")
+    with pytest.raises(runner.RunError, match="LLAMA_CPP_TOKENIZE_URL is set while route read uses"):
+        runner._probe_routes(resumed, lambda *_: None)
+
+
+@pytest.mark.parametrize("bad_roles,fragment", [
+    ({"read": {"unexpected": 1}}, "read.unexpected"),
+    ({"read": {"slot": "zero"}}, "read.slot"),
+    ({"read": {"api_key_env": ""}}, "read.api_key_env"),
+    ({"reviewer": {"model": "small"}}, "reviewer.model"),
+])
+def test_resume_refuses_malformed_recorded_routes(servers, monkeypatch, tmp_path, bad_roles, fragment):
+    endpoint = Endpoint(servers[0], "base")
+    spec = {"repo": str(tmp_path), "public_row": {"msg": "task"}, "chat_url": endpoint.chat_url,
+            "model": "base", "environment": {}, "max_turns": 1,
+            "routes": {"schema": routes.SCHEMA, "roles": bad_roles}}
+    monkeypatch.setattr(runner.resume_module, "assess", lambda *args, **kwargs: {
+        "spec": spec, "max_turns": 1})
+    monkeypatch.setattr(runner, "_check_python", lambda python: python)
+    monkeypatch.setattr(runner, "check_slot_context", lambda *args, **kwargs: None)
+    with pytest.raises(runner.resume_module.ResumeRefused, match=fragment):
+        runner.resume_run(tmp_path, endpoint=endpoint, printer=lambda *_: None)
+
+
 def test_inactive_spec_unchanged_shape(tmp_path):
     # The inactive route table is omitted from the run spec, including a fully commented file.
     endpoint = Endpoint("http://127.0.0.1:8080/v1", "base")

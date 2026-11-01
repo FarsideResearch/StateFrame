@@ -174,6 +174,8 @@ class RunOptions:
     route_cli: list[str] = field(default_factory=list)
     routes_file: Path | None = None
     _routes: routes.RouteTable | None = field(default=None, init=False, repr=False)
+    _recorded_routes: object = field(default=None, init=False, repr=False)
+    _recorded_route_default: dict[str, object] | None = field(default=None, init=False, repr=False)
 
 
 TEST_ENV_KEY = re.compile(r"^[A-Z][A-Z0-9_]{0,63}$")
@@ -866,7 +868,8 @@ def _route_defaults(options: RunOptions) -> dict[str, object]:
 
 def _resolve_routes(options: RunOptions) -> routes.RouteTable:
     return routes.resolve(_route_defaults(options), cli=options.route_cli, file=options.routes_file,
-                          profile=profiles.load_routes(options.profile))
+                          profile=profiles.load_routes(options.profile), recorded=options._recorded_routes,
+                          recorded_default=options._recorded_route_default)
 
 
 def _routed_endpoint(settings: dict[str, object]) -> Endpoint:
@@ -1623,6 +1626,20 @@ def _compare_resume_routes(recorded: object, current: routes.RouteTable | None,
             raise resume_module.ResumeRefused(
                 f"--route {entry!r} can only change ROLE.endpoint or ROLE.model; remove it to resume")
         allowed.add((role, field))
+    if recorded is None:
+        if cli:
+            role, _, field = cli[0].partition("=")[0].rpartition(".")
+            raise resume_module.ResumeRefused(
+                f"this run started without per-step models; --route {role}.{field} is set now; remove it to resume")
+        if current is None or not current.active:
+            return []
+        if current.first_change is None:
+            raise resume_module.ResumeRefused("this run started without per-step models; remove routes to resume")
+        role, field = current.first_change
+        env_name = f"STATEFRAME_ROUTE_{role.upper().replace('.', '_')}_{field.upper()}"
+        raise resume_module.ResumeRefused(
+            f"this run started without per-step models; route {role}.{field} is set now "
+            f"({env_name} or a routes file); remove it to resume")
     old_roles = recorded.get("roles", {}) if isinstance(recorded, dict) else {}
     new_roles = current.roles if current is not None else {}
     old_masks = recorded.get("unit_overrides", {}) if isinstance(recorded, dict) else {}
@@ -1754,9 +1771,17 @@ def resume_run(run_dir: Path, *, endpoint: Endpoint | None = None, max_turns: in
                 options._cache_slot, options._cache_slot_selection = slot["slot"], "resumed"
             old_default = (base, str(spec["model"]))
             new_default = (options.endpoint.base_url, options.endpoint.model)
-            _compare_resume_routes(spec.get("routes"), _resolve_routes(options), options.route_cli,
-                                   old_default=old_default, new_default=new_default, unresolved_auto=True)
-            _probe_routes(options, printer, resume_roles=(spec.get("routes") or {}).get("roles"))
+            options._recorded_routes = spec.get("routes")
+            options._recorded_route_default = _route_defaults(options)
+            options._recorded_route_default.update(endpoint=base, model=str(spec["model"]),
+                                                   allow_remote=not _is_loopback(base))
+            try:
+                current_routes = _resolve_routes(options)
+                _compare_resume_routes(spec.get("routes"), current_routes, options.route_cli,
+                                       old_default=old_default, new_default=new_default, unresolved_auto=True)
+                _probe_routes(options, printer, resume_roles=(spec.get("routes") or {}).get("roles"))
+            except routes.RecordedRouteError as error:
+                raise resume_module.ResumeRefused(str(error)) from None
             route_changes = _compare_resume_routes(spec.get("routes"), options._routes, options.route_cli,
                                                    old_default=old_default, new_default=new_default)
             lock = resume_module.hold_run_lock(run_dir)  # noqa: F841 - held until this resume returns

@@ -188,10 +188,11 @@ def test_killed_second_leg_replays_first_leg_and_verifies_pending_bytes(tmp_path
             first = (run_dir / "wire" / "0001.request.json").read_bytes()
             second = pending_request.read_bytes()
             route_bytes = pending_route.read_bytes()
+            recorded_routes = json.loads((run_dir / "spec.json").read_text())["routes"]
             _kill_run(process, run_dir)
             resumed = subprocess.run([PYTHON, "-m", "stateframe", "resume", str(run_dir),
-                                      "--quiet", *routes], capture_output=True, text=True,
-                                     env=environment(), timeout=300, check=False)
+                                      "--quiet"], capture_output=True, text=True,
+                                      env=environment(), timeout=300, check=False)
         finally:
             if process.poll() is None:
                 _kill_run(process, run_dir)
@@ -199,6 +200,7 @@ def test_killed_second_leg_replays_first_leg_and_verifies_pending_bytes(tmp_path
     assert (run_dir / "wire" / "0001.request.json").read_bytes() == first
     assert (run_dir / "wire" / "0002.request.json").read_bytes() == second
     assert (run_dir / "wire" / "0002.route.json").read_bytes() == route_bytes
+    assert json.loads((run_dir / "spec.json").read_text())["routes"] == recorded_routes
     assert "discarded.txt" not in (run_dir / "final.diff").read_text()
     assert "accepted.txt" in (run_dir / "final.diff").read_text()
 

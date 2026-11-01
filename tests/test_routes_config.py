@@ -30,6 +30,36 @@ def test_sources_merge_per_field_and_digest_ignores_source(tmp_path):
     assert table.digest == same.digest
 
 
+def test_no_recorded_layer_preserves_inactive_example_and_plain_table(tmp_path):
+    path = tmp_path / "routes.toml"
+    path.write_text(routes.example())
+    plain = resolve()
+    example = resolve(file=path)
+    assert not plain.active
+    assert example.public() == plain.public()
+    assert example.sources == plain.sources
+    assert resolve(recorded=None).public() == plain.public()
+
+
+def test_recorded_unit_class_override_survives_without_source_file():
+    started = resolve(cli=["read.model=small", "unit.patch.temperature=0.2"])
+    resumed = resolve(recorded=started.public(), recorded_default=DEFAULT)
+    assert resumed.public() == started.public()
+    assert resumed.sources["unit.patch"]["temperature"] == "recorded"
+    assert resumed.resolve("read", unit_class="patch")["temperature"] == 0.2
+
+
+def test_recorded_routes_survive_removed_file_and_env(tmp_path):
+    path = tmp_path / "routes.toml"
+    path.write_text('[roles.read]\nendpoint = "http://127.0.0.1:8090/v1"\n')
+    started = routes.resolve(DEFAULT, file=path, environ={"STATEFRAME_ROUTE_READ_MODEL": "small"})
+    path.unlink()
+    resumed = resolve(recorded=started.public(), recorded_default=DEFAULT)
+    assert resumed.public() == started.public()
+    assert resumed.sources["read"]["endpoint"] == "recorded"
+    assert resumed.sources["read"]["model"] == "recorded"
+
+
 def test_json_schema_and_unit_class_lookup(tmp_path):
     path = tmp_path / "routes.json"
     path.write_text(json.dumps({"schema": routes.SCHEMA, "roles": {

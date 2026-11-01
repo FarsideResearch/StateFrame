@@ -27,12 +27,17 @@ class RouteError(ValueError):
     """A routing source cannot be used safely."""
 
 
+class RecordedRouteError(RouteError):
+    """A route table saved in a run is malformed."""
+
+
 @dataclass(frozen=True)
 class RouteTable:
     roles: dict[str, dict[str, object]]
     sources: dict[str, dict[str, str]]
     active: bool
     digest: str
+    first_change: tuple[str, str] | None = None
 
     def public(self) -> dict[str, object]:
         public: dict[str, object] = {"schema": SCHEMA, "digest": self.digest, "roles": self.roles}
@@ -87,7 +92,7 @@ def _value(role: str, field: str, raw: object, *, text_value: bool = False) -> o
             raise RouteError(f"{label} must be a nonempty model name; change model")
         return raw.strip()
     if field == "api_key_env":
-        if (not isinstance(raw, str) or not raw.replace("_", "").isalnum()
+        if (not isinstance(raw, str) or not raw or not raw.replace("_", "").isalnum()
                 or raw[0].isdigit()):
             raise RouteError(f"{label} must be an environment variable NAME, not a key; change api_key_env")
         return raw
@@ -208,10 +213,71 @@ def _cli_blocks(values: list[str]) -> dict[str, dict[str, object]]:
     return result
 
 
+def _role_base(default: Mapping[str, object], role: str) -> dict[str, object]:
+    base = dict(default)
+    if role == "decide2":
+        base.update(model="decision-tier", temperature=0.0, max_tokens=384)
+    return base
+
+
+def _recorded_blocks(document: object, default: Mapping[str, object]) -> dict[str, dict[str, object]]:
+    if not isinstance(document, dict) or document.get("schema") != SCHEMA:
+        raise RecordedRouteError(f"recorded routes must use schema {SCHEMA}")
+    saved_roles = document.get("roles")
+    saved_masks = document.get("unit_overrides", {})
+    if not isinstance(saved_roles, dict) or not isinstance(saved_masks, dict):
+        raise RecordedRouteError("recorded routes.roles and routes.unit_overrides must be tables")
+    validated: dict[str, dict[str, object]] = {}
+    for role, settings in saved_roles.items():
+        field_label = next(iter(settings), "*") if isinstance(settings, dict) else "*"
+        try:
+            _check_role(role)
+        except RouteError as error:
+            raise RecordedRouteError(f"recorded route {role}.{field_label}: {error}") from None
+        if not isinstance(settings, dict):
+            raise RecordedRouteError(f"recorded route {role}.* must be a table of fields")
+        validated[role] = {}
+        for field, raw in settings.items():
+            if field not in FIELDS:
+                raise RecordedRouteError(f"unknown recorded route field {role}.{field}")
+            try:
+                validated[role][field] = (None if raw is None and field in ("api_key_env", "slot")
+                                           else _value(role, field, raw))
+            except RouteError as error:
+                raise RecordedRouteError(f"recorded {error}") from None
+    blocks: dict[str, dict[str, object]] = {}
+    for role, settings in validated.items():
+        if role == "unit" or role.startswith("unit."):
+            blocks[role] = {}
+            continue
+        original = _role_base(default, role)
+        blocks[role] = {field: value for field, value in settings.items()
+                        if value != original.get(field)}
+    for role, fields in saved_masks.items():
+        if not isinstance(role, str) or (role != "unit" and not role.startswith("unit.")):
+            raise RecordedRouteError(f"recorded route {role}.* is not a unit role")
+        try:
+            _check_role(role)
+        except RouteError as error:
+            raise RecordedRouteError(f"recorded route {role}.*: {error}") from None
+        if not isinstance(fields, list):
+            raise RecordedRouteError(f"recorded route {role}.* unit_overrides must be a list of fields")
+        blocks[role] = {}
+        for field in fields:
+            if not isinstance(field, str) or field not in FIELDS:
+                raise RecordedRouteError(f"unknown recorded route field {role}.{field}")
+            if field not in validated.get(role, {}):
+                raise RecordedRouteError(f"recorded route {role}.{field} has no saved value")
+            blocks[role][field] = validated[role][field]
+    return blocks
+
+
 def resolve(default: Mapping[str, object], *, cli: list[str] | None = None, file: Path | None = None,
-            profile: object = None, environ: Mapping[str, str] | None = None) -> RouteTable:
+            profile: object = None, environ: Mapping[str, str] | None = None,
+            recorded: object = None, recorded_default: Mapping[str, object] | None = None) -> RouteTable:
     environ = os.environ if environ is None else environ
-    layers = (("profile", _blocks({} if profile is None else profile, "profile routes")),
+    layers = (("recorded", _recorded_blocks(recorded, recorded_default or default) if recorded is not None else {}),
+              ("profile", _blocks({} if profile is None else profile, "profile routes")),
               ("file", load_file(routes_path(file, environ))),
               ("env", _env_blocks(environ)), ("cli", _cli_blocks(cli or [])))
     names = list(ROLES)
@@ -219,9 +285,7 @@ def resolve(default: Mapping[str, object], *, cli: list[str] | None = None, file
     roles: dict[str, dict[str, object]] = {}
     sources: dict[str, dict[str, str]] = {}
     for role in names:
-        base = dict(default)
-        if role == "decide2":
-            base.update(model="decision-tier", temperature=0.0, max_tokens=384)
+        base = _role_base(default, role)
         chosen = {field: "default" for field in base}
         for source, layer in layers:
             for field, value in layer.get(role, {}).items():
@@ -248,32 +312,47 @@ def resolve(default: Mapping[str, object], *, cli: list[str] | None = None, file
                                                   environ.get("STATEFRAME_ALLOW_REMOTE_ENDPOINT") == "1"):
                 raise RouteError(f"route {role} (unit {unit_class}) endpoint {endpoint} is not on this machine; "
                                  "set unit.allow_remote = true (your code will be sent there) or use a local endpoint")
-    return with_effective_roles(RouteTable(
-        roles, sources, request_settings_changed(table, default, environ=environ), ""))
+    first_change = first_request_setting_change(table, default, environ=environ)
+    return with_effective_roles(RouteTable(roles, sources, first_change is not None, "", first_change))
 
 
 def request_settings_changed(table: RouteTable, default: Mapping[str, object], *,
                              environ: Mapping[str, str] | None = None) -> bool:
     """Compare every request role in main and unit scope with its unrouted request."""
+    return first_request_setting_change(table, default, environ=environ) is not None
+
+
+def first_request_setting_change(table: RouteTable, default: Mapping[str, object], *,
+                                 environ: Mapping[str, str] | None = None) -> tuple[str, str] | None:
+    """Name the first route setting that changes an unrouted request."""
     ignored = {"allow_remote", "cost_input_per_mtok", "cost_cached_input_per_mtok",
                "cost_output_per_mtok"}
     fallback_tokenizer = (environ or {}).get("LLAMA_CPP_TOKENIZE_URL")
     unit_classes = {"default", *(role[5:] for role in table.roles if role.startswith("unit."))}
+
+    def owner(role: str, unit_class: str | None, field: str) -> str:
+        if unit_class is not None:
+            for unit_role in (f"unit.{unit_class}", "unit"):
+                if table.sources.get(unit_role, {}).get(field, "default") != "default":
+                    return unit_role
+        return role
+
     for role in ROLES:
         if role == "unit":
             continue
-        expected = dict(default)
-        if role == "decide2":
-            expected.update(model="decision-tier", temperature=0.0, max_tokens=384)
+        expected = _role_base(default, role)
         actual = table.roles[role]
         default_tokenizer = fallback_tokenizer or expected.get("tokenizer") or expected["endpoint"]
-        for settings in (actual, *(table.resolve(role, unit_class=name) for name in unit_classes)):
+        for unit_class in (None, *sorted(unit_classes)):
+            settings = actual if unit_class is None else table.resolve(role, unit_class=unit_class)
             route_tokenizer = settings.get("tokenizer") or fallback_tokenizer or settings["endpoint"]
-            if route_tokenizer != default_tokenizer or any(
-                    settings.get(field) != expected.get(field)
-                    for field in settings if field not in ignored and field != "tokenizer"):
-                return True
-    return False
+            if route_tokenizer != default_tokenizer:
+                field = "tokenizer" if settings.get("tokenizer") else "endpoint"
+                return owner(role, unit_class, field), field
+            for field in settings:
+                if field not in ignored and field != "tokenizer" and settings.get(field) != expected.get(field):
+                    return owner(role, unit_class, field), field
+    return None
 
 
 def with_effective_roles(table: RouteTable) -> RouteTable:
@@ -281,7 +360,7 @@ def with_effective_roles(table: RouteTable) -> RouteTable:
     contents: object = {"roles": table.roles, "unit_overrides": overrides} if overrides else table.roles
     canonical = json.dumps(contents, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
     digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
-    return RouteTable(table.roles, table.sources, table.active, digest)
+    return RouteTable(table.roles, table.sources, table.active, digest, table.first_change)
 
 
 def example() -> str:
