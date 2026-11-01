@@ -77,11 +77,9 @@ def launch(spec: dict) -> None:
     process_limits = [(resource.RLIMIT_CPU, math.ceil(limits["cpu_seconds"])),
                       (resource.RLIMIT_FSIZE, limits["file_bytes"]),
                       (resource.RLIMIT_NOFILE, limits["nofile"])]
-    if sys.platform != "darwin":
-        # macOS counts every process the user owns against RLIMIT_NPROC (hundreds on a normal
-        # desktop), so a per-command budget there would make the first fork fail. On macOS the
-        # supervisor enforces the budget on the tracked descendant tree instead.
-        process_limits.append((resource.RLIMIT_NPROC, limits["nproc"]))
+    # The supervisor bounds tracked descendants in the command's PID namespace.
+    # RLIMIT_NPROC is uid-wide on Linux and can refuse a safe command when unrelated
+    # same-uid threads exist, including tasks hidden in another PID namespace.
     for kind, value in process_limits:
         # Never silently keep a weaker limit if the OS refuses this request.
         hard = resource.getrlimit(kind)[1]

@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- Linux checks now count same-uid threads before setting a relative process limit, with headroom for tasks outside the visible PID namespace. This prevents ordinary desktop threads from stopping bubblewrap before a check starts.
+- Sandboxed commands use the execution supervisor's descendant budget without a uid-wide process limit. The public probe still denies forks through seccomp.
+
 ## 0.2.2 (2026-11-01)
 
 - Multi-file requests now offer current product code before repeated-read and navigation bookkeeping. Coverage lines show which source ranges are in view and whether a file changed since its last read when that comparison is available. Small files of at most 60 lines and 2 KiB can be shown whole when the request budget allows. Code bookmarks keep the failing test and related product source in view when the current check has a usable source location.

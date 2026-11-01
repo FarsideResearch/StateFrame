@@ -1,31 +1,46 @@
-"""Regression: the check sandbox must start for a user who already owns many processes.
-
-RLIMIT_NPROC counts every process the user owns on Linux; an absolute cap of 64 made bwrap fail
-("Creating new namespace failed: Resource temporarily unavailable") for typical desktop sessions,
-so every run stopped at its first check. The ceiling is now the current count plus the budget.
-"""
+"""The Linux outer check must tolerate same-uid threads and still bound forks."""
+import os
+import select
 import subprocess
 import sys
 
 import pytest
 
 import kernel_execution_policy as policy
+from kernel_exec_capability import shell_capability
+from kernel_exec_session import ExecSession
 
 pytestmark = [pytest.mark.host_sandbox,
               pytest.mark.skipif(not sys.platform.startswith("linux"), reason="Linux RLIMIT_NPROC semantics")]
 
 
-def test_check_sandbox_starts_with_many_user_processes(tmp_path):
-    sleepers = [subprocess.Popen(["sleep", "120"]) for _ in range(80)]
+def test_check_sandbox_starts_with_many_user_threads(tmp_path):
+    helper = subprocess.Popen(
+        [sys.executable, "-c", "import sys, threading\n"
+         "event = threading.Event()\n"
+         "threads = [threading.Thread(target=event.wait, daemon=True) for _ in range(400)]\n"
+         "for thread in threads: thread.start()\n"
+         "print('ready', flush=True)\n"
+         "sys.stdin.buffer.read(1)\n"],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     try:
-        assert policy._user_process_count() >= 80
+        ready, _, _ = select.select([helper.stdout], [], [], 10)
+        assert ready, "same-uid thread helper did not start"
+        assert helper.stdout.readline() == b"ready\n", helper.stderr.read() if helper.poll() is not None else ""
+        assert len(os.listdir(f"/proc/{helper.pid}/task")) >= 401
         result = policy.run_sandboxed(["/bin/sh", "-c", "echo ok"], tmp_path, timeout=60)
         assert result.completed.returncode == 0, result.completed.stderr
         assert "ok" in result.completed.stdout
+        for name in ("workspace", "env", "home", "run"):
+            (tmp_path / name).mkdir()
+        cap = shell_capability(workspace=tmp_path / "workspace", run_env_dir=tmp_path / "env",
+                               scratch_home=tmp_path / "home", network="none", writable=True)
+        with ExecSession(tmp_path / "run") as session:
+            command = session.run(["/bin/sh", "-c", "echo session-ok"], cap)
+        assert command.exit_code == 0 and b"session-ok" in command.output, command
     finally:
-        for sleeper in sleepers:
-            sleeper.kill()
-            sleeper.wait()
+        helper.terminate()
+        helper.communicate(timeout=10)
 
 
 def test_check_sandbox_still_bounds_new_processes(tmp_path):

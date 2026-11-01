@@ -138,7 +138,7 @@ class ExecSession:
                     raise ExecSessionError("write authority exceeds initial Linux session mount envelope")
             return
         if sys.platform.startswith("linux") and os.getuid() == 0:
-            raise ExecSessionError("Linux execution requires a non-root host UID to enforce RLIMIT_NPROC")
+            raise ExecSessionError("Linux execution requires a non-root host UID")
         self._sandboxed = cap.sandboxed
         command = [sys.executable, "-I", str(Path(__file__).with_name("kernel_exec_supervisor.py")),
                    str(self._directory), self.backend, "host"]
