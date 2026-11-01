@@ -3,7 +3,9 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shlex
+import shutil
 import signal
 import subprocess
 import time
@@ -11,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from ._support import Endpoint, PYTHON, copy_repo, environment
+from ._support import Endpoint, PYTHON, ROOT, copy_repo, environment
 
 
 pytestmark = [pytest.mark.host_sandbox,
@@ -324,3 +326,37 @@ def test_routed_tokenizer_survives_sealing_on_a_separate_server(tmp_path):
     assert roles and set(roles) <= {"plan", "read"}
     assert tok_log.is_file() and tok_log.read_text().strip()
     assert '"kind":"token_counting_unavailable"' not in (run_dir / "engine.log").read_text()
+
+
+_RECEIPT = re.compile(rb'(edit_receipt\\*":\\*")[0-9a-f]{20}')
+
+
+def _default_wire(tmp_path: Path, monkeypatch, name: str, *extra: str) -> tuple[list[bytes], Path]:
+    """One fixed-seed scripted run in process; returns each request with edit-receipt ids masked."""
+    from stateframe import cli, runner
+
+    monkeypatch.setattr(runner.secrets, "token_hex", lambda n=16: "0123456789abcdef" * 2)
+    run_dir = tmp_path / name
+    with Endpoint(ROOT / "examples" / "discount_bug.script.json") as server:
+        code = cli.main(["run", "--repo", str(tmp_path / "discount_bug"), "--task",
+                         "Fix the pricing code so the tests pass.", "--endpoint", server.url,
+                         "--model", "scripted", "--run-dir", str(run_dir), "--quiet", "--json", *extra])
+    assert code == 0, name
+    return ([_RECEIPT.sub(rb"\1<RECEIPT>", path.read_bytes())
+             for path in sorted((run_dir / "wire").glob("*.request.json"))], run_dir)
+
+
+def test_inactive_routes_keep_requests_byte_identical(tmp_path, monkeypatch, capsys):
+    """No route settings and the all-commented example file both leave the default path untouched."""
+    shutil.copytree(ROOT / "examples" / "discount_bug", tmp_path / "discount_bug")
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    for variable in [key for key in os.environ if key.startswith("STATEFRAME_ROUTE")]:
+        monkeypatch.delenv(variable)
+    plain, plain_dir = _default_wire(tmp_path, monkeypatch, "plain")
+    example, example_dir = _default_wire(tmp_path, monkeypatch, "example", "--routes",
+                                         str(ROOT / "examples" / "routes.example.toml"))
+    capsys.readouterr()
+    assert plain and plain == example
+    for run_dir in (plain_dir, example_dir):
+        assert "routes" not in json.loads((run_dir / "spec.json").read_text())
+        assert not list((run_dir / "wire").glob("*.route.json"))
