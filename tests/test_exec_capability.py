@@ -84,6 +84,8 @@ def test_linux_builder_network_and_mount_contract(cap, monkeypatch, network):
     assert "--unshare-all" in command and "--die-with-parent" in command
     assert "--new-session" in command
     assert "--disable-userns" in command and "--assert-userns-disabled" in command
+    # Regression: --unshare-all skips the user namespace as root, and bwrap then rejects the guard.
+    assert "--unshare-user" in command
     assert ("--share-net" in command) is (network == "full")
     index = command.index(str(cap.workspace))
     assert command[index - 1] == "--ro-bind"
@@ -110,10 +112,10 @@ def test_bwrap_namespace_guard_support_is_cached_per_binary(cap, monkeypatch):
 
     def help_text(command, **kwargs):
         calls.append(command)
-        assert command[1] == "--help" and kwargs["timeout"] == 5
-        options = ("--disable-userns --assert-userns-disabled"
-                   if command[0] == "/new/bwrap" else "--unshare-user")
-        return SimpleNamespace(returncode=0, stdout=options)
+        # A real trial launch with the guard and its own user namespace, not a --help parse.
+        assert command[1:4] == ["--unshare-user", "--disable-userns", "--assert-userns-disabled"]
+        assert kwargs["timeout"] == 5
+        return SimpleNamespace(returncode=0 if command[0] == "/new/bwrap" else 1)
 
     isolation._bwrap_userns_guard_supported.cache_clear()
     monkeypatch.setattr(isolation.subprocess, "run", help_text)
@@ -121,7 +123,7 @@ def test_bwrap_namespace_guard_support_is_cached_per_binary(cap, monkeypatch):
         assert isolation._bwrap_userns_guard_supported("/new/bwrap")
         assert isolation._bwrap_userns_guard_supported("/new/bwrap")
         assert not isolation._bwrap_userns_guard_supported("/old/bwrap")
-        assert calls == [["/new/bwrap", "--help"], ["/old/bwrap", "--help"]]
+        assert [call[0] for call in calls] == ["/new/bwrap", "/old/bwrap"]
     finally:
         isolation._bwrap_userns_guard_supported.cache_clear()
 

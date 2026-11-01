@@ -80,16 +80,19 @@ def backend() -> str:
 
 @lru_cache(maxsize=16)
 def _bwrap_userns_guard_supported(executable: str) -> bool:
-    """Probe one installed binary, not each command, for the paired guard flags."""
+    """Launch once per binary to learn whether the guard works here, not each command.
+
+    Advertised flags are not enough: the guard also needs a user namespace, which hosts
+    may forbid. Any failure keeps the existing launch contract instead of breaking it.
+    """
+    probe = [executable, "--unshare-user", "--disable-userns", "--assert-userns-disabled",
+             "--ro-bind", "/", "/", "--", "/bin/sh", "-c", "exit 0"]
     try:
-        result = subprocess.run([executable, "--help"], capture_output=True, text=True,
-                                timeout=5, check=False,
+        result = subprocess.run(probe, capture_output=True, timeout=5, check=False,
                                 env={"PATH": os.defpath, "LANG": "C", "LC_ALL": "C"})
-    except (OSError, subprocess.TimeoutExpired) as error:
-        raise RuntimeError("cannot inspect bubblewrap namespace protections") from error
-    if result.returncode != 0:
-        raise RuntimeError("cannot inspect bubblewrap namespace protections")
-    return "--disable-userns" in result.stdout and "--assert-userns-disabled" in result.stdout
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return result.returncode == 0
 
 
 def _interpreter_roots(selected: Path) -> set[str]:
@@ -300,9 +303,12 @@ def capability_command(command, cap, *, platform_backend=None, shared_namespace=
             arguments += ["--as-pid-1"]
         if cap.network == "full":
             arguments += ["--share-net"]
-    # Both paths created a user namespace above; refuse further user namespaces
-    # when this binary provides the guard. Older binaries keep their existing contract.
+    # Refuse further user namespaces when this binary and host can enforce it. The guard
+    # needs a user namespace of its own: --unshare-all only tries one, and running as root
+    # skips it, so request it explicitly. Otherwise keep the existing contract.
     if _bwrap_userns_guard_supported(executable):
+        if not shared_namespace:
+            arguments += ["--unshare-user"]
         arguments += ["--disable-userns", "--assert-userns-disabled"]
     arguments += ["--dev", "/dev", "--cap-drop", "ALL"]
     # Merged-/usr distributions make /lib, /bin, ... symlinks. Capability roots are resolved,

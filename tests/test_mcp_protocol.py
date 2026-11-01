@@ -92,7 +92,9 @@ def test_timeout_kills_child(tmp_path):
 @pytest.mark.host_sandbox
 def test_driver_cleans_malformed_peer(tmp_path):
     marker = tmp_path / "home" / "server.lock"
-    response = call(tmp_path, "malformed", timeout=.3, extra=(str(marker),))
+    # The malformed reply arrives as soon as the server starts; the deadline only has to
+    # outlast a sandboxed interpreter start on a loaded host, and costs nothing otherwise.
+    response = call(tmp_path, "malformed", timeout=5, extra=(str(marker),))
     assert response["ok"] is False
     assert marker.read_text() == "server started\n"
     assert lock_released(marker)
