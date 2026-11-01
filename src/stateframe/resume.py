@@ -28,9 +28,12 @@ from .engine.kernel_tool_tape import ToolTape, ToolTapeError
 ENGINE_LOCK = ".engine.lock"
 RUN_LOCK = ".run.lock"
 # Per-attempt files: moved to attempts/<n>/ on resume, so the resumed attempt writes its own.
-ATTEMPT_FILES = ("worker", "wire", "requests", "sends.jsonl", "engine.log", "engine-result.json",
+# The pending-verified marker moves first: an archive killed partway must never leave it at the run
+# root without the wire/ it proves (the next attempt would then retire a check it never ran).
+ATTEMPT_FILES = ("resume-pending-verified.json", "worker", "wire", "requests", "sends.jsonl",
+                 "engine.log", "engine-result.json",
                  "child-traceback.txt", "summary.json", "final.diff", "tests-after.txt",
-                 "resume-divergence.json", "resume-pending-verified.json", "workspace", "checks",
+                 "resume-divergence.json", "workspace", "checks",
                  "checkpoint-refused.json",
                  "env", "env-sites.json", "shell-home", "shell-cache",
                  "shell-ask.json", "shell-answer.json")
@@ -132,7 +135,8 @@ def carry_forward_records(spec: dict, own_tape: list[dict[str, object]],
                 verified = json.loads(marker.read_bytes())
             except (OSError, ValueError):
                 pass
-        if (not isinstance(verified, dict) or verified.get("send") != prior_pending.get("send")
+        if (not isinstance(verified, dict) or type(verified.get("send")) is not int
+                or verified.get("send") != prior_pending.get("send")
                 or verified.get("recorded_route") != prior_pending.get("route")
                 or not isinstance(verified.get("route"), dict)
                 or not replay_tape.Replayer([], route_changes=prior_route_changes)._route_matches(

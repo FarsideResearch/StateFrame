@@ -168,6 +168,60 @@ def test_failed_send_renumbering_retires_verified_pending(tmp_path):
     assert not (run / "resume-pending-verified.json").exists()
 
 
+@pytest.mark.parametrize("bad_send", [True, 1.0, "1", None])
+def test_malformed_pending_marker_never_retires_the_check(tmp_path, bad_send):
+    # JSON true == 1 in Python: the marker's send must be an exact int to prove anything.
+    run, spec = _interrupted_routed_run(tmp_path)
+    old_wire = run / "attempts" / "1" / "wire"
+    _write_send(old_wire, 1, completed=False)
+    spec["resume"] = {"tape": replay_tape.build(old_wire, run / "attempts" / "1" / "sends.jsonl"),
+                      "pending": replay_tape.pending_request(old_wire)}
+    prior_pending = spec["resume"]["pending"]
+    _mark_pending_verified(run, prior_pending)
+    marker = json.loads((run / "resume-pending-verified.json").read_text())
+    (run / "resume-pending-verified.json").write_text(json.dumps({**marker, "send": bad_send}))
+    (run / "spec.json").write_text(json.dumps(spec))
+
+    resume.archive_attempt({"run": run, "spec": spec, "attempt": 2, "max_turns": 8}, tmp_path,
+                           use_checkpoint=False)
+
+    assert json.loads((run / "spec.json").read_text())["resume"]["pending"] == prior_pending
+
+
+def test_archive_killed_between_marker_and_wire_keeps_the_check(tmp_path, monkeypatch):
+    # Attempt 2 verified the carried pending send (marker written) and was killed live; its archive is
+    # then killed after the first move. The next archive must still carry the original check.
+    run, spec = _interrupted_routed_run(tmp_path)
+    old_wire = run / "attempts" / "1" / "wire"
+    _write_send(old_wire, 1, completed=False)
+    spec["resume"] = {"tape": replay_tape.build(old_wire, run / "attempts" / "1" / "sends.jsonl"),
+                      "pending": replay_tape.pending_request(old_wire)}
+    prior_pending = spec["resume"]["pending"]
+    _mark_pending_verified(run, prior_pending)
+    _write_send(run / "wire", 1, completed=False)  # attempt 2's rebuilt request, verified, then killed
+    (run / "spec.json").write_text(json.dumps(spec))
+    real_replace, moved = resume.os.replace, []
+
+    def killed_after_first_move(src, dst):
+        if moved:
+            raise KeyboardInterrupt("killed while archiving")
+        moved.append(Path(src).name)
+        real_replace(src, dst)
+
+    monkeypatch.setattr(resume.os, "replace", killed_after_first_move)
+    with pytest.raises(KeyboardInterrupt):
+        resume.archive_attempt({"run": run, "spec": spec, "attempt": 2, "max_turns": 8}, tmp_path,
+                               use_checkpoint=False)
+    monkeypatch.setattr(resume.os, "replace", real_replace)
+    assert moved == ["resume-pending-verified.json"]
+    assert not (run / "resume-pending-verified.json").exists()
+
+    resume.archive_attempt({"run": run, "spec": spec, "attempt": 3, "max_turns": 8}, tmp_path,
+                           use_checkpoint=False)
+
+    assert json.loads((run / "spec.json").read_text())["resume"]["pending"] == prior_pending
+
+
 def test_equal_length_replay_keeps_prior_pending_and_route_changes(tmp_path):
     run, spec = _interrupted_routed_run(tmp_path)
     old_wire = run / "attempts" / "1" / "wire"
