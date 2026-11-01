@@ -5,6 +5,13 @@
 - Add explicitly selected reusable skills, a bounded catalog and on-demand instruction loading. Optional command definitions require separate trust and use the existing sandbox and replay path.
 - Pin selected skill bytes for resume and refuse changed or missing bundles before replay.
 
+## 0.2.2 (2026-11-01)
+
+- Multi-file requests now offer current product code before repeated-read and navigation bookkeeping. Coverage lines show which source ranges are in view and whether a file changed since its last read when that comparison is available. Small files of at most 60 lines and 2 KiB can be shown whole when the request budget allows. Code bookmarks keep the failing test and related product source in view when the current check has a usable source location.
+- A completed batch of proved unchanged reads costs one no-progress watch unit instead of one per file; repeated unchanged batches still end `STALLED`. `STATEFRAME_CODE_BOOKMARKS` is on by default; setting it off restores 0.2.1 behavior byte for byte. `STATEFRAME_READ_LOCKOUT` remains an independent, default-off switch with a two-request maximum. See the running guide and known limitations.
+- Measured so far: all five live runs of the previously stalled multi-file task completed and were submitted, with all 14 tests passing (three on an earlier build of this release in 2, 4 and 26 requests; two on the release code in 7 and 23 requests). This is a small sample on one task.
+- Safety and determinism for the new source view: whole files only add to what 0.2.1 would show (a large file never displaces smaller recent windows), every source shown in a request passes the same secret-path filter as the initial working copy (a secret-named file created mid-run is never shown), resume restores the request counter that numbers repeated reads, and the opt-in read lockout classifies tools by capability so a dynamically added reading tool cannot bypass it. An offline rebuild showed all 11 product files whole, up from 1 of 11, while the request fell from 85,664 to 77,017 bytes under the 82,026-byte ceiling.
+
 ## 0.2.1 (2026-10-31)
 
 Correctness fixes in what the model is shown. This release does not fix the re-reading stall on large multi-file tasks described in KNOWN_LIMITATIONS.md; that work continues.

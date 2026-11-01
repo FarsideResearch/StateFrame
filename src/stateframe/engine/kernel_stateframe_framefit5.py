@@ -295,6 +295,9 @@ _FRAMEFIT5_HOST_CONTEXT_PREFIXES = (
 def _is_framefit5_host_context_panel(message: Mapping[str, object]) -> bool:
     """Recognize current host panels that must accompany the selected exchange."""
     content = message.get("content")
+    if isinstance(content, str) and content.startswith("[Read lockout] "):
+        return (message.get("role") == "user"
+                and message.get("_request_budget_section") == "stage_evidence")
     return (
         message.get("role") == "user"
         and isinstance(content, str)
@@ -2324,7 +2327,7 @@ def _reconcile_framefit5_source_notices(
                 and isinstance(read_revision, str)
                 and read_revision == current_revision
                 and receipt_ids):
-            if fact.get("body_delivery") == "present":
+            if fact.get("body_delivery") in {"present", "bookmarked"}:
                 current_read_paths.add(path)
             read_lines.append(
                 f"{path} already read at rev {read_revision}, unchanged since; "
@@ -2361,6 +2364,8 @@ def _reconcile_framefit5_source_notices(
 
                 notice = eviction_notice(path, current_revision)
             read_lines[-1] += "; " + notice
+        elif owed and fact.get("body_delivery") == "bookmarked":
+            read_lines[-1] += "; " + str(fact.get("delivery_notice"))
 
     other_paths = [
         path for path in deferred_paths

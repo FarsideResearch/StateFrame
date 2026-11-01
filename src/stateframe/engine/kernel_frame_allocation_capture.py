@@ -708,12 +708,60 @@ def finalize_frame_candidate(
         return current_limit
 
     byte_limit = trim_optional_candidate()
+    state_message = next(
+        message
+        for message in candidate["messages"]
+        if str(message.get("content") or "").startswith(STATE_HEADER + "\n")
+    )
+    payload, state = _state_payload(state_message)
+    frame = state["framefit5"]
+    from kernel_reread_result_truth import read_is_owed
+    needs_bookmarks = bool(getattr(runtime, "_code_bookmark_carry", ())) or any(
+        isinstance(row, Mapping) and row.get("body_delivery") == "not_shown"
+        and read_is_owed(row)
+        for row in frame.get("read_facts", ())
+    )
+    bookmarks = []
+    bookmark_decision: dict[str, object] = {"reason": "no_owed_reads"}
+    collected_bookmark_count = 0
+    if needs_bookmarks:
+        from kernel_code_bookmarks import collect as collect_code_bookmarks
+        bookmarks = collect_code_bookmarks(runtime, frame, decision=bookmark_decision)
+        collected_bookmark_count = len(bookmarks)
+        if bookmarks:
+            from kernel_stateframe_framefit5 import _serialize_state_message
+            frame["code_bookmarks"] = bookmarks
+            state_message["content"] = _serialize_state_message(payload)
+    collected_bookmarks = copy.deepcopy(bookmarks)
     from kernel_frame_source_snapshot import (
-        fit_recent_read_windows, public_check_source_windows,
+        editable_product_windows, fit_recent_read_windows, public_check_source_windows,
         recent_editable_read_windows,
     )
     recent_windows = recent_editable_read_windows(runtime, frame)
+    ordinary_recent_windows = recent_windows
     public_windows = public_check_source_windows(runtime, frame)
+    bookmarks = frame.get("code_bookmarks")
+    bookmark_reconciliation = isinstance(bookmarks, list) and bool(bookmarks)
+    if isinstance(bookmarks, list) and bookmarks:
+        from kernel_code_bookmarks import resolve as resolve_bookmark, windows as bookmark_windows
+        from kernel_frame_optional_allocation import FrameAllocationReplanNeeded
+        root = _workspace_root(runtime)
+        for row in bookmarks:
+            if not isinstance(row, Mapping):
+                continue
+            current = resolve_bookmark(root, row)
+            if current is not None and current.get("revision") != row.get("revision"):
+                raise FrameAllocationReplanNeeded("bookmarked source changed before allocation")
+        selected = bookmark_windows(root, bookmarks)
+        if selected:
+            # Keep ordinary ranges even where they overlap: if fitting demotes
+            # a bookmark, its earlier read is still a fallback candidate.
+            # The fitter deduplicates exact carriers and delivery truth merges
+            # coverage by path, revision and range on the final wire.
+            recent_windows = [*selected, *recent_windows]
+    product_windows, editable_product_paths = editable_product_windows(
+        runtime, frame, bookmarks if isinstance(bookmarks, list) else (),
+    )
     plan = getattr(capture, "_request_source_closure_override", None)
     if not isinstance(plan, Mapping):
         plan = getattr(runtime, "_request_source_closure", None)
@@ -742,7 +790,7 @@ def finalize_frame_candidate(
     # complete-envelope fit. Their other units remain deferred; actual pressure
     # below can remove these host copies without touching newest input.
     visibility_paths = set(getattr(capture, "_visibility_required_paths", ()))
-    visibility_paths.update(row["path"] for row in recent_windows)
+    visibility_paths.update(row["path"] for row in [*recent_windows, *product_windows])
     if plan.get("deferred_paths"):
         _remove_deferred_source_excerpts(
             candidate["messages"], [path for path in plan["deferred_paths"]
@@ -762,6 +810,20 @@ def finalize_frame_candidate(
     from kernel_stateframe_capacity import within_protected_capacity
 
     def source_windows_fit(trial: Mapping[str, object]) -> bool:
+        if (bookmark_reconciliation or product_windows) and isinstance(trial.get("messages"), list):
+            # The selected source windows and the typed visibility claim are
+            # one measured proposal. Reconcile before admission, never after.
+            from kernel_reread_result_truth import refresh_messages
+            from kernel_stateframe_framefit5 import FrameFit5Error
+            try:
+                refresh_messages(
+                    trial["messages"],
+                    required_deferred_paths=tuple(plan.get("deferred_paths", ())),
+                )
+                from kernel_frame_source_snapshot import _prune_redundant_source_metadata
+                _prune_redundant_source_metadata(trial["messages"])
+            except (FrameFit5Error, TypeError, ValueError):
+                return False  # Optional source advice cannot reject the base.
         _count, trial_method = meter.measure(trial)
         byte_limit_for_windows = request_byte_limit(trial_method)
         # A bound release prefix must stay within its standard wire cap;
@@ -777,7 +839,7 @@ def finalize_frame_candidate(
             )
         )
 
-    recent_paths = {row["path"] for row in recent_windows}
+    recent_paths = {row["path"] for row in [*recent_windows, *product_windows]}
 
     def retained_reads_fit() -> bool:
         if not recent_windows:
@@ -787,14 +849,18 @@ def finalize_frame_candidate(
         # spending their bytes first makes retained pages disappear on the wire.
         full_reads = fit_recent_read_windows(
             candidate, recent_windows,
+            product_windows=product_windows,
             protected_messages=protected,
             newest_user_suffix=getattr(capture, "_framefit5_newest_user_suffix", ()),
             deferred_source_paths=tuple(plan.get("deferred_paths", ())),
+            editable_paths=editable_product_paths,
             fits=source_windows_fit,
         )
         contents = {message.get("content") for message in full_reads["messages"]
                     if isinstance(message, Mapping) and isinstance(message.get("content"), str)}
-        return all(window["content"] in contents for window in recent_windows)
+        return all(window["content"] in contents
+                   or window.get("compact_content") in contents
+                   for window in recent_windows)
 
     seen: set[tuple[tuple[str, ...], str]] = set()
     # Each selected path may first defer its omitted closure units and later
@@ -863,13 +929,37 @@ def finalize_frame_candidate(
             # considering a mandatory-minimum refusal or source deferral.
             without_excess_reads = fit_recent_read_windows(
                 candidate, recent_windows,
+                product_windows=product_windows,
                 protected_messages=protected,
                 newest_user_suffix=getattr(capture, "_framefit5_newest_user_suffix", ()),
                 deferred_source_paths=tuple(plan.get("deferred_paths", ())),
+                editable_paths=editable_product_paths,
                 fits=source_windows_fit,
             )
             if without_excess_reads != candidate:
                 candidate = without_excess_reads
+                continue
+            if bookmarks:
+                # No optional source selection may create a new minimum. Retry
+                # the measured base with ordinary reads and no bookmark state.
+                state_message = next(message for message in candidate["messages"]
+                                     if str(message.get("content") or "").startswith(STATE_HEADER + "\n"))
+                payload, state = _state_payload(state_message)
+                state["framefit5"].pop("code_bookmarks", None)
+                state_message["content"] = _serialize_state_message(payload)
+                bookmarks = []
+                recent_windows = ordinary_recent_windows
+                from kernel_reread_result_truth import refresh_messages
+                refresh_messages(candidate["messages"],
+                                 required_deferred_paths=tuple(plan.get("deferred_paths", ())))
+                candidate = fit_recent_read_windows(
+                    candidate, recent_windows, protected_messages=protected,
+                    product_windows=(),
+                    newest_user_suffix=getattr(capture, "_framefit5_newest_user_suffix", ()),
+                    deferred_source_paths=tuple(plan.get("deferred_paths", ())),
+                    editable_paths=editable_product_paths,
+                    fits=source_windows_fit,
+                )
                 continue
         current = tuple(plan.get("deferred_paths", ()))
         if not base_fits and current:
@@ -957,12 +1047,21 @@ def finalize_frame_candidate(
         raise FrameRequestAllocationError(
             "final allocation search exceeded finite candidates"
         )
-    if recent_windows or public_windows:
+    from kernel_code_bookmarks import enabled as bookmarks_enabled
+    from kernel_request_source_window import parse_model_source_window
+    has_source_windows = any(
+        isinstance(message, Mapping)
+        and parse_model_source_window(message.get("content")) is not None
+        for message in candidate["messages"]
+    )
+    if recent_windows or product_windows or public_windows or bookmarks_enabled() and has_source_windows:
         candidate = fit_recent_read_windows(
             candidate, recent_windows, public_checks=public_windows,
+            product_windows=product_windows,
             protected_messages=protected,
             newest_user_suffix=getattr(capture, "_framefit5_newest_user_suffix", ()),
             deferred_source_paths=tuple(plan.get("deferred_paths", ())),
+            editable_paths=editable_product_paths,
             fits=source_windows_fit,
         )
         receipt = verify_final_source_delivery(
@@ -992,4 +1091,81 @@ def finalize_frame_candidate(
     capture._request_source_closure_override = copy.deepcopy(plan)
     capture.request_source_final_delivery = receipt
     capture.request_budget_exceeded = False
+    final_state = next(
+        _state_payload(message)[1]["framefit5"]
+        for message in candidate["messages"]
+        if str(message.get("content") or "").startswith(STATE_HEADER + "\n")
+    )
+    final_bookmarks = final_state.get("code_bookmarks")
+    bookmarked_paths = (
+        {row["path"] for row in final_bookmarks
+         if isinstance(row, Mapping) and isinstance(row.get("path"), str)}
+        if isinstance(final_bookmarks, list) else set()
+    )
+    from kernel_request_source_window import parse_model_source_window
+    carried_source_paths = {
+        parsed["path"]
+        for message in candidate["messages"]
+        if isinstance(message, Mapping)
+        and isinstance(message.get("content"), str)
+        and "[code bookmark]" in message["content"]
+        if (parsed := parse_model_source_window(message["content"])) is not None
+        and isinstance(parsed.get("path"), str)
+    }
+    whole_source_revisions = {
+        parsed["path"]: parsed.get("revision") for message in candidate["messages"]
+        if isinstance(message, Mapping)
+        if (parsed := parse_model_source_window(message.get("content"))) is not None
+        and parsed.get("status") == "COMPLETE" and isinstance(parsed.get("path"), str)
+    }
+    current_revisions = {fact["path"]: fact.get("current_revision")
+                         for fact in final_state.get("read_facts", ())
+                         if isinstance(fact, Mapping) and isinstance(fact.get("path"), str)}
+    whole_source_paths = {path for path, revision in whole_source_revisions.items()
+                          if path not in current_revisions or current_revisions[path] == revision}
+    carried_whole_paths = {row["path"] for row in collected_bookmarks
+                           if isinstance(row, Mapping) and row.get("path") in whole_source_paths
+                           and row.get("revision") == whole_source_revisions[row["path"]]}
+    visible_bookmarked_paths = (bookmarked_paths & carried_source_paths) | (
+        carried_whole_paths
+    ) | {
+        fact["path"] for fact in final_state.get("read_facts", ())
+        if isinstance(fact, Mapping) and fact.get("path") in bookmarked_paths
+        and fact.get("body_delivery") in {"present", "bookmarked"}
+    }
+    active = bool(visible_bookmarked_paths)
+    reason = ("activated" if active else
+              "capacity_dropped" if collected_bookmark_count and not final_bookmarks else
+              "no_delivery" if collected_bookmark_count else bookmark_decision["reason"])
+    from kernel_read_lockout import final_source_visible, release as release_read_lockout
+    visible_bookmarks = ([row for row in final_bookmarks if isinstance(row, Mapping)
+                          and row.get("path") in visible_bookmarked_paths]
+                         if isinstance(final_bookmarks, list) else [])
+    visible_bookmarks.extend(row for row in collected_bookmarks
+                             if row.get("path") in carried_whole_paths
+                             and row not in visible_bookmarks)
+    if (getattr(runtime, "_read_lockout_notice", None)
+            and not final_source_visible(runtime, visible_bookmarks, candidate["tools"])):
+        # The prior request's visible bookmark was only provisional. Rebuild an
+        # unrestricted request before a provider sees a completion-only trap.
+        from kernel_frame_optional_allocation import FrameAllocationReplanNeeded
+        release_read_lockout(runtime, "SOURCE_NOT_VISIBLE")
+        raise FrameAllocationReplanNeeded("locked repair source absent from final request")
+    journal = getattr(capture, "journal", getattr(runtime, "journal", None))
+    emit = getattr(journal, "emit", None)
+    from kernel_code_bookmarks import enabled as bookmarks_enabled
+    if bookmarks_enabled() and callable(emit):
+        for drop in bookmark_decision.get("drops", ()):
+            emit("code_bookmark_dropped", request_id=getattr(capture, "request_id", None),
+                 path=drop["path"], symbol=drop["symbol"], reason=drop["reason"],
+                 dispatch=False)
+        emit("code_bookmark_activation_decision",
+             request_id=getattr(capture, "request_id", None),
+             reason=reason, activated=active,
+             collected_count=collected_bookmark_count,
+             final_count=len(final_bookmarks) if isinstance(final_bookmarks, list) else 0,
+             dispatch=False)
+    capture._code_bookmark_transition = (
+        active, copy.deepcopy(visible_bookmarks) if active else []
+    )
     return candidate

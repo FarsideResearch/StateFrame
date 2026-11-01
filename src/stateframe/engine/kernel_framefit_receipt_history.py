@@ -123,7 +123,11 @@ class ReceiptHistory:
             })
             summary["receipt_count"] += 1
         elif event.get("kind") == "check_receipt":
-            key = ("check",)
+            from kernel_code_bookmarks import enabled as bookmarks_enabled
+            # Selector frontiers are required only for bookmark localization.
+            # The off path keeps the release's single latest check receipt.
+            key = (("check", str(event.get("selector") or ""))
+                   if bookmarks_enabled() else ("check",))
         elif (edit := _applied_edit_receipt(event)) is not None:
             key = ("edit", _sha(edit.get("target_path")))
 

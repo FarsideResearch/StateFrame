@@ -1,0 +1,1 @@
+STOP_ON_ERROR = False
