@@ -788,9 +788,12 @@ def main(argv: list[str]) -> int:
                     "slot": (spec.get("prompt_cache_slot") or {}).get("slot"),
                     "context_tokens": int(environment.get("STATEFRAME_CONTEXT_TOKENS", 65536))}
         kernel_frame_routes.install(spec["routes"], baseline=baseline)
+        # Same rule as stateframe.routes.uses_other_model (this module cannot import the package):
+        # decide2's built-in "decision-tier" alias is served by the default model.
         if os.environ.get("LLAMA_CPP_TOKENIZE_URL") and any(
-                settings.get("model") != spec["model"] and not settings.get("tokenizer")
-                for settings in spec["routes"]["roles"].values()):
+                settings.get("model") not in {spec["model"], "decision-tier" if role == "decide2" else spec["model"]}
+                and not settings.get("tokenizer")
+                for role, settings in spec["routes"]["roles"].items()):
             raise ValueError("LLAMA_CPP_TOKENIZE_URL conflicts with routed models; set each role tokenizer")
         routed_endpoints = {spec["chat_url"]}
         routed_endpoints.update(

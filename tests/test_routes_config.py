@@ -172,3 +172,12 @@ def test_commented_example_is_inactive(tmp_path):
     shipped = Path(__file__).resolve().parents[1] / "examples" / "routes.example.toml"
     assert shipped.read_text() == routes.example()
     assert not resolve(file=shipped).active
+
+
+def test_decide2_alias_is_not_another_model():
+    # Regression: decide2's built-in "decision-tier" alias made every routed run with
+    # LLAMA_CPP_TOKENIZE_URL refuse to start (runner and engine child both checked it).
+    assert not routes.uses_other_model("decide2", "decision-tier", "qwen")
+    assert not routes.uses_other_model("read", "qwen", "qwen")
+    assert routes.uses_other_model("read", "decision-tier", "qwen")
+    assert routes.uses_other_model("decide2", "small", "qwen")

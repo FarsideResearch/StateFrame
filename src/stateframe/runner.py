@@ -882,11 +882,12 @@ def _probe_routes(options: RunOptions, printer=print, *, resume_roles: dict | No
         options._routes = None
         return
     assert options.endpoint is not None
-    if os.environ.get("LLAMA_CPP_TOKENIZE_URL") and any(
-            settings["model"] != options.endpoint.model and table.sources[role].get("tokenizer", "default") == "default"
-            for role, settings in table.roles.items()):
-        raise RunError("LLAMA_CPP_TOKENIZE_URL is set while a route uses another model; set that role's tokenizer "
-                       "or unset LLAMA_CPP_TOKENIZE_URL")
+    mismatched = [role for role, settings in table.roles.items()
+                  if routes.uses_other_model(role, settings["model"], options.endpoint.model)
+                  and table.sources[role].get("tokenizer", "default") == "default"]
+    if os.environ.get("LLAMA_CPP_TOKENIZE_URL") and mismatched:
+        raise RunError(f"LLAMA_CPP_TOKENIZE_URL is set while route {mismatched[0]} uses another model; set "
+                       f"{mismatched[0]}.tokenizer or unset LLAMA_CPP_TOKENIZE_URL")
     checked: set[tuple[str, str]] = set()
     slots_by_endpoint: dict[str, object] = {}
     # Resolve default-endpoint auto pins before constructing probe endpoints. The

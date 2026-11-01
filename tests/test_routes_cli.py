@@ -98,8 +98,13 @@ def test_start_refusals_name_route_and_repair(servers, monkeypatch):
         runner._probe_routes(options, lambda *_: None)
     monkeypatch.setenv("LLAMA_CPP_TOKENIZE_URL", default + "/tokenize")
     options.route_cli = [f"read.endpoint={small}", "read.model=small"]
-    with pytest.raises(runner.RunError, match="LLAMA_CPP_TOKENIZE_URL is set"):
+    with pytest.raises(runner.RunError, match="LLAMA_CPP_TOKENIZE_URL is set while route read uses"):
         runner._probe_routes(options, lambda *_: None)
+    # Regression: decide2's built-in "decision-tier" alias counted as another model, so any active
+    # route was refused even after the routed role named its own tokenizer.
+    options.route_cli = [f"read.endpoint={small}", "read.model=small", f"read.tokenizer={small}"]
+    runner._probe_routes(options, lambda *_: None)
+    assert options._routes is not None
 
 
 def test_unit_overlay_model_is_probed_with_request_endpoint(servers, monkeypatch):

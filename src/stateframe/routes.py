@@ -62,6 +62,11 @@ def valid_role(role: str) -> bool:
     return role in ROLES or (role.startswith("unit.") and bool(_CLASS.fullmatch(role[5:])))
 
 
+def uses_other_model(role: str, model: object, default_model: str) -> bool:
+    """Whether a role's model differs from the run's model; decide2's built-in alias is the default model."""
+    return model not in {default_model, "decision-tier" if role == "decide2" else default_model}
+
+
 def _check_role(role: object) -> str:
     if not isinstance(role, str) or not valid_role(role):
         raise RouteError(f"unknown route role {role!r}; roles are read, plan, edit, finish, decide2, unit, unit.<class>")
