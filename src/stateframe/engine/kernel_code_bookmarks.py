@@ -101,6 +101,26 @@ def _outline(source: str) -> list[dict[str, object]]:
         return []
 
 
+def _import_binding(source: str, name: str) -> dict[str, object] | None:
+    """Find one explicit module-level import that binds a public name."""
+    try:
+        tree = ast.parse(source)
+    except (SyntaxError, ValueError, RecursionError, MemoryError, OverflowError):
+        return None
+    matches = []
+    for node in tree.body:
+        if not isinstance(node, (ast.Import, ast.ImportFrom)):
+            continue
+        for alias in node.names:
+            bound = alias.asname or (alias.name.split(".", 1)[0]
+                                     if isinstance(node, ast.Import) else alias.name)
+            if bound == name and alias.name != "*":
+                matches.append({"name": name, "qualified_name": name,
+                                "start_line": node.lineno,
+                                "end_line": node.end_lineno or node.lineno})
+    return matches[0] if len(matches) == 1 else None
+
+
 def _symbol_at(source: str, line: int, name: str = "") -> dict[str, object] | None:
     rows = _outline(source)
     matching = [row for row in rows
@@ -109,7 +129,10 @@ def _symbol_at(source: str, line: int, name: str = "") -> dict[str, object] | No
         matching = [row for row in matching
                     if row["name"] == name or row["qualified_name"] == name]
     if not matching:
-        return None
+        binding = _import_binding(source, name) if name else None
+        return (binding if binding is not None
+                and int(binding["start_line"]) <= line <= int(binding["end_line"])
+                else None)
     matching.sort(key=lambda row: (int(row["end_line"]) - int(row["start_line"]),
                                    str(row["qualified_name"])))
     selected = matching[0]
@@ -385,7 +408,9 @@ def _assertion_targets(root: Path, paths: Sequence[str],
                 if len(matches) == 1:
                     result.append((path, int(matches[0]["start_line"]), name))
                 elif not matches:
-                    result.append((path, 1, name or "<module>"))
+                    binding = _import_binding(source[0], name) if name else None
+                    result.append((path, int(binding["start_line"]) if binding else 1,
+                                   name or "<module>"))
     return result
 
 
@@ -658,6 +683,10 @@ def resolve(root: Path, bookmark: Mapping[str, object]) -> dict[str, object] | N
                 "source": source}
     outline = _outline(source)
     rows = [row for row in outline if row["qualified_name"] == symbol]
+    if not rows:
+        binding = _import_binding(source, symbol)
+        if binding is not None:
+            rows = [binding]
     if len(rows) != 1:
         return {"path": path, "symbol": symbol, "status": "unresolved",
                 "revision": revision, "outline": [row["qualified_name"]

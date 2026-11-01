@@ -12,7 +12,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from kernel_code_bookmarks import _source, collect, resolve, windows
+from kernel_code_bookmarks import _source, _symbol_at, collect, resolve, windows
 from kernel_context import token_estimate
 from kernel_frame_source_snapshot import _current_window, fit_recent_read_windows
 from kernel_read_exec import execute_read
@@ -88,6 +88,34 @@ def test_failed_traceback_keeps_three_current_units_and_context(tmp_path, monkey
     deliveries = {row["path"]: row["body_delivery"] for row in frame["read_facts"]}
     assert all(deliveries[name] == "present" for name in names[:3])
     assert all(deliveries[name] == "not_shown" for name in names[3:])
+
+
+def test_reexport_bookmark_resolves_only_one_explicit_binding(tmp_path):
+    root = tmp_path.resolve()
+    package = root / "pkg"
+    package.mkdir()
+    source = "from .runner import run_batch\n\n__all__ = ['run_batch']\n"
+    (package / "__init__.py").write_text(source)
+    bookmark = {"path": "pkg/__init__.py", "symbol": "run_batch", "rank": 1}
+
+    assert _symbol_at(source, 1, "run_batch") == {
+        "name": "run_batch", "qualified_name": "run_batch",
+        "start_line": 1, "end_line": 1,
+    }
+    assert _symbol_at(source, 3, "run_batch") is None
+    resolved = resolve(root, bookmark)
+    assert resolved is not None and resolved["status"] == "current"
+    assert resolved["start_line"] == resolved["end_line"] == 1
+
+    (package / "__init__.py").write_text("\n\n" + source)
+    shifted = resolve(root, bookmark)
+    assert shifted is not None and shifted["status"] == "current"
+    assert shifted["start_line"] == shifted["end_line"] == 3
+
+    (package / "__init__.py").write_text(
+        "from .runner import run_batch\nfrom .other import run_batch\n")
+    ambiguous = resolve(root, bookmark)
+    assert ambiguous is not None and ambiguous["status"] == "unresolved"
 
 
 def test_edit_discharges_bookmark_visibility_claim(tmp_path, monkeypatch):
