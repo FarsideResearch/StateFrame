@@ -265,3 +265,37 @@ def test_escalation_without_second_response_allowance_stops_before_dispatch(tmp_
     events = [json.loads(line) for path in event_files for line in path.read_text().splitlines()]
     retained = [event for event in events if event.get("kind", "").startswith("passive_retention")]
     assert "discarded.txt" not in json.dumps(retained)
+
+
+def test_routed_tokenizer_survives_sealing_on_a_separate_server(tmp_path):
+    # Regression (gate 3): final qualification replaced a route's tokenizer with its chat endpoint.
+    # The routed chat server has no /tokenize, so only the route's own tokenizer can count it.
+    repo = copy_repo(tmp_path)
+    run_dir = tmp_path / "run"
+    tok_log, base_tok_log = tmp_path / "tok.jsonl", tmp_path / "base-tok.jsonl"
+    cheap_script = tmp_path / "cheap.script.json"
+    cheap_script.write_text(json.dumps({"model": "cheap", "steps": [
+        {"tool": "read", "arguments": {"path": "app.py"}},
+        {"tool": "read", "arguments": {"path": "app.py"}}]}))
+    tok_script = tmp_path / "tok.script.json"
+    tok_script.write_text(json.dumps({"model": "cheap", "steps": [], "tokenize": {"mode": "ok"},
+                                      "tokenize_log": str(tok_log)}))
+    default_script = tmp_path / "default.script.json"
+    default_script.write_text(json.dumps({"model": "scripted", "steps": [], "tokenize": {"mode": "ok"},
+                                          "tokenize_log": str(base_tok_log)}))
+    with Endpoint(default_script) as default, Endpoint(cheap_script) as cheap, Endpoint(tok_script) as tok:
+        routes = []
+        for role in ("plan", "read"):
+            routes += ["--route", f"{role}.endpoint={cheap.url}", "--route", f"{role}.model=cheap",
+                       "--route", f"{role}.tokenizer={tok.url}"]
+        process = subprocess.run([
+            PYTHON, "-m", "stateframe", "run", "--repo", str(repo), "--task", "Inspect app.py",
+            "--endpoint", default.url, "--model", "scripted", "--run-dir", str(run_dir),
+            "--test-python", PYTHON, "--test-cmd", "python -m unittest discover -s tests -q",
+            "--max-turns", "2", "--quiet", *routes], capture_output=True, text=True,
+            env=environment(), timeout=240, check=False)
+    assert process.returncode in (0, 1), process.stdout + process.stderr
+    roles = [json.loads(path.read_text())["role"] for path in sorted((run_dir / "wire").glob("*.route.json"))]
+    assert roles and set(roles) <= {"plan", "read"}
+    assert tok_log.is_file() and tok_log.read_text().strip()
+    assert '"kind":"token_counting_unavailable"' not in (run_dir / "engine.log").read_text()

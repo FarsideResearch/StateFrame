@@ -21505,6 +21505,10 @@ class StateFrameRuntime:
         # Retain the caller's inputs before any host projection or source closure
         # is frozen. A single unsent source replan can then run normal preparation
         # against the current workspace instead of relabeling stale proof bytes.
+        # Every re-entry into prepare (notice dedup, source replan) must keep a routed second
+        # leg's forced role and frozen frame; unrouted requests carry none.
+        route_options = ({"forced_route": forced_route, "frozen_route_capture": frozen_route_capture}
+                         if forced_route is not None or frozen_route_capture is not None else {})
         source_replan_inputs = None
         if provider_request and getattr(self, "stateframe_framefit_mode", "off") == "on":
             source_messages = copy.deepcopy(messages)
@@ -21515,6 +21519,8 @@ class StateFrameRuntime:
                 "provider_request": True,
                 "request_host_text_preparer": request_host_text_preparer,
             }
+            if route_options:
+                source_replan_inputs["route_options"] = route_options
         from kernel_host_cache import clear_request_cache
         clear_request_cache(self)
         from kernel_lean import enabled as lean_enabled
@@ -21554,7 +21560,8 @@ class StateFrameRuntime:
             return prepare_with_commit(self, StateFrameRuntime.prepare, messages,
                                        uncapped=uncapped, tools=tools,
                                        provider_request=provider_request,
-                                       request_host_text_preparer=request_host_text_preparer)
+                                       request_host_text_preparer=request_host_text_preparer,
+                                       **route_options)
         if self.memory_isolation is not None and not lean_on:
             messages, uncapped = self.memory_isolation.prepare(messages, uncapped)
         from kernel_request_evidence_closure import (
@@ -22027,6 +22034,7 @@ class StateFrameRuntime:
                     role = forced_route or role_for_request(self.binding().get("artifact"))
                     capture.frame_route = _resolve_frame_route(
                         role, forced_by=getattr(frozen_route_capture, "request_id", None))
+                    capture._frame_route_frozen_capture = frozen_route_capture
                     capture._frame_route_typed_state = copy.deepcopy(typed_state)
                     capture._frame_route_action_context = copy.deepcopy(self._framefit_action_context)
                     capture._tokenize_endpoint = str(capture.frame_route.settings.get("tokenizer")

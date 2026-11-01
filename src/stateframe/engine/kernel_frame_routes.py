@@ -207,6 +207,15 @@ def classify_calls(calls: object, *, custom_writes: set[str] | frozenset[str] = 
     return "read"
 
 
+def forced_leg_options(capture: object) -> dict[str, object]:
+    """prepare() options that rebuild an escalated leg with its forced role; {} for any other capture."""
+    route = getattr(capture, "frame_route", None)
+    frozen = getattr(capture, "_frame_route_frozen_capture", None)
+    if route is None or route.escalated_from is None or frozen is None:
+        return {}
+    return {"forced_route": route.role, "frozen_route_capture": frozen}
+
+
 def escalation_target(answering: Route | None, calls: object,
                       *, custom_writes: set[str] | frozenset[str] = frozenset()) -> str | None:
     if answering is None or not isinstance(calls, list) or not calls:

@@ -71,6 +71,9 @@ class Script:
         self.slots = [int(n) for n in document.get("slots") or []]
         self.tokenize_calls = 0
         self.slots_calls = 0
+        # Optional path: one JSON line per answered /tokenize call, so a test can see which server counted.
+        self.tokenize_log = (Path(document["tokenize_log"]) if isinstance(document.get("tokenize_log"), str)
+                             else None)
 
     def next_call(self, offered: list[str]) -> dict:
         with self.lock:
@@ -140,7 +143,11 @@ def make_handler(script: Script):
                 self._send(400, {"error": {"message": "invalid JSON"}})
                 return
             # Roughly 4 characters per token, as integer ids; only the count matters to the meter.
-            self._send(200, {"tokens": list(range(max(1, len(content) // 4)))})
+            count = max(1, len(content) // 4)
+            if script.tokenize_log is not None:
+                with script.lock, script.tokenize_log.open("a", encoding="utf-8") as stream:
+                    stream.write(json.dumps({"path": self.path, "tokens": count}) + "\n")
+            self._send(200, {"tokens": list(range(count))})
 
         def do_GET(self) -> None:  # noqa: N802
             if self.path.rstrip("/") == "/v1/models":

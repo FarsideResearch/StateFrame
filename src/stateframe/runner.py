@@ -1418,8 +1418,11 @@ def _route_costs(run: Path, route_spec: dict, sends: list[dict],
                         "completion_tokens": completion}
         for key, value in token_counts.items():
             if type(value) is int and value >= 0:
-                row[key] += value
+                if row[key] is not None:
+                    row[key] += value
             else:
+                # One unreported count makes the role's column unknown, never a silent undercount.
+                row[key] = None
                 incomplete.add(role)
         valid_usage = (all(type(token_counts[key]) is int and token_counts[key] >= 0 for key in token_counts)
                        and token_counts["cached_tokens"] <= token_counts["prompt_tokens"])
@@ -1456,15 +1459,16 @@ def _route_costs(run: Path, route_spec: dict, sends: list[dict],
         if role not in incomplete and (row["requests"] or
                                       all(type(rates[role].get(key)) in (int, float) for key in keys)):
             row["estimated_cost"] = round(priced[role], 8)
-    total = {key: sum(int(row[key]) for row in rows.values()) for key in
-              ("requests", "escalated", "prompt_tokens", "cached_tokens", "completion_tokens")}
+    total = {key: (None if any(row[key] is None for row in rows.values())
+                   else sum(int(row[key]) for row in rows.values()))
+             for key in ("requests", "escalated", "prompt_tokens", "cached_tokens", "completion_tokens")}
     total["requests"] += unattributed_sends
     if unattributed_sends:
         for key in ("escalated", "prompt_tokens", "cached_tokens", "completion_tokens"):
             total[key] = None
     costs = [row["estimated_cost"] for row in rows.values() if row["requests"]]
-    total["estimated_cost"] = (round(sum(costs), 8) if not unattributed_sends and
-                               len(costs) == sum(bool(row["requests"]) for row in rows.values()) else None)
+    total["estimated_cost"] = (round(sum(costs), 8)
+                               if not unattributed_sends and all(cost is not None for cost in costs) else None)
     as_edit = round(priced_as_edit, 8) if total["estimated_cost"] is not None and not edit_incomplete else None
     return {"roles": rows, "total": total, "unattributed_sends": unattributed_sends,
             "all_at_edit_rates": as_edit,

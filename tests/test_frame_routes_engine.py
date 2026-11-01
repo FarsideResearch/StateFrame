@@ -323,3 +323,77 @@ def test_routed_seal_keeps_token_meter_on_capture_only():
     frame_routes.install(table("read.model=reader"))
     assert not allocation.publishes_runtime_token_meter(routed)
     assert allocation.publishes_runtime_token_meter(plain)
+
+
+def test_notice_dedup_reentry_keeps_forced_role():
+    # Regression: notice dedup (on in the shipped profile) re-enters prepare and dropped the
+    # forced role, so an escalated edit step was re-asked of the read model.
+    import kernel_stateframe_notice_dedup as dedup
+
+    seen = []
+
+    def prepare(runtime, messages, *, uncapped, tools, provider_request=True,
+                request_host_text_preparer=None, forced_route=None, frozen_route_capture=None):
+        seen.append((forced_route, frozen_route_capture, request_host_text_preparer))
+        return SimpleNamespace(messages=[])
+
+    first, preparer = object(), (lambda *args, **kwargs: None)
+    runtime = SimpleNamespace()
+    dedup.prepare_with_commit(runtime, prepare, [], uncapped=[], tools=[],
+                              forced_route="edit", frozen_route_capture=first)
+    dedup.prepare_with_commit(runtime, prepare, [], uncapped=[], tools=[],
+                              request_host_text_preparer=preparer,
+                              forced_route="finish", frozen_route_capture=first)
+    dedup.prepare_with_commit(runtime, prepare, [], uncapped=[], tools=[])
+    assert seen == [("edit", first, None), ("finish", first, preparer), (None, None, None)]
+
+
+def test_forced_leg_options_rebuild_only_escalated_legs():
+    frame_routes.install(table("read.model=reader"))
+    first = object()
+    escalated = SimpleNamespace(frame_route=frame_routes.resolve("edit", forced_by="r1"),
+                                _frame_route_frozen_capture=first)
+    ordinary = SimpleNamespace(frame_route=frame_routes.resolve("read"),
+                               _frame_route_frozen_capture=None)
+    assert frame_routes.forced_leg_options(escalated) == {"forced_route": "edit",
+                                                          "frozen_route_capture": first}
+    assert frame_routes.forced_leg_options(ordinary) == {}
+    assert frame_routes.forced_leg_options(SimpleNamespace()) == {}
+
+
+def _bound_names(nodes, *, skip=()):
+    """Names a block binds (assignments, except-as, imports, loops), not counting nested functions."""
+    bound, stack = set(), list(nodes)
+    while stack:
+        node = stack.pop()
+        if any(node is skipped for skipped in skip):
+            continue
+        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store):
+            bound.add(node.id)
+        elif isinstance(node, ast.ExceptHandler) and node.name:
+            bound.add(node.name)
+        elif isinstance(node, (ast.Import, ast.ImportFrom)):
+            bound.update((alias.asname or alias.name).split(".")[0] for alias in node.names)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef,
+                             ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)):
+            continue  # own scope: cannot rebind work() locals
+        stack.extend(ast.iter_child_nodes(node))
+    return bound
+
+
+def test_routed_step_branch_never_rebinds_work_locals():
+    # Regression: the escalation loop reused `target`, overwriting work()'s target file path, so
+    # every routed run that escalated crashed at the end ('str' object has no attribute 'relative_to').
+    from probes import react_repair
+
+    tree = ast.parse(Path(react_repair.__file__).read_text())
+    work = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "work")
+    branch = next(node for node in ast.walk(work) if isinstance(node, ast.If)
+                  and ast.unparse(node.test) == "not _frame_routes.ROUTES_ACTIVE")
+    routed = _bound_names(branch.orelse)
+    elsewhere = _bound_names(work.body, skip=branch.orelse)
+    # The step's own results are shared with the unrouted branch by design.
+    shared = {"content", "calls", "_prepared", "_capture_token"}
+    clashes = sorted(name for name in routed & elsewhere
+                     if name not in shared and not name.startswith("_route"))
+    assert clashes == []

@@ -416,3 +416,33 @@ def test_missing_route_record_makes_summary_totals_unknown(tmp_path, capsys):
     output = capsys.readouterr().out
     assert "1 send(s) missing route records; totals unknown" in output
     assert "total             2   unknown  unknown" in output
+
+
+def test_unreported_cached_tokens_make_cost_unknown_not_a_crash(tmp_path, capsys):
+    # Regression: a server that reports no cached_tokens left one role's cost None, and the
+    # total summed it (TypeError int + None) after a successful routed run.
+    wire = tmp_path / "wire"
+    wire.mkdir()
+    for index, role in ((1, "read"), (2, "edit")):
+        (wire / f"{index:04d}.route.json").write_text(json.dumps({"role": role, "scope": "run"}))
+    rates = {"cost_input_per_mtok": 1.0, "cost_cached_input_per_mtok": 0.5,
+             "cost_output_per_mtok": 2.0}
+    spec = {"roles": {"read": rates, "edit": rates}}
+    sends = [{"send": 1, "request_id": "a", "completion_tokens": 5},
+             {"send": 2, "request_id": "b", "completion_tokens": 7}]
+    usage = [{"total": 20, "cached": None}, {"total": 30, "cached": 3}]
+    costs = runner._route_costs(tmp_path, spec, sends, usage)
+    assert costs["roles"]["read"]["cached_tokens"] is None
+    assert costs["roles"]["read"]["prompt_tokens"] == 20
+    assert costs["roles"]["read"]["estimated_cost"] is None
+    assert costs["roles"]["edit"]["estimated_cost"] is not None
+    assert costs["total"]["cached_tokens"] is None
+    assert costs["total"]["prompt_tokens"] == 50
+    assert costs["total"]["estimated_cost"] is None
+    assert costs["estimated_savings"] is None
+    (tmp_path / "final.diff").write_text("")
+    cli._print_summary({"run_dir": str(tmp_path), "tests_before": {"passed": True},
+                        "tests_after": {"command": "pytest"}, "runtime_outcome": "completed",
+                        "check_outcome": "pass", "artifact": "captured", "succeeded": False,
+                        "route_costs": costs})
+    assert "read              1         0       20  unknown" in capsys.readouterr().out

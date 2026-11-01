@@ -7971,16 +7971,21 @@ def work(d, *, resume=None):
                         if _capture_token is not None:
                             ACTIVE_REQUEST.reset(_capture_token)
                             _capture_token = None
+                        # A rerouted escalated leg keeps its forced role and frozen frame.
+                        _reroute_options = (_frame_routes.forced_leg_options(_prepared.capture)
+                                            if _frame_routes.ROUTES_ACTIVE else {})
                         if _provider_request and _request_host_text_preparer is not None:
                             _prepared = measurement.prepare(
                                 msgs, uncapped=_uncapped_messages,
                                 tools=_request_tools, provider_request=True,
                                 request_host_text_preparer=_request_host_text_preparer,
+                                **_reroute_options,
                             )
                         else:
                             _prepared = measurement.prepare(
                                 msgs, uncapped=_uncapped_messages,
                                 tools=_request_tools, provider_request=_provider_request,
+                                **_reroute_options,
                             )
                         _audit_system_prompt(_prepared.messages)
                         if not provider_dispatch_allowed(_prepared):
@@ -8017,17 +8022,17 @@ def work(d, *, resume=None):
                             try:
                                 content, calls = _provider_request_once()
                             except RouteEscalation as decision:
-                                target = decision.target
+                                _route_target = decision.target
                                 calls = decision.calls
                                 content = ""
                             else:
                                 custom_writes = ({name for name, tool in getattr(
                                     _agent_tools, "custom", {}).items() if tool.writes == "workspace"}
                                     if getattr(first_capture, "frame_route", None) is not None else set())
-                                target = (escalation_target(getattr(first_capture, "frame_route", None), calls,
+                                _route_target = (escalation_target(getattr(first_capture, "frame_route", None), calls,
                                                             custom_writes=custom_writes)
                                           if not _route_escalated and native_batch is None else None)
-                            if target is None:
+                            if _route_target is None:
                                 break
                             _route_escalated = True
                             from kernel_frame_routes import note_response, reject_capture
@@ -8035,7 +8040,7 @@ def work(d, *, resume=None):
                             reject_capture(measurement, first_capture)
                             first_capture.journal.emit(
                                 "route_escalation_discarded", request_id=first_capture.request_id,
-                                step=step, role=first_capture.frame_route.role, to=target,
+                                step=step, role=first_capture.frame_route.role, to=_route_target,
                                 classes=[(call.get("function") or {}).get("name") for call in calls],
                                 usage=dict(getattr(first_capture, "accounting", {})), dispatch=False)
                             if _capture_token is not None:
@@ -8046,12 +8051,12 @@ def work(d, *, resume=None):
                                     msgs, uncapped=_uncapped_messages, tools=_request_tools,
                                     provider_request=True,
                                     request_host_text_preparer=_request_host_text_preparer,
-                                    forced_route=target, frozen_route_capture=first_capture)
+                                    forced_route=_route_target, frozen_route_capture=first_capture)
                             else:
                                 _prepared = measurement.prepare(
                                     msgs, uncapped=_uncapped_messages, tools=_request_tools,
                                     provider_request=_provider_request,
-                                    forced_route=target, frozen_route_capture=first_capture)
+                                    forced_route=_route_target, frozen_route_capture=first_capture)
                             if not provider_dispatch_allowed(_prepared):
                                 _route_stopped = True
                                 measurement.system_outcome = "response_budget_exhausted"

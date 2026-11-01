@@ -22,6 +22,17 @@ def publishes_runtime_token_meter(candidate) -> bool:
     return not (_frame_routes.ROUTES_ACTIVE and getattr(candidate, "frame_route", None) is not None)
 
 
+def routed_tokenize_endpoint(capture) -> str | None:
+    """The tokenizer a routed capture was bound to at preparation (its route's tokenizer or endpoint).
+
+    Sealing must keep it: the chat endpoint differs whenever the route names its own tokenizer.
+    """
+    if not (_frame_routes.ROUTES_ACTIVE and getattr(capture, "frame_route", None) is not None):
+        return None
+    bound = getattr(capture, "_tokenize_endpoint", None)
+    return bound if isinstance(bound, str) and bound else None
+
+
 def build_qualified_request(capture, runtime, body, *, endpoint, key, deadline=None):
     """Complete, fit and prove detached state, then publish one coherent record."""
     from kernel_request_kind import classify, gate_required, validate_adapter, RequestKindError
@@ -64,7 +75,7 @@ def build_qualified_request(capture, runtime, body, *, endpoint, key, deadline=N
     _request_token_meter(runtime, capture, tokenizer_endpoint=endpoint)
     candidate, context = detached_context(capture, runtime)
     candidate._tokenize_deadline = deadline
-    candidate._tokenize_endpoint = endpoint
+    candidate._tokenize_endpoint = routed_tokenize_endpoint(capture) or endpoint
     body = copy.deepcopy(body)
     truth = capture_context(candidate, context, body, side_call=False)
     if enabled():

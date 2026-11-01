@@ -4331,6 +4331,7 @@ class RequestCapture:
                     tools=copy.deepcopy(inputs["tools"]),
                     provider_request=inputs["provider_request"],
                     request_host_text_preparer=inputs["request_host_text_preparer"],
+                    **inputs.get("route_options", {}),
                 )
             replacement = prepared.capture
             from kernel_read_reuse_visibility import retire_changed_revision_candidates
@@ -5061,11 +5062,14 @@ class RequestCapture:
             require_local(endpoint, allow_remote=bool(route.settings.get("allow_remote")))
             key_name = route.settings.get("api_key_env")
             key = os.environ.get(key_name, "") if isinstance(key_name, str) else ""
-            self.journal.emit("frame_route", request_id=self.request_id, role=route.role,
-                              scope=route.scope, unit_class=route.unit_class,
-                              endpoint_host=urllib.parse.urlsplit(endpoint).hostname,
-                              model=route.model, overridden_fields=route.overridden_fields,
-                              escalated_from=route.escalated_from, dispatch=False)
+            # One journal record per request, even when its body is built more than once.
+            if getattr(self, "_frame_route_journaled", None) != self.request_id:
+                self._frame_route_journaled = self.request_id
+                self.journal.emit("frame_route", request_id=self.request_id, role=route.role,
+                                  scope=route.scope, unit_class=route.unit_class,
+                                  endpoint_host=urllib.parse.urlsplit(endpoint).hostname,
+                                  model=route.model, overridden_fields=route.overridden_fields,
+                                  escalated_from=route.escalated_from, dispatch=False)
         if not _recovery_prepared:
             self._v43g_prepare_body(body)
         # Preserve the once-adapted transport input before budget/fact edits.
