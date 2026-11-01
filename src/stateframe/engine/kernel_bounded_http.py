@@ -526,11 +526,12 @@ def _child() -> None:
             headers={"Content-Type": "application/json", **headers,
                      "Authorization": "Bearer " + packet["key"]})
         attempt = {"content_encoding": headers.get("Content-Encoding"),
-                   "body_bytes": len(data), "body_sha256": hashlib.sha256(data).hexdigest()}
+                   "body_bytes": len(data), "body_sha256": hashlib.sha256(data).hexdigest(),
+                   "http_status": None}
+        attempts.append(attempt)
         try:
             with opener.open(request, timeout=packet["socket_timeout"]) as response:
                 attempt["http_status"] = response.status
-                attempts.append(attempt)
                 if response.length is not None and response.length > MAX_RESPONSE_BYTES:
                     raise ValueError("HTTP response exceeds bounded transport limit")
                 result = _read_response_body(
@@ -542,7 +543,6 @@ def _child() -> None:
             return result
         except urllib.error.HTTPError as error:
             attempt["http_status"] = error.code
-            attempts.append(attempt)
             error_body = _read_response_body(
                 error, tracker, deadline=packet["deadline"],
                 socket_timeout=packet["socket_timeout"], max_bytes=MAX_ERROR_BYTES)

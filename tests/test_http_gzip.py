@@ -40,6 +40,9 @@ def transport_server():
             body = self.rfile.read(int(self.headers["Content-Length"]))
             encoding = self.headers.get("Content-Encoding")
             seen.append((encoding, body, self.headers.get("X-Request-Body-SHA256")))
+            if encoding is None and accepts_gzip.get("close_on_identity"):
+                self.close_connection = True
+                return
             if encoding == "gzip" and not accepts_gzip["value"]:
                 status, reply = 415, b'{"error":"unsupported encoding"}'
             elif encoding is None and accepts_gzip.get("reject_identity") and len(seen) <= 2:
@@ -168,6 +171,39 @@ def test_wire_recorder_keeps_refused_resend_evidence_on_failure(monkeypatch, tmp
     assert record["request_sha256"] == hashlib.sha256(WIRE).hexdigest()
     assert (tmp_path / "wire/0001.error.txt").read_text() == "BoundedTransportError\n"
     assert build_replay_tape(tmp_path / "wire", tmp_path / "sends.jsonl") == []
+
+
+@pytest.mark.host_sandbox
+def test_wire_recorder_keeps_resend_when_server_closes_without_response(
+        monkeypatch, tmp_path, transport_server):
+    import kernel_bounded_http as child_http
+
+    monkeypatch.setenv("STATEFRAME_HTTP_GZIP", "on")
+    endpoint, seen, settings = transport_server
+    settings["close_on_identity"] = True
+    original = child_http.request_bytes
+    try:
+        _child.install_wire_recorder(tmp_path, endpoint)
+        with pytest.raises(child_http.BoundedTransportError) as failure:
+            child_http.request_bytes(
+                WIRE, endpoint, "", deadline=time.monotonic() + 10, socket_timeout=5)
+    finally:
+        child_http.request_bytes = original
+
+    assert [entry[0] for entry in seen] == ["gzip", None]
+    assert gzip.decompress(seen[0][1]) == seen[1][1] == WIRE
+    assert [entry[2] for entry in seen] == [hashlib.sha256(WIRE).hexdigest()] * 2
+    assert failure.value.error_type == "RemoteDisconnected"
+    assert failure.value.http_status is None
+    record = json.loads((tmp_path / "sends.jsonl").read_text())
+    attempts = record["transport_attempts"]
+    assert [attempt["http_status"] for attempt in attempts] == [415, None]
+    assert [attempt["content_encoding"] for attempt in attempts] == ["gzip", None]
+    assert [attempt["body_bytes"] for attempt in attempts] == [len(entry[1]) for entry in seen]
+    assert [attempt["body_sha256"] for attempt in attempts] == [
+        hashlib.sha256(entry[1]).hexdigest() for entry in seen]
+    assert record["error"] == "BoundedTransportError"
+    assert (tmp_path / "wire/0001.error.txt").read_text() == "BoundedTransportError\n"
 
 
 @pytest.mark.host_sandbox
