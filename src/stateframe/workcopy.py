@@ -68,6 +68,14 @@ def _ignored(name: str, is_dir: bool) -> bool:
     return any(fnmatch.fnmatch(name, pattern) for pattern in IGNORE_GLOBS + SECRET_GLOBS)
 
 
+def frame_source_path_allowed(path: str) -> bool:
+    """Use the copy's exclusion rules for source added after the copy was made."""
+    parts = path.split("/") if isinstance(path, str) else []
+    return bool(parts and all(part not in {"", ".", ".."} for part in parts)
+                and not any(_ignored(part, True) for part in parts[:-1])
+                and not _ignored(parts[-1], False))
+
+
 def create(original: Path, destination: Path, limits: Limits | None = None) -> WorkCopy:
     """Copy ``original`` into ``destination`` (which must not exist), recording hashes."""
     limits = limits or Limits()
