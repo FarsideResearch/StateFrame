@@ -529,6 +529,8 @@ def _child() -> None:
     packet = json.load(sys.stdin)
     wire = packet["wire"].encode()
     body, encoding = encode_request(wire, gzip_enabled=packet.get("gzip") is True)
+    gzipped = encoding.get("Content-Encoding") == "gzip"
+    first_attempt = True
     tracker = _AbortiveConnectionTracker()
     handlers = [_AbortiveHTTPHandler(tracker), _AbortiveHTTPSHandler(tracker)]
     if "route_allow_remote" in packet:
@@ -557,11 +559,14 @@ def _child() -> None:
                 error_body = _read_response_body(
                     error, tracker, deadline=packet["deadline"],
                     socket_timeout=packet["socket_timeout"], max_bytes=MAX_ERROR_BYTES)
-                if error.code == 415 and encoding and time.monotonic() < packet["deadline"]:
+                if (error.code == 415 and gzipped and first_attempt
+                        and time.monotonic() < packet["deadline"]):
                     # A stock llama.cpp server refuses gzip bodies (only the lab relay inflates them);
                     # the request was not processed, so send the same JSON once uncompressed.
                     tracker.finish_all()  # close the refused attempt's connection gracefully first
-                    body, encoding = wire, {}
+                    body = wire
+                    encoding.pop("Content-Encoding")
+                    first_attempt = False
                     continue
                 error.relay_error = _relay_error_label(error_body)
                 error.server_error = safe_server_error(error_body, packet["key"])
