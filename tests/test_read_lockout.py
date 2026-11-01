@@ -84,8 +84,8 @@ def _trigger(tmp_path):
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text("value = 1\n")
     runtime, events = _runtime(tmp_path)
-    _read(runtime, "probe-request-14", "pkg/batch/contracts.py")
     assert "read" in _names(_menu(runtime, "probe-request-14"))
+    _read(runtime, "probe-request-14", "pkg/batch/contracts.py")
     _read(runtime, "probe-request-15", "pkg/service.py")
     return runtime, events
 
@@ -117,13 +117,13 @@ def test_probe_state_next_request_has_no_read_and_factual_frame_line(tmp_path, m
     frame = [{"role": "user", "content": "[StateFrame]\ncurrent state"}]
     append_frame_line(runtime, frame)
     assert frame[0]["content"] == "[StateFrame]\ncurrent state"
-    assert "pkg/batch/contracts.py, pkg/service.py were re-read unchanged" in frame[1]["content"]
+    assert "pkg/service.py were re-read unchanged" in frame[1]["content"]
     assert "assert 'BatchResult' in batch.__all__" in frame[1]["content"]
     assert "read is unavailable for this request" in frame[1]["content"]
     assert _is_framefit5_host_context_panel(frame[1])
     assert not _is_framefit5_host_context_panel({"role": "user", "content": frame[1]["content"]})
     assert [row["reason_code"] for row in events if row["kind"] == "read_lockout_decision"] == [
-        "TWO_UNCHANGED_READ_REQUESTS"]
+        "UNCHANGED_READ_REQUEST"]
     assert "read" not in _names(_menu(runtime, "probe-request-15"))
     assert len(events) == 1
 
@@ -315,7 +315,7 @@ def test_dispatched_rejected_edit_does_not_release_lock(tmp_path, monkeypatch, r
     assert bolt.workspace_revision == 1
     assert "read" not in _names(_menu(runtime, "probe-request-16"))
     assert [row["reason_code"] for row in events if row["kind"] == "read_lockout_decision"] == [
-        "TWO_UNCHANGED_READ_REQUESTS"]
+        "UNCHANGED_READ_REQUEST"]
     assert "read" in _names(_menu(runtime, "probe-request-17"))
 
 
@@ -458,8 +458,8 @@ def test_mixed_provider_batch_cannot_count_as_unchanged_reads(tmp_path, monkeypa
                                     "kind": "edit", "result_class": "APPLIED"})
     assert "read" in _names(_menu(runtime, "request-15"))
     _read(runtime, "request-15", "module.py")
-    assert "read" in _names(_menu(runtime, "request-16"))
-    assert not events
+    assert "read" not in _names(_menu(runtime, "request-16"))
+    assert [row["reason_code"] for row in events] == ["UNCHANGED_READ_REQUEST"]
 
 
 def test_locked_menu_is_enforced_at_dispatch(tmp_path, monkeypatch):
@@ -476,3 +476,67 @@ def test_locked_menu_is_enforced_at_dispatch(tmp_path, monkeypatch):
         assert tool not in names
         assert not request_menu_action_admissible(runtime, tool, "probe-request-15")
     assert request_menu_action_admissible(runtime, "edit", "probe-request-15")
+
+
+def test_watch_charges_one_unchanged_native_batch_and_restores_tail():
+    watch = UnboundedProgressWatch(threshold=10)
+    revision = "sha256:" + "a" * 64
+    for path in ("a.py", "b.py", "c.py"):
+        watch._new(("read", path, revision))
+    watch.streak = 5
+    receipts = []
+    for index, path in enumerate(("a.py", "b.py", "c.py")):
+        receipts.append({"request_id": "origin" if index == 0 else f"action-{index}",
+                         "kind": "read", "result_class": "OK", "target_path": path,
+                         "delivery": {"revision": revision,
+                                      "unchanged_since_request": True,
+                                      "requested_bytes_delivered": 0,
+                                      "effective_range": {"start_line": 1, "end_line": 1}}})
+        watch.observe({}, receipts, boundary=index + 1, batch_origin="origin",
+                      batch_complete=index == 2)
+    assert watch.streak == 6
+    resumed = UnboundedProgressWatch.from_snapshot(json.loads(json.dumps(watch.snapshot())))
+    resumed.observe({}, receipts, boundary=4, batch_origin="origin", batch_complete=True)
+    assert resumed.streak == 6
+    resumed.observe({}, receipts, boundary=5, batch_origin="origin", batch_complete=True)
+    assert resumed.streak == 7
+    legacy = watch.snapshot()
+    legacy["schema"] = "unbounded-progress-watch/1"
+    del legacy["batch_tail_pending"]
+    assert UnboundedProgressWatch.from_snapshot(legacy).streak == 6
+
+
+def test_watch_does_not_collapse_mixed_or_unproved_batch():
+    watch = UnboundedProgressWatch(threshold=10)
+    revision = "sha256:" + "a" * 64
+    watch._new(("read", "a.py", revision))
+    watch.streak = 5
+    read = {"request_id": "origin", "kind": "read", "result_class": "OK",
+            "target_path": "a.py", "delivery": {"revision": revision,
+            "unchanged_since_request": True, "requested_bytes_delivered": 0,
+            "effective_range": {"start_line": 1, "end_line": 1}}}
+    rows = [read]
+    watch.observe({}, rows, boundary=1, batch_origin="origin")
+    rows.append({"request_id": "action-2", "kind": "edit", "result_class": "REJECTED"})
+    watch.observe({}, rows, boundary=2, batch_origin="origin")
+    rows.append({**read, "request_id": "action-3"})
+    watch.observe({}, rows, boundary=3, batch_origin="origin", batch_complete=True)
+    assert watch.streak == 8
+    watch.observe({}, rows, boundary=4, batch_origin="origin", batch_complete=True)
+    assert watch.streak == 9
+
+
+def test_same_path_with_two_revisions_is_not_one_unchanged_batch(tmp_path):
+    from kernel_read_lockout import _request_reads
+
+    runtime, _events = _runtime(tmp_path)
+    source = tmp_path / "module.py"
+    source.write_text("value = 1\n")
+    current = "sha256:" + hashlib.sha256(source.read_bytes()).hexdigest()
+    rows = [{"kind": "read", "result_class": "OK", "target_path": "module.py",
+             "delivery": {"unchanged_since_request": True,
+                          "requested_bytes_delivered": 0,
+                          "effective_range": {"start_line": 1, "end_line": 1},
+                          "revision": revision}}
+            for revision in ("sha256:" + "a" * 64, current)]
+    assert _request_reads(runtime, rows) is None

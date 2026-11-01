@@ -227,22 +227,30 @@ class UnboundedProgressWatch:
         self._seen: dict[str, None] = {}
         self._receipt_cursor = 0
         self._last_boundary: int | None = None
+        self._batch_tail_pending: str | None = None
 
     def snapshot(self) -> dict[str, object]:
         """Persist hashes only, in eviction order, in the worker checkpoint."""
         return {
-            "schema": "unbounded-progress-watch/1", "threshold": self.threshold,
+            "schema": "unbounded-progress-watch/2", "threshold": self.threshold,
             "streak": self.streak, "seen": list(self._seen),
             "receipt_cursor": self._receipt_cursor,
             "last_boundary": self._last_boundary,
+            "batch_tail_pending": self._batch_tail_pending,
         }
 
     @classmethod
     def from_snapshot(cls, state: object) -> UnboundedProgressWatch:
-        fields = {"schema", "threshold", "streak", "seen", "receipt_cursor", "last_boundary"}
-        if (not isinstance(state, Mapping) or set(state) != fields
-                or state.get("schema") != "unbounded-progress-watch/1"):
+        old_fields = {"schema", "threshold", "streak", "seen", "receipt_cursor", "last_boundary"}
+        if (not isinstance(state, Mapping)
+                or (state.get("schema"), frozenset(state)) not in {
+                    ("unbounded-progress-watch/1", frozenset(old_fields)),
+                    ("unbounded-progress-watch/2", frozenset(old_fields | {"batch_tail_pending"})),
+                }):
             raise ValueError("invalid progress watch snapshot")
+        tail = state.get("batch_tail_pending")
+        if tail is not None and (not isinstance(tail, str) or not 0 < len(tail) <= 160):
+            raise ValueError("invalid progress watch batch tail")
         watch = cls(threshold=state["threshold"])
         for key in ("streak", "receipt_cursor"):
             if type(state[key]) is not int or state[key] < 0:
@@ -259,6 +267,7 @@ class UnboundedProgressWatch:
         watch._receipt_cursor = state["receipt_cursor"]
         watch._last_boundary = boundary
         watch._seen = dict.fromkeys(seen)
+        watch._batch_tail_pending = tail
         return watch
 
     def _new(self, value: object) -> bool:
@@ -272,8 +281,47 @@ class UnboundedProgressWatch:
             del self._seen[next(iter(self._seen))]
         return True
 
+    @staticmethod
+    def _unchanged_read_continuation(
+            receipts: list[dict], cursor: int, batch_origin: str | None) -> bool:
+        """Charge one idle unit for a request's proved unchanged read batch.
+
+        The first read remains chargeable. Only subsequent receipts from that
+        same all-unchanged request suppress an action-level idle charge; mixed
+        or unproved batches keep ordinary accounting.
+        """
+        if cursor < 1 or cursor >= len(receipts):
+            return False
+        request_id = batch_origin or receipts[cursor].get("request_id")
+        if not isinstance(request_id, str) or not request_id:
+            return False
+        if batch_origin:
+            first = next((index for index in range(cursor - 1, -1, -1)
+                          if receipts[index].get("request_id") == batch_origin), None)
+            if first is None:
+                return False
+        else:
+            if receipts[cursor - 1].get("request_id") != request_id:
+                return False
+            first = cursor - 1
+            while first and receipts[first - 1].get("request_id") == request_id:
+                first -= 1
+        for receipt in receipts[first:]:
+            delivery = receipt.get("delivery")
+            if ((not batch_origin and receipt.get("request_id") != request_id)
+                    or receipt.get("kind") != "read"
+                    or receipt.get("result_class") != "OK"
+                    or not isinstance(delivery, Mapping)
+                    or delivery.get("unchanged_since_request") is not True
+                    or delivery.get("requested_bytes_delivered") != 0
+                    or not isinstance(delivery.get("effective_range"), Mapping)):
+                return False
+        return True
+
     def observe(self, binding: Mapping[str, object], receipts: list[dict], *,
-                boundary: int | None = None, charge_idle: bool = True) -> bool:
+                boundary: int | None = None, charge_idle: bool = True,
+                batch_origin: str | None = None,
+                batch_complete: bool = False) -> bool:
         # Worker checkpoints follow this observation but precede dispatch. A
         # restart at that same boundary must not charge the idle turn twice.
         if boundary is not None and boundary == self._last_boundary:
@@ -297,11 +345,25 @@ class UnboundedProgressWatch:
             identity = self._identity(binding, receipt, kind, result, revision)
             if identity is not None and self._new(identity):
                 progress = True
+        unchanged_continuation = self._unchanged_read_continuation(
+            receipts, cursor, batch_origin)
+        tail = (batch_complete and batch_origin is not None
+                and cursor == len(receipts)
+                and self._batch_tail_pending == batch_origin)
+        self._batch_tail_pending = None
+        if (batch_complete and batch_origin is not None and cursor < len(receipts)
+                and (unchanged_continuation or receipts[cursor].get("request_id") == batch_origin)
+                and all(isinstance(row.get("delivery"), Mapping)
+                        and row.get("kind") == "read" and row.get("result_class") == "OK"
+                        and row["delivery"].get("unchanged_since_request") is True
+                        and row["delivery"].get("requested_bytes_delivered") == 0
+                        for row in receipts[cursor:])):
+            self._batch_tail_pending = batch_origin
         self._receipt_cursor = len(receipts)
         self._last_boundary = boundary
         if progress:
             self.streak = 0
-        elif charge_idle:
+        elif charge_idle and not unchanged_continuation and not tail:
             self.streak += 1
         return self.streak >= self.threshold
 
@@ -386,7 +448,16 @@ def stop_unbounded_no_progress(runtime: object, watch: UnboundedProgressWatch, *
     # Observe the boundary and receipts while paused, but do not charge an
     # idle turn caused by the host's own two-request restriction. Real new
     # evidence still resets the watch under its ordinary rules.
-    if not watch.observe(binding, receipts, boundary=boundary, charge_idle=not locked):
+    batch = getattr(runtime, "native_batch", None)
+    batch_origin = (getattr(batch, "origin", None)
+                    if getattr(batch, "index", 0) >= 1 else None)
+    batch_complete = (isinstance(batch_origin, str)
+                      and getattr(batch, "index", 0) == getattr(batch, "size", -1)
+                      and not getattr(batch, "pending", ())
+                      and getattr(batch, "inflight", None) is None)
+    if not watch.observe(binding, receipts, boundary=boundary,
+                         charge_idle=not locked, batch_origin=batch_origin,
+                         batch_complete=batch_complete):
         return False
     if locked:
         return False

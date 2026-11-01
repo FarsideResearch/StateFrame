@@ -48,8 +48,7 @@ def _request_receipts(runtime: object, request_id: str) -> list[Mapping[str, obj
             and row.get("request_id") == request_id]
 
 
-def _request_reads(runtime: object, request_id: str) -> dict[str, str] | None:
-    rows = _request_receipts(runtime, request_id)
+def _request_reads(runtime: object, rows: Sequence[Mapping[str, object]]) -> dict[str, str] | None:
     if not rows or any(row.get("kind") != "read" for row in rows):
         return None
     paths: dict[str, str] = {}
@@ -62,14 +61,16 @@ def _request_reads(runtime: object, request_id: str) -> dict[str, str] | None:
                 or not isinstance(delivery.get("effective_range"), Mapping)
                 or not isinstance(path, str) or not isinstance(delivery.get("revision"), str)):
             return None
+        if path in paths and paths[path] != delivery["revision"]:
+            return None
         paths[path] = delivery["revision"]
     if len(paths) > _MAX_LOCKED_PATHS or sum(map(len, paths)) > _MAX_PATH_TEXT:
         return None
     return paths if _fresh(runtime, paths) else None
 
 
-def _new_evidence(runtime: object, request_id: str) -> bool:
-    for row in _request_receipts(runtime, request_id):
+def _new_evidence(rows: Sequence[Mapping[str, object]]) -> bool:
+    for row in rows:
         kind, result = row.get("kind"), row.get("result_class")
         if kind == "edit" and result == "APPLIED":
             return True
@@ -85,9 +86,34 @@ def _new_evidence(runtime: object, request_id: str) -> bool:
     return False
 
 
+def _completed_request(runtime: object, previous: object,
+                       current: object) -> tuple[str | None, list[Mapping[str, object]]]:
+    """Use the provider batch, not its individual action request IDs."""
+    batch = getattr(runtime, "native_batch", None)
+    origin = getattr(batch, "origin", None)
+    size = getattr(batch, "size", 0)
+    if (isinstance(origin, str) and type(size) is int and size > 1
+            and getattr(batch, "index", 0) == size
+            and not getattr(batch, "pending", ())
+            and getattr(batch, "inflight", None) is None):
+        receipts = getattr(getattr(runtime, "owner", None), "_receipts", ())
+        first = next((index for index in range(len(receipts) - 1, -1, -1)
+                      if isinstance(receipts[index], Mapping)
+                      and receipts[index].get("request_id") == origin), None)
+        if first is not None:
+            rows = list(receipts[first:])
+            if len(rows) == size and all(isinstance(row, Mapping) for row in rows):
+                return origin, rows
+        return None, []
+    completed = (current if isinstance(current, str) and _request_receipts(runtime, current)
+                 else previous if isinstance(previous, str)
+                 and _request_receipts(runtime, previous) else None)
+    return completed, _request_receipts(runtime, completed) if completed else []
+
+
 def _repair_route(runtime: object, tools: Sequence[dict], paths: Mapping[str, str]) -> bool:
     """Lock only with visible, editable source and an admitted edit/check pair."""
-    if (getattr(runtime, "stateframe_framefit_mode", "off") != "on"
+    if (not paths or getattr(runtime, "stateframe_framefit_mode", "off") != "on"
             or getattr(runtime, "_code_bookmarks_active", False) is not True):
         return False
     # The carry contains only bookmarks actually delivered by the last
@@ -99,7 +125,9 @@ def _repair_route(runtime: object, tools: Sequence[dict], paths: Mapping[str, st
     editable = editable_read_paths(runtime)
     targets = {row.get("path") for row in carry if isinstance(row, Mapping)
                and row.get("read_only") is False}
-    if not (set(paths) & targets & editable):
+    # The model can be circling over test/dependency files while the repair
+    # source is already visible in a separate editable bookmark.
+    if not (targets & editable):
         return False
     names = {tool.get("function", {}).get("name") for tool in tools
              if isinstance(tool, Mapping) and isinstance(tool.get("function"), Mapping)}
@@ -114,7 +142,7 @@ def final_source_visible(runtime: object, visible_bookmarks: Sequence[Mapping[st
     if not isinstance(state, Mapping) or not state.get("remaining"):
         return True
     paths = state.get("paths")
-    if not isinstance(paths, Mapping):
+    if not isinstance(paths, Mapping) or not paths:
         return False
     from kernel_read_reuse_visibility import editable_read_paths
     editable = editable_read_paths(runtime)
@@ -122,7 +150,7 @@ def final_source_visible(runtime: object, visible_bookmarks: Sequence[Mapping[st
                   if isinstance(row, Mapping) and row.get("read_only") is False}
     names = {tool.get("function", {}).get("name") for tool in tools
              if isinstance(tool, Mapping) and isinstance(tool.get("function"), Mapping)}
-    return (bool(set(paths) & repairable & editable)
+    return (bool(repairable & editable)
             and bool(names & {"edit", "str_replace"})
             and bool(names & {"run_tests", "authored_check"}))
 
@@ -152,6 +180,9 @@ def project(runtime: object, tools: Sequence[dict]) -> list[dict]:
     if not bookmarks_enabled():
         return list(tools)
     state = _state(runtime)
+    batch = getattr(runtime, "native_batch", None)
+    if getattr(batch, "pending", ()) or getattr(batch, "inflight", None) is not None:
+        return filter_tools(runtime, tools) if state["remaining"] else list(tools)
     if getattr(runtime, "_request_deferred_source_paths", ()):
         release(runtime, "FRESH_READ_REQUIRED")
         state["streak"] = 0
@@ -162,7 +193,8 @@ def project(runtime: object, tools: Sequence[dict]) -> list[dict]:
         capped = False
         if state["remaining"] and current_request != state["projected_after"]:
             state["remaining"] -= 1
-            if _new_evidence(runtime, previous):
+            _completed_id, completed_rows = _completed_request(runtime, previous, current_request)
+            if _new_evidence(completed_rows):
                 state["remaining"] = 0
                 _emit(runtime, "NEW_EVIDENCE", state)
                 state["streak"] = 0
@@ -178,11 +210,9 @@ def project(runtime: object, tools: Sequence[dict]) -> list[dict]:
         # Count each dispatched request once. A post-dispatch projection can
         # already contain this request's receipts; normal sends see the prior
         # request's receipts instead.
-        completed = (current_request if _request_receipts(runtime, current_request)
-                     else previous if isinstance(previous, str)
-                     and _request_receipts(runtime, previous) else None)
+        completed, completed_rows = _completed_request(runtime, previous, current_request)
         if isinstance(completed, str) and completed != state["counted"]:
-            reads = _request_reads(runtime, completed) if current is not None else None
+            reads = _request_reads(runtime, completed_rows) if current is not None else None
             if reads is not None and current == state["failure"]:
                 state["streak"] = min(2, state["streak"] + 1)
                 state["paths"].update(reads)
@@ -201,10 +231,10 @@ def project(runtime: object, tools: Sequence[dict]) -> list[dict]:
                 or sum(map(len, state["paths"])) > _MAX_PATH_TEXT):
             state["streak"] = 0
             state["paths"] = {}
-        if (state["streak"] == 2 and not state["remaining"] and not capped
+        if (state["streak"] >= 1 and not state["remaining"] and not capped
                 and _repair_route(runtime, tools, state["paths"])):
             state["remaining"] = _MAX_LOCKED_REQUESTS
-            _emit(runtime, "TWO_UNCHANGED_READ_REQUESTS", state)
+            _emit(runtime, "UNCHANGED_READ_REQUEST", state)
     if (not state["remaining"] or _failure(runtime) != state["failure"]
             or not _fresh(runtime, state["paths"])
             or getattr(runtime, "_request_deferred_source_paths", ())
