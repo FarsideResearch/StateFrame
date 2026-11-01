@@ -5,6 +5,7 @@ uses provider-origin health probes during the wait instead of a first-byte timeo
 """
 from __future__ import annotations
 
+from collections.abc import Callable
 import functools
 import http.client
 import json
@@ -20,6 +21,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from typing import TypeVar
 
 MAX_RESPONSE_BYTES = 16 * 1024 * 1024
 MAX_ERROR_BYTES = 8 * 1024
@@ -253,7 +255,8 @@ def _child_transport_error(diagnostic: bytes, key: str) -> BoundedTransportError
 
 def request_bytes(wire: bytes, endpoint: str, key: str, *,
                   deadline: float, socket_timeout: float,
-                  liveness_timeout: float | None = None) -> bytes:
+                  liveness_timeout: float | None = None,
+                  record_attempts: Callable[[list[dict[str, object]]], None] | None = None) -> bytes:
     """Bound the full HTTP operation and abort it after provider liveness is lost."""
     if not math.isfinite(deadline) or not math.isfinite(socket_timeout) or socket_timeout <= 0:
         raise ValueError("invalid HTTP deadline or socket timeout")
@@ -277,6 +280,13 @@ def request_bytes(wire: bytes, endpoint: str, key: str, *,
         output, diagnostic = _communicate_with_liveness(
             process, packet, endpoint, key, deadline=deadline,
             liveness_timeout=float(liveness_timeout))
+        if record_attempts is not None and diagnostic:
+            try:
+                attempts = json.loads(diagnostic).get("transport_attempts")
+            except (ValueError, AttributeError):
+                attempts = None
+            if isinstance(attempts, list):
+                record_attempts(attempts)
         if process.returncode != 0:
             raise _child_transport_error(diagnostic, key)
         return output
@@ -286,11 +296,27 @@ def request_bytes(wire: bytes, endpoint: str, key: str, *,
 
 REQUEST_GZIP_ENV = "STATEFRAME_HTTP_GZIP"
 REQUEST_GZIP_MIN_BYTES = 32 * 1024
+_Response = TypeVar("_Response")
+
+
+def send_with_gzip_fallback(
+        send: Callable[[bytes, dict[str, str]], _Response],
+        body: bytes, headers: dict[str, str], identity: bytes,
+        identity_headers: dict[str, str],
+        on_refused: Callable[[urllib.error.HTTPError], bool]) -> _Response:
+    """Retry only the first HTTP 415 to a request actually encoded as gzip."""
+    try:
+        return send(body, headers)
+    except urllib.error.HTTPError as error:
+        if (error.code != 415 or headers.get("Content-Encoding") != "gzip"
+                or not on_refused(error)):
+            raise
+    return send(identity, identity_headers)
 
 
 def request_gzip_enabled(environ: dict[str, str] | None = None) -> bool:
-    """``STATEFRAME_HTTP_GZIP`` on (default) | off; anything else fails closed."""
-    mode = str((environ if environ is not None else os.environ).get(REQUEST_GZIP_ENV, "on")).strip().lower()
+    """``STATEFRAME_HTTP_GZIP`` off (default) | on; anything else fails closed."""
+    mode = str((environ if environ is not None else os.environ).get(REQUEST_GZIP_ENV, "off")).strip().lower()
     if mode not in {"on", "off"}:
         raise ValueError(f"{REQUEST_GZIP_ENV} must be 'on' or 'off'")
     return mode == "on"
@@ -385,7 +411,8 @@ class _AbortiveConnectionMixin:
 
     def set_timeout(self, seconds: float) -> None:
         active_socket = self._active_socket or self.sock
-        if active_socket is not None:
+        # A finished earlier attempt (the gzip 415 resend) leaves a closed socket registered.
+        if active_socket is not None and active_socket.fileno() != -1:
             active_socket.settimeout(seconds)
 
     def abort(self) -> None:
@@ -499,35 +526,64 @@ def _read_response_body(
 
 def _child() -> None:
     packet = json.load(sys.stdin)
-    body, encoding = encode_request(packet["wire"].encode(), gzip_enabled=packet.get("gzip") is True)
-    request = urllib.request.Request(packet["endpoint"], data=body,
-        headers={"Content-Type": "application/json", **encoding,
-                 "Authorization": "Bearer " + packet["key"]})
+    wire = packet["wire"].encode()
+    body, encoding = encode_request(wire, gzip_enabled=packet.get("gzip") is True)
+    identity, identity_headers = encode_request(wire, gzip_enabled=False)
     tracker = _AbortiveConnectionTracker()
     opener = urllib.request.build_opener(
         _AbortiveHTTPHandler(tracker), _AbortiveHTTPSHandler(tracker))
     response_complete = False
+    attempts: list[dict[str, object]] = []
+
+    def send(data: bytes, headers: dict[str, str]) -> bytes:
+        import hashlib
+        request = urllib.request.Request(packet["endpoint"], data=data,
+            headers={"Content-Type": "application/json", **headers,
+                     "Authorization": "Bearer " + packet["key"]})
+        attempt = {"content_encoding": headers.get("Content-Encoding"),
+                   "body_bytes": len(data), "body_sha256": hashlib.sha256(data).hexdigest(),
+                   "http_status": None}
+        attempts.append(attempt)
+        try:
+            with opener.open(request, timeout=packet["socket_timeout"]) as response:
+                attempt["http_status"] = response.status
+                if response.length is not None and response.length > MAX_RESPONSE_BYTES:
+                    raise ValueError("HTTP response exceeds bounded transport limit")
+                result = _read_response_body(
+                    response, tracker, deadline=packet["deadline"],
+                    socket_timeout=packet["socket_timeout"], max_bytes=MAX_RESPONSE_BYTES)
+                if len(result) > MAX_RESPONSE_BYTES:
+                    raise ValueError("HTTP response exceeds bounded transport limit")
+                tracker.finish_all()
+            return result
+        except urllib.error.HTTPError as error:
+            attempt["http_status"] = error.code
+            error_body = _read_response_body(
+                error, tracker, deadline=packet["deadline"],
+                socket_timeout=packet["socket_timeout"], max_bytes=MAX_ERROR_BYTES)
+            error.relay_error = _relay_error_label(error_body)
+            error.server_error = safe_server_error(error_body, packet["key"])
+            raise
+
+    def on_refused(_error: urllib.error.HTTPError) -> bool:
+        if time.monotonic() >= packet["deadline"]:
+            return False
+        tracker.finish_all()
+        return True
+
     try:
-        with opener.open(request, timeout=packet["socket_timeout"]) as response:
-            if response.length is not None and response.length > MAX_RESPONSE_BYTES:
-                raise ValueError("HTTP response exceeds bounded transport limit")
-            data = _read_response_body(
-                response, tracker, deadline=packet["deadline"],
-                socket_timeout=packet["socket_timeout"], max_bytes=MAX_RESPONSE_BYTES)
-            if len(data) > MAX_RESPONSE_BYTES:
-                raise ValueError("HTTP response exceeds bounded transport limit")
-            tracker.finish_all()
+        data = send_with_gzip_fallback(
+            send, body, encoding, identity, identity_headers, on_refused)
         response_complete = True
-    except urllib.error.HTTPError as error:
-        error_body = _read_response_body(
-            error, tracker, deadline=packet["deadline"],
-            socket_timeout=packet["socket_timeout"], max_bytes=MAX_ERROR_BYTES)
-        error.relay_error = _relay_error_label(error_body)
-        error.server_error = safe_server_error(error_body, packet["key"])
+    except Exception as error:
+        if len(attempts) > 1:
+            error.transport_attempts = attempts
         raise
     finally:
         if not response_complete:
             tracker.abort_all()
+    if len(attempts) > 1:
+        sys.stderr.write(json.dumps({"transport_attempts": attempts}))
     sys.stdout.buffer.write(data)
 
 
@@ -548,5 +604,7 @@ if __name__ == "__main__":
                                      if isinstance(relay_error, str)
                                      and relay_error in RELAY_ERROR_LABELS else None,
                                      "server_error": server_error
-                                     if isinstance(server_error, str) else None}))
+                                     if isinstance(server_error, str) else None,
+                                     **({"transport_attempts": error.transport_attempts}
+                                        if hasattr(error, "transport_attempts") else {})}))
         raise SystemExit(1) from None

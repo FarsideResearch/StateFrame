@@ -33,6 +33,7 @@ from kernel_plain_contracts import (
 )
 from kernel_plain_hooks import HookSettings, PlainHooks
 from kernel_plain_http import AbortiveHTTPTransport
+from kernel_bounded_http import send_with_gzip_fallback
 from kernel_plain_loop import (
     OUT_CAP, TOOLS, Limits, ProviderHTTPError, ProviderTransportError, run_loop,
 )
@@ -453,15 +454,15 @@ GZIP_MIN_BYTES = 32 * 1024
 
 
 def encode_request_body(body: dict, environ: Mapping[str, str] | None = None) -> tuple[bytes, dict]:
-    """Serialize the request; gzip it when large (the lab relay inflates ``Content-Encoding: gzip``).
+    """Serialize the request; opt-in gzip for relays that inflate ``Content-Encoding: gzip``.
 
     10-13: the container -> socat sidecar -> host.docker.internal path truncates request bodies at
     a fixed ~149,326 bytes (relay_short_body expected=162765 received=149326, 5x identical), so a
     transcript past that size could never be sent. gzip keeps the wire well under the cap.
-    ``STATEFRAME_PLAIN_GZIP=off`` restores identity bodies for endpoints without the relay.
+    ``STATEFRAME_PLAIN_GZIP=on`` enables compression for a compatible relay.
     """
     raw = json.dumps(body).encode()
-    mode = str((environ if environ is not None else os.environ).get(GZIP_ENV, "on")).strip().lower()
+    mode = str((environ if environ is not None else os.environ).get(GZIP_ENV, "off")).strip().lower()
     if mode not in {"on", "off"}:
         raise ValueError(f"{GZIP_ENV} must be 'on' or 'off'")
     # End-to-end integrity header over the IDENTITY body: the lab relay verifies it after any
@@ -482,16 +483,38 @@ class _PlainHTTPProvider:
 
     def __call__(self, body: dict, timeout: float) -> Mapping[str, object]:
         data, encoding = encode_request_body(body)
-        request = urllib.request.Request(self.url, data=data, headers={
-            "Content-Type": "application/json", **encoding,
-            **({"Authorization": f"Bearer {self.key}"} if self.key else {})})
+        if encoding.get("Content-Encoding") == "gzip":
+            import gzip
+            identity = gzip.decompress(data)
+        else:
+            identity = data
+        identity_headers = {key: value for key, value in encoding.items()
+                            if key != "Content-Encoding"}
         tracker_id = self.transport.begin()
         completed = False
+        deadline = time.monotonic() + timeout
+
+        def send(payload: bytes, headers: dict[str, str]) -> bytes:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError("plain provider request timed out")
+            request = urllib.request.Request(self.url, data=payload, headers={
+                "Content-Type": "application/json", **headers,
+                **({"Authorization": f"Bearer {self.key}"} if self.key else {})})
+            with self.transport.opener(tracker_id).open(request, timeout=remaining) as response:
+                result = response.read()
+                self.transport.finish(tracker_id)
+            return result
+
+        def on_refused(error: urllib.error.HTTPError) -> bool:
+            error.read()
+            self.transport.finish(tracker_id)
+            return time.monotonic() < deadline
+
         try:
             try:
-                with self.transport.opener(tracker_id).open(request, timeout=timeout) as response:
-                    payload = response.read()
-                    self.transport.finish(tracker_id)
+                payload = send_with_gzip_fallback(
+                    send, data, encoding, identity, identity_headers, on_refused)
                 completed = True
                 return json.loads(payload)
             except urllib.error.HTTPError as error:
