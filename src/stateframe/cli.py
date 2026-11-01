@@ -259,9 +259,13 @@ def _print_summary(summary: dict) -> None:
         for role, row in [*costs["roles"].items(), ("total", costs["total"])]:
             cost = row["estimated_cost"]
             display = f"${cost:.6f}" if cost is not None else "unknown"
-            print(f"{role:<13} {row['requests']:>5} {row['escalated']:>9} "
-                  f"{row['prompt_tokens']:>8} {row['cached_tokens']:>8} "
-                  f"{row['completion_tokens']:>10} {display:>14}")
+            counts = {key: "unknown" if row[key] is None else row[key]
+                      for key in ("escalated", "prompt_tokens", "cached_tokens", "completion_tokens")}
+            print(f"{role:<13} {row['requests']:>5} {counts['escalated']:>9} "
+                  f"{counts['prompt_tokens']:>8} {counts['cached_tokens']:>8} "
+                  f"{counts['completion_tokens']:>10} {display:>14}")
+        if costs.get("unattributed_sends"):
+            print(f"{costs['unattributed_sends']} send(s) missing route records; totals unknown")
         if costs.get("all_at_edit_rates") is not None:
             print(f"all at edit rates: ${costs['all_at_edit_rates']:.6f}; "
                   f"estimated savings: ${costs['estimated_savings']:.6f}")

@@ -95,14 +95,17 @@ def _value(role: str, field: str, raw: object, *, text_value: bool = False) -> o
     if field == "slot" and raw == "auto":
         return raw
     if field in ("slot", "top_k", "max_tokens", "context_tokens"):
-        number = int(raw) if text_value and isinstance(raw, str) and raw.strip().lstrip("+").isdigit() else raw
+        try:
+            number = int(raw) if text_value and isinstance(raw, str) and raw.strip().lstrip("+").isdigit() else raw
+        except (ValueError, OverflowError):
+            number = None
         minimum = 0 if field in ("slot", "top_k") else 1
         if type(number) is not int or number < minimum:
             raise RouteError(f"{label} must be {'a nonnegative' if minimum == 0 else 'a positive'} integer; change {field}")
         return number
     try:
         number = float(raw) if (type(raw) in (int, float) or text_value and isinstance(raw, str)) else math.nan
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         number = math.nan
     bounds = {"temperature": (0, 2), "top_p": (0, 1), "min_p": (0, 1)}
     if field in bounds:
@@ -130,6 +133,8 @@ def _blocks(document: object, source: str) -> dict[str, dict[str, object]]:
         expanded["unit"] = unit
         classes = {key: value for key, value in unit.items() if key not in FIELDS and isinstance(value, dict)}
         for class_name, values in classes.items():
+            if f"unit.{class_name}" in expanded:
+                raise RouteError(f"duplicate route role unit.{class_name}; use one table in {source}")
             expanded[f"unit.{class_name}"] = values
             del unit[class_name]
     output = {}
@@ -201,7 +206,7 @@ def _cli_blocks(values: list[str]) -> dict[str, dict[str, object]]:
 def resolve(default: Mapping[str, object], *, cli: list[str] | None = None, file: Path | None = None,
             profile: object = None, environ: Mapping[str, str] | None = None) -> RouteTable:
     environ = os.environ if environ is None else environ
-    layers = (("profile", _blocks(profile or {}, "profile routes")),
+    layers = (("profile", _blocks({} if profile is None else profile, "profile routes")),
               ("file", load_file(routes_path(file, environ))),
               ("env", _env_blocks(environ)), ("cli", _cli_blocks(cli or [])))
     names = list(ROLES)
@@ -227,13 +232,27 @@ def resolve(default: Mapping[str, object], *, cli: list[str] | None = None, file
             raise RouteError(f"route {role} uses api_key_env {key_name}, which is not set; export it or remove api_key_env")
         roles[role], sources[role] = base, chosen
     table = RouteTable(roles, sources, False, "")
-    return with_effective_roles(RouteTable(roles, sources, request_settings_changed(table, default), ""))
+    unit_classes = {"default", *(role[5:] for role in roles if role.startswith("unit."))}
+    for role in ROLES:
+        if role == "unit":
+            continue
+        for unit_class in unit_classes:
+            effective = table.resolve(role, unit_class=unit_class)
+            endpoint = str(effective["endpoint"])
+            if not _is_loopback(endpoint) and not (effective.get("allow_remote") or
+                                                  environ.get("STATEFRAME_ALLOW_REMOTE_ENDPOINT") == "1"):
+                raise RouteError(f"route {role} (unit {unit_class}) endpoint {endpoint} is not on this machine; "
+                                 "set unit.allow_remote = true (your code will be sent there) or use a local endpoint")
+    return with_effective_roles(RouteTable(
+        roles, sources, request_settings_changed(table, default, environ=environ), ""))
 
 
-def request_settings_changed(table: RouteTable, default: Mapping[str, object]) -> bool:
+def request_settings_changed(table: RouteTable, default: Mapping[str, object], *,
+                             environ: Mapping[str, str] | None = None) -> bool:
     """Compare every request role in main and unit scope with its unrouted request."""
     ignored = {"allow_remote", "cost_input_per_mtok", "cost_cached_input_per_mtok",
                "cost_output_per_mtok"}
+    fallback_tokenizer = (environ or {}).get("LLAMA_CPP_TOKENIZE_URL")
     unit_classes = {"default", *(role[5:] for role in table.roles if role.startswith("unit."))}
     for role in ROLES:
         if role == "unit":
@@ -242,8 +261,12 @@ def request_settings_changed(table: RouteTable, default: Mapping[str, object]) -
         if role == "decide2":
             expected.update(model="decision-tier", temperature=0.0, max_tokens=384)
         actual = table.roles[role]
+        default_tokenizer = fallback_tokenizer or expected.get("tokenizer") or expected["endpoint"]
         for settings in (actual, *(table.resolve(role, unit_class=name) for name in unit_classes)):
-            if any(settings.get(field) != expected.get(field) for field in settings if field not in ignored):
+            route_tokenizer = settings.get("tokenizer") or fallback_tokenizer or settings["endpoint"]
+            if route_tokenizer != default_tokenizer or any(
+                    settings.get(field) != expected.get(field)
+                    for field in settings if field not in ignored and field != "tokenizer"):
                 return True
     return False
 

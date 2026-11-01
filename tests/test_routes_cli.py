@@ -102,6 +102,93 @@ def test_start_refusals_name_route_and_repair(servers, monkeypatch):
         runner._probe_routes(options, lambda *_: None)
 
 
+def test_unit_overlay_model_is_probed_with_request_endpoint(servers, monkeypatch):
+    default, small = servers
+    served = {(default, "base"), (default, "large"), (small, "small")}
+    checked = []
+
+    def probe(endpoint):
+        checked.append((endpoint.base_url, endpoint.model))
+        return {"model_found": (endpoint.base_url, endpoint.model) in served}
+
+    monkeypatch.setattr(Endpoint, "probe", probe)
+    monkeypatch.setattr(Endpoint, "get_slots", lambda self: [{"id": 0, "n_ctx": 65536}])
+    options = runner.RunOptions(repo=None, task="task", endpoint=Endpoint(default, "base"),
+                                route_cli=[f"read.endpoint={small}", "read.model=small",
+                                           "unit.model=large"])
+    with pytest.raises(runner.RunError, match="route read.*unit.*does not serve model"):
+        runner._probe_routes(options, lambda *_: None)
+    assert (small, "large") in checked
+
+
+def test_unit_overlay_context_is_checked_on_request_endpoint(servers, monkeypatch):
+    default, small = servers
+    monkeypatch.setattr(Endpoint, "get_slots", lambda self: [
+        {"id": 0, "n_ctx": 65536 if self.base_url == small else 131072}])
+    options = runner.RunOptions(repo=None, task="task", endpoint=Endpoint(default, "base"),
+                                route_cli=[f"read.endpoint={small}", "read.model=small",
+                                           "unit.context_tokens=131072"])
+    with pytest.raises(runner.RunError, match="route read.*unit.*65,536-token slot"):
+        runner._probe_routes(options, lambda *_: None)
+
+
+def test_unit_overlay_slot_is_checked_on_request_endpoint(servers, monkeypatch):
+    default, small = servers
+    monkeypatch.setattr(Endpoint, "get_slots", lambda self: [
+        {"id": 0 if self.base_url == small else 1, "n_ctx": 65536}])
+    options = runner.RunOptions(repo=None, task="task", endpoint=Endpoint(default, "base"),
+                                route_cli=[f"read.endpoint={small}", "read.model=small",
+                                           "unit.slot=1"])
+    with pytest.raises(runner.RunError, match="route read.*unit.*slot 1 is not reported"):
+        runner._probe_routes(options, lambda *_: None)
+
+
+def test_unit_overlay_tokenizer_is_checked_for_effective_model(servers, monkeypatch):
+    default, small = servers
+    tokenizer = "http://127.0.0.1:12345/v1"
+    served = {(default, "base"), (small, "small"), (small, "base"),
+              (tokenizer, "small")}
+    monkeypatch.setattr(Endpoint, "probe", lambda self: {
+        "model_found": (self.base_url, self.model) in served})
+    monkeypatch.setattr(Endpoint, "get_slots", lambda self: [{"id": 0, "n_ctx": 65536}])
+    options = runner.RunOptions(repo=None, task="task", endpoint=Endpoint(default, "base"),
+                                route_cli=[f"read.endpoint={small}", "read.model=small",
+                                           f"read.tokenizer={tokenizer}", "unit.model=base"])
+    with pytest.raises(runner.RunError, match="route read.*unit.*tokenizer does not list model"):
+        runner._probe_routes(options, lambda *_: None)
+
+
+def test_decide2_model_exception_does_not_hide_unit_model_refusal(servers):
+    default, _ = servers
+    options = runner.RunOptions(repo=None, task="task", endpoint=Endpoint(default, "base"),
+                                route_cli=["plan.temperature=0.5",
+                                           "unit.model=decision-tier"])
+    with pytest.raises(runner.RunError, match="route unit endpoint does not serve model"):
+        runner._probe_routes(options, lambda *_: None)
+
+
+def test_default_tokenizer_override_keeps_spec_environment_and_output_inactive(
+        servers, tmp_path, capsys):
+    default, _ = servers
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "calc.py").write_text("def answer():\n    return 1\n")
+    (repo / "test_calc.py").write_text("from calc import answer\ndef test_answer(): assert answer() == 1\n")
+    baseline = runner.RunOptions(repo=None, task="task", endpoint=Endpoint(default, "base"))
+    same = runner.RunOptions(repo=repo, task="task", endpoint=Endpoint(default, "base"),
+                             run_dir=tmp_path / "run",
+                             route_cli=[f"read.tokenizer={default}"])
+    runner._probe_routes(baseline)
+    baseline_output = capsys.readouterr()
+    runner._probe_routes(same)
+    assert capsys.readouterr() == baseline_output
+    assert same._routes is None
+    assert runner._child_env(same) == runner._child_env(baseline)
+    _, _, spec = runner.prepare(same)
+    assert "routes" not in spec
+    assert "routes" not in json.loads((same.run_dir / "spec.json").read_text())
+
+
 def test_routed_key_reaches_child_without_entering_spec(servers, monkeypatch):
     default, _ = servers
     monkeypatch.setenv("ROUTE_TEST_KEY", "secret-not-for-spec")
@@ -302,3 +389,30 @@ def test_route_summary_uses_wire_usage_and_prices(tmp_path, capsys):
                     "files_changed": []})
     cli._print_summary(summary)
     assert "=== model routes ===" in capsys.readouterr().out
+
+
+def test_missing_route_record_makes_summary_totals_unknown(tmp_path, capsys):
+    wire = tmp_path / "wire"
+    wire.mkdir()
+    (wire / "0001.route.json").write_text(json.dumps({"role": "read", "scope": "main"}))
+    rates = {"cost_input_per_mtok": 1.0, "cost_cached_input_per_mtok": 1.0,
+             "cost_output_per_mtok": 1.0}
+    spec = {"roles": {"read": rates, "edit": rates}}
+    sends = [{"send": 1, "request_id": "known", "completion_tokens": 5},
+             {"send": 2, "request_id": "missing", "completion_tokens": 7}]
+    usage = [{"total": 20, "cached": 2}, {"total": 30, "cached": 3}]
+    costs = runner._route_costs(tmp_path, spec, sends, usage)
+    assert costs["total"]["requests"] == 2
+    assert costs["total"]["prompt_tokens"] is None
+    assert costs["total"]["estimated_cost"] is None
+    assert costs["all_at_edit_rates"] is None
+    assert costs["estimated_savings"] is None
+    assert costs["unattributed_sends"] == 1
+    (tmp_path / "final.diff").write_text("")
+    cli._print_summary({"run_dir": str(tmp_path), "tests_before": {"passed": True},
+                        "tests_after": {"command": "pytest"}, "runtime_outcome": "completed",
+                        "check_outcome": "pass", "artifact": "captured", "succeeded": False,
+                        "route_costs": costs})
+    output = capsys.readouterr().out
+    assert "1 send(s) missing route records; totals unknown" in output
+    assert "total             2   unknown  unknown" in output

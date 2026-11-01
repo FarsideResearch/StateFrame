@@ -20,6 +20,7 @@ import time
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
+from itertools import chain
 from pathlib import Path
 from typing import Callable
 
@@ -904,13 +905,31 @@ def _probe_routes(options: RunOptions, printer=print, *, resume_roles: dict | No
                            "choose a slot number or free a server slot")
         settings["slot"] = selected
     baseline = _route_defaults(options)
-    if not routes.request_settings_changed(table, baseline):
+    if not routes.request_settings_changed(table, baseline, environ=os.environ):
         options._routes = None
         return
-    for role, settings in table.roles.items():
+    def effective_unit_routes():
+        overrides = table.unit_overrides()
+        if not overrides:
+            return
+        classes = {"default", *(name[5:] for name in overrides if name.startswith("unit."))}
+        for request_role in routes.ROLES:
+            if request_role == "unit":
+                continue
+            for unit_class in sorted(classes):
+                settings = table.resolve(request_role, unit_class=unit_class)
+                sources = dict(table.sources[request_role])
+                for name in ("unit", f"unit.{unit_class}"):
+                    for route_field in overrides.get(name, ()):
+                        sources[route_field] = table.sources[name][route_field]
+                yield f"{request_role} (unit {unit_class})", settings, sources
+
+    for role, settings, sources in chain(
+            ((role, settings, table.sources[role]) for role, settings in table.roles.items()),
+            effective_unit_routes()):
         endpoint = _routed_endpoint(settings)
         if (endpoint.base_url != options.endpoint.base_url
-                and table.sources[role].get("slot") == "default"):
+                and sources.get("slot") == "default"):
             # A pin discovered on the default server is not a pin on this one.
             settings["slot"] = None
         identity = (endpoint.base_url, endpoint.model)
@@ -919,11 +938,12 @@ def _probe_routes(options: RunOptions, printer=print, *, resume_roles: dict | No
                 probe = endpoint.probe()
             except EndpointError as error:
                 raise RunError(f"route {role} {error}; change {role}.endpoint or {role}.model") from None
-            if probe.get("model_found") is False and not (
-                    role == "decide2" and table.sources[role].get("model") == "default"):
-                raise RunError(f"route {role} endpoint does not serve model {endpoint.model!r}; "
-                               f"change {role}.model or {role}.endpoint")
-            checked.add(identity)
+            if probe.get("model_found") is False:
+                if not (role.partition(" (unit ")[0] == "decide2" and sources.get("model") == "default"):
+                    raise RunError(f"route {role} endpoint does not serve model {endpoint.model!r}; "
+                                   f"change {role}.model or {role}.endpoint")
+            else:
+                checked.add(identity)
         if endpoint.base_url not in slots_by_endpoint:
             slots_by_endpoint[endpoint.base_url] = endpoint.get_slots()
         slots = slots_by_endpoint[endpoint.base_url]
@@ -1359,17 +1379,21 @@ def _route_costs(run: Path, route_spec: dict, sends: list[dict],
     keys = ("cost_input_per_mtok", "cost_cached_input_per_mtok", "cost_output_per_mtok")
     request_roles: dict[str, str] = {}
     escalated_from: list[tuple[str, int]] = []
+    unattributed_sends = max(0, len(sends) - len(metrics))
     for fallback, (send, usage) in enumerate(zip(sends, metrics), start=1):
         index = send.get("send") if type(send.get("send")) is int else fallback
         path = run / "wire" / f"{index:04d}.route.json"
         if not path.is_file():
+            unattributed_sends += 1
             continue
         try:
             route = json.loads(path.read_text())
         except (OSError, UnicodeError, ValueError):
+            unattributed_sends += 1
             continue
         role = route.get("role") if isinstance(route, dict) else None
         if role not in rows:
+            unattributed_sends += 1
             continue
         row = rows[role]
         row["requests"] += 1
@@ -1433,11 +1457,17 @@ def _route_costs(run: Path, route_spec: dict, sends: list[dict],
                                       all(type(rates[role].get(key)) in (int, float) for key in keys)):
             row["estimated_cost"] = round(priced[role], 8)
     total = {key: sum(int(row[key]) for row in rows.values()) for key in
-             ("requests", "escalated", "prompt_tokens", "cached_tokens", "completion_tokens")}
+              ("requests", "escalated", "prompt_tokens", "cached_tokens", "completion_tokens")}
+    total["requests"] += unattributed_sends
+    if unattributed_sends:
+        for key in ("escalated", "prompt_tokens", "cached_tokens", "completion_tokens"):
+            total[key] = None
     costs = [row["estimated_cost"] for row in rows.values() if row["requests"]]
-    total["estimated_cost"] = round(sum(costs), 8) if len(costs) == sum(bool(row["requests"]) for row in rows.values()) else None
+    total["estimated_cost"] = (round(sum(costs), 8) if not unattributed_sends and
+                               len(costs) == sum(bool(row["requests"]) for row in rows.values()) else None)
     as_edit = round(priced_as_edit, 8) if total["estimated_cost"] is not None and not edit_incomplete else None
-    return {"roles": rows, "total": total, "all_at_edit_rates": as_edit,
+    return {"roles": rows, "total": total, "unattributed_sends": unattributed_sends,
+            "all_at_edit_rates": as_edit,
             "estimated_savings": round(as_edit - total["estimated_cost"], 8)
             if as_edit is not None and total["estimated_cost"] is not None else None}
 

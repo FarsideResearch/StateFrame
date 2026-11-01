@@ -53,6 +53,13 @@ def test_toml_nested_unit_class_table(tmp_path):
     assert table.resolve("read", unit_class="other")["model"] == "shared"
 
 
+def test_duplicate_nested_and_dotted_unit_class_is_refused():
+    profile = {"roles": {"unit": {"patch": {"model": "nested"}},
+                         "unit.patch": {"model": "dotted"}}}
+    with pytest.raises(routes.RouteError, match="duplicate route role unit.patch"):
+        resolve(profile=profile)
+
+
 def test_unit_override_mask_changes_digest_even_when_value_equals_default():
     plain = resolve(cli=["plan.model=large"])
     unit = resolve(cli=["plan.model=large", "unit.model=base"])
@@ -96,6 +103,35 @@ def test_inactive_and_public_view_never_contain_key_value():
     assert table.active
     assert table.public()["roles"]["edit"]["api_key_env"] == "OPENAI_KEY"
     assert "very-secret-value" not in json.dumps(table.public())
+
+
+def test_default_endpoint_tokenizer_does_not_activate_routes():
+    table = resolve(cli=["read.tokenizer=http://127.0.0.1:8080/v1"])
+    assert not table.active
+
+
+def test_unit_overlay_cannot_remove_remote_opt_in():
+    with pytest.raises(routes.RouteError, match="route read.*unit.*allow_remote"):
+        resolve(cli=["read.endpoint=https://api.example.org/v1", "read.allow_remote=true",
+                     "unit.allow_remote=false"])
+
+
+def test_profile_routes_value_must_be_a_table():
+    with pytest.raises(routes.RouteError, match="profile routes must contain a roles table"):
+        resolve(profile=[])
+
+
+def test_oversized_cli_integer_has_route_error():
+    with pytest.raises(routes.RouteError, match="route read.max_tokens"):
+        resolve(cli=["read.max_tokens=" + "9" * 5000])
+
+
+def test_oversized_json_rate_has_route_error(tmp_path):
+    path = tmp_path / "routes.json"
+    path.write_text(json.dumps({"schema": routes.SCHEMA, "roles": {
+        "read": {"cost_input_per_mtok": 10 ** 1000}}}))
+    with pytest.raises(routes.RouteError, match="route read.cost_input_per_mtok"):
+        resolve(file=path)
 
 
 @pytest.mark.parametrize("cli,fragment", [
