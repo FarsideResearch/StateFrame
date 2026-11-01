@@ -36,6 +36,12 @@ Large tasks or repositories can require more state and source context than fits.
 - Workspace reconciliation stops without promoting command effects when any regular file exceeds 16 MiB, aggregate regular-file bytes exceed 256 MiB, or the tree exceeds 20,000 entries. These bounds also apply before execution when the snapshot is captured.
 - The shipped product profile uses the composed loop. The plain loop accepts foreground shell but refuses background jobs and Git, web or custom tool settings before execution. Lean mode is not supported by the product profile.
 
+## Lifecycle hooks
+
+Hooks always use the execution sandbox. There is no host-execution option or unsandboxed fallback; a sandbox startup failure is a hook error. Windows is unsupported. Linux desktop notifications cannot reach the user's D-Bus session from the sandbox; use an explicitly configured webhook instead. On Linux, network mode `loopback` gives a hook its own private loopback, so a service listening on the host's loopback needs `full`. The macOS notification and webhook samples are examples and are not exercised by the automated end-to-end tests.
+
+If a process is killed while a hook has a durable intent but no completion record, StateFrame cannot know whether an outside effect occurred and refuses to resume that run. Completed hook decisions are served from the run tape. A hook script is pinned, but a hook that deliberately runs project code from the mutable working copy can be influenced by the agent's edits to that code. The `[USER HOOKS]` label describes the text's source; it does not make that text a prompt-injection boundary. See [Lifecycle hooks](docs/guide/hooks.md) for the write, network and size limits.
+
 ## Checks
 
 The engine checks its work with pytest test files from the repository, so a repository needs at least one (`--check` names them). `--test-cmd` changes only the outer before-and-after command used to report pass or fail; it does not replace the engine's pytest checks, so a repository without pytest tests cannot be used yet. The interpreter selected for a run must be able to invoke pytest and the repository's required test dependencies. The check file can inspect any output file, not only Python (see "Tasks whose output is files" in the README).

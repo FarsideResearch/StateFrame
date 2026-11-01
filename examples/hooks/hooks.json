@@ -1,0 +1,48 @@
+{
+  "schema": "stateframe-hooks/1",
+  "hooks": [
+    {
+      "name": "session-context",
+      "event": "session_start",
+      "argv": ["session_start_context.py"],
+      "files": ["session_start_context.py"]
+    },
+    {
+      "name": "shell-guard",
+      "event": "pre_tool",
+      "tools": ["shell"],
+      "argv": ["shell_guard.py"],
+      "files": ["shell_guard.py"],
+      "timeout": 10
+    },
+    {
+      "name": "format-changed-python",
+      "event": "post_tool",
+      "tools": ["*"],
+      "changed": true,
+      "paths": ["*.py"],
+      "argv": ["formatter.py", "{paths}"],
+      "files": ["formatter.py"],
+      "writes": "changed",
+      "timeout": 15
+    },
+    {
+      "name": "lint-changed-python",
+      "event": "post_tool",
+      "tools": ["*"],
+      "changed": true,
+      "paths": ["*.py"],
+      "argv": ["lint_changed.py"],
+      "files": ["lint_changed.py"],
+      "timeout": 15
+    },
+    {
+      "name": "require-passing-check",
+      "event": "stop",
+      "argv": ["stop_gate.py"],
+      "files": ["stop_gate.py"],
+      "max_blocks": 2,
+      "timeout": 15
+    }
+  ]
+}

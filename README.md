@@ -90,7 +90,7 @@ Install a reusable instruction bundle with `stateframe skill install path/to/ski
 
 ## Project instructions
 
-Add `--instructions` to `run` or `chat` to give the agent your repository's own `AGENTS.md` (or `CLAUDE.md` when there is no `AGENTS.md`), or `--instructions=FILE` to use a specific file. The text goes into every request right after StateFrame's system prompt, framed as untrusted repository content: it can describe conventions and commands, but it cannot add tools, widen the sandbox or override engine rules. It is off by default because a live comparison on the bundled examples showed no gain (see [known limitations](KNOWN_LIMITATIONS.md)). Details in [Running](docs/guide/running.md#project-instructions).
+Add `--instructions` to `run` or `chat` to give the agent your repository's own `AGENTS.md` (or `CLAUDE.md` when there is no `AGENTS.md`), or `--instructions=FILE` to use a specific file. The text is added to the end of StateFrame's system prompt in every request, framed as untrusted repository content: it can describe conventions and commands, but it cannot add tools, widen the sandbox or override engine rules. It is off by default because a live comparison on the bundled examples showed no gain (see [known limitations](KNOWN_LIMITATIONS.md)). Details in [Running](docs/guide/running.md#project-instructions).
 
 ## What the agent can do
 
@@ -100,6 +100,7 @@ Add `--instructions` to `run` or `chat` to give the agent your repository's own 
 - **Run commands:** foreground shell commands and read-only background jobs with bounded, budget-aware replies, per-run dependencies, protected-test restoration and replay verification. See [agent tools](docs/guide/tools.md).
 - **Inspect and organize:** read sanitized Git history, fetch public documentation when enabled, and delete or move files within the task's edit scope. Explicitly trusted command tools can be supplied with `--tools`; local MCP stdio servers can be supplied with `--mcp`.
 - **Check its work:** run your tests, try code in a sandboxed probe, write and run its own checks, and read the check results.
+- **Customize run boundaries:** use sandboxed hooks to add start context, guard admitted calls (including `skill_load` and MCP tools), inspect tool results, gate submissions and report final outcomes. See the [hooks guide](docs/guide/hooks.md).
 - **Finish:** a run counts as done only after its checks pass. The engine makes that call, not the model.
 - **Around that:** a map of your repository's code (12 languages, plus structure for HTML, CSS, JSON, TOML and YAML), an interactive chat with diff, undo and apply, resume after a stop, and inspect to see exactly what the model was sent.
 
@@ -117,7 +118,7 @@ Add `--instructions` to `run` or `chat` to give the agent your repository's own 
 
 ## Tools and safety
 
-The [agent tools guide](docs/guide/tools.md) lists the tool arguments, command policies, sandbox boundaries and replay rules. Shell is sandboxed by default. Web fetch is opt-in, and host shell execution requires an explicit flag that prints a warning. Shell and workspace-writing custom commands are reconciled within limits of 16 MiB per file, 256 MiB in aggregate and 20,000 entries. The shipped product profile uses the composed loop; lean mode is not supported. The plain loop only supports foreground shell from this tool set.
+The [agent tools guide](docs/guide/tools.md) lists the tool arguments, command policies, sandbox boundaries and replay rules. Shell commands are sandboxed by default; user hooks always run in the sandbox. Web fetch is opt-in, and host shell execution requires an explicit flag that prints a warning. Shell and workspace-writing custom commands are reconciled within limits of 16 MiB per file, 256 MiB in aggregate and 20,000 entries. The shipped product profile uses the composed loop; lean mode is not supported. The plain loop only supports foreground shell from this tool set.
 
 ## What works today
 
@@ -176,6 +177,7 @@ Check it before a run: send the same text to `/tokenize` on both servers and com
 - The engine checks its work with pytest test files from your repository (`--check <path>` names them; by default every `test_*.py` / `*_test.py`). A repository needs at least one. `--test-cmd` only changes the outer command StateFrame runs before and after to report pass or fail; it does not replace the engine's pytest checks.
 - Your tests run with your project's Python: the repository's `.venv/`, `venv/` or `env/`, else `python3` on PATH. `--test-python PATH` picks another; it needs pytest and your project's test dependencies. `--python` sets one interpreter for both the engine and your tests.
 - `--in-place` applies a passing result to your repository. Without it, nothing in your repository changes; the result stays in the run directory.
+- `--hooks FILE` adds a trusted hook definition file to `run` or `chat`; it can be repeated. A project file at `.stateframe/hooks.json` runs only after you trust its exact contents with `stateframe hooks trust --repo PATH`. Use `--no-project-hooks` to skip that file for one run. See [Hooks](docs/guide/hooks.md).
 - There is no time limit by default. Stop any run with Ctrl-C, or pass `--timeout <seconds>`.
 - There is no step limit by default. `--max-turns N` stops a run after N model turns.
 - `STATEFRAME_EVICTFIX=on` (opt-in, off by default) keeps more recent reads in the frame instead of evicting them. It is slower on long runs in this release, and we have not measured an edit gain from it. `legacy` (or `off`) is the default.

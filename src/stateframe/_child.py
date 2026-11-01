@@ -120,7 +120,8 @@ def _actions(response: object) -> list[str]:
     return out[:16] + (["actions truncated"] if truncated else [])
 
 
-def install_wire_recorder(run: Path, chat_url: str, replayer: Replayer | None = None) -> None:
+def install_wire_recorder(run: Path, chat_url: str, replayer: Replayer | None = None,
+                          hook_wiring=None) -> None:
     """Record every physical chat send: exact identity bytes, response bytes, usage.
 
     On ``stateframe resume`` a send the interrupted attempt already completed is answered from its
@@ -151,7 +152,7 @@ def install_wire_recorder(run: Path, chat_url: str, replayer: Replayer | None = 
             if replayed is None and replayer.diverged is not None:
                 (run / "resume-divergence.json").write_text(json.dumps(
                     {**replayer.diverged, "send": index, "checkpoint": replayer.strict}, indent=1))
-                if (run / "tool-tape.jsonl").is_file():
+                if (run / "tool-tape.jsonl").is_file() or hook_wiring is not None:
                     from kernel_tool_tape import ToolReplayRefused
                     raise ToolReplayRefused(f"send {index}: {replayer.diverged['reason']}")
                 if replayer.strict:
@@ -191,6 +192,11 @@ def install_wire_recorder(run: Path, chat_url: str, replayer: Replayer | None = 
                                              "error": type(error).__name__}) + "\n")
             emit("send_error", send=index, error=type(error).__name__)
             raise
+        if hook_wiring is not None:
+            from kernel_measurement import ACTIVE_REQUEST
+            capture = ACTIVE_REQUEST.get()
+            request_id = getattr(capture, "request_id", None)
+            hook_wiring.sent(wire, str(request_id) if request_id is not None else f"send:{index}")
         elapsed = time.monotonic() - started
         stem.with_suffix(".response.json").write_bytes(response)
         try:
@@ -240,7 +246,7 @@ def install_token_count_warning() -> None:
     RequestTokenMeter.measure = measured
 
 
-def install_checked_ask(rr, spec: dict, run: Path) -> None:
+def install_checked_ask(rr, spec: dict, run: Path, hook_wiring=None) -> None:
     """The release runner's provider callback contract, minus the lab release fences."""
     original_ask = rr.ask_tools
     requests_dir = run / "requests"
@@ -331,8 +337,12 @@ def install_checked_ask(rr, spec: dict, run: Path) -> None:
     # source locations. The lab runner's only input step is the host-capacity notice, which the
     # product never enables, so preparation is the identity.
     def prepare_request_host_text(messages, *, runtime, tools,
-                                  frame_request_allocation=None, framefit5_inputs=None):
+                                   frame_request_allocation=None, framefit5_inputs=None):
         from capability_request_preflight import prepare_release_host_text
+        if hook_wiring is not None:
+            panel = hook_wiring.panel(runtime)
+            if panel is not None:
+                messages = [*messages, panel]
         return prepare_release_host_text(
             messages, runtime, tools=tools,
             frame_request_allocation=frame_request_allocation,
@@ -770,6 +780,7 @@ def main(argv: list[str]) -> int:
     from kernel_mcp_tools import load_mcp_files
     from kernel_tool_settings import ToolSettingsError, load_tool_settings
     from kernel_tool_tape import ToolTapeError, configure_replay
+    hook_wiring = None
     try:
         settings = load_tool_settings()
         if settings is not None:
@@ -784,6 +795,19 @@ def main(argv: list[str]) -> int:
                 raise CustomToolError("custom tool definition or executable changed since host validation")
             mcp_servers = load_mcp_files([Path(item["path"]) for item in settings.mcp_files],
                                          shell_network=settings.shell_network)
+        if "hooks" in spec:
+            from kernel_hooks import HookSet, verify_bundle
+            from kernel_hook_wiring import HookWiring
+            from kernel_tool_tape import replay_mode_active
+
+            if type(spec["hooks"]) is not dict:
+                raise ValueError("run hook spec must be an object")
+            hook_spec = dict(spec["hooks"])
+            hook_spec.pop("start_context", None)
+            hooks = HookSet.from_spec(hook_spec)
+            verify_bundle(hook_spec["bundle_manifest"], run / "hook-bundle")
+            hook_wiring = HookWiring(run, hooks, spec, replay=replay_mode_active)
+            HOST_STATE["hooks"] = hook_wiring.state
         configure_replay(run, active=bool(replayer and replayer.tape))
     except (ToolSettingsError, CustomToolError, ToolTapeError, SkillError, OSError, KeyError, ValueError) as error:
         emit("engine_error", error=type(error).__name__, detail=str(error)[:300])
@@ -817,6 +841,8 @@ def main(argv: list[str]) -> int:
         from kernel_project_instructions import configure as configure_project_instructions
         configure_project_instructions(spec.get("project_instructions"))
         from probes import react_repair as rr
+        if hook_wiring is not None:
+            rr._hook_wiring = hook_wiring
         from kernel_protocol_spec import publish_public_spec
 
         publish_public_spec(output / "protocol-spec.json")
@@ -829,11 +855,11 @@ def main(argv: list[str]) -> int:
         rr.REPOS["build"] = Path(spec["parent_snapshot"])
         install_repo_context(rr, Path(spec["parent_snapshot"]))
         install_compact_capture(Path(spec["parent_snapshot"]))
-        install_wire_recorder(run, spec["chat_url"], replayer)
+        install_wire_recorder(run, spec["chat_url"], replayer, hook_wiring)
         previous_checks = Path(resume["previous_attempt"]) / "checks" if resume is not None else None
         install_check_recorder(run, replayer, previous_checks)
         install_token_count_warning()
-        install_checked_ask(rr, spec, run)
+        install_checked_ask(rr, spec, run, hook_wiring)
         install_test_log(rr)
         register_host_state(required=checkpoint is not None, secret=key)
         row = json.loads(json.dumps(spec["public_row"]))
@@ -851,9 +877,20 @@ def main(argv: list[str]) -> int:
     except BaseException as error:  # noqa: BLE001 - report every engine failure as a typed record
         (run / "child-traceback.txt").write_text(traceback.format_exc())
         emit("engine_error", error=type(error).__name__, detail=" ".join(str(error).split())[:300])
-        result = {"result": "ENGINE_ERROR", "error": type(error).__name__}
+        if hook_wiring is not None:
+            from kernel_hook_exec import HookContainmentError
+            kind = "HOOK_CONTAINMENT" if isinstance(error, HookContainmentError) else "ENGINE_ERROR"
+        else:
+            kind = "ENGINE_ERROR"
+        result = {"result": kind, "error": type(error).__name__}
         status = 1
     finally:
+        if hook_wiring is not None:
+            try:
+                hook_wiring.close()
+            except BaseException as error:  # a failed hook cleanup is terminal
+                emit("engine_error", error=type(error).__name__, detail=str(error)[:300])
+                result, status = {"result": "HOOK_CONTAINMENT", "error": str(error)[:300]}, 1
         try:
             cleanup = session.stop_all()
             if not cleanup.ok:

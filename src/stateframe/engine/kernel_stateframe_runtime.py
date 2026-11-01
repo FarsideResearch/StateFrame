@@ -24693,7 +24693,10 @@ class StateFrameRuntime:
     def finish(self, result: Mapping[str, object], *, messages: Sequence[dict] | None = None) -> None:
         if self._finished:
             return
-        if getattr(self, "stateframe_completion_owner_mode", "off") == "on":
+        hook_terminated = str(result.get("result", "")).upper() in {
+            "HOOK_BLOCKED", "HOOK_CONTAINMENT"}
+        if (not hook_terminated
+                and getattr(self, "stateframe_completion_owner_mode", "off") == "on"):
             from kernel_completion_owner import reconcile_submitted_request, request_pending
             reconcile_submitted_request(self)
             if request_pending(self):
@@ -24743,6 +24746,7 @@ class StateFrameRuntime:
             if terminal_status in {"HARNESS_ERROR", "HARNESS_SUSPECT",
                                    "ATTEMPT_BUDGET_EXHAUSTED", "RENDER_OVERFLOW",
                                    "STOPPED_INCOMPLETE",
+                                   "HOOK_BLOCKED", "HOOK_CONTAINMENT",
                                    "BLOCKED", "NEEDS_WORK", "UNCERTIFIED_SUBMIT"}:
                 terminal_gates.append("terminal:" + terminal_status)
             facts = self._compute_host_done_facts(

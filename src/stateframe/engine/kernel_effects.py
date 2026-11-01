@@ -1,4 +1,5 @@
 """Content-addressed, no-follow workspace effect accounting and restoration."""
+
 from __future__ import annotations
 
 import hashlib
@@ -110,7 +111,11 @@ class ContentStore:
             fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
             try:
                 info = os.fstat(fd)
-                if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_size != entry.size:
+                if (
+                    not stat.S_ISREG(info.st_mode)
+                    or info.st_nlink != 1
+                    or info.st_size != entry.size
+                ):
                     raise EffectError(f"workspace changed while capturing {relative}")
                 target = self._path(entry.digest)
                 target.parent.mkdir(parents=True, exist_ok=True)
@@ -122,13 +127,17 @@ class ContentStore:
                         while block := os.read(fd, 1 << 20):
                             total += len(block)
                             if total > entry.size or total > MAX_FILE_BYTES:
-                                raise EffectError(f"workspace grew while capturing {relative}")
+                                raise EffectError(
+                                    f"workspace grew while capturing {relative}"
+                                )
                             digest.update(block)
                             output.write(block)
                         output.flush()
                         os.fsync(output.fileno())
                     if total != entry.size or digest.hexdigest() != entry.digest:
-                        raise EffectError(f"workspace changed while capturing {relative}")
+                        raise EffectError(
+                            f"workspace changed while capturing {relative}"
+                        )
                     if target.exists():
                         # Verification is bounded, independently of the workspace.
                         self.verify(entry.digest)
@@ -176,7 +185,10 @@ def _validate_manifest_limits(manifest: Manifest) -> None:
     if len(manifest) > MAX_WORKSPACE_ENTRIES:
         raise EffectError("workspace exceeds entry-count limit")
     sizes = [entry.size for entry in manifest.values() if entry.kind == "file"]
-    if any(size < 0 or size > MAX_FILE_BYTES for size in sizes) or sum(sizes) > MAX_WORKSPACE_BYTES:
+    if (
+        any(size < 0 or size > MAX_FILE_BYTES for size in sizes)
+        or sum(sizes) > MAX_WORKSPACE_BYTES
+    ):
         raise EffectError("workspace exceeds per-file or aggregate byte limit")
 
 
@@ -200,34 +212,51 @@ def scan(workspace: Path, *, exclude: Callable[[str], bool]) -> Manifest:
                 info = child.stat(follow_symlinks=False)
                 if stat.S_ISREG(info.st_mode):
                     total_bytes += info.st_size
-                    if info.st_size > MAX_FILE_BYTES or total_bytes > MAX_WORKSPACE_BYTES:
-                        raise EffectError("workspace exceeds per-file or aggregate byte limit")
+                    if (
+                        info.st_size > MAX_FILE_BYTES
+                        or total_bytes > MAX_WORKSPACE_BYTES
+                    ):
+                        raise EffectError(
+                            "workspace exceeds per-file or aggregate byte limit"
+                        )
                 mode = stat.S_IMODE(info.st_mode)
                 if stat.S_ISDIR(info.st_mode):
                     result[relative] = Entry("dir", mode, None, 0)
                     visit(Path(child.path))
                 elif stat.S_ISLNK(info.st_mode):
-                    link = os.readlink(child.path).encode("utf-8", errors="surrogateescape")
-                    result[relative] = Entry("symlink", mode, hashlib.sha256(link).hexdigest(), len(link))
+                    link = os.readlink(child.path).encode(
+                        "utf-8", errors="surrogateescape"
+                    )
+                    result[relative] = Entry(
+                        "symlink", mode, hashlib.sha256(link).hexdigest(), len(link)
+                    )
                 elif stat.S_ISREG(info.st_mode) and info.st_nlink == 1:
                     digest = hashlib.sha256()
                     fd = os.open(child.path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
                     try:
                         opened = os.fstat(fd)
                         if (opened.st_dev, opened.st_ino) != (info.st_dev, info.st_ino):
-                            raise EffectError(f"workspace changed while scanning {relative}")
+                            raise EffectError(
+                                f"workspace changed while scanning {relative}"
+                            )
                         consumed = 0
                         with os.fdopen(fd, "rb", closefd=False) as source:
                             while block := source.read(1024 * 1024):
                                 consumed += len(block)
                                 if consumed > info.st_size or consumed > MAX_FILE_BYTES:
-                                    raise EffectError(f"workspace grew while scanning {relative}")
+                                    raise EffectError(
+                                        f"workspace grew while scanning {relative}"
+                                    )
                                 digest.update(block)
                         if consumed != info.st_size:
-                            raise EffectError(f"workspace changed while scanning {relative}")
+                            raise EffectError(
+                                f"workspace changed while scanning {relative}"
+                            )
                     finally:
                         os.close(fd)
-                    result[relative] = Entry("file", mode, digest.hexdigest(), opened.st_size)
+                    result[relative] = Entry(
+                        "file", mode, digest.hexdigest(), opened.st_size
+                    )
                 else:
                     result[relative] = Entry("other", mode, None, info.st_size)
 
@@ -280,15 +309,37 @@ class WorkspaceEffectPolicy:
             return False, "protected test or inode alias"
         if effect.after and effect.after.kind in {"symlink", "other"}:
             return False, "symlinks, hardlinks, and special files are not allowed"
-        if effect.before and effect.before.kind == "file" and effect.before.mode & 0o111 and effect.after is None:
-            return False, "shell removal of executable files cannot preserve move metadata; use file_delete"
+        if (
+            effect.before
+            and effect.before.kind == "file"
+            and effect.before.mode & 0o111
+            and effect.after is None
+        ):
+            return (
+                False,
+                "shell removal of executable files cannot preserve move metadata; use file_delete",
+            )
         if effect.after and effect.after.kind == "file":
-            previous = effect.before.mode & 0o111 if effect.before and effect.before.kind == "file" else 0
+            previous = (
+                effect.before.mode & 0o111
+                if effect.before and effect.before.kind == "file"
+                else 0
+            )
             if effect.after.mode & 0o111 != previous:
-                return False, "executable mode changes are not supported by the sealed artifact"
+                return (
+                    False,
+                    "executable mode changes are not supported by the sealed artifact",
+                )
         if effect.before is None and effect.after and effect.after.kind == "dir":
-            allowed = self.directory_allowed is not None and self.directory_allowed(effect.path)
-            return allowed, "structural product directory" if allowed else "new directory is not allowed"
+            allowed = self.directory_allowed is not None and self.directory_allowed(
+                effect.path
+            )
+            return (
+                allowed,
+                "structural product directory"
+                if allowed
+                else "new directory is not allowed",
+            )
         if self.edit_scope is not None and not self.edit_scope(effect.path):
             return False, "outside edit scope"
         if effect.before is None and not self.new_file_allowed(effect.path):
@@ -296,9 +347,14 @@ class WorkspaceEffectPolicy:
         return True, "authorized workspace effect"
 
 
-def effect_policy_for_run(workspace: Path, row: Mapping[str, object],
-                          baseline_tests: set[str], *,
-                          baseline_manifest: Manifest | None = None) -> WorkspaceEffectPolicy:
+def effect_policy_for_run(
+    workspace: Path,
+    row: Mapping[str, object],
+    baseline_tests: set[str],
+    *,
+    baseline_manifest: Manifest | None = None,
+    hook_paths: frozenset[str] = frozenset(),
+) -> WorkspaceEffectPolicy:
     """Adapt the engine's own path decisions; keep their policy in one place."""
     from probes.react_repair import _is_product_path, protected_test_path
 
@@ -307,7 +363,9 @@ def effect_policy_for_run(workspace: Path, row: Mapping[str, object],
     if not isinstance(files, Mapping):
         raise EffectError("run row has no product files mapping")
     editable = frozenset(str(path) for path in files)
-    original_paths = frozenset((baseline_manifest or scan(root, exclude=lambda _: False)).keys())
+    original_paths = frozenset(
+        (baseline_manifest or scan(root, exclude=lambda _: False)).keys()
+    )
     protected_inodes = set()
     for name in baseline_tests:
         try:
@@ -316,8 +374,22 @@ def effect_policy_for_run(workspace: Path, row: Mapping[str, object],
             continue
         if stat.S_ISREG(info.st_mode):
             protected_inodes.add((info.st_dev, info.st_ino))
+    for name in hook_paths:
+        try:
+            info = os.lstat(root / name)
+        except FileNotFoundError:
+            continue
+        if stat.S_ISREG(info.st_mode):
+            # Hardlinks have no content digest in a workspace scan. An alias
+            # present before the first action could mutate a protected file
+            # without producing an effect to restore.
+            if info.st_nlink != 1:
+                raise EffectError(f"protected hook file has hardlinks: {name}")
+            protected_inodes.add((info.st_dev, info.st_ino))
 
     def is_protected(path: str) -> bool:
+        if path in hook_paths:
+            return True
         candidate = root / path
         if protected_test_path(candidate, baseline_tests):
             return True
@@ -325,27 +397,54 @@ def effect_policy_for_run(workspace: Path, row: Mapping[str, object],
             info = os.lstat(candidate)
         except FileNotFoundError:
             return False
+        if hook_paths and stat.S_ISREG(info.st_mode):
+            for name in hook_paths:
+                try:
+                    protected = os.lstat(root / name)
+                except FileNotFoundError:
+                    continue
+                if stat.S_ISREG(protected.st_mode) and (info.st_dev, info.st_ino) == (
+                    protected.st_dev,
+                    protected.st_ino,
+                ):
+                    return True
         return (info.st_dev, info.st_ino) in protected_inodes
 
     return WorkspaceEffectPolicy(
         protected=is_protected,
-        edit_scope=(None if row.get("scoped_edits") is False else
-                    lambda path: path in editable or (path not in original_paths and
-                                                       _is_product_path(path, row))),
+        edit_scope=(
+            None
+            if row.get("scoped_edits") is False
+            else lambda path: (
+                path in editable
+                or (path not in original_paths and _is_product_path(path, row))
+            )
+        ),
         new_file_allowed=lambda path: _is_product_path(path, row),
         baseline_manifest=baseline_manifest,
         directory_allowed=lambda path: (
-            row.get("tier") == "USER-REPO" and row.get("scoped_edits") is False
-            and _is_product_path(path, row)) or any(
-            path == str(base).rstrip("/") or path.startswith(str(base).rstrip("/") + "/")
-            for base in row.get("allowed_product_paths", ())
-            if (root / str(base)).is_dir()),
+            (
+                row.get("tier") == "USER-REPO"
+                and row.get("scoped_edits") is False
+                and _is_product_path(path, row)
+            )
+            or any(
+                path == str(base).rstrip("/")
+                or path.startswith(str(base).rstrip("/") + "/")
+                for base in row.get("allowed_product_paths", ())
+                if (root / str(base)).is_dir()
+            )
+        ),
     )
 
 
 def _safe_path(root: Path, relative: str) -> Path:
     pure = PurePosixPath(relative)
-    if pure.is_absolute() or not pure.parts or any(part in {".", ".."} for part in pure.parts):
+    if (
+        pure.is_absolute()
+        or not pure.parts
+        or any(part in {".", ".."} for part in pure.parts)
+    ):
         raise EffectError(f"invalid workspace path: {relative!r}")
     current = root
     for part in pure.parts[:-1]:
@@ -369,8 +468,14 @@ def _remove(path: Path) -> None:
         os.unlink(path)
 
 
-def _restore(root: Path, relative: str, before: Manifest, store: ContentStore,
-             baseline_store: ContentStore | None, policy: EffectPolicy) -> None:
+def _restore(
+    root: Path,
+    relative: str,
+    before: Manifest,
+    store: ContentStore,
+    baseline_store: ContentStore | None,
+    policy: EffectPolicy,
+) -> None:
     target = _safe_path(root, relative)
     old = before.get(relative)
     if old is None:
@@ -388,21 +493,29 @@ def _restore(root: Path, relative: str, before: Manifest, store: ContentStore,
                 child_relative = f"{relative}/{child.name}"
                 if child_relative not in before:
                     _remove(Path(child.path))
-        descendants = sorted((p for p in before if p.startswith(relative + "/")),
-                             key=lambda p: (p.count("/"), p))
+        descendants = sorted(
+            (p for p in before if p.startswith(relative + "/")),
+            key=lambda p: (p.count("/"), p),
+        )
         for child in descendants:
             _restore(root, child, before, store, baseline_store, policy)
         os.chmod(target, old.mode)
         return
     if old.digest is None:
         raise EffectError(f"pre-call file has no digest: {relative}")
-    use_baseline = (isinstance(policy, WorkspaceEffectPolicy) and
-                    policy.baseline_manifest is not None and policy.protected(relative))
+    use_baseline = (
+        isinstance(policy, WorkspaceEffectPolicy)
+        and policy.baseline_manifest is not None
+        and policy.protected(relative)
+    )
     if use_baseline and baseline_store is None:
         raise EffectError(f"protected baseline store unavailable for {relative}")
     source = baseline_store if use_baseline else store
-    baseline = (policy.baseline_manifest.get(relative) if isinstance(policy, WorkspaceEffectPolicy)
-                and policy.baseline_manifest else None)
+    baseline = (
+        policy.baseline_manifest.get(relative)
+        if isinstance(policy, WorkspaceEffectPolicy) and policy.baseline_manifest
+        else None
+    )
     entry = baseline if use_baseline and baseline is not None else old
     if entry.digest is None:
         raise EffectError(f"baseline file has no digest: {relative}")
@@ -430,8 +543,14 @@ class Reconciliation:
     manifest: Manifest
 
 
-def reconcile(workspace: Path, before: Manifest, after: Manifest, policy: EffectPolicy,
-              store: ContentStore, baseline_store: ContentStore | None) -> Reconciliation:
+def reconcile(
+    workspace: Path,
+    before: Manifest,
+    after: Manifest,
+    policy: EffectPolicy,
+    store: ContentStore,
+    baseline_store: ContentStore | None,
+) -> Reconciliation:
     _validate_manifest_limits(before)
     _validate_manifest_limits(after)
     effects = diff(before, after)
@@ -442,26 +561,38 @@ def reconcile(workspace: Path, before: Manifest, after: Manifest, policy: Effect
         admitted = {effect.path for effect, allowed, _ in decisions if allowed}
         decisions = [
             (effect, True, "parent of authorized effect")
-            if (not allowed and effect.before is None and effect.after is not None
-                and effect.after.kind == "dir" and not policy.protected(effect.path)
-                and any(path.startswith(effect.path + "/") for path in admitted))
+            if (
+                not allowed
+                and effect.before is None
+                and effect.after is not None
+                and effect.after.kind == "dir"
+                and not policy.protected(effect.path)
+                and any(path.startswith(effect.path + "/") for path in admitted)
+            )
             else (effect, allowed, reason)
-            for effect, allowed, reason in decisions]
+            for effect, allowed, reason in decisions
+        ]
     denied = [(effect, reason) for effect, allowed, reason in decisions if not allowed]
     # Only restore an ancestor when its current type prevents reaching the child,
     # or that ancestor is itself denied. Restoring an authorized new directory
     # would discard authorized siblings of a denied child.
     denied_paths = {effect.path for effect, _ in denied}
     roots = []
-    for effect, _ in sorted(denied, key=lambda item: (item[0].path.count("/"), item[0].path)):
+    for effect, _ in sorted(
+        denied, key=lambda item: (item[0].path.count("/"), item[0].path)
+    ):
         candidate = effect.path
         for parent in PurePosixPath(effect.path).parents:
             ancestor = str(parent)
-            if ancestor in denied_paths or (ancestor in before and
-                    before[ancestor].kind == "dir" and
-                    (ancestor not in after or after[ancestor].kind != "dir")):
+            if ancestor in denied_paths or (
+                ancestor in before
+                and before[ancestor].kind == "dir"
+                and (ancestor not in after or after[ancestor].kind != "dir")
+            ):
                 candidate = str(parent)
-        if candidate not in roots and not any(candidate.startswith(parent + "/") for parent in roots):
+        if candidate not in roots and not any(
+            candidate.startswith(parent + "/") for parent in roots
+        ):
             roots.append(candidate)
     failures = []
     failure_details = []
@@ -474,12 +605,23 @@ def reconcile(workspace: Path, before: Manifest, after: Manifest, policy: Effect
     if failures:
         raise EffectRestoreError(failures, failure_details)
     included = before.keys() | after.keys()
-    prefixes = {str(parent) for path in included for parent in PurePosixPath(path).parents
-                if str(parent) != "."}
-    final = scan(Path(workspace), exclude=lambda path: path not in included and path not in prefixes)
+    prefixes = {
+        str(parent)
+        for path in included
+        for parent in PurePosixPath(path).parents
+        if str(parent) != "."
+    }
+    final = scan(
+        Path(workspace),
+        exclude=lambda path: path not in included and path not in prefixes,
+    )
     for effect, _ in denied:
         expected = before.get(effect.path)
-        if isinstance(policy, WorkspaceEffectPolicy) and policy.baseline_manifest and policy.protected(effect.path):
+        if (
+            isinstance(policy, WorkspaceEffectPolicy)
+            and policy.baseline_manifest
+            and policy.protected(effect.path)
+        ):
             expected = policy.baseline_manifest.get(effect.path, expected)
         if final.get(effect.path) != expected:
             failures.append(effect.path)
@@ -502,4 +644,6 @@ def reconcile(workspace: Path, before: Manifest, after: Manifest, policy: Effect
 
 def manifest_digest(manifest: Manifest) -> str:
     payload = [(path, asdict(entry)) for path, entry in sorted(manifest.items())]
-    return hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    return hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()

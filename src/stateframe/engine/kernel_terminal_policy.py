@@ -22,6 +22,9 @@ FATAL_OUTCOMES = frozenset({
     "harden8_owner_finalization_error", "harden8_route_error", "invalidate_attempt",
     "quarantine_harness", "run_incomplete",
 })
+# User-configured hook policy ends the run: a stop hook's veto limit, or lost hook containment. These are
+# explicit user decisions or safety stops, never heuristics, so they stay authoritative under hard-budget mode.
+USER_POLICY_OUTCOMES = frozenset({"hook_blocked", "hook_containment"})
 
 _ADVISORY_MESSAGES = {
     "blocked": "The host marked the current completion attempt blocked. Continue with the available repair, evidence, or verification actions until a hard budget is reached or completion is accepted.",
@@ -72,11 +75,13 @@ def terminal_category(outcome: object, runtime: object | None = None) -> str:
         return "done"
     if value in FATAL_OUTCOMES:
         return "fatal"
+    if value in USER_POLICY_OUTCOMES:
+        return "policy"
     return "heuristic"
 
 
 def terminal_outcome_permitted(outcome: object, runtime: object | None = None) -> bool:
-    return terminal_category(outcome, runtime) in {"budget", "done", "fatal", "stuck"}
+    return terminal_category(outcome, runtime) in {"budget", "done", "fatal", "policy", "stuck"}
 
 
 def advisory_message(trigger: str) -> str:
@@ -168,7 +173,7 @@ def record_terminal(runtime: object, outcome: object, *, trigger: str,
 
 
 __all__ = [
-    "DONE_OUTCOMES", "FATAL_OUTCOMES", "HARD_BUDGET_OUTCOMES", "MODE_ENV",
+    "DONE_OUTCOMES", "FATAL_OUTCOMES", "HARD_BUDGET_OUTCOMES", "MODE_ENV", "USER_POLICY_OUTCOMES",
     "advisory_message", "deliver_pending_advisories", "enabled", "queue_advisory",
     "record_terminal", "terminal_category", "terminal_outcome_permitted",
 ]

@@ -33,6 +33,8 @@ Your repository's tests run with your project's Python (`.venv/`, `venv/`, `env/
 
 The shipped product profile uses the composed loop; lean mode is not supported by that profile. The plain loop allows foreground shell but refuses Git, web, custom tools and background jobs. Command replies shrink to the measured request budget, with omitted byte counts and the full taped observation retained within collector limits. Executable-bit effects are refused and restored because the sealed candidate does not transport them.
 
+Lifecycle hooks (`--hooks FILE`, or a digest-trusted `.stateframe/hooks.json`) run in the sandbox at six run boundaries and are replayed from `hook-tape.jsonl` on resume. With no hook source enabled the child never imports the hook modules, so request bytes match a release without hooks; `tests/test_hook_wiring_parity.py` checks this against an untouched checkout named by `SF_TEST_PARITY_BASELINE`.
+
 ## Where to go next
 
 - [ARCHITECTURE.md](ARCHITECTURE.md): diagrams of the request lifecycle, the frame, completion, resume, history and the code map.
@@ -41,6 +43,7 @@ The shipped product profile uses the composed loop; lean mode is not supported b
 - [Code map](docs/guide/code-map.md): which module owns what.
 - [Running](docs/guide/running.md): CLI, profiles, flags, test interpreter, resume, determinism scope.
 - [Agent tools](docs/guide/tools.md): command, job, file, Git, web and custom tool contracts and safety.
+- [Hooks](docs/guide/hooks.md): lifecycle events, configuration, project trust, sandbox and replay behavior.
 - [Extending](docs/guide/extending.md): tools, profiles, tests.
 - [Troubleshooting](docs/guide/troubleshooting.md): common errors and what they mean.
 - [Design rationale](docs/guide/design.md): why it is built this way.

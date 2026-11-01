@@ -93,6 +93,12 @@ Run with `stateframe run ... --tools path/to/tools.json`. Names must match `^[a-
 
 `network` defaults to `none` and cannot exceed `--shell-network`. `writes` defaults to `none`, which mounts the working copy read-only; `workspace` allows reconciled effects. `replay` defaults to `external`; use `local` only for a reproducible command. A full-network tool must use external replay. `timeout_seconds` is required and must be finite, greater than zero and at most 600; invalid values fail at load before execution. Custom replies have bounded shell-style output and shrink further when the whole request approaches its budget. Invalid arguments use `BAD_ARGUMENTS`; a changed executable uses `TOOL_CHANGED`. Invalid definitions fail at load before a model request. With no tokenizer, schema admission uses a recorded byte estimate rather than a measured token count.
 
+## Lifecycle hooks
+
+Hooks run configured commands at six run boundaries. They have a separate minimal execution capability, a bounded JSON input contract and their own durable replay tape. Hooks do not appear in the model's tool menu. A hook may deny an admitted action, add labeled context, add a note after a tool result, veto a submission, or report a final run outcome. The formatter option can modify only the existing regular files changed by its triggering action and selected by its path filters; all other effects are restored or stop the run if restoration fails.
+
+Use `--hooks FILE` for an explicitly named definition file or `stateframe hooks trust --repo R` for a repository's `.stateframe/hooks.json`. Trust is tied to the file and pinned inputs. Hooks never fall back to host execution, and their network permission cannot exceed `--shell-network`. See [Lifecycle hooks](hooks.md) for the event table, JSON contract, formatter limits, trust flow and replay rules.
+
 ## MCP servers
 
 `--mcp FILE` is a repeatable opt-in for trusted local MCP stdio servers. The file is strict JSON. For example:

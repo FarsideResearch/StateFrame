@@ -606,7 +606,10 @@ def compact_f4_messages(messages: Sequence[Mapping[str, object]], *,
         if message.get("role") == "system":
             content = str(message.get("content") or "")
             if addendum not in content:
-                message["content"] = content + "\n" + addendum
+                # Project instructions (untrusted repository text) stay last, after every engine rule.
+                from kernel_project_instructions import split_block
+                engine_text, block = split_block(content)
+                message["content"] = engine_text + "\n" + addendum + block
                 _note("system_glossary", content, message["content"])
             break
     return result
