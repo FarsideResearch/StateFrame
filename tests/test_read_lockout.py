@@ -633,7 +633,8 @@ def test_locked_menu_is_enforced_at_dispatch(tmp_path, monkeypatch):
     assert request_menu_action_admissible(runtime, "edit", "probe-request-15")
 
 
-def test_watch_charges_one_unchanged_native_batch_and_restores_tail():
+def test_watch_charges_one_unchanged_native_batch_and_restores_tail(monkeypatch):
+    monkeypatch.setenv("STATEFRAME_CODE_BOOKMARKS", "on")
     watch = UnboundedProgressWatch(threshold=10)
     revision = "sha256:" + "a" * 64
     for path in ("a.py", "b.py", "c.py"):
@@ -698,13 +699,14 @@ def test_watch_charges_early_unchanged_reads_in_completed_mixed_batch():
     assert watch.streak == 4
 
 
-def test_bookmarks_off_watch_snapshot_persists_identity_filter(monkeypatch):
+def test_bookmarks_off_watch_snapshot_uses_release_schema(monkeypatch):
     monkeypatch.setenv("STATEFRAME_CODE_BOOKMARKS", "off")
     watch = UnboundedProgressWatch()
     snapshot = watch.snapshot()
-    assert snapshot["schema"] == "unbounded-progress-watch/3"
+    assert snapshot["schema"] == "unbounded-progress-watch/1"
     assert snapshot["seen"] == []
     assert "batch_tail_pending" not in snapshot
+    assert "seen_filter" not in snapshot
     assert UnboundedProgressWatch.from_snapshot(snapshot).snapshot() == snapshot
 
 

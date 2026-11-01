@@ -463,6 +463,77 @@ def test_bookmarks_off_qualified_request_and_journal_match_release(tmp_path, mon
                 if row["kind"] == "code_bookmark_activation_decision"]
 
 
+def test_qualified_request_reports_final_source_coverage(tmp_path, monkeypatch):
+    from kernel_request_source_window import parse_model_source_window
+
+    monkeypatch.setenv("STATEFRAME_CODE_BOOKMARKS", "on")
+    root = tmp_path / "workspace"
+    (root / "pkg").mkdir(parents=True)
+    (root / "tests").mkdir()
+    (root / "pkg/__init__.py").write_text("VALUE = 1\n")
+    (root / "tests/test_app.py").write_text("def test_app(): assert True\n")
+    runtime = _runtime_with_product(root)
+    messages = [{"role": "user", "content": "Task: Fix value."}]
+    context = build_action_context(messages, workspace_root=root)
+    context["journal_receipt_records"] = []
+    runtime._framefit_action_context = context
+    body = _qualified_fixture_request(
+        runtime, {"verification": {"revision": "current", "status": "FAIL"}},
+        messages, context, baseline=False, monkeypatch=monkeypatch,
+    )
+    coverage = [str(message.get("content")) for message in body["messages"]
+                if str(message.get("content", "")).startswith("[Source coverage]\n")]
+    assert len(coverage) == 1
+    for message in body["messages"]:
+        metadata = parse_model_source_window(message.get("content"))
+        if metadata is None or metadata.get("absence") != "NONE":
+            continue
+        assert metadata["path"] in coverage[0]
+        assert f"({metadata['total_lines']} lines," in coverage[0]
+
+
+def test_qualified_request_journals_unresolved_bookmark_drop(tmp_path, monkeypatch):
+    monkeypatch.setenv("STATEFRAME_CODE_BOOKMARKS", "on")
+    root = tmp_path / "workspace"
+    (root / "pkg").mkdir(parents=True)
+    (root / "tests").mkdir()
+    paths = ["pkg/__init__.py", *(f"pkg/module_{index}.py" for index in range(3))]
+    for path in paths:
+        (root / path).write_text("VALUE = 1\n")
+    (root / "tests/test_app.py").write_text("def test_app(): assert True\n")
+    runtime = _runtime_with_product(root)
+    runtime.edit_contract = {"edit_authority": {"editable_paths": paths}}
+    runtime._code_bookmark_carry = [{
+        "path": paths[0], "symbol": "missing", "rank": 1,
+        "revision": "sha256:" + hashlib.sha256((root / paths[0]).read_bytes()).hexdigest(),
+    }]
+    events = []
+    runtime.journal.emit = lambda kind, **fields: events.append({"kind": kind, **fields})
+    messages = [{"role": "user", "content": "Task: Fix value."}]
+    context = build_action_context(messages, workspace_root=root)
+    context["journal_receipt_records"] = []
+    runtime._framefit_action_context = context
+
+    def state_transform(state):
+        state["read_facts"] = [{
+            "path": path, "read_revision": "sha256:" + hashlib.sha256(
+                (root / path).read_bytes()).hexdigest(),
+            "current_revision": "sha256:" + hashlib.sha256(
+                (root / path).read_bytes()).hexdigest(),
+            "body_delivery": "not_shown",
+        } for path in paths]
+
+    body = _qualified_fixture_request(
+        runtime, {"verification": {"revision": "current", "status": "FAIL"}},
+        messages, context, baseline=False, monkeypatch=monkeypatch,
+        state_transform=state_transform,
+    )
+    assert {"kind": "code_bookmark_dropped", "request_id": "fixture-1",
+            "path": paths[0], "symbol": "missing", "reason": "unresolved_symbol",
+            "dispatch": False} in events
+    assert "missing not resolved in current source" not in json.dumps(body)
+
+
 def test_final_send_replans_if_locked_source_is_not_delivered(tmp_path, monkeypatch):
     from kernel_frame_optional_allocation import FrameAllocationReplanNeeded
 
@@ -706,7 +777,7 @@ def test_portable_differential_changes_only_checks_and_protected_advice(
         assert token_estimate(patched) >= runtime.frame_ceiling * 0.8
 
 
-def test_small_request_bookmark_switch_is_byte_identical(tmp_path, monkeypatch):
+def test_small_request_off_switch_matches_parent_and_on_has_coverage(tmp_path, monkeypatch):
     root = tmp_path / "workspace"
     (root / "pkg").mkdir(parents=True)
     (root / "tests").mkdir()
@@ -734,7 +805,9 @@ def test_small_request_bookmark_switch_is_byte_identical(tmp_path, monkeypatch):
     monkeypatch.setenv("STATEFRAME_CODE_BOOKMARKS", "on")
     enabled = _qualified_fixture_request(runtime, frame, messages, context,
                                           baseline=False, monkeypatch=monkeypatch)
-    assert json.dumps(enabled, sort_keys=True) == json.dumps(baseline, sort_keys=True)
+    assert json.dumps(enabled, sort_keys=True) != json.dumps(baseline, sort_keys=True)
+    assert any(str(row.get("content", "")).startswith("[Source coverage]\n")
+               for row in enabled["messages"])
     parent_source = subprocess.check_output([
         "git", "show", "a0ce931:src/stateframe/engine/kernel_frame_allocation_capture.py"
     ], cwd=Path(__file__).resolve().parents[1])
@@ -745,11 +818,12 @@ def test_small_request_bookmark_switch_is_byte_identical(tmp_path, monkeypatch):
     parent = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(parent)
     with monkeypatch.context() as patch:
+        patch.setenv("STATEFRAME_CODE_BOOKMARKS", "off")
         patch.setattr(sys.modules[__name__], "finalize_frame_candidate",
                       parent.finalize_frame_candidate)
         parent_request = _qualified_fixture_request(
             runtime, frame, messages, context, baseline=False, monkeypatch=monkeypatch)
-    assert json.dumps(enabled, sort_keys=True) == json.dumps(parent_request, sort_keys=True)
+    assert json.dumps(baseline, sort_keys=True) == json.dumps(parent_request, sort_keys=True)
 
 
 def test_pressured_bookmarks_pass_final_allocation_and_validation(tmp_path, monkeypatch):

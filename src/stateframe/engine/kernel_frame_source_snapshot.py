@@ -309,8 +309,26 @@ def recent_editable_read_windows(runtime: object, frame: Mapping[str, object]) -
                     continue
                 content, exact = partial
             seen.add(key)
-            result.append({"path": path, "start_line": start, "end_line": end,
-                           "content": content, "source_chars": len(exact)})
+            window = {"path": path, "start_line": start, "end_line": end,
+                      "content": content, "source_chars": len(exact)}
+            from kernel_code_bookmarks import SMALL_FILE_MAX_BYTES, SMALL_FILE_MAX_LINES, enabled
+            if enabled():
+                from kernel_stateframe_headcarry import _read_source
+                raw = _read_source(root, path)
+                if raw is not None and len(raw) <= SMALL_FILE_MAX_BYTES:
+                    total = len(raw.splitlines(keepends=True))
+                    if 0 < total <= SMALL_FILE_MAX_LINES and (start, end) != (1, total):
+                        complete = _current_window(
+                            root, path, 1, total,
+                            "sha256:" + hashlib.sha256(raw).hexdigest(),
+                        )
+                        if complete is not None:
+                            window.update({"compact_content": content,
+                                           "compact_source_chars": len(exact),
+                                           "content": complete[0],
+                                           "source_chars": len(complete[1]),
+                                           "start_line": 1, "end_line": total})
+            result.append(window)
             if len(result) == 3:
                 return result
     return result
@@ -424,6 +442,67 @@ def public_check_source_windows(runtime: object, state: Mapping[str, object]) ->
     return result
 
 
+def _source_coverage_line_items(messages: Sequence[Mapping[str, object]]) -> list[str]:
+    """Describe exact current ranges after selection, using final wire metadata."""
+    from kernel_request_source_window import parse_model_source_window
+    from kernel_stateframe_framefit5 import STATE_HEADER, _state_payload
+
+    facts: dict[str, Mapping[str, object]] = {}
+    for message in messages:
+        content = message.get("content")
+        if not isinstance(content, str) or not content.startswith(STATE_HEADER + "\n"):
+            continue
+        try:
+            frame = _state_payload(message)[1].get("framefit5", {})
+        except (TypeError, ValueError, KeyError):
+            break
+        if isinstance(frame, Mapping):
+            facts = {row["path"]: row for row in frame.get("read_facts", ())
+                     if isinstance(row, Mapping) and isinstance(row.get("path"), str)}
+        break
+
+    shown: dict[tuple[str, str, int], list[tuple[int, int]]] = {}
+    for message in messages:
+        metadata = parse_model_source_window(message.get("content"))
+        if not isinstance(metadata, Mapping) or metadata.get("absence") != "NONE":
+            continue
+        path, revision, total = (metadata.get("path"), metadata.get("revision"),
+                                 metadata.get("total_lines"))
+        if not isinstance(path, str) or not isinstance(revision, str) or type(total) is not int:
+            continue
+        ranges = shown.setdefault((path, revision, total), [])
+        for span in metadata.get("ranges", ()):
+            if (isinstance(span, Mapping) and type(span.get("start_line")) is int
+                    and type(span.get("end_line")) is int):
+                ranges.append((span["start_line"], span["end_line"]))
+
+    lines = []
+    for (path, revision, total), ranges in sorted(shown.items()):
+        merged: list[tuple[int, int]] = []
+        for start, end in sorted(set(ranges)):
+            if merged and start <= merged[-1][1] + 1:
+                merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+            else:
+                merged.append((start, end))
+        fact = facts.get(path, {})
+        if fact.get("current_revision") == revision and fact.get("read_revision") == revision:
+            change = "unchanged since last read"
+        elif fact.get("current_revision") == revision and isinstance(fact.get("read_revision"), str):
+            change = "changed since last read"
+        else:
+            change = "change since last read unverified"
+        if merged == [(1, total)]:
+            visibility = (f"all {total} lines are shown below; reading it again "
+                          "returns the same bytes.")
+        elif merged:
+            spans = ", ".join(f"{start}-{end}" for start, end in merged)
+            visibility = f"lines {spans} shown below; other lines not shown."
+        else:
+            visibility = "partial source shown below; complete line coverage unverified."
+        lines.append(f"{path} ({total} lines, {change}): {visibility}")
+    return lines
+
+
 def fit_recent_read_windows(body: Mapping[str, object], windows: Sequence[Mapping[str, object]],
                             *, public_checks: Sequence[Mapping[str, object]] = (),
                             protected_messages: Sequence[Mapping[str, object]] = (),
@@ -431,8 +510,10 @@ def fit_recent_read_windows(body: Mapping[str, object], windows: Sequence[Mappin
                             deferred_source_paths: Sequence[str] = (),
                             fits: object) -> dict[str, object]:
     """Fit source messages against the caller's measured complete-wire budget."""
+    from kernel_code_bookmarks import enabled as bookmarks_enabled
     from kernel_request_source_window import parse_model_source_window, parse_window
 
+    show_coverage = bookmarks_enabled()
     base = copy.deepcopy(dict(body))
     messages = base.get("messages")
     if not isinstance(messages, list):
@@ -442,6 +523,7 @@ def fit_recent_read_windows(body: Mapping[str, object], windows: Sequence[Mappin
         and (str(message["content"]).startswith("kept ")
              and (" recent reads; about " in str(message["content"])
                   or " selected source windows; about " in str(message["content"]))
+              or show_coverage and str(message["content"]).startswith("[Source coverage]\n")
              or (meta := parse_model_source_window(message["content"])) is not None
              and meta.get("owner") in {"recent_editable_read", "required_public_check"}))]
     def window_key(content: object) -> tuple[object, ...] | None:
@@ -542,8 +624,17 @@ def fit_recent_read_windows(body: Mapping[str, object], windows: Sequence[Mappin
         summary = (f"kept {emitted_reads} selected source windows; about {source_chars} chars of source fit"
                    if bookmark_emitted
                    else f"kept {emitted_reads} recent reads; about {source_chars} chars of source fit")
-        additions.append({"role": "user", "content": summary})
+        if reads or checks or not show_coverage:
+            additions.append({"role": "user", "content": summary})
         rows[position:position] = additions
+        if show_coverage:
+            coverage = _source_coverage_line_items(rows)
+            if coverage:
+                first_source = next(index for index, message in enumerate(rows)
+                                    if isinstance(message, Mapping)
+                                    and parse_model_source_window(message.get("content")) is not None)
+                rows.insert(first_source, {"role": "user", "content":
+                                       "[Source coverage]\n" + "\n".join(coverage)})
         return trial
     check_levels = ("full", "excerpt", "assertions") if public_checks else ("full",)
     limit = len(windows) if any(row.get("bookmark") for row in windows) else min(3, len(windows))
@@ -568,8 +659,8 @@ def fit_recent_read_windows(body: Mapping[str, object], windows: Sequence[Mappin
             for level in check_levels:
                 checks = [(str(row.get(level) or ""), int(row.get(level + "_chars", 0)))
                           for row in public_checks]
-                proposals = (variants(windows[:count]) if count <= rank_one_count
-                             else ([dict(row) for row in windows[:count]],))
+                proposals = (variants(windows[:count]) if show_coverage or count <= rank_one_count
+                              else ([dict(row) for row in windows[:count]],))
                 for selection in proposals:
                     trial = candidate(
                         selection, checks,
@@ -579,8 +670,8 @@ def fit_recent_read_windows(body: Mapping[str, object], windows: Sequence[Mappin
                         return trial
     for count in range(limit, -1, -1):
         for release_deferred in ((False, True) if deferred_paths and count else (False,)):
-            proposals = (variants(windows[:count]) if count <= rank_one_count
-                         else ([dict(row) for row in windows[:count]],))
+            proposals = (variants(windows[:count]) if show_coverage or count <= rank_one_count
+                          else ([dict(row) for row in windows[:count]],))
             for selection in proposals:
                 trial = candidate(selection, (), release_deferred=release_deferred)
                 if fits(trial):

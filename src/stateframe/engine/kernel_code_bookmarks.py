@@ -22,6 +22,8 @@ MAX_FAILURE_BYTES = 64_000
 MAX_EVIDENCE_FRAMES = 24
 MAX_DISCOVERY_PATHS = 64
 MAX_UNIT_LINES = 120
+SMALL_FILE_MAX_LINES = 60
+SMALL_FILE_MAX_BYTES = 2048
 MAX_NEIGHBOR_EDGES = 64
 
 
@@ -440,7 +442,7 @@ def _calls_in(node: ast.FunctionDef | ast.AsyncFunctionDef) -> set[str]:
 
 
 def collect(runtime: object, frame: Mapping[str, object],
-            decision: MutableMapping[str, str] | None = None) -> list[dict[str, object]]:
+            decision: MutableMapping[str, object] | None = None) -> list[dict[str, object]]:
     """Use only current failed checks and authenticated read/edit receipts."""
     def finish(rows: list[dict[str, object]], reason: str) -> list[dict[str, object]]:
         if decision is not None:
@@ -609,7 +611,19 @@ def collect(runtime: object, frame: Mapping[str, object],
             lines = edit.get("lines")
             if isinstance(lines, Mapping) and type(lines.get("start")) is int:
                 add(str(edit["path"]), lines["start"], "", 1, "applied_edit")
-    selected = sorted(records.values(), key=lambda row: (
+    eligible = []
+    for row in records.values():
+        current = resolve(root, row)
+        if current is None or current.get("status") != "current":
+            if decision is not None:
+                decision.setdefault("drops", []).append({
+                    "path": row["path"], "symbol": row["symbol"],
+                    "reason": ("unresolved_symbol" if current is not None
+                               else "source_unavailable"),
+                })
+            continue
+        eligible.append(row)
+    selected = sorted(eligible, key=lambda row: (
         int(row["rank"]), -int(row["age"]), row["path"], row["symbol"],
     ))[:MAX_BOOKMARKS]
     ordered = sorted(selected, key=lambda row: (
@@ -725,26 +739,6 @@ def windows(root: Path, bookmarks: Sequence[Mapping[str, object]]) -> list[dict[
         resolved = resolve(root, bookmark)
         if resolved is None:
             continue
-        if resolved.get("status") == "unresolved":
-            source = str(resolved["source"])
-            lines = source.splitlines(keepends=True)
-            if not lines:
-                continue
-            raw = _render_ranges(lines, [{"start_line": 1, "end_line": 1}],
-                                 path=str(bookmark["path"]),
-                                 revision=str(resolved["revision"]), total_lines=len(lines))
-            projected = project_source_window(raw, owner="recent_editable_read")
-            if projected:
-                label = (f"[code bookmark] {bookmark['path']}::{bookmark['symbol']} "
-                         "not resolved in current source; current outline: "
-                         + ", ".join(str(name) for name in resolved["outline"][:12]))
-                projected = projected.replace("\n" + WINDOW_CONTENT_MARKER + "\n",
-                                              "\n" + label + "\n" + WINDOW_CONTENT_MARKER + "\n", 1)
-                result.append({"path": bookmark["path"], "start_line": 1,
-                               "end_line": 1, "content": projected,
-                               "source_chars": len(lines[0]), "bookmark": True,
-                               "rank": bookmark.get("rank", 2), "tier": "outline"})
-            continue
         if resolved.get("status") != "current":
             continue
         source = str(resolved["source"])
@@ -761,8 +755,9 @@ def windows(root: Path, bookmarks: Sequence[Mapping[str, object]]) -> list[dict[
         context = [span for span in _context_ranges(source, str(bookmark["symbol"]), start, end)
                    if span[1] - span[0] < 40]
 
-        def render(span: tuple[int, int], label_tier: str) -> tuple[str, int] | None:
-            spans = _merge([span, *context])
+        def render(span: tuple[int, int], label_tier: str, *, whole: bool = False) -> tuple[str, int] | None:
+            spans = [(1, len(lines))] if whole else _merge([span, *context])
+            displayed = (1, len(lines)) if whole else span
             raw = _render_ranges(lines, [{"start_line": left, "end_line": right}
                                          for left, right in spans],
                                  path=str(bookmark["path"]),
@@ -774,21 +769,31 @@ def windows(root: Path, bookmarks: Sequence[Mapping[str, object]]) -> list[dict[
                            f"{span[1] - span[0] + 1}; "
                            if label_tier == "slice" else "")
             label = (f"[code bookmark] {bookmark['path']}::{bookmark['symbol']} "
-                     f"tier={label_tier} lines={span[0]}-{span[1]} "
-                     f"of unit {start}-{end} ({end - start + 1} lines); "
-                     f"{slice_label}read the symbol or range for more")
+                     f"tier={label_tier} lines={displayed[0]}-{displayed[1]} "
+                     f"of unit {start}-{end} ({end - start + 1} lines)"
+                     + ("; whole file shown" if whole else
+                        f"; {slice_label}read the symbol or range for more"))
             projected = projected.replace("\n" + WINDOW_CONTENT_MARKER + "\n",
                                           "\n" + label + "\n" + WINDOW_CONTENT_MARKER + "\n", 1)
             chars = sum(len("".join(lines[left - 1:right])) for left, right in spans)
             return projected, chars
 
-        full = render(unit, tier)
+        full = render(unit, tier, whole=unit == (1, len(lines)))
         if full is None:
             continue
         row = {"path": bookmark["path"], "start_line": unit[0],
                "end_line": unit[1], "content": full[0], "source_chars": full[1],
-               "bookmark": True, "rank": rank, "tier": tier}
-        if rank == 1 and tier == "slice":
+                "bookmark": True, "rank": rank, "tier": tier}
+        if (len(lines) <= SMALL_FILE_MAX_LINES
+                and len(source.encode("utf-8")) <= SMALL_FILE_MAX_BYTES
+                and unit != (1, len(lines))):
+            complete = render((1, len(lines)), "whole_file", whole=True)
+            if complete is not None:
+                row["compact_content"] = row["content"]
+                row["compact_source_chars"] = row["source_chars"]
+                row["content"], row["source_chars"] = complete
+                row["start_line"], row["end_line"] = 1, len(lines)
+        if rank == 1 and tier == "slice" and "compact_content" not in row:
             compact = _compact_span(*unit, evidence_line)
             if compact != unit:
                 alternative = render(compact, "slice")

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 from pathlib import Path
@@ -96,9 +97,8 @@ def test_bookmarks_off_multi_selector_context_and_request_match_release(monkeypa
     assert request == fixture["request"].encode()
 
 
-@pytest.mark.parametrize("bookmarks", ["on", "off"])
-def test_watch_remembers_more_than_4096_read_identities_after_checkpoint(monkeypatch, bookmarks):
-    monkeypatch.setenv("STATEFRAME_CODE_BOOKMARKS", bookmarks)
+def test_watch_remembers_more_than_4096_read_identities_after_checkpoint(monkeypatch):
+    monkeypatch.setenv("STATEFRAME_CODE_BOOKMARKS", "on")
     watch = UnboundedProgressWatch(threshold=32)
     revision = "sha256:" + hashlib.sha256(b"same source").hexdigest()
     for index in range(4097):
@@ -116,3 +116,71 @@ def test_watch_remembers_more_than_4096_read_identities_after_checkpoint(monkeyp
         receipts.append(row)
         assert restored.observe({}, receipts, boundary=index + 1) is (index == 31)
     assert restored.streak == 32
+
+
+def test_bookmarks_off_watch_matches_release_eviction_and_snapshot_bytes(monkeypatch):
+    monkeypatch.setenv("STATEFRAME_CODE_BOOKMARKS", "off")
+    monkeypatch.setenv("STATEFRAME_READ_LOCKOUT", "off")
+    watch = UnboundedProgressWatch(threshold=32)
+    release_seen = {}
+    revision = "sha256:" + hashlib.sha256(b"same source").hexdigest()
+    for index in range(4097):
+        identity = ("read", f"path-{index}.py", revision)
+        key = hashlib.sha256(json.dumps(identity, sort_keys=True, separators=(",", ":"),
+                                        default=str).encode()).hexdigest()
+        assert key not in release_seen
+        release_seen[key] = None
+        if len(release_seen) > 4096:
+            del release_seen[next(iter(release_seen))]
+        assert watch._new(identity)
+    assert len(watch._seen) == 4096
+    assert watch._seen_filter is None
+    assert next(iter(watch._seen)) == next(iter(release_seen))
+    watch.streak = 31
+    # Keep the released field order: checkpoint JSON must be byte-identical.
+    expected = {"schema": "unbounded-progress-watch/1", "threshold": 32,
+                "streak": 31, "seen": list(release_seen), "receipt_cursor": 0,
+                "last_boundary": None}
+    def wire(value):
+        return json.dumps(value, separators=(",", ":")).encode()
+    assert wire(watch.snapshot()) == wire(expected)
+    restored = UnboundedProgressWatch.from_snapshot(json.loads(wire(watch.snapshot())))
+    assert wire(restored.snapshot()) == wire(expected)
+    assert restored._seen_filter is None
+    first = {"kind": "read", "result_class": "OK", "target_path": "path-0.py",
+             "delivery": {"revision": revision}}
+    assert not restored.observe({}, [first], boundary=1)
+    assert restored.streak == 0
+    assert next(reversed(restored._seen)) == hashlib.sha256(json.dumps(
+        ("read", "path-0.py", revision), separators=(",", ":")).encode()).hexdigest()
+
+
+def test_bookmarks_on_new_identities_remain_new_through_100000(monkeypatch):
+    monkeypatch.setenv("STATEFRAME_CODE_BOOKMARKS", "on")
+    watch = UnboundedProgressWatch()
+    for index in range(50_000):
+        assert watch._new(("read", f"path-{index}.py", "same-revision")), index
+    restored = UnboundedProgressWatch.from_snapshot(json.loads(json.dumps(watch.snapshot())))
+    for index in range(50_000, 100_000):
+        assert restored._new(("read", f"path-{index}.py", "same-revision")), index
+    assert not restored._new(("read", "path-0.py", "same-revision"))
+    assert len(restored._seen) == 4096
+
+
+def test_old_filter_snapshot_upgrades_from_exact_recent_identities(monkeypatch):
+    monkeypatch.setenv("STATEFRAME_CODE_BOOKMARKS", "on")
+    watch = UnboundedProgressWatch()
+    for index in range(4097):
+        watch._new(("read", f"path-{index}.py", "same-revision"))
+    old_filter = bytearray(128 * 1024)
+    for key in watch._seen:
+        digest = bytes.fromhex(key)
+        for offset in range(0, 20, 4):
+            bit = int.from_bytes(digest[offset:offset + 4], "big") % (len(old_filter) * 8)
+            old_filter[bit // 8] |= 1 << (bit % 8)
+    snapshot = watch.snapshot()
+    snapshot["seen_filter"] = base64.b64encode(old_filter).decode("ascii")
+    restored = UnboundedProgressWatch.from_snapshot(snapshot)
+    assert not restored._new(("read", "path-1.py", "same-revision"))
+    assert restored._new(("read", "new-path.py", "same-revision"))
+    assert len(base64.b64decode(restored.snapshot()["seen_filter"])) == 8 * 1024 * 1024

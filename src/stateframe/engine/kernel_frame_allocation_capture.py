@@ -722,7 +722,7 @@ def finalize_frame_candidate(
         for row in frame.get("read_facts", ())
     )
     bookmarks = []
-    bookmark_decision: dict[str, str] = {"reason": "no_owed_reads"}
+    bookmark_decision: dict[str, object] = {"reason": "no_owed_reads"}
     collected_bookmark_count = 0
     if needs_bookmarks:
         from kernel_code_bookmarks import collect as collect_code_bookmarks
@@ -1035,7 +1035,14 @@ def finalize_frame_candidate(
         raise FrameRequestAllocationError(
             "final allocation search exceeded finite candidates"
         )
-    if recent_windows or public_windows:
+    from kernel_code_bookmarks import enabled as bookmarks_enabled
+    from kernel_request_source_window import parse_model_source_window
+    has_source_windows = any(
+        isinstance(message, Mapping)
+        and parse_model_source_window(message.get("content")) is not None
+        for message in candidate["messages"]
+    )
+    if recent_windows or public_windows or bookmarks_enabled() and has_source_windows:
         candidate = fit_recent_read_windows(
             candidate, recent_windows, public_checks=public_windows,
             protected_messages=protected,
@@ -1115,6 +1122,10 @@ def finalize_frame_candidate(
     emit = getattr(journal, "emit", None)
     from kernel_code_bookmarks import enabled as bookmarks_enabled
     if bookmarks_enabled() and callable(emit):
+        for drop in bookmark_decision.get("drops", ()):
+            emit("code_bookmark_dropped", request_id=getattr(capture, "request_id", None),
+                 path=drop["path"], symbol=drop["symbol"], reason=drop["reason"],
+                 dispatch=False)
         emit("code_bookmark_activation_decision",
              request_id=getattr(capture, "request_id", None),
              reason=reason, activated=active,

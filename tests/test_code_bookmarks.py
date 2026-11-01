@@ -79,13 +79,14 @@ def test_failed_traceback_keeps_three_current_units_and_context(tmp_path, monkey
         assert "from math import sqrt" in content
         assert "FACTOR = " in content
         assert "class Worker:" in content
-        assert "tier=full" in content
+        assert "whole file shown" in content
+        assert "read the symbol or range for more" not in content
         assert verify_model_source_window(content, path=row["path"],
                                           source=(root / row["path"]).read_text())
     reconcile_frame(frame, [{"role": "user", "content": row["content"]}
                             for row in selected])
     deliveries = {row["path"]: row["body_delivery"] for row in frame["read_facts"]}
-    assert all(deliveries[name] == "bookmarked" for name in names[:3])
+    assert all(deliveries[name] == "present" for name in names[:3])
     assert all(deliveries[name] == "not_shown" for name in names[3:])
 
 
@@ -135,7 +136,7 @@ def test_carried_symbol_follows_edit_with_stale_failure_and_resume(tmp_path, mon
     assert target["symbol"] == "Worker.target"
     assert target["start_line"] == original[0]["start_line"] + 7
     assert target["rank"] == 2
-    assert any("lines=11-12" in row["content"] for row in windows(root, shifted)
+    assert any("unit 11-12" in row["content"] for row in windows(root, shifted)
                if row["path"] == names[0])
 
     snapshot = checkpoint_replay(runtime)
@@ -323,7 +324,7 @@ def test_capacity_shedding_reconciles_partial_delivery_truth(tmp_path, monkeypat
     fit_protected_frame(body, max_request_bytes=ceiling)
     final = _state_payload(body["messages"][0])[1]["framefit5"]
     assert "code_bookmarks" not in final
-    assert final["read_facts"][0]["body_delivery"] == "not_shown"
+    assert final["read_facts"][0]["body_delivery"] == "present"
 
 
 def test_capacity_reduces_old_read_facts_before_current_bookmark(tmp_path, monkeypatch):
@@ -362,14 +363,14 @@ def test_bookmark_follows_shift_and_deleted_symbol_degrades(tmp_path, monkeypatc
     assert current is not None and current["status"] == "current"
     assert current["start_line"] == bookmark["start_line"] + 40
     shown = windows(root, [bookmark])[0]["content"]
-    assert "lines=44-45" in shown
+    assert "unit 44-45" in shown
     path.write_text("from math import sqrt\nFACTOR = 1\nclass Worker: pass\n")
     missing = resolve(root, bookmark)
     assert missing is not None and missing["status"] == "unresolved"
     assert "Worker" in missing["outline"]
 
 
-def test_missing_asserted_symbol_renders_current_outline(tmp_path, monkeypatch):
+def test_missing_asserted_symbol_is_dropped_before_slot_selection(tmp_path, monkeypatch):
     monkeypatch.setenv("STATEFRAME_CODE_BOOKMARKS", "on")
     root, runtime, frame, names = _workspace(tmp_path)
     test_path = root / "tests/test_flow.py"
@@ -383,11 +384,11 @@ def test_missing_asserted_symbol_renders_current_outline(tmp_path, monkeypatch):
                                 "current_revision": _revision(test_path)})
     runtime._check_output_receipts["check-receipt:one"]["stdout"] = (
         "tests/test_flow.py:3: AssertionError\n")
-    bookmark = next(row for row in collect(runtime, frame)
-                    if row["path"] == names[0] and row["symbol"] == "missing")
-    shown = windows(root, [bookmark])[0]["content"]
-    assert "missing not resolved in current source" in shown
-    assert "Worker.target" in shown
+    decision = {}
+    bookmarks = collect(runtime, frame, decision=decision)
+    assert not any(row["path"] == names[0] and row["symbol"] == "missing"
+                   for row in bookmarks)
+    assert {"path": names[0], "symbol": "missing", "reason": "unresolved_symbol"} in decision["drops"]
 
 
 def test_body_and_decorator_edits_change_unit_digest(tmp_path, monkeypatch):
@@ -775,17 +776,18 @@ def test_bookmark_source_rejects_swapped_parent_and_fifo(tmp_path, monkeypatch):
     assert _source(root, "pkg/source.py") is None
 
 
-def test_outline_recursion_degrades_to_current_unresolved_source(tmp_path, monkeypatch):
+def test_outline_recursion_drops_unresolved_bookmarks(tmp_path, monkeypatch):
     import kernel_paged_source
 
     root, runtime, frame, _names = _workspace(tmp_path)
     def fail(_source_text):
         raise RecursionError("pathological syntax tree")
     monkeypatch.setattr(kernel_paged_source, "symbol_outline", fail)
-    bookmarks = collect(runtime, frame)
-    assert bookmarks
-    selected = windows(root, bookmarks)
-    assert selected and "not resolved in current source" in selected[0]["content"]
+    decision = {}
+    bookmarks = collect(runtime, frame, decision=decision)
+    assert not bookmarks
+    assert decision["drops"]
+    assert all(row["reason"] == "unresolved_symbol" for row in decision["drops"])
 
 
 def test_file_move_does_not_guess_bookmark_identity(tmp_path):
@@ -822,34 +824,35 @@ def test_disjoint_ordinary_window_survives_bookmark_in_same_revision(tmp_path):
         row["content"] for row in fitted["messages"]}
 
 
-def test_exact_bookmark_overlap_leaves_room_for_disjoint_window(tmp_path):
+def test_whole_file_bookmark_falls_back_to_window_under_pressure(tmp_path):
     path = tmp_path / "module.py"
-    path.write_text("def target(): return 1\nOTHER = 2\n")
+    path.write_text("def target(): return 1\n" +
+                    "".join(f"FILLER_{index} = {index}\n" for index in range(38)) +
+                    "OTHER = 2\n")
     revision = _revision(path)
     bookmark = windows(tmp_path, [{"path": "module.py", "symbol": "target",
                                    "rank": 1, "revision": revision}])[0]
-    overlap = _current_window(tmp_path, "module.py", 1, 1, revision)
-    disjoint = _current_window(tmp_path, "module.py", 2, 2, revision)
-    assert overlap is not None and disjoint is not None
-    assert bookmark["content"] != overlap[0]
-    ordinary_overlap = {"path": "module.py", "content": overlap[0],
-                        "start_line": 1, "end_line": 1, "source_chars": len(overlap[1])}
+    disjoint = _current_window(tmp_path, "module.py", 40, 40, revision)
+    assert disjoint is not None
+    assert "compact_content" in bookmark
     ordinary_disjoint = {"path": "module.py", "content": disjoint[0],
-                         "start_line": 2, "end_line": 2, "source_chars": len(disjoint[1])}
+                        "start_line": 40, "end_line": 40, "source_chars": len(disjoint[1])}
     base = {"messages": [{"role": "system", "content": "rules"}], "tools": []}
-    expected = fit_recent_read_windows(
-        base, [bookmark, ordinary_disjoint], fits=lambda _body: True)
+    compact = {**bookmark, "content": bookmark["compact_content"],
+               "source_chars": bookmark["compact_source_chars"]}
+    expected = fit_recent_read_windows(base, [compact, ordinary_disjoint],
+                                       fits=lambda _body: True)
     ceiling = token_estimate(expected)
     fitted = fit_recent_read_windows(
-        base, [bookmark, ordinary_overlap, ordinary_disjoint],
+        base, [bookmark, ordinary_disjoint],
         fits=lambda body: token_estimate(body) <= ceiling)
     contents = [row["content"] for row in fitted["messages"]]
     assert token_estimate(fitted) <= ceiling
-    assert bookmark["content"] in contents
-    assert ordinary_overlap["content"] not in contents
+    assert bookmark["compact_content"] in contents
+    assert bookmark["content"] not in contents
     assert ordinary_disjoint["content"] in contents
     assert (f"kept 2 selected source windows; about "
-            f"{bookmark['source_chars'] + ordinary_disjoint['source_chars']} "
+            f"{bookmark['compact_source_chars'] + ordinary_disjoint['source_chars']} "
             "chars of source fit") in contents
 
 

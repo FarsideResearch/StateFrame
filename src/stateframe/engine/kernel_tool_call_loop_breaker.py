@@ -22,6 +22,9 @@ DEFAULT_STREAK = 5
 MIN_STREAK = 2
 MAX_STREAK = 32
 LOOP_BREAKER_NOTICE = "[kernel] TOOL_CALL_LOOP_BREAKER"
+_SEEN_FILTER_BYTES = 8 * 1024 * 1024
+_SEEN_FILTER_HASHES = 24
+_LEGACY_SEEN_FILTER_BYTES = 128 * 1024
 
 _EDIT_TOOLS = frozenset({"edit", "str_replace", "replace_module", "file_create", "write", "replace"})
 _TEST_TOOLS = frozenset({"run_tests", "test", "pytest"})
@@ -218,8 +221,8 @@ class UnboundedProgressWatch:
 
     Only host revision/evidence novelty resets the streak. Model text, repeated
     refusals, counters and timestamps never establish progress. Memory stays
-    bounded independently of run length. Membership is conservative once the
-    digest filter saturates; there is no fixed run-length cap.
+    bounded independently of run length. With bookmarks enabled, membership
+    is conservative once the digest filter saturates.
     """
 
     def __init__(self, *, threshold: int = 32) -> None:
@@ -228,24 +231,31 @@ class UnboundedProgressWatch:
         self.threshold = threshold
         self.streak = 0
         self._seen: dict[str, None] = {}
-        # Monotone membership prevents an old identity becoming new when the
-        # exact recent cache evicts it. False positives only undercount novelty.
-        self._seen_filter = bytearray(128 * 1024)
+        # Bookmarks-off retains the released 4,096-entry eviction behavior.
+        # Allocate the monotone filter only when bookmarks need it.
+        self._seen_filter: bytearray | None = None
         self._receipt_cursor = 0
         self._last_boundary: int | None = None
         self._batch_tail_pending: str | None = None
 
     def snapshot(self) -> dict[str, object]:
-        """Persist recent hashes and monotone membership in the worker checkpoint."""
+        """Persist the release snapshot unless bookmarks enable monotone membership."""
+        from kernel_code_bookmarks import enabled as bookmarks_enabled
+        bookmarks_on = bookmarks_enabled()
         state = {
-            "schema": "unbounded-progress-watch/3", "threshold": self.threshold,
+            "schema": "unbounded-progress-watch/3" if bookmarks_on else "unbounded-progress-watch/1",
+            "threshold": self.threshold,
             "streak": self.streak, "seen": list(self._seen),
             "receipt_cursor": self._receipt_cursor,
             "last_boundary": self._last_boundary,
-            "seen_filter": base64.b64encode(self._seen_filter).decode("ascii"),
         }
-        from kernel_code_bookmarks import enabled as bookmarks_enabled
-        if bookmarks_enabled():
+        if bookmarks_on:
+            if self._seen_filter is None:
+                for key in self._seen:
+                    self._remember_filter(key)
+                if self._seen_filter is None:
+                    self._seen_filter = bytearray(_SEEN_FILTER_BYTES)
+            state["seen_filter"] = base64.b64encode(self._seen_filter).decode("ascii")
             state["batch_tail_pending"] = self._batch_tail_pending
         return state
 
@@ -285,14 +295,31 @@ class UnboundedProgressWatch:
                 decoded = base64.b64decode(encoded, validate=True) if isinstance(encoded, str) else b""
             except (ValueError, binascii.Error) as error:
                 raise ValueError("invalid progress watch identities") from error
-            if len(decoded) != len(watch._seen_filter):
+            if len(decoded) not in {_LEGACY_SEEN_FILTER_BYTES, _SEEN_FILTER_BYTES}:
                 raise ValueError("invalid progress watch identities")
-            watch._seen_filter[:] = decoded
-            if any(not watch._remember_filter(key) for key in seen):
-                raise ValueError("invalid progress watch identities")
-        else:
+            if len(decoded) == _LEGACY_SEEN_FILTER_BYTES:
+                # The old bitset cannot be enlarged without losing its hashes.
+                # Retain exact recent identities; start a larger filter from them.
+                size = len(decoded) * 8
+                for key in seen:
+                    digest = bytes.fromhex(key)
+                    indexes = (int.from_bytes(digest[offset:offset + 4], "big") % size
+                               for offset in range(0, 20, 4))
+                    if not all(decoded[index // 8] & (1 << (index % 8)) for index in indexes):
+                        raise ValueError("invalid progress watch identities")
+                    watch._remember_filter(key)
+            else:
+                watch._seen_filter = bytearray(decoded)
+                if any(not watch._remember_filter(key) for key in seen):
+                    raise ValueError("invalid progress watch identities")
+        elif state["schema"] == "unbounded-progress-watch/2":
             for key in seen:
                 watch._remember_filter(key)
+        else:
+            from kernel_code_bookmarks import enabled as bookmarks_enabled
+            if bookmarks_enabled():
+                for key in seen:
+                    watch._remember_filter(key)
         watch._batch_tail_pending = tail
         return watch
 
@@ -300,7 +327,8 @@ class UnboundedProgressWatch:
         key = hashlib.sha256(json.dumps(
             value, sort_keys=True, separators=(",", ":"), default=str,
         ).encode("utf-8")).hexdigest()
-        if self._remember_filter(key):
+        from kernel_code_bookmarks import enabled as bookmarks_enabled
+        if bookmarks_enabled() and self._remember_filter(key):
             return False
         if key in self._seen:
             return False
@@ -310,11 +338,14 @@ class UnboundedProgressWatch:
         return True
 
     def _remember_filter(self, key: str) -> bool:
-        """Return whether a digest was probably seen, without ever forgetting it."""
+        """Return probable membership; use 24 positions in an 8 MiB bitset."""
+        if self._seen_filter is None:
+            self._seen_filter = bytearray(_SEEN_FILTER_BYTES)
         digest = bytes.fromhex(key)
         size = len(self._seen_filter) * 8
-        indexes = [int.from_bytes(digest[offset:offset + 4], "big") % size
-                   for offset in range(0, 20, 4)]
+        start = int.from_bytes(digest[:8], "big")
+        step = int.from_bytes(digest[8:16], "big") | 1
+        indexes = [(start + index * step) % size for index in range(_SEEN_FILTER_HASHES)]
         seen = all(self._seen_filter[index // 8] & (1 << (index % 8))
                    for index in indexes)
         for index in indexes:
