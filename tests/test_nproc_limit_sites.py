@@ -2,11 +2,13 @@
 import ast
 import io
 from pathlib import Path
+import sys
 
 import pytest
 
 import kernel_execution_policy as policy
 import kernel_exec_supervisor as supervisor
+import kernel_test_isolation as isolation
 import sf_launch
 
 
@@ -76,7 +78,7 @@ def test_planted_embedded_runner_limit_is_caught():
         _assert_single_site(sources)
 
 
-def test_outer_limit_uses_task_count_and_headroom(monkeypatch):
+def test_outer_preexec_never_lowers_nproc_before_bwrap(monkeypatch):
     calls = []
     monkeypatch.setattr(policy.platform, "system", lambda: "Linux")
     monkeypatch.setattr(policy, "_user_task_count", lambda: 400)
@@ -84,28 +86,74 @@ def test_outer_limit_uses_task_count_and_headroom(monkeypatch):
                         lambda kind: (policy.resource.RLIM_INFINITY, policy.resource.RLIM_INFINITY))
     monkeypatch.setattr(policy.resource, "setrlimit", lambda kind, limits: calls.append((kind, limits)))
     policy._resource_preexec(30, 512 * 1024 * 1024, 1024 * 1024, 128, 64)()
-    assert (policy.resource.RLIMIT_NPROC, (592, 592)) in calls
+    assert all(kind != policy.resource.RLIMIT_NPROC for kind, _ in calls)
+
+
+def test_outer_policy_passes_relative_ceiling_to_builder(monkeypatch, tmp_path):
+    received = {}
+    monkeypatch.setattr(policy.platform, "system", lambda: "Linux")
+    monkeypatch.setattr(policy, "_user_task_count", lambda: 400)
+    monkeypatch.setattr(policy, "require_capabilities", lambda: object())
+
+    def build(command, root, env, **kwargs):
+        received.update(kwargs)
+        return command, env
+
+    policy._prepared(["/bin/true"], tmp_path, {}, None, False, 64, isolation_builder=build)
+    assert received["nproc_ceiling"] == 592
+
+
+def test_outer_command_installs_nproc_after_bwrap(monkeypatch, tmp_path):
+    monkeypatch.setattr(isolation, "backend", lambda: "/usr/bin/bwrap")
+    monkeypatch.setattr(isolation.platform, "system", lambda: "Linux")
+    command, _ = isolation.isolated_command(["/bin/echo", "ok"], tmp_path, {},
+                                             nproc_ceiling=592)
+    boundary = command.index("--")
+    assert command[boundary + 1:boundary + 5] == [
+        sys.executable, "-I", "/tmp/sf_launch.py", "--nproc-ceiling"]
+    assert command[boundary + 5:] == ["592", "/bin/echo", "ok"]
+    assert ["--ro-bind", str(ENGINE / "sf_launch.py"), "/tmp/sf_launch.py"] == command[
+        command.index(str(ENGINE / "sf_launch.py")) - 1:
+        command.index(str(ENGINE / "sf_launch.py")) + 2]
 
 
 def test_task_count_uses_real_uid_and_threads(monkeypatch):
     monkeypatch.setattr(sf_launch.os, "getuid", lambda: 1001)
     monkeypatch.setattr(sf_launch.os, "listdir", lambda path: ["11", "12", "13"])
     statuses = {
-        "/proc/11/status": "Uid:\t1001\t0\t0\t0\nThreads:\t401\n",
-        "/proc/12/status": "Uid:\t1002\t1001\t1001\t1001\nThreads:\t50\n",
-        "/proc/13/status": "Uid:\t1001\t1002\t1002\t1002\nThreads:\t2\n",
+        "/proc/11/status": b"Uid:\t1001\t0\t0\t0\nThreads:\t401\n",
+        "/proc/12/status": b"Uid:\t1002\t1001\t1001\t1001\nThreads:\t50\n",
+        "/proc/13/status": b"Uid:\t1001\t1002\t1002\t1002\nThreads:\t2\n",
     }
-    monkeypatch.setattr(sf_launch, "open", lambda path, **kwargs: io.StringIO(statuses[path]), raising=False)
+    monkeypatch.setattr(sf_launch, "open", lambda path, *args, **kwargs: io.BytesIO(statuses[path]), raising=False)
     assert sf_launch._user_task_count() == 403
 
 
-def test_task_count_refuses_unreadable_status(monkeypatch):
-    monkeypatch.setattr(sf_launch.os, "listdir", lambda path: ["11"])
-    def denied(path, **kwargs):
+def test_task_count_skips_unreadable_foreign_status(monkeypatch):
+    monkeypatch.setattr(sf_launch.os, "getuid", lambda: 1001)
+    monkeypatch.setattr(sf_launch.os, "listdir", lambda path: ["11", "12"])
+    def status(path, *args, **kwargs):
+        if path == "/proc/12/status":
+            raise PermissionError(path)  # hidepid=1 foreign process
+        return io.BytesIO(b"Uid:\t1001\t1001\t1001\t1001\nThreads:\t3\n")
+    monkeypatch.setattr(sf_launch, "open", status, raising=False)
+    assert sf_launch._user_task_count() == 3
+
+
+def test_task_count_skips_unavailable_proc_listing(monkeypatch):
+    def unavailable(path):
         raise PermissionError(path)
-    monkeypatch.setattr(sf_launch, "open", denied, raising=False)
-    with pytest.raises(RuntimeError, match="cannot count visible Linux tasks"):
-        sf_launch._user_task_count()
+
+    monkeypatch.setattr(sf_launch.os, "listdir", unavailable)
+    assert sf_launch._user_task_count() == 0
+
+
+def test_task_count_ignores_non_ascii_name(monkeypatch):
+    monkeypatch.setattr(sf_launch.os, "getuid", lambda: 1001)
+    monkeypatch.setattr(sf_launch.os, "listdir", lambda path: ["11"])
+    status = b"Name:\tbad\xffname\nUid:\t1001\t1001\t1001\t1001\nThreads:\t2\n"
+    monkeypatch.setattr(sf_launch, "open", lambda path, *args, **kwargs: io.BytesIO(status), raising=False)
+    assert sf_launch._user_task_count() == 2
 
 
 def test_command_cgroup_uses_writable_pids_max_or_falls_back(monkeypatch, tmp_path):

@@ -1,10 +1,12 @@
 from dataclasses import asdict
 import json
 from pathlib import Path
+import resource
 import subprocess
 import sys
 
 from kernel_exec_capability import ExecLimits
+import sf_launch
 
 LAUNCH = Path(__file__).resolve().parents[1] / "src/stateframe/engine/sf_launch.py"
 
@@ -30,18 +32,26 @@ def test_launcher_stdin_closed(tmp_path):
 
 def test_launcher_session_umask_limits_and_fds(tmp_path):
     script = tmp_path / "inspect.py"
-    script.write_text('''import json, os, resource
+    script.write_text('''import json, os, resource, sys
+sys.path.insert(0, %r)
+from sf_launch import _user_task_count
 print(json.dumps({"session": os.getsid(0) == os.getpid(), "umask": os.umask(0),
 "cpu": resource.getrlimit(resource.RLIMIT_CPU)[0], "nproc": resource.getrlimit(resource.RLIMIT_NPROC)[0],
-"nofile": resource.getrlimit(resource.RLIMIT_NOFILE)[0]}))
-''')
+"nofile": resource.getrlimit(resource.RLIMIT_NOFILE)[0],
+"tasks": _user_task_count() if sys.platform.startswith("linux") else None}))
+''' % str(LAUNCH.parent))
     result = launch(tmp_path, [sys.executable, "-I", str(script)])
     assert result.returncode == 0, result.stderr
     data = json.loads(result.stdout)
     assert data["session"] and data["umask"] == 0o077
     assert data["cpu"] == 300 and data["nofile"] <= 1024
-    import resource
-    assert data["nproc"] == resource.getrlimit(resource.RLIMIT_NPROC)[0]
+    inherited_soft = resource.getrlimit(resource.RLIMIT_NPROC)[0]
+    if sys.platform.startswith("linux"):
+        assert data["tasks"] <= data["nproc"] <= data["tasks"] + ExecLimits().nproc + sf_launch._NPROC_HEADROOM
+        if inherited_soft != resource.RLIM_INFINITY:
+            assert data["nproc"] <= inherited_soft
+    else:
+        assert data["nproc"] == inherited_soft
 
 
 def test_launcher_missing_executable_reports_failure(tmp_path):

@@ -22,7 +22,7 @@ from collections.abc import Mapping, Sequence
 from typing import Callable
 
 from kernel_test_isolation import isolated_command, sandbox_executable
-from sf_launch import _set_relative_nproc_limit, _user_task_count, _NPROC_HEADROOM
+from sf_launch import _user_task_count, _NPROC_HEADROOM
 
 
 MAX_WALL_SECONDS = 900.0
@@ -221,13 +221,7 @@ def _resource_preexec(cpu_seconds: float, memory_bytes: int,
     memory = int(_limit_value("memory_bytes", memory_bytes, maximum=4 * 1024 * 1024 * 1024))
     file_limit = int(_limit_value("file_bytes", file_bytes, maximum=64 * 1024 * 1024))
     nofile_limit = int(_limit_value("nofile", nofile, maximum=1024))
-    nproc_limit = int(_limit_value("nproc", nproc, maximum=256))
-    nproc_ceiling = None
-    if platform.system() == "Linux":
-        try:
-            nproc_ceiling = _user_task_count() + nproc_limit + _NPROC_HEADROOM
-        except RuntimeError as error:
-            raise ExecutionPolicyError("cannot count Linux tasks for process limit") from error
+    _limit_value("nproc", nproc, maximum=256)
 
     def _lower_only(which: int, value: int) -> None:
         # A non-root process may only LOWER a hard limit.  Containers often start
@@ -244,9 +238,6 @@ def _resource_preexec(cpu_seconds: float, memory_bytes: int,
         _lower_only(resource.RLIMIT_CORE, 0)
         resource.setrlimit(resource.RLIMIT_NOFILE,
                            _lowered_limits(resource.getrlimit(resource.RLIMIT_NOFILE), nofile_limit))
-        # The count is captured before fork; the helper is the only NPROC setter.
-        if nproc_ceiling is not None:
-            _set_relative_nproc_limit(nproc_ceiling)
         if hasattr(resource, "RLIMIT_AS"):
             try:
                 resource.setrlimit(resource.RLIMIT_AS, (memory, memory))
@@ -278,13 +269,17 @@ def _kill_group(process: subprocess.Popen[bytes]) -> bool:
 
 def _prepared(command: Sequence[object], root: Path, env: Mapping[object, object] | None,
               internal_env: Mapping[str, object] | None,
-              readonly_workspace: bool,
+              readonly_workspace: bool, nproc: int,
               isolation_builder: Callable[..., tuple[list[str], dict[str, str]]] = isolated_command,
               ) -> tuple[list[str], dict[str, str], CapabilityReport]:
     report = require_capabilities()
     arguments = _arguments(command)
+    nproc_ceiling = None
+    if platform.system() == "Linux":
+        nproc_ceiling = _user_task_count() + int(_limit_value("nproc", nproc, maximum=256)) + _NPROC_HEADROOM
     isolated, clean = isolation_builder(
-        arguments, root, _safe_environment(env), readonly_workspace=readonly_workspace)
+        arguments, root, _safe_environment(env), readonly_workspace=readonly_workspace,
+        nproc_ceiling=nproc_ceiling)
     for key, value in (internal_env or {}).items():
         if not str(key).startswith("STATEFRAME_"):
             raise ExecutionPolicyError("internal execution variables must be STATEFRAME_*")
@@ -310,7 +305,7 @@ def sandboxed_popen(command: Sequence[object], root: str | os.PathLike[str], *,
     """Start an argv child behind the required sandbox and resource policy."""
     contained = _contained_root(root)
     command_line, clean, report = _prepared(
-        command, contained, env, internal_env, readonly_workspace,
+        command, contained, env, internal_env, readonly_workspace, nproc,
         isolation_builder=isolation_builder)
     factory = popen_factory or subprocess.Popen
     process = factory(

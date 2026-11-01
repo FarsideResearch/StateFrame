@@ -31,30 +31,27 @@ def _current_cgroup() -> Path | None:
 
 
 def _user_task_count() -> int:
-    """Count visible threads charged to our real UID, not procfs directory owners."""
+    """Count readable threads charged to our real UID, not procfs owners."""
     uid = os.getuid()
     try:
         entries = os.listdir("/proc")
-    except OSError as error:
-        raise RuntimeError("cannot count Linux tasks for process limit") from error
+    except OSError:
+        return 0
     count = 0
     for entry in entries:
         if not entry.isdigit():
             continue
         try:
-            with open(f"/proc/{entry}/status", encoding="ascii") as status:
-                fields = {line.split(":", 1)[0]: line.split(":", 1)[1].split()
-                          for line in status if line.startswith(("Uid:", "Threads:"))}
-            real_uid = int(fields["Uid"][0])
-            threads = int(fields["Threads"][0])
-            if threads < 1:
-                raise ValueError("invalid thread count")
-        except FileNotFoundError:
-            continue  # The process exited while scanning.
-        except (OSError, KeyError, IndexError, ValueError) as error:
-            raise RuntimeError("cannot count visible Linux tasks for process limit") from error
-        if real_uid == uid:
-            count += threads
+            with open(f"/proc/{entry}/status", "rb") as status:
+                fields = {line.split(b":", 1)[0]: line.split(b":", 1)[1].split()
+                          for line in status if line.startswith((b"Uid:", b"Threads:"))}
+            if int(fields[b"Uid"][0]) != uid:
+                continue
+            threads = int(fields[b"Threads"][0])
+            if threads > 0:
+                count += threads
+        except (OSError, KeyError, IndexError, ValueError):
+            continue  # Hidden, vanished, or incomplete procfs entry.
     return count
 
 
@@ -149,6 +146,12 @@ def launch(spec: dict) -> None:
 
 def main() -> int:
     try:
+        if len(sys.argv) >= 4 and sys.argv[1] == "--nproc-ceiling":
+            ceiling = int(sys.argv[2])
+            if ceiling < 1:
+                raise ValueError("NPROC ceiling must be positive")
+            _set_relative_nproc_limit(ceiling)
+            os.execvpe(sys.argv[3], sys.argv[3:], os.environ)
         if len(sys.argv) >= 4 and sys.argv[1] == "--cgroup-enter":
             try:
                 with open(os.path.join(sys.argv[2], "cgroup.procs"), "w", encoding="ascii") as stream:
