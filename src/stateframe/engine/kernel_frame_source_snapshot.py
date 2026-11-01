@@ -334,6 +334,77 @@ def recent_editable_read_windows(runtime: object, frame: Mapping[str, object]) -
     return result
 
 
+def editable_product_windows(runtime: object, frame: Mapping[str, object],
+                             bookmarks: Sequence[Mapping[str, object]]) -> tuple[list[dict[str, object]], list[str]]:
+    """Offer current task files before historical frame metadata spends the budget."""
+    from kernel_code_bookmarks import enabled as bookmarks_enabled
+    from kernel_read_reuse_visibility import editable_read_paths
+    from kernel_request_source_window import _safe_framefit_path
+    from kernel_stateframe_framefit5 import _workspace_root
+    from kernel_stateframe_headcarry import _read_source
+
+    if not bookmarks_enabled():
+        return [], []
+    editable = editable_read_paths(runtime)
+    for edit in frame.get("applied_edits", ()):
+        if (isinstance(edit, Mapping) and edit.get("result_class") == "APPLIED"
+                and isinstance(edit.get("file"), str)
+                and _safe_framefit_path(edit["file"]) == edit["file"]):
+            editable.add(edit["file"])
+    source_suffixes = {".py", ".js", ".jsx", ".ts", ".tsx", ".vue", ".go",
+                       ".rs", ".java", ".rb", ".php", ".css", ".html", ".sql", ".sh"}
+    editable = sorted(path for path in editable
+                      if not path.startswith("tests/")
+                      and Path(path).suffix in source_suffixes)
+    root = _workspace_root(runtime)
+    facts = {row.get("path"): row for row in frame.get("read_facts", ())
+             if isinstance(row, Mapping)}
+    available = []
+    for path in editable:
+        raw = _read_source(root, path)
+        if raw is None or not raw or len(raw) > 512_000:
+            continue
+        try:
+            source = raw.decode("utf-8")
+        except UnicodeError:
+            continue
+        lines = source.splitlines(keepends=True)
+        if not lines:
+            continue
+        revision = "sha256:" + hashlib.sha256(raw).hexdigest()
+        fact = facts.get(path)
+        if (isinstance(fact, Mapping) and isinstance(fact.get("current_revision"), str)
+                and fact["current_revision"] != revision):
+            raise FrameAllocationReplanNeeded("editable product changed before allocation")
+        available.append((path, raw, len(lines), revision))
+    # A small task is an indivisible whole-source offer. Large tasks keep the
+    # failing assertion and bookmarks ahead of other recently read paths.
+    small = sum(len(raw) for _, raw, _, _ in available) <= 12 * 1024
+    priority: dict[str, int] = {}
+    for row in bookmarks:
+        if not isinstance(row, Mapping) or not isinstance(row.get("path"), str):
+            continue
+        rank = min(int(row.get("rank", 2)),
+                   1 if row.get("origin") == "failed_check" else 2)
+        path = row["path"]
+        priority[path] = min(priority.get(path, rank), rank)
+    ordered = sorted(available, key=lambda row: (priority.get(row[0], 3), row[0]))
+    windows = []
+    total = 0
+    for path, raw, count, revision in ordered:
+        if not small and total + len(raw) > 12 * 1024:
+            continue
+        current = _current_window(root, path, 1, count, revision)
+        if current is None:
+            raise FrameAllocationReplanNeeded("editable product changed before rendering")
+        windows.append({"path": path, "start_line": 1, "end_line": count,
+                        "content": current[0], "source_chars": len(current[1]),
+                        "product_source": True, "bookmark": True,
+                        "rank": priority.get(path, 3)})
+        total += len(raw)
+    return windows, editable
+
+
 def public_check_source_windows(runtime: object, state: Mapping[str, object]) -> list[dict[str, str]]:
     """Retain only authenticated ranges the model read from named public checks."""
     from kernel_request_source_window import (
@@ -442,7 +513,8 @@ def public_check_source_windows(runtime: object, state: Mapping[str, object]) ->
     return result
 
 
-def _source_coverage_line_items(messages: Sequence[Mapping[str, object]]) -> list[str]:
+def _source_coverage_line_items(messages: Sequence[Mapping[str, object]],
+                                editable_paths: Sequence[str] = ()) -> list[str]:
     """Describe exact current ranges after selection, using final wire metadata."""
     from kernel_request_source_window import parse_model_source_window
     from kernel_stateframe_framefit5 import STATE_HEADER, _state_payload
@@ -491,16 +563,136 @@ def _source_coverage_line_items(messages: Sequence[Mapping[str, object]]) -> lis
             change = "changed since last read"
         else:
             change = "change since last read unverified"
+        noun = "line" if total == 1 else "lines"
         if merged == [(1, total)]:
-            visibility = (f"all {total} lines are shown below; reading it again "
-                          "returns the same bytes.")
+            visibility = (("the single line is shown below" if total == 1 else
+                           f"all {total} lines are shown below") +
+                          "; reading it again returns the same bytes.")
         elif merged:
             spans = ", ".join(f"{start}-{end}" for start, end in merged)
             visibility = f"lines {spans} shown below; other lines not shown."
         else:
             visibility = "partial source shown below; complete line coverage unverified."
-        lines.append(f"{path} ({total} lines, {change}): {visibility}")
-    return lines
+        lines.append(f"{path} ({total} {noun}, {change}): {visibility}")
+    shown_paths = {path for path, _revision, _total in shown}
+    for path in sorted((set(editable_paths) | set(facts)) - shown_paths):
+        lines.append(f"{path}: not shown; read this path to see current source.")
+    return sorted(lines)
+
+
+def _prune_redundant_source_metadata(messages: list[dict[str, object]]) -> None:
+    """Spend duplicated, advisory bytes only after exact whole-file selection."""
+    from kernel_request_source_window import parse_model_source_window
+    from kernel_stateframe_framefit5 import STATE_HEADER, _serialize_state_message, _state_payload
+
+    complete_revisions = {meta["path"]: meta.get("revision") for message in messages
+                          if (meta := parse_model_source_window(message.get("content"))) is not None
+                          and meta.get("absence") == "NONE" and meta.get("status") == "COMPLETE"
+                          and isinstance(meta.get("path"), str)}
+    complete = set(complete_revisions)
+    for message in messages:
+        content = message.get("content")
+        if not isinstance(content, str) or not content.startswith(STATE_HEADER + "\n"):
+            continue
+        frame = _state_payload(message)[1].get("framefit5", {})
+        if isinstance(frame, Mapping):
+            for fact in frame.get("read_facts", ()):
+                if (isinstance(fact, Mapping) and fact.get("path") in complete
+                        and isinstance(fact.get("current_revision"), str)
+                        and fact["current_revision"] != complete_revisions[fact["path"]]):
+                    complete.discard(fact["path"])
+        break
+    if not complete:
+        return
+    read_paths: set[str] = set()
+    for message in messages:
+        content = message.get("content")
+        if not isinstance(content, str):
+            continue
+        if content.startswith(STATE_HEADER + "\n"):
+            payload, state = _state_payload(message)
+            frame = state.get("framefit5")
+            if not isinstance(frame, dict):
+                continue
+            read_paths = {row["path"] for row in frame.get("read_facts", ())
+                          if isinstance(row, Mapping) and isinstance(row.get("path"), str)}
+            for fact in frame.get("read_facts", ()):
+                if not isinstance(fact, dict) or fact.get("path") not in complete:
+                    continue
+                receipts = fact.get("receipts")
+                latest_receipt = receipts[-1:] if isinstance(receipts, list) else []
+                for key in ("receipts", "historical_receipts", "journal_workspace_revisions",
+                            "historical_workspace_revisions", "receipt_count", "revision_scope",
+                            "content_sha256", "lines"):
+                    fact.pop(key, None)
+                if fact.get("status") == "UNCHANGED" and latest_receipt:
+                    # The validator requires one authenticated receipt for an
+                    # unchanged claim even when its source is shown whole.
+                    fact["receipts"] = latest_receipt
+            bookmarks = frame.get("code_bookmarks")
+            if isinstance(bookmarks, list):
+                frame["code_bookmarks"] = [row for row in bookmarks
+                                           if not isinstance(row, Mapping)
+                                           or row.get("path") not in complete]
+            ledger = frame.get("action_ledger")
+            if isinstance(ledger, dict):
+                edits = ledger.get("applied_edits")
+                if isinstance(edits, list) and len(edits) > 3:
+                    older = edits[:-3]
+                    previous = ledger.get("historical_applied_edits")
+                    previous_count = (previous.get("count", 0)
+                                      if isinstance(previous, Mapping)
+                                      and type(previous.get("count")) is int else 0)
+                    ledger["applied_edits"] = edits[-3:]
+                    ledger["historical_applied_edits"] = {
+                        "count": previous_count + len(older),
+                        "sha256": hashlib.sha256(json.dumps(
+                            [previous, older] if previous_count else older,
+                            sort_keys=True, separators=(",", ":"),
+                            ensure_ascii=False,
+                        ).encode()).hexdigest(),
+                    }
+            for row in frame.get("prior_user_context", ()):
+                if not isinstance(row, dict) or row.get("kind") != "prior_user_context":
+                    continue
+                prior = row.get("content")
+                if not isinstance(prior, str) or "\nWORLD KNOWLEDGE " not in prior:
+                    continue
+                kept = [line for line in prior.splitlines()
+                        if not any(line.startswith((f"- {path} ", f"- {path}::"))
+                                   for path in complete)]
+                shortened = "\n".join(kept)
+                if prior.endswith("\n"):
+                    shortened += "\n"
+                if shortened != prior:
+                    row["content"] = shortened
+                    row["content_sha256"] = hashlib.sha256(shortened.encode()).hexdigest()
+            message["content"] = _serialize_state_message(payload)
+        elif content.startswith("[LITERAL SITE INVENTORY |"):
+            lines = content.splitlines()
+            retained = [line for line in lines if not any(
+                line.startswith(f"- {path}:") for path in complete)]
+            site_lines = [line for line in retained if line.startswith("- ")]
+            if len(site_lines) > 6:
+                to_drop = len(site_lines) - 6
+                bounded = []
+                for line in retained:
+                    if line.startswith("- ") and to_drop:
+                        to_drop -= 1
+                        continue
+                    bounded.append(line)
+                retained = bounded
+            omitted = len(lines) - len(retained)
+            if omitted:
+                retained.append(f"{omitted} site lines omitted; current source or bounded inventory carries them.")
+                message["content"] = "\n".join(retained)
+        elif content.startswith("[Host fact]\n") and read_paths:
+            lines = content.splitlines()
+            message["content"] = "\n".join([lines[0], *(
+                line for line in lines[1:]
+                if not line.startswith(("Current source bytes attached to this request:",
+                                        "Journal-backed source read facts:"))
+            )])
 
 
 def fit_recent_read_windows(body: Mapping[str, object], windows: Sequence[Mapping[str, object]],
@@ -508,10 +700,12 @@ def fit_recent_read_windows(body: Mapping[str, object], windows: Sequence[Mappin
                             protected_messages: Sequence[Mapping[str, object]] = (),
                             newest_user_suffix: Sequence[Mapping[str, object]] = (),
                             deferred_source_paths: Sequence[str] = (),
+                            editable_paths: Sequence[str] = (),
                             fits: object) -> dict[str, object]:
     """Fit source messages against the caller's measured complete-wire budget."""
     from kernel_code_bookmarks import enabled as bookmarks_enabled
     from kernel_request_source_window import parse_model_source_window, parse_window
+    from kernel_stateframe_framefit5 import _is_volatile_tail_message
 
     show_coverage = bookmarks_enabled()
     base = copy.deepcopy(dict(body))
@@ -587,6 +781,7 @@ def fit_recent_read_windows(body: Mapping[str, object], windows: Sequence[Mappin
                     if (key := window_key(message.get("content"))) is not None}
         position = next((index for index, message in enumerate(rows)
                          if message.get("role") in {"assistant", "tool"}
+                         or (show_coverage and _is_volatile_tail_message(message))
                          or str(message.get("content") or "").startswith("[FRAMEFIT5_VOLATILE_TAIL]")),
                         len(rows))
         if newest_user_suffix:
@@ -628,11 +823,13 @@ def fit_recent_read_windows(body: Mapping[str, object], windows: Sequence[Mappin
             additions.append({"role": "user", "content": summary})
         rows[position:position] = additions
         if show_coverage:
-            coverage = _source_coverage_line_items(rows)
+            _prune_redundant_source_metadata(rows)
+            coverage = _source_coverage_line_items(rows, editable_paths)
             if coverage:
-                first_source = next(index for index, message in enumerate(rows)
-                                    if isinstance(message, Mapping)
-                                    and parse_model_source_window(message.get("content")) is not None)
+                first_source = next((index for index, message in enumerate(rows)
+                                     if isinstance(message, Mapping)
+                                     and parse_model_source_window(message.get("content")) is not None),
+                                    position)
                 rows.insert(first_source, {"role": "user", "content":
                                        "[Source coverage]\n" + "\n".join(coverage)})
         return trial

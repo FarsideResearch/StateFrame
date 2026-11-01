@@ -489,7 +489,52 @@ def test_qualified_request_reports_final_source_coverage(tmp_path, monkeypatch):
         if metadata is None or metadata.get("absence") != "NONE":
             continue
         assert metadata["path"] in coverage[0]
-        assert f"({metadata['total_lines']} lines," in coverage[0]
+        noun = "line" if metadata["total_lines"] == 1 else "lines"
+        assert f"({metadata['total_lines']} {noun}," in coverage[0]
+
+
+def test_qualified_request_carries_all_recorded_small_product_files(tmp_path, monkeypatch):
+    from kernel_request_source_window import parse_model_source_window
+
+    monkeypatch.setenv("STATEFRAME_CODE_BOOKMARKS", "on")
+    fixture = Path(__file__).parent / "fixtures" / "pin_bm10_b" / "source" / "pkg"
+    root = tmp_path / "workspace"
+    product = []
+    for source in fixture.rglob("*.py"):
+        path = source.relative_to(fixture.parent).as_posix()
+        target = root / path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(source.read_bytes())
+        product.append(path)
+    (root / "tests").mkdir(exist_ok=True)
+    (root / "tests/test_app.py").write_text("def test_app(): assert True\n")
+    runtime = _runtime_with_product(root)
+    runtime.edit_contract = {"edit_authority": {"editable_paths": product}}
+    messages = [{"role": "user", "content": "Task: wire the batch runner."}]
+    context = build_action_context(messages, workspace_root=root)
+    context["journal_receipt_records"] = []
+    runtime._framefit_action_context = context
+
+    def state_transform(state):
+        state["read_facts"] = [{
+            "path": path,
+            "read_revision": "sha256:" + hashlib.sha256((root / path).read_bytes()).hexdigest(),
+            "current_revision": "sha256:" + hashlib.sha256((root / path).read_bytes()).hexdigest(),
+            "status": "UNVERIFIABLE", "unchanged_since_read": False,
+            "body_delivery": "not_shown",
+        } for path in product]
+
+    body = _qualified_fixture_request(
+        runtime, {"verification": {"revision": "current", "status": "FAIL"}},
+        messages, context, baseline=False, monkeypatch=monkeypatch,
+        state_transform=state_transform,
+    )
+    full = {metadata["path"] for message in body["messages"]
+            if (metadata := parse_model_source_window(message.get("content")))
+            and metadata.get("status") == "COMPLETE"}
+    assert len(product) == 11
+    assert set(product) <= full
+    assert token_estimate(body) <= runtime.frame_ceiling
 
 
 def test_qualified_request_journals_unresolved_bookmark_drop(tmp_path, monkeypatch):
@@ -644,8 +689,12 @@ def test_recorded_t2_request14_state_activates_current_failure_bookmarks(
         validate=False, return_capture=True)
     final = _materialized_request(result)["messages"][2]["content"]["state"]["framefit5"]
     symbols = {(row["path"], row["symbol"]) for row in final["code_bookmarks"]}
-    assert {("pkg/registry.py", "lookup"), ("pkg/service.py", "run_batch"),
-            ("pkg/worker.py", "Worker.process_batch")} <= symbols
+    from kernel_request_source_window import parse_model_source_window
+    full_paths = {metadata["path"] for message in result["messages"]
+                  if (metadata := parse_model_source_window(message.get("content")))
+                  and metadata.get("status") == "COMPLETE"}
+    assert {"pkg/registry.py", "pkg/service.py", "pkg/worker.py"} <= full_paths
+    assert not any(path in full_paths for path, _symbol in symbols)
     assert capture._code_bookmark_transition[0] is True
     decisions = [row for row in emitted if row["kind"] == "code_bookmark_activation_decision"]
     assert len(decisions) == 1
@@ -899,11 +948,14 @@ def test_pressured_bookmarks_pass_final_allocation_and_validation(tmp_path, monk
         runtime, result["messages"], result["tools"],
         refresh_sources=False, refresh_headcarry=False,
     )
-    assert set(names[:3]) <= {row["path"] for row in projected["code_bookmarks"]
-                              if row["rank"] == 1}
+    from kernel_request_source_window import parse_model_source_window
+    whole_paths = {metadata["path"] for message in result["messages"]
+                   if (metadata := parse_model_source_window(message.get("content")))
+                   and metadata.get("status") == "COMPLETE"}
+    assert set(names[:3]) <= whole_paths
+    assert not any(row["path"] in whole_paths for row in projected["code_bookmarks"])
     delivery = {row["path"]: row["body_delivery"] for row in projected["read_facts"]}
     assert all(delivery[name] in {"present", "bookmarked"} for name in names[:3])
-    from kernel_request_source_window import parse_model_source_window
     same_path_ranges = [metadata.get("ranges") for message in result["messages"]
                         if (metadata := parse_model_source_window(message.get("content")))
                         and metadata.get("path") == names[0]]
@@ -937,7 +989,7 @@ def test_pressured_bookmarks_pass_final_allocation_and_validation(tmp_path, monk
             runtime, frame, messages, context, baseline=False, monkeypatch=monkeypatch,
             state_transform=mark_failure, return_capture=True)
     assert token_estimate(tight) <= baseline_ceiling
-    assert tight_capture._code_bookmark_transition[0] is False
+    assert tight_capture._code_bookmark_transition[0] is True
     runtime.frame_ceiling = 10_000
     def reject_validation(*_args, **_kwargs):
         raise ValueError("reprepare")
@@ -972,8 +1024,7 @@ def test_pressured_bookmarks_pass_final_allocation_and_validation(tmp_path, monk
     )
     assert json.dumps(replayed, sort_keys=True) == json.dumps(near, sort_keys=True)
 
-    # The old check is stale after an edit, but the qualified identity follows
-    # its function into the next frame and remains checkpointable.
+    # After an edit, the current whole file remains the source carrier.
     changed = root / names[0]
     changed.write_text("\n" * 5 + changed.read_text())
     runtime._workspace_view_store.note_mutation((names[0],), "edit")
@@ -996,8 +1047,11 @@ def test_pressured_bookmarks_pass_final_allocation_and_validation(tmp_path, monk
     state_message = next(message for message in after_edit["messages"]
                          if str(message.get("content") or "").startswith("[StateFrame]\n"))
     current = json.loads(state_message["content"].split("\n", 1)[1])["state"]["framefit5"]
-    assert any(row["path"] == names[0] and row["symbol"] == "target"
-               and row["start_line"] == 6 for row in current["code_bookmarks"])
+    after_edit_source = [metadata for message in after_edit["messages"]
+                         if (metadata := parse_model_source_window(message.get("content")))
+                         and metadata.get("path") == names[0]]
+    assert any(metadata.get("status") == "COMPLETE" for metadata in after_edit_source)
+    assert not any(row["path"] == names[0] for row in current.get("code_bookmarks", ()))
     assert runtime._code_bookmarks_active is True
     from kernel_reread_result_truth import checkpoint_replay, restore_replay
     checkpoint = checkpoint_replay(runtime)

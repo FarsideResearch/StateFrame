@@ -732,8 +732,9 @@ def finalize_frame_candidate(
             from kernel_stateframe_framefit5 import _serialize_state_message
             frame["code_bookmarks"] = bookmarks
             state_message["content"] = _serialize_state_message(payload)
+    collected_bookmarks = copy.deepcopy(bookmarks)
     from kernel_frame_source_snapshot import (
-        fit_recent_read_windows, public_check_source_windows,
+        editable_product_windows, fit_recent_read_windows, public_check_source_windows,
         recent_editable_read_windows,
     )
     recent_windows = recent_editable_read_windows(runtime, frame)
@@ -758,6 +759,13 @@ def finalize_frame_candidate(
             # The fitter deduplicates exact carriers and delivery truth merges
             # coverage by path, revision and range on the final wire.
             recent_windows = [*selected, *recent_windows]
+    product_windows, editable_product_paths = editable_product_windows(
+        runtime, frame, bookmarks if isinstance(bookmarks, list) else (),
+    )
+    if product_windows:
+        bookmarked = [row for row in recent_windows if row.get("bookmark") is True]
+        ordinary = [row for row in recent_windows if row.get("bookmark") is not True]
+        recent_windows = [*bookmarked, *product_windows, *ordinary]
     plan = getattr(capture, "_request_source_closure_override", None)
     if not isinstance(plan, Mapping):
         plan = getattr(runtime, "_request_source_closure", None)
@@ -806,7 +814,7 @@ def finalize_frame_candidate(
     from kernel_stateframe_capacity import within_protected_capacity
 
     def source_windows_fit(trial: Mapping[str, object]) -> bool:
-        if bookmark_reconciliation and isinstance(trial.get("messages"), list):
+        if (bookmark_reconciliation or product_windows) and isinstance(trial.get("messages"), list):
             # The selected source windows and the typed visibility claim are
             # one measured proposal. Reconcile before admission, never after.
             from kernel_reread_result_truth import refresh_messages
@@ -816,6 +824,8 @@ def finalize_frame_candidate(
                     trial["messages"],
                     required_deferred_paths=tuple(plan.get("deferred_paths", ())),
                 )
+                from kernel_frame_source_snapshot import _prune_redundant_source_metadata
+                _prune_redundant_source_metadata(trial["messages"])
             except (FrameFit5Error, TypeError, ValueError):
                 return False  # Optional source advice cannot reject the base.
         _count, trial_method = meter.measure(trial)
@@ -846,6 +856,7 @@ def finalize_frame_candidate(
             protected_messages=protected,
             newest_user_suffix=getattr(capture, "_framefit5_newest_user_suffix", ()),
             deferred_source_paths=tuple(plan.get("deferred_paths", ())),
+            editable_paths=editable_product_paths,
             fits=source_windows_fit,
         )
         contents = {message.get("content") for message in full_reads["messages"]
@@ -924,6 +935,7 @@ def finalize_frame_candidate(
                 protected_messages=protected,
                 newest_user_suffix=getattr(capture, "_framefit5_newest_user_suffix", ()),
                 deferred_source_paths=tuple(plan.get("deferred_paths", ())),
+                editable_paths=editable_product_paths,
                 fits=source_windows_fit,
             )
             if without_excess_reads != candidate:
@@ -946,6 +958,7 @@ def finalize_frame_candidate(
                     candidate, recent_windows, protected_messages=protected,
                     newest_user_suffix=getattr(capture, "_framefit5_newest_user_suffix", ()),
                     deferred_source_paths=tuple(plan.get("deferred_paths", ())),
+                    editable_paths=editable_product_paths,
                     fits=source_windows_fit,
                 )
                 continue
@@ -1048,6 +1061,7 @@ def finalize_frame_candidate(
             protected_messages=protected,
             newest_user_suffix=getattr(capture, "_framefit5_newest_user_suffix", ()),
             deferred_source_paths=tuple(plan.get("deferred_paths", ())),
+            editable_paths=editable_product_paths,
             fits=source_windows_fit,
         )
         receipt = verify_final_source_delivery(
@@ -1098,7 +1112,23 @@ def finalize_frame_candidate(
         if (parsed := parse_model_source_window(message["content"])) is not None
         and isinstance(parsed.get("path"), str)
     }
-    visible_bookmarked_paths = (bookmarked_paths & carried_source_paths) | {
+    whole_source_revisions = {
+        parsed["path"]: parsed.get("revision") for message in candidate["messages"]
+        if isinstance(message, Mapping)
+        if (parsed := parse_model_source_window(message.get("content"))) is not None
+        and parsed.get("status") == "COMPLETE" and isinstance(parsed.get("path"), str)
+    }
+    current_revisions = {fact["path"]: fact.get("current_revision")
+                         for fact in final_state.get("read_facts", ())
+                         if isinstance(fact, Mapping) and isinstance(fact.get("path"), str)}
+    whole_source_paths = {path for path, revision in whole_source_revisions.items()
+                          if path not in current_revisions or current_revisions[path] == revision}
+    carried_whole_paths = {row["path"] for row in collected_bookmarks
+                           if isinstance(row, Mapping) and row.get("path") in whole_source_paths
+                           and row.get("revision") == whole_source_revisions[row["path"]]}
+    visible_bookmarked_paths = (bookmarked_paths & carried_source_paths) | (
+        carried_whole_paths
+    ) | {
         fact["path"] for fact in final_state.get("read_facts", ())
         if isinstance(fact, Mapping) and fact.get("path") in bookmarked_paths
         and fact.get("body_delivery") in {"present", "bookmarked"}
@@ -1111,6 +1141,9 @@ def finalize_frame_candidate(
     visible_bookmarks = ([row for row in final_bookmarks if isinstance(row, Mapping)
                           and row.get("path") in visible_bookmarked_paths]
                          if isinstance(final_bookmarks, list) else [])
+    visible_bookmarks.extend(row for row in collected_bookmarks
+                             if row.get("path") in carried_whole_paths
+                             and row not in visible_bookmarks)
     if (getattr(runtime, "_read_lockout_notice", None)
             and not final_source_visible(runtime, visible_bookmarks, candidate["tools"])):
         # The prior request's visible bookmark was only provisional. Rebuild an
