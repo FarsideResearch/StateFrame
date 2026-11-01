@@ -77,18 +77,20 @@ def server(tmp_path):
 
 def config(tmp_path, server, **changes):
     definition = {"name": "local", "trust": "This test server is authored by this repository.",
-                  "argv": [str(server)], "timeout_seconds": 2}
+                  "argv": [str(server)], "timeout_seconds": 15}
     definition.update(changes)
     path = tmp_path / "mcp.json"
     path.write_text(json.dumps({"schema": "stateframe-mcp/1", "servers": [definition]}))
     return load_mcp_files([path], shell_network="loopback")
 
 
-def driver(server, mode, operation="list", **args):
+def driver(server, mode, operation="list", *, timeout=15, **args):
+    # A sandboxed interpreter start can take over a second on a loaded Linux host;
+    # only the deliberate hang case uses a short deadline.
     workspace = server.parent / "workspace"
     workspace.mkdir(exist_ok=True)
     definition = config(server.parent, server, argv=[sys.executable, str(server), mode],
-                        timeout_seconds=1).servers[0]
+                        timeout_seconds=timeout).servers[0]
     return run_driver(definition, operation, workspace, server.parent,
                       shell_network="none", host_authorization=False,
                       tool=args.get("tool", ""), arguments=args.get("arguments"))
@@ -120,7 +122,8 @@ def test_driver_calls_and_maps_results(server):
 def test_driver_fails_closed(server, mode, fragment):
     operation = "call" if mode == "huge" else "list"
     with pytest.raises(McpError, match=fragment):
-        driver(server, mode, operation, tool="echo", arguments={"text": "x"})
+        driver(server, mode, operation, timeout=4 if mode == "hang" else 15,
+               tool="echo", arguments={"text": "x"})
 
 
 @pytest.mark.parametrize("field,value", [

@@ -32,7 +32,7 @@ FIXTURE = Path(__file__).parent / "fixtures/mcp_server.py"
 
 
 def config(tmp_path, mode, *, replay="external", writes="none", argv_tail=(),
-           processes="single", timeout_seconds=5):
+           processes="single", timeout_seconds=15):
     path = tmp_path / "mcp.json"
     path.write_text(json.dumps({"schema": "stateframe-mcp/1", "servers": [{
         "name": "fixture", "trust": "Reviewed local fixture for this test",
@@ -316,7 +316,7 @@ def test_detached_grandchild_contained_at_real_boundary(tmp_path, mode):
     marker = scratch / "grandchild.lock"
     config_path = config(tmp_path, mode, argv_tail=(str(marker),),
                          processes="spawn" if sys.platform == "linux" else "single",
-                         timeout_seconds=1)
+                         timeout_seconds=5)
     server = load_mcp_files([config_path], shell_network="none").servers[0]
     if mode == "double_fork_success":
         result = run_driver(server, "call", workspace, tmp_path, shell_network="none",

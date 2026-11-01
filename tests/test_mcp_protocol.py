@@ -46,7 +46,7 @@ def test_monitor_counts_private_namespace_and_nested_family_union(monkeypatch):
     assert monitor._sample() == "aggregate resident-memory limit exceeded"
 
 
-def call(tmp_path, mode, *, action="list", timeout=2, extra=()):
+def call(tmp_path, mode, *, action="list", timeout=15, extra=()):
     workspace = tmp_path / "workspace"
     home = tmp_path / "home"
     cache = tmp_path / "cache"
@@ -83,7 +83,7 @@ def test_normal_pagination_and_server_request(tmp_path):
 @pytest.mark.host_sandbox
 def test_timeout_kills_child(tmp_path):
     marker = tmp_path / "home" / "server.lock"
-    response = call(tmp_path, "hang", timeout=3, extra=(str(marker),))
+    response = call(tmp_path, "hang", timeout=5, extra=(str(marker),))
     assert response["code"] == "TIMEOUT"
     assert marker.read_text() == "server started\n"
     assert lock_released(marker)
