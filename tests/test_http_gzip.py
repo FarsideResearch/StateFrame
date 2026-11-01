@@ -305,7 +305,9 @@ def test_default_profile_cli_run_sends_large_request_without_gzip(tmp_path):
     try:
         result = subprocess.run([
             sys.executable, "-m", "stateframe", "run", "--repo", str(repo),
-            "--task", "Check this repository. " + "x" * 40_000,
+            # The task is capped at 4096 characters; system, tools and frame already carry about 30 KB,
+            # so a task near the cap puts the first request over the 32 KiB compression threshold.
+            "--task", "Check this repository. " + "x" * 4_000,
             "--endpoint", f"http://127.0.0.1:{server.server_port}/v1",
             "--model", "scripted", "--run-dir", str(run_dir),
             "--test-python", sys.executable, "--max-turns", "4", "--quiet",
