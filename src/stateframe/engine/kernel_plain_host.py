@@ -33,6 +33,7 @@ from kernel_plain_contracts import (
 )
 from kernel_plain_hooks import HookSettings, PlainHooks
 from kernel_plain_http import AbortiveHTTPTransport
+from kernel_http_fallback import send_with_gzip_fallback
 from kernel_plain_loop import (
     OUT_CAP, TOOLS, Limits, ProviderHTTPError, ProviderTransportError, run_loop,
 )
@@ -482,16 +483,38 @@ class _PlainHTTPProvider:
 
     def __call__(self, body: dict, timeout: float) -> Mapping[str, object]:
         data, encoding = encode_request_body(body)
-        request = urllib.request.Request(self.url, data=data, headers={
-            "Content-Type": "application/json", **encoding,
-            **({"Authorization": f"Bearer {self.key}"} if self.key else {})})
+        if encoding.get("Content-Encoding") == "gzip":
+            import gzip
+            identity = gzip.decompress(data)
+        else:
+            identity = data
+        identity_headers = {key: value for key, value in encoding.items()
+                            if key != "Content-Encoding"}
         tracker_id = self.transport.begin()
         completed = False
+        deadline = time.monotonic() + timeout
+
+        def send(payload: bytes, headers: dict[str, str]) -> bytes:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError("plain provider request timed out")
+            request = urllib.request.Request(self.url, data=payload, headers={
+                "Content-Type": "application/json", **headers,
+                **({"Authorization": f"Bearer {self.key}"} if self.key else {})})
+            with self.transport.opener(tracker_id).open(request, timeout=remaining) as response:
+                result = response.read()
+                self.transport.finish(tracker_id)
+            return result
+
+        def on_refused(error: urllib.error.HTTPError) -> bool:
+            error.read()
+            self.transport.finish(tracker_id)
+            return time.monotonic() < deadline
+
         try:
             try:
-                with self.transport.opener(tracker_id).open(request, timeout=timeout) as response:
-                    payload = response.read()
-                    self.transport.finish(tracker_id)
+                payload = send_with_gzip_fallback(
+                    send, data, encoding, identity, identity_headers, on_refused)
                 completed = True
                 return json.loads(payload)
             except urllib.error.HTTPError as error:
