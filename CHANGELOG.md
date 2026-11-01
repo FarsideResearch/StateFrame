@@ -5,7 +5,7 @@
 - Add optional per-step models. Each request is assigned a role (`read`, `plan`, `edit`, `finish`, `decide2`, `unit`) from what the engine already knows, and each role can have its own endpoint, model, sampling, limits, slot, tokenizer and cost rates. Set them with `--route ROLE.FIELD=VALUE`, `STATEFRAME_ROUTE_<ROLE>_<FIELD>`, a TOML or JSON routes file, or the profile. `stateframe config init` writes a commented example.
 - With no route settings, requests are byte-identical to 0.2.3.
 - A reply that edits files or says done from another role's model is discarded unrun and the same step is asked again of the `edit` or `finish` model, from the same frame.
-- Each role's server is checked at start. Remote endpoints need a per-role opt-in (or the global one), including on redirects.
+- Each role's server is checked at start. Remote endpoints need a per-role opt-in (or the global one), including on redirects. Routed requests never go through an HTTP proxy.
 - Runs print their effective routes at start and per-role sends, discarded replies, tokens and estimated cost at the end.
 - Resume records each request's route before it is sent and verifies it on replay. Changing a route on resume is refused; `stateframe resume --route` may move an endpoint or rename a model.
 

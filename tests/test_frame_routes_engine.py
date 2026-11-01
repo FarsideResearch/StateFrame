@@ -477,7 +477,7 @@ def _large_wire():
     return ('{"model":"reader","messages":[{"role":"user","content":"' + "x" * 40000 + '"}]}').encode()
 
 
-def test_gzip_415_after_deadline_is_not_resent():
+def test_gzip_send_past_deadline_times_out_without_resend():
     from stateframe.engine import kernel_bounded_http
 
     wire = _large_wire()
