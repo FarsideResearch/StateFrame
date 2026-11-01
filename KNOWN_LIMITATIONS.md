@@ -56,6 +56,16 @@ To stay inside the prompt budget, the engine evicts file contents the model read
 
 This release has an early five-run result on the previously stalled multi-file refactor: Qwen3.6-35B-A3B submitted with all 14 tests passing in all five runs. On 0.2.1, Qwen3.6-35B-A3B solved the HTTP transport task (graded as a correct candidate), while the same refactor ended in a no-progress stop. DeepSeek V4 Flash solved the refactor on that build in 2 of 2 runs, with all 14 tests passing. These small samples are smoke tests, not success rates. On an earlier release, Flash also solved the HTTP transport task and solved a harder multi-step task in 1 of 2 runs (hidden tests); the other run exhausted its request budget mid-fix. Repeated reads can still occur on a larger single-file task. Other models are untested.
 
+## Per-step models
+
+- Roles are assigned mechanically. The engine cannot tell reading from editing before the reply, because the tools it offers do not depend on what the step is for. So an edit step first goes to the `read` model; if that reply writes files it is thrown away unrun and the step is asked again of the `edit` model. Each edit step costs one extra request on the `read` model.
+- Switching models between requests resets the server's prompt cache for that request, so a routed run reuses less cache than a single-model run.
+- The token allowance for chat-template overhead is calibrated on Qwen3.6-35B-A3B. Each role's tokens are counted on its own server, but a model with a much larger template can come close to its slot on the largest frames.
+- Every role's server slot must be at least the run's context size (65,536 tokens by default). A small model served with a smaller slot is refused at start.
+- Routed roles speak the OpenAI-compatible chat API. There is no Anthropic or other provider-specific adapter yet.
+- Routing makes a run cheaper only when the `read` model is good at the tool protocol. In our first live check (the discount_bug example, reading on MiniCPM5-1B, everything else on Qwen3.6-35B-A3B), both runs passed the tests. The routed run needed 38 requests against 3, because most of the small model's replies made no tool call or ran to their token limit, and it took over 20 times as long. Try a read model on a short task first, and cap `read.max_tokens`.
+- Cost figures are estimates from the rates you set, using the token counts each server reports. A server that reports no usage leaves its cost unknown.
+
 ## Multi-file source and repeated reads
 
 With `STATEFRAME_CODE_BOOKMARKS` on by default, the frame offers current editable product source before repeated-read and navigation bookkeeping. Each editable product path has a coverage line showing which source ranges are in view and whether the source changed since its last read when that comparison is available. Files of at most 60 lines and 2 KiB can be shown whole when the request budget allows. Very large repositories still get selected windows, not every whole file. Bookmarks use a current failing check to keep its test code and related product source in view, but need a usable source location. Setup and collection failures, and failures without a `file:line`, do not activate them. Set `STATEFRAME_CODE_BOOKMARKS=off` to restore 0.2.1 behavior byte for byte.

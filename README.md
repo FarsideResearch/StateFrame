@@ -32,7 +32,7 @@ Details: [ARCHITECTURE.md](ARCHITECTURE.md), [KNOWN_LIMITATIONS.md](KNOWN_LIMITA
 
 Upcoming, not in this release:
 
-- Choosing which model handles each kind of step, for example a small model for reading and a strong model for writing code.
+- Provider-specific adapters for routed roles (for example the Anthropic API). Routed roles speak the OpenAI-compatible chat API today.
 - Published agents-per-GPU benchmark (how many concurrent agents fit on one card).
 - Measurements over longer runs than the ranges tested so far.
 - Faster resume from checkpoints (on this release resume uses the full replay).
@@ -164,6 +164,7 @@ Check it before a run: send the same text to `/tokenize` on both servers and com
 ## Configuration
 
 - `--endpoint` and `--model` (or `STATEFRAME_ENDPOINT` and `STATEFRAME_MODEL`) choose the server and model. Only loopback addresses are allowed by default; a remote endpoint needs `STATEFRAME_ALLOW_REMOTE_ENDPOINT=1` and prints a warning that your code will leave the machine.
+- Optional per-step models: send reading to a small local model and edits to a stronger one, each with its own endpoint, sampling and cost rates. With no route settings every request goes to the one model above, unchanged. `stateframe config init` writes a commented example; see [Per-step models](docs/guide/running.md#per-step-models).
 - The engine checks its work with pytest test files from your repository (`--check <path>` names them; by default every `test_*.py` / `*_test.py`). A repository needs at least one. `--test-cmd` only changes the outer command StateFrame runs before and after to report pass or fail; it does not replace the engine's pytest checks.
 - Your tests run with your project's Python: the repository's `.venv/`, `venv/` or `env/`, else `python3` on PATH. `--test-python PATH` picks another; it needs pytest and your project's test dependencies. `--python` sets one interpreter for both the engine and your tests.
 - `--in-place` applies a passing result to your repository. Without it, nothing in your repository changes; the result stays in the run directory.
