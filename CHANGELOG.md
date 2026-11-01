@@ -3,6 +3,7 @@
 ## 0.2.3 (2026-11-01)
 
 - Requests to a stock llama-server failed with HTTP 415 once they reached 32 KiB; compression is now off by default. If compression is enabled for a compatible relay and a server refuses it, the request is sent once more without compression.
+- Resume now tells releases apart: the engine fingerprint it compares is refreshed for this release (0.2.1 and 0.2.2 carried the 0.2.0 value, so a run started on an older release was admitted and then fell back to replaying its recorded requests).
 
 ## 0.2.2 (2026-11-01)
 
