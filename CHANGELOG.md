@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.2.5 (2026-11-01)
+
+- Model requests never go through an HTTP proxy. A proxy set in a profile, or a macOS system proxy, could receive a local run's requests, including the task and API key.
+
 ## 0.2.4 (2026-11-01)
 
 - Add explicitly selected reusable skills, a bounded catalog and on-demand instruction loading. Optional command definitions require separate trust and use the existing sandbox and replay path.
