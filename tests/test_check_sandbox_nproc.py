@@ -19,7 +19,8 @@ pytestmark = [pytest.mark.host_sandbox,
               pytest.mark.skipif(not sys.platform.startswith("linux"), reason="Linux RLIMIT_NPROC semantics")]
 
 THREAD_STORM_SCRIPT = ("import threading\n"
-                       "threading.stack_size(65536)\n"
+                       # Small stacks keep the storm cheap; arm64 Linux needs at least 128 KiB (PTHREAD_STACK_MIN).
+                       "threading.stack_size(262144)\n"
                        "event = threading.Event()\nthreads = []\n"
                        "try:\n"
                        "    for _ in range(200):\n"
