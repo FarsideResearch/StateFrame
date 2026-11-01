@@ -871,10 +871,13 @@ def checkpoint(runtime, messages, worker_state):
         "trimmed": sorted(runtime._trimmed),
         "conversation": checkpoint_conversation(messages),
         "owner_restore": capture_owner_restore(runtime),
-        # This clock advances even when no read/bookmark state exists.
-        "provider_request_count": getattr(runtime, "_frame_budget_request_count", 0),
     }
     from kernel_code_bookmarks import enabled as bookmarks_enabled
+    from kernel_read_lockout import enabled as lockout_enabled
+    if bookmarks_enabled() or lockout_enabled():
+        # This clock advances even when no read/bookmark state exists. Only the mechanisms that number
+        # repeated reads need it; with both switches off the checkpoint stays byte-identical to 0.2.1.
+        state["provider_request_count"] = getattr(runtime, "_frame_budget_request_count", 0)
     if bookmarks_enabled() and (
              getattr(runtime, "_code_bookmarks_active", False) is True
              or getattr(runtime, "_reread_result_truth", None)

@@ -150,18 +150,7 @@ def test_frame_source_paths_all_use_shared_workcopy_predicate(monkeypatch):
         assert "frame_source_path_allowed" in inspect.getsource(entrypoint), entrypoint
 
 
-def test_read_free_checkpoint_kill_and_resume_preserves_later_notice(tmp_path, monkeypatch):
-    from kernel_continuation_restart import WorkerResumeError, restore_provider_request_count
-    from kernel_read_exec import execute_read
-    from kernel_stateframe_runtime import note_provider_request
-
-    monkeypatch.setenv("STATEFRAME_CODE_BOOKMARKS", "on")
-    monkeypatch.setenv("STATEFRAME_DELIVER_REQUESTED_BYTES", "on")
-    monkeypatch.setenv("KERNEL_CONTINUATION_RESTART", "1")
-    source = tmp_path / "module.py"
-    source.write_text("VALUE = 1\n")
-    marker = tmp_path / "checkpoint.json"
-    child = """
+_CHECKPOINT_CHILD = """
 import json, os, sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -196,11 +185,40 @@ for _ in range(4):
 restart.checkpoint(runtime, [], {})
 os._exit(0)
 """
+
+
+def _checkpoint_after_four_requests(tmp_path):
+    """Write one real worker checkpoint after four provider requests, in a fresh process; return it."""
+    marker = tmp_path / "checkpoint.json"
     root = Path(__file__).resolve().parents[1] / "src"
-    subprocess.run([sys.executable, "-c", child, str(root),
+    subprocess.run([sys.executable, "-c", _CHECKPOINT_CHILD, str(root),
                     str(root / "stateframe/engine"), str(marker)], check=True,
                    timeout=20, env=os.environ.copy())
-    saved = json.loads(marker.read_text())
+    return json.loads(marker.read_text())
+
+
+def test_switches_off_checkpoint_has_no_request_counter(tmp_path, monkeypatch):
+    # 0.2.1 checkpoints never carried the provider request counter; with both switches off the
+    # checkpoint bytes (and so its hash and journal event) must stay identical to the release.
+    monkeypatch.setenv("STATEFRAME_CODE_BOOKMARKS", "off")
+    monkeypatch.setenv("STATEFRAME_READ_LOCKOUT", "off")
+    monkeypatch.setenv("KERNEL_CONTINUATION_RESTART", "1")
+    saved = _checkpoint_after_four_requests(tmp_path)
+    assert "provider_request_count" not in saved
+    assert "code_bookmark_replay" not in saved
+
+
+def test_read_free_checkpoint_kill_and_resume_preserves_later_notice(tmp_path, monkeypatch):
+    from kernel_continuation_restart import WorkerResumeError, restore_provider_request_count
+    from kernel_read_exec import execute_read
+    from kernel_stateframe_runtime import note_provider_request
+
+    monkeypatch.setenv("STATEFRAME_CODE_BOOKMARKS", "on")
+    monkeypatch.setenv("STATEFRAME_DELIVER_REQUESTED_BYTES", "on")
+    monkeypatch.setenv("KERNEL_CONTINUATION_RESTART", "1")
+    source = tmp_path / "module.py"
+    source.write_text("VALUE = 1\n")
+    saved = _checkpoint_after_four_requests(tmp_path)
     assert saved["provider_request_count"] == 4
     assert "code_bookmark_replay" not in saved
     with pytest.raises(WorkerResumeError, match="invalid provider request count"):
