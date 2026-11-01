@@ -91,6 +91,19 @@ def _read_cache(measurement: object) -> OrderedDict[str, _ReadSourceCacheEntry] 
         return None
 
 
+def delivered_page_snapshot(measurement: object) -> list[list[object]]:
+    """Persist bounded page identities, never source bytes or observations."""
+    pages = OrderedDict(getattr(measurement, "_read_page_delivery_replay", {}))
+    cache = getattr(measurement, "_read_contract_source_cache", None)
+    if isinstance(cache, OrderedDict):
+        for entry in cache.values():
+            for key, page in entry.pages.items():
+                number = page.get("delivered_request_number")
+                if type(number) is int and number > 0:
+                    pages[key] = number
+    return [[key, number] for key, number in list(pages.items())[-128:]]
+
+
 def _cached_source(measurement: object, identity: str, signature: tuple[int, int, int, int, int],
                    generation: str | None) -> _ReadSourceCacheEntry | None:
     cache = _read_cache(measurement)
@@ -184,6 +197,74 @@ def _visible_in_messages(messages: Sequence[Mapping[str, object]] | None,
         if isinstance(content, str) and prior_text in content:
             return True
     return False
+
+
+def _unchanged_request_number(
+        measurement: object, page: Mapping[str, object] | None,
+        args: Mapping[str, object], start: int) -> int | None:
+    """Only a prior delivered default page may become an unchanged notice."""
+    if page is None or start != 0 or any(
+            args.get(key) not in (None, "", 0)
+            for key in ("line", "start_line", "end_line", "symbol", "cursor",
+                        "column", "max_lines", "max_chars", "page_size")):
+        return None
+    prior = page.get("delivered_request_number")
+    current = getattr(measurement, "_frame_budget_request_count", None)
+    if (type(prior) is not int or type(current) is not int
+            or prior < 1 or current <= prior):
+        return None
+    return prior
+
+
+def record_serialized_read_pages(
+        measurement: object, messages: Sequence[Mapping[str, object]],
+        request_number: int) -> None:
+    """Mark cached pages only when their host reply survived the request wire."""
+    from kernel_code_bookmarks import enabled as bookmarks_enabled
+    if not bookmarks_enabled():
+        return
+    if type(request_number) is not int or request_number < 1:
+        return
+    cache = getattr(measurement, "_read_contract_source_cache", None)
+    if not isinstance(cache, OrderedDict):
+        return
+    replies = [message for message in messages
+               if isinstance(message, Mapping) and message.get("role") == "tool"]
+    from kernel_request_source_window import parse_model_source_window, verify_model_source_window
+    windows: dict[str, list[str]] = {}
+    for message in messages:
+        if not isinstance(message, Mapping) or message.get("role") != "user":
+            continue
+        content = message.get("content")
+        if not isinstance(content, str) or not content.startswith("[Current source:"):
+            continue
+        metadata = parse_model_source_window(content)
+        path = metadata.get("path") if isinstance(metadata, Mapping) else None
+        if isinstance(path, str):
+            windows.setdefault(path, []).append(content)
+    for identity, entry in cache.items():
+        path = identity.rsplit("::", 1)[-1]
+        source = (entry.content.decode("utf-8", errors="replace")
+                  if isinstance(entry.content, bytes) else None)
+        verified_windows = (
+            [window for window in windows.get(path, ())
+             if verify_model_source_window(window, path=path, source=source)]
+            if isinstance(source, str) else ())
+        for page in entry.pages.values():
+            page_content = page.get("content")
+            in_window = (isinstance(page_content, str) and bool(page_content)
+                         and any(page_content in window for window in verified_windows))
+            if _visible_in_messages(replies, page.get("observation")) or in_window:
+                page["delivered_request_number"] = request_number
+
+
+def _unchanged_text(path: str, request_number: int) -> str:
+    from kernel_code_bookmarks import enabled as bookmarks_enabled
+    if not bookmarks_enabled():
+        return (f"[read] {path[:120]} unchanged since request {request_number}; "
+                "request an explicit line range for the exact bytes.")
+    return (f"[read] {path[:120]} unchanged since request {request_number}; "
+            "the exact range was previously delivered.")
 
 
 def _dropped_range_withheld(
@@ -433,7 +514,15 @@ def execute_read(root: Path, p: Path, raw: str, display: str, start: int, *,
             observation = cached_observation
             from kernel_gate_switches import deliver_requested_bytes_enabled
             deliver_requested = deliver_requested_bytes_enabled() or result_truth
-            if (not deliver_requested and not _withheld_from_wire(
+            from kernel_code_bookmarks import enabled as bookmarks_enabled
+            repeat_request = (_unchanged_request_number(
+                measurement, page, request.arguments, start)
+                if bookmarks_enabled() else None)
+            if (repeat_request is not None and not _withheld_from_wire(
+                    measurement, root, p, cached_metadata.get("effective_range"))):
+                dedup_receipt["status"] = "UNCHANGED_VISIBLE"
+                observation = _unchanged_text(display, repeat_request)
+            elif (not deliver_requested and not _withheld_from_wire(
                     measurement, root, p, cached_metadata.get("effective_range"))
                     and _visible_in_messages(visible_messages, cached_observation)):
                 dedup_receipt["status"] = "UNCHANGED_VISIBLE"
@@ -444,6 +533,9 @@ def execute_read(root: Path, p: Path, raw: str, display: str, start: int, *,
             cached_metadata["read_dedup"] = dedup_receipt
             if delivery is not None:
                 delivery.update(cached_metadata)
+                from kernel_code_bookmarks import enabled as bookmarks_enabled
+                if bookmarks_enabled():
+                    delivery["read_dedup"] = dedup_receipt
                 delivery["host_outcome"] = "OBSERVED"
                 delivery["read_reuse"] = _ordinary_read_receipt(
                     step, raw, start, "cached_exact_page")
@@ -477,8 +569,12 @@ def execute_read(root: Path, p: Path, raw: str, display: str, start: int, *,
                     )
                 except (AttributeError, OSError, TypeError, ValueError):
                     pass
-            if str(cached_metadata.get("result_class", "OK")) == "OK" and result_truth:
-                note = result_note(measurement, identity, generation, cache_entry.revision, step)
+            if (str(cached_metadata.get("result_class", "OK")) == "OK"
+                    and result_truth and repeat_request is None):
+                note = result_note(
+                    measurement, identity, generation, cache_entry.revision, step,
+                    requested_range=cached_metadata.get("requested_range"),
+                    effective_range=cached_metadata.get("effective_range"))
                 if note:
                     observation += "\n" + note
             return str(cached_metadata.get("result_class", "OK")), observation, None
@@ -581,6 +677,18 @@ def execute_read(root: Path, p: Path, raw: str, display: str, start: int, *,
             source.metadata, source.content)
         duplicate = (cache_entry.pages.get(dedup_key)
                      if cache_entry is not None and source.result_class == "OK" else None)
+        from kernel_code_bookmarks import enabled as bookmarks_enabled
+        if duplicate is None and bookmarks_enabled() and source.result_class == "OK":
+            replay = getattr(measurement, "_read_page_delivery_replay", None)
+            number = replay.get(dedup_key) if isinstance(replay, Mapping) else None
+            if type(number) is int and number > 0:
+                duplicate = {"delivered_request_number": number}
+        repeat_request = (_unchanged_request_number(
+            measurement, duplicate, request.arguments, start)
+            if bookmarks_enabled() else None)
+        if repeat_request is not None and _withheld_from_wire(
+                measurement, root, p, source.metadata.get("effective_range")):
+            repeat_request = None
         dedup_receipt: dict[str, object] = {
             "schema": "stateframe-read-dedup/1",
             "status": "CACHE_DELIVERED" if file_cache_hit else "EXECUTED",
@@ -592,7 +700,10 @@ def execute_read(root: Path, p: Path, raw: str, display: str, start: int, *,
         deliver_requested = deliver_requested_bytes_enabled() or result_truth
         if duplicate is not None:
             prior_text = duplicate.get("observation")
-            if (not deliver_requested and not _withheld_from_wire(
+            if repeat_request is not None:
+                dedup_receipt["status"] = "UNCHANGED_VISIBLE"
+                observation = _unchanged_text(display, repeat_request)
+            elif (not deliver_requested and not _withheld_from_wire(
                     measurement, root, p, source.metadata.get("effective_range"))
                     and _visible_in_messages(visible_messages, prior_text)):
                 dedup_receipt["status"] = "UNCHANGED_VISIBLE"
@@ -614,6 +725,9 @@ def execute_read(root: Path, p: Path, raw: str, display: str, start: int, *,
                 "metadata": dict(source.metadata),
                 "request_fingerprint": _page_request_fingerprint(
                     request, identity, str(source.metadata.get("revision") or "")),
+                "delivered_request_number": (
+                    duplicate.get("delivered_request_number")
+                    if isinstance(duplicate, Mapping) else None),
             }
             cache_entry.pages.move_to_end(dedup_key)
             while len(cache_entry.pages) > _READ_CACHE_MAX_PAGES_PER_FILE:
@@ -668,18 +782,20 @@ def execute_read(root: Path, p: Path, raw: str, display: str, start: int, *,
                         "reason": "reuse_planner_unavailable", "budget_charge": 1,
                     }
                 if deliver_requested:
-                    if exact_reuse and not result_truth:
+                    if repeat_request is not None or (exact_reuse and not result_truth):
                         reuse = delivery.get("read_reuse")
                         reuse_status = (reuse.get("status")
                                         if isinstance(reuse, Mapping) else None)
+                        from kernel_code_bookmarks import enabled as bookmarks_enabled
                         dedup_receipt["status"] = (
-                            "UNCHANGED_VISIBLE" if reuse_status == "UNCHANGED_VISIBLE"
+                            "UNCHANGED_VISIBLE" if (bookmarks_enabled() and repeat_request is not None)
+                            or reuse_status == "UNCHANGED_VISIBLE"
                             else "CACHED_BYTES")
-                        observation = _reuse_text(
-                            display, str(source.metadata.get("revision") or ""),
-                            source.metadata.get("requested_range"),
-                            source.metadata.get("effective_range"),
-                        )
+                        observation = (_unchanged_text(display, repeat_request)
+                                       if repeat_request is not None else _reuse_text(
+                                           display, str(source.metadata.get("revision") or ""),
+                                           source.metadata.get("requested_range"),
+                                           source.metadata.get("effective_range")))
                         _record_requested_byte_delivery(
                             delivery, status="REUSED_PROVEN",
                             content=source.content, metadata=source.metadata,
@@ -714,9 +830,12 @@ def execute_read(root: Path, p: Path, raw: str, display: str, start: int, *,
         if delivery_segment_started is not None:
             delivery_elapsed_ns += time.perf_counter_ns() - delivery_segment_started
             delivery_segment_started = None
-        if source.result_class == "OK" and result_truth:
-            note = result_note(measurement, identity, _workspace_generation(measurement),
-                               source.metadata.get("revision"), step)
+        if source.result_class == "OK" and result_truth and repeat_request is None:
+            note = result_note(
+                measurement, identity, _workspace_generation(measurement),
+                source.metadata.get("revision"), step,
+                requested_range=source.metadata.get("requested_range"),
+                effective_range=source.metadata.get("effective_range"))
             if note:
                 observation += "\n" + note
         return source.result_class, observation, read_bytes
@@ -864,6 +983,17 @@ def dispatch_live_read(root: Path, p: Path, raw: str, display: str, start: int, 
     from kernel_reread_result_truth import enabled as result_truth_enabled
     if read_once_note is not None and not result_truth_enabled():
         observation = f"{observation}\n{read_once_note}"
+    # A menu decision needs the outcome actually returned to the model, rather
+    # than a cache hit (which may still have delivered source bytes).
+    from kernel_code_bookmarks import enabled as bookmarks_enabled
+    if bookmarks_enabled():
+        dedup = delivery.get("read_dedup")
+        delivery["unchanged_since_request"] = (
+            result == "OK"
+            and isinstance(dedup, Mapping)
+            and dedup.get("status") == "UNCHANGED_VISIBLE"
+            and observation.startswith(f"[read] {display[:120]} unchanged since request ")
+            and delivery.get("requested_bytes_delivered", 0) == 0)
     from kernel_serve_reads import enabled as serve_reads_enabled, note_read_outcome
     if serve_reads_enabled():
         from kernel_gate_switches import deliver_requested_bytes_enabled

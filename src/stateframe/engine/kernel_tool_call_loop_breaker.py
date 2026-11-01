@@ -6,6 +6,8 @@ silently discard the action that exposed the loop.
 """
 from __future__ import annotations
 
+import base64
+import binascii
 import hashlib
 import json
 import os
@@ -20,6 +22,9 @@ DEFAULT_STREAK = 5
 MIN_STREAK = 2
 MAX_STREAK = 32
 LOOP_BREAKER_NOTICE = "[kernel] TOOL_CALL_LOOP_BREAKER"
+_SEEN_FILTER_BYTES = 8 * 1024 * 1024
+_SEEN_FILTER_HASHES = 24
+_LEGACY_SEEN_FILTER_BYTES = 128 * 1024
 
 _EDIT_TOOLS = frozenset({"edit", "str_replace", "replace_module", "file_create", "write", "replace"})
 _TEST_TOOLS = frozenset({"run_tests", "test", "pytest"})
@@ -216,7 +221,8 @@ class UnboundedProgressWatch:
 
     Only host revision/evidence novelty resets the streak. Model text, repeated
     refusals, counters and timestamps never establish progress. Memory stays
-    bounded independently of run length; productive runs have no lifetime cap.
+    bounded independently of run length. With bookmarks enabled, membership
+    is conservative once the digest filter saturates.
     """
 
     def __init__(self, *, threshold: int = 32) -> None:
@@ -225,24 +231,48 @@ class UnboundedProgressWatch:
         self.threshold = threshold
         self.streak = 0
         self._seen: dict[str, None] = {}
+        # Bookmarks-off retains the released 4,096-entry eviction behavior.
+        # Allocate the monotone filter only when bookmarks need it.
+        self._seen_filter: bytearray | None = None
         self._receipt_cursor = 0
         self._last_boundary: int | None = None
+        self._batch_tail_pending: str | None = None
 
     def snapshot(self) -> dict[str, object]:
-        """Persist hashes only, in eviction order, in the worker checkpoint."""
-        return {
-            "schema": "unbounded-progress-watch/1", "threshold": self.threshold,
+        """Persist the release snapshot unless bookmarks enable monotone membership."""
+        from kernel_code_bookmarks import enabled as bookmarks_enabled
+        bookmarks_on = bookmarks_enabled()
+        state = {
+            "schema": "unbounded-progress-watch/3" if bookmarks_on else "unbounded-progress-watch/1",
+            "threshold": self.threshold,
             "streak": self.streak, "seen": list(self._seen),
             "receipt_cursor": self._receipt_cursor,
             "last_boundary": self._last_boundary,
         }
+        if bookmarks_on:
+            if self._seen_filter is None:
+                for key in self._seen:
+                    self._remember_filter(key)
+                if self._seen_filter is None:
+                    self._seen_filter = bytearray(_SEEN_FILTER_BYTES)
+            state["seen_filter"] = base64.b64encode(self._seen_filter).decode("ascii")
+            state["batch_tail_pending"] = self._batch_tail_pending
+        return state
 
     @classmethod
     def from_snapshot(cls, state: object) -> UnboundedProgressWatch:
-        fields = {"schema", "threshold", "streak", "seen", "receipt_cursor", "last_boundary"}
-        if (not isinstance(state, Mapping) or set(state) != fields
-                or state.get("schema") != "unbounded-progress-watch/1"):
+        old_fields = {"schema", "threshold", "streak", "seen", "receipt_cursor", "last_boundary"}
+        if (not isinstance(state, Mapping)
+                or (state.get("schema"), frozenset(state)) not in {
+                    ("unbounded-progress-watch/1", frozenset(old_fields)),
+                    ("unbounded-progress-watch/2", frozenset(old_fields | {"batch_tail_pending"})),
+                    ("unbounded-progress-watch/3", frozenset(old_fields | {"seen_filter"})),
+                    ("unbounded-progress-watch/3", frozenset(old_fields | {"batch_tail_pending", "seen_filter"})),
+                }):
             raise ValueError("invalid progress watch snapshot")
+        tail = state.get("batch_tail_pending")
+        if tail is not None and (not isinstance(tail, str) or not 0 < len(tail) <= 160):
+            raise ValueError("invalid progress watch batch tail")
         watch = cls(threshold=state["threshold"])
         for key in ("streak", "receipt_cursor"):
             if type(state[key]) is not int or state[key] < 0:
@@ -259,12 +289,47 @@ class UnboundedProgressWatch:
         watch._receipt_cursor = state["receipt_cursor"]
         watch._last_boundary = boundary
         watch._seen = dict.fromkeys(seen)
+        if state["schema"] == "unbounded-progress-watch/3":
+            encoded = state["seen_filter"]
+            try:
+                decoded = base64.b64decode(encoded, validate=True) if isinstance(encoded, str) else b""
+            except (ValueError, binascii.Error) as error:
+                raise ValueError("invalid progress watch identities") from error
+            if len(decoded) not in {_LEGACY_SEEN_FILTER_BYTES, _SEEN_FILTER_BYTES}:
+                raise ValueError("invalid progress watch identities")
+            if len(decoded) == _LEGACY_SEEN_FILTER_BYTES:
+                # The old bitset cannot be enlarged without losing its hashes.
+                # Retain exact recent identities; start a larger filter from them.
+                size = len(decoded) * 8
+                for key in seen:
+                    digest = bytes.fromhex(key)
+                    indexes = (int.from_bytes(digest[offset:offset + 4], "big") % size
+                               for offset in range(0, 20, 4))
+                    if not all(decoded[index // 8] & (1 << (index % 8)) for index in indexes):
+                        raise ValueError("invalid progress watch identities")
+                    watch._remember_filter(key)
+            else:
+                watch._seen_filter = bytearray(decoded)
+                if any(not watch._remember_filter(key) for key in seen):
+                    raise ValueError("invalid progress watch identities")
+        elif state["schema"] == "unbounded-progress-watch/2":
+            for key in seen:
+                watch._remember_filter(key)
+        else:
+            from kernel_code_bookmarks import enabled as bookmarks_enabled
+            if bookmarks_enabled():
+                for key in seen:
+                    watch._remember_filter(key)
+        watch._batch_tail_pending = tail
         return watch
 
     def _new(self, value: object) -> bool:
         key = hashlib.sha256(json.dumps(
             value, sort_keys=True, separators=(",", ":"), default=str,
         ).encode("utf-8")).hexdigest()
+        from kernel_code_bookmarks import enabled as bookmarks_enabled
+        if bookmarks_enabled() and self._remember_filter(key):
+            return False
         if key in self._seen:
             return False
         self._seen[key] = None
@@ -272,12 +337,47 @@ class UnboundedProgressWatch:
             del self._seen[next(iter(self._seen))]
         return True
 
+    def _remember_filter(self, key: str) -> bool:
+        """Return probable membership; use 24 positions in an 8 MiB bitset."""
+        if self._seen_filter is None:
+            self._seen_filter = bytearray(_SEEN_FILTER_BYTES)
+        digest = bytes.fromhex(key)
+        size = len(self._seen_filter) * 8
+        start = int.from_bytes(digest[:8], "big")
+        step = int.from_bytes(digest[8:16], "big") | 1
+        indexes = [(start + index * step) % size for index in range(_SEEN_FILTER_HASHES)]
+        seen = all(self._seen_filter[index // 8] & (1 << (index % 8))
+                   for index in indexes)
+        for index in indexes:
+            self._seen_filter[index // 8] |= 1 << (index % 8)
+        return seen
+
+    @staticmethod
+    def _unchanged_read_batch(receipts: list[dict]) -> bool:
+        """Discount only after every action in the completed batch is known."""
+        if not receipts:
+            return False
+        for receipt in receipts:
+            delivery = receipt.get("delivery")
+            if (receipt.get("kind") != "read"
+                    or receipt.get("result_class") != "OK"
+                    or not isinstance(delivery, Mapping)
+                    or delivery.get("unchanged_since_request") is not True
+                    or delivery.get("requested_bytes_delivered") != 0
+                    or not isinstance(delivery.get("effective_range"), Mapping)):
+                return False
+        return True
+
     def observe(self, binding: Mapping[str, object], receipts: list[dict], *,
-                boundary: int | None = None) -> bool:
+                boundary: int | None = None, charge_idle: bool = True,
+                batch_origin: str | None = None,
+                batch_complete: bool = False) -> bool:
         # Worker checkpoints follow this observation but precede dispatch. A
         # restart at that same boundary must not charge the idle turn twice.
         if boundary is not None and boundary == self._last_boundary:
             return self.streak >= self.threshold
+        from kernel_code_bookmarks import enabled as bookmarks_enabled
+        bookmarks_on = bookmarks_enabled()
         revision = binding.get("product_files") or binding.get("product_revision") or binding.get("artifact")
         progress = self._new(("revision", revision)) if revision is not None else False
         cursor = min(self._receipt_cursor, len(receipts))
@@ -297,9 +397,24 @@ class UnboundedProgressWatch:
             identity = self._identity(binding, receipt, kind, result, revision)
             if identity is not None and self._new(identity):
                 progress = True
+        charge = 1
+        if bookmarks_on and isinstance(batch_origin, str):
+            if not batch_complete:
+                charge = 0
+            elif cursor == len(receipts) and self._batch_tail_pending == batch_origin:
+                charge = 0
+            else:
+                first = next((index for index in range(len(receipts) - 1, -1, -1)
+                              if receipts[index].get("request_id") == batch_origin), None)
+                rows = receipts[first:] if first is not None else receipts[cursor:]
+                charge = 1 if self._unchanged_read_batch(rows) else max(1, len(rows))
+                self._batch_tail_pending = batch_origin
         self._receipt_cursor = len(receipts)
         self._last_boundary = boundary
-        self.streak = 0 if progress else self.streak + 1
+        if progress:
+            self.streak = 0
+        elif charge_idle:
+            self.streak += charge
         return self.streak >= self.threshold
 
     @staticmethod
@@ -377,7 +492,25 @@ def stop_unbounded_no_progress(runtime: object, watch: UnboundedProgressWatch, *
         return False
     binding = runtime.binding()
     receipts = getattr(runtime.owner, "_receipts", [])
-    if not watch.observe(binding, receipts, boundary=boundary):
+    lock = getattr(runtime, "_read_lockout_state", None)
+    from kernel_read_lockout import enabled as lockout_enabled
+    locked = (lockout_enabled() and isinstance(lock, Mapping) and lock.get("remaining", 0) > 0
+              and getattr(runtime, "_read_lockout_notice", None))
+    # Observe the boundary and receipts while paused, but do not charge an
+    # idle turn caused by the host's own two-request restriction. Real new
+    # evidence still resets the watch under its ordinary rules.
+    batch = getattr(runtime, "native_batch", None)
+    batch_origin = (getattr(batch, "origin", None)
+                    if getattr(batch, "index", 0) >= 1 else None)
+    batch_complete = (isinstance(batch_origin, str)
+                      and getattr(batch, "index", 0) == getattr(batch, "size", -1)
+                      and not getattr(batch, "pending", ())
+                      and getattr(batch, "inflight", None) is None)
+    if not watch.observe(binding, receipts, boundary=boundary,
+                         charge_idle=not locked, batch_origin=batch_origin,
+                         batch_complete=batch_complete):
+        return False
+    if locked:
         return False
     runtime.system_outcome = "stalled"
     runtime.journal.emit(
