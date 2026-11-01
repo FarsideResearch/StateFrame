@@ -872,11 +872,13 @@ def checkpoint(runtime, messages, worker_state):
         "conversation": checkpoint_conversation(messages),
         "owner_restore": capture_owner_restore(runtime),
     }
-    if getattr(runtime, "_code_bookmarks_active", False) is True:
-        from kernel_code_bookmarks import enabled as bookmarks_enabled
+    from kernel_code_bookmarks import enabled as bookmarks_enabled
+    if bookmarks_enabled() and (
+            getattr(runtime, "_code_bookmarks_active", False) is True
+            or getattr(runtime, "_reread_result_truth", None)
+            or getattr(runtime, "_read_lockout_state", None)):
         from kernel_reread_result_truth import checkpoint_replay
-        if bookmarks_enabled():
-            state["code_bookmark_replay"] = checkpoint_replay(runtime)
+        state["code_bookmark_replay"] = checkpoint_replay(runtime)
     policy = first_green_checkpoint_section(runtime)
     if policy is not None:
         state[FIRST_GREEN_CHECKPOINT_KEY] = policy

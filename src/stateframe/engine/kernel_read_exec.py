@@ -548,6 +548,9 @@ def execute_read(root: Path, p: Path, raw: str, display: str, start: int, *,
                     and result_truth and repeat_request is None):
                 note = result_note(measurement, identity, generation, cache_entry.revision, step)
                 if note:
+                    if delivery is not None and note.startswith(
+                            "[read] requested bytes are unchanged since request "):
+                        delivery["unchanged_since_request"] = True
                     observation += "\n" + note
             return str(cached_metadata.get("result_class", "OK")), observation, None
 
@@ -797,6 +800,9 @@ def execute_read(root: Path, p: Path, raw: str, display: str, start: int, *,
             note = result_note(measurement, identity, _workspace_generation(measurement),
                                source.metadata.get("revision"), step)
             if note:
+                if delivery is not None and note.startswith(
+                        "[read] requested bytes are unchanged since request "):
+                    delivery["unchanged_since_request"] = True
                 observation += "\n" + note
         return source.result_class, observation, read_bytes
     except ReadArgumentError as error:
@@ -946,10 +952,10 @@ def dispatch_live_read(root: Path, p: Path, raw: str, display: str, start: int, 
     # A menu decision needs the outcome actually returned to the model, rather
     # than a cache hit (which may still have delivered source bytes).
     from kernel_code_bookmarks import enabled as bookmarks_enabled
-    if (bookmarks_enabled()
-            and getattr(measurement, "_code_bookmarks_active", False) is True):
-        delivery["unchanged_since_request"] = observation.startswith(
-            f"[read] {display[:120]} unchanged since request ")
+    if bookmarks_enabled():
+        delivery["unchanged_since_request"] = (
+            delivery.get("unchanged_since_request") is True
+            or observation.startswith(f"[read] {display[:120]} unchanged since request "))
     from kernel_serve_reads import enabled as serve_reads_enabled, note_read_outcome
     if serve_reads_enabled():
         from kernel_gate_switches import deliver_requested_bytes_enabled

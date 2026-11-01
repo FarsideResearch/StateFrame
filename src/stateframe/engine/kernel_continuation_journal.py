@@ -7,9 +7,11 @@ Unanchored reopening requires an explicit recovery-only opt-in.
 """
 from __future__ import annotations
 
+import ast
 import contextvars
 import copy
 import fcntl
+import io
 import inspect
 import json
 import os
@@ -17,6 +19,7 @@ import re
 import stat
 import threading
 import time
+import tokenize
 import uuid
 from collections import OrderedDict, deque
 from dataclasses import dataclass
@@ -1052,6 +1055,33 @@ class ContinuationJournal(AuditJournal):
             return value
         return None
 
+    @staticmethod
+    def _framefit_failure_context(record: Mapping[str, object]) -> str:
+        """Keep bounded host check evidence through the receipt projection.
+
+        Older journals put the preview only in the quoted summary.  Decode that
+        host-authored field during replay so a resumed run sees the same location.
+        """
+        preview = record.get("assertion_context_preview")
+        if isinstance(preview, str):
+            return preview[:4096]
+        summary = record.get("summary")
+        if not isinstance(summary, str) or len(summary) > 65536:
+            return ""
+        marker = " assertion_context="
+        if marker not in summary:
+            return ""
+        literal = summary.split(marker, 1)[1]
+        try:
+            first = next(tokenize.generate_tokens(io.StringIO(literal).readline))
+            if first.type != tokenize.STRING:
+                return ""
+            decoded = ast.literal_eval(first.string)
+        except (StopIteration, SyntaxError, ValueError, TypeError, MemoryError,
+                RecursionError, tokenize.TokenError):
+            return ""
+        return decoded[:4096] if isinstance(decoded, str) else ""
+
     def _index_framefit_receipt(self, record: Mapping[str, object], *, coverage=None) -> None:
         """Keep receipt detail until the semantic history reducer is needed."""
         kind = record.get("kind")
@@ -1096,10 +1126,19 @@ class ContinuationJournal(AuditJournal):
             projected["sequence"] = sequence
 
         if kind == "check_receipt":
-            for field in ("status", "revision", "tested_rev", "receipt_id", "selector"):
+            from kernel_code_bookmarks import enabled as bookmarks_enabled
+            bookmark_fields = bookmarks_enabled()
+            fields = ("status", "revision", "tested_rev", "receipt_id", "selector")
+            if bookmark_fields:
+                fields += ("outcome", "failure_phase")
+            for field in fields:
                 value = self._framefit_scalar(record.get(field))
                 if value is not None:
                     projected[field] = value
+            if bookmark_fields and str(projected.get("status", "")).upper() == "FAIL":
+                context = self._framefit_failure_context(record)
+                if context:
+                    projected["assertion_context_preview"] = context
             self._framefit_latest_check = copy.deepcopy(projected)
             self._framefit_last_applied_edit_after_check = None
         else:

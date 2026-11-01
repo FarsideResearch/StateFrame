@@ -817,7 +817,8 @@ def test_exact_bookmark_overlap_leaves_room_for_disjoint_window(tmp_path):
             "chars of source fit") in contents
 
 
-def test_worker_checkpoint_writes_restorable_bookmark_section(monkeypatch):
+@pytest.mark.parametrize("active", [True, False])
+def test_worker_checkpoint_writes_restorable_bookmark_section(monkeypatch, active):
     import kernel_continuation_restart as restart
     import kernel_frame_series_replay
     import kernel_native_restart
@@ -830,7 +831,7 @@ def test_worker_checkpoint_writes_restorable_bookmark_section(monkeypatch):
     runtime = SimpleNamespace(
         owner=SimpleNamespace(workspace_revision=1, current_step=1),
         current_product_revision="rev1", current_request_id="request-one",
-        _code_bookmarks_active=True, _code_bookmark_carry=[],
+        _code_bookmarks_active=active, _code_bookmark_carry=[],
         _latest_check_receipt=receipt, host_check_receipts=[receipt],
         step_ledger=SimpleNamespace(pending=None), live_projection=None,
         frame_series=None, decision_state=None, native_batch=None,
@@ -855,6 +856,7 @@ def test_worker_checkpoint_writes_restorable_bookmark_section(monkeypatch):
     monkeypatch.setattr(kernel_working_notes_restart, "snapshot", lambda _value: None)
     restart.checkpoint(runtime, [], {})
     section = events[-1]["checkpoint"]["code_bookmark_replay"]
+    assert section["active"] is active
     resumed = SimpleNamespace(owner=SimpleNamespace(workspace_revision=1),
                               current_product_revision="rev1", current_request_id="request-one")
     restore_replay(resumed, section)

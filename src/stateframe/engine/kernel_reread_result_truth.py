@@ -52,6 +52,12 @@ def _canonical_failure(receipt: object) -> dict[str, str] | None:
 
 def _current_failure(measurement: object) -> dict[str, str] | None:
     revision = _current_product_revision(measurement)
+    context = getattr(measurement, "_framefit_action_context", None)
+    frame = context.get("framefit5") if isinstance(context, Mapping) else None
+    verdict = frame.get("last_verdict") if isinstance(frame, Mapping) else None
+    if revision is None and isinstance(verdict, Mapping):
+        candidate = verdict.get("current_revision")
+        revision = candidate if isinstance(candidate, str) else None
     if revision is None:
         return None
     latest = getattr(measurement, "_latest_check_receipt", None)
@@ -63,8 +69,38 @@ def _current_failure(measurement: object) -> dict[str, str] | None:
             for row in receipts)
         if authenticated and failure["revision"] == revision:
             return failure
-    if isinstance(latest, Mapping) and latest.get("revision") == revision:
+    if (isinstance(latest, Mapping) and latest.get("revision") == revision
+            and latest.get("status") != "FAIL"):
         return None
+    if (isinstance(verdict, Mapping) and verdict.get("status") == "FAIL"
+            and verdict.get("tested_revision") == revision
+            and verdict.get("current_revision") == revision):
+        # The compact journal projection is durable; the runtime's public
+        # receipt list can be absent after resume. A later edit invalidates
+        # this frame until the next capture rebuilds its verdict.
+        edits = frame.get("applied_edits", ())
+        frame_edits = [row for row in edits if isinstance(row, Mapping)] if isinstance(
+            edits, (list, tuple)) else []
+        latest_edit_turn = max((row["turn"] for row in frame_edits
+                                if type(row.get("turn")) is int), default=-1)
+        latest_edit_ids = {row.get("edit_receipt") for row in frame_edits
+                           if row.get("turn") == latest_edit_turn}
+        owner_receipts = getattr(getattr(measurement, "owner", None), "_receipts", ())
+        if not any(isinstance(row, Mapping) and row.get("kind") == "edit"
+                   and row.get("result_class") == "APPLIED"
+                   and (type(row.get("turn")) is not int
+                        or row["turn"] > latest_edit_turn
+                        or (row["turn"] == latest_edit_turn
+                            and row.get("receipt_id") not in latest_edit_ids))
+                   for row in owner_receipts):
+            records = context.get("journal_receipt_records", ())
+            for row in reversed(records):
+                if (isinstance(row, Mapping)
+                        and row.get("receipt_id") == verdict.get("check_receipt_id")
+                        and row.get("revision") == revision):
+                    failure = _canonical_failure(row)
+                    if failure is not None:
+                        return failure
     replayed = getattr(measurement, "_bookmark_failure_data", None)
     if isinstance(replayed, Mapping) and replayed.get("revision") == revision:
         return _canonical_failure({**replayed, "assertion_context_preview": replayed.get("assertion")})
@@ -110,8 +146,7 @@ def result_note(measurement: object, identity: str, generation: str | None,
     if type(action) is not int or action < 0:
         return None
     from kernel_code_bookmarks import enabled as bookmarks_enabled
-    active = (getattr(measurement, "_code_bookmarks_active", False) is True
-              and bookmarks_enabled())
+    active = bookmarks_enabled()
     if active and (not isinstance(generation, str) or not isinstance(identity, str)
                    or len(identity) > 2048 or len(generation) > 512
                    or len(revision) > 128):
@@ -127,21 +162,27 @@ def result_note(measurement: object, identity: str, generation: str | None,
     key = (generation, revision)
     failure = _current_failure(measurement) if active else None
     failure_key = tuple(failure.values()) if failure is not None else None
-    request_id = getattr(measurement, "current_request_id", None)
+    request_number = getattr(measurement, "_frame_budget_request_count", None)
+    has_provider_number = type(request_number) is int and request_number > 0
+    request_id = (str(request_number) if has_provider_number
+                  else getattr(measurement, "current_request_id", None))
     request_id = request_id if isinstance(request_id, str) and 0 < len(request_id) <= 120 else None
     if previous is not None and previous[:2] == key:
         seen.move_to_end(identity)
-        if failure_key is not None and len(previous) > 3 and previous[3] == failure_key:
-            prior = (f"request {previous[4]}" if len(previous) > 4 and previous[4]
-                     else f"action {previous[2]}")
-            return (f"[read] requested bytes are unchanged since {prior}; "
-                    f"current failing assertion: {failure['assertion']}. "
-                    "Current requested content is in this result.")
-        if failure_key is not None:
+        prior_request = previous[4] if len(previous) > 4 else None
+        if active and (failure_key is not None or len(previous) < 4
+                       or previous[3] is None):
             seen[identity] = (*key, previous[2], failure_key, request_id)
+        if active and prior_request and (prior_request != request_id
+                                         or not has_provider_number):
+            assertion = (f" current failing assertion: {failure['assertion']}."
+                         if failure_key is not None and len(previous) > 3
+                         and previous[3] == failure_key else "")
+            return (f"[read] requested bytes are unchanged since request {prior_request};"
+                    f"{assertion} Current requested content is in this result.")
         return (f"[read] unchanged since action {previous[2]} @rev {generation}; "
                 "current requested content is in this result.")
-    seen[identity] = (*key, action, failure_key, request_id) if failure_key else (*key, action)
+    seen[identity] = (*key, action, failure_key, request_id) if active else (*key, action)
     seen.move_to_end(identity)
     while len(seen) > _SEEN_LIMIT:
         seen.popitem(last=False)
@@ -174,7 +215,8 @@ def checkpoint_replay(measurement: object) -> dict[str, object]:
         and isinstance(row.get("symbol"), str) and len(row["symbol"]) <= 256
         and public_path(row["path"]) == row["path"] and row["path"].endswith(".py")
     ] if isinstance(carry, list) else []
-    snapshot = {"schema": _REPLAY_SCHEMA, "active": True,
+    snapshot = {"schema": _REPLAY_SCHEMA,
+                "active": getattr(measurement, "_code_bookmarks_active", False) is True,
                 "seen": rows[-_SEEN_LIMIT:], "failure": failure,
                 "bookmarks": bookmarks}
     from kernel_read_lockout import checkpoint as lockout_checkpoint
@@ -195,7 +237,7 @@ def restore_replay(measurement: object, snapshot: object) -> None:
     from kernel_public_localization import public_path
 
     if (not isinstance(snapshot, Mapping) or snapshot.get("schema") != _REPLAY_SCHEMA
-            or snapshot.get("active") is not True):
+            or type(snapshot.get("active")) is not bool):
         raise ValueError("invalid bookmark read replay")
     rows, failure = snapshot.get("seen"), snapshot.get("failure")
     bookmarks = snapshot.get("bookmarks", [])
@@ -244,7 +286,7 @@ def restore_replay(measurement: object, snapshot: object) -> None:
         raise ValueError("invalid bookmark read replay")
     measurement._reread_result_truth = restored
     measurement._bookmark_failure_data = dict(failure) if failure is not None else None
-    measurement._code_bookmarks_active = True
+    measurement._code_bookmarks_active = snapshot["active"]
     measurement._code_bookmark_carry = restored_bookmarks
     if "read_lockout" in snapshot:
         from kernel_read_lockout import restore as restore_lockout

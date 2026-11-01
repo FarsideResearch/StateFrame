@@ -7,7 +7,9 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 
 
-_PURE_SOURCE_TOOLS = frozenset({"read"})
+_PURE_SOURCE_TOOLS = frozenset({
+    "read", "grep", "shell", "list_files", "where_defined", "who_calls", "references",
+})
 _MAX_LOCKED_REQUESTS = 2
 _MAX_LOCKED_PATHS = 64
 _MAX_PATH_TEXT = 4096
@@ -40,10 +42,16 @@ def _fresh(runtime: object, paths: Mapping[str, str]) -> bool:
     return True
 
 
-def _request_reads(runtime: object, request_id: str) -> dict[str, str] | None:
+def _request_receipts(runtime: object, request_id: str) -> list[Mapping[str, object]]:
     receipts = getattr(getattr(runtime, "owner", None), "_receipts", ())
-    rows = [row for row in receipts if isinstance(row, Mapping)
-            and row.get("request_id") == request_id]
+    rows = [row for row in receipts if isinstance(row, Mapping)]
+    start = next((index for index, row in enumerate(rows)
+                  if row.get("request_id") == request_id), None)
+    return rows[start:] if start is not None else []
+
+
+def _request_reads(runtime: object, request_id: str) -> dict[str, str] | None:
+    rows = _request_receipts(runtime, request_id)
     if not rows or any(row.get("kind") != "read" for row in rows):
         return None
     paths: dict[str, str] = {}
@@ -61,12 +69,10 @@ def _request_reads(runtime: object, request_id: str) -> dict[str, str] | None:
 
 
 def _new_evidence(runtime: object, request_id: str) -> bool:
-    receipts = getattr(getattr(runtime, "owner", None), "_receipts", ())
-    return any(isinstance(row, Mapping) and row.get("request_id") == request_id
-               and (row.get("kind") not in {None, "read"}
+    return any((row.get("kind") not in {None, "read"}
                     or (isinstance(row.get("delivery"), Mapping)
                         and row["delivery"].get("unchanged_since_request") is not True))
-               for row in receipts)
+               for row in _request_receipts(runtime, request_id))
 
 
 def _state(runtime: object) -> dict[str, object]:
@@ -91,17 +97,18 @@ def project(runtime: object, tools: Sequence[dict]) -> list[dict]:
     """Project the next request once, even if its menu is recomposed."""
     from kernel_code_bookmarks import enabled as bookmarks_enabled
 
-    if not bookmarks_enabled() or getattr(runtime, "_code_bookmarks_active", False) is not True:
+    if not bookmarks_enabled():
         return list(tools)
     state = _state(runtime)
     if getattr(runtime, "_request_deferred_source_paths", ()):
         release(runtime, "FRESH_READ_REQUIRED")
         state["streak"] = 0
         return list(tools)
-    previous = getattr(runtime, "current_request_id", None)
-    if isinstance(previous, str) and previous != state["evaluated"]:
+    current_request = getattr(runtime, "current_request_id", None)
+    previous = state["evaluated"]
+    if isinstance(current_request, str) and current_request != previous:
         capped = False
-        if state["remaining"] and previous != state["projected_after"]:
+        if state["remaining"] and current_request != state["projected_after"]:
             state["remaining"] -= 1
             if _new_evidence(runtime, previous):
                 state["remaining"] = 0
@@ -110,7 +117,13 @@ def project(runtime: object, tools: Sequence[dict]) -> list[dict]:
                 capped = True
                 _emit(runtime, "REQUEST_CAP", state)
         current = _failure(runtime)
-        reads = _request_reads(runtime, previous) if current is not None else None
+        # The provider menu is normally prepared before its new request ID has
+        # any receipts. Tests and post-dispatch projections may already have
+        # receipts for that ID; evaluate those once at the same boundary.
+        completed = previous if isinstance(previous, str) else (
+            current_request if _request_receipts(runtime, current_request) else None)
+        reads = (_request_reads(runtime, completed)
+                 if isinstance(completed, str) and current is not None else None)
         if reads is not None and current == state["failure"]:
             state["streak"] = min(2, state["streak"] + 1)
             state["paths"].update(reads)
@@ -123,7 +136,7 @@ def project(runtime: object, tools: Sequence[dict]) -> list[dict]:
             if not state["remaining"]:
                 state["paths"] = {}
                 state["failure"] = None
-        state["evaluated"] = previous
+        state["evaluated"] = current_request
         if (len(state["paths"]) > _MAX_LOCKED_PATHS
                 or sum(map(len, state["paths"])) > _MAX_PATH_TEXT):
             state["streak"] = 0
@@ -139,11 +152,12 @@ def project(runtime: object, tools: Sequence[dict]) -> list[dict]:
             _emit(runtime, "FRESH_READ_REQUIRED", state)
         runtime._read_lockout_notice = None
         return list(tools)
-    state["projected_after"] = previous
+    state["projected_after"] = current_request
     paths = ", ".join(sorted(state["paths"]))
     runtime._read_lockout_notice = (
         f"Read lockout: {paths} were re-read unchanged; failing assertion: "
-        f"{state['failure'][-1]}; read is unavailable for this request.")
+        f"{state['failure'][-1]}; read is unavailable for this request; "
+        "grep, shell, and source navigation are also unavailable.")
     runtime._read_lockout_last_notice = runtime._read_lockout_notice
     return filter_tools(runtime, tools)
 

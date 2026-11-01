@@ -235,3 +235,49 @@ def test_final_capability_floor_cannot_reintroduce_locked_read(tmp_path, monkeyp
     monkeypatch.setenv("STATEFRAME_CODE_BOOKMARKS", "off")
     names, schemas, _digest = _request_tool_floor_schemas(runtime, TOOLS)
     assert "read" in names and "read" in schemas
+
+
+def test_inactive_replay_keeps_bookmark_state_and_menu(tmp_path, monkeypatch):
+    monkeypatch.setenv("STATEFRAME_CODE_BOOKMARKS", "on")
+    runtime, _ = _runtime(tmp_path)
+    runtime._code_bookmarks_active = False
+    (tmp_path / "module.py").write_text("value = 1\n")
+    _menu(runtime, "request-14")
+    _read(runtime, "request-14", "module.py")
+    snapshot = json.loads(json.dumps(checkpoint_replay(runtime)))
+    assert snapshot["active"] is False
+    resumed, _ = _runtime(tmp_path)
+    resumed.owner._receipts = list(runtime.owner._receipts)
+    restore_replay(resumed, snapshot)
+    assert resumed._code_bookmarks_active is False
+    assert _names(_menu(runtime, "request-15")) == _names(_menu(resumed, "request-15"))
+
+
+def test_mixed_provider_batch_cannot_count_as_unchanged_reads(tmp_path, monkeypatch):
+    monkeypatch.setenv("STATEFRAME_CODE_BOOKMARKS", "on")
+    runtime, events = _runtime(tmp_path)
+    (tmp_path / "module.py").write_text("value = 1\n")
+    _menu(runtime, "request-14")
+    _read(runtime, "request-14", "module.py")
+    runtime.owner._receipts.append({"request_id": "another-action-in-14",
+                                    "kind": "edit", "result_class": "APPLIED"})
+    assert "read" in _names(_menu(runtime, "request-15"))
+    _read(runtime, "request-15", "module.py")
+    assert "read" in _names(_menu(runtime, "request-16"))
+    assert not events
+
+
+def test_locked_menu_is_enforced_at_dispatch(tmp_path, monkeypatch):
+    from kernel_completion_owner import request_menu_action_admissible
+
+    monkeypatch.setenv("STATEFRAME_CODE_BOOKMARKS", "on")
+    runtime, _ = _trigger(tmp_path)
+    names = _names(_menu(runtime, "probe-request-15"))
+    runtime._completion_owner_request_contract = {
+        "request_id": "probe-request-15", "advertised_actions": names,
+    }
+    for tool in ("read", "grep", "shell", "list_files", "where_defined",
+                 "who_calls", "references"):
+        assert tool not in names
+        assert not request_menu_action_admissible(runtime, tool, "probe-request-15")
+    assert request_menu_action_admissible(runtime, "edit", "probe-request-15")
