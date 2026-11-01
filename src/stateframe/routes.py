@@ -68,7 +68,7 @@ def _check_role(role: object) -> str:
     return role
 
 
-def _value(role: str, field: str, raw: object) -> object:
+def _value(role: str, field: str, raw: object, *, text_value: bool = False) -> object:
     label = f"route {role}.{field}"
     if field in ("endpoint", "tokenizer"):
         if not isinstance(raw, str):
@@ -88,23 +88,20 @@ def _value(role: str, field: str, raw: object) -> object:
         return raw
     if field == "allow_remote":
         if type(raw) is not bool:
-            if isinstance(raw, str) and raw.lower() in ("true", "false"):
+            if text_value and isinstance(raw, str) and raw.lower() in ("true", "false"):
                 return raw.lower() == "true"
             raise RouteError(f"{label} must be true or false; change allow_remote")
         return raw
     if field == "slot" and raw == "auto":
         return raw
     if field in ("slot", "top_k", "max_tokens", "context_tokens"):
-        try:
-            number = int(raw) if type(raw) is not bool and str(raw).strip().lstrip("+").isdigit() else None
-        except (TypeError, ValueError):
-            number = None
+        number = int(raw) if text_value and isinstance(raw, str) and raw.strip().lstrip("+").isdigit() else raw
         minimum = 0 if field in ("slot", "top_k") else 1
-        if number is None or number < minimum:
+        if type(number) is not int or number < minimum:
             raise RouteError(f"{label} must be {'a nonnegative' if minimum == 0 else 'a positive'} integer; change {field}")
         return number
     try:
-        number = float(raw) if type(raw) is not bool else math.nan
+        number = float(raw) if (type(raw) in (int, float) or text_value and isinstance(raw, str)) else math.nan
     except (TypeError, ValueError):
         number = math.nan
     bounds = {"temperature": (0, 2), "top_p": (0, 1), "min_p": (0, 1)}
@@ -183,7 +180,7 @@ def _env_blocks(environ: Mapping[str, str]) -> dict[str, dict[str, object]]:
         if role.startswith("unit_") and role != "unit":
             role = "unit." + role[5:]
         _check_role(role)
-        result.setdefault(role, {})[field] = _value(role, field, raw)
+        result.setdefault(role, {})[field] = _value(role, field, raw, text_value=True)
     return result
 
 
@@ -197,7 +194,7 @@ def _cli_blocks(values: list[str]) -> dict[str, dict[str, object]]:
         _check_role(role)
         if field not in FIELDS:
             raise RouteError(f"unknown route field {role}.{field}; fields are {', '.join(FIELDS)}; change --route")
-        result.setdefault(role, {})[field] = _value(role, field, raw)
+        result.setdefault(role, {})[field] = _value(role, field, raw, text_value=True)
     return result
 
 
@@ -229,13 +226,26 @@ def resolve(default: Mapping[str, object], *, cli: list[str] | None = None, file
         if key_name and key_name not in environ:
             raise RouteError(f"route {role} uses api_key_env {key_name}, which is not set; export it or remove api_key_env")
         roles[role], sources[role] = base, chosen
-    active = any(field not in ("allow_remote", "cost_input_per_mtok", "cost_cached_input_per_mtok",
-                               "cost_output_per_mtok") and
-                 value != ("decision-tier" if role == "decide2" and field == "model" else
-                           0.0 if role == "decide2" and field == "temperature" else
-                           384 if role == "decide2" and field == "max_tokens" else default.get(field))
-                 for role, values in roles.items() for field, value in values.items())
-    return with_effective_roles(RouteTable(roles, sources, active, ""))
+    table = RouteTable(roles, sources, False, "")
+    return with_effective_roles(RouteTable(roles, sources, request_settings_changed(table, default), ""))
+
+
+def request_settings_changed(table: RouteTable, default: Mapping[str, object]) -> bool:
+    """Compare every request role in main and unit scope with its unrouted request."""
+    ignored = {"allow_remote", "cost_input_per_mtok", "cost_cached_input_per_mtok",
+               "cost_output_per_mtok"}
+    unit_classes = {"default", *(role[5:] for role in table.roles if role.startswith("unit."))}
+    for role in ROLES:
+        if role == "unit":
+            continue
+        expected = dict(default)
+        if role == "decide2":
+            expected.update(model="decision-tier", temperature=0.0, max_tokens=384)
+        actual = table.roles[role]
+        for settings in (actual, *(table.resolve(role, unit_class=name) for name in unit_classes)):
+            if any(settings.get(field) != expected.get(field) for field in settings if field not in ignored):
+                return True
+    return False
 
 
 def with_effective_roles(table: RouteTable) -> RouteTable:

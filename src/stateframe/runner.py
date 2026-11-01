@@ -592,6 +592,12 @@ def prepare(options: RunOptions) -> tuple[Path, workcopy.WorkCopy, dict]:
     _validate_timeout(options.timeout_s)
     _remaining(options)
     environment = profiles.load(options.profile)
+    if options._routes is not None:
+        routed_keys = {settings.get("api_key_env") for settings in options._routes.roles.values()}
+        stored_names = set(environment) | set(options.extra_env) | set(options.test_env) | set(options._context_env)
+        collision = sorted(name for name in stored_names if name in routed_keys)
+        if collision:
+            raise RunError(f"{collision[0]} is a routed api_key_env; remove that spec environment value")
     if options.max_turns is None:
         options.max_turns = profile_steps(options.profile)
     if options.max_turns == 0:
@@ -737,6 +743,13 @@ def _child_env(options: RunOptions) -> dict[str, str]:
     return env
 
 
+def _slot_id(entry: dict) -> int | None:
+    slot_id = entry.get("id")
+    if type(slot_id) is not int or slot_id < 0:
+        slot_id = entry.get("id_slot")
+    return slot_id if type(slot_id) is int and slot_id >= 0 else None
+
+
 def _idle_slot(slots: object) -> tuple[int | None, bool]:
     """Return the lowest uniquely reported idle slot and whether status was usable."""
     if not isinstance(slots, list):
@@ -746,11 +759,9 @@ def _idle_slot(slots: object) -> tuple[int | None, bool]:
     for entry in slots:
         if not isinstance(entry, dict):
             continue
-        slot_id = entry.get("id")
-        if type(slot_id) is not int:
-            slot_id = entry.get("id_slot")
+        slot_id = _slot_id(entry)
         processing = entry.get("is_processing")
-        if type(slot_id) is not int or slot_id < 0 or type(processing) is not bool:
+        if slot_id is None or type(processing) is not bool:
             continue
         if slot_id in by_id:
             duplicates.add(slot_id)
@@ -877,6 +888,25 @@ def _probe_routes(options: RunOptions, printer=print, *, resume_roles: dict | No
                        "or unset LLAMA_CPP_TOKENIZE_URL")
     checked: set[tuple[str, str]] = set()
     slots_by_endpoint: dict[str, object] = {}
+    # Resolve default-endpoint auto pins before constructing probe endpoints. The
+    # resolved table may be inactive, and Endpoint construction can print a warning.
+    for role, settings in table.roles.items():
+        if settings.get("slot") != "auto" or settings.get("endpoint") != options.endpoint.base_url:
+            continue
+        if options.endpoint.base_url not in slots_by_endpoint:
+            slots_by_endpoint[options.endpoint.base_url] = options.endpoint.get_slots()
+        recorded = (resume_roles or {}).get(role, {})
+        selected = recorded.get("slot") if type(recorded.get("slot")) is int else None
+        if selected is None:
+            selected, _ = _idle_slot(slots_by_endpoint[options.endpoint.base_url])
+        if selected is None:
+            raise RunError(f"route {role}.slot = auto found no idle slot at {options.endpoint.base_url}; "
+                           "choose a slot number or free a server slot")
+        settings["slot"] = selected
+    baseline = _route_defaults(options)
+    if not routes.request_settings_changed(table, baseline):
+        options._routes = None
+        return
     for role, settings in table.roles.items():
         endpoint = _routed_endpoint(settings)
         if (endpoint.base_url != options.endpoint.base_url
@@ -908,19 +938,19 @@ def _probe_routes(options: RunOptions, printer=print, *, resume_roles: dict | No
                                "choose a slot number or free a server slot")
             settings["slot"] = selected
         if selected is not None and isinstance(slots, list) and slots and not any(
-                isinstance(entry, dict) and entry.get("id", entry.get("id_slot")) == selected
+                isinstance(entry, dict) and _slot_id(entry) == selected
                 for entry in slots):
             raise RunError(f"route {role}.slot {selected} is not reported by {endpoint.base_url}; "
                            "choose a slot this server reports or use slot = 'auto'")
         slot_entries = [entry for entry in slots or [] if isinstance(entry, dict) and
-                        (selected is None or entry.get("id", entry.get("id_slot")) == selected)]
+                        (selected is None or _slot_id(entry) == selected)]
         sizes = [entry["n_ctx"] for entry in slot_entries if type(entry.get("n_ctx")) is int]
         configured_context = int(settings.get("context_tokens") or options._context_tokens)
         if configured_context < options._context_tokens:
             raise RunError(f"route {role}.context_tokens={configured_context} is smaller than this run's "
                            f"{options._context_tokens:,}-token frame; raise it or lower STATEFRAME_CONTEXT_TOKENS")
-        need = configured_context
         explicit = bool(options._context_env.get(CONTEXT_TOKENS_ENV))
+        need = options._context_tokens if explicit else configured_context
         if sizes and (min(sizes) < need or explicit and any(size != need for size in sizes)):
             size = min(sizes)
             raise RunError(f"route {role} model {endpoint.model} has a {size:,}-token slot; this run's frames "
@@ -941,20 +971,6 @@ def _probe_routes(options: RunOptions, printer=print, *, resume_roles: dict | No
                 raise RunError(f"route {role}.tokenizer does not list model {endpoint.model!r}; "
                                f"change {role}.tokenizer to a server for that model")
     # An auto slot is an effective setting: hash the resolved table the engine receives.
-    baseline = _route_defaults(options)
-    active = False
-    for role, settings in table.roles.items():
-        expected = dict(baseline)
-        if role == "decide2":
-            expected.update(model="decision-tier", temperature=0.0, max_tokens=384)
-        if any(settings.get(field) != expected.get(field) for field in settings
-               if field not in ("allow_remote", "cost_input_per_mtok", "cost_cached_input_per_mtok",
-                                "cost_output_per_mtok")):
-            active = True
-            break
-    if not active:
-        options._routes = None
-        return
     table = routes.with_effective_roles(routes.RouteTable(table.roles, table.sources, True, ""))
     options._routes = table
     for role, settings in table.roles.items():
@@ -1317,6 +1333,17 @@ def _cache_share_line(summary: dict[str, object]) -> str:
     return f"cached share: {share:.1%} ({cached}/{total}, normalized)" + suffix
 
 
+def _effective_route_prices(route_spec: dict, role: str, route: dict) -> dict:
+    prices = dict(route_spec["roles"].get(role, {}))
+    if route.get("scope") == "unit":
+        unit_class = route.get("unit_class")
+        for name in ("unit", f"unit.{unit_class}" if isinstance(unit_class, str) else ""):
+            unit = route_spec["roles"].get(name, {})
+            prices.update({key: unit[key] for key in route_spec.get("unit_overrides", {}).get(name, ())
+                           if key in unit})
+    return prices
+
+
 def _route_costs(run: Path, route_spec: dict, sends: list[dict],
                  metrics: list[dict[str, int | None]]) -> dict[str, object]:
     """Price recorded sends only; missing usage stays unknown rather than becoming zero."""
@@ -1326,6 +1353,10 @@ def _route_costs(run: Path, route_spec: dict, sends: list[dict],
                "completion_tokens": 0, "estimated_cost": None}
         for role in rates}
     incomplete: set[str] = set()
+    priced: dict[str, float] = {role: 0.0 for role in rates}
+    priced_as_edit = 0.0
+    edit_incomplete = False
+    keys = ("cost_input_per_mtok", "cost_cached_input_per_mtok", "cost_output_per_mtok")
     request_roles: dict[str, str] = {}
     escalated_from: list[tuple[str, int]] = []
     for fallback, (send, usage) in enumerate(zip(sends, metrics), start=1):
@@ -1359,12 +1390,31 @@ def _route_costs(run: Path, route_spec: dict, sends: list[dict],
                     completion = None
         if type(completion) is not int and isinstance(send.get("usage"), dict):
             completion = send["usage"].get("completion_tokens")
-        for key, value in (("prompt_tokens", usage["total"]), ("cached_tokens", usage["cached"]),
-                           ("completion_tokens", completion)):
+        token_counts = {"prompt_tokens": usage["total"], "cached_tokens": usage["cached"],
+                        "completion_tokens": completion}
+        for key, value in token_counts.items():
             if type(value) is int and value >= 0:
                 row[key] += value
             else:
                 incomplete.add(role)
+        valid_usage = (all(type(token_counts[key]) is int and token_counts[key] >= 0 for key in token_counts)
+                       and token_counts["cached_tokens"] <= token_counts["prompt_tokens"])
+        for hypothetical, prices in ((False, _effective_route_prices(route_spec, role, route)),
+                                     (True, _effective_route_prices(route_spec, "edit", route))):
+            if valid_usage and all(type(prices.get(key)) in (int, float) for key in keys):
+                cost = ((token_counts["prompt_tokens"] - token_counts["cached_tokens"]) * prices[keys[0]] +
+                        token_counts["cached_tokens"] * prices[keys[1]] +
+                        token_counts["completion_tokens"] * prices[keys[2]]) / 1_000_000
+                if hypothetical:
+                    priced_as_edit += cost
+                else:
+                    priced[role] += cost
+            elif hypothetical:
+                edit_incomplete = True
+            else:
+                incomplete.add(role)
+        if not valid_usage:
+            incomplete.add(role)
     for source, fallback in escalated_from:
         role = request_roles.get(source)
         if role is None and fallback > 1:
@@ -1378,24 +1428,15 @@ def _route_costs(run: Path, route_spec: dict, sends: list[dict],
                     pass
         if role in rows:
             rows[role]["escalated"] += 1
-    keys = ("cost_input_per_mtok", "cost_cached_input_per_mtok", "cost_output_per_mtok")
     for role, row in rows.items():
-        prices = rates[role]
-        if role not in incomplete and all(type(prices.get(key)) in (int, float) for key in keys):
-            uncached = row["prompt_tokens"] - row["cached_tokens"]
-            row["estimated_cost"] = round((uncached * prices[keys[0]] +
-                                            row["cached_tokens"] * prices[keys[1]] +
-                                            row["completion_tokens"] * prices[keys[2]]) / 1_000_000, 8)
+        if role not in incomplete and (row["requests"] or
+                                      all(type(rates[role].get(key)) in (int, float) for key in keys)):
+            row["estimated_cost"] = round(priced[role], 8)
     total = {key: sum(int(row[key]) for row in rows.values()) for key in
              ("requests", "escalated", "prompt_tokens", "cached_tokens", "completion_tokens")}
     costs = [row["estimated_cost"] for row in rows.values() if row["requests"]]
     total["estimated_cost"] = round(sum(costs), 8) if len(costs) == sum(bool(row["requests"]) for row in rows.values()) else None
-    edit = rates.get("edit", {})
-    as_edit = None
-    if total["estimated_cost"] is not None and all(type(edit.get(key)) in (int, float) for key in keys):
-        as_edit = round(((total["prompt_tokens"] - total["cached_tokens"]) * edit[keys[0]] +
-                         total["cached_tokens"] * edit[keys[1]] +
-                         total["completion_tokens"] * edit[keys[2]]) / 1_000_000, 8)
+    as_edit = round(priced_as_edit, 8) if total["estimated_cost"] is not None and not edit_incomplete else None
     return {"roles": rows, "total": total, "all_at_edit_rates": as_edit,
             "estimated_savings": round(as_edit - total["estimated_cost"], 8)
             if as_edit is not None and total["estimated_cost"] is not None else None}
@@ -1549,6 +1590,15 @@ def _compare_resume_routes(recorded: object, current: routes.RouteTable | None,
         allowed.add((role, field))
     old_roles = recorded.get("roles", {}) if isinstance(recorded, dict) else {}
     new_roles = current.roles if current is not None else {}
+    old_masks = recorded.get("unit_overrides", {}) if isinstance(recorded, dict) else {}
+    new_masks = current.unit_overrides() if current is not None else {}
+    for role in sorted(set(old_masks) | set(new_masks)):
+        before_fields = set(old_masks.get(role, ()))
+        after_fields = set(new_masks.get(role, ()))
+        for field in sorted(before_fields ^ after_fields):
+            raise resume_module.ResumeRefused(
+                f"route {role}.{field} changed (unit override: "
+                f"run: {field in before_fields}, now: {field in after_fields}); unset it to resume")
     changes: list[dict[str, object]] = []
     for role in sorted(set(old_roles) | set(new_roles)):
         old = old_roles.get(role, {})

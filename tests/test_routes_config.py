@@ -61,6 +61,32 @@ def test_unit_override_mask_changes_digest_even_when_value_equals_default():
     assert unit.resolve("plan", unit_class="other")["model"] == "base"
 
 
+def test_unit_default_model_changes_decide2_request_and_activates():
+    table = resolve(cli=["unit.model=base"])
+    assert table.resolve("decide2", unit_class="default")["model"] == "base"
+    assert table.active
+
+
+@pytest.mark.parametrize("suffix,body", [
+    (".toml", '[roles.read]\nallow_remote = "true"\n'),
+    (".toml", '[roles.read]\ntemperature = "0.3"\n'),
+    (".json", '{"schema":"stateframe-routes/1","roles":{"read":{"allow_remote":"true"}}}'),
+    (".json", '{"schema":"stateframe-routes/1","roles":{"read":{"temperature":"0.3"}}}'),
+    (".json", '{"schema":"stateframe-routes/1","roles":{"read":{"slot":"2"}}}'),
+])
+def test_file_values_require_native_types(tmp_path, suffix, body):
+    path = tmp_path / ("routes" + suffix)
+    path.write_text(body)
+    with pytest.raises(routes.RouteError, match="route read"):
+        resolve(file=path)
+
+
+def test_profile_values_require_native_types():
+    with pytest.raises(routes.RouteError, match="route read.top_p"):
+        resolve(profile={"roles": {"read": {"top_p": "0.3"}}})
+    assert resolve(cli=["read.top_p=0.3", "read.allow_remote=true"]).roles["read"]["top_p"] == 0.3
+
+
 def test_inactive_and_public_view_never_contain_key_value():
     assert not resolve().active
     assert not resolve(cli=["read.model=base"]).active

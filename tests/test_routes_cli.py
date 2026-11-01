@@ -112,6 +112,23 @@ def test_routed_key_reaches_child_without_entering_spec(servers, monkeypatch):
     assert "secret-not-for-spec" not in json.dumps(options._routes.public())
 
 
+@pytest.mark.parametrize("source", ["test_env", "extra_env"])
+def test_spec_environment_cannot_persist_routed_key_value(servers, tmp_path, monkeypatch, source):
+    default, _ = servers
+    monkeypatch.setenv("ROUTE_TEST_KEY", "secret-not-for-spec")
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "calc.py").write_text("def answer():\n    return 1\n")
+    (repo / "test_calc.py").write_text("from calc import answer\ndef test_answer(): assert answer() == 1\n")
+    options = runner.RunOptions(repo=repo, task="Fix answer", endpoint=Endpoint(default, "base"),
+                                run_dir=tmp_path / "run", route_cli=["edit.api_key_env=ROUTE_TEST_KEY"],
+                                **{source: {"ROUTE_TEST_KEY": "secret-not-for-spec"}})
+    runner._probe_routes(options, lambda *_: None)
+    with pytest.raises(runner.RunError, match="ROUTE_TEST_KEY"):
+        runner.prepare(options)
+    assert not (tmp_path / "run" / "spec.json").exists()
+
+
 def test_route_capacity_refusal_names_role(servers):
     default, _ = servers
     server = ThreadingHTTPServer(("127.0.0.1", 0),
@@ -128,6 +145,51 @@ def test_route_capacity_refusal_names_role(servers):
         server.shutdown()
         thread.join(timeout=2)
         server.server_close()
+
+
+@pytest.mark.parametrize("slot_size", [65536, 16384])
+def test_explicit_context_checks_run_slot_size(servers, monkeypatch, slot_size):
+    default, small = servers
+    options = runner.RunOptions(repo=None, task="task", endpoint=Endpoint(default, "base"),
+                                route_cli=[f"read.endpoint={small}", "read.model=small",
+                                           "read.context_tokens=65536"])
+    options._context_tokens = 32768
+    options._context_env = {runner.CONTEXT_TOKENS_ENV: "32768"}
+    monkeypatch.setattr(Endpoint, "get_slots", lambda self: [{"id": 0, "n_ctx":
+                          slot_size if self.model == "small" else 32768}])
+    with pytest.raises(runner.RunError, match="route read model small has a"):
+        runner._probe_routes(options, lambda *_: None)
+
+
+@pytest.mark.parametrize("slot_entry,accepted", [
+    ({"id": True, "n_ctx": 65536}, False),
+    ({"id": "bad", "id_slot": 1, "n_ctx": 65536}, True),
+])
+def test_route_slot_uses_valid_nonnegative_integer_id(servers, monkeypatch, slot_entry, accepted):
+    default, _ = servers
+    options = runner.RunOptions(repo=None, task="task", endpoint=Endpoint(default, "base"),
+                                route_cli=["read.slot=1"])
+    monkeypatch.setattr(Endpoint, "get_slots", lambda self: [slot_entry])
+    if accepted:
+        runner._probe_routes(options, lambda *_: None)
+        assert options._routes is not None
+    else:
+        with pytest.raises(runner.RunError, match="is not reported"):
+            runner._probe_routes(options, lambda *_: None)
+
+
+def test_resolved_inactive_auto_slot_emits_no_route_output(servers, monkeypatch, capsys):
+    default, _ = servers
+    monkeypatch.setenv("STATEFRAME_ALLOW_REMOTE_ENDPOINT", "1")
+    options = runner.RunOptions(repo=None, task="task", endpoint=Endpoint(default, "base"),
+                                route_cli=["read.slot=auto"])
+    options._cache_slot = 0
+    monkeypatch.setattr(Endpoint, "get_slots", lambda self: [{"id": 0, "n_ctx": 65536,
+                                                                 "is_processing": False}])
+    capsys.readouterr()
+    runner._probe_routes(options)
+    assert options._routes is None
+    assert capsys.readouterr().err == ""
 
 
 def test_resume_reuses_resolved_auto_slot(servers, monkeypatch):
@@ -171,6 +233,38 @@ def test_resume_refusal_names_role_and_field():
     assert changes == [{"role": "edit", "field": "model", "from": "old", "to": "new"}]
     with pytest.raises(runner.resume_module.ResumeRefused, match="only change ROLE.endpoint or ROLE.model"):
         runner._compare_resume_routes(recorded, current, ["edit.temperature=0.5"])
+
+
+def test_resume_refuses_changed_unit_override_mask():
+    before = routes.resolve({"endpoint": "http://127.0.0.1:8080/v1", "model": "base"},
+                            cli=["plan.model=large", "unit.model=base"], environ={})
+    after = routes.resolve({"endpoint": "http://127.0.0.1:8080/v1", "model": "base"},
+                           cli=["plan.model=large"], environ={})
+    assert before.roles == after.roles
+    with pytest.raises(runner.resume_module.ResumeRefused, match="route unit.model changed"):
+        runner._compare_resume_routes(before.public(), after, [])
+
+
+def test_unit_send_uses_effective_rate_override(tmp_path):
+    wire = tmp_path / "wire"
+    wire.mkdir()
+    (wire / "0001.route.json").write_text(json.dumps({"role": "read", "scope": "unit",
+        "unit_class": "patch", "model": "base", "escalated_from": None}))
+    spec = {"roles": {"read": {"cost_input_per_mtok": 1.0,
+                              "cost_cached_input_per_mtok": 1.0, "cost_output_per_mtok": 1.0},
+                      "edit": {"cost_input_per_mtok": 20.0,
+                               "cost_cached_input_per_mtok": 20.0, "cost_output_per_mtok": 20.0},
+                      "unit": {"cost_input_per_mtok": 10.0},
+                      "unit.patch": {"cost_input_per_mtok": 12.0}},
+            "unit_overrides": {"unit": ["cost_input_per_mtok"],
+                               "unit.patch": ["cost_input_per_mtok"]}}
+    costs = runner._route_costs(tmp_path, spec, [{"send": 1, "request_id": "unit-1",
+                                                 "completion_tokens": 10}],
+                                [{"total": 100, "cached": 20}])
+    assert costs["roles"]["read"]["estimated_cost"] == 0.00099
+    assert costs["total"]["estimated_cost"] == 0.00099
+    assert costs["all_at_edit_rates"] == 0.00156
+    assert costs["estimated_savings"] == 0.00057
 
 
 def test_route_summary_uses_wire_usage_and_prices(tmp_path, capsys):
