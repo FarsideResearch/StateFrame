@@ -170,6 +170,9 @@ class ToolTape:
     def pending(self) -> tuple[TapeRecord, ...]:
         return tuple(record for record in self._records.values() if not record.completed)
 
+    def records(self) -> tuple[TapeRecord, ...]:
+        return tuple(self._records.values())
+
 
 def replay_decision(record: TapeRecord | None, *, replay_external_allowed: bool) -> ReplayDecision:
     if record is None:

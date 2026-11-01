@@ -1072,6 +1072,10 @@ def build_typed_state(
     host_tools = agent_tools_service()
     if host_tools is not None and host_tools.jobs.jobs:
         state["jobs"] = host_tools.snapshot()
+    from kernel_skills import service as skills_service
+    skills = skills_service()
+    if skills is not None:
+        state["skills"] = skills.catalog()
     from kernel_framefit_receipt_history import attach_history
 
     attach_history(state, action_context)
@@ -1558,8 +1562,11 @@ def compose_frame_only(
         and str(task.get("content")).startswith(STATE_HEADER + "\n")
     )
     task_messages = [] if task_is_state_frame else [task]
+    from kernel_skills import service as skills_service
+    skills = skills_service()
+    skill_messages = skills.messages() if skills is not None else []
     result = [
-        *systems, *task_messages, state_block, *current_sources, *source_notices,
+        *systems, *task_messages, state_block, *skill_messages, *current_sources, *source_notices,
         *host_context_panels, *newest,
         *(copy.deepcopy(dict(message)) for message in latest_exchange),
         {"role": "user", "content": VOLATILE_TAIL_MARKER},

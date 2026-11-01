@@ -287,6 +287,11 @@ def build_qualified_request(capture, runtime, body, *, endpoint, key, deadline=N
     # Internal candidate construction may have no enclosing adapter. It does
     # not grant transport admission; physical send requires a bound gate.
     capture._qualified_request_gate_passed = callable(gate)
+    if capture._qualified_request_gate_passed:
+        from kernel_skills import service as skills_service
+        skills = skills_service()
+        if skills is not None:
+            skills.commit_delivery(body["messages"])
     publish_code_bookmark_transition(runtime, capture._code_bookmark_transition)
     return record
 

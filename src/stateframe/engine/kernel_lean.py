@@ -26,7 +26,7 @@ PLAIN_SYSTEM_PROMPT = (
 )
 PLAIN_TOOL_NAMES = frozenset({
     "list_files", "read", "grep", "str_replace", "edit", "file_create", "file_delete", "file_move", "shell",
-    "write", "run_tests", "done", "job_wait", "job_output", "job_stop", "git", "web_fetch",
+    "write", "run_tests", "done", "job_wait", "job_output", "job_stop", "git", "web_fetch", "skill_load",
 })
 MAX_TOOL_RESULT_BYTES = 24_000
 MAX_TOOL_RESULT_CHARS = 12_000
@@ -44,7 +44,7 @@ _KNOWN_TOOL_NAMES = frozenset({
     *PLAIN_TOOL_NAMES, "insert_before", "authored_check", "read_check_receipt",
     "recall", "work", "work_update", "note_update", "probe", "reproduce",
     "test", "replace_module", "decide", "where_defined", "who_calls",
-    "references", "outline", "dependency_fact", "read_pointer", "abstain",
+    "references", "outline", "dependency_fact", "read_pointer", "abstain", "skill_load",
 })
 _EVIDENCE_PIN_RE = re.compile(
     r"\[EVIDENCEPIN\].*?(?:\[/EVIDENCEPIN\]|$)", re.DOTALL,

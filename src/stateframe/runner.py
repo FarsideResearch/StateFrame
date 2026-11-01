@@ -29,6 +29,7 @@ from .endpoint import CHAT_SUFFIX, Endpoint, EndpointError
 from .task_row import build_row
 from .engine.kernel_custom_tools import CustomToolError, load_tool_files
 from .engine.kernel_tool_settings import ToolSettings
+from .skills import SkillError, measured_skills_digest, resolve_skills, skills_digest, verify_records
 
 PACKAGE = Path(__file__).resolve().parent
 ENGINE_DIR = PACKAGE / "engine"
@@ -168,6 +169,8 @@ class RunOptions:
     test_env: dict[str, str] = field(default_factory=dict)
     pytest_plugins: str | None = None  # "installed": let pytest load installed plugins
     tool_settings: ToolSettings = field(default_factory=ToolSettings)
+    skills: tuple[str, ...] = ()
+    trust_skill_tools: bool = False
     shell_confirm: Callable[[str], bool] | None = field(default=None, repr=False)
     _deadline: float | None = field(default=None, init=False, repr=False)
 
@@ -598,10 +601,38 @@ def prepare(options: RunOptions) -> tuple[Path, workcopy.WorkCopy, dict]:
         raise RunError("--max-turns must be 0 (no limit) or between 1 and 500")
     if not ENGINE_DIR.is_dir():
         raise RunError("engine directory missing from the package; reinstall stateframe")
+    try:
+        selected_skills = resolve_skills(options.skills, trusted=options.trust_skill_tools)
+    except SkillError as error:
+        raise RunError(str(error)) from error
+    if selected_skills and str(options.extra_env.get("STATEFRAME_AGENT_LOOP", environment.get("STATEFRAME_AGENT_LOOP", "full"))).lower() == "plain":
+        raise RunError("--skill requires the composed loop; plain loop does not support skills")
+    if selected_skills and str(options.extra_env.get("STATEFRAME_LEAN", environment.get("STATEFRAME_LEAN", "off"))).lower() == "on":
+        raise RunError("--skill requires the composed loop; lean mode does not support skills")
+    records = [skill.record(trusted=options.trust_skill_tools) for skill in selected_skills]
+    measurements = None
+    if selected_skills:
+        # Admission is host-owned and recorded before the child builds its first request.
+        sys.path.insert(0, str(ENGINE_DIR))
+        try:
+            from .engine.kernel_request_diet import RequestTokenMeter
+            from .engine.kernel_skills import SkillRuntime, measure_admission
+            meter = RequestTokenMeter(endpoint=options.endpoint.chat_url, template_overhead_tokens=0)
+            measurements = measure_admission(selected_skills, records, meter)
+            digest = measured_skills_digest(records, measurements)
+            SkillRuntime(records, digest, options.endpoint.chat_url, measurements)
+        except SkillError as error:
+            raise RunError(str(error)) from error
+        finally:
+            sys.path.remove(str(ENGINE_DIR))
     settings = options.tool_settings
+    if options.trust_skill_tools:
+        settings = replace(settings, tools_files=(*settings.tools_files, *(
+            {"path": str(skill.path / "tools.json"), "digest": "pending"}
+            for skill in selected_skills if skill.tools_json_sha256)))
     builtin_names = frozenset(("grep", "list_files", "read", "edit", "str_replace", "insert_before",
         "authored_check", "file_create", "run_tests", "read_check_receipt", "recall", "done",
-        "shell", "job_wait", "job_output", "job_stop", "file_delete", "file_move", "git", "web_fetch"))
+        "shell", "job_wait", "job_output", "job_stop", "file_delete", "file_move", "git", "web_fetch", "skill_load"))
     try:
         custom = load_tool_files([Path(item["path"]) for item in settings.tools_files],
                                  builtin_names=builtin_names, shell_network=settings.shell_network)
@@ -646,12 +677,20 @@ def prepare(options: RunOptions) -> tuple[Path, workcopy.WorkCopy, dict]:
     settings_file = run / "tool-settings.json"
     settings_file.write_text(json.dumps(settings.as_dict(), indent=1, sort_keys=True))
     settings_file.chmod(0o600)
+    skills_file = run / "skill-settings.json"
+    skills_record = {"schema": "stateframe-skill-settings/1", "skills": records,
+                     "skills_digest": (measured_skills_digest(records, measurements)
+                                       if measurements is not None else skills_digest(records)),
+                     **({"measurements": measurements} if measurements is not None else {})}
+    skills_file.write_text(json.dumps(skills_record, indent=1, sort_keys=True))
+    skills_file.chmod(0o600)
     environment.update(options._context_env)
     opt_in = resolve_opt_in_switches()
     environment.update(opt_in)
     environment.update(options.extra_env)
     # Host authority wins over every caller-supplied environment overlay.
     environment["STATEFRAME_TOOL_SETTINGS_FILE"] = str(settings_file)
+    environment["STATEFRAME_SKILL_SETTINGS_FILE"] = str(skills_file)
     # Slot selection is a runner-owned contract. A stale ambient value or an
     # extra environment entry must not pin a slot after discovery found none.
     environment.pop("REACT_SLOT_ID", None)
@@ -669,6 +708,7 @@ def prepare(options: RunOptions) -> tuple[Path, workcopy.WorkCopy, dict]:
         environment["STATEFRAME_TASK_PYTEST_PLUGINS"] = "installed"
     environment_sources = {k: "profile:" + options.profile for k in environment}
     environment_sources["STATEFRAME_TOOL_SETTINGS_FILE"] = "runner:host-tool-settings"
+    environment_sources["STATEFRAME_SKILL_SETTINGS_FILE"] = "runner:host-skill-settings"
     for name in opt_in:
         environment_sources[name] = ("ambient:" + name if os.environ.get(name, "").strip()
                                      else "runner:default-" + OPT_IN_RUNNER_DEFAULTS[name])
@@ -690,6 +730,9 @@ def prepare(options: RunOptions) -> tuple[Path, workcopy.WorkCopy, dict]:
         "tool_settings": settings.as_dict(),
         "custom_tools_digest": custom.digest,
         "custom_executables": {tool.name: tool.executable_digest for tool in custom.tools},
+        "skills": records,
+        "skills_digest": skills_record["skills_digest"],
+        **({"skills_measurements": measurements} if measurements is not None else {}),
         "environment": environment,
         "environment_sources": environment_sources,
         "prompt_cache_slot": {
@@ -1315,8 +1358,14 @@ def resume_run(run_dir: Path, *, endpoint: Endpoint | None = None, max_turns: in
     _validate_timeout(timeout_s)
     started = time.monotonic()
     run_dir = run_dir.resolve()
-    state = resume_module.assess(run_dir, max_turns=max_turns, model=model)
+    state = resume_module.assess(run_dir, max_turns=max_turns, model=model,
+                                 replay_external=replay_external)
     spec: dict = state["spec"]  # type: ignore[assignment]
+    try:
+        verify_records(spec.get("skills", []), spec.get("skills_digest", skills_digest([])),
+                       spec.get("skills_measurements"))
+    except SkillError as error:
+        raise resume_module.ResumeRefused(str(error)) from error
     if "tool_settings" in spec:
         try:
             settings = ToolSettings.from_dict(spec["tool_settings"])
@@ -1324,7 +1373,7 @@ def resume_run(run_dir: Path, *, endpoint: Endpoint | None = None, max_turns: in
             raise resume_module.ResumeRefused(f"recorded tool settings are invalid: {error}") from error
         builtin_names = frozenset(("grep", "list_files", "read", "edit", "str_replace", "insert_before",
             "authored_check", "file_create", "run_tests", "read_check_receipt", "recall", "done",
-            "shell", "job_wait", "job_output", "job_stop", "file_delete", "file_move", "git", "web_fetch"))
+            "shell", "job_wait", "job_output", "job_stop", "file_delete", "file_move", "git", "web_fetch", "skill_load"))
         for item in settings.tools_files:
             path = Path(item["path"])
             try:
@@ -1405,7 +1454,8 @@ def resume_run(run_dir: Path, *, endpoint: Endpoint | None = None, max_turns: in
             if int(state["max_turns"]) != int(spec["max_turns"]):
                 printer(step_limit_restart_warning(int(spec["max_turns"]), int(state["max_turns"])))
             previous = resume_module.archive_attempt(
-                state, ENGINE_DIR, use_checkpoint=same_limits and options.tool_settings.shell == "off")
+                state, ENGINE_DIR, use_checkpoint=same_limits and options.tool_settings.shell == "off",
+                replay_external=replay_external)
             spec = _resume_spec(run_dir, endpoint)
             # The cache slot stays the one the run started with: it is part of the request bytes.
             slot = spec.get("prompt_cache_slot") or {}
@@ -1420,7 +1470,10 @@ def resume_run(run_dir: Path, *, endpoint: Endpoint | None = None, max_turns: in
                         "set back to the recorded name; nothing else is changed (recorded in spec.json, "
                         "summary.json and any resume-divergence.json)")
             checkpoint = spec["resume"].get("checkpoint")
-            if checkpoint:
+            if spec["resume"].get("restart_live"):
+                printer("restart live: the changed step limit starts at request 1; previous model and tool "
+                        "exchanges remain archived")
+            elif checkpoint:
                 printer(f"checkpoint: engine state restored as of send {checkpoint['sends']} (step "
                         f"{checkpoint['step']}); {checkpoint['tail']} later recorded exchange(s) are replayed "
                         "and checked byte for byte, then the run continues live")
@@ -1439,7 +1492,8 @@ def resume_run(run_dir: Path, *, endpoint: Endpoint | None = None, max_turns: in
             # refused attempt's files and replay the interrupted attempt from the start instead.
             printer(f"checkpoint restore refused ({refused}); falling back to replaying the run")
             state["attempt"] = int(state["attempt"]) + 1
-            resume_module.archive_attempt(state, ENGINE_DIR, use_checkpoint=False, tape_from=previous)
+            resume_module.archive_attempt(state, ENGINE_DIR, use_checkpoint=False, tape_from=previous,
+                                          replay_external=replay_external)
             spec = _resume_spec(run_dir, endpoint)
             spec["resume"]["checkpoint_refused"] = refused
             (run_dir / "spec.json").write_text(json.dumps(spec, indent=1, sort_keys=True))
