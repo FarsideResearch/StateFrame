@@ -15,6 +15,7 @@ from .runner import RunError, RunOptions, resume_run, run
 from .task_row import TaskRowError
 from .workcopy import WorkCopyError
 from .engine.kernel_tool_settings import ToolSettings, ToolSettingsError
+from .skills import install as install_skill, list_installed, remove as remove_skill
 from datetime import datetime, timezone
 
 
@@ -111,8 +112,12 @@ def _add_task_arguments(command: argparse.ArgumentParser, *, for_run: bool = Fal
     command.add_argument("--shell-ask", action=argparse.BooleanOptionalAction,
                          default=not for_run)
     command.add_argument("--shell-network", choices=("none", "loopback", "full"), default="loopback")
-    for flag in ("shell-allow", "shell-deny", "shell-read", "web-allow", "tools"):
+    for flag in ("shell-allow", "shell-deny", "shell-read", "web-allow", "tools", "mcp"):
         command.add_argument("--" + flag, action="append", default=[])
+    command.add_argument("--skill", action="append", default=[], metavar="NAME_OR_PATH",
+                         help="load a selected instruction bundle (repeatable)")
+    command.add_argument("--trust-skill-tools", action="store_true",
+                         help="offer selected skills' command definitions")
     command.add_argument("--shell-sandbox", choices=("on", "off"), default="on")
     for flag in ("run-env", "git-tool", "web"):
         command.add_argument("--" + flag, action=argparse.BooleanOptionalAction, default=None)
@@ -164,6 +169,14 @@ def build_parser() -> argparse.ArgumentParser:
     _add_task_arguments(chat_cmd)
     chat_cmd.add_argument("--session-dir", type=Path,
                           help="where to keep the session (default: ~/.stateframe/sessions/<repo>-<time>)")
+    skill_cmd = commands.add_parser("skill", help="manage installed instruction bundles")
+    skill_actions = skill_cmd.add_subparsers(dest="skill_action", required=True)
+    skill_install = skill_actions.add_parser("install", help="validate and install a bundle")
+    skill_install.add_argument("path", type=Path)
+    skill_install.add_argument("--force", action="store_true")
+    skill_actions.add_parser("list", help="list installed bundles")
+    skill_remove = skill_actions.add_parser("remove", help="remove an installed bundle")
+    skill_remove.add_argument("name")
     return parser
 
 
@@ -184,7 +197,9 @@ def _run_options(args: argparse.Namespace, endpoint: Endpoint) -> RunOptions:
                             web=args.web if args.web is not None else False,
                             web_allow=tuple(args.web_allow),
                             tools_files=tuple({"path": str(Path(path).expanduser().resolve()), "digest": "pending"}
-                                              for path in args.tools))
+                                              for path in args.tools),
+                            mcp_files=tuple({"path": str(Path(path).expanduser().resolve()), "digest": "pending"}
+                                            for path in args.mcp))
     return RunOptions(repo=args.repo, task=getattr(args, "task", ""), endpoint=endpoint,
                       max_turns=args.max_turns, test_cmd=args.test_cmd, checks=args.check,
                       target=args.target, edit_paths=args.edit,
@@ -196,7 +211,8 @@ def _run_options(args: argparse.Namespace, endpoint: Endpoint) -> RunOptions:
                       slot=args.slot, keep_checkpoints=args.keep_checkpoints,
                       timeout_s=args.timeout,
                       quiet=getattr(args, "quiet", False) or getattr(args, "json", False),
-                      tool_settings=settings)
+                      tool_settings=settings, skills=tuple(args.skill),
+                      trust_skill_tools=args.trust_skill_tools)
 
 
 def _print_summary(summary: dict) -> None:
@@ -289,6 +305,17 @@ def main(argv: list[str] | None = None) -> int:
             else:
                 _print_summary(summary)
             return summary["exit_code"]
+        if args.command == "skill":
+            if args.skill_action == "install":
+                skill = install_skill(args.path, force=args.force)
+                print(f"installed {skill.name} ({skill.skill_md_sha256[:12]})")
+            elif args.skill_action == "list":
+                for skill in list_installed():
+                    print(f"{skill.name}\t{skill.description}\ttools={'yes' if skill.tools_json_sha256 else 'no'}\t{skill.skill_md_sha256}")
+            else:
+                remove_skill(args.name)
+                print(f"removed {args.name}")
+            return 0
         endpoint = Endpoint.from_args(args.endpoint, args.model, args.api_key_env)
         if args.command == "chat":
             from . import chat

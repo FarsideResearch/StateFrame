@@ -38,6 +38,7 @@ class ToolSettings:
     web: bool = False
     web_allow: tuple[str, ...] = ()
     tools_files: tuple[dict[str, str], ...] = ()
+    mcp_files: tuple[dict[str, str], ...] = ()
     replay_external: bool = False
 
     def __post_init__(self) -> None:
@@ -64,22 +65,32 @@ class ToolSettings:
                 or not all(isinstance(v, str) and v for v in item.values())
                 for item in self.tools_files):
             raise ToolSettingsError("tools_files: expected path and digest records")
+        if not isinstance(self.mcp_files, tuple) or any(
+                not isinstance(item, dict) or set(item) != {"path", "digest"}
+                or not all(isinstance(v, str) and v for v in item.values())
+                for item in self.mcp_files):
+            raise ToolSettingsError("mcp_files: expected path and digest records")
 
     def as_dict(self) -> dict[str, object]:
         # JSON-canonical form (tuples as lists): the child compares this against the spec's JSON copy.
-        return json.loads(json.dumps({"schema": SCHEMA, **asdict(self)}))
+        values = asdict(self)
+        if not self.mcp_files:
+            values.pop("mcp_files")  # Preserve the 0.2.0 authority digest for runs without MCP.
+        return json.loads(json.dumps({"schema": SCHEMA, **values}))
 
     @classmethod
     def from_dict(cls, data: object) -> "ToolSettings":
         if not isinstance(data, dict) or data.get("schema") != SCHEMA:
             raise ToolSettingsError("tool settings: expected stateframe-tool-settings/1")
         names = set(cls.__dataclass_fields__)
-        if set(data) != names | {"schema"}:
+        expected = (names | {"schema"}) if "mcp_files" in data else ((names - {"mcp_files"}) | {"schema"})
+        if set(data) != expected:
             raise ToolSettingsError("tool settings: missing or unknown fields: " +
-                                    ", ".join(sorted(set(data) ^ (names | {"schema"}))))
+                                    ", ".join(sorted(set(data) ^ expected)))
         values = dict(data)
         del values["schema"]
-        for key in ("shell_allow", "shell_deny", "shell_read", "web_allow", "tools_files"):
+        values.setdefault("mcp_files", [])
+        for key in ("shell_allow", "shell_deny", "shell_read", "web_allow", "tools_files", "mcp_files"):
             if not isinstance(values[key], list):
                 raise ToolSettingsError(f"{key}: expected list")
             values[key] = tuple(values[key])
