@@ -85,6 +85,10 @@ def _add_task_arguments(command: argparse.ArgumentParser, *, for_run: bool = Fal
                          help="another file the fix may change (repeatable); with --edit or in a "
                               "repo over 200 source files only --target and --edit files are "
                               "editable, the rest of the repo is read-only context")
+    command.add_argument("--hooks", action="append", default=[], metavar="FILE",
+                         help="trusted hook configuration file (repeatable)")
+    command.add_argument("--no-project-hooks", action="store_true",
+                         help="skip the repository's trusted .stateframe/hooks.json file")
     command.add_argument("--target", metavar="PATH",
                          help="starting-file hint (default: first module the checks import)")
     if for_run:
@@ -177,6 +181,12 @@ def build_parser() -> argparse.ArgumentParser:
     skill_actions.add_parser("list", help="list installed bundles")
     skill_remove = skill_actions.add_parser("remove", help="remove an installed bundle")
     skill_remove.add_argument("name")
+
+    hooks_cmd = commands.add_parser("hooks", help="manage explicitly trusted project hooks")
+    hooks_subcommands = hooks_cmd.add_subparsers(dest="hooks_command", required=True)
+    trust_cmd = hooks_subcommands.add_parser("trust", help="trust or withdraw a repository hook file")
+    trust_cmd.add_argument("--repo", required=True, type=Path, help="repository containing .stateframe/hooks.json")
+    trust_cmd.add_argument("--remove", action="store_true", help="withdraw trust for this repository hook file")
     return parser
 
 
@@ -212,13 +222,20 @@ def _run_options(args: argparse.Namespace, endpoint: Endpoint) -> RunOptions:
                       timeout_s=args.timeout,
                       quiet=getattr(args, "quiet", False) or getattr(args, "json", False),
                       tool_settings=settings, skills=tuple(args.skill),
-                      trust_skill_tools=args.trust_skill_tools)
+                      trust_skill_tools=args.trust_skill_tools,
+                      hooks_files=tuple(Path(path).expanduser().resolve() for path in args.hooks),
+                      no_project_hooks=args.no_project_hooks,
+                      hooks_repo=args.repo.resolve())
 
 
 def _print_summary(summary: dict) -> None:
     diff = Path(summary["run_dir"], "final.diff").read_text()
     print()
-    print("=== final diff ===" if summary.get("succeeded") else "=== partial diff (not promoted) ===")
+    if summary.get("runtime_outcome") == "hook_containment" and summary.get("applied_in_place"):
+        title = "=== final diff (applied before HOOK_CONTAINMENT) ==="
+    else:
+        title = "=== final diff ===" if summary.get("succeeded") else "=== partial diff (not promoted) ==="
+    print(title)
     print(diff if diff else "(no changes)")
     before, after = summary["tests_before"], summary["tests_after"]
     print("=== tests ===")
@@ -232,6 +249,7 @@ def _print_summary(summary: dict) -> None:
          f"artifact={summary['artifact']}"),
         ("engine result", summary.get("engine_result")),
         *([("engine error", summary["engine_error_reason"])] if summary.get("engine_error_reason") else []),
+        *([("hook containment", summary["hook_containment"])] if summary.get("hook_containment") else []),
         ("model requests", summary.get("requests")),
         ("provider sends", summary.get("provider_sends")),
         ("request bytes sent", summary.get("request_bytes_sent")),
@@ -288,6 +306,10 @@ def main(argv: list[str] | None = None) -> int:
                 sys.stdout.flush()
             else:
                 print(out)
+            return 0
+        if args.command == "hooks":
+            from .hook_host import trust_project_hooks
+            trust_project_hooks(args.repo, remove=args.remove)
             return 0
         if args.command == "resume":
             endpoint = None

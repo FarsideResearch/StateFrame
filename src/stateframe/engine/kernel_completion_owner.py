@@ -8302,6 +8302,14 @@ def terminal_result(runtime: object, result: Mapping[str, object]) -> dict[str, 
         return join_terminal(
             runtime, sealed, writer="kernel_completion_owner.terminal_result",
         )
+    hook_terminal = str(result.get("result", "")).upper()
+    if hook_terminal in {"HOOK_BLOCKED", "HOOK_CONTAINMENT"}:
+        terminal = dict(result)
+        terminal["accepted"] = False
+        terminal["certified"] = False
+        return join_terminal(
+            runtime, terminal, writer="kernel_completion_owner.terminal_result",
+        )
     terminal = _legacy_terminal_result(runtime, result)
     from kernel_done_readiness_authority import (
         apply_terminal_result, decision_for_runtime,

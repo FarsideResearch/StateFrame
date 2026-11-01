@@ -106,6 +106,7 @@ flowchart TB
     RUNNER --> WC[workcopy.py: safe copy]
     RUNNER --> TI[test_interpreter.py: your tests' Python]
     RUNNER --> OC[outer_checks.py: before and after checks]
+    RUNNER --> HH[hook_host.py: trust and runner lifecycle events]
     RUNNER --> CH[_child.py: engine process]
     CH --> LOOP[engine probes/react_repair.py: agent loop and tools]
     LOOP --> RT[engine kernel_stateframe_runtime.py: build, fit, qualify]
@@ -116,11 +117,19 @@ flowchart TB
     RT --> BUD[engine kernel_execution_reply_budget.py: fit execution replies]
     LOOP --> TAPE[engine kernel_tool_tape.py: replay classes]
     LOOP --> CKP[engine kernel_checkpoint.py: checkpoints]
+    CH --> HW[engine kernel_hook_wiring.py: child hook boundaries]
+    HW --> HK[engine kernel_hooks.py: definitions and request panel]
+    HW --> HE[engine kernel_hook_exec.py: sandbox, effects and replay]
+    HE --> HD[engine kernel_hook_driver.py: bounded process streams]
     RUNNER --> RES[resume.py and replay_tape.py]
     CLI --> INS[inspect_run.py]
 ```
 
 The product package (`src/stateframe/`) is standard library only and owns the command line, the run directory, the working copy and the checks around a run. The engine (`src/stateframe/engine/`) runs in its own child process and owns everything about a request: the agent loop and tools, building and fitting the frame, sandboxed execution and checkpoints. [docs/guide/code-map.md](docs/guide/code-map.md) lists each module.
+
+## Lifecycle hooks
+
+Hook configuration and project digest trust are resolved by the runner. Start and end events run in the host process through the same execution sandbox. Child events pass through one wiring module that records gate results, notes and scoped formatter changes. The typed `[USER HOOKS]` panel is optional request context; no hook modules are loaded in the child when no hook source is enabled. See [Lifecycle hooks](docs/guide/hooks.md) for the contract and limits.
 
 ## Safety
 

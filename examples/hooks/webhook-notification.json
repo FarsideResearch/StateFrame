@@ -1,0 +1,24 @@
+{
+  "schema": "stateframe-hooks/1",
+  "hooks": [
+    {
+      "name": "webhook-notification",
+      "event": "session_end",
+      "argv": [
+        "/usr/bin/curl",
+        "--fail",
+        "--silent",
+        "--show-error",
+        "--request",
+        "POST",
+        "--header",
+        "Content-Type: application/json",
+        "--data-binary",
+        "@-",
+        "https://ntfy.sh/replace-with-your-topic"
+      ],
+      "network": "full",
+      "timeout": 30
+    }
+  ]
+}

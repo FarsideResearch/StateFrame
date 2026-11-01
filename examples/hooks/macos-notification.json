@@ -1,0 +1,16 @@
+{
+  "schema": "stateframe-hooks/1",
+  "hooks": [
+    {
+      "name": "macos-notification",
+      "event": "session_end",
+      "argv": [
+        "/usr/bin/osascript",
+        "-e",
+        "display notification \"StateFrame run finished\" with title \"StateFrame\""
+      ],
+      "network": "none",
+      "timeout": 10
+    }
+  ]
+}

@@ -8,6 +8,7 @@
 | `stateframe resume <run-dir>` | Continues a stopped run (Ctrl-C, `kill -9`, crash, lost server). |
 | `stateframe inspect <run-dir> --send N --frame` | Shows the frame, messages or exact bytes of request `N`. |
 | `stateframe chat --repo R` | Interactive session: tasks, follow-ups, `/diff`, `/undo`, `/apply`. |
+| `stateframe hooks trust --repo R` | Review and trust the exact `.stateframe/hooks.json` configuration for repository `R`. |
 
 ## Common flags
 
@@ -28,8 +29,11 @@
 - `--git-tool` / `--no-git-tool`: read-only Git tool, on by default when the source has Git metadata.
 - `--web` / `--no-web`: web fetch, off by default. `--web-allow DOMAIN` repeats to restrict hosts.
 - `--tools FILE`: repeatable trusted custom command definitions in `stateframe-tools/1` JSON.
+- `--hooks FILE`: repeatable lifecycle hook definitions in `stateframe-hooks/1` JSON. Project hooks at `.stateframe/hooks.json` require `stateframe hooks trust --repo R`; `--no-project-hooks` skips them for one `run` or `chat` command.
 - `--skill NAME_OR_PATH`: repeatable selected skill bundle. `--trust-skill-tools` offers its optional command definitions. See [Skills](skills.md).
 - On `resume`, `--replay-external` explicitly repeats recorded external operations before continuing.
+
+Hook files named with `--hooks` are explicitly trusted by that command. Project hook files need a separate digest trust step, and edits to the file or its pinned scripts require trust again. The [hooks guide](hooks.md) describes the event contract and the sandbox boundary.
 
 ## Which Python runs your tests
 
