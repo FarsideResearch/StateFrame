@@ -8,6 +8,7 @@ overflow is a presentation fault, not an attempt outcome.
 from __future__ import annotations
 
 from kernel_step_limits import parse_step_limit, reached, remaining as limit_remaining
+import kernel_frame_routes as _frame_routes
 
 import copy
 import ast
@@ -234,7 +235,9 @@ def _reprepare_on_source_change(function):
     """Retry one unsent preparation when its source authority changes mid-build."""
     @functools.wraps(function)
     def wrapped(self, messages, *, uncapped, tools, provider_request=True,
-                request_host_text_preparer=None):
+                request_host_text_preparer=None, **route_options):
+        # route_options carries forced_route/frozen_route_capture for a routed second leg only;
+        # unrouted callers never pass it, so their calls are unchanged.
         from kernel_frame_optional_allocation import FrameAllocationReplanNeeded
 
         if (not provider_request
@@ -245,6 +248,7 @@ def _reprepare_on_source_change(function):
                 self, messages, uncapped=uncapped, tools=tools,
                 provider_request=provider_request,
                 request_host_text_preparer=request_host_text_preparer,
+                **route_options,
             )
         # The first attempt may mutate its input lists. Preserve caller-owned
         # material before it runs so a retry cannot inherit a stale projection.
@@ -257,6 +261,7 @@ def _reprepare_on_source_change(function):
                 self, messages, uncapped=uncapped, tools=tools,
                 provider_request=provider_request,
                 request_host_text_preparer=request_host_text_preparer,
+                **route_options,
             )
         except FrameAllocationReplanNeeded:
             pass
@@ -269,6 +274,7 @@ def _reprepare_on_source_change(function):
                     self, fresh_messages, uncapped=fresh_uncapped,
                     tools=fresh_tools, provider_request=provider_request,
                     request_host_text_preparer=request_host_text_preparer,
+                    **route_options,
                 )
             capture = getattr(prepared, "capture", None)
             if capture is not None:
@@ -15243,6 +15249,23 @@ class StateFrameRuntime:
             self.journal.emit('rejected_candidate_closed', step=record['step'],
                               reason=recovery.reason, candidate=recovery.candidate)
         closed = self.journal.emit('action_outcome_closed', record=record)
+        if _frame_routes.ROUTES_ACTIVE:
+            from kernel_frame_routes import close_action as _close_frame_route_action
+            revision = self.binding().get("artifact")
+            canonical = {}
+            checks = []
+            if record.get("tool") == "run_tests":
+                canonical = next((row for row in reversed(self.test_receipts)
+                                  if isinstance(row, Mapping) and row.get("step") == record.get("step")
+                                  and row.get("execution_ids") and row.get("check_receipt_ids")), {})
+                reader = getattr(self.journal, "framefit_receipt_records", None)
+                if callable(reader):
+                    checks = [row for row in reader() if isinstance(row, Mapping)
+                              and row.get("kind") == "check_receipt"
+                              and row.get("execution_id") in canonical.get("execution_ids", ())
+                              and row.get("receipt_id") in canonical.get("check_receipt_ids", ())]
+            _close_frame_route_action(record, revision=revision,
+                                      canonical=canonical, receipts=checks)
         # Native tool batches close receipts here; ``observe`` is not called
         # for that path.  Feed the same settled record to STALLWIRE so the
         # unified owner sees the live action stream, not only text observations.
@@ -20504,6 +20527,8 @@ class StateFrameRuntime:
         return without, True
 
     def _record_passive_retention_capture(self, capture: object) -> dict[str, object] | None:
+        if _frame_routes.ROUTES_ACTIVE and getattr(capture, "route_response_discarded", False):
+            return None
         store = getattr(self, "passive_retention", None)
         if store is None or capture is None:
             return None
@@ -21474,7 +21499,9 @@ class StateFrameRuntime:
     @_host_phase("prepare")
     def prepare(self, messages: Sequence[dict], *, uncapped: Sequence[dict],
                  tools: object, provider_request: bool = True,
-                 request_host_text_preparer: Callable[..., object] | None = None) -> PreparedRequest:
+                 request_host_text_preparer: Callable[..., object] | None = None,
+                 forced_route: str | None = None,
+                 frozen_route_capture: object | None = None) -> PreparedRequest:
         # Retain the caller's inputs before any host projection or source closure
         # is frozen. A single unsent source replan can then run normal preparation
         # against the current workspace instead of relabeling stale proof bytes.
@@ -21574,30 +21601,57 @@ class StateFrameRuntime:
                     (), capture, {"kind": ENV_BROKEN, "receipt": receipt.as_dict()})
         # Native queued actions prepare frames without a provider response. Keep
         # the last actual model response until a newer response is committed.
-        if not lean_on:
-            self._record_passive_retention_capture(self._active_capture)
-        if (self._active_capture is not None
-                and self._active_capture.response_event_id is not None):
-            self._last_capture = self._active_capture
-        if not lean_on and (f4_on or getattr(self, "stateframe_hybrid_mode", "off") == "on"):
-            self._f4_record_real_exchanges(uncapped)
-        if not lean_on and self.self_plan_state is not None and self._last_capture is not None:
-            previous_frame = getattr(self._last_capture, "self_plan_frame", None)
-            if isinstance(previous_frame, Mapping):
-                self.self_plan_state.observe(
-                    previous_frame,
-                    getattr(self._last_capture, "response_reasoning_content", ""))
-        if not lean_on and self.unified_lifecycle is not None and self._last_capture is not None:
-            if ((getattr(self._last_capture, "output_cap_hit", False)
-                 or getattr(self._last_capture, "finish_reason", None) == "length")
-                    and not getattr(self._last_capture, "unified_cap_noted", False)):
-                self.unified_lifecycle.note_output_cap()
-                self._last_capture.unified_cap_noted = True
-        # The edit and its host-run public check are one delivered observation:
-        # history receives the synthetic tool result immediately after the edit
-        # result, while rich frames receive the same fact through receipts.
-        self._deliver_auto_verify(messages, uncapped)
-        self.close_step(uncapped)
+        if not _frame_routes.ROUTES_ACTIVE:
+            if not lean_on:
+                self._record_passive_retention_capture(self._active_capture)
+            if (self._active_capture is not None
+                    and self._active_capture.response_event_id is not None):
+                self._last_capture = self._active_capture
+            if not lean_on and (f4_on or getattr(self, "stateframe_hybrid_mode", "off") == "on"):
+                self._f4_record_real_exchanges(uncapped)
+            if not lean_on and self.self_plan_state is not None and self._last_capture is not None:
+                previous_frame = getattr(self._last_capture, "self_plan_frame", None)
+                if isinstance(previous_frame, Mapping):
+                    self.self_plan_state.observe(
+                        previous_frame,
+                        getattr(self._last_capture, "response_reasoning_content", ""))
+            if not lean_on and self.unified_lifecycle is not None and self._last_capture is not None:
+                if ((getattr(self._last_capture, "output_cap_hit", False)
+                     or getattr(self._last_capture, "finish_reason", None) == "length")
+                        and not getattr(self._last_capture, "unified_cap_noted", False)):
+                    self.unified_lifecycle.note_output_cap()
+                    self._last_capture.unified_cap_noted = True
+            # The edit and its host-run public check are one delivered observation:
+            # history receives the synthetic tool result immediately after the edit
+            # result, while rich frames receive the same fact through receipts.
+            self._deliver_auto_verify(messages, uncapped)
+            self.close_step(uncapped)
+        else:
+            if not lean_on and frozen_route_capture is None:
+                self._record_passive_retention_capture(self._active_capture)
+            if (frozen_route_capture is None and self._active_capture is not None
+                    and self._active_capture.response_event_id is not None):
+                self._last_capture = self._active_capture
+            if frozen_route_capture is None and not lean_on and (f4_on or getattr(self, "stateframe_hybrid_mode", "off") == "on"):
+                self._f4_record_real_exchanges(uncapped)
+            if frozen_route_capture is None and not lean_on and self.self_plan_state is not None and self._last_capture is not None:
+                previous_frame = getattr(self._last_capture, "self_plan_frame", None)
+                if isinstance(previous_frame, Mapping):
+                    self.self_plan_state.observe(
+                        previous_frame,
+                        getattr(self._last_capture, "response_reasoning_content", ""))
+            if frozen_route_capture is None and not lean_on and self.unified_lifecycle is not None and self._last_capture is not None:
+                if ((getattr(self._last_capture, "output_cap_hit", False)
+                     or getattr(self._last_capture, "finish_reason", None) == "length")
+                        and not getattr(self._last_capture, "unified_cap_noted", False)):
+                    self.unified_lifecycle.note_output_cap()
+                    self._last_capture.unified_cap_noted = True
+            # The edit and its host-run public check are one delivered observation:
+            # history receives the synthetic tool result immediately after the edit
+            # result, while rich frames receive the same fact through receipts.
+            if frozen_route_capture is None:
+                self._deliver_auto_verify(messages, uncapped)
+                self.close_step(uncapped)
         _tool_call_loop_notice = None
         _tool_call_loop_breaker = getattr(self, "_tool_call_loop_breaker", None)
         if not lean_on and provider_request and _tool_call_loop_breaker is not None:
@@ -21605,7 +21659,8 @@ class StateFrameRuntime:
             self._tool_call_loop_breaker_ready = False
         # Native batches arm the final check while closing their last edit;
         # deliver that result in this same provider request.
-        self._deliver_auto_verify(messages, uncapped)
+        if not _frame_routes.ROUTES_ACTIVE or frozen_route_capture is None:
+            self._deliver_auto_verify(messages, uncapped)
         if lean_on:
             # Plain LEAN requests skip the projected-frame arm below, so they
             # must advance the same host continuation boundary here.
@@ -21891,40 +21946,93 @@ class StateFrameRuntime:
         if framefit5_on:
             self._framefit_action_context = None
             try:
-                from kernel_stateframe_action_ledger import ActionLedgerError, build_framefit_action_context
-                from kernel_stateframe_framefit5 import FrameFit5Error, attach_typed_state, build_typed_state
+                if not _frame_routes.ROUTES_ACTIVE:
+                    from kernel_stateframe_action_ledger import ActionLedgerError, build_framefit_action_context
+                    from kernel_stateframe_framefit5 import FrameFit5Error, attach_typed_state, build_typed_state
 
-                workspace_root = getattr(self.owner, "root", None)
-                if workspace_root is None:
-                    raise RuntimeError("FRAMEFIT5 candidate workspace root is unavailable")
-                receipt_reader = getattr(self.journal, "framefit_receipt_records", None)
-                if not callable(receipt_reader):
-                    raise RuntimeError("journal has no durable FRAMEFIT5 receipt projection")
-                context_reader = getattr(self.journal, "framefit_receipt_context", None)
-                receipt_context = (context_reader() if callable(context_reader)
-                                   else {"journal_receipt_records": receipt_reader()})
-                if getattr(self.journal, "framefit_receipt_overflowed", False):
-                    raise RuntimeError("journal FRAMEFIT5 receipt projection is incomplete")
-                action_context = build_framefit_action_context(
-                    uncapped,
-                    keep_k=0,
-                    prior_ledger=None,
-                    workspace_root=workspace_root,
-                    prior_open_edit_site=None,
-                    journal=self.journal,
-                )
-                site_context = action_context.get("site_context")
-                if isinstance(site_context, Mapping):
-                    self.journal.emit(
-                        "framefit5_action_context_degraded",
-                        producer="kernel_stateframe_runtime",
-                        status=str(site_context.get("status") or "UNVERIFIABLE"),
-                        reason=str(site_context.get("reason") or "unknown"),
-                        dispatch=False,
+                    workspace_root = getattr(self.owner, "root", None)
+                    if workspace_root is None:
+                        raise RuntimeError("FRAMEFIT5 candidate workspace root is unavailable")
+                    receipt_reader = getattr(self.journal, "framefit_receipt_records", None)
+                    if not callable(receipt_reader):
+                        raise RuntimeError("journal has no durable FRAMEFIT5 receipt projection")
+                    context_reader = getattr(self.journal, "framefit_receipt_context", None)
+                    receipt_context = (context_reader() if callable(context_reader)
+                                       else {"journal_receipt_records": receipt_reader()})
+                    if getattr(self.journal, "framefit_receipt_overflowed", False):
+                        raise RuntimeError("journal FRAMEFIT5 receipt projection is incomplete")
+                    action_context = build_framefit_action_context(
+                        uncapped,
+                        keep_k=0,
+                        prior_ledger=None,
+                        workspace_root=workspace_root,
+                        prior_open_edit_site=None,
+                        journal=self.journal,
                     )
-                action_context.update(receipt_context)
-                typed_state = build_typed_state(uncapped, action_context, self)
-                self._framefit_action_context = attach_typed_state(action_context, typed_state)
+                    site_context = action_context.get("site_context")
+                    if isinstance(site_context, Mapping):
+                        self.journal.emit(
+                            "framefit5_action_context_degraded",
+                            producer="kernel_stateframe_runtime",
+                            status=str(site_context.get("status") or "UNVERIFIABLE"),
+                            reason=str(site_context.get("reason") or "unknown"),
+                            dispatch=False,
+                        )
+                    action_context.update(receipt_context)
+                    typed_state = build_typed_state(uncapped, action_context, self)
+                    self._framefit_action_context = attach_typed_state(action_context, typed_state)
+                else:
+                    from kernel_stateframe_action_ledger import ActionLedgerError
+                    from kernel_stateframe_framefit5 import FrameFit5Error
+                    if frozen_route_capture is not None:
+                        self._framefit_action_context = copy.deepcopy(
+                            frozen_route_capture._frame_route_action_context)
+                        typed_state = copy.deepcopy(frozen_route_capture._frame_route_typed_state)
+                    else:
+                        from kernel_stateframe_action_ledger import ActionLedgerError, build_framefit_action_context
+                        from kernel_stateframe_framefit5 import FrameFit5Error, attach_typed_state, build_typed_state
+
+                        workspace_root = getattr(self.owner, "root", None)
+                        if workspace_root is None:
+                            raise RuntimeError("FRAMEFIT5 candidate workspace root is unavailable")
+                        receipt_reader = getattr(self.journal, "framefit_receipt_records", None)
+                        if not callable(receipt_reader):
+                            raise RuntimeError("journal has no durable FRAMEFIT5 receipt projection")
+                        context_reader = getattr(self.journal, "framefit_receipt_context", None)
+                        receipt_context = (context_reader() if callable(context_reader)
+                                           else {"journal_receipt_records": receipt_reader()})
+                        if getattr(self.journal, "framefit_receipt_overflowed", False):
+                            raise RuntimeError("journal FRAMEFIT5 receipt projection is incomplete")
+                        action_context = build_framefit_action_context(
+                            uncapped,
+                            keep_k=0,
+                            prior_ledger=None,
+                            workspace_root=workspace_root,
+                            prior_open_edit_site=None,
+                            journal=self.journal,
+                        )
+                        site_context = action_context.get("site_context")
+                        if isinstance(site_context, Mapping):
+                            self.journal.emit(
+                                "framefit5_action_context_degraded",
+                                producer="kernel_stateframe_runtime",
+                                status=str(site_context.get("status") or "UNVERIFIABLE"),
+                                reason=str(site_context.get("reason") or "unknown"),
+                                dispatch=False,
+                            )
+                        action_context.update(receipt_context)
+                        typed_state = build_typed_state(uncapped, action_context, self)
+                        self._framefit_action_context = attach_typed_state(action_context, typed_state)
+                    from kernel_frame_routes import resolve as _resolve_frame_route, role_for_request
+                    role = forced_route or role_for_request(self.binding().get("artifact"))
+                    capture.frame_route = _resolve_frame_route(
+                        role, forced_by=getattr(frozen_route_capture, "request_id", None))
+                    capture._frame_route_typed_state = copy.deepcopy(typed_state)
+                    capture._frame_route_action_context = copy.deepcopy(self._framefit_action_context)
+                    capture._tokenize_endpoint = str(capture.frame_route.settings.get("tokenizer")
+                                                     or capture.frame_route.settings["endpoint"])
+                    capture.route_deadline = time.monotonic() + float(
+                        capture.frame_route.settings.get("timeout_s") or 1800)
             except Exception as error:
                 self._framefit_action_context = None
                 from kernel_boundary_recovery import safe_error_class

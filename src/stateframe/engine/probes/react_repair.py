@@ -82,6 +82,7 @@ from kernel_silent_off_organs import (  # noqa: E402
 from sampler_config import apply_to_request as _apply_sampler_fields  # noqa: E402
 from kernel_done_acceptance import done_accepted  # noqa: E402
 import kernel_workspace_truth as _workspace_truth  # noqa: E402
+import kernel_frame_routes as _frame_routes  # noqa: E402
 
 CORPUS = POC / "results.SNAPSHOT-20260920" / (os.environ.get("BENCH_CORPUS") or "real_tasks_v3.jsonl")
 API = os.environ.get("DS_URL", "")
@@ -3180,6 +3181,9 @@ def ask_tools(messages, mt=4000, temp=None, tools=None, known_refs=None):
                 raise ValueError("REACT_SLOT_ID must be nonnegative")
             from kernel_prompt_cache import configure_pinned_slot
             configure_pinned_slot(body, slot)
+        if _frame_routes.ROUTES_ACTIVE and capture is not None and getattr(capture, "frame_route", None) is not None:
+            from kernel_frame_routes import apply_body
+            apply_body(body, capture.frame_route, default_endpoint=API)
         from kernel_step_contract import (configure, configure_action_envelope,
                                           decode, enabled as contract_enabled)
         with turn_timing_step("contracts"):
@@ -3196,6 +3200,8 @@ def ask_tools(messages, mt=4000, temp=None, tools=None, known_refs=None):
                 max(request_timeout_budget_seconds(), wall_timeout * 2)
                 if frozen_timeout_retry_active else wall_timeout
             )
+            if _frame_routes.ROUTES_ACTIVE and capture is not None and getattr(capture, "route_deadline", None) is not None:
+                future_timeout = max(0.001, capture.route_deadline - time.monotonic())
             choice = fut.result(timeout=future_timeout)
             if capture is not None:
                 activate_turn_timing(capture.journal)
@@ -6752,6 +6758,15 @@ def work(d, *, resume=None):
             )
             from kernel_request_kind import bind_auxiliary
             bind_auxiliary(capture, "decide2")
+            if _frame_routes.ROUTES_ACTIVE:
+                from kernel_frame_routes import apply_body, resolve
+                capture.frame_route = resolve("decide2")
+                capture._tokenize_endpoint = str(capture.frame_route.settings.get("tokenizer")
+                                                 or capture.frame_route.settings["endpoint"])
+                capture.route_deadline = time.monotonic() + float(
+                    capture.frame_route.settings.get("timeout_s") or 1800)
+                body = dict(body)
+                apply_body(body, capture.frame_route, default_endpoint=API)
             choice = capture.send(dict(body), API, KEY, side_call_contract=side_call_contract)
             if isinstance(choice, _Mapping):
                 message = choice.get("message")
@@ -7892,9 +7907,23 @@ def work(d, *, resume=None):
                     try:
                         if toolcall_mode:
                             if native_batch is not None:
+                                route = (getattr(_prepared.capture, "frame_route", None)
+                                         if _frame_routes.ROUTES_ACTIVE else None)
+                                before_commit = None
+                                if route is not None and not _route_escalated:
+                                    from kernel_frame_routes import RouteEscalation, escalation_target
+                                    custom_writes = {name for name, tool in getattr(
+                                        _agent_tools, "custom", {}).items() if tool.writes == "workspace"}
+
+                                    def before_commit(batch):
+                                        target = escalation_target(route, batch,
+                                                                   custom_writes=custom_writes)
+                                        if target is not None:
+                                            raise RouteEscalation(target, batch)
                                 return native_batch.next(
                                     ask_tools, list(_prepared.messages), temp=run_temp,
-                                    tools=_request_tools, known_refs=_action_known_refs)
+                                    tools=_request_tools, known_refs=_action_known_refs,
+                                    **({"before_commit": before_commit} if before_commit is not None else {}))
                             return ask_tools(
                                 list(_prepared.messages), temp=run_temp,
                                 tools=_request_tools, known_refs=_action_known_refs)
@@ -7977,7 +8006,72 @@ def work(d, *, resume=None):
 
             try:
                 if toolcall_mode:
-                    content, calls = _provider_request_once()
+                    if not _frame_routes.ROUTES_ACTIVE:
+                        content, calls = _provider_request_once()
+                    else:
+                        from kernel_frame_routes import RouteEscalation, escalation_target
+                        _route_escalated = False
+                        _route_stopped = False
+                        while True:
+                            first_capture = _prepared.capture
+                            try:
+                                content, calls = _provider_request_once()
+                            except RouteEscalation as decision:
+                                target = decision.target
+                                calls = decision.calls
+                                content = ""
+                            else:
+                                custom_writes = ({name for name, tool in getattr(
+                                    _agent_tools, "custom", {}).items() if tool.writes == "workspace"}
+                                    if getattr(first_capture, "frame_route", None) is not None else set())
+                                target = (escalation_target(getattr(first_capture, "frame_route", None), calls,
+                                                            custom_writes=custom_writes)
+                                          if not _route_escalated and native_batch is None else None)
+                            if target is None:
+                                break
+                            _route_escalated = True
+                            from kernel_frame_routes import note_response, reject_capture
+                            note_response(discarded=True)
+                            reject_capture(measurement, first_capture)
+                            first_capture.journal.emit(
+                                "route_escalation_discarded", request_id=first_capture.request_id,
+                                step=step, role=first_capture.frame_route.role, to=target,
+                                classes=[(call.get("function") or {}).get("name") for call in calls],
+                                usage=dict(getattr(first_capture, "accounting", {})), dispatch=False)
+                            if _capture_token is not None:
+                                ACTIVE_REQUEST.reset(_capture_token)
+                                _capture_token = None
+                            if _provider_request and _request_host_text_preparer is not None:
+                                _prepared = measurement.prepare(
+                                    msgs, uncapped=_uncapped_messages, tools=_request_tools,
+                                    provider_request=True,
+                                    request_host_text_preparer=_request_host_text_preparer,
+                                    forced_route=target, frozen_route_capture=first_capture)
+                            else:
+                                _prepared = measurement.prepare(
+                                    msgs, uncapped=_uncapped_messages, tools=_request_tools,
+                                    provider_request=_provider_request,
+                                    forced_route=target, frozen_route_capture=first_capture)
+                            if not provider_dispatch_allowed(_prepared):
+                                _route_stopped = True
+                                measurement.system_outcome = "response_budget_exhausted"
+                                break
+                            if _completion_owner_on and not owner_boundary(measurement, provider_request=True):
+                                _route_stopped = True
+                                measurement.system_outcome = "response_budget_exhausted"
+                                break
+                            allowed = (owner_charge_response(measurement, _budget, step=step)
+                                       if _completion_owner_on else _budget.charge_response(step=step))
+                            if not allowed:
+                                _route_stopped = True
+                                measurement.system_outcome = "response_budget_exhausted"
+                                break
+                            _capture_token = measurement.activate(_prepared)
+                        if _route_stopped:
+                            break
+                        if getattr(_prepared.capture, "frame_route", None) is not None:
+                            from kernel_frame_routes import note_response
+                            note_response(discarded=False)
                     _remember_edit_nturn_model_plan(content)
                     if _edit_nturn_session is not None and _edit_nturn_session.pending:
                         _edit_nturn_session.request_started()

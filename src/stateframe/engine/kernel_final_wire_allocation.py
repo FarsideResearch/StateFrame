@@ -8,7 +8,18 @@ import json
 import time
 from collections.abc import Mapping
 
+import kernel_frame_routes as _frame_routes
+
 from kernel_request_seal import QualifiedRequest, OwnerPresentation, RequestSealError, freeze
+
+
+def publishes_runtime_token_meter(candidate) -> bool:
+    """Whether sealing copies the context meter back onto the runtime.
+
+    A routed request's meter lives on its capture only (kernel_request_budget._request_token_meter):
+    publishing it would hand the next request this route's tokenizer, and the routed context has none.
+    """
+    return not (_frame_routes.ROUTES_ACTIVE and getattr(candidate, "frame_route", None) is not None)
 
 
 def build_qualified_request(capture, runtime, body, *, endpoint, key, deadline=None):
@@ -245,7 +256,8 @@ def build_qualified_request(capture, runtime, body, *, endpoint, key, deadline=N
     from kernel_request_candidate import runtime_authority_fields
     runtime_updates = {name: copy.deepcopy(getattr(context, name))
                        for name in runtime_authority_fields(context) if hasattr(context, name)}
-    runtime_updates["_request_token_meter"] = context._request_token_meter
+    if publishes_runtime_token_meter(candidate):
+        runtime_updates["_request_token_meter"] = context._request_token_meter
     if deadline is not None and time.monotonic() >= deadline:
         raise TimeoutError("request deadline expired during qualification")
     capture_updates = {

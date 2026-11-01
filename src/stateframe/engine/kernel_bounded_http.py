@@ -6,6 +6,7 @@ uses provider-origin health probes during the wait instead of a first-byte timeo
 from __future__ import annotations
 
 import functools
+import ipaddress
 import http.client
 import json
 import math
@@ -251,9 +252,32 @@ def _child_transport_error(diagnostic: bytes, key: str) -> BoundedTransportError
     )
 
 
+def _require_routed_local(url: str, allow_remote: bool) -> None:
+    parsed = urllib.parse.urlsplit(url)
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username or parsed.password:
+        raise ValueError("routed HTTP destination is invalid")
+    try:
+        local = ipaddress.ip_address(parsed.hostname).is_loopback
+    except ValueError:
+        local = parsed.hostname.lower() == "localhost"
+    if not local and not allow_remote and os.environ.get("STATEFRAME_ALLOW_REMOTE_ENDPOINT") != "1":
+        raise ValueError("routed HTTP destination is not on this machine")
+
+
+class _RoutedRedirects(urllib.request.HTTPRedirectHandler):
+    def __init__(self, allow_remote: bool) -> None:
+        self.allow_remote = allow_remote
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        _require_routed_local(newurl, self.allow_remote)
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
 def request_bytes(wire: bytes, endpoint: str, key: str, *,
                   deadline: float, socket_timeout: float,
-                  liveness_timeout: float | None = None) -> bytes:
+                  liveness_timeout: float | None = None,
+                  route_meta: dict[str, object] | None = None,
+                  route_allow_remote: bool = False) -> bytes:
     """Bound the full HTTP operation and abort it after provider liveness is lost."""
     if not math.isfinite(deadline) or not math.isfinite(socket_timeout) or socket_timeout <= 0:
         raise ValueError("invalid HTTP deadline or socket timeout")
@@ -266,10 +290,13 @@ def request_bytes(wire: bytes, endpoint: str, key: str, *,
     remaining = deadline - time.monotonic()
     if remaining <= 0:
         raise TimeoutError("HTTP deadline expired before submission")
+    if route_meta is not None:
+        _require_routed_local(endpoint, route_allow_remote)
     packet = json.dumps({"wire": wire.decode("utf-8"), "endpoint": endpoint, "key": key,
-                         "deadline": deadline,
-                         "socket_timeout": min(socket_timeout, remaining),
-                         "gzip": request_gzip_enabled()}).encode()
+                          "deadline": deadline,
+                          "socket_timeout": min(socket_timeout, remaining),
+                          "gzip": request_gzip_enabled(),
+                          **({"route_allow_remote": route_allow_remote} if route_meta is not None else {})}).encode()
     process = subprocess.Popen(
         [sys.executable, "-I", "-B", str(Path(__file__).resolve()), "--http-child"],
         stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
@@ -504,8 +531,11 @@ def _child() -> None:
         headers={"Content-Type": "application/json", **encoding,
                  "Authorization": "Bearer " + packet["key"]})
     tracker = _AbortiveConnectionTracker()
-    opener = urllib.request.build_opener(
-        _AbortiveHTTPHandler(tracker), _AbortiveHTTPSHandler(tracker))
+    handlers = [_AbortiveHTTPHandler(tracker), _AbortiveHTTPSHandler(tracker)]
+    if "route_allow_remote" in packet:
+        _require_routed_local(packet["endpoint"], packet["route_allow_remote"])
+        handlers.append(_RoutedRedirects(packet["route_allow_remote"]))
+    opener = urllib.request.build_opener(*handlers)
     response_complete = False
     try:
         with opener.open(request, timeout=packet["socket_timeout"]) as response:

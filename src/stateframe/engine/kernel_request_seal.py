@@ -1,6 +1,8 @@
 """Immutable request inputs and the single provider authorization record."""
 from __future__ import annotations
 
+import kernel_frame_routes as _frame_routes
+
 from collections.abc import Mapping
 from dataclasses import dataclass
 import hashlib
@@ -109,7 +111,9 @@ class QualifiedRequest:
         for field, attribute in (("request_kind", "request_kind"), ("adapter", "_qualified_adapter")):
             if field in authority and authority[field] != getattr(capture, attribute, None):
                 raise RequestSealError("qualified request classification changed: " + field)
-        meter = getattr(runtime, "_request_token_meter", None)
+        meter = (getattr(capture, "_request_token_meter", None)
+                 if _frame_routes.ROUTES_ACTIVE and getattr(capture, "frame_route", None) is not None
+                 else getattr(runtime, "_request_token_meter", None))
         if meter is None:
             meter = getattr(capture, "_request_token_meter", None)
         if meter is None:
@@ -119,7 +123,9 @@ class QualifiedRequest:
         from kernel_request_diet import resolve_tokenize_url, tokenizer_contract
         if meter.provider_identity != tokenizer_contract(runtime, capture):
             raise RequestSealError("qualified tokenizer provider contract changed")
-        endpoint = resolve_tokenize_url(endpoint=getattr(capture, "_tokenize_endpoint", None))
+        endpoint = resolve_tokenize_url(
+            capture=capture if _frame_routes.ROUTES_ACTIVE and getattr(capture, "frame_route", None) is not None else None,
+            endpoint=getattr(capture, "_tokenize_endpoint", None))
         self.measurement.validate(
             candidate, authority["request_budget_final_wire"], request_id=self.request_id,
             logical_request_id=self.lineage,

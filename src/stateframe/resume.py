@@ -321,8 +321,11 @@ def archive_attempt(state: dict[str, object], engine_dir: Path, *, use_checkpoin
     # A fallback after a refused checkpoint restore replays the INTERRUPTED attempt (``tape_from``),
     # not the refused one, which holds only the restored prefix.
     source = tape_from or folder
-    tape = carry_forward(spec, replay_tape.build(source / "wire", source / "sends.jsonl"),
+    tape = carry_forward(spec, replay_tape.build(source / "wire", source / "sends.jsonl",
+                                                  routes_required=bool(spec.get("routes"))),
                          (source / "resume-divergence.json").exists())
+    pending = (replay_tape.pending_request(source / "wire", routes_required=True)
+               if spec.get("routes") else None)
     checkpoint = select_checkpoint(run, tape, source / "wire") if use_checkpoint else None
     spec["max_turns"] = int(state["max_turns"])
     spec["environment"]["REACT_STEPS"] = str(spec["max_turns"])
@@ -337,6 +340,7 @@ def archive_attempt(state: dict[str, object], engine_dir: Path, *, use_checkpoin
                       "previous_status": state.get("previous_status"),
                       "resumed": datetime.now(timezone.utc).isoformat(timespec="seconds"),
                       "tape": tape,
+                      **({"pending": pending} if pending is not None else {}),
                       **({"model_swap": swap} if isinstance(swap, dict) else {})}
     if checkpoint is not None:
         spec["resume"]["checkpoint"] = checkpoint

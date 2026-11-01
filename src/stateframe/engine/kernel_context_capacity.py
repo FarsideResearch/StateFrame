@@ -12,6 +12,8 @@ llama.cpp endpoint (``GET /slots``, then ``GET /props``).  Unknown -> no-op.
 """
 from __future__ import annotations
 
+import kernel_frame_routes as _frame_routes
+
 import http.client
 import json
 import math
@@ -153,6 +155,11 @@ def enforce_context_capacity(capture: object, body: dict[str, object], *,
     if not isinstance(endpoint, str):
         return
     n_ctx = live_slot if ENDPOINT_SIZE.configured else resolve_n_ctx(endpoint, key)
+    route = getattr(capture, "frame_route", None) if _frame_routes.ROUTES_ACTIVE else None
+    if route is not None and not ENDPOINT_SIZE.configured:
+        configured = route.settings.get("context_tokens")
+        if type(configured) is int and configured > 0:
+            n_ctx = min(n_ctx, configured) if type(n_ctx) is int else configured
     if n_ctx is None:
         return
     from kernel_measurement import _prompt_token_estimate

@@ -50,10 +50,16 @@ class Script:
                 raise ValueError(f"script step {index} must name a tool")
             if "required" in step and not isinstance(step["required"], bool):
                 raise ValueError(f"script step {index} required must be a boolean")
+            if "repeat" in step and not isinstance(step["repeat"], bool):
+                raise ValueError(f"script step {index} repeat must be a boolean")
+            delay = step.get("delay_s", 0)
+            if type(delay) not in (int, float) or not 0 <= delay <= 30:
+                raise ValueError(f"script step {index} delay_s must be between 0 and 30")
         self.position = 0
         self._states = ["pending"] * len(self.steps)
         self.lock = threading.Lock()
         self.requests: list[dict] = []
+        self.request_log = Path(document["request_log"]) if isinstance(document.get("request_log"), str) else None
         # Optional llama.cpp-style POST .../tokenize, for tests of the token meter. Absent = 404
         # (the meter then uses its conservative estimate). Modes:
         #   {"mode": "ok"}                          answer every call
@@ -64,16 +70,19 @@ class Script:
         # Optional llama.cpp-style GET /slots: a list of per-slot n_ctx, e.g. [32768] (absent = 404).
         self.slots = [int(n) for n in document.get("slots") or []]
         self.tokenize_calls = 0
+        self.slots_calls = 0
 
     def next_call(self, offered: list[str]) -> dict:
         with self.lock:
             while self.position < len(self.steps):
                 index = self.position
                 step = self.steps[index]
-                self.position += 1
                 if step["tool"] in offered:
+                    if not step.get("repeat", False):
+                        self.position += 1
                     self._states[index] = "consumed"
                     return step
+                self.position += 1
                 self._states[index] = "skipped"
                 if step.get("required", True):
                     raise ScriptStepUnavailable(
@@ -137,6 +146,8 @@ def make_handler(script: Script):
             if self.path.rstrip("/") == "/v1/models":
                 self._send(200, {"object": "list", "data": [{"id": script.model, "object": "model"}]})
             elif self.path.rstrip("/") == "/slots" and script.slots:
+                with script.lock:
+                    script.slots_calls += 1
                 self._send(200, [{"id": i, "n_ctx": n, "is_processing": False} for i, n in enumerate(script.slots)])
             else:
                 self._send(404, {"error": {"message": "not found"}})
@@ -158,6 +169,9 @@ def make_handler(script: Script):
                 self._send(400, {"error": {"message": "invalid JSON"}})
                 return
             script.requests.append(body)
+            if script.request_log is not None:
+                with script.lock, script.request_log.open("a", encoding="utf-8") as stream:
+                    stream.write(json.dumps(body, ensure_ascii=False) + "\n")
             offered = [t.get("function", {}).get("name") for t in body.get("tools") or []
                        if isinstance(t, dict)]
             try:
@@ -165,6 +179,8 @@ def make_handler(script: Script):
             except ScriptStepUnavailable as error:
                 self._send(409, {"error": {"message": str(error)}})
                 return
+            if step.get("delay_s"):
+                time.sleep(float(step["delay_s"]))
             call = {"id": f"call_{len(script.requests)}", "type": "function",
                     "function": {"name": step["tool"],
                                  "arguments": json.dumps(step.get("arguments") or {})}}
