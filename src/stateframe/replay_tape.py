@@ -109,6 +109,22 @@ def with_recorded_model(request: bytes, recorded: bytes, model_swap: dict | None
     return recorded[:theirs[1]] + request[ours[1]:]
 
 
+def route_model_swap(route: object, route_changes: list[dict[str, object]],
+                     model_swap: dict | None = None) -> dict | None:
+    """The allowed model-name substitution for a recorded route after ordered route moves."""
+    if not isinstance(route, dict):
+        return model_swap
+    recorded = route.get("model")
+    served = recorded
+    for change in route_changes:
+        if (change.get("role") == route.get("role") and change.get("field") == "model"
+                and change.get("from") == served):
+            served = change.get("to")
+    if served != recorded:
+        return {"served": served, "recorded": [recorded]}
+    return model_swap
+
+
 def _send_records(sends_path: Path) -> dict[int, dict]:
     """sends.jsonl by send index; a torn final line (process killed mid-append) is ignored."""
     if not sends_path.is_file():
@@ -345,14 +361,4 @@ class Replayer:
         return response
 
     def _route_model_swap(self, route: object) -> dict | None:
-        if not isinstance(route, dict):
-            return self.model_swap
-        recorded = route.get("model")
-        served = recorded
-        for change in self.route_changes:
-            if (change.get("role") == route.get("role") and change.get("field") == "model"
-                    and change.get("from") == served):
-                served = change.get("to")
-        if served != recorded:
-            return {"served": served, "recorded": [recorded]}
-        return self.model_swap
+        return route_model_swap(route, self.route_changes, self.model_swap)

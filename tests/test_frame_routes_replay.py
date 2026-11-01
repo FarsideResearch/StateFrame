@@ -18,11 +18,12 @@ WIRE = b'{"model": "reader", "messages": []}'
 RESPONSE = b'{"choices":[{"message":{"tool_calls":[]}}]}'
 
 
-def _write_send(wire, number, *, route=ROUTE, completed=True):
+def _write_send(wire, number, *, route=ROUTE, request=WIRE, completed=True):
     wire.mkdir(parents=True, exist_ok=True)
     stem = f"{number:04d}"
-    (wire / f"{stem}.route.json").write_text(json.dumps(route))
-    (wire / f"{stem}.request.json").write_bytes(WIRE)
+    if route is not None:
+        (wire / f"{stem}.route.json").write_text(json.dumps(route))
+    (wire / f"{stem}.request.json").write_bytes(request)
     if completed:
         (wire / f"{stem}.response.json").write_bytes(RESPONSE)
 
@@ -90,6 +91,78 @@ def test_later_model_move_wins_when_replaying_earlier_route(tmp_path):
     assert replay.answer(b'{"model": "latest", "messages": []}',
                          route={**ROUTE, "model": "latest"}) == RESPONSE
     assert replay.diverged is None
+
+
+def test_model_moved_replayed_prefix_keeps_carried_tail_and_unverified_pending(tmp_path):
+    run, spec = _interrupted_routed_run(tmp_path)
+    old_wire = run / "attempts" / "1" / "wire"
+    _write_send(old_wire, 1)
+    _write_send(old_wire, 2)
+    _write_send(old_wire, 3, completed=False)
+    moved_route = {**ROUTE, "model": "latest"}
+    moved_request = b'{"model": "latest", "messages": []}'
+    _write_send(run / "wire", 1, route=moved_route, request=moved_request)
+    _write_send(run / "wire", 2, route=moved_route, request=moved_request, completed=False)
+    moves = [{"role": "read", "field": "model", "from": "reader", "to": "middle"},
+             {"role": "read", "field": "model", "from": "middle", "to": "latest"}]
+    spec["resume"] = {"tape": replay_tape.build(old_wire, old_wire.parent / "sends.jsonl"),
+                      "pending": replay_tape.pending_request(old_wire), "route_changes": moves}
+    prior_pending = spec["resume"]["pending"]
+    (run / "spec.json").write_text(json.dumps(spec))
+
+    resume.archive_attempt({"run": run, "spec": spec, "attempt": 2, "max_turns": 8}, tmp_path,
+                           use_checkpoint=False)
+
+    resumed = json.loads((run / "spec.json").read_text())["resume"]
+    assert [item["send"] for item in resumed["tape"]] == [1, 2]
+    assert resumed["pending"] == prior_pending
+    assert resumed["route_changes"] == moves
+
+
+@pytest.mark.parametrize("attempt_request", [
+    b'{"model": "unauthorized", "messages": []}',
+    b'{"model": "latest", "messages": [1]}',
+])
+def test_model_moved_prefix_with_other_difference_drops_carried_state(tmp_path, attempt_request):
+    run, spec = _interrupted_routed_run(tmp_path)
+    old_wire = run / "attempts" / "1" / "wire"
+    _write_send(old_wire, 1)
+    _write_send(old_wire, 2)
+    _write_send(old_wire, 3, completed=False)
+    _write_send(run / "wire", 1, route={**ROUTE, "model": "latest"}, request=attempt_request)
+    moves = [{"role": "read", "field": "model", "from": "reader", "to": "latest"}]
+    spec["resume"] = {"tape": replay_tape.build(old_wire, old_wire.parent / "sends.jsonl"),
+                      "pending": replay_tape.pending_request(old_wire), "route_changes": moves}
+    (run / "spec.json").write_text(json.dumps(spec))
+
+    resume.archive_attempt({"run": run, "spec": spec, "attempt": 2, "max_turns": 8}, tmp_path,
+                           use_checkpoint=False)
+
+    resumed = json.loads((run / "spec.json").read_text())["resume"]
+    assert len(resumed["tape"]) == 1
+    assert "pending" not in resumed
+    assert "route_changes" not in resumed
+
+
+def test_unrouted_model_name_difference_does_not_carry_prior_tape(tmp_path):
+    run, spec = _interrupted_routed_run(tmp_path)
+    spec.pop("routes")
+    old_wire = run / "attempts" / "1" / "wire"
+    _write_send(old_wire, 1, route=None)
+    _write_send(old_wire, 2, route=None)
+    _write_send(run / "wire", 1, route=None,
+                request=b'{"model": "latest", "messages": []}')
+    spec["resume"] = {"tape": replay_tape.build(old_wire, old_wire.parent / "sends.jsonl"),
+                      "model_swap": {"served": "latest", "recorded": ["reader"]}}
+    (run / "spec.json").write_text(json.dumps(spec))
+
+    resume.archive_attempt({"run": run, "spec": spec, "attempt": 2, "max_turns": 8}, tmp_path,
+                           use_checkpoint=False)
+
+    resumed = json.loads((run / "spec.json").read_text())["resume"]
+    assert len(resumed["tape"]) == 1
+    assert resumed["tape"][0]["request_digest"] == replay_tape.normalized_digest(
+        b'{"model": "latest", "messages": []}')
 
 
 def test_carried_tape_uses_its_own_pending_send(tmp_path):

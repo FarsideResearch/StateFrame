@@ -104,6 +104,24 @@ def _journal_lineage_ok(run: Path) -> str | None:
     return None
 
 
+def _faithful_completed_request(own: dict[str, object], old: dict[str, object], *,
+                               routed: bool, route_changes: list[dict[str, object]]) -> bool:
+    if own.get("request_digest") == old.get("request_digest"):
+        return True
+    if not routed:
+        return False
+    swap = replay_tape.route_model_swap(old.get("route"), route_changes)
+    own_path, old_path = own.get("request"), old.get("request")
+    if swap is None or not isinstance(own_path, str) or not isinstance(old_path, str):
+        return False
+    try:
+        alternate = replay_tape.with_recorded_model(Path(own_path).read_bytes(),
+                                                    Path(old_path).read_bytes(), swap)
+    except OSError:
+        return False
+    return alternate is not None and replay_tape.normalized_digest(alternate) == old.get("request_digest")
+
+
 def carry_forward_records(spec: dict, own_tape: list[dict[str, object]],
                           own_pending: dict[str, object] | None, wire_dir: Path, *, diverged: bool,
                           restart_live: bool = False) -> tuple[list[dict[str, object]],
@@ -121,7 +139,8 @@ def carry_forward_records(spec: dict, own_tape: list[dict[str, object]],
     prior_pending = prior.get("pending") if spec.get("routes") else None
     prior_route_changes = (prior.get("route_changes") or []) if spec.get("routes") else []
     faithful = (not diverged and isinstance(previous, list) and len(own_tape) <= len(previous)
-                and all(own.get("request_digest") == old.get("request_digest")
+                and all(_faithful_completed_request(own, old, routed=bool(spec.get("routes")),
+                                                   route_changes=prior_route_changes)
                         for own, old in zip(own_tape, previous)))
     if not faithful:
         return own_tape, own_pending, []

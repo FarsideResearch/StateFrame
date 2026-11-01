@@ -1,11 +1,12 @@
 """Product CLI, routed startup, resume refusal, and summary contracts."""
 import json
 import time
+from pathlib import Path
 from urllib.request import Request, urlopen
 
 import pytest
 
-from stateframe import cli, replay_tape, routes, runner
+from stateframe import _child, cli, replay_tape, routes, runner
 from stateframe.endpoint import Endpoint, EndpointError
 from stateframe.scripted_endpoint import Script, make_handler
 from http.server import ThreadingHTTPServer
@@ -515,6 +516,107 @@ def test_resume_run_keeps_pending_across_two_endpoint_moves_and_refusal(tmp_path
         assert len(scripts[1].requests) == 1
         assert not scripts[2].requests
         assert len(scripts[3].requests) == 1
+        assert not (run / "resume-divergence.json").exists()
+    finally:
+        for server, thread in active:
+            server.shutdown()
+            thread.join(timeout=2)
+            server.server_close()
+
+
+def test_three_resumes_keep_pending_through_chained_endpoint_and_model_moves(tmp_path, monkeypatch):
+    # Stub the engine launch and Python probe to choose the kill points. Route validation, attempt
+    # archival, the child wire recorder, replay checks, and scripted-server HTTP sends run for real.
+    monkeypatch.syspath_prepend(str(Path(_child.__file__).parent / "engine"))
+    import kernel_bounded_http
+
+    scripts = [Script({"model": model}) for model in ("base", "small", "middle", "latest", "final")]
+    active = []
+    for script in scripts:
+        server = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(script))
+        thread = Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        active.append((server, thread))
+    try:
+        urls = [f"http://127.0.0.1:{server.server_port}/v1" for server, _ in active]
+        default, original, middle, latest, final = urls
+        monkeypatch.delenv("LLAMA_CPP_TOKENIZE_URL", raising=False)
+        monkeypatch.setattr(runner, "_check_python", lambda python: python)
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        (repo / "app.py").write_text("value = 1\n")
+        (repo / "test_app.py").write_text("from app import value\ndef test_value(): assert value == 1\n")
+        run = tmp_path / "run"
+        options = runner.RunOptions(repo=repo, task="Inspect app.py", endpoint=Endpoint(default, "base"),
+                                    run_dir=run, route_cli=[f"read.endpoint={original}", "read.model=small"])
+        runner._probe_routes(options, lambda *_: None)
+        runner.prepare(options)
+        physical = kernel_bounded_http.request_bytes
+
+        def route(url, model):
+            return {"role": "read", "scope": "run", "unit_class": None,
+                    "endpoint": url + "/chat/completions",
+                    "endpoint_host": url.removeprefix("http://").removesuffix("/v1"),
+                    "model": model, "escalated_from": None}
+
+        def send(body, url, model):
+            return kernel_bounded_http.request_bytes(
+                body, url + "/chat/completions", "", deadline=time.monotonic() + 15,
+                socket_timeout=5, route_meta=route(url, model))
+
+        def pending(wire, number, body, url, model):
+            stem = wire / f"{number:04d}"
+            stem.with_suffix(".route.json").write_text(json.dumps(route(url, model)))
+            stem.with_suffix(".request.json").write_bytes(body)
+
+        initial = b'{"model": "small", "messages": []}'
+        _child.install_wire_recorder(run, Endpoint(default, "base").chat_url,
+                                     routed_endpoints={route(original, "small")["endpoint"]})
+        recorded_responses = [send(initial, original, "small") for _ in range(2)]
+        pending(run / "wire", 3, initial, original, "small")
+
+        destinations = [(middle, "middle"), (latest, "latest"), (final, "final")]
+        seen = []
+
+        def execute(_options, _started, _printer, run_dir, _work, spec):
+            index = len(seen)
+            url, model = destinations[index]
+            resume_spec = spec["resume"]
+            seen.append(resume_spec)
+            monkeypatch.setattr(kernel_bounded_http, "request_bytes", physical)
+            replay = replay_tape.Replayer(resume_spec["tape"], pending=resume_spec.get("pending"),
+                                          route_changes=resume_spec.get("route_changes"))
+            _child.install_wire_recorder(run_dir, spec["chat_url"], replayer=replay,
+                                         routed_endpoints={route(url, model)["endpoint"]})
+            body = json.dumps({"model": model, "messages": []}).encode()
+            count = (1, 2, 3)[index]
+            responses = [send(body, url, model) for _ in range(count)]
+            assert responses[:min(count, 2)] == recorded_responses[:min(count, 2)]
+            assert replay.diverged is None
+            if index < 2:
+                pending(run_dir / "wire", count + 1, body, url, model)
+            else:
+                assert replay.pending is None
+                assert replay.pending_verified is not None
+            return {"result": "INTERRUPTED"}
+
+        monkeypatch.setattr(runner, "_execute", execute)
+        for url, model in destinations:
+            runner.resume_run(run, route_cli=[f"read.endpoint={url}", f"read.model={model}"],
+                              printer=lambda *_: None)
+
+        assert len(seen) == 3
+        assert [len(item["tape"]) for item in seen] == [2, 2, 2]
+        assert all(item["pending"]["request_digest"] == replay_tape.normalized_digest(initial)
+                   for item in seen)
+        assert [len(item["route_changes"]) for item in seen] == [2, 4, 6]
+        assert [len(script.requests) for script in scripts] == [0, 2, 0, 0, 1]
+        recorded_sends = [json.loads(line) for line in (run / "sends.jsonl").read_text().splitlines()]
+        assert [item.get("replayed", False) for item in recorded_sends] == [True, True, False]
+        verification = json.loads((run / "resume-pending-verified.json").read_text())
+        assert verification["send"] == 3
+        assert verification["recorded_route"] == route(original, "small")
+        assert verification["route"] == route(final, "final")
         assert not (run / "resume-divergence.json").exists()
     finally:
         for server, thread in active:
