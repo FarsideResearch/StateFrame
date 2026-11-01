@@ -1,0 +1,41 @@
+{
+  "context": {
+    "journal_receipt_count": 2,
+    "journal_receipt_history": {
+      "historical_applied_edits": {
+        "count": 0,
+        "sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+      },
+      "historical_read_facts": {
+        "count": 0,
+        "sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+      },
+      "history_digest": {
+        "call_ids": [],
+        "kind": "action_history_digest",
+        "kind_counts": {
+          "journal_check_receipt": 1
+        },
+        "row_count": 1,
+        "rows_sha256": "5eaadf23bcc8ee50205bba12e4166772dad1ca817cf868d2068825bd1862ad41",
+        "source_text": "not_carried",
+        "tool_counts": {}
+      },
+      "projection_sha256": "7488d45a2cc2f754b2f8547b3a0b8206c533a917f6fcd32a3c8343bfd28b0ce9",
+      "reads": {},
+      "receipt_count": 2,
+      "receipts_sha256": "cf9897524d5eed2168e41e2741162a1360129181c391d9e52c87faee8802156a",
+      "schema": "framefit-receipt-history/1"
+    },
+    "journal_receipt_records": [
+      {
+        "kind": "check_receipt",
+        "receipt_id": "b",
+        "selector": "tests/b.py",
+        "status": "PASS"
+      }
+    ]
+  },
+  "request": "{\"messages\":[{\"content\":{\"journal_receipt_count\":2,\"journal_receipt_history\":{\"historical_applied_edits\":{\"count\":0,\"sha256\":\"4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945\"},\"historical_read_facts\":{\"count\":0,\"sha256\":\"4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945\"},\"history_digest\":{\"call_ids\":[],\"kind\":\"action_history_digest\",\"kind_counts\":{\"journal_check_receipt\":1},\"row_count\":1,\"rows_sha256\":\"5eaadf23bcc8ee50205bba12e4166772dad1ca817cf868d2068825bd1862ad41\",\"source_text\":\"not_carried\",\"tool_counts\":{}},\"projection_sha256\":\"7488d45a2cc2f754b2f8547b3a0b8206c533a917f6fcd32a3c8343bfd28b0ce9\",\"reads\":{},\"receipt_count\":2,\"receipts_sha256\":\"cf9897524d5eed2168e41e2741162a1360129181c391d9e52c87faee8802156a\",\"schema\":\"framefit-receipt-history/1\"},\"journal_receipt_records\":[{\"kind\":\"check_receipt\",\"receipt_id\":\"b\",\"selector\":\"tests/b.py\",\"status\":\"PASS\"}]},\"role\":\"user\"}],\"tools\":[]}",
+  "tag": "v0.2.1"
+}

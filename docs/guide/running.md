@@ -77,6 +77,14 @@ Only the default 65,536-token slot is measured on long runs; other sizes are tes
 
 A profile is a JSON file (`"schema": "stateframe-product-profile/1"`) whose `switches` map sets the engine's `STATEFRAME_*` switches for a run. The default is the one profile shipped in `src/stateframe/profiles/`. `--profile NAME_OR_PATH` uses another. Many switches ship disabled; turning one on is a profile edit. Engine settings come only from the profile: the engine child drops inherited `STATEFRAME_*` variables, `--test-env` refuses them, and the engine refuses any switch it has no reader for. Host-issued shell, network, sandbox, web and custom-tool authority comes from CLI flags, not profile switches. The shipped product profile uses the composed loop; lean mode is not supported by that profile. The plain loop refuses Git, web and custom-tool settings before execution and supports foreground shell only.
 
+### Multi-file source and repeated reads
+
+`STATEFRAME_CODE_BOOKMARKS` is on by default. Each request offers current editable product source before repeated-read and navigation bookkeeping. Files of at most 60 lines and 2 KiB may be shown whole when the request budget allows; larger tasks get selected windows. A coverage line for every editable product path says which lines are in view and whether that source changed since its last read when the comparison is available. When a current failing check has a usable source location, code bookmarks keep its test code and related product source in view. Set the switch to `off` in the profile to restore the 0.2.1 behavior byte for byte.
+
+A completed batch made entirely of proved unchanged reads costs one no-progress watch unit instead of one per file. Mixed or unproved batches keep per-action accounting. Repeated unchanged batches still reach `STALLED`.
+
+`STATEFRAME_READ_LOCKOUT=on` is an independent optional profile switch; it is off by default and requires bookmarks. After a completed batch of unchanged reads, the current failing check must still apply, editable bookmarked source must be visible, and an edit and check route must be available. The next request then hides source-reading routes. The restriction lasts at most two requests and releases sooner when new evidence appears or the repair route disappears. If the no-progress watch is one step from its limit, the run can stop before this restriction takes effect.
+
 ## Checkpoints and resume
 
 Resume replays the recorded run by default. Checkpoints for a faster restore are off by default in this release (`STATEFRAME_CHECKPOINT=save` turns them on: about one every 5 requests, the two newest kept, signed with a per-install key in `~/.stateframe/checkpoint.key`). See "Checkpoint settings" in the README for the switches. When a run finishes for good (its result was submitted, or it stopped on an error that would only repeat, so resume would refuse it), StateFrame removes its checkpoints and prints how much it freed; `--keep-checkpoints` (or `STATEFRAME_KEEP_CHECKPOINTS=1`) keeps them. Stopped, cancelled, killed and crashed runs always keep theirs.
@@ -99,3 +107,33 @@ Shell output does not count as a source read or an engine check. Network install
 need `--shell-network full`, and installs in the run environment last only for that
 run. See [Agent tools and execution safety](tools.md) for each tool, its arguments,
 policy, refusals and resume behavior.
+
+### Foreground shell settings
+
+`--shell standard` enables bounded foreground commands by default. The sandbox
+is the security boundary; its program filter is a convenience, and interpreters
+and build scripts can run other programs within that boundary. `--shell read-only`
+uses an inspection grammar, a read-only workspace, scratch-only writes and no
+network. `--shell unrestricted` removes the filter. `--shell off` hides the tool.
+Host execution requires explicit `--shell unrestricted --shell-sandbox off`.
+
+Networking defaults to loopback. Use `--shell-network none` to disconnect it or
+`--shell-network full` for network installs. `--shell-allow`, `--shell-deny` and
+`--shell-read` extend the host policy. Chat answers `--shell-ask` requests on its
+TTY; unattended runs decline. Confirmation expires after 120 seconds.
+
+The default run environment clones the selected virtual environment or creates
+a system-site environment from the selected base interpreter. Installs affect
+this run only; update dependency declarations to keep them. Engine checks and
+final host checks use the same environment. `--no-run-env` disables provisioning.
+Shell output grants neither source-read credit nor test evidence: use native
+reads and `run_tests` for those. Authorized product changes invalidate earlier
+reads and checks; protected tests are restored from the immutable start snapshot.
+Plain-loop mode retains its declared-product-only edit/export contract.
+
+Shell-enabled resumes rebuild the environment and scratch state and replay from
+the beginning, even when a checkpoint exists. Local calls must reproduce their
+exit code, workspace and environment identity before their recorded output is
+served. Full-network and host calls require `--replay-external`; incomplete calls
+refuse resume. Raw retained output and truncation counters remain in the run
+directory. The foreground shell tool does not launch background shell commands; read-only background jobs use the separate job tools.

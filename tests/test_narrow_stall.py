@@ -3,8 +3,12 @@
 import ast
 import copy
 import hashlib
+import importlib.util
 import inspect
 import json
+from pathlib import Path
+import subprocess
+import sys
 import textwrap
 from types import SimpleNamespace
 
@@ -113,11 +117,12 @@ def test_live_red_dispatch_skips_blank_symbol_and_dispatches_valid_one(tmp_path,
 
 def _read(path, content, call_id):
     revision = "sha256:" + hashlib.sha256(content.encode()).hexdigest()
+    line_count = len(content.splitlines())
     return [
         {"role": "assistant", "tool_calls": [{"id": call_id, "type": "function",
             "function": {"name": "read", "arguments": json.dumps({"path": path})}}]},
         {"role": "tool", "tool_call_id": call_id,
-         "content": f"[read page] path={path} revision={revision} lines=1-1/1 "
+         "content": f"[read page] path={path} revision={revision} lines=1-{line_count}/{line_count} "
                     f"chars={len(content)} clip=none\ncurrent source\n{content}"},
     ]
 
@@ -193,6 +198,28 @@ def test_missing_startup_edit_scope_still_recommends_site(tmp_path):
     state = build_typed_state(messages, context, runtime)
     assert state["next_site"]["path"] == "pkg/app.py"
     assert [site["path"] for site in state["open_sites"]] == ["pkg/app.py"]
+
+
+def test_framefit5_request_carries_bounded_read_lockout_line(tmp_path, monkeypatch):
+    from kernel_read_lockout import append_frame_line
+
+    monkeypatch.setenv("STATEFRAME_CODE_BOOKMARKS", "on")
+    monkeypatch.setenv("STATEFRAME_READ_LOCKOUT", "on")
+    messages, context, runtime = _frame_request(tmp_path, "pkg/app.py", ["pkg/app.py"])
+    state = build_typed_state(messages, context, runtime)
+    prepared = [{"role": "system", "content": "rules"}, messages[0],
+                {"role": "user", "content": _serialize_state_message(
+                    {"state": {"framefit5": state}})}]
+    runtime._read_lockout_notice = (
+        "Read lockout: pkg/app.py was re-read unchanged; failing assertion: "
+        "assert VALUE == 2; read is unavailable for this request.")
+    append_frame_line(runtime, prepared)
+    assembled = assemble_framefit5_request(
+        prepared, prepared[:2], live_frame=state, runtime=runtime,
+        host_text_messages=prepared)
+    notices = [row["content"] for row in assembled
+               if str(row.get("content", "")).startswith("[Read lockout] ")]
+    assert notices == ["[Read lockout] " + runtime._read_lockout_notice]
 
 
 def test_inventory_uses_next_original_candidate_after_forbidden(tmp_path, monkeypatch):
@@ -323,7 +350,8 @@ def _runtime_projection(runtime, frame, *, baseline, monkeypatch):
     return projection
 
 
-def _qualified_fixture_request(runtime, frame, messages, context, *, baseline, monkeypatch):
+def _qualified_fixture_request(runtime, frame, messages, context, *, baseline, monkeypatch,
+                               state_transform=None, validate=True, return_capture=False):
     import kernel_stateframe_framefit5
 
     with monkeypatch.context() as patch:
@@ -332,6 +360,8 @@ def _qualified_fixture_request(runtime, frame, messages, context, *, baseline, m
             patch.setattr(kernel_stateframe_framefit5, "_editable_site",
                           lambda *_args: True)
         state = build_typed_state(messages, context, runtime)
+    if state_transform is not None:
+        state_transform(state)
     projection = _runtime_projection(runtime, frame, baseline=baseline,
                                      monkeypatch=monkeypatch)
     projection["state"]["framefit5"] = state
@@ -358,12 +388,13 @@ def _qualified_fixture_request(runtime, frame, messages, context, *, baseline, m
         _request_source_closure_override=plan,
     )
     result = finalize_frame_candidate(runtime, capture, body, frame_counter=token_estimate)
-    validation = validate_final_product_boundary(
-        runtime, result["messages"], result["tools"],
-        refresh_sources=False, refresh_headcarry=False,
-    )
-    assert validation["checked_before_provider"] is True
-    return result
+    if validate:
+        validation = validate_final_product_boundary(
+            runtime, result["messages"], result["tools"],
+            refresh_sources=False, refresh_headcarry=False,
+        )
+        assert validation["checked_before_provider"] is True
+    return (result, capture) if return_capture else result
 
 
 def _materialized_request(body):
@@ -374,6 +405,327 @@ def _materialized_request(body):
     assert len(state_messages) == 1
     state_messages[0]["content"] = json.loads(state_messages[0]["content"].split("\n", 1)[1])
     return result
+
+
+def test_bookmarks_off_qualified_request_and_journal_match_release(tmp_path, monkeypatch):
+    """Compare the complete qualified frame, not the bookmark collector alone."""
+    monkeypatch.setenv("STATEFRAME_CODE_BOOKMARKS", "off")
+    root = tmp_path / "workspace"
+    (root / "pkg").mkdir(parents=True)
+    (root / "tests").mkdir()
+    for index in range(4):
+        (root / f"pkg/module_{index}.py").write_text(f"VALUE = {index}\n")
+    (root / "pkg/__init__.py").write_text("from .module_0 import VALUE\n")
+    (root / "tests/test_app.py").write_text("def test_app(): assert True\n")
+    messages = [{"role": "user", "content": "Fix value."}]
+    context = build_action_context(messages, workspace_root=root)
+    context["journal_receipt_records"] = []
+    frame = {"verification": {"revision": "current", "status": "FAIL"}}
+
+    def state_transform(state):
+        state["read_facts"] = [{
+            "path": f"pkg/module_{index}.py",
+            "read_revision": "sha256:" + hashlib.sha256(
+                (root / f"pkg/module_{index}.py").read_bytes()).hexdigest(),
+            "current_revision": "sha256:" + hashlib.sha256(
+                (root / f"pkg/module_{index}.py").read_bytes()).hexdigest(),
+            "body_delivery": "not_shown",
+        } for index in range(4)]
+
+    source = subprocess.check_output([
+        "git", "show", "v0.2.1:src/stateframe/engine/kernel_frame_allocation_capture.py"
+    ], cwd=Path(__file__).resolve().parents[1])
+    release_path = tmp_path / "release_frame_allocation_capture.py"
+    release_path.write_bytes(source)
+    spec = importlib.util.spec_from_file_location("release_frame_allocation_capture", release_path)
+    assert spec is not None and spec.loader is not None
+    release = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(release)
+
+    def qualified(finalize):
+        events = []
+        runtime = _runtime_with_product(root)
+        runtime.journal.emit = lambda kind, **fields: events.append({"kind": kind, **fields})
+        runtime._framefit_action_context = context
+        with monkeypatch.context() as patch:
+            patch.setitem(globals(), "finalize_frame_candidate", finalize)
+            body = _qualified_fixture_request(
+                runtime, frame, messages, context, baseline=False,
+                monkeypatch=patch, state_transform=state_transform, validate=False)
+        return (json.dumps(body, sort_keys=True, separators=(",", ":")).encode(),
+                json.dumps(events, sort_keys=True, separators=(",", ":")).encode())
+
+    current_body, current_events = qualified(finalize_frame_candidate)
+    release_body, release_events = qualified(release.finalize_frame_candidate)
+    assert current_body == release_body
+    assert current_events == release_events
+    assert not [row for row in json.loads(current_events)
+                if row["kind"] == "code_bookmark_activation_decision"]
+
+
+def test_qualified_request_reports_final_source_coverage(tmp_path, monkeypatch):
+    from kernel_request_source_window import parse_model_source_window
+
+    monkeypatch.setenv("STATEFRAME_CODE_BOOKMARKS", "on")
+    root = tmp_path / "workspace"
+    (root / "pkg").mkdir(parents=True)
+    (root / "tests").mkdir()
+    (root / "pkg/__init__.py").write_text("VALUE = 1\n")
+    (root / "tests/test_app.py").write_text("def test_app(): assert True\n")
+    runtime = _runtime_with_product(root)
+    messages = [{"role": "user", "content": "Task: Fix value."}]
+    context = build_action_context(messages, workspace_root=root)
+    context["journal_receipt_records"] = []
+    runtime._framefit_action_context = context
+    body = _qualified_fixture_request(
+        runtime, {"verification": {"revision": "current", "status": "FAIL"}},
+        messages, context, baseline=False, monkeypatch=monkeypatch,
+    )
+    coverage = [str(message.get("content")) for message in body["messages"]
+                if str(message.get("content", "")).startswith("[Source coverage]\n")]
+    assert len(coverage) == 1
+    for message in body["messages"]:
+        metadata = parse_model_source_window(message.get("content"))
+        if metadata is None or metadata.get("absence") != "NONE":
+            continue
+        assert metadata["path"] in coverage[0]
+        noun = "line" if metadata["total_lines"] == 1 else "lines"
+        assert f"({metadata['total_lines']} {noun}," in coverage[0]
+
+
+def test_qualified_request_carries_all_recorded_small_product_files(tmp_path, monkeypatch):
+    from kernel_request_source_window import parse_model_source_window
+
+    monkeypatch.setenv("STATEFRAME_CODE_BOOKMARKS", "on")
+    fixture = Path(__file__).parent / "fixtures" / "pin_bm10_b" / "source" / "pkg"
+    root = tmp_path / "workspace"
+    product = []
+    for source in fixture.rglob("*.py"):
+        path = source.relative_to(fixture.parent).as_posix()
+        target = root / path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(source.read_bytes())
+        product.append(path)
+    (root / "tests").mkdir(exist_ok=True)
+    (root / "tests/test_app.py").write_text("def test_app(): assert True\n")
+    runtime = _runtime_with_product(root)
+    runtime.edit_contract = {"edit_authority": {"editable_paths": product}}
+    messages = [{"role": "user", "content": "Task: wire the batch runner."}]
+    context = build_action_context(messages, workspace_root=root)
+    context["journal_receipt_records"] = []
+    runtime._framefit_action_context = context
+
+    def state_transform(state):
+        state["read_facts"] = [{
+            "path": path,
+            "read_revision": "sha256:" + hashlib.sha256((root / path).read_bytes()).hexdigest(),
+            "current_revision": "sha256:" + hashlib.sha256((root / path).read_bytes()).hexdigest(),
+            "status": "UNVERIFIABLE", "unchanged_since_read": False,
+            "body_delivery": "not_shown",
+        } for path in product]
+
+    body = _qualified_fixture_request(
+        runtime, {"verification": {"revision": "current", "status": "FAIL"}},
+        messages, context, baseline=False, monkeypatch=monkeypatch,
+        state_transform=state_transform,
+    )
+    full = {metadata["path"] for message in body["messages"]
+            if (metadata := parse_model_source_window(message.get("content")))
+            and metadata.get("status") == "COMPLETE"}
+    assert len(product) == 11
+    assert set(product) <= full
+    assert token_estimate(body) <= runtime.frame_ceiling
+
+
+def test_qualified_request_journals_unresolved_bookmark_drop(tmp_path, monkeypatch):
+    monkeypatch.setenv("STATEFRAME_CODE_BOOKMARKS", "on")
+    root = tmp_path / "workspace"
+    (root / "pkg").mkdir(parents=True)
+    (root / "tests").mkdir()
+    paths = ["pkg/__init__.py", *(f"pkg/module_{index}.py" for index in range(3))]
+    for path in paths:
+        (root / path).write_text("VALUE = 1\n")
+    (root / "tests/test_app.py").write_text("def test_app(): assert True\n")
+    runtime = _runtime_with_product(root)
+    runtime.edit_contract = {"edit_authority": {"editable_paths": paths}}
+    runtime._code_bookmark_carry = [{
+        "path": paths[0], "symbol": "missing", "rank": 1,
+        "revision": "sha256:" + hashlib.sha256((root / paths[0]).read_bytes()).hexdigest(),
+    }]
+    events = []
+    runtime.journal.emit = lambda kind, **fields: events.append({"kind": kind, **fields})
+    messages = [{"role": "user", "content": "Task: Fix value."}]
+    context = build_action_context(messages, workspace_root=root)
+    context["journal_receipt_records"] = []
+    runtime._framefit_action_context = context
+
+    def state_transform(state):
+        state["read_facts"] = [{
+            "path": path, "read_revision": "sha256:" + hashlib.sha256(
+                (root / path).read_bytes()).hexdigest(),
+            "current_revision": "sha256:" + hashlib.sha256(
+                (root / path).read_bytes()).hexdigest(),
+            "body_delivery": "not_shown",
+        } for path in paths]
+
+    body = _qualified_fixture_request(
+        runtime, {"verification": {"revision": "current", "status": "FAIL"}},
+        messages, context, baseline=False, monkeypatch=monkeypatch,
+        state_transform=state_transform,
+    )
+    assert {"kind": "code_bookmark_dropped", "request_id": "fixture-1",
+            "path": paths[0], "symbol": "missing", "reason": "unresolved_symbol",
+            "dispatch": False} in events
+    assert "missing not resolved in current source" not in json.dumps(body)
+
+
+def test_final_send_replans_if_locked_source_is_not_delivered(tmp_path, monkeypatch):
+    from kernel_frame_optional_allocation import FrameAllocationReplanNeeded
+
+    monkeypatch.setenv("STATEFRAME_CODE_BOOKMARKS", "on")
+    monkeypatch.setenv("STATEFRAME_READ_LOCKOUT", "on")
+    root = tmp_path / "workspace"
+    (root / "pkg").mkdir(parents=True)
+    (root / "pkg/__init__.py").write_text("VALUE = 1\n")
+    runtime = _runtime_with_product(root)
+    events = []
+    runtime.journal.emit = lambda kind, **fields: events.append({"kind": kind, **fields})
+    runtime._read_lockout_state = {
+        "remaining": 2, "streak": 2, "paths": {"pkg/__init__.py": "sha256:current"},
+        "failure": ("check-1",), "evaluated": "request-1", "counted": "request-1",
+        "projected_after": "request-1",
+    }
+    runtime._read_lockout_notice = "locked source"
+    messages = [{"role": "user", "content": "Fix value."}]
+    context = build_action_context(messages, workspace_root=root)
+    context["journal_receipt_records"] = []
+    runtime._framefit_action_context = context
+    with pytest.raises(FrameAllocationReplanNeeded, match="locked repair source absent"):
+        _qualified_fixture_request(runtime, {}, messages, context, baseline=False,
+                                   monkeypatch=monkeypatch, validate=False)
+    assert runtime._read_lockout_state["remaining"] == 0
+    assert events[-1]["reason_code"] == "SOURCE_NOT_VISIBLE"
+
+
+def test_recorded_t2_request14_state_activates_current_failure_bookmarks(
+        tmp_path, monkeypatch):
+    from kernel_framefit_receipt_history import ReceiptHistory
+
+    monkeypatch.setenv("STATEFRAME_CODE_BOOKMARKS", "on")
+    root = tmp_path / "workspace"
+    (root / "pkg/batch").mkdir(parents=True)
+    (root / "tests").mkdir()
+    product = {
+        "pkg/__init__.py": "from .batch import run_batch\n",
+        "pkg/batch/__init__.py": "from .runner import run_batch\n",
+        "pkg/batch/contracts.py": "class BatchResult: pass\n",
+        "pkg/batch/runner.py": "def run_batch(items, work): return []\n",
+        "pkg/service.py": "def run_batch(items, work): return []\n",
+        "pkg/worker.py": ("class Worker:\n"
+                          "    def process_batch(self, items, work): return []\n"),
+        "pkg/cli.py": "def run_batch(items, work): return []\n",
+        "pkg/registry.py": "def lookup(name): return None\n",
+        "pkg/serializers.py": "def serialize(value): return value\n",
+        "pkg/config.py": "STOP_ON_ERROR = False\n",
+        "pkg/legacy_batch.py": "def legacy_batch(): return None\n",
+    }
+    tests = {
+        "tests/test_batch_contract.py": "def test_batch(): assert True\n",
+        "tests/test_preservation.py": "def test_preservation(): assert True\n",
+        "tests/test_consumers.py": (
+            "from pkg import service, worker\n"
+            "def test_consumers():\n"
+            "    assert service.run_batch([1], str) == []\n"
+            "    assert worker.Worker().process_batch([2], str) == []\n"
+            "    assert calls == [(1,), (2,)]\n"),
+        "tests/test_registration_serialization.py": (
+            "from pkg import registry\n"
+            "def test_registry():\n"
+            "    assert registry.lookup('batch') is not None\n"),
+    }
+    for name, source in {**product, **tests}.items():
+        (root / name).write_text(source)
+    runtime = _runtime_with_product(root)
+    runtime.edit_contract = {"edit_authority": {"editable_paths": list(product)}}
+    runtime.protected_tests = {root / name: "baseline" for name in tests}
+    emitted = []
+    runtime.journal.emit = lambda kind, **fields: emitted.append({"kind": kind, **fields})
+    revision = runtime.binding()["product_revision"]
+    messages = [{"role": "user", "content": "Task: wire the batch runner."},
+                *_read("pkg/__init__.py", product["pkg/__init__.py"], "read-1")]
+    context = build_action_context(messages, workspace_root=root)
+    history = ReceiptHistory()
+    for selector, identity, line in (
+            ("tests/test_consumers.py", "consumer", 5),
+            ("tests/test_registration_serialization.py", "registry", 3)):
+        history.observe({"kind": "check_receipt", "selector": selector,
+                         "receipt_id": f"check-receipt:{identity}", "revision": revision,
+                         "status": "FAIL",
+                         "summary": f"CHECK_FAILURE_SUMMARY\\n{selector}:{line}: AssertionError"})
+    context.update(history.context())
+    runtime._framefit_action_context = context
+    frame = {"verification": {"revision": revision, "status": "FAIL"},
+             "readiness": {"revision": revision, "public_check_status": "FAIL"},
+             "test_receipts": [{"revision": revision, "result_class": "RED",
+                                "receipt_id": "check-receipt:registry"}]}
+
+    def recorded_state(state):
+        state["last_verdict"] = {"status": "FAIL", "tested_revision": revision,
+                                 "current_revision": revision,
+                                 "check_receipt_id": "check-receipt:registry"}
+        state["read_facts"] = [
+            {"path": name,
+             "read_revision": "sha256:" + hashlib.sha256((root / name).read_bytes()).hexdigest(),
+             "current_revision": "sha256:" + hashlib.sha256((root / name).read_bytes()).hexdigest(),
+             "status": "UNCHANGED", "unchanged_since_read": True,
+             "body_delivery": "present" if name in tests or name in {
+                 "pkg/batch/__init__.py", "pkg/config.py"} else "not_shown"}
+            for name in [*tests, *product]
+        ]
+
+    result, capture = _qualified_fixture_request(
+        runtime, frame, messages, context, baseline=False,
+        monkeypatch=monkeypatch, state_transform=recorded_state,
+        validate=False, return_capture=True)
+    final = _materialized_request(result)["messages"][2]["content"]["state"]["framefit5"]
+    symbols = {(row["path"], row["symbol"]) for row in final["code_bookmarks"]}
+    from kernel_request_source_window import parse_model_source_window
+    full_paths = {metadata["path"] for message in result["messages"]
+                  if (metadata := parse_model_source_window(message.get("content")))
+                  and metadata.get("status") == "COMPLETE"}
+    assert {"pkg/registry.py", "pkg/service.py", "pkg/worker.py"} <= full_paths
+    assert not any(path in full_paths for path, _symbol in symbols)
+    assert capture._code_bookmark_transition[0] is True
+    decisions = [row for row in emitted if row["kind"] == "code_bookmark_activation_decision"]
+    assert len(decisions) == 1
+    assert decisions[0]["reason"] == "activated"
+    assert decisions[0]["collected_count"] >= 3
+    emitted.clear()
+    monkeypatch.setenv("STATEFRAME_CODE_BOOKMARKS", "off")
+    disabled = _qualified_fixture_request(
+        runtime, frame, messages, context, baseline=False,
+        monkeypatch=monkeypatch, state_transform=recorded_state,
+        validate=False)
+    disabled_frame = next(
+        message for message in _materialized_request(disabled)["messages"]
+        if isinstance(message.get("content"), dict)
+        and message["content"].get("schema") == "stateframe-f4/1")
+    assert "code_bookmarks" not in disabled_frame["content"]["state"]["framefit5"]
+    assert [row["reason"] for row in emitted
+            if row["kind"] == "code_bookmark_activation_decision"] == []
+    emitted.clear()
+    monkeypatch.setenv("STATEFRAME_CODE_BOOKMARKS", "on")
+    missing = dict(context)
+    missing.pop("journal_receipt_history", None)
+    missing["journal_receipt_records"] = []
+    missing["journal_receipt_count"] = 0
+    runtime._framefit_action_context = missing
+    _qualified_fixture_request(
+        runtime, frame, messages, missing, baseline=False,
+        monkeypatch=monkeypatch, state_transform=recorded_state,
+        validate=False)
+    assert [row["reason"] for row in emitted
+            if row["kind"] == "code_bookmark_activation_decision"] == ["no_failed_receipt"]
 
 
 def _different_paths(before, after, prefix=()):
@@ -472,3 +824,248 @@ def test_portable_differential_changes_only_checks_and_protected_advice(
                for path in differences), differences
     if case == "near_budget":
         assert token_estimate(patched) >= runtime.frame_ceiling * 0.8
+
+
+def test_small_request_off_switch_matches_parent_and_on_has_coverage(tmp_path, monkeypatch):
+    root = tmp_path / "workspace"
+    (root / "pkg").mkdir(parents=True)
+    (root / "tests").mkdir()
+    root = root.resolve()
+    entry = root / "pkg/__init__.py"
+    entry.write_text("VALUE = 1\n")
+    (root / "tests/test_app.py").write_text("assert True\n")
+    runtime = _runtime_with_product(root)
+    revision = runtime.binding()["product_revision"]
+    frame = {
+        "artifact_revisions": {"pkg/__init__.py": "sha256:" + hashlib.sha256(entry.read_bytes()).hexdigest()},
+        "verification": {"revision": revision, "status": "FAIL"},
+        "readiness": {"revision": revision, "public_check_status": "FAIL"},
+        "test_receipts": [{"revision": revision, "result_class": "RED",
+                           "receipt_id": "current-failure"}],
+    }
+    messages = [{"role": "user", "content": "Task: Fix value."},
+                *_read("pkg/__init__.py", entry.read_text(), "read-1")]
+    context = build_action_context(messages, workspace_root=root)
+    context["journal_receipt_records"] = []
+    runtime._framefit_action_context = context
+    monkeypatch.setenv("STATEFRAME_CODE_BOOKMARKS", "off")
+    baseline = _qualified_fixture_request(runtime, frame, messages, context,
+                                          baseline=False, monkeypatch=monkeypatch)
+    monkeypatch.setenv("STATEFRAME_CODE_BOOKMARKS", "on")
+    enabled = _qualified_fixture_request(runtime, frame, messages, context,
+                                          baseline=False, monkeypatch=monkeypatch)
+    assert json.dumps(enabled, sort_keys=True) != json.dumps(baseline, sort_keys=True)
+    assert any(str(row.get("content", "")).startswith("[Source coverage]\n")
+               for row in enabled["messages"])
+    parent_source = subprocess.check_output([
+        "git", "show", "a0ce931:src/stateframe/engine/kernel_frame_allocation_capture.py"
+    ], cwd=Path(__file__).resolve().parents[1])
+    parent_path = tmp_path / "parent_frame_allocation_capture.py"
+    parent_path.write_bytes(parent_source)
+    spec = importlib.util.spec_from_file_location("parent_frame_allocation_capture", parent_path)
+    assert spec is not None and spec.loader is not None
+    parent = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(parent)
+    with monkeypatch.context() as patch:
+        patch.setenv("STATEFRAME_CODE_BOOKMARKS", "off")
+        patch.setattr(sys.modules[__name__], "finalize_frame_candidate",
+                      parent.finalize_frame_candidate)
+        parent_request = _qualified_fixture_request(
+            runtime, frame, messages, context, baseline=False, monkeypatch=monkeypatch)
+    assert json.dumps(baseline, sort_keys=True) == json.dumps(parent_request, sort_keys=True)
+
+
+def test_pressured_bookmarks_pass_final_allocation_and_validation(tmp_path, monkeypatch):
+    root = tmp_path / "workspace"
+    (root / "pkg").mkdir(parents=True)
+    (root / "tests").mkdir()
+    (root / "pkg/__init__.py").write_text("VALUE = 1\n")
+    (root / "tests/test_app.py").write_text("assert True\n")
+    names = [f"pkg/module_{index}.py" for index in range(10)]
+    for index, name in enumerate(names):
+        (root / name).write_text(f"def target(): return {index}\n" +
+                                 ("OTHER = 42\n" if index == 0 else ""))
+    root = root.resolve()
+    runtime = _runtime_with_product(root)
+    runtime.edit_contract = {"edit_authority": {"editable_paths": ["pkg/__init__.py", *names]}}
+    revision = runtime.binding()["product_revision"]
+    frame = {
+        "artifact_revisions": {"pkg/__init__.py": "sha256:" + hashlib.sha256(
+            (root / "pkg/__init__.py").read_bytes()).hexdigest()},
+        "verification": {"revision": revision, "status": "FAIL"},
+        "readiness": {"revision": revision, "public_check_status": "FAIL"},
+        "test_receipts": [{"revision": revision, "result_class": "RED",
+                           "receipt_id": "current-failure"}],
+    }
+    messages = [{"role": "user", "content": "Task: Fix the modules."}]
+    for index, name in enumerate(names):
+        messages += _read(name, (root / name).read_text(), f"read-{index}")
+    messages += _read(names[0], (root / names[0]).read_text(), "read-extra")
+    context = build_action_context(messages, workspace_root=root)
+    context["journal_receipt_records"] = [{
+        "kind": "action_receipt",
+        "receipt": {"kind": "read", "target_path": name, "result_class": "OK",
+                    "receipt_id": f"read-receipt:{index}", "workspace_revision": "1"},
+    } for index, name in enumerate(names)]
+    runtime._framefit_action_context = context
+    receipt_id = "check-receipt:bookmark-fixture"
+    runtime._check_output_receipts = {receipt_id: {
+        "status": "FAIL", "revision": revision,
+        "stdout": "Traceback (most recent call last):\n" + "".join(
+            f'  File "{name}", line 1, in target\n'
+            for name in names[:3]) + "AssertionError: wrong result\n",
+    }}
+
+    def mark_failure(state):
+        assert len(state["read_facts"]) >= 10
+        for fact in state["read_facts"]:
+            fact["body_delivery"] = "not_shown"
+        state["last_verdict"] = {
+            "status": "FAIL", "tested_revision": revision,
+            "current_revision": revision, "check_receipt_id": receipt_id,
+            "line": f"LAST FAIL at rev {revision}",
+        }
+        state["action_ledger"]["journal_verdict"] = copy.deepcopy(state["last_verdict"])
+
+    monkeypatch.setenv("STATEFRAME_CODE_BOOKMARKS", "on")
+    result, capture = _qualified_fixture_request(
+        runtime, frame, messages, context, baseline=False, monkeypatch=monkeypatch,
+        state_transform=mark_failure, validate=False, return_capture=True,
+    )
+    assert token_estimate(result) <= runtime.frame_ceiling
+    state_message = next(message for message in result["messages"]
+                         if str(message.get("content") or "").startswith("[StateFrame]\n"))
+    projected = json.loads(state_message["content"].split("\n", 1)[1])["state"]["framefit5"]
+    from kernel_reread_result_truth import reconcile_frame
+    expected = copy.deepcopy(projected)
+    reconcile_frame(expected, result["messages"])
+    assert expected["read_facts"] == projected["read_facts"], [
+        (before["path"], before.get("body_delivery"), after.get("body_delivery"))
+        for before, after in zip(projected["read_facts"], expected["read_facts"])
+        if before != after
+    ]
+    validate_final_product_boundary(
+        runtime, result["messages"], result["tools"],
+        refresh_sources=False, refresh_headcarry=False,
+    )
+    from kernel_request_source_window import parse_model_source_window
+    whole_paths = {metadata["path"] for message in result["messages"]
+                   if (metadata := parse_model_source_window(message.get("content")))
+                   and metadata.get("status") == "COMPLETE"}
+    assert set(names[:3]) <= whole_paths
+    assert not any(row["path"] in whole_paths for row in projected["code_bookmarks"])
+    delivery = {row["path"]: row["body_delivery"] for row in projected["read_facts"]}
+    assert all(delivery[name] in {"present", "bookmarked"} for name in names[:3])
+    same_path_ranges = [metadata.get("ranges") for message in result["messages"]
+                        if (metadata := parse_model_source_window(message.get("content")))
+                        and metadata.get("path") == names[0]]
+    assert any(any(span.get("end_line") == 2 for span in ranges)
+               for ranges in same_path_ranges)
+    assert capture._code_bookmark_transition[0] is True
+    assert getattr(runtime, "_code_bookmarks_active", False) is False
+    monkeypatch.setenv("STATEFRAME_CODE_BOOKMARKS", "off")
+    disabled = _qualified_fixture_request(
+        runtime, frame, messages, context, baseline=False, monkeypatch=monkeypatch,
+        state_transform=mark_failure, validate=False)
+    from kernel_reread_result_truth import refresh_messages
+    refresh_messages(disabled["messages"])
+    validate_final_product_boundary(
+        runtime, disabled["messages"], disabled["tools"],
+        refresh_sources=False, refresh_headcarry=False)
+    baseline_ceiling = token_estimate(disabled)
+    runtime.frame_ceiling = baseline_ceiling
+    monkeypatch.setenv("STATEFRAME_CODE_BOOKMARKS", "on")
+    import kernel_code_bookmarks
+    original_collect = kernel_code_bookmarks.collect
+    def padded_optional_metadata(bookmark_runtime, bookmark_frame, *, decision=None):
+        rows = original_collect(bookmark_runtime, bookmark_frame, decision=decision)
+        for row in rows:
+            row["origin"] += "x" * 2000
+        return rows
+
+    with monkeypatch.context() as patch:
+        patch.setattr(kernel_code_bookmarks, "collect", padded_optional_metadata)
+        tight, tight_capture = _qualified_fixture_request(
+            runtime, frame, messages, context, baseline=False, monkeypatch=monkeypatch,
+            state_transform=mark_failure, return_capture=True)
+    assert token_estimate(tight) <= baseline_ceiling
+    assert tight_capture._code_bookmark_transition[0] is True
+    runtime.frame_ceiling = 10_000
+    def reject_validation(*_args, **_kwargs):
+        raise ValueError("reprepare")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(sys.modules[__name__], "validate_final_product_boundary",
+                      reject_validation)
+        with pytest.raises(ValueError, match="reprepare"):
+            _qualified_fixture_request(
+                runtime, frame, messages, context, baseline=False, monkeypatch=monkeypatch,
+                state_transform=mark_failure)
+    assert getattr(runtime, "_code_bookmark_carry", None) is None
+    retry = _qualified_fixture_request(
+        runtime, frame, messages, context, baseline=False, monkeypatch=monkeypatch,
+        state_transform=mark_failure)
+    assert json.dumps(retry, sort_keys=True) == json.dumps(result, sort_keys=True)
+    runtime._code_bookmarks_active, runtime._code_bookmark_carry = capture._code_bookmark_transition
+    runtime.frame_ceiling = token_estimate(result) + 200
+    near = _qualified_fixture_request(
+        runtime, frame, messages, context, baseline=False, monkeypatch=monkeypatch,
+        state_transform=mark_failure,
+    )
+    assert 0.9 * runtime.frame_ceiling <= token_estimate(near) <= runtime.frame_ceiling
+    restarted = _runtime_with_product(root)
+    restarted.edit_contract = copy.deepcopy(runtime.edit_contract)
+    restarted.frame_ceiling = runtime.frame_ceiling
+    restarted._framefit_action_context = context
+    restarted._check_output_receipts = copy.deepcopy(runtime._check_output_receipts)
+    replayed = _qualified_fixture_request(
+        restarted, frame, messages, context, baseline=False, monkeypatch=monkeypatch,
+        state_transform=mark_failure,
+    )
+    assert json.dumps(replayed, sort_keys=True) == json.dumps(near, sort_keys=True)
+
+    # After an edit, the current whole file remains the source carrier.
+    changed = root / names[0]
+    changed.write_text("\n" * 5 + changed.read_text())
+    runtime._workspace_view_store.note_mutation((names[0],), "edit")
+    runtime._invalidate_binding_cache()
+    updated_revision = runtime.binding()["product_revision"]
+    runtime.frame_ceiling = 10_000
+
+    def mark_stale(state):
+        state["last_verdict"] = {
+            "status": "STALE", "tested_revision": revision,
+            "current_revision": updated_revision,
+            "check_receipt_id": receipt_id, "line": "STALE after edit",
+        }
+        state["action_ledger"]["journal_verdict"] = copy.deepcopy(state["last_verdict"])
+
+    after_edit = _qualified_fixture_request(
+        runtime, frame, messages, context, baseline=False, monkeypatch=monkeypatch,
+        state_transform=mark_stale,
+    )
+    state_message = next(message for message in after_edit["messages"]
+                         if str(message.get("content") or "").startswith("[StateFrame]\n"))
+    current = json.loads(state_message["content"].split("\n", 1)[1])["state"]["framefit5"]
+    after_edit_source = [metadata for message in after_edit["messages"]
+                         if (metadata := parse_model_source_window(message.get("content")))
+                         and metadata.get("path") == names[0]]
+    assert any(metadata.get("status") == "COMPLETE" for metadata in after_edit_source)
+    assert not any(row["path"] == names[0] for row in current.get("code_bookmarks", ()))
+    assert runtime._code_bookmarks_active is True
+    from kernel_reread_result_truth import checkpoint_replay, restore_replay
+    checkpoint = checkpoint_replay(runtime)
+    resumed = _runtime_with_product(root)
+    resumed.edit_contract = copy.deepcopy(runtime.edit_contract)
+    resumed.frame_ceiling = runtime.frame_ceiling
+    resumed._framefit_action_context = context
+    resumed._check_output_receipts = copy.deepcopy(runtime._check_output_receipts)
+    restore_replay(resumed, checkpoint)
+    resumed_request = _qualified_fixture_request(
+        resumed, frame, messages, context, baseline=False, monkeypatch=monkeypatch,
+        state_transform=mark_stale,
+    )
+    assert json.dumps(resumed_request, sort_keys=True) == json.dumps(after_edit, sort_keys=True), (
+        [".".join(map(str, path)) for path in _different_paths(
+            _materialized_request(resumed_request), _materialized_request(after_edit))]
+    )
