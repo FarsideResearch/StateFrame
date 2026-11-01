@@ -15270,10 +15270,13 @@ class StateFrameRuntime:
                                   and row.get("execution_ids") and row.get("check_receipt_ids")), {})
                 reader = getattr(self.journal, "framefit_receipt_records", None)
                 if callable(reader):
-                    checks = [row for row in reader() if isinstance(row, Mapping)
-                              and row.get("kind") == "check_receipt"
-                              and row.get("execution_id") in canonical.get("execution_ids", ())
-                              and row.get("receipt_id") in canonical.get("check_receipt_ids", ())]
+                    # A check can emit a later enrichment for the same receipt ID.
+                    latest_checks = {}
+                    for row in reader():
+                        if (isinstance(row, Mapping) and row.get("kind") == "check_receipt"
+                                and row.get("receipt_id") in canonical.get("check_receipt_ids", ())):
+                            latest_checks[row["receipt_id"]] = row
+                    checks = list(latest_checks.values())
             _close_frame_route_action(record, revision=revision,
                                       canonical=canonical, receipts=checks)
         # Native tool batches close receipts here; ``observe`` is not called

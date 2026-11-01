@@ -19,6 +19,7 @@ from urllib.request import Request
 import pytest
 
 from stateframe import routes
+from kernel_continuation_journal import ContinuationJournal
 import kernel_frame_routes as frame_routes
 
 
@@ -54,22 +55,46 @@ def test_digest_and_unit_mask(monkeypatch):
         frame_routes.install(bad)
 
 
-def test_plan_uses_complete_current_failure_and_last_action():
+def test_plan_uses_complete_current_failure_and_last_action(tmp_path, monkeypatch):
     frame_routes.install(table("read.model=reader"))
     assert frame_routes.role_for_request("rev") == "plan"
+    monkeypatch.setenv("STATEFRAME_CODE_BOOKMARKS", "off")
+    journal = ContinuationJournal(tmp_path, "routes-checks", {"origin": "fixture"})
+    try:
+        for receipt_id, execution_id in (("r1", "a"), ("r2", "b"), ("r3", "c")):
+            journal.emit("check_receipt", status="FAIL", revision="rev", tested_rev="rev",
+                         receipt_id=receipt_id, selector="tests/test_example.py",
+                         execution_id=execution_id)
+        projected = [row for row in journal.framefit_receipt_records()
+                     if row["kind"] == "check_receipt"]
+    finally:
+        journal.close()
+    assert all(set(row) == {"kind", "event_id", "sequence", "status", "revision",
+                            "tested_rev", "receipt_id", "selector"} for row in projected)
+    current = projected[:2]
     check = {"execution_ids": ["a", "b"], "check_receipt_ids": ["r1", "r2"], "status": "FAIL"}
     frame_routes.close_action({"tool": "run_tests", "tool_call_id": "call"}, revision="rev",
-                              canonical=check, receipts=[{"execution_id": "a", "receipt_id": "r1", "revision": "rev"},
-                                                         {"execution_id": "b", "receipt_id": "r2", "revision": "rev"}])
+                              canonical=check, receipts=current)
     assert frame_routes.LAST_CLOSED_ACTION["call_id"] == "call"
     assert frame_routes.LAST_CLOSED_ACTION["execution_ids"] == ["a", "b"]
     assert frame_routes.role_for_request("rev") == "plan"
     assert frame_routes.role_for_request("new-rev") == "read"
     frame_routes.close_action({"tool": "read"}, revision="rev")
     assert frame_routes.role_for_request("rev") == "read"
-    frame_routes.close_action({"tool": "run_tests"}, revision="rev", canonical=check,
-                              receipts=[{"execution_id": "a", "receipt_id": "r1", "revision": "rev"},
-                                        {"execution_id": "b", "receipt_id": "r2", "revision": "old"}])
+    for receipts in (current[:1], projected, [current[0], current[0]],
+                     [current[0], {**current[1], "revision": "old"}]):
+        frame_routes.close_action({"tool": "run_tests"}, revision="rev", canonical=check,
+                                  receipts=receipts)
+        assert frame_routes.role_for_request("rev") == "read"
+    for incomplete in ({**check, "execution_ids": []},
+                       {**check, "check_receipt_ids": ["r1"]},
+                       {**check, "check_receipt_ids": ["r1", "r1"]}):
+        frame_routes.close_action({"tool": "run_tests"}, revision="rev", canonical=incomplete,
+                                  receipts=current)
+        assert frame_routes.role_for_request("rev") == "read"
+    frame_routes.close_action({"tool": "run_tests"}, revision="rev",
+                              canonical={**check, "status": "PASS"},
+                              receipts=[{**row, "status": "PASS"} for row in current])
     assert frame_routes.role_for_request("rev") == "read"
 
 

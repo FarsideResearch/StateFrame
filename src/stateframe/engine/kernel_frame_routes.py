@@ -184,9 +184,9 @@ def close_action(record: Mapping[str, object], *, revision: object = None,
     canonical = canonical or {}
     ids = list(canonical.get("execution_ids") or [])
     receipt_ids = list(canonical.get("check_receipt_ids") or [])
-    all_current = bool(ids and len(ids) == len(receipt_ids) and receipts and
-                       len(receipts) == len(ids) and
-                       {row.get("execution_id") for row in receipts} == set(ids) and
+    all_current = bool(ids and receipt_ids and len(ids) == len(receipt_ids) and receipts and
+                       len(set(receipt_ids)) == len(receipt_ids) and
+                       len(receipts) == len(receipt_ids) and
                        {row.get("receipt_id") for row in receipts} == set(receipt_ids) and
                        all(item.get("revision") == revision for item in receipts))
     LAST_CLOSED_ACTION.clear()

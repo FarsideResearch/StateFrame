@@ -86,6 +86,39 @@ def test_public_cli_routes_first_plan_send_to_second_endpoint(tmp_path):
     assert first["endpoint_host"] == cheap.url.removeprefix("http://").removesuffix("/v1")
 
 
+def test_failed_check_replans_then_read_action_returns_to_read_route(tmp_path):
+    repo = tmp_path / "discount_bug"
+    shutil.copytree(ROOT / "examples" / "discount_bug", repo)
+    run_dir = tmp_path / "run-failed-check"
+    plan_script = tmp_path / "plan.script.json"
+    plan_script.write_text(json.dumps({"model": "plan", "steps": [
+        {"tool": "run_tests", "required": True,
+         "arguments": {"target": "tests/test_pricing.py"}},
+        {"tool": "read", "required": True,
+         "arguments": {"path": "shop/pricing.py"}}]}))
+    default_script = tmp_path / "default.script.json"
+    default_script.write_text(json.dumps({"model": "scripted", "steps": [
+        {"tool": "read", "required": True,
+         "arguments": {"path": "shop/pricing.py"}}]}))
+    with Endpoint(default_script) as default, Endpoint(plan_script) as plan:
+        process = subprocess.run([
+            PYTHON, "-m", "stateframe", "run", "--repo", str(repo),
+            "--task", "Run tests/test_pricing.py, then inspect shop/pricing.py twice.",
+            "--endpoint", default.url, "--model", "scripted", "--run-dir", str(run_dir),
+            "--test-python", PYTHON, "--max-turns", "3", "--quiet",
+            "--route", f"plan.endpoint={plan.url}", "--route", "plan.model=plan",
+        ], capture_output=True, text=True, env=environment(), timeout=300, check=False)
+    assert process.returncode in (0, 1), process.stdout + process.stderr
+    wire = run_dir / "wire"
+    routes = [json.loads((wire / f"{index:04d}.route.json").read_text())
+              for index in (1, 2, 3)]
+    assert [route["role"] for route in routes] == ["plan", "plan", "read"]
+    events = [json.loads(line) for path in (run_dir / "worker" / "measurement-runs").glob("*/events.jsonl")
+              for line in path.read_text().splitlines()]
+    assert any(event.get("kind") == "test_subprocess_completed" and event.get("exit_code") == 1
+               for event in events)
+
+
 def test_read_edit_reply_is_discarded_and_reasked_on_default(tmp_path):
     repo = copy_repo(tmp_path)
     run_dir = tmp_path / "run-escalated"
