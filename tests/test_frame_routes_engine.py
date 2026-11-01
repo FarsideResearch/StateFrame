@@ -55,10 +55,11 @@ def test_digest_and_unit_mask(monkeypatch):
         frame_routes.install(bad)
 
 
-def test_plan_uses_complete_current_failure_and_last_action(tmp_path, monkeypatch):
+@pytest.mark.parametrize("bookmarks", ["off", "on"])
+def test_plan_uses_complete_current_failure_and_last_action(tmp_path, monkeypatch, bookmarks):
     frame_routes.install(table("read.model=reader"))
     assert frame_routes.role_for_request("rev") == "plan"
-    monkeypatch.setenv("STATEFRAME_CODE_BOOKMARKS", "off")
+    monkeypatch.setenv("STATEFRAME_CODE_BOOKMARKS", bookmarks)
     journal = ContinuationJournal(tmp_path, "routes-checks", {"origin": "fixture"})
     try:
         for receipt_id, execution_id in (("r1", "a"), ("r2", "b"), ("r3", "c")):
@@ -69,8 +70,12 @@ def test_plan_uses_complete_current_failure_and_last_action(tmp_path, monkeypatc
                      if row["kind"] == "check_receipt"]
     finally:
         journal.close()
-    assert all(set(row) == {"kind", "event_id", "sequence", "status", "revision",
-                            "tested_rev", "receipt_id", "selector"} for row in projected)
+    # The real projection: routing may rely only on kind, receipt_id and revision, never execution_id.
+    assert all({"kind", "receipt_id", "revision"} <= set(row) and "execution_id" not in row
+               for row in projected)
+    if bookmarks == "off":
+        assert all(set(row) == {"kind", "event_id", "sequence", "status", "revision",
+                                "tested_rev", "receipt_id", "selector"} for row in projected)
     current = projected[:2]
     check = {"execution_ids": ["a", "b"], "check_receipt_ids": ["r1", "r2"], "status": "FAIL"}
     frame_routes.close_action({"tool": "run_tests", "tool_call_id": "call"}, revision="rev",
