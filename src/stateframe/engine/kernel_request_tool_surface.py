@@ -105,7 +105,10 @@ def _request_tool_floor_schemas(
 
     base_by_name = _schema_index(base_tools)
     current_by_name = _schema_index(incoming_tools)
-    floor_names = list(_REQUEST_TOOL_FLOOR)
+    # skill_load is offered only for runs with selected skills. The floor must
+    # not require or restore a schema that the run never made dispatchable.
+    floor_names = [name for name in _REQUEST_TOOL_FLOOR
+                   if name != "skill_load" or name in base_by_name or name in current_by_name]
     if "list_files" in base_by_name:
         floor_names.append("list_files")
     from kernel_code_bookmarks import enabled as bookmarks_enabled

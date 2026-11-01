@@ -1,4 +1,4 @@
-"""Requests without selected skills retain the 0.2.1 wire contract."""
+"""Requests without selected skills retain the 0.2.3 wire contract."""
 from __future__ import annotations
 
 import io
@@ -16,6 +16,8 @@ from ._support import Endpoint, PYTHON, ROOT, copy_repo, environment
 
 
 pytestmark = pytest.mark.host_sandbox
+
+_BASELINE_COMMIT = "33c6c511611cc249b90b47930905a8e60648c05c"
 
 
 _EDIT_RECEIPT = re.compile(rb'(edit_receipt\\*":\\*")[0-9a-f]{20}')
@@ -72,9 +74,9 @@ def _run_tree(root: Path, case: Path, repo: Path, script: Path) -> tuple[bytes, 
     return requests
 
 
-def test_no_skills_wire_matches_021(tmp_path):
+def test_no_skills_wire_matches_023(tmp_path):
     archive = subprocess.run(
-        ["git", "-C", str(ROOT), "archive", "97cd52d", "src"],
+        ["git", "-C", str(ROOT), "archive", _BASELINE_COMMIT, "src"],
         capture_output=True, check=True)
     baseline = tmp_path / "baseline-tree"
     baseline.mkdir()
