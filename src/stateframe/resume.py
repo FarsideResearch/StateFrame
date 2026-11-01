@@ -30,7 +30,8 @@ RUN_LOCK = ".run.lock"
 # Per-attempt files: moved to attempts/<n>/ on resume, so the resumed attempt writes its own.
 ATTEMPT_FILES = ("worker", "wire", "requests", "sends.jsonl", "engine.log", "engine-result.json",
                  "child-traceback.txt", "summary.json", "final.diff", "tests-after.txt",
-                 "resume-divergence.json", "workspace", "checks", "checkpoint-refused.json",
+                 "resume-divergence.json", "resume-pending-verified.json", "workspace", "checks",
+                 "checkpoint-refused.json",
                  "env", "env-sites.json", "shell-home", "shell-cache",
                  "shell-ask.json", "shell-answer.json")
 
@@ -106,9 +107,9 @@ def carry_forward_records(spec: dict, own_tape: list[dict[str, object]],
                                                                 dict[str, object] | None, list[dict[str, object]]]:
     """Select the completed tape, pending check, and route moves for the next attempt.
 
-    A faithful replay keeps the earlier unfinished tail. At the equal-length boundary it keeps the
-    earlier pending request only if this attempt has not sent a replacement. A divergence or live
-    restart makes the current attempt's records authoritative instead.
+    A faithful replay keeps the earlier unfinished tail. After replaying all carried responses, the
+    earlier pending check and route moves survive until the child durably records a matching passing
+    comparison. A divergence or live restart makes the current attempt's records authoritative.
     """
     if restart_live:
         return [], None, []
@@ -123,16 +124,28 @@ def carry_forward_records(spec: dict, own_tape: list[dict[str, object]],
         return own_tape, own_pending, []
     if len(own_tape) < len(previous):
         return own_tape + previous[len(own_tape):], prior_pending, prior_route_changes
-    prior_send = prior_pending.get("send") if isinstance(prior_pending, dict) else None
-    if type(prior_send) is int:
-        sends = {int(path.name[:4]) for path in wire_dir.glob("[0-9][0-9][0-9][0-9].request.json")}
-        own_send = own_pending.get("send") if isinstance(own_pending, dict) else None
-        if not any(send > prior_send for send in sends):
-            # No send yet: the earlier check still stands. A rebuilt copy of the same in-flight request
-            # with no response is unverified (the child writes it before the check runs), so the
-            # original stays authoritative. Only a finished send at that number retires it.
-            if own_send == prior_send or (own_pending is None and prior_send not in sends):
-                return own_tape, prior_pending, prior_route_changes
+    if isinstance(prior_pending, dict):
+        marker = wire_dir.parent / "resume-pending-verified.json"
+        verified = None
+        if marker.is_file():
+            try:
+                verified = json.loads(marker.read_bytes())
+            except (OSError, ValueError):
+                pass
+        if (not isinstance(verified, dict) or verified.get("send") != prior_pending.get("send")
+                or verified.get("recorded_route") != prior_pending.get("route")
+                or not isinstance(verified.get("route"), dict)
+                or not replay_tape.Replayer([], route_changes=prior_route_changes)._route_matches(
+                    prior_pending["route"], verified["route"])):
+            return own_tape, prior_pending, prior_route_changes
+        request_path = prior_pending.get("request")
+        try:
+            request_sha256 = (hashlib.sha256(Path(request_path).read_bytes()).hexdigest()
+                              if isinstance(request_path, str) else None)
+        except OSError:
+            return own_tape, prior_pending, prior_route_changes
+        if verified.get("request_sha256") != request_sha256:
+            return own_tape, prior_pending, prior_route_changes
     return own_tape, own_pending, []
 
 

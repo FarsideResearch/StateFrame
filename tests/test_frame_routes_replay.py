@@ -1,6 +1,7 @@
 """Routed wire records are written before submission and constrain replay."""
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 
@@ -36,6 +37,14 @@ def _interrupted_routed_run(tmp_path):
             "engine_source": profiles.engine_source_summary(), "routes": {"roles": {"read": ROUTE}}}
     (run / "spec.json").write_text(json.dumps(spec))
     return run, spec
+
+
+def _mark_pending_verified(run, pending, *, route=ROUTE):
+    request = pending.get("request")
+    marker = {"send": pending["send"],
+              "request_sha256": hashlib.sha256(Path(request).read_bytes()).hexdigest() if request else None,
+              "recorded_route": pending["route"], "route": route}
+    (run / "resume-pending-verified.json").write_text(json.dumps(marker))
 
 
 def test_second_resume_keeps_route_move_for_carried_tape(tmp_path):
@@ -104,6 +113,61 @@ def test_carried_tape_uses_its_own_pending_send(tmp_path):
     assert resumed["pending"]["request"] == str(old_wire / "0003.request.json")
 
 
+def test_failed_send_renumbering_keeps_unverified_pending_and_route_move(tmp_path):
+    run, spec = _interrupted_routed_run(tmp_path)
+    old_wire = run / "attempts" / "1" / "wire"
+    _write_send(old_wire, 1, completed=False)
+    (old_wire / "0001.error.txt").write_text("send failed")
+    _write_send(old_wire, 2)
+    _write_send(old_wire, 3, completed=False)
+    _write_send(run / "wire", 1)
+    _write_send(run / "wire", 2, completed=False)
+    (run / "wire" / "0002.request.json").write_bytes(b'{"model": "reader", "messages": [1]}')
+    move = {"role": "read", "field": "endpoint", "from": "http://127.0.0.1:8090/v1",
+            "to": "http://127.0.0.1:9000/v1"}
+    spec["resume"] = {"tape": replay_tape.build(old_wire, run / "attempts" / "1" / "sends.jsonl"),
+                      "pending": replay_tape.pending_request(old_wire), "route_changes": [move]}
+    prior_pending = spec["resume"]["pending"]
+    assert [record["send"] for record in spec["resume"]["tape"]] == [2]
+    assert prior_pending["send"] == 3
+    assert replay_tape.pending_request(run / "wire", routes_required=True)["send"] == 2
+    (run / "spec.json").write_text(json.dumps(spec))
+
+    resume.archive_attempt({"run": run, "spec": spec, "attempt": 2, "max_turns": 8}, tmp_path,
+                           use_checkpoint=False)
+
+    resumed = json.loads((run / "spec.json").read_text())["resume"]
+    assert resumed["pending"] == prior_pending
+    assert resumed["route_changes"] == [move]
+
+
+def test_failed_send_renumbering_retires_verified_pending(tmp_path):
+    run, spec = _interrupted_routed_run(tmp_path)
+    old_wire = run / "attempts" / "1" / "wire"
+    _write_send(old_wire, 1, completed=False)
+    (old_wire / "0001.error.txt").write_text("send failed")
+    _write_send(old_wire, 2)
+    _write_send(old_wire, 3, completed=False)
+    _write_send(run / "wire", 1)
+    _write_send(run / "wire", 2, completed=False)
+    move = {"role": "read", "field": "model", "from": "reader", "to": "renamed"}
+    spec["resume"] = {"tape": replay_tape.build(old_wire, run / "attempts" / "1" / "sends.jsonl"),
+                      "pending": replay_tape.pending_request(old_wire), "route_changes": [move]}
+    _mark_pending_verified(run, spec["resume"]["pending"], route={**ROUTE, "model": "renamed"})
+    (run / "spec.json").write_text(json.dumps(spec))
+
+    resume.archive_attempt({"run": run, "spec": spec, "attempt": 2, "max_turns": 8}, tmp_path,
+                           use_checkpoint=False)
+
+    resumed = json.loads((run / "spec.json").read_text())["resume"]
+    assert len(resumed["tape"]) == 1
+    assert resumed["pending"]["send"] == 2
+    assert resumed["pending"]["request"] == str(run / "attempts" / "2" / "wire" / "0002.request.json")
+    assert "route_changes" not in resumed
+    assert (run / "attempts" / "2" / "resume-pending-verified.json").is_file()
+    assert not (run / "resume-pending-verified.json").exists()
+
+
 def test_equal_length_replay_keeps_prior_pending_and_route_changes(tmp_path):
     run, spec = _interrupted_routed_run(tmp_path)
     old_wire = run / "attempts" / "1" / "wire"
@@ -152,6 +216,36 @@ def test_unverified_rebuilt_pending_does_not_replace_the_original_check(tmp_path
     assert resumed["route_changes"] == [move]
 
 
+@pytest.mark.parametrize("stale_field", ["request_sha256", "route"])
+def test_stale_pending_verification_marker_does_not_retire_check(tmp_path, stale_field):
+    run, spec = _interrupted_routed_run(tmp_path)
+    old_wire = run / "attempts" / "1" / "wire"
+    _write_send(old_wire, 1)
+    _write_send(old_wire, 2, completed=False)
+    _write_send(run / "wire", 1)
+    _write_send(run / "wire", 2, completed=False)
+    move = {"role": "read", "field": "model", "from": "reader", "to": "renamed"}
+    spec["resume"] = {"tape": replay_tape.build(old_wire, run / "attempts" / "1" / "sends.jsonl"),
+                      "pending": replay_tape.pending_request(old_wire), "route_changes": [move]}
+    prior_pending = spec["resume"]["pending"]
+    _mark_pending_verified(run, spec["resume"]["pending"], route={**ROUTE, "model": "renamed"})
+    marker = run / "resume-pending-verified.json"
+    stale = json.loads(marker.read_text())
+    if stale_field == "request_sha256":
+        stale["request_sha256"] = "0" * 64
+    else:
+        stale["route"]["model"] = "wrong"
+    marker.write_text(json.dumps(stale))
+    (run / "spec.json").write_text(json.dumps(spec))
+
+    resume.archive_attempt({"run": run, "spec": spec, "attempt": 2, "max_turns": 8}, tmp_path,
+                           use_checkpoint=False)
+
+    resumed = json.loads((run / "spec.json").read_text())["resume"]
+    assert resumed["pending"] == prior_pending
+    assert resumed["route_changes"] == [move]
+
+
 def test_equal_length_replay_drops_prior_pending_after_later_failed_send(tmp_path):
     run, spec = _interrupted_routed_run(tmp_path)
     old_wire = run / "attempts" / "1" / "wire"
@@ -163,6 +257,7 @@ def test_equal_length_replay_drops_prior_pending_after_later_failed_send(tmp_pat
     spec["resume"] = {"tape": replay_tape.build(old_wire, run / "attempts" / "1" / "sends.jsonl"),
                       "pending": replay_tape.pending_request(old_wire),
                       "route_changes": [{"role": "read", "field": "model", "from": "reader", "to": "new"}]}
+    _mark_pending_verified(run, spec["resume"]["pending"], route={**ROUTE, "model": "new"})
     (run / "spec.json").write_text(json.dumps(spec))
 
     resume.archive_attempt({"run": run, "spec": spec, "attempt": 2, "max_turns": 8}, tmp_path,
@@ -268,6 +363,59 @@ def test_route_record_precedes_request_and_submission(tmp_path, monkeypatch):
                                              socket_timeout=10, route_meta=ROUTE) == RESPONSE
     assert seen[:2] == ["0001.route.json", "0001.request.json"]
     assert json.loads((run / "wire" / "0001.route.json").read_text()) == ROUTE
+
+
+@pytest.mark.parametrize("case", ["passing", "model_move", "failing", "orphan", "unrouted"])
+def test_child_records_pending_verification_before_live_send(tmp_path, monkeypatch, case):
+    monkeypatch.syspath_prepend(str(Path(_child.__file__).parent / "engine"))
+    import kernel_bounded_http
+
+    run = tmp_path / "run"
+    run.mkdir()
+    old_wire = tmp_path / "old" / "wire"
+    if case == "orphan":
+        old_wire.mkdir(parents=True)
+        (old_wire / "0003.route.json").write_text(json.dumps(ROUTE))
+    else:
+        _write_send(old_wire, 3, completed=False)
+    pending = replay_tape.pending_request(old_wire) if case != "unrouted" else None
+    move = {"role": "read", "field": "model", "from": "reader", "to": "renamed"}
+    replay = replay_tape.Replayer([], pending=pending,
+                                  route_changes=[move] if case == "model_move" else None)
+    marker = run / "resume-pending-verified.json"
+    wire = (b'{"model": "reader", "messages": [1]}' if case == "failing" else
+            b'{"model": "renamed", "messages": []}' if case == "model_move" else WIRE)
+    route = {**ROUTE, "model": "renamed"} if case == "model_move" else ROUTE
+    replaced = []
+    replace = _child.os.replace
+
+    def observed_replace(source, target):
+        replaced.append(Path(target).name)
+        replace(source, target)
+
+    def physical(request, endpoint, key, **kwargs):
+        assert request == wire and endpoint == URL
+        assert marker.exists() is (case in {"passing", "model_move", "orphan"})
+        if case in {"passing", "model_move", "orphan"}:
+            assert replaced[-1] == "resume-pending-verified.json"
+        return RESPONSE
+
+    monkeypatch.setattr(_child.os, "replace", observed_replace)
+    monkeypatch.setattr(kernel_bounded_http, "request_bytes", physical)
+    _child.install_wire_recorder(run, URL, replayer=replay,
+                                 routed_endpoints={URL} if case != "unrouted" else None)
+    kwargs = {"route_meta": route} if case != "unrouted" else {}
+    assert kernel_bounded_http.request_bytes(wire, URL, "", deadline=1000000,
+                                             socket_timeout=10, **kwargs) == RESPONSE
+    if case in {"passing", "model_move", "orphan"}:
+        assert json.loads(marker.read_text()) == {
+            "send": 3, "request_sha256": None if case == "orphan" else hashlib.sha256(WIRE).hexdigest(),
+            "recorded_route": ROUTE, "route": route}
+        assert replay.diverged is None
+    else:
+        assert not marker.exists()
+        assert "resume-pending-verified.json" not in replaced
+        assert (run / "resume-divergence.json").exists() is (case == "failing")
 
 
 def test_orphan_route_record_becomes_pending_and_requires_same_destination(tmp_path):

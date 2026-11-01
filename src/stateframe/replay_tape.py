@@ -254,6 +254,7 @@ class Replayer:
         # The request that was in flight (sent, no response) when the attempt stopped: the first live
         # request after the tape must rebuild it byte for byte (checked once).
         self.pending = dict(pending) if pending else None
+        self.pending_verified: dict[str, object] | None = None
         self.route_changes = list(route_changes or [])
 
     def _route_matches(self, expected: dict[str, object], actual: dict[str, object] | None) -> bool:
@@ -286,22 +287,26 @@ class Replayer:
                                      "recorded_send": expected["send"]}
                     return None
                 if expected.get("orphan_route"):
+                    self.pending_verified = {"send": expected["send"], "request_sha256": None,
+                                             "recorded_route": expected.get("route"), "route": route}
                     return None
+                recorded = Path(str(expected["request"])).read_bytes()
                 digest = normalized_digest(request)
                 if digest != expected["request_digest"]:
                     swap = self._route_model_swap(expected.get("route"))
-                    recorded = Path(str(expected["request"])).read_bytes()
                     alternate = with_recorded_model(request, recorded, swap)
-                    if alternate is not None and normalized_digest(alternate) == expected["request_digest"]:
+                    if alternate is None or normalized_digest(alternate) != expected["request_digest"]:
+                        self.diverged = {
+                            "tape_position": self.cursor + 1, "tape_total": len(self.tape),
+                            "recorded_send": expected["send"], "recorded_digest": expected["request_digest"],
+                            "replayed_digest": digest,
+                            "reason": "the engine's rebuilt request differs from the request in flight when the "
+                                      "attempt stopped",
+                            "first_difference": first_difference(recorded, request)}
                         return None
-                    self.diverged = {
-                        "tape_position": self.cursor + 1, "tape_total": len(self.tape),
-                        "recorded_send": expected["send"], "recorded_digest": expected["request_digest"],
-                        "replayed_digest": digest,
-                        "reason": "the engine's rebuilt request differs from the request in flight when the "
-                                  "attempt stopped",
-                        "first_difference": first_difference(Path(str(expected["request"])).read_bytes(),
-                                                             request)}
+                self.pending_verified = {"send": expected["send"],
+                                         "request_sha256": hashlib.sha256(recorded).hexdigest(),
+                                         "recorded_route": expected.get("route"), "route": route}
             return None
         item = self.tape[self.cursor]
         if "route" in item and not self._route_matches(item["route"], route):

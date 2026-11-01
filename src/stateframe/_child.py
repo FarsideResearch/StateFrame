@@ -184,6 +184,9 @@ def install_wire_recorder(run: Path, chat_url: str, replayer: Replayer | None = 
         # An in-flight request to verify keeps the replayer in the path even with no tail left to answer.
         if replayer is not None and (replayer.active or replayer.pending is not None):
             replayed = replayer.answer(wire, route=route)
+            if routed_endpoints is not None and replayer.pending_verified is not None:
+                atomic_bytes(run / "resume-pending-verified.json", json.dumps(
+                    replayer.pending_verified, sort_keys=True, separators=(",", ":")).encode())
             if replayed is None and replayer.diverged is not None:
                 (run / "resume-divergence.json").write_text(json.dumps(
                     {**replayer.diverged, "send": index, "checkpoint": replayer.strict}, indent=1))
