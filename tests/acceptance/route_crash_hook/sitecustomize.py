@@ -24,15 +24,19 @@ if os.environ.get("ROUTE_CRASH_POINT") == "after_route:2":
 elif os.environ.get("ROUTE_CRASH_POINT") == "after_discard":
     _import = builtins.__import__
 
-    def _patch_journal(module):
-        journal = getattr(module, "AuditJournal", None)
-        if journal is None or getattr(journal, "_route_crash_wrapped", False):
+    _JOURNALS = {"kernel_measurement": "AuditJournal", "kernel_continuation_journal": "ContinuationJournal"}
+
+    def _patch_journal(module, class_name):
+        journal = getattr(module, class_name, None)
+        # The run journal is a ContinuationJournal, which defines its own emit: patch each class's own method.
+        if journal is None or "emit" not in vars(journal) or "_route_crash_wrapped" in vars(journal):
             return
-        original = journal.emit
+        original = vars(journal)["emit"]
 
         def emit_then_block(self, kind, **fields):
             result = original(self, kind, **fields)
-            if kind == "route_escalation_discarded":
+            if kind == "route_escalation_discarded" and not os.environ.get("ROUTE_CRASH_BLOCKED"):
+                os.environ["ROUTE_CRASH_BLOCKED"] = "1"  # once, even if one emit calls the other
                 _block()
             return result
 
@@ -41,8 +45,8 @@ elif os.environ.get("ROUTE_CRASH_POINT") == "after_discard":
 
     def _import_then_patch(name, globals=None, locals=None, fromlist=(), level=0):
         module = _import(name, globals, locals, fromlist, level)
-        if name == "kernel_measurement":
-            _patch_journal(module)
+        if name in _JOURNALS:
+            _patch_journal(module, _JOURNALS[name])
         return module
 
     builtins.__import__ = _import_then_patch

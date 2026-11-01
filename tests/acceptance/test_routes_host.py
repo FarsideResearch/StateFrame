@@ -20,10 +20,23 @@ pytestmark = [pytest.mark.host_sandbox,
                                  reason="routing engine lane not installed")]
 
 
-def _kill_run(process: subprocess.Popen[str]) -> None:
+def _kill_run(process: subprocess.Popen[str], run_dir: Path | None = None) -> None:
+    """Kill the CLI and, like a machine crash, the engine: it runs in its own session and holds the run lock."""
     if process.poll() is None:
         os.killpg(process.pid, signal.SIGKILL)
     process.communicate(timeout=5)
+    if run_dir is None:
+        return
+    from stateframe.resume import ENGINE_LOCK, _lock_holder
+
+    cutoff = time.monotonic() + 15
+    while (holder := _lock_holder(run_dir / ENGINE_LOCK)) is not None and time.monotonic() < cutoff:
+        try:
+            os.killpg(os.getpgid(int(holder)), signal.SIGKILL)
+        except (ProcessLookupError, PermissionError, ValueError):
+            pass
+        time.sleep(0.1)
+    assert _lock_holder(run_dir / ENGINE_LOCK) is None, "engine survived the simulated crash"
 
 
 def _crash_python(tmp_path: Path, point: str) -> tuple[Path, Path, Path]:
@@ -102,12 +115,22 @@ def test_read_edit_reply_is_discarded_and_reasked_on_default(tmp_path):
     assert len(cheap_requests) >= 2 and default_requests
     assert all(request["model"] == "cheap" for request in cheap_requests)
     assert all(request["model"] == "scripted" for request in default_requests)
+    import re
+
     def frame(request):
-        return [message["content"] for message in request["messages"]
-                if isinstance(message.get("content"), str)
-                and message["content"].startswith("[StateFrame]\n")]
-    assert frame(cheap_requests[1])
-    assert frame(cheap_requests[1]) == frame(default_requests[0])
+        """The typed frame, and the live owner budget line, which leg two's own charge changes by design."""
+        texts = [message["content"] for message in request["messages"]
+                 if isinstance(message.get("content"), str)
+                 and message["content"].startswith("[StateFrame]\n")]
+        assert len(texts) == 1
+        parsed = json.loads(texts[0].split("\n", 1)[1])
+        limits = parsed["state"]["framefit5"]["owner_protocol"].pop("continuation_limits")
+        decisions = int(re.search(r"model_decisions_remaining=(\d+)", limits).group(1))
+        return parsed, decisions
+    first_frame, first_decisions = frame(cheap_requests[1])
+    second_frame, second_decisions = frame(default_requests[0])
+    assert first_frame == second_frame  # the typed frame is the handoff between models
+    assert first_decisions - second_decisions == 1  # leg two charged its own model decision
     wire = run_dir / "wire"
     routes = [json.loads(path.read_text()) for path in sorted(wire.glob("*.route.json"))]
     cheap_host = cheap.url.removeprefix("http://").removesuffix("/v1")
@@ -165,13 +188,13 @@ def test_killed_second_leg_replays_first_leg_and_verifies_pending_bytes(tmp_path
             first = (run_dir / "wire" / "0001.request.json").read_bytes()
             second = pending_request.read_bytes()
             route_bytes = pending_route.read_bytes()
-            _kill_run(process)
+            _kill_run(process, run_dir)
             resumed = subprocess.run([PYTHON, "-m", "stateframe", "resume", str(run_dir),
                                       "--quiet", *routes], capture_output=True, text=True,
                                      env=environment(), timeout=300, check=False)
         finally:
             if process.poll() is None:
-                _kill_run(process)
+                _kill_run(process, run_dir)
     assert resumed.returncode in (0, 1), resumed.stdout + resumed.stderr
     assert (run_dir / "wire" / "0001.request.json").read_bytes() == first
     assert (run_dir / "wire" / "0002.request.json").read_bytes() == second
@@ -220,14 +243,14 @@ def test_routed_crash_boundary_replays_with_same_route_and_request_bytes(tmp_pat
                 assert not route2.exists()
             saved = {path.name: path.read_bytes() for path in wire.glob("*.route.json")}
             saved.update({path.name: path.read_bytes() for path in wire.glob("*.request.json")})
-            _kill_run(process)
+            _kill_run(process, run_dir)
             arm.unlink()
             resumed = subprocess.run([PYTHON, "-m", "stateframe", "resume", str(run_dir),
                                       "--quiet", *routes], capture_output=True, text=True,
                                      env=environment(), timeout=300, check=False)
         finally:
             if process.poll() is None:
-                _kill_run(process)
+                _kill_run(process, run_dir)
     assert resumed.returncode in (0, 1), resumed.stdout + resumed.stderr
     for name, data in saved.items():
         assert (wire / name).read_bytes() == data
