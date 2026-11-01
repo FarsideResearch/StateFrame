@@ -204,6 +204,7 @@ def test_framefit5_request_carries_bounded_read_lockout_line(tmp_path, monkeypat
     from kernel_read_lockout import append_frame_line
 
     monkeypatch.setenv("STATEFRAME_CODE_BOOKMARKS", "on")
+    monkeypatch.setenv("STATEFRAME_READ_LOCKOUT", "on")
     messages, context, runtime = _frame_request(tmp_path, "pkg/app.py", ["pkg/app.py"])
     state = build_typed_state(messages, context, runtime)
     prepared = [{"role": "system", "content": "rules"}, messages[0],
@@ -466,6 +467,7 @@ def test_final_send_replans_if_locked_source_is_not_delivered(tmp_path, monkeypa
     from kernel_frame_optional_allocation import FrameAllocationReplanNeeded
 
     monkeypatch.setenv("STATEFRAME_CODE_BOOKMARKS", "on")
+    monkeypatch.setenv("STATEFRAME_READ_LOCKOUT", "on")
     root = tmp_path / "workspace"
     (root / "pkg").mkdir(parents=True)
     (root / "pkg/__init__.py").write_text("VALUE = 1\n")

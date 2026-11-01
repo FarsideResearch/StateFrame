@@ -874,9 +874,11 @@ def checkpoint(runtime, messages, worker_state):
     }
     from kernel_code_bookmarks import enabled as bookmarks_enabled
     if bookmarks_enabled() and (
-            getattr(runtime, "_code_bookmarks_active", False) is True
-            or getattr(runtime, "_reread_result_truth", None)
-            or getattr(runtime, "_read_lockout_state", None)):
+             getattr(runtime, "_code_bookmarks_active", False) is True
+             or getattr(runtime, "_reread_result_truth", None)
+             or getattr(runtime, "_read_contract_source_cache", None)
+             or getattr(runtime, "_read_page_delivery_replay", None)
+             or getattr(runtime, "_read_lockout_state", None)):
         from kernel_reread_result_truth import checkpoint_replay
         state["code_bookmark_replay"] = checkpoint_replay(runtime)
     policy = first_green_checkpoint_section(runtime)

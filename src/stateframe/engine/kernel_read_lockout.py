@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import os
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 
@@ -13,6 +14,15 @@ _PURE_SOURCE_TOOLS = frozenset({
 _MAX_LOCKED_REQUESTS = 2
 _MAX_LOCKED_PATHS = 64
 _MAX_PATH_TEXT = 4096
+_SWITCH = "STATEFRAME_READ_LOCKOUT"
+
+
+def enabled() -> bool:
+    value = os.environ.get(_SWITCH, "off").strip().lower()
+    if value not in {"off", "on"}:
+        raise ValueError(f"{_SWITCH} must be on or off")
+    from kernel_code_bookmarks import enabled as bookmarks_enabled
+    return value == "on" and bookmarks_enabled()
 
 
 def _failure(runtime: object) -> tuple[str, ...] | None:
@@ -138,6 +148,8 @@ def _repair_route(runtime: object, tools: Sequence[dict], paths: Mapping[str, st
 def final_source_visible(runtime: object, visible_bookmarks: Sequence[Mapping[str, object]],
                          tools: Sequence[dict]) -> bool:
     """Validate that a locked request actually carries its repair source."""
+    if not enabled():
+        return True
     state = getattr(runtime, "_read_lockout_state", None)
     if not isinstance(state, Mapping) or not state.get("remaining"):
         return True
@@ -175,9 +187,7 @@ def _emit(runtime: object, reason: str, state: Mapping[str, object]) -> None:
 
 def project(runtime: object, tools: Sequence[dict]) -> list[dict]:
     """Project the next request once, even if its menu is recomposed."""
-    from kernel_code_bookmarks import enabled as bookmarks_enabled
-
-    if not bookmarks_enabled():
+    if not enabled():
         return list(tools)
     state = _state(runtime)
     batch = getattr(runtime, "native_batch", None)
@@ -256,8 +266,7 @@ def project(runtime: object, tools: Sequence[dict]) -> list[dict]:
 
 def filter_tools(runtime: object, tools: Sequence[dict]) -> list[dict]:
     """Keep the restriction through later request menu authorities."""
-    from kernel_code_bookmarks import enabled as bookmarks_enabled
-    if not bookmarks_enabled() or not getattr(runtime, "_read_lockout_notice", None):
+    if not enabled() or not getattr(runtime, "_read_lockout_notice", None):
         return list(tools)
     if getattr(runtime, "_request_deferred_source_paths", ()):
         release(runtime, "FRESH_READ_REQUIRED")
@@ -273,8 +282,7 @@ def filter_tools(runtime: object, tools: Sequence[dict]) -> list[dict]:
 
 
 def append_frame_line(runtime: object, messages: list[dict]) -> None:
-    from kernel_code_bookmarks import enabled as bookmarks_enabled
-    if not bookmarks_enabled():
+    if not enabled():
         return
     notice = getattr(runtime, "_read_lockout_notice", None)
     previous = getattr(runtime, "_read_lockout_last_notice", None)
@@ -293,6 +301,8 @@ def append_frame_line(runtime: object, messages: list[dict]) -> None:
 
 
 def release(runtime: object, reason: str) -> None:
+    if not enabled():
+        return
     state = getattr(runtime, "_read_lockout_state", None)
     if isinstance(state, dict) and state["remaining"]:
         state["remaining"] = 0
@@ -302,6 +312,8 @@ def release(runtime: object, reason: str) -> None:
 
 
 def checkpoint(runtime: object) -> dict[str, object] | None:
+    if not enabled():
+        return None
     state = getattr(runtime, "_read_lockout_state", None)
     if not isinstance(state, dict):
         return None
@@ -309,7 +321,7 @@ def checkpoint(runtime: object) -> dict[str, object] | None:
 
 
 def restore(runtime: object, snapshot: object) -> None:
-    if snapshot is None:
+    if snapshot is None or not enabled():
         return
     if (isinstance(snapshot, Mapping)
             and snapshot.get("schema") == "stateframe-read-lockout/1"):

@@ -12,7 +12,7 @@ from collections.abc import Mapping, Sequence
 ENV = "STATEFRAME_REREAD_RESULT_TRUTH"
 EVICTION_NOTICE = "[not shown] {path} @rev {rev}: re-read to see it"
 _SEEN_LIMIT = 256
-_REPLAY_SCHEMA = "stateframe-code-bookmark-read-replay/2"
+_REPLAY_SCHEMA = "stateframe-code-bookmark-read-replay/3"
 
 
 def _current_product_revision(measurement: object) -> str | None:
@@ -228,7 +228,10 @@ def checkpoint_replay(measurement: object) -> dict[str, object]:
     snapshot = {"schema": _REPLAY_SCHEMA,
                 "active": getattr(measurement, "_code_bookmarks_active", False) is True,
                 "seen": rows[-_SEEN_LIMIT:], "failure": failure,
-                "bookmarks": bookmarks}
+                "bookmarks": bookmarks,
+                "request_number": getattr(measurement, "_frame_budget_request_count", 0)}
+    from kernel_read_exec import delivered_page_snapshot
+    snapshot["pages"] = delivered_page_snapshot(measurement)
     from kernel_read_lockout import checkpoint as lockout_checkpoint
     lockout = lockout_checkpoint(measurement)
     if lockout is not None:
@@ -246,7 +249,8 @@ def restore_replay(measurement: object, snapshot: object) -> None:
     from kernel_code_bookmarks import MAX_BOOKMARKS
     from kernel_public_localization import public_path
 
-    if (not isinstance(snapshot, Mapping) or snapshot.get("schema") != _REPLAY_SCHEMA
+    if (not isinstance(snapshot, Mapping)
+            or snapshot.get("schema") not in {_REPLAY_SCHEMA, "stateframe-code-bookmark-read-replay/2"}
             or type(snapshot.get("active")) is not bool):
         raise ValueError("invalid bookmark read replay")
     rows, failure = snapshot.get("seen"), snapshot.get("failure")
@@ -255,6 +259,24 @@ def restore_replay(measurement: object, snapshot: object) -> None:
             or (failure is not None and not isinstance(failure, Mapping))
             or not isinstance(bookmarks, list) or len(bookmarks) > MAX_BOOKMARKS):
         raise ValueError("invalid bookmark read replay")
+    pages = snapshot.get("pages", [])
+    if (not isinstance(pages, list) or len(pages) > 128
+            or (snapshot["schema"] == _REPLAY_SCHEMA and "pages" not in snapshot)):
+        raise ValueError("invalid bookmark read replay")
+    request_number = snapshot.get("request_number", 0)
+    if (type(request_number) is not int or not 0 <= request_number <= 1_000_000_000
+            or (snapshot["schema"] == _REPLAY_SCHEMA and "request_number" not in snapshot)):
+        raise ValueError("invalid bookmark read replay")
+    restored_pages: OrderedDict[str, int] = OrderedDict()
+    for row in pages:
+        if (not isinstance(row, list) or len(row) != 2
+                or not isinstance(row[0], str)
+                or re.fullmatch(r"[0-9a-f]{64}", row[0]) is None
+                or row[0] in restored_pages
+                or type(row[1]) is not int or not 1 <= row[1] <= 1_000_000_000
+                or (snapshot["schema"] == _REPLAY_SCHEMA and row[1] > request_number)):
+            raise ValueError("invalid bookmark read replay")
+        restored_pages[row[0]] = row[1]
     restored_bookmarks = []
     for bookmark in bookmarks:
         if (not isinstance(bookmark, Mapping)
@@ -304,6 +326,9 @@ def restore_replay(measurement: object, snapshot: object) -> None:
     measurement._bookmark_failure_data = dict(failure) if failure is not None else None
     measurement._code_bookmarks_active = snapshot["active"]
     measurement._code_bookmark_carry = restored_bookmarks
+    measurement._read_page_delivery_replay = restored_pages
+    if snapshot["schema"] == _REPLAY_SCHEMA:
+        measurement._frame_budget_request_count = request_number
     if "read_lockout" in snapshot:
         from kernel_read_lockout import restore as restore_lockout
         restore_lockout(measurement, snapshot["read_lockout"])

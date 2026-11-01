@@ -231,13 +231,18 @@ class UnboundedProgressWatch:
 
     def snapshot(self) -> dict[str, object]:
         """Persist hashes only, in eviction order, in the worker checkpoint."""
-        return {
-            "schema": "unbounded-progress-watch/2", "threshold": self.threshold,
+        from kernel_code_bookmarks import enabled as bookmarks_enabled
+        bookmarks_on = bookmarks_enabled()
+        state = {
+            "schema": "unbounded-progress-watch/2" if bookmarks_on
+                      else "unbounded-progress-watch/1", "threshold": self.threshold,
             "streak": self.streak, "seen": list(self._seen),
             "receipt_cursor": self._receipt_cursor,
             "last_boundary": self._last_boundary,
-            "batch_tail_pending": self._batch_tail_pending,
         }
+        if bookmarks_on:
+            state["batch_tail_pending"] = self._batch_tail_pending
+        return state
 
     @classmethod
     def from_snapshot(cls, state: object) -> UnboundedProgressWatch:
@@ -282,34 +287,13 @@ class UnboundedProgressWatch:
         return True
 
     @staticmethod
-    def _unchanged_read_continuation(
-            receipts: list[dict], cursor: int, batch_origin: str | None) -> bool:
-        """Charge one idle unit for a request's proved unchanged read batch.
-
-        The first read remains chargeable. Only subsequent receipts from that
-        same all-unchanged request suppress an action-level idle charge; mixed
-        or unproved batches keep ordinary accounting.
-        """
-        if cursor < 1 or cursor >= len(receipts):
+    def _unchanged_read_batch(receipts: list[dict]) -> bool:
+        """Discount only after every action in the completed batch is known."""
+        if not receipts:
             return False
-        request_id = batch_origin or receipts[cursor].get("request_id")
-        if not isinstance(request_id, str) or not request_id:
-            return False
-        if batch_origin:
-            first = next((index for index in range(cursor - 1, -1, -1)
-                          if receipts[index].get("request_id") == batch_origin), None)
-            if first is None:
-                return False
-        else:
-            if receipts[cursor - 1].get("request_id") != request_id:
-                return False
-            first = cursor - 1
-            while first and receipts[first - 1].get("request_id") == request_id:
-                first -= 1
-        for receipt in receipts[first:]:
+        for receipt in receipts:
             delivery = receipt.get("delivery")
-            if ((not batch_origin and receipt.get("request_id") != request_id)
-                    or receipt.get("kind") != "read"
+            if (receipt.get("kind") != "read"
                     or receipt.get("result_class") != "OK"
                     or not isinstance(delivery, Mapping)
                     or delivery.get("unchanged_since_request") is not True
@@ -326,6 +310,8 @@ class UnboundedProgressWatch:
         # restart at that same boundary must not charge the idle turn twice.
         if boundary is not None and boundary == self._last_boundary:
             return self.streak >= self.threshold
+        from kernel_code_bookmarks import enabled as bookmarks_enabled
+        bookmarks_on = bookmarks_enabled()
         revision = binding.get("product_files") or binding.get("product_revision") or binding.get("artifact")
         progress = self._new(("revision", revision)) if revision is not None else False
         cursor = min(self._receipt_cursor, len(receipts))
@@ -345,26 +331,24 @@ class UnboundedProgressWatch:
             identity = self._identity(binding, receipt, kind, result, revision)
             if identity is not None and self._new(identity):
                 progress = True
-        unchanged_continuation = self._unchanged_read_continuation(
-            receipts, cursor, batch_origin)
-        tail = (batch_complete and batch_origin is not None
-                and cursor == len(receipts)
-                and self._batch_tail_pending == batch_origin)
-        self._batch_tail_pending = None
-        if (batch_complete and batch_origin is not None and cursor < len(receipts)
-                and (unchanged_continuation or receipts[cursor].get("request_id") == batch_origin)
-                and all(isinstance(row.get("delivery"), Mapping)
-                        and row.get("kind") == "read" and row.get("result_class") == "OK"
-                        and row["delivery"].get("unchanged_since_request") is True
-                        and row["delivery"].get("requested_bytes_delivered") == 0
-                        for row in receipts[cursor:])):
-            self._batch_tail_pending = batch_origin
+        charge = 1
+        if bookmarks_on and isinstance(batch_origin, str):
+            if not batch_complete:
+                charge = 0
+            elif cursor == len(receipts) and self._batch_tail_pending == batch_origin:
+                charge = 0
+            else:
+                first = next((index for index in range(len(receipts) - 1, -1, -1)
+                              if receipts[index].get("request_id") == batch_origin), None)
+                rows = receipts[first:] if first is not None else receipts[cursor:]
+                charge = 1 if self._unchanged_read_batch(rows) else max(1, len(rows))
+                self._batch_tail_pending = batch_origin
         self._receipt_cursor = len(receipts)
         self._last_boundary = boundary
         if progress:
             self.streak = 0
-        elif charge_idle and not unchanged_continuation and not tail:
-            self.streak += 1
+        elif charge_idle:
+            self.streak += charge
         return self.streak >= self.threshold
 
     @staticmethod
@@ -443,7 +427,8 @@ def stop_unbounded_no_progress(runtime: object, watch: UnboundedProgressWatch, *
     binding = runtime.binding()
     receipts = getattr(runtime.owner, "_receipts", [])
     lock = getattr(runtime, "_read_lockout_state", None)
-    locked = (isinstance(lock, Mapping) and lock.get("remaining", 0) > 0
+    from kernel_read_lockout import enabled as lockout_enabled
+    locked = (lockout_enabled() and isinstance(lock, Mapping) and lock.get("remaining", 0) > 0
               and getattr(runtime, "_read_lockout_notice", None))
     # Observe the boundary and receipts while paused, but do not charge an
     # idle turn caused by the host's own two-request restriction. Real new

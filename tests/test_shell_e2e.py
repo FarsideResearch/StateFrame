@@ -213,3 +213,66 @@ def test_kill_resume_serves_byte_identical_next_request(tmp_path):
         output.close()
         server.shutdown()
         server.server_close()
+def test_kill_resume_preserves_repeated_read_request_bytes(tmp_path):
+    """The resumed third request must retain the second read's unchanged notice."""
+    import threading
+
+    class PausedScript(Script):
+        def __init__(self):
+            super().__init__({"model": "scripted", "steps": [
+                step("read", path="pkg/value.py"),
+                step("read", path="pkg/value.py"),
+                *finish(),
+            ], "tokenize": {"mode": "ok"}})
+            self.arrived = threading.Event()
+            self.release = threading.Event()
+            self.pause = True
+
+        def next_call(self, offered):
+            if self.position == 2 and self.pause:
+                self.arrived.set()
+                assert self.release.wait(120), "test did not release paused provider"
+            return super().next_call(offered)
+
+    repo = fixture_repo(tmp_path)
+    run = tmp_path / "run"
+    script = PausedScript()
+    server = serve(script)
+    url = f"http://127.0.0.1:{server.server_port}/v1"
+    output = (tmp_path / "first.log").open("w")
+    env = environment()  # Both switches use their default engine values.
+    process = subprocess.Popen(command(repo, run, url), env=env, stdout=output,
+                               stderr=subprocess.STDOUT)
+    try:
+        deadline = time.monotonic() + 120
+        while not script.arrived.wait(0.1) and process.poll() is None:
+            assert time.monotonic() < deadline, "provider request timed out"
+        assert script.arrived.is_set(), (tmp_path / "first.log").read_text()
+        original = {p.name: p.read_bytes() for p in (run / "requests").glob("*.json")}
+        assert len(original) >= 3
+        assert any(b"unchanged since request" in body for body in original.values())
+        process.send_signal(signal.SIGTERM)
+        process.wait(timeout=20)
+        script.pause = False
+        script.release.set()
+        deadline = time.monotonic() + 5
+        while script.position == 2 and time.monotonic() < deadline:
+            time.sleep(0.01)
+        script.position = 2
+        result = subprocess.run([sys.executable, "-m", "stateframe", "resume", str(run),
+                                 "--endpoint", url, "--model", "scripted", "--quiet"],
+                                env=env, capture_output=True, text=True, timeout=240)
+        assert result.returncode == 0, result.stdout + result.stderr
+        rebuilt = {p.name: p.read_bytes() for p in (run / "requests").glob("*.json")}
+        assert original.keys() <= rebuilt.keys()
+        for name, body in original.items():
+            assert rebuilt[name] == body, name
+        assert not (run / "resume-divergence.json").exists()
+    finally:
+        script.release.set()
+        if process.poll() is None:
+            process.terminate()
+            process.wait(timeout=20)
+        output.close()
+        server.shutdown()
+        server.server_close()

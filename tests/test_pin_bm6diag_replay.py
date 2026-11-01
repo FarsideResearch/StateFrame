@@ -8,7 +8,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from kernel_read_exec import dispatch_live_read, execute_read, record_serialized_read_pages
-from kernel_read_lockout import append_frame_line, final_source_visible
+from kernel_read_lockout import append_frame_line
 from kernel_request_tool_surface import _request_tool_floor_schemas
 from kernel_stateframe_runtime import StateFrameRuntime
 from kernel_tool_call_loop_breaker import UnboundedProgressWatch, stop_unbounded_no_progress
@@ -108,16 +108,19 @@ def _prime_pages(runtime, recorded):
 
 
 def _dispatch(runtime, case, index):
-    row = case["receipts"][index]
-    path = row["target_path"]
-    runtime.current_request_id = row["request_id"]
+    row = case["receipts"][index] if index < len(case["receipts"]) else None
+    path = case["calls"][index]["path"]
+    runtime.current_request_id = (row["request_id"] if row is not None else
+                                  f"request-{case['request']}-action-{index + 1}")
     runtime._frame_budget_request_count = case["request"]
     result, observation, _source, delivery = dispatch_live_read(
         runtime.owner.root, runtime.owner.root / path, path, path, 0,
-        args=case["calls"][index], measurement=runtime, step=row["turn"],
+        args=case["calls"][index], measurement=runtime,
+        step=row["turn"] if row is not None else 1000 + index,
         bolt=runtime.owner, policy=None, resolved_path=path)
     assert result == "OK"
-    assert delivery["revision"] == row["revision"]
+    if row is not None:
+        assert delivery["revision"] == row["revision"]
     assert delivery["unchanged_since_request"] is True
     assert delivery["requested_bytes_delivered"] == 0
     assert observation.startswith("[read] ")
@@ -126,6 +129,7 @@ def _dispatch(runtime, case, index):
 
 def _replay(tmp_path, monkeypatch):
     monkeypatch.setenv("STATEFRAME_CODE_BOOKMARKS", "on")
+    monkeypatch.delenv("STATEFRAME_READ_LOCKOUT", raising=False)
     monkeypatch.setenv("STATEFRAME_DELIVER_REQUESTED_BYTES", "on")
     recorded = _recorded()
     cases = recorded["cases"]
@@ -137,54 +141,49 @@ def _replay(tmp_path, monkeypatch):
              for row in recorded["prior_reads"]]
     watch.observe(runtime.binding(), prior, boundary=0)
     watch.streak = 22  # Near the recorded stall boundary; no lockout may reset it.
-    _case(runtime, cases[0])
-    names, _wire = _menu(runtime, cases[0])
-    assert "read" in names
-    counters = [(13, watch.streak, True)]
-    runtime.native_batch = SimpleNamespace(origin=cases[0]["receipts"][0]["request_id"],
-                                           index=0, size=len(cases[0]["calls"]),
-                                           pending=list(cases[0]["calls"]), inflight=None)
-    for index in range(len(cases[0]["receipts"])):
-        _dispatch(runtime, cases[0], index)
-        runtime.native_batch.index = index + 1
-        runtime.native_batch.pending.pop(0)
-        assert not stop_unbounded_no_progress(runtime, watch, boundary=index + 1)
-        if runtime.native_batch.pending:
-            runtime.current_request_id = cases[0]["receipts"][index + 1]["request_id"]
-            assert "read" in [tool["function"]["name"] for tool in
-                              StateFrameRuntime.tool_menu(runtime, _tools(cases[0]), [])]
-    assert watch.streak == 23
-    for case in cases[1:]:
-        previous = cases[case["request"] - 14]
-        _case(runtime, case, carry=previous["frame"]["state"]["framefit5"]["code_bookmarks"])
+    counters = []
+    boundary = 0
+    for index_case, case in enumerate(cases):
+        previous = cases[index_case - 1] if index_case else None
+        carry = (previous["frame"]["state"]["framefit5"]["code_bookmarks"]
+                 if previous is not None else None)
+        _case(runtime, case, carry=carry)
         names, wire = _menu(runtime, case)
-        if case["request"] == 14:
-            visible = {message.split("]", 1)[0].removeprefix("[Current source: ")
-                       for message in case["source_messages"]}
-            delivered = [row for row in case["frame"]["state"]["framefit5"]["code_bookmarks"]
-                         if row["path"] in visible]
-            assert final_source_visible(runtime, delivered, _tools(case))
-        assert not stop_unbounded_no_progress(runtime, watch, boundary=case["request"] + 10)
-        counters.append((case["request"], watch.streak, "read" in names))
-        if case["request"] == 14:
-            assert b"[Read lockout]" in wire
-        runtime.native_batch = None  # The corrected locked menus cannot dispatch recorded reads.
+        assert "read" in names and b"[Read lockout]" not in wire
+        assert runtime._code_bookmarks_active is True
+        assert case["frame"]["state"]["framefit5"]["code_bookmarks"]
+        runtime.native_batch = SimpleNamespace(
+            origin=case["receipts"][0]["request_id"], index=0,
+            size=len(case["calls"]), pending=list(case["calls"]), inflight=None)
+        for index in range(len(case["calls"])):
+            _dispatch(runtime, case, index)
+            runtime.native_batch.index = index + 1
+            runtime.native_batch.pending.pop(0)
+            boundary += 1
+            assert not stop_unbounded_no_progress(runtime, watch, boundary=boundary)
+            if runtime.native_batch.pending:
+                runtime.current_request_id = (case["receipts"][index + 1]["request_id"]
+                                              if index + 1 < len(case["receipts"]) else
+                                              f"request-{case['request']}-action-{index + 2}")
+                assert "read" in [tool["function"]["name"] for tool in
+                                  StateFrameRuntime.tool_menu(runtime, _tools(case), [])]
+        counters.append((case["request"], watch.streak, True))
+        runtime.native_batch = None
     return runtime, watch, events, cases, counters
 
 
-def test_recorded_bm6diag_batch_locks_before_watch_stalls(tmp_path, monkeypatch):
+def test_recorded_bm6diag_default_read_survives_request_16(tmp_path, monkeypatch):
     runtime, watch, events, cases, counters = _replay(tmp_path, monkeypatch)
-    assert [row[2] for row in counters] == [True, False, False, True]
-    assert [row[1] for row in counters] == [22, 23, 23, 24]
+    assert [row[2] for row in counters] == [True, True, True, True]
+    assert [row[1] for row in counters] == [23, 24, 25, 26]
     assert watch.streak < watch.threshold
     assert runtime.system_outcome is None
-    assert [row["reason_code"] for row in events if row["kind"] == "read_lockout_decision"] == [
-        "UNCHANGED_READ_REQUEST", "REQUEST_CAP"]
+    assert not [row for row in events if row["kind"] == "read_lockout_decision"]
     assert [len(case["calls"]) for case in cases] == [10, 1, 9, 10]
     assert [len(case["receipts"]) for case in cases] == [10, 1, 9, 9]
 
 
-def test_rereads_after_lock_release_still_stall(tmp_path, monkeypatch):
+def test_default_rereads_still_stall_in_bounded_requests(tmp_path, monkeypatch):
     runtime, watch, _events, cases, _counters = _replay(tmp_path, monkeypatch)
     case = cases[-1]
     boundary = 30
@@ -206,7 +205,7 @@ def test_rereads_after_lock_release_still_stall(tmp_path, monkeypatch):
         stop_unbounded_no_progress(runtime, watch, boundary=boundary)
     assert runtime.system_outcome == "stalled"
     assert watch.streak == watch.threshold == 32
-    assert requests <= 24
+    assert requests == 6
 
 
 if __name__ == "__main__":
