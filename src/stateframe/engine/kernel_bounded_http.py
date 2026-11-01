@@ -412,7 +412,8 @@ class _AbortiveConnectionMixin:
 
     def set_timeout(self, seconds: float) -> None:
         active_socket = self._active_socket or self.sock
-        if active_socket is not None:
+        # A finished earlier attempt (the gzip 415 resend) leaves a closed socket registered.
+        if active_socket is not None and active_socket.fileno() != -1:
             active_socket.settimeout(seconds)
 
     def abort(self) -> None:
@@ -526,10 +527,8 @@ def _read_response_body(
 
 def _child() -> None:
     packet = json.load(sys.stdin)
-    body, encoding = encode_request(packet["wire"].encode(), gzip_enabled=packet.get("gzip") is True)
-    request = urllib.request.Request(packet["endpoint"], data=body,
-        headers={"Content-Type": "application/json", **encoding,
-                 "Authorization": "Bearer " + packet["key"]})
+    wire = packet["wire"].encode()
+    body, encoding = encode_request(wire, gzip_enabled=packet.get("gzip") is True)
     tracker = _AbortiveConnectionTracker()
     handlers = [_AbortiveHTTPHandler(tracker), _AbortiveHTTPSHandler(tracker)]
     if "route_allow_remote" in packet:
@@ -538,23 +537,35 @@ def _child() -> None:
     opener = urllib.request.build_opener(*handlers)
     response_complete = False
     try:
-        with opener.open(request, timeout=packet["socket_timeout"]) as response:
-            if response.length is not None and response.length > MAX_RESPONSE_BYTES:
-                raise ValueError("HTTP response exceeds bounded transport limit")
-            data = _read_response_body(
-                response, tracker, deadline=packet["deadline"],
-                socket_timeout=packet["socket_timeout"], max_bytes=MAX_RESPONSE_BYTES)
-            if len(data) > MAX_RESPONSE_BYTES:
-                raise ValueError("HTTP response exceeds bounded transport limit")
-            tracker.finish_all()
-        response_complete = True
-    except urllib.error.HTTPError as error:
-        error_body = _read_response_body(
-            error, tracker, deadline=packet["deadline"],
-            socket_timeout=packet["socket_timeout"], max_bytes=MAX_ERROR_BYTES)
-        error.relay_error = _relay_error_label(error_body)
-        error.server_error = safe_server_error(error_body, packet["key"])
-        raise
+        while True:
+            request = urllib.request.Request(packet["endpoint"], data=body,
+                headers={"Content-Type": "application/json", **encoding,
+                         "Authorization": "Bearer " + packet["key"]})
+            try:
+                with opener.open(request, timeout=packet["socket_timeout"]) as response:
+                    if response.length is not None and response.length > MAX_RESPONSE_BYTES:
+                        raise ValueError("HTTP response exceeds bounded transport limit")
+                    data = _read_response_body(
+                        response, tracker, deadline=packet["deadline"],
+                        socket_timeout=packet["socket_timeout"], max_bytes=MAX_RESPONSE_BYTES)
+                    if len(data) > MAX_RESPONSE_BYTES:
+                        raise ValueError("HTTP response exceeds bounded transport limit")
+                    tracker.finish_all()
+                response_complete = True
+                break
+            except urllib.error.HTTPError as error:
+                error_body = _read_response_body(
+                    error, tracker, deadline=packet["deadline"],
+                    socket_timeout=packet["socket_timeout"], max_bytes=MAX_ERROR_BYTES)
+                if error.code == 415 and encoding and time.monotonic() < packet["deadline"]:
+                    # A stock llama.cpp server refuses gzip bodies (only the lab relay inflates them);
+                    # the request was not processed, so send the same JSON once uncompressed.
+                    tracker.finish_all()  # close the refused attempt's connection gracefully first
+                    body, encoding = wire, {}
+                    continue
+                error.relay_error = _relay_error_label(error_body)
+                error.server_error = safe_server_error(error_body, packet["key"])
+                raise
     finally:
         if not response_complete:
             tracker.abort_all()

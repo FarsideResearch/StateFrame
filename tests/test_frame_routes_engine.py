@@ -397,3 +397,43 @@ def test_routed_step_branch_never_rebinds_work_locals():
     clashes = sorted(name for name in routed & elsewhere
                      if name not in shared and not name.startswith("_route"))
     assert clashes == []
+
+
+def test_gzip_refused_with_415_is_resent_once_uncompressed():
+    # Regression: the transport gzips bodies of 32 KiB or more for the lab relay; a stock llama.cpp
+    # server (a small local read model) answers 415, which stopped every routed run at its first read.
+    from stateframe.engine import kernel_bounded_http
+
+    seen = []
+
+    class StockServer(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"  # llama.cpp framing: Content-Length, keep-alive
+
+        def log_message(self, *_args):
+            pass
+
+        def do_POST(self):  # noqa: N802
+            raw = self.rfile.read(int(self.headers["Content-Length"]))
+            encoding = self.headers.get("Content-Encoding")
+            seen.append((encoding, raw))
+            status, reply = (415, b'{"error":"unsupported"}') if encoding else (200, b'{"ok":true}')
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(reply)))
+            self.end_headers()
+            self.wfile.write(reply)
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), StockServer)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    wire = ('{"model":"reader","messages":[{"role":"user","content":"' + "x" * 40000 + '"}]}').encode()
+    try:
+        endpoint = f"http://127.0.0.1:{server.server_address[1]}/v1/chat/completions"
+        reply = kernel_bounded_http.request_bytes(wire, endpoint, "", deadline=time.monotonic() + 10,
+                                                  socket_timeout=5)
+    finally:
+        server.shutdown()
+        server.server_close()
+    assert reply == b'{"ok":true}'
+    assert [encoding for encoding, _ in seen] == ["gzip", None]
+    assert seen[1][1] == wire
