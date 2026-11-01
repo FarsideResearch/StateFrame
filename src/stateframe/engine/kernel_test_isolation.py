@@ -112,7 +112,8 @@ def _interpreter_roots(selected: Path) -> set[str]:
 
 
 def isolated_command(command: list[str], root: Path, env: dict[str, str], *,
-                     readonly_workspace: bool = False) -> tuple[list[str], dict[str, str]]:
+                     readonly_workspace: bool = False,
+                     nproc_budget: int | None = None) -> tuple[list[str], dict[str, str]]:
     executable = backend()
     root = root.resolve()
     scratch = root / ".test-tmp"
@@ -215,6 +216,13 @@ def isolated_command(command: list[str], root: Path, env: dict[str, str], *,
     arguments.extend(["--ro-bind" if readonly_workspace else "--bind", str(root), str(root)])
     if readonly_workspace:
         arguments.extend(["--bind", str(scratch), str(scratch)])
+    if nproc_budget is not None:
+        # bwrap must finish creating its namespaces before the uid-wide task
+        # ceiling is installed. /tmp is private to this sandbox.
+        launcher = Path(__file__).with_name("sf_launch.py").resolve()
+        arguments.extend(["--ro-bind", str(launcher), "/tmp/sf_launch.py"])
+        command = [sys.executable, "-I", "/tmp/sf_launch.py", "--nproc-budget",
+                   str(nproc_budget), *command]
     arguments.extend(["--chdir", str(root), "--", *command])
     return arguments, clean
 

@@ -22,10 +22,11 @@ from kernel_exec_capability import capability_from_dict
 from kernel_exec_tracker import Descendants, ProcessTable
 from kernel_job_output import JobOutputCollector
 from kernel_test_isolation import capability_command
+from sf_launch import _command_cgroup
 
 
 class ManagedProcess:
-    def __init__(self, ident, process, collector, cap, table):
+    def __init__(self, ident, process, collector, cap, table, cgroup=None):
         self.id = ident
         self.process = process
         self.collector = collector
@@ -44,6 +45,15 @@ class ManagedProcess:
         self.ended = None
         self.limit_detail = ""
         self.containment_failed = False
+        self.cgroup = cgroup
+
+    def remove_cgroup(self):
+        if self.cgroup is not None:
+            try:
+                self.cgroup.rmdir()
+            except OSError:
+                return  # A still-reaping task can temporarily keep it populated.
+            self.cgroup = None
 
     def stop(self, grace):
         if self.cleanup is None and self.stop_at is None:
@@ -52,6 +62,7 @@ class ManagedProcess:
 
     def tick(self, rows):
         if self.cleanup is not None:
+            self.remove_cgroup()
             return
         now = time.monotonic()
         if not self.eof:
@@ -102,6 +113,7 @@ class ManagedProcess:
         self.ended = time.monotonic()
         self.process.stdout.close()
         self.collector.seal()
+        self.remove_cgroup()
 
     def status(self, consume=False):
         output = b""
@@ -164,19 +176,28 @@ class Supervisor:
         self.next_id += 1
         ident = f"j{self.next_id}"
         collector = JobOutputCollector(self.directory / f"{ident}.output", capacity=1 << 20)
-        with tempfile.TemporaryFile(dir=self.directory) as input_file:
-            supplied = request.get("stdin")
-            if supplied is not None:
-                input_file.write(base64.b64decode(supplied, validate=True))
-                input_file.seek(0)
-            try:
+        cgroup = _command_cgroup(ident, cap.limits.nproc) if cap.sandboxed and self.backend == "bwrap" else None
+        if cgroup is not None:
+            command = [os.path.realpath(sys.executable), "-I", str(Path(__file__).with_name("sf_launch.py")),
+                       "--cgroup-enter", str(cgroup), *command]
+        try:
+            with tempfile.TemporaryFile(dir=self.directory) as input_file:
+                supplied = request.get("stdin")
+                if supplied is not None:
+                    input_file.write(base64.b64decode(supplied, validate=True))
+                    input_file.seek(0)
                 process = subprocess.Popen(command, stdin=input_file if supplied is not None else subprocess.DEVNULL,
                                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                            env=environment, close_fds=True)
-            except OSError:
-                collector.close()
-                raise
-        job = ManagedProcess(ident, process, collector, cap, self.table)
+        except BaseException:
+            collector.close()
+            if cgroup is not None:
+                try:
+                    cgroup.rmdir()
+                except OSError:
+                    pass
+            raise
+        job = ManagedProcess(ident, process, collector, cap, self.table, cgroup)
         self.jobs[ident] = job
         return {"id": ident}
 
@@ -285,6 +306,7 @@ class Supervisor:
                 time.sleep(0.01)
             for job in self.jobs.values():
                 job.collector.close()
+                job.remove_cgroup()
             self.selector.close()
             self.control.close()
 

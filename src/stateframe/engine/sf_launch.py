@@ -9,6 +9,82 @@ import os
 import platform
 import resource
 import sys
+from pathlib import Path
+
+_NPROC_HEADROOM = 128
+
+
+def _current_cgroup() -> Path | None:
+    """Return our delegated v2 cgroup, if its mount is visible."""
+    if not sys.platform.startswith("linux"):
+        return None
+    try:
+        with open("/proc/self/cgroup", encoding="ascii") as stream:
+            relative = next(line.split(":", 2)[2].strip() for line in stream
+                            if line.startswith("0::"))
+        root = Path("/sys/fs/cgroup").resolve()
+        path = (root / relative.lstrip("/")).resolve()
+        path.relative_to(root)
+        return path if (path / "cgroup.controllers").is_file() else None
+    except (OSError, RuntimeError, StopIteration, ValueError):
+        return None
+
+
+def _command_cgroup(ident: str, nproc: int) -> Path | None:
+    """Use delegated pids.max when available; RLIMIT_NPROC remains the fallback."""
+    parent = _current_cgroup()
+    if parent is None:
+        return None
+    group = parent / f"stateframe-{os.getpid()}-{ident}"
+    try:
+        group.mkdir()
+        try:
+            if not (group / "pids.max").is_file():
+                group.rmdir()
+                return None
+            # Allow a few bubblewrap setup tasks. The in-namespace limit
+            # independently bounds the check's tasks when delegation is absent.
+            (group / "pids.max").write_text(str(nproc + 8), encoding="ascii")
+        except OSError:
+            group.rmdir()
+            return None
+    except OSError:
+        return None
+    return group
+
+
+def _user_task_count() -> int:
+    """Count readable threads charged to our real UID, not procfs owners."""
+    uid = os.getuid()
+    try:
+        entries = os.listdir("/proc")
+    except OSError:
+        return 0
+    count = 0
+    for entry in entries:
+        if not entry.isdigit():
+            continue
+        try:
+            with open(f"/proc/{entry}/status", "rb") as status:
+                fields = {line.split(b":", 1)[0]: line.split(b":", 1)[1].split()
+                          for line in status if line.startswith((b"Uid:", b"Threads:"))}
+            if int(fields[b"Uid"][0]) != uid:
+                continue
+            threads = int(fields[b"Threads"][0])
+            if threads > 0:
+                count += threads
+        except (OSError, KeyError, IndexError, ValueError):
+            continue  # Hidden, vanished, or incomplete procfs entry.
+    return count
+
+
+def _set_relative_nproc_limit(ceiling: int) -> None:
+    """Apply the single uid-wide NPROC setter without raising an inherited hard cap."""
+    soft, hard = resource.getrlimit(resource.RLIMIT_NPROC)
+    infinity = resource.RLIM_INFINITY
+    bound = ceiling if hard == infinity else min(ceiling, hard)
+    new_soft = bound if soft == infinity else min(bound, soft)
+    resource.setrlimit(resource.RLIMIT_NPROC, (new_soft, bound))
 
 
 def install_syscall_filter(*, network_none: bool) -> None:
@@ -78,11 +154,6 @@ def launch(spec: dict) -> None:
     process_limits = [(resource.RLIMIT_CPU, math.ceil(limits["cpu_seconds"])),
                       (resource.RLIMIT_FSIZE, limits["file_bytes"]),
                       (resource.RLIMIT_NOFILE, limits["nofile"])]
-    if sys.platform != "darwin":
-        # macOS counts every process the user owns against RLIMIT_NPROC (hundreds on a normal
-        # desktop), so a per-command budget there would make the first fork fail. On macOS the
-        # supervisor enforces the budget on the tracked descendant tree instead.
-        process_limits.append((resource.RLIMIT_NPROC, limits["nproc"]))
     for kind, value in process_limits:
         # Never silently keep a weaker limit if the OS refuses this request.
         hard = resource.getrlimit(kind)[1]
@@ -90,11 +161,28 @@ def launch(spec: dict) -> None:
         resource.setrlimit(kind, (value, value))
     resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
     os.chdir(spec["cwd"])
+    if sys.platform.startswith("linux"):
+        # Count immediately before exec; the optional cgroup and supervisor provide
+        # independent bounds when namespace visibility or concurrent tasks race us.
+        _set_relative_nproc_limit(_user_task_count() + limits["nproc"] + _NPROC_HEADROOM)
     os.execvpe(argv[0], argv, spec["env"])
 
 
 def main() -> int:
     try:
+        if len(sys.argv) >= 4 and sys.argv[1] == "--nproc-budget":
+            budget = int(sys.argv[2])
+            if not 1 <= budget <= 256:
+                raise ValueError("NPROC budget is outside the execution policy bound")
+            _set_relative_nproc_limit(_user_task_count() + budget + _NPROC_HEADROOM)
+            os.execvpe(sys.argv[3], sys.argv[3:], os.environ)
+        if len(sys.argv) >= 4 and sys.argv[1] == "--cgroup-enter":
+            try:
+                with open(os.path.join(sys.argv[2], "cgroup.procs"), "w", encoding="ascii") as stream:
+                    stream.write(str(os.getpid()))
+            except OSError:
+                pass  # RLIMIT_NPROC remains the mandatory fallback.
+            os.execvpe(sys.argv[3], sys.argv[3:], os.environ)
         if len(sys.argv) >= 4 and sys.argv[1] in {"--network-none", "--process-filter"}:
             environment = json.loads(sys.argv[2])
             install_syscall_filter(network_none=sys.argv[1] == "--network-none")
