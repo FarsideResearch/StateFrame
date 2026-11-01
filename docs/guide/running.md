@@ -68,11 +68,13 @@ Only the default 65,536-token slot is measured on long runs; other sizes are tes
 
 A profile is a JSON file (`"schema": "stateframe-product-profile/1"`) whose `switches` map sets the engine's `STATEFRAME_*` switches for a run. The default is the one profile shipped in `src/stateframe/profiles/`. `--profile NAME_OR_PATH` uses another. Many switches ship disabled; turning one on is a profile edit. Engine settings come only from the profile: the engine child drops inherited `STATEFRAME_*` variables, `--test-env` refuses them, and the engine refuses any switch it has no reader for.
 
-### Repeated source reads
+### Multi-file source and repeated reads
 
-The shipped profile keeps source bookmarks on. A source page that was delivered in an earlier request can be returned as an unchanged notice when the same default read is repeated at the same revision. A completed batch made entirely of proved unchanged reads costs one no-progress watch unit.
+`STATEFRAME_CODE_BOOKMARKS` is on by default. Each request offers current editable product source before repeated-read and navigation bookkeeping. Files of at most 60 lines and 2 KiB may be shown whole when the request budget allows; larger tasks get selected windows. A coverage line for every editable product path says which lines are in view and whether that source changed since its last read when the comparison is available. When a current failing check has a usable source location, code bookmarks keep its test code and related product source in view. Set the switch to `off` in the profile to restore the 0.2.1 behavior byte for byte.
 
-`STATEFRAME_READ_LOCKOUT=on` is an optional profile switch; it is off by default and requires bookmarks. After a completed request contains only proved unchanged source reads, the current failed check must still apply, an editable bookmarked source must be visible, and an edit and check route must be available. The next request then hides source-read routes and shows the unchanged-read reason. The restriction lasts at most two requests and releases sooner when new evidence appears or the repair route disappears. At the known 31/32 no-progress watch boundary, the run can stop before this restriction takes effect.
+A completed batch made entirely of proved unchanged reads costs one no-progress watch unit instead of one per file. Mixed or unproved batches keep per-action accounting. Repeated unchanged batches still reach `STALLED`.
+
+`STATEFRAME_READ_LOCKOUT=on` is an independent optional profile switch; it is off by default and requires bookmarks. After a completed batch of unchanged reads, the current failing check must still apply, editable bookmarked source must be visible, and an edit and check route must be available. The next request then hides source-reading routes. The restriction lasts at most two requests and releases sooner when new evidence appears or the repair route disappears. If the no-progress watch is one step from its limit, the run can stop before this restriction takes effect.
 
 ## Checkpoints and resume
 

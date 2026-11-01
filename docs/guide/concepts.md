@@ -18,6 +18,8 @@ Older turns are not sent. Their content already lives in the typed state, and th
 
 The engine, not the model. Before each send it fits the frame and the selected source code into the prompt budget (33,344 tokens by default, the size it was built and measured with; see [Context size](running.md#context-size)). When something has to give, it trims lower-priority detail; it never summarizes away the authoritative state, and it always keeps a ledger of what was read. If a task cannot fit what it needs, the engine stops with a clear reason instead of sending a broken request.
 
+For multi-file tasks, current editable product source is offered before repeated-read and navigation bookkeeping. Every editable product path gets a coverage line showing which source ranges are in view and whether the file changed since its last read when that comparison is available. Small files of at most 60 lines and 2 KiB may be shown whole when the budget allows; larger repositories still use selected windows. When a current failing check has a usable source location, code bookmarks keep its test code and related product source in view.
+
 ## Receipts and ledgers
 
 Every action the engine runs (a read, an edit, a test run) produces a host-recorded result. Facts the engine measured, such as which tests pass, which files were read and what is still owed, are handed to the model plainly in the frame. The model decides what to do; the engine owns the bookkeeping. The task ledger is schema-validated.
