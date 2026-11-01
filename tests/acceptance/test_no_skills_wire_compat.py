@@ -4,6 +4,7 @@ from __future__ import annotations
 import io
 import json
 import os
+import re
 import subprocess
 import tarfile
 from pathlib import Path
@@ -15,6 +16,9 @@ from ._support import Endpoint, PYTHON, ROOT, copy_repo, environment
 
 
 pytestmark = pytest.mark.host_sandbox
+
+
+_EDIT_RECEIPT = re.compile(rb'(edit_receipt\\*":\\*")[0-9a-f]{20}')
 
 
 def _raw_tools(request: bytes) -> bytes:
@@ -95,5 +99,9 @@ def test_no_skills_wire_matches_021(tmp_path):
     assert current[0] == old[0], first_difference(old[0], current[0])
     for number, (expected, actual) in enumerate(zip(old, current), 1):
         assert _raw_tools(actual) == _raw_tools(expected), number
-        assert normalized_digest(actual) == normalized_digest(expected), (
+        # Each run seeds its own edit-receipt IDs (documented in KNOWN_LIMITATIONS.md), so two
+        # separate runs differ in exactly that 20-hex value. Every other byte must match literally.
+        assert _EDIT_RECEIPT.sub(rb"\1<receipt>", actual) == _EDIT_RECEIPT.sub(rb"\1<receipt>", expected), (
             number, first_difference(expected, actual))
+        assert normalized_digest(_EDIT_RECEIPT.sub(rb"\1<receipt>", actual)) == normalized_digest(
+            _EDIT_RECEIPT.sub(rb"\1<receipt>", expected)), number
