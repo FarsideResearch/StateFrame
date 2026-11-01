@@ -1,10 +1,11 @@
 """Product CLI, routed startup, resume refusal, and summary contracts."""
 import json
 import time
+from urllib.request import Request, urlopen
 
 import pytest
 
-from stateframe import cli, routes, runner
+from stateframe import cli, replay_tape, routes, runner
 from stateframe.endpoint import Endpoint, EndpointError
 from stateframe.scripted_endpoint import Script, make_handler
 from http.server import ThreadingHTTPServer
@@ -431,6 +432,95 @@ def test_resume_refuses_malformed_recorded_routes(servers, monkeypatch, tmp_path
     monkeypatch.setattr(runner, "check_slot_context", lambda *args, **kwargs: None)
     with pytest.raises(runner.resume_module.ResumeRefused, match=fragment):
         runner.resume_run(tmp_path, endpoint=endpoint, printer=lambda *_: None)
+
+
+def test_resume_run_keeps_pending_across_two_endpoint_moves_and_refusal(tmp_path, monkeypatch):
+    scripts = [Script({"model": model}) for model in ("base", "small", "small", "small")]
+    active = []
+    for script in scripts:
+        server = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(script))
+        thread = Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        active.append((server, thread))
+    try:
+        default, original, moved, latest = [f"http://127.0.0.1:{server.server_port}/v1"
+                                             for server, _ in active]
+        monkeypatch.delenv("LLAMA_CPP_TOKENIZE_URL", raising=False)
+        monkeypatch.setattr(runner, "_check_python", lambda python: python)
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        (repo / "app.py").write_text("value = 1\n")
+        (repo / "test_app.py").write_text("from app import value\ndef test_value(): assert value == 1\n")
+        run = tmp_path / "run"
+        options = runner.RunOptions(repo=repo, task="Inspect app.py", endpoint=Endpoint(default, "base"),
+                                    run_dir=run, route_cli=[f"read.endpoint={original}", "read.model=small"])
+        runner._probe_routes(options, lambda *_: None)
+        runner.prepare(options)
+
+        request = b'{"model": "small", "messages": []}'
+
+        def route(url):
+            return {"role": "read", "scope": "run", "unit_class": None,
+                    "endpoint": url + "/chat/completions",
+                    "endpoint_host": url.removeprefix("http://").removesuffix("/v1"),
+                    "model": "small", "escalated_from": None}
+
+        def record(wire, number, url, response=None):
+            wire.mkdir(exist_ok=True)
+            stem = wire / f"{number:04d}"
+            stem.with_suffix(".route.json").write_text(json.dumps(route(url)))
+            stem.with_suffix(".request.json").write_bytes(request)
+            if response is not None:
+                stem.with_suffix(".response.json").write_bytes(response)
+
+        def physical(url):
+            with urlopen(Request(url + "/chat/completions", data=request,
+                                 headers={"Content-Type": "application/json"}), timeout=5) as reply:
+                return reply.read()
+
+        first_response = physical(original)
+        record(run / "wire", 1, original, first_response)
+        record(run / "wire", 2, original)
+        seen = []
+
+        def execute(_options, _started, _printer, run_dir, _work, spec):
+            resume_spec = spec["resume"]
+            seen.append(resume_spec)
+            current = moved if len(seen) == 1 else latest
+            replay = replay_tape.Replayer(resume_spec["tape"], pending=resume_spec.get("pending"),
+                                          route_changes=resume_spec.get("route_changes"))
+            assert replay.answer(request, route=route(current)) == first_response
+            assert replay.diverged is None
+            record(run_dir / "wire", 1, current, first_response)
+            if len(seen) == 2:
+                assert resume_spec["pending"]["request_digest"] == replay_tape.normalized_digest(request)
+                assert replay.answer(request, route=route(current)) is None
+                assert replay.diverged is None and replay.pending is None
+                record(run_dir / "wire", 2, current, physical(current))
+            return {"result": "INTERRUPTED"}
+
+        monkeypatch.setattr(runner, "_execute", execute)
+        runner.resume_run(run, route_cli=[f"read.endpoint={moved}"], printer=lambda *_: None)
+        after_first = (run / "spec.json").read_bytes()
+        with pytest.raises(runner.RunError, match="route read endpoint does not serve model 'wrong'"):
+            runner.resume_run(run, route_cli=["read.model=wrong"], printer=lambda *_: None)
+        assert (run / "spec.json").read_bytes() == after_first
+        runner.resume_run(run, route_cli=[f"read.endpoint={latest}"], printer=lambda *_: None)
+
+        assert len(seen) == 2
+        assert len(seen[0]["route_changes"]) == 1
+        assert seen[1]["route_changes"] == [
+            {"role": "read", "field": "endpoint", "from": original, "to": moved},
+            {"role": "read", "field": "endpoint", "from": moved, "to": latest}]
+        assert len(scripts[1].requests) == 1
+        assert not scripts[2].requests
+        assert len(scripts[3].requests) == 1
+        assert not (run / "resume-divergence.json").exists()
+    finally:
+        for server, thread in active:
+            server.shutdown()
+            thread.join(timeout=2)
+            server.server_close()
 
 
 def test_inactive_spec_unchanged_shape(tmp_path):

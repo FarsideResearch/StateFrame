@@ -104,6 +104,73 @@ def test_carried_tape_uses_its_own_pending_send(tmp_path):
     assert resumed["pending"]["request"] == str(old_wire / "0003.request.json")
 
 
+def test_equal_length_replay_keeps_prior_pending_and_route_changes(tmp_path):
+    run, spec = _interrupted_routed_run(tmp_path)
+    old_wire = run / "attempts" / "1" / "wire"
+    _write_send(old_wire, 1)
+    _write_send(old_wire, 2, completed=False)
+    _write_send(run / "wire", 1)
+    move = {"role": "read", "field": "endpoint", "from": "http://127.0.0.1:8090/v1",
+            "to": "http://127.0.0.1:9000/v1"}
+    spec["resume"] = {"tape": replay_tape.build(old_wire, run / "attempts" / "1" / "sends.jsonl"),
+                      "pending": replay_tape.pending_request(old_wire), "route_changes": [move]}
+    prior_pending = spec["resume"]["pending"]
+    (run / "spec.json").write_text(json.dumps(spec))
+
+    resume.archive_attempt({"run": run, "spec": spec, "attempt": 2, "max_turns": 8}, tmp_path,
+                           use_checkpoint=False)
+
+    resumed = json.loads((run / "spec.json").read_text())["resume"]
+    assert len(resumed["tape"]) == 1
+    assert resumed["pending"] == prior_pending
+    assert resumed["route_changes"] == [move]
+
+
+def test_equal_length_replay_drops_prior_pending_after_later_failed_send(tmp_path):
+    run, spec = _interrupted_routed_run(tmp_path)
+    old_wire = run / "attempts" / "1" / "wire"
+    _write_send(old_wire, 1)
+    _write_send(old_wire, 2, completed=False)
+    _write_send(run / "wire", 1)
+    _write_send(run / "wire", 2, completed=False)
+    (run / "wire" / "0002.error.txt").write_text("send failed")
+    spec["resume"] = {"tape": replay_tape.build(old_wire, run / "attempts" / "1" / "sends.jsonl"),
+                      "pending": replay_tape.pending_request(old_wire),
+                      "route_changes": [{"role": "read", "field": "model", "from": "reader", "to": "new"}]}
+    (run / "spec.json").write_text(json.dumps(spec))
+
+    resume.archive_attempt({"run": run, "spec": spec, "attempt": 2, "max_turns": 8}, tmp_path,
+                           use_checkpoint=False)
+
+    resumed = json.loads((run / "spec.json").read_text())["resume"]
+    assert len(resumed["tape"]) == 1
+    assert "pending" not in resumed and "route_changes" not in resumed
+
+
+@pytest.mark.parametrize("divergence", ["marker", "request"])
+def test_diverged_replay_drops_prior_pending_and_route_changes(tmp_path, divergence):
+    run, spec = _interrupted_routed_run(tmp_path)
+    old_wire = run / "attempts" / "1" / "wire"
+    _write_send(old_wire, 1)
+    _write_send(old_wire, 2, completed=False)
+    _write_send(run / "wire", 1)
+    if divergence == "marker":
+        (run / "resume-divergence.json").write_text("{}")
+    else:
+        (run / "wire" / "0001.request.json").write_bytes(b'{"model": "reader", "messages": [1]}')
+    spec["resume"] = {"tape": replay_tape.build(old_wire, run / "attempts" / "1" / "sends.jsonl"),
+                      "pending": replay_tape.pending_request(old_wire),
+                      "route_changes": [{"role": "read", "field": "model", "from": "reader", "to": "new"}]}
+    (run / "spec.json").write_text(json.dumps(spec))
+
+    resume.archive_attempt({"run": run, "spec": spec, "attempt": 2, "max_turns": 8}, tmp_path,
+                           use_checkpoint=False)
+
+    resumed = json.loads((run / "spec.json").read_text())["resume"]
+    assert len(resumed["tape"]) == 1
+    assert "pending" not in resumed and "route_changes" not in resumed
+
+
 def test_live_restart_discards_carried_route_changes_and_pending(tmp_path):
     run, spec = _interrupted_routed_run(tmp_path)
     old_wire = run / "attempts" / "1" / "wire"
