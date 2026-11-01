@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- Add opt-in project instructions: `--instructions` gives the agent the repository's `AGENTS.md` (else `CLAUDE.md`), and `--instructions=FILE` a chosen file. The text is bounded to 6,144 bytes with a visible truncation note, placed once after the system prompt so the request head stays cache-stable, framed as untrusted repository content that cannot change tools, the sandbox or engine rules, and pinned by SHA-256 so resume refuses a changed or missing file. Without the flag, requests are unchanged byte for byte.
+- Measured: on Qwen3.6-35B-A3B the three bundled examples passed 9 of 9 runs with and without a realistic `AGENTS.md` (27 and 28 model requests), so the feature ships off by default.
+
 ## 0.2.5 (2026-11-01)
 
 - Model requests never go through an HTTP proxy. A proxy set in a profile, or a macOS system proxy, could receive a local run's requests, including the task and API key.

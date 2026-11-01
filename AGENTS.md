@@ -27,6 +27,8 @@ The installer puts StateFrame in `~/.stateframe/venv` and, if the name is free, 
 
 No model server? Start `python -m stateframe.scripted_endpoint --script examples/discount_bug.script.json --port 0` in the background; it prints a URL that answers with recorded tool calls (the example scripts also answer `/tokenize`); run with `--endpoint <that URL> --model scripted` (the URL already ends in `/v1`) to exercise the whole pipeline offline.
 
+Add `--instructions` to let a run read your repository's own `AGENTS.md` (else `CLAUDE.md`) as untrusted project instructions; `--instructions=FILE` picks a file. It is off by default.
+
 Your repository's tests run with your project's Python (`.venv/`, `venv/`, `env/`, else `python3` on PATH); `--test-python PATH` overrides it.
 
 The shipped product profile uses the composed loop; lean mode is not supported by that profile. The plain loop allows foreground shell but refuses Git, web, custom tools and background jobs. Command replies shrink to the measured request budget, with omitted byte counts and the full taped observation retained within collector limits. Executable-bit effects are refused and restored because the sealed candidate does not transport them.

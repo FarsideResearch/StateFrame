@@ -29,7 +29,20 @@
 - `--web` / `--no-web`: web fetch, off by default. `--web-allow DOMAIN` repeats to restrict hosts.
 - `--tools FILE`: repeatable trusted custom command definitions in `stateframe-tools/1` JSON.
 - `--skill NAME_OR_PATH`: repeatable selected skill bundle. `--trust-skill-tools` offers its optional command definitions. See [Skills](skills.md).
+- `--instructions[=FILE]`: project instructions, off by default. With no value, the repository's `AGENTS.md`, else `CLAUDE.md`; with a value, that file. `--no-instructions` states the default explicitly. See [Project instructions](#project-instructions).
 - On `resume`, `--replay-external` explicitly repeats recorded external operations before continuing.
+
+## Project instructions
+
+`--instructions` reads the repository's `AGENTS.md` (or `CLAUDE.md` when there is no `AGENTS.md`) from the repository root; `--instructions=FILE` reads that file instead, which may live outside the repository. Write the value with `=` (or put the flag last) so the next argument is not taken as the file name.
+
+- The file must be a regular file of at most 1 MiB. An in-repository symlink is followed only when its target stays inside the repository, and a file the working copy excludes (for example a secret-named path) is never shown.
+- At most 6,144 bytes are shown, cut at a line boundary, with a visible note giving the shown and total byte counts. The model can read the rest of a file inside the repository with its normal read tools.
+- The text is placed once per request as a second system message, right after the engine's system prompt and before the task, so the stable request head (and the server's prompt cache) is unchanged from one request to the next.
+- The text is framed as untrusted repository content. It cannot grant or remove tools, widen the sandbox or network, change protected tests or completion checks, or override engine rules.
+- The run records the file's SHA-256. `resume` refuses before replay when the file changed or is missing.
+- Without `--instructions`, or with it when no file exists, requests are byte for byte the same as without this feature.
+- The plain loop and lean mode do not support project instructions: an explicit `--instructions=FILE` is refused and a discovered file is skipped with a note.
 
 ## Which Python runs your tests
 
