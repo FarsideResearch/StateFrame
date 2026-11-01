@@ -762,10 +762,6 @@ def finalize_frame_candidate(
     product_windows, editable_product_paths = editable_product_windows(
         runtime, frame, bookmarks if isinstance(bookmarks, list) else (),
     )
-    if product_windows:
-        bookmarked = [row for row in recent_windows if row.get("bookmark") is True]
-        ordinary = [row for row in recent_windows if row.get("bookmark") is not True]
-        recent_windows = [*bookmarked, *product_windows, *ordinary]
     plan = getattr(capture, "_request_source_closure_override", None)
     if not isinstance(plan, Mapping):
         plan = getattr(runtime, "_request_source_closure", None)
@@ -794,7 +790,7 @@ def finalize_frame_candidate(
     # complete-envelope fit. Their other units remain deferred; actual pressure
     # below can remove these host copies without touching newest input.
     visibility_paths = set(getattr(capture, "_visibility_required_paths", ()))
-    visibility_paths.update(row["path"] for row in recent_windows)
+    visibility_paths.update(row["path"] for row in [*recent_windows, *product_windows])
     if plan.get("deferred_paths"):
         _remove_deferred_source_excerpts(
             candidate["messages"], [path for path in plan["deferred_paths"]
@@ -843,7 +839,7 @@ def finalize_frame_candidate(
             )
         )
 
-    recent_paths = {row["path"] for row in recent_windows}
+    recent_paths = {row["path"] for row in [*recent_windows, *product_windows]}
 
     def retained_reads_fit() -> bool:
         if not recent_windows:
@@ -853,6 +849,7 @@ def finalize_frame_candidate(
         # spending their bytes first makes retained pages disappear on the wire.
         full_reads = fit_recent_read_windows(
             candidate, recent_windows,
+            product_windows=product_windows,
             protected_messages=protected,
             newest_user_suffix=getattr(capture, "_framefit5_newest_user_suffix", ()),
             deferred_source_paths=tuple(plan.get("deferred_paths", ())),
@@ -932,6 +929,7 @@ def finalize_frame_candidate(
             # considering a mandatory-minimum refusal or source deferral.
             without_excess_reads = fit_recent_read_windows(
                 candidate, recent_windows,
+                product_windows=product_windows,
                 protected_messages=protected,
                 newest_user_suffix=getattr(capture, "_framefit5_newest_user_suffix", ()),
                 deferred_source_paths=tuple(plan.get("deferred_paths", ())),
@@ -956,6 +954,7 @@ def finalize_frame_candidate(
                                  required_deferred_paths=tuple(plan.get("deferred_paths", ())))
                 candidate = fit_recent_read_windows(
                     candidate, recent_windows, protected_messages=protected,
+                    product_windows=(),
                     newest_user_suffix=getattr(capture, "_framefit5_newest_user_suffix", ()),
                     deferred_source_paths=tuple(plan.get("deferred_paths", ())),
                     editable_paths=editable_product_paths,
@@ -1055,9 +1054,10 @@ def finalize_frame_candidate(
         and parse_model_source_window(message.get("content")) is not None
         for message in candidate["messages"]
     )
-    if recent_windows or public_windows or bookmarks_enabled() and has_source_windows:
+    if recent_windows or product_windows or public_windows or bookmarks_enabled() and has_source_windows:
         candidate = fit_recent_read_windows(
             candidate, recent_windows, public_checks=public_windows,
+            product_windows=product_windows,
             protected_messages=protected,
             newest_user_suffix=getattr(capture, "_framefit5_newest_user_suffix", ()),
             deferred_source_paths=tuple(plan.get("deferred_paths", ())),

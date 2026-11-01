@@ -110,8 +110,9 @@ def _request_tool_floor_schemas(
         floor_names.append("list_files")
     from kernel_code_bookmarks import enabled as bookmarks_enabled
     if bookmarks_enabled() and getattr(runtime, "_read_lockout_notice", None):
-        from kernel_read_lockout import _PURE_SOURCE_TOOLS
-        floor_names = [name for name in floor_names if name not in _PURE_SOURCE_TOOLS]
+        from kernel_read_lockout import _source_access
+        floor_names = [name for name in floor_names
+                       if _source_access(runtime, base_by_name.get(name, {})) != "source_reader"]
 
     journal = getattr(runtime, "journal", None)
     run_id = getattr(journal, "run_id", None)

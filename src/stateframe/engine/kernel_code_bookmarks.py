@@ -36,8 +36,10 @@ def enabled() -> bool:
 
 def _source(root: Path, path: str) -> tuple[str, str] | None:
     from kernel_public_localization import public_path
+    from stateframe.workcopy import frame_source_path_allowed
 
-    if (public_path(path) != path or not path.endswith(".py")
+    if (public_path(path) != path or not frame_source_path_allowed(path)
+            or not path.endswith(".py")
             or any(ord(char) < 32 or char in "\u202a\u202b\u202c\u202d\u202e"
                    for char in path)):
         return None

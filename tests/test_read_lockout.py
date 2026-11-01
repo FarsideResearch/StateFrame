@@ -587,6 +587,47 @@ def test_final_capability_floor_cannot_reintroduce_locked_read(tmp_path, monkeyp
     assert "read" in names and "read" in schemas
 
 
+def test_dynamic_workspace_reader_is_removed_while_locked(tmp_path, monkeypatch):
+    monkeypatch.setenv("STATEFRAME_CODE_BOOKMARKS", "on")
+    runtime, _events = _trigger(tmp_path)
+    dynamic = {"type": "function", "function": {"name": "mcp_repo__source_read",
+               "parameters": {"type": "object"}}}
+    runtime._workspace_tool_capabilities = {"mcp_repo__source_read": "source_reader"}
+    runtime.current_request_id = "probe-request-15"
+    offered = StateFrameRuntime.tool_menu(runtime, [*TOOLS, dynamic], [])
+    assert "mcp_repo__source_read" not in _names(offered)
+    assert "read" not in _names(offered)
+    assert {"edit", "run_tests"} <= set(_names(offered))
+
+
+def test_unclassified_dynamic_tool_prevents_lockout(tmp_path, monkeypatch):
+    monkeypatch.setenv("STATEFRAME_CODE_BOOKMARKS", "on")
+    runtime, events = _trigger(tmp_path)
+    dynamic = {"type": "function", "function": {"name": "skill_workspace_reader",
+               "parameters": {"type": "object"}}}
+    runtime.current_request_id = "probe-request-15"
+    offered = StateFrameRuntime.tool_menu(runtime, [*TOOLS, dynamic], [])
+    assert {"read", "skill_workspace_reader"} <= set(_names(offered))
+    assert not any(row["reason_code"] == "UNCHANGED_READ_REQUEST" for row in events)
+
+
+def test_late_unclassified_reader_releases_lockout_and_builtin_cannot_be_overridden(
+        tmp_path, monkeypatch):
+    from kernel_read_lockout import filter_tools
+
+    monkeypatch.setenv("STATEFRAME_CODE_BOOKMARKS", "on")
+    runtime, _events = _trigger(tmp_path)
+    _menu(runtime, "probe-request-15")
+    assert runtime._read_lockout_notice
+    runtime._workspace_tool_capabilities = {"read": "other"}
+    assert "read" not in _names(filter_tools(runtime, TOOLS))
+    dynamic = {"type": "function", "function": {"name": "mcp_repo__new_reader",
+               "parameters": {"type": "object"}}}
+    released = filter_tools(runtime, [*TOOLS, dynamic])
+    assert {"read", "mcp_repo__new_reader"} <= set(_names(released))
+    assert runtime._read_lockout_notice is None
+
+
 def test_inactive_replay_keeps_bookmark_state_and_menu(tmp_path, monkeypatch):
     monkeypatch.setenv("STATEFRAME_CODE_BOOKMARKS", "on")
     runtime, _ = _runtime(tmp_path)
