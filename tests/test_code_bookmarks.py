@@ -490,6 +490,39 @@ def test_activation_boundary_and_kill_switch_are_byte_identical(tmp_path, monkey
     assert collect(runtime, frame) == []
 
 
+@pytest.mark.parametrize("case,summary,phase,outcome,reason", [
+    ("no_assertion_line", "AssertionError: wrong value", "ASSERTION", "BEHAVIOR_FAIL",
+     "no_failed_location"),
+    ("other_runner", "custom runner failed without a source location", "OBSERVATION",
+     "BEHAVIOR_FAIL", "no_failed_location"),
+    ("collection", "pkg/module_0.py:5: failed during collection", "COLLECTION",
+     "INVALID_CHECK", "non_behavior_failure"),
+    ("stdout_only", "check failed; stdout omitted from projection", "OBSERVATION",
+     "BEHAVIOR_FAIL", "no_failed_location"),
+    ("stderr_only", "check failed; stderr omitted from projection", "OBSERVATION",
+     "BEHAVIOR_FAIL", "no_failed_location"),
+])
+def test_unsupported_failure_evidence_keeps_bookmarks_inactive(
+        tmp_path, monkeypatch, case, summary, phase, outcome, reason):
+    monkeypatch.setenv("STATEFRAME_CODE_BOOKMARKS", "on")
+    _root, runtime, frame, names = _workspace(tmp_path)
+    receipt_id = frame["last_verdict"]["check_receipt_id"]
+    runtime._framefit_action_context["journal_receipt_records"] = [{
+        "kind": "check_receipt", "receipt_id": receipt_id, "revision": "current",
+        "status": "FAIL", "outcome": outcome, "failure_phase": phase,
+        "summary": summary,
+    }]
+    if case == "stdout_only":
+        runtime._check_output_receipts[receipt_id]["stdout"] = (
+            f"{names[0]}:5: AssertionError: private stdout location")
+    if case == "stderr_only":
+        runtime._check_output_receipts[receipt_id]["stderr"] = (
+            f"{names[0]}:5: AssertionError: private stderr location")
+    decision = {}
+    assert collect(runtime, frame, decision) == []
+    assert decision["reason"] == reason
+
+
 def test_unchanged_read_keeps_requested_bytes_and_current_failure(tmp_path):
     path = tmp_path / "module.py"
     path.write_text("VALUE = 3\n")
@@ -541,7 +574,7 @@ def test_same_assertion_with_changed_failure_phase_is_not_reused(tmp_path):
     followup = result_note(measurement, "module.py", "generation", "sha256:abc", 3)
     assert followup is not None
     assert "unchanged since request request-one" in followup
-    assert "current failing assertion: assert value == 4" in followup
+    assert "current failing assertion" not in followup
 
 
 @pytest.mark.parametrize("outcome", [None, "BEHAVIOR_FAIL"])
@@ -589,7 +622,10 @@ def test_three_execute_reads_match_parent_when_inactive_or_off(tmp_path, monkeyp
     args = {"path": "module.py", "start_line": 1, "end_line": 1}
 
     def three(note):
-        monkeypatch.setattr(current_truth, "result_note", note)
+        def compatible_note(*args, **kwargs):
+            return note(*args) if note is parent.result_note else note(*args, **kwargs)
+
+        monkeypatch.setattr(current_truth, "result_note", compatible_note)
         measurement = SimpleNamespace(owner=SimpleNamespace(workspace_revision=1),
                                       _code_bookmarks_active=active, retained=None,
                                       step_ledger=None,

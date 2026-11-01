@@ -273,7 +273,7 @@ class UnboundedProgressWatch:
         return True
 
     def observe(self, binding: Mapping[str, object], receipts: list[dict], *,
-                boundary: int | None = None) -> bool:
+                boundary: int | None = None, charge_idle: bool = True) -> bool:
         # Worker checkpoints follow this observation but precede dispatch. A
         # restart at that same boundary must not charge the idle turn twice.
         if boundary is not None and boundary == self._last_boundary:
@@ -299,7 +299,10 @@ class UnboundedProgressWatch:
                 progress = True
         self._receipt_cursor = len(receipts)
         self._last_boundary = boundary
-        self.streak = 0 if progress else self.streak + 1
+        if progress:
+            self.streak = 0
+        elif charge_idle:
+            self.streak += 1
         return self.streak >= self.threshold
 
     @staticmethod
@@ -377,7 +380,15 @@ def stop_unbounded_no_progress(runtime: object, watch: UnboundedProgressWatch, *
         return False
     binding = runtime.binding()
     receipts = getattr(runtime.owner, "_receipts", [])
-    if not watch.observe(binding, receipts, boundary=boundary):
+    lock = getattr(runtime, "_read_lockout_state", None)
+    locked = (isinstance(lock, Mapping) and lock.get("remaining", 0) > 0
+              and getattr(runtime, "_read_lockout_notice", None))
+    # Observe the boundary and receipts while paused, but do not charge an
+    # idle turn caused by the host's own two-request restriction. Real new
+    # evidence still resets the watch under its ordinary rules.
+    if not watch.observe(binding, receipts, boundary=boundary, charge_idle=not locked):
+        return False
+    if locked:
         return False
     runtime.system_outcome = "stalled"
     runtime.journal.emit(

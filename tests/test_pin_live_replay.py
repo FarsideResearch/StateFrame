@@ -225,7 +225,7 @@ def test_check_projection_bookmark_switch_preserves_off_shape(tmp_path, monkeypa
     assert any("assertion_context_preview" in row for row in on_checks)
 
 
-def test_recorded_bm5_b_lockout_closes_source_escape_tools(tmp_path, monkeypatch):
+def test_recorded_bm5_b_notes_alone_cannot_lock_without_live_delivery(tmp_path, monkeypatch):
     monkeypatch.setenv("STATEFRAME_CODE_BOOKMARKS", "on")
     recorded = _recorded()
     root = _source_root(tmp_path, recorded)
@@ -236,19 +236,9 @@ def test_recorded_bm5_b_lockout_closes_source_escape_tools(tmp_path, monkeypatch
     assert b"unchanged since request 14" in json.dumps([
         {"role": "tool", "content": row["replayed_result_note"]}
         for row in actions if row.get("replayed_result_note")]).encode()
-    replayed = _menu_replay(recorded, checks, root, actions,
-                           stop_on_lockout=True)
-    locked = [(number, names, wire, events) for number, names, wire, events in replayed
-              if "read" not in names]
-    assert locked, replayed
-    assert locked[0][0] == 16
-    assert not {"read", "grep", "shell", "list_files", "where_defined",
-                "who_calls", "references"} & set(locked[0][1])
-    assert {"edit", "str_replace", "run_tests", "done"} <= set(locked[0][1])
-    assert b"[Read lockout]" in locked[0][2]
-    assert b"failing assertion:" in locked[0][2]
-    assert [event["reason_code"] for event in locked[0][3]] == [
-        "TWO_UNCHANGED_READ_REQUESTS"]
+    replayed = _menu_replay(recorded, checks, root, actions)
+    assert all("read" in names and b"[Read lockout]" not in wire and not events
+               for _, names, wire, events in replayed)
 
 
 if __name__ == "__main__":

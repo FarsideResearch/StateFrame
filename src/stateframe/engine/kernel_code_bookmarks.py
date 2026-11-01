@@ -466,6 +466,14 @@ def collect(runtime: object, frame: Mapping[str, object],
     prior = prior[:MAX_BOOKMARKS] if isinstance(prior, list) else ()
     verdict = frame.get("last_verdict")
     receipts = _failure_receipts(runtime, verdict) if isinstance(verdict, Mapping) else []
+    selected_receipt = next((row for row in receipts
+                             if row.get("receipt_id") == verdict.get("check_receipt_id")), None)
+    if (selected_receipt is not None
+            and (str(selected_receipt.get("outcome") or "").upper()
+                 in {"INVALID_CHECK", "ENVIRONMENT", "NOT_RUN", "UNKNOWN"}
+                 or str(selected_receipt.get("failure_phase") or "").upper()
+                 in {"COLLECTION", "IMPORT", "SETUP", "HOST", "EXECUTION", "TIMEOUT"})):
+        return finish([], "non_behavior_failure")
     if not receipts and not prior:
         reason = ("stale_revision" if isinstance(verdict, Mapping)
                   and verdict.get("status") == "FAIL"
@@ -482,6 +490,11 @@ def collect(runtime: object, frame: Mapping[str, object],
         return finish([], "no_paths")
     locations = [location for receipt in receipts
                  for location in _evidence_locations(_failure_text(receipt), paths)]
+    if receipts and not locations:
+        # A failed check without a source location cannot authenticate a
+        # repair bookmark. In particular, bounded journal records may omit
+        # stdout/stderr from other runners or collection failures.
+        return finish([], "no_failed_location")
     records: dict[tuple[str, str], dict[str, object]] = {}
     age = 0
 

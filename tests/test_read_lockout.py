@@ -15,6 +15,7 @@ from kernel_request_tool_surface import _request_tool_floor_schemas
 from kernel_stateframe_framefit5 import _is_framefit5_host_context_panel
 from kernel_reread_result_truth import checkpoint_replay, restore_replay
 from kernel_stateframe_runtime import StateFrameRuntime
+from kernel_tool_call_loop_breaker import UnboundedProgressWatch, stop_unbounded_no_progress
 
 
 TOOLS = [
@@ -37,6 +38,15 @@ def _runtime(root: Path):
     runtime.journal = SimpleNamespace(emit=lambda kind, **fields: events.append({"kind": kind, **fields}))
     runtime._base_tool_menu = lambda tools, _messages: list(tools)
     runtime._code_bookmarks_active = True
+    runtime.stateframe_framefit_mode = "on"
+    runtime._code_bookmark_carry = [
+        {"path": path, "symbol": "value", "read_only": False}
+        for path in ("pkg/batch/contracts.py", "pkg/service.py")]
+    runtime.edit_contract = {"edit_authority": {"editable_paths": [
+        "pkg/batch/contracts.py", "pkg/service.py"]}}
+    runtime._framefit_action_context = {"framefit5": {"read_facts": [
+        {"path": path, "body_delivery": "present"}
+        for path in ("pkg/batch/contracts.py", "pkg/service.py")]}}
     runtime.current_request_id = None
     runtime.binding = lambda: {"product_revision": "sha256:probe-revision"}
     failure = {
@@ -56,6 +66,8 @@ def _read(runtime, request_id: str, path: str, *, unchanged: bool = True):
         "request_id": request_id, "kind": "read", "result_class": "OK",
         "target_path": path,
         "delivery": {"unchanged_since_request": unchanged,
+                     "requested_bytes_delivered": 0 if unchanged else len(source),
+                     "effective_range": {"byte_start": 0, "byte_end": len(source)},
                      "revision": "sha256:" + hashlib.sha256(source).hexdigest()},
     })
 
@@ -78,6 +90,24 @@ def _trigger(tmp_path):
     return runtime, events
 
 
+def _live_read(runtime, request_id, path, arguments):
+    runtime.current_request_id = request_id
+    runtime.retained = None
+    runtime.step_ledger = None
+    runtime.owner.workspace_revision = 1
+
+    def receipt(kind, intent, fingerprint, result, **fields):
+        runtime.owner._receipts.append({"request_id": request_id, "kind": kind,
+                                        "intent": intent, "fingerprint": fingerprint,
+                                        "result_class": result, **fields})
+
+    runtime.owner.receipt = receipt
+    return dispatch_live_read(
+        runtime.owner.root, runtime.owner.root / path, path, path, 0,
+        args=arguments, measurement=runtime, step=len(runtime.owner._receipts) + 1,
+        bolt=runtime.owner, policy=None, resolved_path=path)
+
+
 def test_probe_state_next_request_has_no_read_and_factual_frame_line(tmp_path, monkeypatch):
     monkeypatch.setenv("STATEFRAME_CODE_BOOKMARKS", "on")
     runtime, events = _trigger(tmp_path)
@@ -92,7 +122,8 @@ def test_probe_state_next_request_has_no_read_and_factual_frame_line(tmp_path, m
     assert "read is unavailable for this request" in frame[1]["content"]
     assert _is_framefit5_host_context_panel(frame[1])
     assert not _is_framefit5_host_context_panel({"role": "user", "content": frame[1]["content"]})
-    assert [row["reason_code"] for row in events] == ["TWO_UNCHANGED_READ_REQUESTS"]
+    assert [row["reason_code"] for row in events if row["kind"] == "read_lockout_decision"] == [
+        "TWO_UNCHANGED_READ_REQUESTS"]
     assert "read" not in _names(_menu(runtime, "probe-request-15"))
     assert len(events) == 1
 
@@ -102,7 +133,8 @@ def test_edit_or_test_releases_read_immediately(tmp_path, monkeypatch, kind):
     monkeypatch.setenv("STATEFRAME_CODE_BOOKMARKS", "on")
     runtime, events = _trigger(tmp_path)
     _menu(runtime, "probe-request-15")
-    runtime.owner._receipts.append({"request_id": "probe-request-16", "kind": kind})
+    runtime.owner._receipts.append({"request_id": "probe-request-15", "kind": kind,
+                                    "result_class": "APPLIED" if kind == "edit" else "FAIL"})
     assert "read" in _names(_menu(runtime, "probe-request-16"))
     assert events[-1]["reason_code"] == "NEW_EVIDENCE"
 
@@ -126,7 +158,7 @@ def test_unseen_or_changed_source_never_triggers(tmp_path, monkeypatch):
     runtime, events = _trigger(tmp_path)
     (tmp_path / "pkg/service.py").write_text("value = 2\n")
     assert "read" in _names(_menu(runtime, "probe-request-15"))
-    assert not events
+    assert not [row for row in events if row["kind"] == "read_lockout_decision"]
 
 
 def test_checkpoint_restores_same_menu_decision(tmp_path, monkeypatch):
@@ -140,6 +172,21 @@ def test_checkpoint_restores_same_menu_decision(tmp_path, monkeypatch):
     restore_replay(resumed, snapshot)
     assert _names(_menu(resumed, "probe-request-15")) == original
     assert resumed._read_lockout_notice == runtime._read_lockout_notice
+
+
+def test_legacy_lockout_checkpoint_resumes_unlocked(tmp_path, monkeypatch):
+    monkeypatch.setenv("STATEFRAME_CODE_BOOKMARKS", "on")
+    runtime, _ = _trigger(tmp_path)
+    _menu(runtime, "probe-request-15")
+    old = dict(checkpoint_replay(runtime)["read_lockout"])
+    old["schema"] = "stateframe-read-lockout/1"
+    del old["counted"]
+    resumed, _ = _runtime(tmp_path)
+    from kernel_read_lockout import restore
+    restore(resumed, old)
+    assert resumed._read_lockout_state["remaining"] == 0
+    assert resumed._read_lockout_state["streak"] == 0
+    assert "read" in _names(_menu(resumed, "probe-request-16"))
 
 
 def test_production_base_menu_projects_lockout(tmp_path, monkeypatch):
@@ -222,6 +269,154 @@ def test_live_read_receipt_marks_only_the_exact_unchanged_notice(tmp_path, monke
     assert delivery["requested_bytes_delivered"] > 0
 
 
+def test_dispatched_fresh_ranges_and_new_file_cannot_start_lockout(tmp_path, monkeypatch):
+    monkeypatch.setenv("STATEFRAME_CODE_BOOKMARKS", "on")
+    monkeypatch.setenv("STATEFRAME_DELIVER_REQUESTED_BYTES", "on")
+    runtime, events = _runtime(tmp_path)
+    for path in ("pkg/batch/contracts.py", "pkg/service.py", "pkg/new.py"):
+        target = tmp_path / path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("ONE = 1\nTWO = 2\nTHREE = 3\n")
+    for number, path, arguments in (
+            (1, "pkg/batch/contracts.py", {"path": "pkg/batch/contracts.py", "start_line": 1, "end_line": 1}),
+            (2, "pkg/batch/contracts.py", {"path": "pkg/batch/contracts.py", "start_line": 2, "end_line": 2}),
+            (3, "pkg/new.py", {"path": "pkg/new.py"}),
+            (4, "pkg/service.py", {"path": "pkg/service.py"})):
+        request = f"request-{number}"
+        _menu(runtime, request)
+        result, observation, _source, delivery = _live_read(runtime, request, path, arguments)
+        assert result == "OK" and "=" in observation
+        assert delivery["unchanged_since_request"] is False
+        assert delivery["requested_bytes_delivered"] > 0
+        assert "read" in _names(_menu(runtime, f"request-{number + 1}"))
+    assert not [row for row in events if row["kind"] == "read_lockout_decision"]
+
+
+@pytest.mark.parametrize("result", ["REJECTED", "FAILED", "NO_OP"])
+def test_dispatched_rejected_edit_does_not_release_lock(tmp_path, monkeypatch, result):
+    from kernel_bolt import KernelBolt
+
+    monkeypatch.setenv("STATEFRAME_CODE_BOOKMARKS", "on")
+    runtime, events = _trigger(tmp_path)
+    assert "read" not in _names(_menu(runtime, "probe-request-15"))
+    bolt = KernelBolt.__new__(KernelBolt)
+    bolt.root = tmp_path
+    bolt._receipts = runtime.owner._receipts
+    bolt.run_id = "pin-rejected"
+    bolt.current_step = 15
+    bolt.workspace_revision = 1
+    bolt.current_request_id = "probe-request-15"
+    bolt.audit_journal = runtime.journal
+    bolt.measurement = None
+    runtime.owner = bolt
+    bolt.receipt("edit", "replace_fn pkg/service.py", "pkg/service.py",
+                 result, detail="edit was not applied", target_path="pkg/service.py")
+    assert bolt._receipts[-1]["request_id"] == "probe-request-15"
+    assert bolt.workspace_revision == 1
+    assert "read" not in _names(_menu(runtime, "probe-request-16"))
+    assert [row["reason_code"] for row in events if row["kind"] == "read_lockout_decision"] == [
+        "TWO_UNCHANGED_READ_REQUESTS"]
+    assert "read" in _names(_menu(runtime, "probe-request-17"))
+
+
+@pytest.mark.parametrize("menu", [
+    ("read", "done"), ("read", "edit", "done"),
+    ("read", "run_tests", "done"), ("read", "edit", "run_tests", "done"),
+])
+def test_lockout_needs_visible_editable_source_and_repair_route(tmp_path, monkeypatch, menu):
+    monkeypatch.setenv("STATEFRAME_CODE_BOOKMARKS", "on")
+    runtime, _events = _trigger(tmp_path.resolve())
+    selected = [tool for tool in TOOLS if tool["function"]["name"] in menu]
+    runtime.current_request_id = "probe-request-15"
+    names = _names(StateFrameRuntime.tool_menu(runtime, selected, []))
+    assert ("read" not in names) == ("edit" in menu and "run_tests" in menu)
+    runtime._code_bookmark_carry[0]["read_only"] = True
+    runtime._code_bookmark_carry[1]["read_only"] = True
+    assert "read" in _names(StateFrameRuntime.tool_menu(runtime, selected, []))
+
+
+def test_other_mode_or_hidden_source_never_locks(tmp_path, monkeypatch):
+    monkeypatch.setenv("STATEFRAME_CODE_BOOKMARKS", "on")
+    runtime, _ = _trigger(tmp_path)
+    runtime.stateframe_framefit_mode = "off"
+    assert "read" in _names(_menu(runtime, "probe-request-15"))
+    runtime, _ = _trigger(tmp_path)
+    runtime._code_bookmark_carry = []
+    assert "read" in _names(_menu(runtime, "probe-request-15"))
+
+
+def test_progress_watch_pauses_idle_charge_during_lockout_without_reset(tmp_path, monkeypatch):
+    monkeypatch.setenv("STATEFRAME_CODE_BOOKMARKS", "on")
+    runtime, _events = _trigger(tmp_path)
+    _menu(runtime, "probe-request-15")
+    watch = UnboundedProgressWatch(threshold=2)
+    watch.observe(runtime.binding(), runtime.owner._receipts, boundary=0)
+    watch.streak = 1
+    assert not stop_unbounded_no_progress(runtime, watch, boundary=10)
+    assert watch.streak == 1
+    assert not stop_unbounded_no_progress(runtime, watch, boundary=11)
+    assert watch.streak == 1
+    _menu(runtime, "probe-request-16")
+    _menu(runtime, "probe-request-17")
+    assert stop_unbounded_no_progress(runtime, watch, boundary=12)
+    assert watch.streak == 2
+
+
+def test_resumed_dispatch_preserves_failure_identity_and_request_bytes(tmp_path, monkeypatch):
+    from kernel_continuation_journal import ContinuationJournal
+    from kernel_reread_result_truth import _current_failure
+
+    monkeypatch.setenv("STATEFRAME_CODE_BOOKMARKS", "on")
+    monkeypatch.setenv("STATEFRAME_DELIVER_REQUESTED_BYTES", "on")
+    path = tmp_path / "pkg/service.py"
+    path.parent.mkdir(parents=True)
+    path.write_text("value = 1\n")
+    live, _ = _runtime(tmp_path)
+    failure = live._latest_check_receipt
+    journal_dir = tmp_path / "journal"
+    journal_dir.mkdir()
+    journal = ContinuationJournal(journal_dir, "pin-resume", {"origin": "fixture"})
+    try:
+        journal.emit("check_receipt", **failure)
+        projected = journal.framefit_receipt_records()
+    finally:
+        journal.close()
+    assert projected[-1]["assertion_context_preview"] == failure["assertion_context_preview"]
+    live._framefit_action_context.update({
+        "framefit5": {"last_verdict": {"status": "FAIL",
+                                     "tested_revision": "sha256:probe-revision",
+                                     "current_revision": "sha256:probe-revision",
+                                     "check_receipt_id": failure["receipt_id"]},
+                      "read_facts": live._framefit_action_context["framefit5"]["read_facts"]},
+        "journal_receipt_records": projected,
+    })
+    _menu(live, "request-one")
+    first = _live_read(live, "request-one", "pkg/service.py",
+                       {"path": "pkg/service.py", "start_line": 1, "end_line": 1})
+    assert first[3]["requested_bytes_delivered"] > 0
+    snapshot = json.loads(json.dumps(checkpoint_replay(live)))
+    resumed, _ = _runtime(tmp_path)
+    resumed._framefit_action_context = json.loads(json.dumps(live._framefit_action_context))
+    resumed._latest_check_receipt = None
+    resumed.host_check_receipts = []
+    restore_replay(resumed, snapshot)
+    assert _current_failure(live) == _current_failure(resumed)
+
+    def wire(runtime):
+        menu = _menu(runtime, "request-two")
+        messages = [{"role": "user", "content": "[StateFrame]\ncurrent state"}]
+        append_frame_line(runtime, messages)
+        result, observation, _source, delivery = _live_read(
+            runtime, "request-two", "pkg/service.py",
+            {"path": "pkg/service.py", "start_line": 1, "end_line": 1})
+        assert result == "OK" and delivery["unchanged_since_request"] is False
+        messages.append({"role": "tool", "content": observation})
+        return json.dumps({"messages": messages, "tools": menu},
+                          sort_keys=True, separators=(",", ":")).encode()
+
+    assert wire(live) == wire(resumed)
+
+
 def test_final_capability_floor_cannot_reintroduce_locked_read(tmp_path, monkeypatch):
     monkeypatch.setenv("STATEFRAME_CODE_BOOKMARKS", "on")
     runtime, _events = _trigger(tmp_path)
@@ -259,7 +454,7 @@ def test_mixed_provider_batch_cannot_count_as_unchanged_reads(tmp_path, monkeypa
     (tmp_path / "module.py").write_text("value = 1\n")
     _menu(runtime, "request-14")
     _read(runtime, "request-14", "module.py")
-    runtime.owner._receipts.append({"request_id": "another-action-in-14",
+    runtime.owner._receipts.append({"request_id": "request-14",
                                     "kind": "edit", "result_class": "APPLIED"})
     assert "read" in _names(_menu(runtime, "request-15"))
     _read(runtime, "request-15", "module.py")

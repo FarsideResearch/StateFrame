@@ -44,10 +44,8 @@ def _fresh(runtime: object, paths: Mapping[str, str]) -> bool:
 
 def _request_receipts(runtime: object, request_id: str) -> list[Mapping[str, object]]:
     receipts = getattr(getattr(runtime, "owner", None), "_receipts", ())
-    rows = [row for row in receipts if isinstance(row, Mapping)]
-    start = next((index for index, row in enumerate(rows)
-                  if row.get("request_id") == request_id), None)
-    return rows[start:] if start is not None else []
+    return [row for row in receipts if isinstance(row, Mapping)
+            and row.get("request_id") == request_id]
 
 
 def _request_reads(runtime: object, request_id: str) -> dict[str, str] | None:
@@ -60,6 +58,8 @@ def _request_reads(runtime: object, request_id: str) -> dict[str, str] | None:
         path = row.get("target_path")
         if (row.get("result_class") != "OK" or not isinstance(delivery, Mapping)
                 or delivery.get("unchanged_since_request") is not True
+                or delivery.get("requested_bytes_delivered", 0) != 0
+                or not isinstance(delivery.get("effective_range"), Mapping)
                 or not isinstance(path, str) or not isinstance(delivery.get("revision"), str)):
             return None
         paths[path] = delivery["revision"]
@@ -69,17 +69,69 @@ def _request_reads(runtime: object, request_id: str) -> dict[str, str] | None:
 
 
 def _new_evidence(runtime: object, request_id: str) -> bool:
-    return any((row.get("kind") not in {None, "read"}
-                    or (isinstance(row.get("delivery"), Mapping)
-                        and row["delivery"].get("unchanged_since_request") is not True))
-               for row in _request_receipts(runtime, request_id))
+    for row in _request_receipts(runtime, request_id):
+        kind, result = row.get("kind"), row.get("result_class")
+        if kind == "edit" and result == "APPLIED":
+            return True
+        if kind in {"test", "check"} and result in {
+                "PASS", "FAIL", "RED", "GREEN", "PASSED", "FAILED", "FAIL_WITH_WITNESS"}:
+            return True
+        delivery = row.get("delivery")
+        if (kind == "read" and result == "OK" and isinstance(delivery, Mapping)
+                and delivery.get("unchanged_since_request") is False
+                and (type(delivery.get("requested_bytes_delivered")) is int
+                     and delivery["requested_bytes_delivered"] > 0)):
+            return True
+    return False
+
+
+def _repair_route(runtime: object, tools: Sequence[dict], paths: Mapping[str, str]) -> bool:
+    """Lock only with visible, editable source and an admitted edit/check pair."""
+    if (getattr(runtime, "stateframe_framefit_mode", "off") != "on"
+            or getattr(runtime, "_code_bookmarks_active", False) is not True):
+        return False
+    # The carry contains only bookmarks actually delivered by the last
+    # qualified request; the pre-allocation frame can still say not_shown.
+    carry = getattr(runtime, "_code_bookmark_carry", ())
+    if not isinstance(carry, list):
+        return False
+    from kernel_read_reuse_visibility import editable_read_paths
+    editable = editable_read_paths(runtime)
+    targets = {row.get("path") for row in carry if isinstance(row, Mapping)
+               and row.get("read_only") is False}
+    if not (set(paths) & targets & editable):
+        return False
+    names = {tool.get("function", {}).get("name") for tool in tools
+             if isinstance(tool, Mapping) and isinstance(tool.get("function"), Mapping)}
+    return (bool(names & {"edit", "str_replace"})
+            and bool(names & {"run_tests", "authored_check"}))
+
+
+def final_source_visible(runtime: object, visible_bookmarks: Sequence[Mapping[str, object]],
+                         tools: Sequence[dict]) -> bool:
+    """Validate that a locked request actually carries its repair source."""
+    state = getattr(runtime, "_read_lockout_state", None)
+    if not isinstance(state, Mapping) or not state.get("remaining"):
+        return True
+    paths = state.get("paths")
+    if not isinstance(paths, Mapping):
+        return False
+    from kernel_read_reuse_visibility import editable_read_paths
+    editable = editable_read_paths(runtime)
+    repairable = {row.get("path") for row in visible_bookmarks
+                  if isinstance(row, Mapping) and row.get("read_only") is False}
+    names = {tool.get("function", {}).get("name") for tool in tools
+             if isinstance(tool, Mapping) and isinstance(tool.get("function"), Mapping)}
+    return (bool(set(paths) & repairable & editable)
+            and bool(names & {"edit", "str_replace"})
+            and bool(names & {"run_tests", "authored_check"}))
 
 
 def _state(runtime: object) -> dict[str, object]:
     state = getattr(runtime, "_read_lockout_state", None)
     if isinstance(state, dict):
         return state
-    state = {"evaluated": None, "streak": 0, "failure": None, "paths": {},
+    state = {"evaluated": None, "counted": None, "streak": 0, "failure": None, "paths": {},
              "remaining": 0, "projected_after": None}
     runtime._read_lockout_state = state
     return state
@@ -113,40 +165,50 @@ def project(runtime: object, tools: Sequence[dict]) -> list[dict]:
             if _new_evidence(runtime, previous):
                 state["remaining"] = 0
                 _emit(runtime, "NEW_EVIDENCE", state)
+                state["streak"] = 0
+                state["paths"] = {}
+                state["failure"] = None
             elif not state["remaining"]:
                 capped = True
                 _emit(runtime, "REQUEST_CAP", state)
-        current = _failure(runtime)
-        # The provider menu is normally prepared before its new request ID has
-        # any receipts. Tests and post-dispatch projections may already have
-        # receipts for that ID; evaluate those once at the same boundary.
-        completed = previous if isinstance(previous, str) else (
-            current_request if _request_receipts(runtime, current_request) else None)
-        reads = (_request_reads(runtime, completed)
-                 if isinstance(completed, str) and current is not None else None)
-        if reads is not None and current == state["failure"]:
-            state["streak"] = min(2, state["streak"] + 1)
-            state["paths"].update(reads)
-        elif reads is not None:
-            state["streak"] = 1
-            state["failure"] = current
-            state["paths"] = reads
-        else:
-            state["streak"] = 0
-            if not state["remaining"]:
+                state["streak"] = 0
                 state["paths"] = {}
                 state["failure"] = None
+        current = _failure(runtime)
+        # Count each dispatched request once. A post-dispatch projection can
+        # already contain this request's receipts; normal sends see the prior
+        # request's receipts instead.
+        completed = (current_request if _request_receipts(runtime, current_request)
+                     else previous if isinstance(previous, str)
+                     and _request_receipts(runtime, previous) else None)
+        if isinstance(completed, str) and completed != state["counted"]:
+            reads = _request_reads(runtime, completed) if current is not None else None
+            if reads is not None and current == state["failure"]:
+                state["streak"] = min(2, state["streak"] + 1)
+                state["paths"].update(reads)
+            elif reads is not None:
+                state["streak"] = 1
+                state["failure"] = current
+                state["paths"] = reads
+            else:
+                state["streak"] = 0
+                if not state["remaining"]:
+                    state["paths"] = {}
+                    state["failure"] = None
+            state["counted"] = completed
         state["evaluated"] = current_request
         if (len(state["paths"]) > _MAX_LOCKED_PATHS
                 or sum(map(len, state["paths"])) > _MAX_PATH_TEXT):
             state["streak"] = 0
             state["paths"] = {}
-        if state["streak"] == 2 and not state["remaining"] and not capped:
+        if (state["streak"] == 2 and not state["remaining"] and not capped
+                and _repair_route(runtime, tools, state["paths"])):
             state["remaining"] = _MAX_LOCKED_REQUESTS
             _emit(runtime, "TWO_UNCHANGED_READ_REQUESTS", state)
     if (not state["remaining"] or _failure(runtime) != state["failure"]
             or not _fresh(runtime, state["paths"])
-            or getattr(runtime, "_request_deferred_source_paths", ())):
+            or getattr(runtime, "_request_deferred_source_paths", ())
+            or (state["remaining"] and not _repair_route(runtime, tools, state["paths"]))):
         if state["remaining"]:
             state["remaining"] = 0
             _emit(runtime, "FRESH_READ_REQUIRED", state)
@@ -172,7 +234,9 @@ def filter_tools(runtime: object, tools: Sequence[dict]) -> list[dict]:
         return list(tools)
     selected = [tool for tool in tools
                 if tool.get("function", {}).get("name") not in _PURE_SOURCE_TOOLS]
-    if not selected:
+    state = getattr(runtime, "_read_lockout_state", None)
+    paths = state.get("paths", {}) if isinstance(state, Mapping) else {}
+    if not selected or not _repair_route(runtime, tools, paths):
         release(runtime, "FRESH_READ_REQUIRED")
         return list(tools)
     return selected
@@ -211,20 +275,51 @@ def checkpoint(runtime: object) -> dict[str, object] | None:
     state = getattr(runtime, "_read_lockout_state", None)
     if not isinstance(state, dict):
         return None
-    return {"schema": "stateframe-read-lockout/1", **state}
+    return {"schema": "stateframe-read-lockout/2", **state}
 
 
 def restore(runtime: object, snapshot: object) -> None:
     if snapshot is None:
         return
-    if (not isinstance(snapshot, Mapping) or snapshot.get("schema") != "stateframe-read-lockout/1"
-            or set(snapshot) != {"schema", "evaluated", "streak", "failure", "paths",
+    if (isinstance(snapshot, Mapping)
+            and snapshot.get("schema") == "stateframe-read-lockout/1"):
+        legacy_fields = {"schema", "evaluated", "streak", "failure", "paths",
+                         "remaining", "projected_after"}
+        if (set(snapshot) != legacy_fields
+                or type(snapshot["streak"]) is not int or not 0 <= snapshot["streak"] <= 2
+                or type(snapshot["remaining"]) is not int
+                or not 0 <= snapshot["remaining"] <= _MAX_LOCKED_REQUESTS
+                or any(value is not None and not isinstance(value, str)
+                       for value in (snapshot["evaluated"], snapshot["projected_after"]))
+                or not isinstance(snapshot["paths"], Mapping)
+                or len(snapshot["paths"]) > _MAX_LOCKED_PATHS
+                or sum(len(path) for path in snapshot["paths"] if isinstance(path, str))
+                > _MAX_PATH_TEXT
+                or any(not isinstance(path, str) or len(path) > 2048
+                       or not isinstance(revision, str) or len(revision) > 128
+                       for path, revision in snapshot["paths"].items())
+                or (snapshot["failure"] is not None and
+                    (not isinstance(snapshot["failure"], (tuple, list))
+                     or len(snapshot["failure"]) != 7
+                     or any(not isinstance(value, str) or len(value) > 200
+                            for value in snapshot["failure"])))):
+            raise ValueError("invalid read lockout replay")
+        # The old state counted a completed request twice and cannot identify
+        # which request supplied its streak. Resume it unlocked, preserving the
+        # last menu boundary but never carrying an unproved restriction.
+        snapshot = {**snapshot, "schema": "stateframe-read-lockout/2",
+                    "counted": snapshot["evaluated"], "streak": 0,
+                    "failure": None, "paths": {}, "remaining": 0,
+                    "projected_after": None}
+    if (not isinstance(snapshot, Mapping) or snapshot.get("schema") != "stateframe-read-lockout/2"
+            or set(snapshot) != {"schema", "evaluated", "counted", "streak", "failure", "paths",
                                      "remaining", "projected_after"}
             or type(snapshot["streak"]) is not int or not 0 <= snapshot["streak"] <= 2
             or type(snapshot["remaining"]) is not int
             or not 0 <= snapshot["remaining"] <= _MAX_LOCKED_REQUESTS
             or any(value is not None and not isinstance(value, str)
-                   for value in (snapshot["evaluated"], snapshot["projected_after"]))
+                   for value in (snapshot["evaluated"], snapshot["counted"],
+                                 snapshot["projected_after"]))
             or (snapshot["failure"] is not None and
                 (not isinstance(snapshot["failure"], (tuple, list))
                  or len(snapshot["failure"]) != 7
@@ -232,13 +327,15 @@ def restore(runtime: object, snapshot: object) -> None:
                         for value in snapshot["failure"])))
             or not isinstance(snapshot["paths"], Mapping)
             or len(snapshot["paths"]) > _MAX_LOCKED_PATHS
-            or sum(map(len, snapshot["paths"])) > _MAX_PATH_TEXT
+            or sum(len(path) for path in snapshot["paths"] if isinstance(path, str))
+            > _MAX_PATH_TEXT
             or any(not isinstance(path, str) or len(path) > 2048
                    or not isinstance(revision, str) or len(revision) > 128
                    for path, revision in snapshot["paths"].items())):
         raise ValueError("invalid read lockout replay")
     runtime._read_lockout_state = {
-        "evaluated": snapshot["evaluated"], "streak": snapshot["streak"],
+        "evaluated": snapshot["evaluated"], "counted": snapshot["counted"],
+        "streak": snapshot["streak"],
         "failure": tuple(snapshot["failure"]) if snapshot["failure"] is not None else None,
         "paths": dict(snapshot["paths"]), "remaining": snapshot["remaining"],
         "projected_after": snapshot["projected_after"],

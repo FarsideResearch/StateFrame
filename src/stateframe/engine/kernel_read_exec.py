@@ -243,8 +243,12 @@ def record_serialized_read_pages(
 
 
 def _unchanged_text(path: str, request_number: int) -> str:
+    from kernel_code_bookmarks import enabled as bookmarks_enabled
+    if not bookmarks_enabled():
+        return (f"[read] {path[:120]} unchanged since request {request_number}; "
+                "request an explicit line range for the exact bytes.")
     return (f"[read] {path[:120]} unchanged since request {request_number}; "
-            "request an explicit line range for the exact bytes.")
+            "the exact range was previously delivered.")
 
 
 def _dropped_range_withheld(
@@ -511,6 +515,9 @@ def execute_read(root: Path, p: Path, raw: str, display: str, start: int, *,
             cached_metadata["read_dedup"] = dedup_receipt
             if delivery is not None:
                 delivery.update(cached_metadata)
+                from kernel_code_bookmarks import enabled as bookmarks_enabled
+                if bookmarks_enabled():
+                    delivery["read_dedup"] = dedup_receipt
                 delivery["host_outcome"] = "OBSERVED"
                 delivery["read_reuse"] = _ordinary_read_receipt(
                     step, raw, start, "cached_exact_page")
@@ -546,11 +553,11 @@ def execute_read(root: Path, p: Path, raw: str, display: str, start: int, *,
                     pass
             if (str(cached_metadata.get("result_class", "OK")) == "OK"
                     and result_truth and repeat_request is None):
-                note = result_note(measurement, identity, generation, cache_entry.revision, step)
+                note = result_note(
+                    measurement, identity, generation, cache_entry.revision, step,
+                    requested_range=cached_metadata.get("requested_range"),
+                    effective_range=cached_metadata.get("effective_range"))
                 if note:
-                    if delivery is not None and note.startswith(
-                            "[read] requested bytes are unchanged since request "):
-                        delivery["unchanged_since_request"] = True
                     observation += "\n" + note
             return str(cached_metadata.get("result_class", "OK")), observation, None
 
@@ -754,8 +761,10 @@ def execute_read(root: Path, p: Path, raw: str, display: str, start: int, *,
                         reuse = delivery.get("read_reuse")
                         reuse_status = (reuse.get("status")
                                         if isinstance(reuse, Mapping) else None)
+                        from kernel_code_bookmarks import enabled as bookmarks_enabled
                         dedup_receipt["status"] = (
-                            "UNCHANGED_VISIBLE" if reuse_status == "UNCHANGED_VISIBLE"
+                            "UNCHANGED_VISIBLE" if (bookmarks_enabled() and repeat_request is not None)
+                            or reuse_status == "UNCHANGED_VISIBLE"
                             else "CACHED_BYTES")
                         observation = (_unchanged_text(display, repeat_request)
                                        if repeat_request is not None else _reuse_text(
@@ -797,12 +806,12 @@ def execute_read(root: Path, p: Path, raw: str, display: str, start: int, *,
             delivery_elapsed_ns += time.perf_counter_ns() - delivery_segment_started
             delivery_segment_started = None
         if source.result_class == "OK" and result_truth and repeat_request is None:
-            note = result_note(measurement, identity, _workspace_generation(measurement),
-                               source.metadata.get("revision"), step)
+            note = result_note(
+                measurement, identity, _workspace_generation(measurement),
+                source.metadata.get("revision"), step,
+                requested_range=source.metadata.get("requested_range"),
+                effective_range=source.metadata.get("effective_range"))
             if note:
-                if delivery is not None and note.startswith(
-                        "[read] requested bytes are unchanged since request "):
-                    delivery["unchanged_since_request"] = True
                 observation += "\n" + note
         return source.result_class, observation, read_bytes
     except ReadArgumentError as error:
@@ -953,9 +962,13 @@ def dispatch_live_read(root: Path, p: Path, raw: str, display: str, start: int, 
     # than a cache hit (which may still have delivered source bytes).
     from kernel_code_bookmarks import enabled as bookmarks_enabled
     if bookmarks_enabled():
+        dedup = delivery.get("read_dedup")
         delivery["unchanged_since_request"] = (
-            delivery.get("unchanged_since_request") is True
-            or observation.startswith(f"[read] {display[:120]} unchanged since request "))
+            result == "OK"
+            and isinstance(dedup, Mapping)
+            and dedup.get("status") == "UNCHANGED_VISIBLE"
+            and observation.startswith(f"[read] {display[:120]} unchanged since request ")
+            and delivery.get("requested_bytes_delivered", 0) == 0)
     from kernel_serve_reads import enabled as serve_reads_enabled, note_read_outcome
     if serve_reads_enabled():
         from kernel_gate_switches import deliver_requested_bytes_enabled

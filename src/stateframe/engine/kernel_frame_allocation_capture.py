@@ -1091,17 +1091,30 @@ def finalize_frame_candidate(
         if (parsed := parse_model_source_window(message["content"])) is not None
         and isinstance(parsed.get("path"), str)
     }
-    active = bool(bookmarked_paths & carried_source_paths) or any(
-        isinstance(fact, Mapping) and fact.get("path") in bookmarked_paths
+    visible_bookmarked_paths = (bookmarked_paths & carried_source_paths) | {
+        fact["path"] for fact in final_state.get("read_facts", ())
+        if isinstance(fact, Mapping) and fact.get("path") in bookmarked_paths
         and fact.get("body_delivery") in {"present", "bookmarked"}
-        for fact in final_state.get("read_facts", ())
-    )
+    }
+    active = bool(visible_bookmarked_paths)
     reason = ("activated" if active else
               "capacity_dropped" if collected_bookmark_count and not final_bookmarks else
               "no_delivery" if collected_bookmark_count else bookmark_decision["reason"])
+    from kernel_read_lockout import final_source_visible, release as release_read_lockout
+    visible_bookmarks = ([row for row in final_bookmarks if isinstance(row, Mapping)
+                          and row.get("path") in visible_bookmarked_paths]
+                         if isinstance(final_bookmarks, list) else [])
+    if (getattr(runtime, "_read_lockout_notice", None)
+            and not final_source_visible(runtime, visible_bookmarks, candidate["tools"])):
+        # The prior request's visible bookmark was only provisional. Rebuild an
+        # unrestricted request before a provider sees a completion-only trap.
+        from kernel_frame_optional_allocation import FrameAllocationReplanNeeded
+        release_read_lockout(runtime, "SOURCE_NOT_VISIBLE")
+        raise FrameAllocationReplanNeeded("locked repair source absent from final request")
     journal = getattr(capture, "journal", getattr(runtime, "journal", None))
     emit = getattr(journal, "emit", None)
-    if callable(emit):
+    from kernel_code_bookmarks import enabled as bookmarks_enabled
+    if bookmarks_enabled() and callable(emit):
         emit("code_bookmark_activation_decision",
              request_id=getattr(capture, "request_id", None),
              reason=reason, activated=active,
@@ -1109,7 +1122,6 @@ def finalize_frame_candidate(
              final_count=len(final_bookmarks) if isinstance(final_bookmarks, list) else 0,
              dispatch=False)
     capture._code_bookmark_transition = (
-        active, copy.deepcopy(final_bookmarks) if active
-        and isinstance(final_bookmarks, list) else []
+        active, copy.deepcopy(visible_bookmarks) if active else []
     )
     return candidate

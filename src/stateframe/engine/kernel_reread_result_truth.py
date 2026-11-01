@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import json
 import os
 import re
 from collections import OrderedDict
@@ -35,17 +36,19 @@ def _canonical_failure(receipt: object) -> dict[str, str] | None:
     if (not isinstance(receipt_id, str) or not 0 < len(receipt_id) <= 160
             or not isinstance(revision, str) or not 0 < len(revision) <= 128):
         return None
-    digest = receipt.get("runner_tail_digest")
-    if not isinstance(digest, str):
-        digest = hashlib.sha256(str(receipt.get("runner_tail") or "").encode()).hexdigest()
-    if re.fullmatch(r"[0-9a-f]{64}", digest) is None:
-        return None
     fields = {key: str(receipt.get(key) or "") for key in ("outcome", "failure_phase")}
     if any(len(value) > 64 for value in fields.values()):
+        return None
+    if (fields["outcome"].upper() in {"INVALID_CHECK", "ENVIRONMENT", "NOT_RUN", "UNKNOWN"}
+            or fields["failure_phase"].upper() in {
+                "COLLECTION", "IMPORT", "SETUP", "HOST", "EXECUTION", "TIMEOUT"}):
         return None
     assertion = " ".join(str(receipt.get("assertion_context_preview") or "").split())[:200].rstrip()
     if not assertion:
         return None
+    # The runner tail is private on the live path and absent from the compact
+    # journal projection. Bind both paths to the same public assertion instead.
+    digest = hashlib.sha256(assertion.encode("utf-8")).hexdigest()
     return {"receipt_id": receipt_id, "revision": revision, "status": "FAIL",
             **fields, "runner_tail_digest": digest, "assertion": assertion}
 
@@ -136,8 +139,9 @@ def read_is_owed(fact: Mapping[str, object] | object,
 
 
 def result_note(measurement: object, identity: str, generation: str | None,
-                revision: object, action: object) -> str | None:
-    """Remember only the latest read identity per file, never source text."""
+                revision: object, action: object, *,
+                requested_range: object = None, effective_range: object = None) -> str | None:
+    """Remember bounded page identities, never source text."""
     owner = getattr(measurement, "owner", None)
     if owner is not None:
         generation = str(getattr(owner, "workspace_revision", 0))
@@ -151,6 +155,12 @@ def result_note(measurement: object, identity: str, generation: str | None,
                    or len(identity) > 2048 or len(generation) > 512
                    or len(revision) > 128):
         return None
+    if active:
+        # A read of a new interval is new evidence even when the file revision
+        # matches a previous request. Hash coordinates to bound checkpoint size.
+        coordinates = json.dumps([requested_range, effective_range], sort_keys=True,
+                                 separators=(",", ":"), default=str)
+        identity = hashlib.sha256((identity + "\0" + coordinates).encode()).hexdigest()
     seen = getattr(measurement, "_reread_result_truth", None)
     if not isinstance(seen, OrderedDict):
         seen = OrderedDict()
@@ -276,14 +286,20 @@ def restore_replay(measurement: object, snapshot: object) -> None:
                                                 or len(request_id) > 120))):
             raise ValueError("invalid bookmark read replay")
         restored[row[0]] = (generation, revision, action,
-                            tuple(failure_key) if failure_key is not None else None,
+                            (tuple(failure_key[:5]) + (
+                                hashlib.sha256(failure_key[6].encode("utf-8")).hexdigest(),
+                                failure_key[6]) if failure_key is not None else None),
                             request_id)
-    if failure is not None and (
-            set(failure) != {"receipt_id", "revision", "status", "outcome",
-                             "failure_phase", "runner_tail_digest", "assertion"}
-            or _canonical_failure({**failure,
-                                   "assertion_context_preview": failure.get("assertion")}) != failure):
-        raise ValueError("invalid bookmark read replay")
+    if failure is not None:
+        if (set(failure) != {"receipt_id", "revision", "status", "outcome",
+                            "failure_phase", "runner_tail_digest", "assertion"}
+                or not isinstance(failure.get("runner_tail_digest"), str)
+                or re.fullmatch(r"[0-9a-f]{64}", failure["runner_tail_digest"]) is None):
+            raise ValueError("invalid bookmark read replay")
+        failure = _canonical_failure({**failure,
+                                      "assertion_context_preview": failure.get("assertion")})
+        if failure is None:
+            raise ValueError("invalid bookmark read replay")
     measurement._reread_result_truth = restored
     measurement._bookmark_failure_data = dict(failure) if failure is not None else None
     measurement._code_bookmarks_active = snapshot["active"]

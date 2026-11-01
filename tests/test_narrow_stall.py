@@ -406,6 +406,89 @@ def _materialized_request(body):
     return result
 
 
+def test_bookmarks_off_qualified_request_and_journal_match_release(tmp_path, monkeypatch):
+    """Compare the complete qualified frame, not the bookmark collector alone."""
+    monkeypatch.setenv("STATEFRAME_CODE_BOOKMARKS", "off")
+    root = tmp_path / "workspace"
+    (root / "pkg").mkdir(parents=True)
+    (root / "tests").mkdir()
+    for index in range(4):
+        (root / f"pkg/module_{index}.py").write_text(f"VALUE = {index}\n")
+    (root / "pkg/__init__.py").write_text("from .module_0 import VALUE\n")
+    (root / "tests/test_app.py").write_text("def test_app(): assert True\n")
+    messages = [{"role": "user", "content": "Fix value."}]
+    context = build_action_context(messages, workspace_root=root)
+    context["journal_receipt_records"] = []
+    frame = {"verification": {"revision": "current", "status": "FAIL"}}
+
+    def state_transform(state):
+        state["read_facts"] = [{
+            "path": f"pkg/module_{index}.py",
+            "read_revision": "sha256:" + hashlib.sha256(
+                (root / f"pkg/module_{index}.py").read_bytes()).hexdigest(),
+            "current_revision": "sha256:" + hashlib.sha256(
+                (root / f"pkg/module_{index}.py").read_bytes()).hexdigest(),
+            "body_delivery": "not_shown",
+        } for index in range(4)]
+
+    source = subprocess.check_output([
+        "git", "show", "v0.2.1:src/stateframe/engine/kernel_frame_allocation_capture.py"
+    ], cwd=Path(__file__).resolve().parents[1])
+    release_path = tmp_path / "release_frame_allocation_capture.py"
+    release_path.write_bytes(source)
+    spec = importlib.util.spec_from_file_location("release_frame_allocation_capture", release_path)
+    assert spec is not None and spec.loader is not None
+    release = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(release)
+
+    def qualified(finalize):
+        events = []
+        runtime = _runtime_with_product(root)
+        runtime.journal.emit = lambda kind, **fields: events.append({"kind": kind, **fields})
+        runtime._framefit_action_context = context
+        with monkeypatch.context() as patch:
+            patch.setitem(globals(), "finalize_frame_candidate", finalize)
+            body = _qualified_fixture_request(
+                runtime, frame, messages, context, baseline=False,
+                monkeypatch=patch, state_transform=state_transform, validate=False)
+        return (json.dumps(body, sort_keys=True, separators=(",", ":")).encode(),
+                json.dumps(events, sort_keys=True, separators=(",", ":")).encode())
+
+    current_body, current_events = qualified(finalize_frame_candidate)
+    release_body, release_events = qualified(release.finalize_frame_candidate)
+    assert current_body == release_body
+    assert current_events == release_events
+    assert not [row for row in json.loads(current_events)
+                if row["kind"] == "code_bookmark_activation_decision"]
+
+
+def test_final_send_replans_if_locked_source_is_not_delivered(tmp_path, monkeypatch):
+    from kernel_frame_optional_allocation import FrameAllocationReplanNeeded
+
+    monkeypatch.setenv("STATEFRAME_CODE_BOOKMARKS", "on")
+    root = tmp_path / "workspace"
+    (root / "pkg").mkdir(parents=True)
+    (root / "pkg/__init__.py").write_text("VALUE = 1\n")
+    runtime = _runtime_with_product(root)
+    events = []
+    runtime.journal.emit = lambda kind, **fields: events.append({"kind": kind, **fields})
+    runtime._read_lockout_state = {
+        "remaining": 2, "streak": 2, "paths": {"pkg/__init__.py": "sha256:current"},
+        "failure": ("check-1",), "evaluated": "request-1", "counted": "request-1",
+        "projected_after": "request-1",
+    }
+    runtime._read_lockout_notice = "locked source"
+    messages = [{"role": "user", "content": "Fix value."}]
+    context = build_action_context(messages, workspace_root=root)
+    context["journal_receipt_records"] = []
+    runtime._framefit_action_context = context
+    with pytest.raises(FrameAllocationReplanNeeded, match="locked repair source absent"):
+        _qualified_fixture_request(runtime, {}, messages, context, baseline=False,
+                                   monkeypatch=monkeypatch, validate=False)
+    assert runtime._read_lockout_state["remaining"] == 0
+    assert events[-1]["reason_code"] == "SOURCE_NOT_VISIBLE"
+
+
 def test_recorded_t2_request14_state_activates_current_failure_bookmarks(
         tmp_path, monkeypatch):
     from kernel_framefit_receipt_history import ReceiptHistory
@@ -507,7 +590,7 @@ def test_recorded_t2_request14_state_activates_current_failure_bookmarks(
         and message["content"].get("schema") == "stateframe-f4/1")
     assert "code_bookmarks" not in disabled_frame["content"]["state"]["framefit5"]
     assert [row["reason"] for row in emitted
-            if row["kind"] == "code_bookmark_activation_decision"] == ["disabled"]
+            if row["kind"] == "code_bookmark_activation_decision"] == []
     emitted.clear()
     monkeypatch.setenv("STATEFRAME_CODE_BOOKMARKS", "on")
     missing = dict(context)
