@@ -155,27 +155,56 @@ def test_engine_child_installs_opener_after_environment():
     assert calls[index + 1] == "_install_direct_opener"
 
 
-def _call_name(node):
-    if not isinstance(node, ast.Call):
-        return None
-    if isinstance(node.func, ast.Attribute):
-        return node.func.attr
-    if isinstance(node.func, ast.Name):
-        return node.func.id
-    return None
+def _urllib_request(node, name):
+    """True for the exact expression ``urllib.request.<name>``."""
+    return (isinstance(node, ast.Attribute) and node.attr == name
+            and isinstance(node.value, ast.Attribute) and node.value.attr == "request"
+            and isinstance(node.value.value, ast.Name) and node.value.value.id == "urllib")
+
+
+def _direct_proxy_handler(node):
+    return (isinstance(node, ast.Call) and _urllib_request(node.func, "ProxyHandler")
+            and len(node.args) == 1 and not node.keywords
+            and isinstance(node.args[0], ast.Dict) and not node.args[0].keys)
+
+
+def _opener_offenders(tree):
+    """Line numbers where an opener is built without a literal ``urllib.request.ProxyHandler({})``.
+
+    Only the qualified call ``urllib.request.build_opener(...)`` passes, so an import alias, a stored
+    reference or an unpacked handler list cannot slip past the check.
+    """
+    calls = {id(node.func): node for node in ast.walk(tree)
+             if isinstance(node, ast.Call) and _urllib_request(node.func, "build_opener")}
+    offenders = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and any(alias.name == "build_opener" for alias in node.names):
+            offenders.append(node.lineno)
+        elif ((isinstance(node, ast.Attribute) and node.attr == "build_opener")
+              or (isinstance(node, ast.Name) and node.id == "build_opener")):
+            call = calls.get(id(node))
+            if (call is None or any(isinstance(arg, ast.Starred) for arg in call.args)
+                    or not any(_direct_proxy_handler(arg) for arg in call.args)):
+                offenders.append(node.lineno)
+    return offenders
 
 
 def test_every_build_opener_explicitly_disables_proxy():
-    offenders = []
-    for path in (ROOT / "src/stateframe").rglob("*.py"):
-        for node in ast.walk(ast.parse(path.read_text())):
-            if _call_name(node) != "build_opener":
-                continue
-            direct = any(
-                _call_name(arg) == "ProxyHandler"
-                and len(arg.args) == 1
-                and isinstance(arg.args[0], ast.Dict) and not arg.args[0].keys
-                for arg in node.args)
-            if not direct:
-                offenders.append(f"{path.relative_to(ROOT)}:{node.lineno}")
-    assert not offenders, "build_opener without ProxyHandler({}): " + ", ".join(offenders)
+    offenders = [f"{path.relative_to(ROOT)}:{line}"
+                 for path in (ROOT / "src/stateframe").rglob("*.py")
+                 for line in _opener_offenders(ast.parse(path.read_text()))]
+    assert not offenders, "build_opener without urllib.request.ProxyHandler({}): " + ", ".join(offenders)
+
+
+@pytest.mark.parametrize("source, flagged", [
+    ("urllib.request.build_opener(urllib.request.ProxyHandler({}))", False),
+    ("urllib.request.build_opener()", True),
+    ("from urllib.request import build_opener\nbuild_opener(urllib.request.ProxyHandler({}))", True),
+    ("make = urllib.request.build_opener\nmake(urllib.request.ProxyHandler({}))", True),
+    ("urllib.request.build_opener(*handlers)", True),
+    ("urllib.request.build_opener(urllib.request.ProxyHandler({}), *handlers)", True),
+    ("urllib.request.build_opener(urllib.request.ProxyHandler(env))", True),
+    ("urllib.request.build_opener(ProxyHandler({}))", True),
+])
+def test_build_opener_guard_rejects_aliases_and_unpacking(source, flagged):
+    assert bool(_opener_offenders(ast.parse(source))) is flagged
