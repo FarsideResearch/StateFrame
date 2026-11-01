@@ -13,8 +13,6 @@ resource.setrlimit(resource.RLIMIT_FSIZE, (1048576, 1048576))
 resource.setrlimit(resource.RLIMIT_AS, (1073741824, 1073741824))
 resource.setrlimit(resource.RLIMIT_CPU, (10, 10))
 resource.setrlimit(resource.RLIMIT_NOFILE, (256, 256))
-resource.setrlimit(resource.RLIMIT_NPROC, (0, 0))
-
 # Missing library, unsupported syscalls or filter installation errors fail closed.
 seccomp = ctypes.CDLL('libseccomp.so.2', use_errno=True)
 seccomp.seccomp_init.argtypes = [ctypes.c_uint32]

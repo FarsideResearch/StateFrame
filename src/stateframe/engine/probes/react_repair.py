@@ -2441,7 +2441,7 @@ _PROBE_TOOL = {"type": "function", "function": {
         "required": ["obligation", "code"]}}}
 
 TOOLS.append(SHELL_SCHEMA)
-from kernel_agent_schemas import BUILTIN_SCHEMAS
+from kernel_agent_schemas import BUILTIN_SCHEMAS  # noqa: E402 - schemas follow the base menu
 TOOLS.extend(BUILTIN_SCHEMAS)
 
 # Tool calls accept an optional `why`: one declared line
@@ -2635,7 +2635,7 @@ def _parse_r1_tool_calls(content: str) -> list:
     keys fill earlier gaps. Never raises; [] when nothing matches."""
     _TOOLS = ("grep", "read", "edit", "str_replace", "insert_before", "authored_check", "file_create", "file_delete", "file_move", "shell",
                "replace_module", "run_tests", "reproduce", "test", "probe", "done",
-               "where_defined", "who_calls", "references")
+               "where_defined", "who_calls", "references", "skill_load")
     # Fix round (rv_figure_it_out_REPORT.md finding 3): the three figure_it_out
     # operator names must only be recognized -- and so only turned into native
     # calls from this parser -- when STATEFRAME_FIGURE_IT_OUT is actually on.
@@ -6194,6 +6194,13 @@ def work(d, *, resume=None):
         _agent_tools = agent_tools_service()
         if _agent_tools is not None:
             _agent_tools.bind()
+            omitted = _agent_tools.shell.spec.get("mcp_omitted", ())
+            if omitted:
+                from kernel_mcp_tools import omission_note
+                note = omission_note(omitted)
+                if note:
+                    msgs[1]["content"] += "\n\n" + note
+                    baseline_messages[1]["content"] += "\n\n" + note
         created_this_run: set = set()
         action_anchor = len(msgs)     # conversation index just after the last real ACTION
         last_surgery_step = -99       # cooldown so back-to-back surgeries cannot thrash

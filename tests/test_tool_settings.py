@@ -121,3 +121,11 @@ def test_as_dict_equals_its_json_round_trip_with_list_fields():
     assert settings.as_dict() == spec_copy
     loaded = ToolSettings.from_dict({**ToolSettings().as_dict(), "shell_allow": ["make"], "web_allow": ["docs.python.org"]})
     assert loaded.as_dict() == json.loads(json.dumps(loaded.as_dict()))
+
+
+def test_pre_mcp_settings_keep_their_recorded_shape():
+    legacy = ToolSettings().as_dict()
+    assert "mcp_files" not in legacy
+    assert ToolSettings.from_dict(legacy).as_dict() == legacy
+    with_mcp = ToolSettings(mcp_files=({"path": "/tmp/mcp.json", "digest": "pin"},))
+    assert ToolSettings.from_dict(with_mcp.as_dict()) == with_mcp

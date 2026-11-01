@@ -1,4 +1,6 @@
 from dataclasses import replace
+import errno
+import fcntl
 import os
 import sys
 import time
@@ -7,6 +9,8 @@ import pytest
 
 from kernel_exec_capability import shell_capability
 from kernel_exec_session import ExecSession
+from kernel_exec_capability import executable_read_roots
+from kernel_test_isolation import _bwrap_userns_guard_supported, sandbox_executable
 
 pytestmark = pytest.mark.host_sandbox
 
@@ -174,6 +178,34 @@ time.sleep(20)
     assert result.wall_seconds < 5
     if sys.platform == "darwin":
         assert "resident-memory" in result.cleanup.detail
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="nested PID namespace requires Linux")
+def test_nested_namespace_children_count_toward_shell_aggregate_limit(setup):
+    from pathlib import Path
+
+    run, cap = setup
+    fixture = Path(__file__).parent / "fixtures/mcp_server.py"
+    cap = replace(cap, read_roots=(*cap.read_roots, *executable_read_roots(fixture)),
+                  limits=replace(cap.limits, memory_bytes=96 << 20,
+                                 nproc=4096, wall_seconds=4))
+    marker = cap.workspace / "nested.lock"
+    with ExecSession(run) as session:
+        result = session.run([PYTHON, "-I", str(fixture), "nested_worker", str(marker)], cap)
+    status = Path(str(marker) + ".status").read_text().strip()
+    executable = sandbox_executable("bwrap")
+    assert executable is not None
+    if _bwrap_userns_guard_supported(executable):
+        assert status.startswith("refused:"), status
+    else:
+        assert status == "nested" or status in {
+            f"refused:{errno.EPERM}", f"refused:{errno.ENOSPC}"}, status
+    assert result.cleanup.ok, result.cleanup
+    assert result.cleanup.detail == "aggregate resident-memory limit exceeded"
+    assert result.wall_seconds < 4
+    with marker.open("r+") as handle:
+        fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        fcntl.flock(handle, fcntl.LOCK_UN)
 
 
 @pytest.mark.parametrize("sandboxed", [False, True])

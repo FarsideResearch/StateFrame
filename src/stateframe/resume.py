@@ -138,7 +138,50 @@ def finished_for_good(run: Path) -> bool:
     return status == "SUBMITTED" or status in outcomes.SEAL_FAILURES
 
 
-def assess(run: Path, *, max_turns: int | None = None, model: str | None = None) -> dict[str, object]:
+def _tool_safety(run: Path, spec: dict, *, replay_external: bool) -> list[dict[str, str]]:
+    """Check the live tape and prior external effects before any attempt is archived."""
+    try:
+        tape = ToolTape(run)
+    except (OSError, ValueError, ToolTapeError) as error:
+        raise ResumeRefused(f"tool tape is damaged: {error}") from error
+    pending = tape.pending()
+    if pending:
+        calls = ", ".join(item.call_id for item in pending)
+        raise ResumeRefused(f"operation {calls} may or may not have happened; reconcile and start a new run")
+    resume_record = spec.get("resume")
+    if resume_record is not None and not isinstance(resume_record, dict):
+        raise ResumeRefused("resume metadata is damaged")
+    prior = (resume_record or {}).get("archived_external_operations", [])
+    if not isinstance(prior, list) or any(
+            not isinstance(item, dict) or set(item) != {"call_id", "tool"}
+            or not all(isinstance(value, str) and value for value in item.values()) for item in prior):
+        raise ResumeRefused("archived external operation metadata is damaged")
+    archived = []
+    for folder in sorted((p for p in (run / "attempts").glob("[0-9]*") if p.name.isdigit()),
+                         key=lambda p: int(p.name)):
+        if not (folder / "tool-tape.jsonl").exists():
+            continue
+        try:
+            old = ToolTape(folder)
+        except (OSError, ValueError, ToolTapeError) as error:
+            raise ResumeRefused(f"archived tool tape is damaged in {folder.name}: {error}") from error
+        if old.pending():
+            calls = ", ".join(item.call_id for item in old.pending())
+            raise ResumeRefused(f"operation {calls} may or may not have happened; reconcile and start a new run")
+        archived.extend({"call_id": item.call_id, "tool": item.tool}
+                        for item in old.records() if item.replay_class == "external")
+    if prior != archived:
+        raise ResumeRefused("archived external operation metadata differs from the saved tool tapes")
+    external = [*archived, *({"call_id": item.call_id, "tool": item.tool}
+                             for item in tape.records() if item.replay_class == "external")]
+    if external and not replay_external:
+        names = ", ".join(f"{item['call_id']} ({item['tool']})" for item in external)
+        raise ResumeRefused(f"external operation {names} requires --replay-external")
+    return external
+
+
+def assess(run: Path, *, max_turns: int | None = None, model: str | None = None,
+           replay_external: bool = False) -> dict[str, object]:
     """Everything a resume needs, or ResumeRefused with the reason."""
     run = run.resolve()
     spec_path = run / "spec.json"
@@ -153,13 +196,7 @@ def assess(run: Path, *, max_turns: int | None = None, model: str | None = None)
     for key in ("environment", "public_row", "parent_snapshot", "chat_url", "model", "max_turns", "repo"):
         if key not in spec:
             raise ResumeRefused(f"spec.json lacks {key!r}; this run was made by an older stateframe")
-    try:
-        pending = ToolTape(run).pending()
-    except ToolTapeError as error:
-        raise ResumeRefused(f"tool tape is damaged: {error}") from error
-    if pending:
-        calls = ", ".join(item.call_id for item in pending)
-        raise ResumeRefused(f"operation {calls} may or may not have happened; reconcile and start a new run")
+    external = _tool_safety(run, spec, replay_external=True)
     recorded = (spec.get("engine_source") or {}).get("shipped_hash")
     installed = profiles.engine_source_summary().get("shipped_hash")
     if not recorded or not installed or recorded != installed:
@@ -204,6 +241,9 @@ def assess(run: Path, *, max_turns: int | None = None, model: str | None = None)
         raise ResumeRefused(f"this run was started with --max-turns {name(previous_turns)}; resume keeps the original "
                             f"budget (drop --max-turns, or pass --max-turns {previous_turns}). Only a run that stopped "
                             "at its step limit can continue with a larger one")
+    if external and not replay_external:
+        names = ", ".join(f"{item['call_id']} ({item['tool']})" for item in external)
+        raise ResumeRefused(f"external operation {names} requires --replay-external")
     problem = _journal_lineage_ok(run)
     if problem:
         raise ResumeRefused(f"the engine journal is damaged ({problem}); this run cannot be resumed")
@@ -217,6 +257,7 @@ def assess(run: Path, *, max_turns: int | None = None, model: str | None = None)
         if (run / "attempts").is_dir() else []
     return {"run": run, "spec": spec, "tape_count": len(tape), "previous_status": status,
             "previous_error": terminal.get("error"), "max_turns": turns,
+            "external_operations": external,
             "model_swap": model_swap_for(spec, model),
             "attempt": (attempts[-1] if attempts else 0) + 1}
 
@@ -306,10 +347,12 @@ def _blobs_intact(folder: Path, meta: dict) -> bool:
 
 
 def archive_attempt(state: dict[str, object], engine_dir: Path, *, use_checkpoint: bool = True,
-                    tape_from: Path | None = None) -> Path:
+                    tape_from: Path | None = None, replay_external: bool = False) -> Path:
     """Move the stopped attempt's files to attempts/<n>/ and point the spec at its tape."""
     run: Path = state["run"]  # type: ignore[assignment]
     spec: dict = state["spec"]  # type: ignore[assignment]
+    restart_live = int(state["max_turns"]) != int(spec["max_turns"])
+    external = _tool_safety(run, spec, replay_external=replay_external) if restart_live else []
     number = int(state["attempt"])
     folder = run / "attempts" / str(number)
     folder.mkdir(parents=True)
@@ -321,9 +364,16 @@ def archive_attempt(state: dict[str, object], engine_dir: Path, *, use_checkpoin
     # A fallback after a refused checkpoint restore replays the INTERRUPTED attempt (``tape_from``),
     # not the refused one, which holds only the restored prefix.
     source = tape_from or folder
-    tape = carry_forward(spec, replay_tape.build(source / "wire", source / "sends.jsonl"),
-                         (source / "resume-divergence.json").exists())
-    checkpoint = select_checkpoint(run, tape, source / "wire") if use_checkpoint else None
+    # The step limit is in request 1. A raised limit changes that request, so
+    # the prior model and tool tape cannot be replayed on this fresh attempt.
+    # Ordinary replay keeps tool-tape.jsonl at the run root for call-id lookup;
+    # a live restart must archive it so fresh calls can reuse their original ids.
+    if restart_live and (run / "tool-tape.jsonl").exists():
+        os.replace(run / "tool-tape.jsonl", folder / "tool-tape.jsonl")
+    tape = ([] if restart_live else carry_forward(
+        spec, replay_tape.build(source / "wire", source / "sends.jsonl"),
+        (source / "resume-divergence.json").exists()))
+    checkpoint = select_checkpoint(run, tape, source / "wire") if use_checkpoint and not restart_live else None
     spec["max_turns"] = int(state["max_turns"])
     spec["environment"]["REACT_STEPS"] = str(spec["max_turns"])
     spec["engine_dir"] = str(engine_dir)  # same release (checked in assess), current install path
@@ -337,6 +387,9 @@ def archive_attempt(state: dict[str, object], engine_dir: Path, *, use_checkpoin
                       "previous_status": state.get("previous_status"),
                       "resumed": datetime.now(timezone.utc).isoformat(timespec="seconds"),
                       "tape": tape,
+                      **({"restart_live": True} if restart_live else {}),
+                      "archived_external_operations": (external if restart_live else
+                          (spec.get("resume") or {}).get("archived_external_operations", [])),
                       **({"model_swap": swap} if isinstance(swap, dict) else {})}
     if checkpoint is not None:
         spec["resume"]["checkpoint"] = checkpoint

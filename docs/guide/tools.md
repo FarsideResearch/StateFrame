@@ -4,6 +4,8 @@ StateFrame offers a tool only when its run settings and the current request allo
 
 The existing file and check tools are `grep`, `list_files`, `read`, `edit`, `str_replace`, `insert_before`, `authored_check`, `file_create`, `run_tests`, `read_check_receipt`, `recall` and `done`. Some runs also offer probe and whole-module operations. The following tools add command execution, file housekeeping and outside observations. Each accepts an optional `why` string.
 
+When a run selects a [skill](skills.md), `skill_load(name)` is also offered. It loads a bounded user-role instruction body and creates a settled observation. It grants no source-read or check evidence. Skill command definitions are offered only with `--trust-skill-tools` and follow the custom command rules below.
+
 ## Shell and jobs
 
 `shell(command, timeout_seconds?, background?)` runs `/bin/sh -c` in the run's execution session. `command` is required, nonempty text of at most 16,384 characters. A foreground call defaults to 120 seconds; `timeout_seconds` accepts 1 through 600. `background: true` starts a job, with a 600-second default and the same 1 through 600 range. At most four jobs may run at once. The shell tool is offered unless `--shell off` is set.
@@ -43,7 +45,7 @@ The host issues a separate capability for shell, jobs, Git, custom tools and pro
 
 On macOS, `sandbox-exec` enforces the declared filesystem and network profile. A supervisor tracks descendants by parent, process group and session and stops them before effects are reconciled. A process deliberately double-forked and orphaned between supervisor sweeps can outlive the run, while remaining in its sandbox profile. Aggregate resident memory is polled, so the memory limit can be exceeded between samples and is not a hard cap.
 
-On Linux, bubblewrap supplies a persistent session with PID and network namespaces and a supervisor at PID 1. Per-command mounts enforce the declared roots. Network `none` also blocks socket syscalls; loopback is private to the session. A full-network session cannot switch to shared loopback placement later in the same session; narrower per-command loopback uses a separate namespace and cannot reach services in the full-network namespace. The sandbox needs working unprivileged user namespaces. Linux command containment was exercised in an aarch64 container; x86_64 command containment has not been verified in this work.
+On Linux, bubblewrap supplies a persistent session with PID and network namespaces and a supervisor at PID 1. Per-command mounts enforce the declared roots. When the installed bubblewrap supports `--disable-userns` and `--assert-userns-disabled`, each command also blocks creation of further user namespaces. Older versions continue to run without that protection; use a newer bubblewrap where untrusted commands can create namespaces. Network `none` also blocks socket syscalls; loopback is private to the session. A full-network session cannot switch to shared loopback placement later in the same session; narrower per-command loopback uses a separate namespace and cannot reach services in the full-network namespace. The sandbox needs working unprivileged user namespaces. Linux command containment was exercised in an aarch64 container; x86_64 command containment has not been verified in this work.
 
 After an arbitrary command becomes quiescent, StateFrame rehashes and checks the working copy. Allowed creations, edits and deletions produce effect receipts and invalidate stale reads and checks. Executable-bit changes, including creating an executable, are refused and restored because the sealed candidate does not carry that metadata. Shell removal of an executable is refused; use `file_delete` for an intentional removal. A protected test, its inode alias, a file outside `--edit` scope in a scoped repository, or a forbidden link or special file is restored to its pre-call state. Protected tests use the immutable run-start baseline. A failed restoration stops the run. New directories are allowed only as part of authorized product effects. Reconciliation refuses to promote effects if a regular file exceeds 16 MiB, total regular-file bytes exceed 256 MiB, or the workspace exceeds 20,000 entries. The limits apply to both the pre-call snapshot and post-call scan. This policy applies to shell and workspace-writing custom tools, not only native edit tools.
 
@@ -90,6 +92,31 @@ The read-only `git` tool is offered for a Git source repository unless `--no-git
 Run with `stateframe run ... --tools path/to/tools.json`. Names must match `^[a-z][a-z0-9_]{1,40}$` and cannot collide with a built-in or another file. Each tool has at most eight typed properties (`string`, `integer`, `number`, `boolean`, with optional enum); strings need `maxLength` at most 1,000. The description is at most 300 characters. An `argv` placeholder occupies a whole item and refers to a required property; values are passed as separate arguments, without shell interpolation. An executable such as `sh -c` can interpret those arguments itself, so the definition's author owns that risk. The executable and definition are hashed for the run. The combined custom schemas must fit 1,500 measured tokens, or load fails with a named error.
 
 `network` defaults to `none` and cannot exceed `--shell-network`. `writes` defaults to `none`, which mounts the working copy read-only; `workspace` allows reconciled effects. `replay` defaults to `external`; use `local` only for a reproducible command. A full-network tool must use external replay. `timeout_seconds` is required and must be finite, greater than zero and at most 600; invalid values fail at load before execution. Custom replies have bounded shell-style output and shrink further when the whole request approaches its budget. Invalid arguments use `BAD_ARGUMENTS`; a changed executable uses `TOOL_CHANGED`. Invalid definitions fail at load before a model request. With no tokenizer, schema admission uses a recorded byte estimate rather than a measured token count.
+
+## MCP servers
+
+`--mcp FILE` is a repeatable opt-in for trusted local MCP stdio servers. The file is strict JSON. For example:
+
+```json
+{
+  "schema": "stateframe-mcp/1",
+  "servers": [{
+    "name": "local_docs",
+    "trust": "I reviewed this local server and its executable.",
+    "argv": ["/absolute/path/to/server", "--fixed-option"],
+    "network": "none",
+    "writes": "none",
+    "replay": "external",
+    "processes": "single",
+    "timeout_seconds": 30,
+    "tools": ["search"]
+  }]
+}
+```
+
+Each server needs a unique name, a nonempty trust statement, fixed argv and a finite timeout of at most 600 seconds. The optional `tools` list limits discovery; without it, all listed tools are considered. The executable and definition are hashed before the run and checked again on resume. StateFrame initializes the server and lists its tools inside an execution sandbox before offering any to the model. Invalid tool names, collisions, unsupported schemas and tools beyond the shared 1,500-token custom plus MCP schema allowance are omitted. The run records engine-owned omission codes and safe names. The model sees at most 16 entries in a 1,000-byte note; remaining entries are counted. Function descriptions are written by the engine and label server descriptions as quoted, bounded, untrusted metadata. Property descriptions receive the same label; neither can authorize actions. Server results are also untrusted content. Put the interpreter in argv explicitly (for example `["/usr/bin/python3", "/path/server.py"]`): a `#!/usr/bin/env` script looks up its interpreter through PATH inside the sandbox and may not find it.
+
+Each discovery and tool call starts a fresh server inside the capability sandbox; the protocol client stays in the engine process. This boundary remains in force even when shell host execution is explicitly authorized. The call is supervised throughout protocol reads and writes. Aggregate resident memory, process count and wall time are checked for the server's containment unit; a limit breach ends the call with a refusal. These limits are polled, so a brief excess between samples remains possible. `processes` defaults to `single`. On macOS, the server sandbox denies process creation. Set `processes` to `spawn` for wrappers that need children on Linux; its private PID namespace is torn down after the call. macOS refuses `spawn`, so point argv at the final program, for example `node /path/dist/index.js` instead of `npx`. `network` defaults to `none` and cannot exceed `--shell-network`; `writes` defaults to `none`, making the working copy read-only. Workspace writes use the same effect reconciliation as custom commands. `replay` defaults to `external`. Resume refuses to initialize or list any external-class server until `--replay-external` is given, even if no tool call was taped. `local` re-executes and compares workspace state; `observation` serves the tape and is allowed only with no network and no workspace writes. A full-network server must use external replay. MCP arguments, including a declared `why` field, are sent as advertised; the engine does not add its own `why` field to MCP schemas. Stateful servers that need a persistent session are unsupported. Only stdio tools/list and tools/call are supported; server requests cannot direct the client to execute other work.
 
 ## Run environment, resume and prompt budget
 

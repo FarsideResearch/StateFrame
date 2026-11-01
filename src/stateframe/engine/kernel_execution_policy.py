@@ -18,10 +18,12 @@ import selectors
 import signal
 import subprocess
 import time
+import uuid
 from collections.abc import Mapping, Sequence
 from typing import Callable
 
 from kernel_test_isolation import isolated_command, sandbox_executable
+from sf_launch import _command_cgroup
 
 
 MAX_WALL_SECONDS = 900.0
@@ -214,35 +216,14 @@ def _lowered_limits(current: tuple[int, int], limit: int) -> tuple[int, int]:
     return new_soft, bound
 
 
-def _user_process_count() -> int:
-    """Processes owned by this real uid (Linux /proc); 0 where /proc is unavailable."""
-    uid = os.getuid()
-    count = 0
-    try:
-        entries = os.listdir("/proc")
-    except OSError:
-        return 0
-    for entry in entries:
-        if entry.isdigit():
-            try:
-                if os.stat(f"/proc/{entry}").st_uid == uid:
-                    count += 1
-            except OSError:
-                continue  # exited while scanning
-    return count
-
-
 def _resource_preexec(cpu_seconds: float, memory_bytes: int,
-                      file_bytes: int, nofile: int, nproc: int) -> Callable[[], None]:
+                      file_bytes: int, nofile: int, nproc: int,
+                      cgroup: Path | None = None) -> Callable[[], None]:
     cpu = int(math.ceil(_limit_value("cpu_seconds", cpu_seconds, maximum=MAX_WALL_SECONDS)))
     memory = int(_limit_value("memory_bytes", memory_bytes, maximum=4 * 1024 * 1024 * 1024))
     file_limit = int(_limit_value("file_bytes", file_bytes, maximum=64 * 1024 * 1024))
     nofile_limit = int(_limit_value("nofile", nofile, maximum=1024))
-    nproc_limit = int(_limit_value("nproc", nproc, maximum=256))
-    # RLIMIT_NPROC counts every process the user owns on Linux as well as macOS, so an absolute
-    # cap of 64 made bwrap itself fail ("Creating new namespace failed") for any user with more than
-    # 64 processes, i.e. most desktop sessions. Budget NEW processes: current count + nproc.
-    nproc_ceiling = _user_process_count() + nproc_limit
+    _limit_value("nproc", nproc, maximum=256)
 
     def _lower_only(which: int, value: int) -> None:
         # A non-root process may only LOWER a hard limit.  Containers often start
@@ -254,16 +235,16 @@ def _resource_preexec(cpu_seconds: float, memory_bytes: int,
         resource.setrlimit(which, (value, value))
 
     def apply() -> None:
+        if cgroup is not None:
+            try:
+                (cgroup / "cgroup.procs").write_text(str(os.getpid()), encoding="ascii")
+            except OSError:
+                pass  # The in-namespace RLIMIT_NPROC is mandatory; cgroup is optional.
         _lower_only(resource.RLIMIT_CPU, cpu)
         _lower_only(resource.RLIMIT_FSIZE, file_limit)
         _lower_only(resource.RLIMIT_CORE, 0)
         resource.setrlimit(resource.RLIMIT_NOFILE,
                            _lowered_limits(resource.getrlimit(resource.RLIMIT_NOFILE), nofile_limit))
-        # On macOS RLIMIT_NPROC counts every process the user owns (~670 on the lab Mac) and the
-        # count is not cheaply knowable here, so it is not lowered. Linux gets a relative ceiling.
-        if hasattr(resource, "RLIMIT_NPROC") and platform.system() != "Darwin":
-            resource.setrlimit(resource.RLIMIT_NPROC,
-                               _lowered_limits(resource.getrlimit(resource.RLIMIT_NPROC), nproc_ceiling))
         if hasattr(resource, "RLIMIT_AS"):
             try:
                 resource.setrlimit(resource.RLIMIT_AS, (memory, memory))
@@ -295,13 +276,16 @@ def _kill_group(process: subprocess.Popen[bytes]) -> bool:
 
 def _prepared(command: Sequence[object], root: Path, env: Mapping[object, object] | None,
               internal_env: Mapping[str, object] | None,
-              readonly_workspace: bool,
+              readonly_workspace: bool, nproc: int,
               isolation_builder: Callable[..., tuple[list[str], dict[str, str]]] = isolated_command,
               ) -> tuple[list[str], dict[str, str], CapabilityReport]:
     report = require_capabilities()
     arguments = _arguments(command)
+    nproc_budget = (int(_limit_value("nproc", nproc, maximum=256))
+                    if platform.system() == "Linux" else None)
     isolated, clean = isolation_builder(
-        arguments, root, _safe_environment(env), readonly_workspace=readonly_workspace)
+        arguments, root, _safe_environment(env), readonly_workspace=readonly_workspace,
+        nproc_budget=nproc_budget)
     for key, value in (internal_env or {}).items():
         if not str(key).startswith("STATEFRAME_"):
             raise ExecutionPolicyError("internal execution variables must be STATEFRAME_*")
@@ -322,12 +306,13 @@ def sandboxed_popen(command: Sequence[object], root: str | os.PathLike[str], *,
                     stderr: object = subprocess.PIPE,
                     readonly_workspace: bool = False,
                     pass_fds: Sequence[int] = (),
+                    cgroup: Path | None = None,
                     isolation_builder: Callable[..., tuple[list[str], dict[str, str]]] = isolated_command,
                     popen_factory: Callable[..., subprocess.Popen] | None = None) -> tuple[subprocess.Popen[bytes], CapabilityReport]:
     """Start an argv child behind the required sandbox and resource policy."""
     contained = _contained_root(root)
     command_line, clean, report = _prepared(
-        command, contained, env, internal_env, readonly_workspace,
+        command, contained, env, internal_env, readonly_workspace, nproc,
         isolation_builder=isolation_builder)
     factory = popen_factory or subprocess.Popen
     process = factory(
@@ -340,7 +325,7 @@ def sandboxed_popen(command: Sequence[object], root: str | os.PathLike[str], *,
         shell=False,
         start_new_session=True,
         pass_fds=tuple(pass_fds),
-        preexec_fn=_resource_preexec(cpu_seconds, memory_bytes, file_bytes, nofile, nproc)
+        preexec_fn=_resource_preexec(cpu_seconds, memory_bytes, file_bytes, nofile, nproc, cgroup)
         if os.name != "nt" else None,
     )
     return process, report
@@ -510,6 +495,8 @@ def run_sandboxed(command: Sequence[object], root: str | os.PathLike[str], *,
     """Run one bounded child; every failure is a refusal or typed result."""
     timeout = float(_limit_value("timeout", timeout, maximum=MAX_WALL_SECONDS))
     output_limit = int(_limit_value("output_limit", output_limit, maximum=4 * 1024 * 1024))
+    nproc_budget = (int(_limit_value("nproc", nproc, maximum=256))
+                    if platform.system() == "Linux" else None)
     payload = input_data.encode("utf-8") if isinstance(input_data, str) else input_data
     trace: dict[str, int] | None = {} if observe_pytest else None
     profile_reader: int | None = None
@@ -537,6 +524,7 @@ def run_sandboxed(command: Sequence[object], root: str | os.PathLike[str], *,
             child_internal_env.pop(_PROFILE_FD_ENV, None)
     if trace is not None:
         trace["sandbox_spawn_start_ns"] = time.monotonic_ns()
+    cgroup = _command_cgroup(uuid.uuid4().hex, nproc_budget) if nproc_budget is not None else None
     try:
         spawn_options = {
             "env": env, "internal_env": child_internal_env,
@@ -546,6 +534,8 @@ def run_sandboxed(command: Sequence[object], root: str | os.PathLike[str], *,
         }
         if pass_fds:
             spawn_options["pass_fds"] = pass_fds
+        if cgroup is not None:
+            spawn_options["cgroup"] = cgroup
         process, report = sandboxed_popen(command, root, **spawn_options)
     except BaseException:
         for fd in (profile_reader, profile_writer):
@@ -554,6 +544,11 @@ def run_sandboxed(command: Sequence[object], root: str | os.PathLike[str], *,
                     os.close(fd)
                 except OSError:
                     pass
+        if cgroup is not None:
+            try:
+                cgroup.rmdir()
+            except OSError:
+                pass
         raise
     if trace is not None:
         trace["sandbox_spawn_complete_ns"] = time.monotonic_ns()
@@ -579,6 +574,11 @@ def run_sandboxed(command: Sequence[object], root: str | os.PathLike[str], *,
         if profile_reader is not None:
             try:
                 os.close(profile_reader)
+            except OSError:
+                pass
+        if cgroup is not None:
+            try:
+                cgroup.rmdir()
             except OSError:
                 pass
     profile_payload = bytes(profile_buffer) if profile_buffer else None
