@@ -186,7 +186,8 @@ def _http_tokenize(content: str, url: str, *, deadline: float | None = None) -> 
         if remaining <= 0:
             raise TimeoutError("tokenizer request deadline expired")
         timeout = min(timeout, remaining)
-    with urllib.request.urlopen(request, timeout=timeout) as response:
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    with opener.open(request, timeout=timeout) as response:
         raw = response.read(_MAX_TOKENIZE_RESPONSE_BYTES + 1)
     if len(raw) > _MAX_TOKENIZE_RESPONSE_BYTES:
         raise ValueError("oversized tokenizer response")

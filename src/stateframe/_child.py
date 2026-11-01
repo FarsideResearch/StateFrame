@@ -24,6 +24,7 @@ import sys
 import tempfile
 import time
 import traceback
+import urllib.request
 from pathlib import Path
 
 if __package__:
@@ -54,6 +55,10 @@ def install_environment(spec: dict) -> None:
         if key.startswith(ENGINE_PREFIXES) and not key.startswith("STATEFRAME_TASK_"):
             del os.environ[key]
     os.environ.update({str(k): str(v) for k, v in spec["environment"].items()})
+
+
+def _install_direct_opener() -> None:
+    urllib.request.install_opener(urllib.request.build_opener(urllib.request.ProxyHandler({})))
 
 
 def _usage(response: object) -> dict[str, object]:
@@ -727,6 +732,8 @@ def main(argv: list[str]) -> int:
     else:
         replayer = Replayer(resume.get("tape") or [], resume.get("model_swap")) if resume is not None else None
     install_environment(spec)
+    # Keep all engine urlopen calls direct, including those outside the primary transport.
+    _install_direct_opener()
     if checkpoint is not None:
         os.environ[CHECKPOINT_RESTORE_ENV] = str(checkpoint["dir"])
     install_run_identity(spec.get("run_identity_seed"))  # before any engine import
