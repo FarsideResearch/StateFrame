@@ -435,7 +435,7 @@ def test_resume_refuses_malformed_recorded_routes(servers, monkeypatch, tmp_path
         runner.resume_run(tmp_path, endpoint=endpoint, printer=lambda *_: None)
 
 
-def test_resume_run_keeps_pending_across_two_endpoint_moves_and_refusal(tmp_path, monkeypatch):
+def test_resume_run_skips_unproven_pending_across_endpoint_moves_and_refusal(tmp_path, monkeypatch):
     scripts = [Script({"model": model}) for model in ("base", "small", "small", "small")]
     active = []
     for script in scripts:
@@ -494,25 +494,30 @@ def test_resume_run_keeps_pending_across_two_endpoint_moves_and_refusal(tmp_path
             assert replay.diverged is None
             record(run_dir / "wire", 1, current, first_response)
             if len(seen) == 2:
-                assert resume_spec["pending"]["request_digest"] == replay_tape.normalized_digest(request)
+                assert "pending" not in resume_spec
+                assert resume_spec["pending_check"] == {"status": "skipped", "reason": "unverified_pending"}
                 assert replay.answer(request, route=route(current)) is None
                 assert replay.diverged is None and replay.pending is None
                 record(run_dir / "wire", 2, current, physical(current))
             return {"result": "INTERRUPTED"}
 
         monkeypatch.setattr(runner, "_execute", execute)
-        runner.resume_run(run, route_cli=[f"read.endpoint={moved}"], printer=lambda *_: None)
+        printed = []
+        runner.resume_run(run, route_cli=[f"read.endpoint={moved}"], printer=printed.append)
+        assert not any("in-flight request of an earlier resume" in line for line in printed)
         after_first = (run / "spec.json").read_bytes()
         with pytest.raises(runner.RunError, match="route read endpoint does not serve model 'wrong'"):
             runner.resume_run(run, route_cli=["read.model=wrong"], printer=lambda *_: None)
         assert (run / "spec.json").read_bytes() == after_first
-        runner.resume_run(run, route_cli=[f"read.endpoint={latest}"], printer=lambda *_: None)
+        runner.resume_run(run, route_cli=[f"read.endpoint={latest}"], printer=printed.append)
 
         assert len(seen) == 2
         assert len(seen[0]["route_changes"]) == 1
         assert seen[1]["route_changes"] == [
             {"role": "read", "field": "endpoint", "from": original, "to": moved},
             {"role": "read", "field": "endpoint", "from": moved, "to": latest}]
+        assert sum("in-flight request of an earlier resume could not be proven" in line
+                   for line in printed) == 1
         assert len(scripts[1].requests) == 1
         assert not scripts[2].requests
         assert len(scripts[3].requests) == 1
@@ -524,7 +529,7 @@ def test_resume_run_keeps_pending_across_two_endpoint_moves_and_refusal(tmp_path
             server.server_close()
 
 
-def test_three_resumes_keep_pending_through_chained_endpoint_and_model_moves(tmp_path, monkeypatch):
+def test_three_resumes_skip_unproven_pending_through_chained_endpoint_and_model_moves(tmp_path, monkeypatch):
     # Stub the engine launch and Python probe to choose the kill points. Route validation, attempt
     # archival, the child wire recorder, replay checks, and scripted-server HTTP sends run for real.
     monkeypatch.syspath_prepend(str(Path(_child.__file__).parent / "engine"))
@@ -597,7 +602,7 @@ def test_three_resumes_keep_pending_through_chained_endpoint_and_model_moves(tmp
                 pending(run_dir / "wire", count + 1, body, url, model)
             else:
                 assert replay.pending is None
-                assert replay.pending_verified is not None
+                assert replay.pending_verified is None
             return {"result": "INTERRUPTED"}
 
         monkeypatch.setattr(runner, "_execute", execute)
@@ -607,22 +612,40 @@ def test_three_resumes_keep_pending_through_chained_endpoint_and_model_moves(tmp
 
         assert len(seen) == 3
         assert [len(item["tape"]) for item in seen] == [2, 2, 2]
-        assert all(item["pending"]["request_digest"] == replay_tape.normalized_digest(initial)
-                   for item in seen)
+        assert seen[0]["pending"]["request_digest"] == replay_tape.normalized_digest(initial)
+        assert all("pending" not in item and item["pending_check"]["status"] == "skipped"
+                   for item in seen[1:])
         assert [len(item["route_changes"]) for item in seen] == [2, 4, 6]
         assert [len(script.requests) for script in scripts] == [0, 2, 0, 0, 1]
         recorded_sends = [json.loads(line) for line in (run / "sends.jsonl").read_text().splitlines()]
         assert [item.get("replayed", False) for item in recorded_sends] == [True, True, False]
-        verification = json.loads((run / "resume-pending-verified.json").read_text())
-        assert verification["send"] == 3
-        assert verification["recorded_route"] == route(original, "small")
-        assert verification["route"] == route(final, "final")
+        assert not (run / "resume-pending-verified.json").exists()
         assert not (run / "resume-divergence.json").exists()
     finally:
         for server, thread in active:
             server.shutdown()
             thread.join(timeout=2)
             server.server_close()
+
+
+def test_unrouted_resume_never_prints_skipped_check(tmp_path, servers, monkeypatch):
+    default, _ = servers
+    monkeypatch.setattr(runner, "_check_python", lambda python: python)
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "app.py").write_text("value = 1\n")
+    (repo / "test_app.py").write_text("from app import value\ndef test_value(): assert value == 1\n")
+    run = tmp_path / "run"
+    runner.prepare(runner.RunOptions(repo=repo, task="Inspect app.py", endpoint=Endpoint(default, "base"),
+                                     run_dir=run))
+    monkeypatch.setattr(runner, "_execute", lambda *_args: {"result": "INTERRUPTED"})
+    printed = []
+    runner.resume_run(run, printer=printed.append)
+    runner.resume_run(run, printer=printed.append)
+
+    resumed = json.loads((run / "spec.json").read_text())["resume"]
+    assert "pending_check" not in resumed
+    assert not any("in-flight request of an earlier resume" in line for line in printed)
 
 
 def test_inactive_spec_unchanged_shape(tmp_path):

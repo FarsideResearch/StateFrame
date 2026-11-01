@@ -52,6 +52,17 @@ def emit(kind: str, **fields: object) -> None:
                                          default=str, separators=(",", ":")), flush=True)
 
 
+def emit_resume_pending_check(spec: dict, resume: dict | None) -> None:
+    """Record a routed resume that dropped an unproven in-flight check, on the child's event stream.
+
+    Kept out of the engine's task row: anything there can reach request bytes, and a changed
+    request would break the replay this resume depends on.
+    """
+    check = resume.get("pending_check") if spec.get("routes") and isinstance(resume, dict) else None
+    if isinstance(check, dict):
+        emit("routes_resume_pending_check_skipped", **check)
+
+
 def install_environment(spec: dict) -> None:
     routed_keys: dict[str, str] = {}
     if isinstance(spec.get("routes"), dict):
@@ -918,6 +929,7 @@ def main(argv: list[str]) -> int:
                                        "initial_oracle_symptom": "OFF",
                                        "live_grader_feedback": "FINAL_ONLY",
                                        "target_disclosure": "PUBLIC_PATHS_UNLOCALIZED"})
+        emit_resume_pending_check(spec, resume)
         emit("engine_start", turns=rr.MAX_STEPS,
              **({"resume_attempt": resume.get("attempt"), "replay_sends": len(replayer.tape)}
                 if resume is not None and replayer is not None else {}))

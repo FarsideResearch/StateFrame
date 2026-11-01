@@ -68,6 +68,8 @@ def test_second_resume_keeps_route_move_for_carried_tape(tmp_path):
     resumed = json.loads((run / "spec.json").read_text())["resume"]
     assert len(resumed["tape"]) == 2
     assert resumed["route_changes"] == [first_move]
+    assert "pending" not in resumed
+    assert resumed["pending_check"] == {"status": "skipped", "reason": "no_pending_check"}
     second_move = {**first_move, "from": first_move["to"], "to": "http://127.0.0.1:9100/v1"}
     runner._compose_resume_route_changes({"resume": resumed}, [second_move])
     assert resumed["route_changes"] == [first_move, second_move]
@@ -93,7 +95,7 @@ def test_later_model_move_wins_when_replaying_earlier_route(tmp_path):
     assert replay.diverged is None
 
 
-def test_model_moved_replayed_prefix_keeps_carried_tail_and_unverified_pending(tmp_path):
+def test_model_moved_replayed_prefix_keeps_tail_but_skips_unverified_pending(tmp_path):
     run, spec = _interrupted_routed_run(tmp_path)
     old_wire = run / "attempts" / "1" / "wire"
     _write_send(old_wire, 1)
@@ -107,7 +109,6 @@ def test_model_moved_replayed_prefix_keeps_carried_tail_and_unverified_pending(t
              {"role": "read", "field": "model", "from": "middle", "to": "latest"}]
     spec["resume"] = {"tape": replay_tape.build(old_wire, old_wire.parent / "sends.jsonl"),
                       "pending": replay_tape.pending_request(old_wire), "route_changes": moves}
-    prior_pending = spec["resume"]["pending"]
     (run / "spec.json").write_text(json.dumps(spec))
 
     resume.archive_attempt({"run": run, "spec": spec, "attempt": 2, "max_turns": 8}, tmp_path,
@@ -115,7 +116,8 @@ def test_model_moved_replayed_prefix_keeps_carried_tail_and_unverified_pending(t
 
     resumed = json.loads((run / "spec.json").read_text())["resume"]
     assert [item["send"] for item in resumed["tape"]] == [1, 2]
-    assert resumed["pending"] == prior_pending
+    assert "pending" not in resumed
+    assert resumed["pending_check"] == {"status": "skipped", "reason": "unverified_pending"}
     assert resumed["route_changes"] == moves
 
 
@@ -141,7 +143,8 @@ def test_model_moved_prefix_with_other_difference_drops_carried_state(tmp_path, 
     resumed = json.loads((run / "spec.json").read_text())["resume"]
     assert len(resumed["tape"]) == 1
     assert "pending" not in resumed
-    assert "route_changes" not in resumed
+    assert resumed["route_changes"] == moves
+    assert resumed["pending_check"]["reason"] == "unverified_pending"
 
 
 def test_unrouted_model_name_difference_does_not_carry_prior_tape(tmp_path):
@@ -163,9 +166,42 @@ def test_unrouted_model_name_difference_does_not_carry_prior_tape(tmp_path):
     assert len(resumed["tape"]) == 1
     assert resumed["tape"][0]["request_digest"] == replay_tape.normalized_digest(
         b'{"model": "latest", "messages": []}')
+    assert "pending_check" not in resumed
 
 
-def test_carried_tape_uses_its_own_pending_send(tmp_path):
+def test_unrouted_resume_keeps_previous_faithful_tail_without_pending_check(tmp_path):
+    run, spec = _interrupted_routed_run(tmp_path)
+    spec.pop("routes")
+    old_wire = run / "attempts" / "1" / "wire"
+    _write_send(old_wire, 1, route=None)
+    _write_send(old_wire, 2, route=None)
+    _write_send(run / "wire", 1, route=None)
+    spec["resume"] = {"tape": replay_tape.build(old_wire, old_wire.parent / "sends.jsonl")}
+    (run / "spec.json").write_text(json.dumps(spec))
+
+    resume.archive_attempt({"run": run, "spec": spec, "attempt": 2, "max_turns": 8}, tmp_path,
+                           use_checkpoint=False)
+    resumed = json.loads((run / "spec.json").read_text())["resume"]
+    assert [item["send"] for item in resumed["tape"]] == [1, 2]
+    assert resumed["tape"][1]["request"] == str(old_wire / "0002.request.json")
+    assert "pending_check" not in resumed
+
+
+def test_skipped_check_event_only_for_routed_runs_and_never_in_the_task_row(monkeypatch):
+    events = []
+    monkeypatch.setattr(_child, "emit", lambda kind, **fields: events.append((kind, fields)))
+    skipped = {"status": "skipped", "reason": "unverified_pending"}
+    _child.emit_resume_pending_check({"routes": {"roles": {"read": {}}}}, {"pending_check": skipped})
+    _child.emit_resume_pending_check({}, {"pending_check": skipped})
+    _child.emit_resume_pending_check({"routes": {"roles": {"read": {}}}}, {"attempt": 2})
+    _child.emit_resume_pending_check({"routes": {"roles": {"read": {}}}}, None)
+    assert events == [("routes_resume_pending_check_skipped", skipped)]
+    # The engine's task row feeds request building; the skipped record must never be put there.
+    source = Path(_child.__file__).read_text()
+    assert "row[" not in source.split("def emit_resume_pending_check", 1)[1].split("\ndef ", 1)[0]
+
+
+def test_carried_tape_skips_unverified_own_pending_send(tmp_path):
     run, spec = _interrupted_routed_run(tmp_path)
     old_wire = run / "attempts" / "1" / "wire"
     _write_send(old_wire, 1)
@@ -182,11 +218,95 @@ def test_carried_tape_uses_its_own_pending_send(tmp_path):
 
     resumed = json.loads((run / "spec.json").read_text())["resume"]
     assert len(resumed["tape"]) == 2
-    assert resumed["pending"]["send"] == 3
-    assert resumed["pending"]["request"] == str(old_wire / "0003.request.json")
+    assert "pending" not in resumed
+    assert resumed["pending_check"]["reason"] == "unverified_pending"
 
 
-def test_failed_send_renumbering_keeps_unverified_pending_and_route_move(tmp_path):
+def test_resume_without_carried_check_skips_its_own_pending(tmp_path):
+    run, spec = _interrupted_routed_run(tmp_path)
+    old_wire = run / "attempts" / "1" / "wire"
+    _write_send(old_wire, 1)
+    _write_send(run / "wire", 1, completed=False)
+    spec["resume"] = {"tape": replay_tape.build(old_wire, old_wire.parent / "sends.jsonl")}
+    (run / "spec.json").write_text(json.dumps(spec))
+
+    resume.archive_attempt({"run": run, "spec": spec, "attempt": 2, "max_turns": 8}, tmp_path,
+                           use_checkpoint=False)
+    resumed = json.loads((run / "spec.json").read_text())["resume"]
+    assert [item["send"] for item in resumed["tape"]] == [1]
+    assert "pending" not in resumed
+    assert resumed["pending_check"] == {"status": "skipped", "reason": "no_pending_check"}
+
+
+def test_first_archive_killed_after_wire_move_replays_without_pending(tmp_path, monkeypatch):
+    run, spec = _interrupted_routed_run(tmp_path)
+    _write_send(run / "wire", 1)
+    _write_send(run / "wire", 2, completed=False)
+    (run / "requests").mkdir()
+    real_replace = resume.os.replace
+
+    def killed_after_wire(src, dst):
+        if Path(src).name == "requests":
+            raise KeyboardInterrupt("killed after wire moved")
+        real_replace(src, dst)
+
+    monkeypatch.setattr(resume.os, "replace", killed_after_wire)
+    with pytest.raises(KeyboardInterrupt):
+        resume.archive_attempt({"run": run, "spec": spec, "attempt": 1, "max_turns": 8}, tmp_path,
+                               use_checkpoint=False)
+    monkeypatch.setattr(resume.os, "replace", real_replace)
+    assert "resume" not in json.loads((run / "spec.json").read_text())
+    assert resume.assess(run)["tape_count"] == 1
+
+    resume.archive_attempt({"run": run, "spec": spec, "attempt": 2, "max_turns": 8}, tmp_path,
+                           use_checkpoint=False)
+    resumed = json.loads((run / "spec.json").read_text())["resume"]
+    assert [item["send"] for item in resumed["tape"]] == [1]
+    assert "pending" not in resumed
+    assert resumed["pending_check"] == {"status": "skipped", "reason": "interrupted_archive"}
+
+
+def test_refused_routed_mismatch_never_adopts_its_pending_request(tmp_path):
+    run, spec = _interrupted_routed_run(tmp_path)
+    old_wire = run / "attempts" / "1" / "wire"
+    _write_send(old_wire, 1)
+    _write_send(old_wire, 2, completed=False)
+    refused_request = b'{"model": "reader", "messages": ["refused"]}'
+    _write_send(run / "wire", 1, request=refused_request, completed=False)
+    (run / "resume-divergence.json").write_text('{"reason":"route mismatch"}')
+    spec["resume"] = {"tape": replay_tape.build(old_wire, old_wire.parent / "sends.jsonl"),
+                      "pending": replay_tape.pending_request(old_wire)}
+    (run / "spec.json").write_text(json.dumps(spec))
+
+    resume.archive_attempt({"run": run, "spec": spec, "attempt": 2, "max_turns": 8}, tmp_path,
+                           use_checkpoint=False)
+    resumed = json.loads((run / "spec.json").read_text())["resume"]
+    assert resumed["tape"] == []
+    assert "pending" not in resumed
+    assert resumed["pending_check"] == {"status": "skipped", "reason": "diverged"}
+
+
+def test_verified_resume_uses_its_own_pending_request(tmp_path):
+    run, spec = _interrupted_routed_run(tmp_path)
+    old_wire = run / "attempts" / "1" / "wire"
+    _write_send(old_wire, 1, completed=False)
+    _write_send(run / "wire", 1)
+    _write_send(run / "wire", 2, request=b'{"model": "reader", "messages": ["live"]}',
+                completed=False)
+    spec["resume"] = {"tape": [], "pending": replay_tape.pending_request(old_wire)}
+    _mark_pending_verified(run, spec["resume"]["pending"])
+    (run / "spec.json").write_text(json.dumps(spec))
+
+    resume.archive_attempt({"run": run, "spec": spec, "attempt": 2, "max_turns": 8}, tmp_path,
+                           use_checkpoint=False)
+    resumed = json.loads((run / "spec.json").read_text())["resume"]
+    assert [item["send"] for item in resumed["tape"]] == [1]
+    assert resumed["pending"]["send"] == 2
+    assert resumed["pending"]["request"] == str(run / "attempts" / "2" / "wire" / "0002.request.json")
+    assert "pending_check" not in resumed
+
+
+def test_failed_send_renumbering_skips_unverified_pending_and_keeps_route_move(tmp_path):
     run, spec = _interrupted_routed_run(tmp_path)
     old_wire = run / "attempts" / "1" / "wire"
     _write_send(old_wire, 1, completed=False)
@@ -210,7 +330,8 @@ def test_failed_send_renumbering_keeps_unverified_pending_and_route_move(tmp_pat
                            use_checkpoint=False)
 
     resumed = json.loads((run / "spec.json").read_text())["resume"]
-    assert resumed["pending"] == prior_pending
+    assert "pending" not in resumed
+    assert resumed["pending_check"]["reason"] == "unverified_pending"
     assert resumed["route_changes"] == [move]
 
 
@@ -236,13 +357,14 @@ def test_failed_send_renumbering_retires_verified_pending(tmp_path):
     assert len(resumed["tape"]) == 1
     assert resumed["pending"]["send"] == 2
     assert resumed["pending"]["request"] == str(run / "attempts" / "2" / "wire" / "0002.request.json")
-    assert "route_changes" not in resumed
+    assert resumed["route_changes"] == [move]
+    assert "pending_check" not in resumed
     assert (run / "attempts" / "2" / "resume-pending-verified.json").is_file()
     assert not (run / "resume-pending-verified.json").exists()
 
 
 @pytest.mark.parametrize("bad_send", [True, 1.0, "1", None])
-def test_malformed_pending_marker_never_retires_the_check(tmp_path, bad_send):
+def test_malformed_pending_marker_skips_the_check(tmp_path, bad_send):
     # JSON true == 1 in Python: the marker's send must be an exact int to prove anything.
     run, spec = _interrupted_routed_run(tmp_path)
     old_wire = run / "attempts" / "1" / "wire"
@@ -258,12 +380,14 @@ def test_malformed_pending_marker_never_retires_the_check(tmp_path, bad_send):
     resume.archive_attempt({"run": run, "spec": spec, "attempt": 2, "max_turns": 8}, tmp_path,
                            use_checkpoint=False)
 
-    assert json.loads((run / "spec.json").read_text())["resume"]["pending"] == prior_pending
+    resumed = json.loads((run / "spec.json").read_text())["resume"]
+    assert "pending" not in resumed
+    assert resumed["pending_check"]["reason"] == "unverified_pending"
 
 
-def test_archive_killed_between_marker_and_wire_keeps_the_check(tmp_path, monkeypatch):
+def test_archive_killed_between_marker_and_wire_skips_the_check(tmp_path, monkeypatch):
     # Attempt 2 verified the carried pending send (marker written) and was killed live; its archive is
-    # then killed after the first move. The next archive must still carry the original check.
+    # then killed after the first move. The next archive has no marker beside its wire.
     run, spec = _interrupted_routed_run(tmp_path)
     old_wire = run / "attempts" / "1" / "wire"
     _write_send(old_wire, 1, completed=False)
@@ -292,10 +416,12 @@ def test_archive_killed_between_marker_and_wire_keeps_the_check(tmp_path, monkey
     resume.archive_attempt({"run": run, "spec": spec, "attempt": 3, "max_turns": 8}, tmp_path,
                            use_checkpoint=False)
 
-    assert json.loads((run / "spec.json").read_text())["resume"]["pending"] == prior_pending
+    resumed = json.loads((run / "spec.json").read_text())["resume"]
+    assert "pending" not in resumed
+    assert resumed["pending_check"]["reason"] == "unverified_pending"
 
 
-def test_equal_length_replay_keeps_prior_pending_and_route_changes(tmp_path):
+def test_equal_length_replay_skips_unverified_pending_and_keeps_route_changes(tmp_path):
     run, spec = _interrupted_routed_run(tmp_path)
     old_wire = run / "attempts" / "1" / "wire"
     _write_send(old_wire, 1)
@@ -305,7 +431,6 @@ def test_equal_length_replay_keeps_prior_pending_and_route_changes(tmp_path):
             "to": "http://127.0.0.1:9000/v1"}
     spec["resume"] = {"tape": replay_tape.build(old_wire, run / "attempts" / "1" / "sends.jsonl"),
                       "pending": replay_tape.pending_request(old_wire), "route_changes": [move]}
-    prior_pending = spec["resume"]["pending"]
     (run / "spec.json").write_text(json.dumps(spec))
 
     resume.archive_attempt({"run": run, "spec": spec, "attempt": 2, "max_turns": 8}, tmp_path,
@@ -313,13 +438,13 @@ def test_equal_length_replay_keeps_prior_pending_and_route_changes(tmp_path):
 
     resumed = json.loads((run / "spec.json").read_text())["resume"]
     assert len(resumed["tape"]) == 1
-    assert resumed["pending"] == prior_pending
+    assert "pending" not in resumed
+    assert resumed["pending_check"]["reason"] == "unverified_pending"
     assert resumed["route_changes"] == [move]
 
 
-def test_unverified_rebuilt_pending_does_not_replace_the_original_check(tmp_path):
-    # Killed after the child wrote its rebuilt request 2 but before the replayer checked it against the
-    # carried pending send: the rebuilt copy is unverified, so the original check and its moves stay.
+def test_unverified_rebuilt_pending_skips_the_original_check(tmp_path):
+    # Killed after the child wrote its rebuilt request 2 but before the replayer checked it.
     run, spec = _interrupted_routed_run(tmp_path)
     old_wire = run / "attempts" / "1" / "wire"
     _write_send(old_wire, 1)
@@ -339,12 +464,13 @@ def test_unverified_rebuilt_pending_does_not_replace_the_original_check(tmp_path
                            use_checkpoint=False)
 
     resumed = json.loads((run / "spec.json").read_text())["resume"]
-    assert resumed["pending"] == prior_pending
+    assert "pending" not in resumed
+    assert resumed["pending_check"]["reason"] == "unverified_pending"
     assert resumed["route_changes"] == [move]
 
 
 @pytest.mark.parametrize("stale_field", ["request_sha256", "route"])
-def test_stale_pending_verification_marker_does_not_retire_check(tmp_path, stale_field):
+def test_stale_pending_verification_marker_skips_check(tmp_path, stale_field):
     run, spec = _interrupted_routed_run(tmp_path)
     old_wire = run / "attempts" / "1" / "wire"
     _write_send(old_wire, 1)
@@ -354,7 +480,6 @@ def test_stale_pending_verification_marker_does_not_retire_check(tmp_path, stale
     move = {"role": "read", "field": "model", "from": "reader", "to": "renamed"}
     spec["resume"] = {"tape": replay_tape.build(old_wire, run / "attempts" / "1" / "sends.jsonl"),
                       "pending": replay_tape.pending_request(old_wire), "route_changes": [move]}
-    prior_pending = spec["resume"]["pending"]
     _mark_pending_verified(run, spec["resume"]["pending"], route={**ROUTE, "model": "renamed"})
     marker = run / "resume-pending-verified.json"
     stale = json.loads(marker.read_text())
@@ -369,7 +494,8 @@ def test_stale_pending_verification_marker_does_not_retire_check(tmp_path, stale
                            use_checkpoint=False)
 
     resumed = json.loads((run / "spec.json").read_text())["resume"]
-    assert resumed["pending"] == prior_pending
+    assert "pending" not in resumed
+    assert resumed["pending_check"]["reason"] == "unverified_pending"
     assert resumed["route_changes"] == [move]
 
 
@@ -392,11 +518,13 @@ def test_equal_length_replay_drops_prior_pending_after_later_failed_send(tmp_pat
 
     resumed = json.loads((run / "spec.json").read_text())["resume"]
     assert len(resumed["tape"]) == 1
-    assert "pending" not in resumed and "route_changes" not in resumed
+    assert "pending" not in resumed
+    assert resumed["route_changes"][0]["to"] == "new"
+    assert "pending_check" not in resumed
 
 
 @pytest.mark.parametrize("divergence", ["marker", "request"])
-def test_diverged_replay_drops_prior_pending_and_route_changes(tmp_path, divergence):
+def test_diverged_replay_skips_prior_pending_but_keeps_route_changes(tmp_path, divergence):
     run, spec = _interrupted_routed_run(tmp_path)
     old_wire = run / "attempts" / "1" / "wire"
     _write_send(old_wire, 1)
@@ -416,7 +544,10 @@ def test_diverged_replay_drops_prior_pending_and_route_changes(tmp_path, diverge
 
     resumed = json.loads((run / "spec.json").read_text())["resume"]
     assert len(resumed["tape"]) == 1
-    assert "pending" not in resumed and "route_changes" not in resumed
+    assert "pending" not in resumed
+    assert resumed["route_changes"][0]["to"] == "new"
+    assert resumed["pending_check"]["reason"] == (
+        "diverged" if divergence == "marker" else "unverified_pending")
 
 
 def test_live_restart_discards_carried_route_changes_and_pending(tmp_path):

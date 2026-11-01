@@ -1900,6 +1900,9 @@ def resume_run(run_dir: Path, *, endpoint: Endpoint | None = None, max_turns: in
                 options._cache_slot, options._cache_slot_selection = slot["slot"], "resumed"
             printer(f"resuming run {run_dir} (attempt {spec['resume']['attempt']}; previous attempt "
                     f"stopped with {state['previous_status'] or 'no engine result'}, files kept in {previous})")
+            if spec["resume"].get("pending_check", {}).get("status") == "skipped":
+                printer("resume: the in-flight request of an earlier resume could not be proven; "
+                        "resuming by full replay without that check")
             if isinstance(swap, dict):
                 printer(f"MODEL NAME SWAP: this run was recorded with model {', '.join(map(repr, swap['recorded']))}"
                         f" and continues with {swap['served']!r}, the name the endpoint serves. This is only "
