@@ -84,19 +84,24 @@ engine finished: SUBMITTED in 100.7s
 stateframe chat --repo path/to/your-repo
 ```
 
+## Skills
+
+Install a reusable instruction bundle with `stateframe skill install path/to/skill`, then select it with `--skill NAME` on `run` or `chat`. The run shows a small catalog and loads the body only when it calls `skill_load`. Optional commands need `--trust-skill-tools`. The [skills guide](docs/guide/skills.md) covers the format, limits and resume rules.
+
 ## What the agent can do
 
 - **Find and read:** search the code, list files, read files, and recall what it found earlier in the run.
+- **Use selected skills:** see a bounded catalog of explicitly selected instruction bundles and load one by name. See [Skills](docs/guide/skills.md).
 - **Change code:** make a targeted edit, replace an exact string, insert code at a spot, create, delete, or move a file, or rewrite a whole module.
 - **Run commands:** foreground shell commands and read-only background jobs with bounded, budget-aware replies, per-run dependencies, protected-test restoration and replay verification. See [agent tools](docs/guide/tools.md).
-- **Inspect and organize:** read sanitized Git history, fetch public documentation when enabled, and delete or move files within the task's edit scope. Explicitly trusted command tools can be supplied with `--tools`.
+- **Inspect and organize:** read sanitized Git history, fetch public documentation when enabled, and delete or move files within the task's edit scope. Explicitly trusted command tools can be supplied with `--tools`; local MCP stdio servers can be supplied with `--mcp`.
 - **Check its work:** run your tests, try code in a sandboxed probe, write and run its own checks, and read the check results.
 - **Finish:** a run counts as done only after its checks pass. The engine makes that call, not the model.
 - **Around that:** a map of your repository's code (12 languages, plus structure for HTML, CSS, JSON, TOML and YAML), an interactive chat with diff, undo and apply, resume after a stop, and inspect to see exactly what the model was sent.
 
 **Not yet:**
 
-- No MCP client or plug-in protocol beyond explicitly configured command tools. A new engine-owned tool still needs code (see [docs/guide/extending.md](docs/guide/extending.md)).
+- MCP supports explicit stdio tool servers. HTTP transport, resources, prompts, sampling and persistent sessions are not supported. A new engine-owned tool still needs code (see [docs/guide/extending.md](docs/guide/extending.md)).
 - No persistent background jobs across resume. A stopped run records their observations but does not relaunch them.
 - No executable-bit changes in the sealed result. Such command effects are refused and restored; executable files can be removed with `file_delete` but cannot be moved with `file_move`.
 

@@ -14,7 +14,8 @@ import pytest
 
 from kernel_read_lockout import append_frame_line
 from kernel_read_exec import dispatch_live_read, execute_read, record_serialized_read_pages
-from kernel_request_tool_surface import _request_tool_floor_schemas
+from kernel_request_tool_surface import _apply_request_tool_floor, _request_tool_floor_schemas
+from kernel_agent_schemas import BUILTIN_SCHEMAS
 from kernel_stateframe_framefit5 import _is_framefit5_host_context_panel
 from kernel_reread_result_truth import checkpoint_replay, restore_replay
 from kernel_stateframe_runtime import StateFrameRuntime
@@ -580,11 +581,31 @@ def test_final_capability_floor_cannot_reintroduce_locked_read(tmp_path, monkeyp
     names, schemas, _digest = _request_tool_floor_schemas(runtime, TOOLS)
     assert "read" not in names
     assert "read" not in schemas
+    assert "skill_load" not in names
     assert {"edit", "str_replace", "run_tests", "done"} <= set(names)
 
     monkeypatch.setenv("STATEFRAME_CODE_BOOKMARKS", "off")
     names, schemas, _digest = _request_tool_floor_schemas(runtime, TOOLS)
     assert "read" in names and "read" in schemas
+    assert "skill_load" not in names
+
+
+def test_capability_floor_with_selected_skill_and_mcp_tool(tmp_path, monkeypatch):
+    monkeypatch.setenv("STATEFRAME_CODE_BOOKMARKS", "off")
+    runtime, _events = _runtime(tmp_path)
+    skill_schema = next(tool for tool in BUILTIN_SCHEMAS
+                        if tool["function"]["name"] == "skill_load")
+    mcp_schema = {"type": "function", "function": {"name": "mcp_repo__lookup",
+                  "parameters": {"type": "object"}}}
+    runtime._completion_owner_full_tools = [*TOOLS, skill_schema, mcp_schema]
+    incoming = [*(tool for tool in TOOLS if tool["function"]["name"] != "read"),
+                mcp_schema]
+    names, schemas, _digest = _request_tool_floor_schemas(runtime, incoming)
+    final = _apply_request_tool_floor(incoming, names, schemas)
+    assert "read" in _names(final)
+    assert "skill_load" in _names(final)
+    assert "mcp_repo__lookup" in _names(final)
+    assert schemas["skill_load"] == skill_schema
 
 
 def test_dynamic_workspace_reader_is_removed_while_locked(tmp_path, monkeypatch):

@@ -126,7 +126,7 @@ def classify_run_test_exit(exit_code: object) -> str:
         return RUN_TEST_RESULT_CLASSES_BY_EXIT.get(exit_code, "NO_VERDICT")
     return "NO_VERDICT"
 READ_ONLY = frozenset({
-    "job_wait", "job_output", "git", "web_fetch",
+    "job_wait", "job_output", "git", "web_fetch", "skill_load",
     "read", "text", "grep", "ls", "list_files", "where_defined",
     "who_calls", "references", "recall", "recall_evidence",
     "recall_generated_artifact", "read_check_receipt", "probe",
@@ -136,7 +136,7 @@ READ_ONLY = frozenset({
 # An observed empty search or missing file finishes an acquisition attempt.
 # It does not prove that a source-read contract or root task was satisfied.
 READ_OUTCOMES = {
-    **{name: frozenset({"NO_OP"}) for name in ("job_wait", "job_output", "git", "web_fetch")},
+    **{name: frozenset({"NO_OP"}) for name in ("job_wait", "job_output", "git", "web_fetch", "skill_load")},
     # ALREADY_PRESENT (empirical read dedup): the exact source is already in the frame at the
     # current revision -- a settled, successful read-only outcome. The registry guard below
     # keeps any future producer class from falling through to an unknown effect.
@@ -158,7 +158,7 @@ READ_OUTCOMES = {
 # not grant source credit, but they must settle the current effect.
 READ_NOT_APPLIED_RESULTS = frozenset({"ERROR", "OUT_OF_RANGE"})
 READ_NOT_APPLIED_RESULTS_BY_TOOL = {
-    **{name: frozenset({"REFUSED"}) for name in ("job_wait", "job_output", "git", "web_fetch")},
+    **{name: frozenset({"REFUSED"}) for name in ("job_wait", "job_output", "git", "web_fetch", "skill_load")},
     # These host producers have distinct refusal classes; keep each vocabulary
     # scoped to its producer instead of broadening shared read/search results.
     "list_files": frozenset({"REJECTED"}),
@@ -168,7 +168,7 @@ READ_NOT_APPLIED_RESULTS_BY_TOOL = {
     "recall_generated_artifact": frozenset({"RECALL_REJECTED"}),
 }
 READ_RESULT_CLASSES = {
-    **{name: frozenset({"NO_OP", "REFUSED"}) for name in ("job_wait", "job_output", "git", "web_fetch")},
+    **{name: frozenset({"NO_OP", "REFUSED"}) for name in ("job_wait", "job_output", "git", "web_fetch", "skill_load")},
     "read": frozenset(READ_OUTCOMES["read"]) | READ_NOT_APPLIED_RESULTS,
     "text": frozenset(READ_OUTCOMES["text"]) | READ_NOT_APPLIED_RESULTS,
     "grep": frozenset(READ_OUTCOMES["grep"]) | READ_NOT_APPLIED_RESULTS,

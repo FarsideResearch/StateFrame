@@ -118,6 +118,39 @@ def test_every_call_classified_before_dispatch():
     assert frame_routes.unclassified_dispatcher({"new_dispatcher_tool"}) == {"new_dispatcher_tool"}
 
 
+def test_workspace_writing_mcp_and_custom_tools_escalate_to_edit(tmp_path):
+    # A read-model reply that calls a writing MCP or custom tool must be re-asked of the edit model.
+    from types import SimpleNamespace
+    from kernel_mcp_tools import McpTool, load_mcp_files
+
+    def server(writes):
+        path = tmp_path / f"mcp-{writes}.json"
+        path.write_text(json.dumps({"schema": "stateframe-mcp/1", "servers": [{
+            "name": f"srv_{writes}", "trust": "Reviewed local fixture for this test",
+            "argv": [sys.executable, str(Path(__file__).parent / "fixtures/mcp_server.py"), "normal"],
+            "network": "none", "writes": writes, "replay": "external", "processes": "single",
+            "timeout_seconds": 15}]}))
+        return load_mcp_files([path], shell_network="loopback").servers[0]
+
+    def mcp_tool(name, writes):
+        return McpTool(name=name, server=server(writes), remote_name="echo", description="",
+                       parameters={"type": "object"}, definition_digest="sha256:test")
+
+    tools = SimpleNamespace(custom={
+        "mcp_w__put": mcp_tool("mcp_w__put", "workspace"), "mcp_r__get": mcp_tool("mcp_r__get", "none"),
+        "fmt": SimpleNamespace(writes="workspace"), "lint": SimpleNamespace(writes="none")})
+    writes = frame_routes.workspace_write_tools(tools)
+    assert writes == {"mcp_w__put", "fmt"}
+    call = lambda name: [{"function": {"name": name, "arguments": "{}"}}]  # noqa: E731
+    assert frame_routes.classify_calls(call("mcp_w__put"), custom_writes=writes) == "edit"
+    assert frame_routes.classify_calls(call("mcp_r__get"), custom_writes=writes) == "read"
+    assert frame_routes.workspace_write_tools(SimpleNamespace()) == frozenset()
+    frame_routes.install(table("read.model=reader"))
+    reader = frame_routes.resolve("read")
+    assert frame_routes.escalation_target(reader, call("mcp_w__put"), custom_writes=writes) == "edit"
+    assert frame_routes.escalation_target(reader, call("mcp_r__get"), custom_writes=writes) is None
+
+
 def test_body_changes_only_effective_fields_and_strips_invalid_pin():
     frame_routes.install(table("read.endpoint=http://127.0.0.1:8090/v1", "read.model=reader",
                                "read.temperature=0.3", "read.max_tokens=500"))

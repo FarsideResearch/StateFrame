@@ -207,6 +207,13 @@ def classify_calls(calls: object, *, custom_writes: set[str] | frozenset[str] = 
     return "read"
 
 
+def workspace_write_tools(agent_tools: object) -> frozenset[str]:
+    """Names of custom command, skill and MCP tools that declare workspace writes; they classify as edit."""
+    custom = getattr(agent_tools, "custom", None)
+    return frozenset(name for name, tool in (custom.items() if isinstance(custom, Mapping) else ())
+                     if getattr(tool, "writes", None) == "workspace")
+
+
 def forced_leg_options(capture: object) -> dict[str, object]:
     """prepare() options that rebuild an escalated leg with its forced role; {} for any other capture."""
     route = getattr(capture, "frame_route", None)

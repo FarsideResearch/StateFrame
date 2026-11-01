@@ -1,7 +1,8 @@
 import pytest
 
 from kernel_tool_tape import ToolTape, ToolTapeError, replay_decision, verify_intent, verify_reexecution
-from stateframe.resume import ResumeRefused, assess
+from stateframe.resume import ResumeRefused, archive_attempt, assess
+from stateframe import profiles
 import json
 
 
@@ -68,3 +69,69 @@ def test_resume_refuses_uncertain_operation_before_replay(tmp_path):
                 pre_manifest_digest="pre")
     with pytest.raises(ResumeRefused, match="operation stable may or may not have happened"):
         assess(tmp_path)
+
+
+def _limited_run(tmp_path):
+    run = tmp_path / "run"
+    run.mkdir(parents=True)
+    (run / "parent").mkdir()
+    spec = {"schema": "stateframe-run/1", "environment": {"REACT_STEPS": "1"},
+            "public_row": {}, "parent_snapshot": str(run / "parent"),
+            "chat_url": "http://127.0.0.1/v1/chat/completions", "model": "scripted",
+            "max_turns": 1, "repo": str(tmp_path), "engine_source": profiles.engine_source_summary()}
+    (run / "spec.json").write_text(json.dumps(spec))
+    (run / "engine-result.json").write_text(json.dumps({"result": {"result": "RESPONSE_BUDGET_EXHAUSTED"}}))
+    return run, spec
+
+
+def _operation(run, replay_class, *, complete=True):
+    tape = ToolTape(run)
+    tape.intent(call_id="same-id", tool="publish" if replay_class == "external" else "shell",
+                args={}, replay_class=replay_class, capability_digest="cap", definition_digest="def",
+                env_identity="env", pre_manifest_digest="pre")
+    if complete:
+        tape.complete(call_id="same-id", exit_code=0, observation="ok",
+                      post_manifest_digest="post", env_identity="env")
+
+
+def test_limit_restart_refuses_incomplete_before_archiving(tmp_path):
+    run, spec = _limited_run(tmp_path)
+    _operation(run, "external", complete=False)
+    with pytest.raises(ResumeRefused, match="may or may not have happened"):
+        assess(run, max_turns=8, replay_external=True)
+    with pytest.raises(ResumeRefused, match="may or may not have happened"):
+        archive_attempt({"run": run, "spec": spec, "attempt": 1, "max_turns": 8}, tmp_path,
+                        replay_external=True)
+    assert not (run / "attempts").exists()
+    assert (run / "tool-tape.jsonl").is_file()
+
+
+def test_limit_restart_requires_consent_and_preserves_external_history(tmp_path):
+    run, spec = _limited_run(tmp_path)
+    _operation(run, "external")
+    with pytest.raises(ResumeRefused, match=r"same-id \(publish\).*--replay-external"):
+        assess(run, max_turns=8)
+    with pytest.raises(ResumeRefused, match="--replay-external"):
+        archive_attempt({"run": run, "spec": spec, "attempt": 1, "max_turns": 8}, tmp_path)
+    assert not (run / "attempts").exists()
+    state = assess(run, max_turns=8, replay_external=True)
+    archive = archive_attempt(state, tmp_path, replay_external=True)
+    assert ToolTape(archive).lookup("same-id").replay_class == "external"
+    assert state["spec"]["resume"]["archived_external_operations"] == [
+        {"call_id": "same-id", "tool": "publish"}]
+    assert not (run / "tool-tape.jsonl").exists()
+    _operation(run, "local")  # A reused id belongs to the new attempt, not the archived tape.
+    with pytest.raises(ResumeRefused, match="--replay-external"):
+        assess(run)
+    assert assess(run, replay_external=True)["external_operations"] == [
+        {"call_id": "same-id", "tool": "publish"}]
+
+
+def test_limit_restart_allows_completed_local_and_observation_ops(tmp_path):
+    for replay_class in ("local", "observation"):
+        run, spec = _limited_run(tmp_path / replay_class)
+        _operation(run, replay_class)
+        state = assess(run, max_turns=8)
+        archive = archive_attempt(state, tmp_path)
+        assert ToolTape(archive).lookup("same-id").replay_class == replay_class
+        assert state["spec"]["resume"]["archived_external_operations"] == []

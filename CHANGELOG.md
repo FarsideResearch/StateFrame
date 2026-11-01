@@ -3,11 +3,24 @@
 ## Unreleased
 
 - Add optional per-step models. Each request is assigned a role (`read`, `plan`, `edit`, `finish`, `decide2`, `unit`) from what the engine already knows, and each role can have its own endpoint, model, sampling, limits, slot, tokenizer and cost rates. Set them with `--route ROLE.FIELD=VALUE`, `STATEFRAME_ROUTE_<ROLE>_<FIELD>`, a TOML or JSON routes file, or the profile. `stateframe config init` writes a commented example.
-- With no route settings, requests are byte-identical to 0.2.3.
+- With no route settings, requests are byte-identical to 0.2.5.
 - A reply that edits files or says done from another role's model is discarded unrun and the same step is asked again of the `edit` or `finish` model, from the same frame.
 - Each role's server is checked at start. Remote endpoints need a per-role opt-in (or the global one), including on redirects. Routed requests never go through an HTTP proxy.
 - Runs print their effective routes at start and per-role sends, discarded replies, tokens and estimated cost at the end.
 - Resume records each request's route before it is sent and verifies it on replay. Changing a route on resume is refused; `stateframe resume --route` may move an endpoint or rename a model.
+
+## 0.2.5 (2026-11-01)
+
+- Model requests never go through an HTTP proxy. A proxy set in a profile, or a macOS system proxy, could receive a local run's requests, including the task and API key.
+
+## 0.2.4 (2026-11-01)
+
+- Add explicitly selected reusable skills, a bounded catalog and on-demand instruction loading. Optional command definitions require separate trust and use the existing sandbox and replay path.
+- Pin selected skill bytes for resume and refuse changed or missing bundles before replay.
+- Add opt-in MCP stdio tool servers with sandboxed discovery and calls, bounded schemas and protocol messages, and tape-aware replay.
+- Keep the protocol client in the engine, contain each server through a private Linux PID namespace or macOS process-creation denial, and bound model-facing omission notes to fixed reason codes.
+- Harden Linux namespace isolation when supported by bubblewrap and account for nested PID namespace descendants in server resource limits.
+- On Linux, a busy desktop (hundreds of threads owned by the same user, for example a browser) could make every sandboxed check fail with "Creating new namespace failed: Resource temporarily unavailable". The process limit is now set after the sandbox starts, relative to the real user's current thread count, so other programs' threads no longer block it. Sandboxed commands keep a hard task limit.
 
 ## 0.2.3 (2026-11-01)
 

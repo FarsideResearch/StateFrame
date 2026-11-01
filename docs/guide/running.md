@@ -28,6 +28,7 @@
 - `--git-tool` / `--no-git-tool`: read-only Git tool, on by default when the source has Git metadata.
 - `--web` / `--no-web`: web fetch, off by default. `--web-allow DOMAIN` repeats to restrict hosts.
 - `--tools FILE`: repeatable trusted custom command definitions in `stateframe-tools/1` JSON.
+- `--skill NAME_OR_PATH`: repeatable selected skill bundle. `--trust-skill-tools` offers its optional command definitions. See [Skills](skills.md).
 - On `resume`, `--replay-external` explicitly repeats recorded external operations before continuing.
 
 ## Which Python runs your tests

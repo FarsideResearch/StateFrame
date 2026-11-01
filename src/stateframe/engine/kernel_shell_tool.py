@@ -202,6 +202,7 @@ class ShellTool:
             raise ShellExecutionFailed(f"{type(error).__name__}: {error}") from error
 
     def _execute(self, args: dict, call_id: str, *, custom=None) -> ShellReply:
+        mcp_server = None
         if custom is None:
             try:
                 admission = admit_shell(args.get("command"), self.settings)
@@ -222,8 +223,11 @@ class ShellTool:
                 replay_class = "observation"
         else:
             from kernel_custom_tools import CustomToolError
+            mcp_server = getattr(custom, "server", None)
+            # MCP owns its declared arguments. Only command tools receive an engine-added rationale.
+            tool_args = args if mcp_server is not None else {k: v for k, v in args.items() if k != "why"}
             try:
-                argv = custom.build_argv({k: v for k, v in args.items() if k != "why"})
+                argv = custom.build_argv(tool_args)
             except CustomToolError as error:
                 return ShellReply(f"REFUSED BAD_ARGUMENTS: {error}")
             try:
@@ -232,10 +236,19 @@ class ShellTool:
                 return ShellReply(f"REFUSED TOOL_CHANGED: {error}")
             name, command = custom.name, custom.name
             from kernel_exec_capability import executable_read_roots
+            extra_roots = ()
+            if mcp_server is not None:
+                import sys
+                extra_roots = (*extra_roots, *executable_read_roots(Path(sys.executable)),
+                               *(Path(arg).resolve() for arg in mcp_server.argv[1:]
+                                 if Path(arg).is_absolute() and Path(arg).is_file()))
             cap = replace(self.capability, purpose="custom_tool", network=custom.network,
+                          sandboxed=True if mcp_server is not None else self.capability.sandboxed,
                           workspace_writable=custom.writes == "workspace",
-                          read_roots=(*self.capability.read_roots, *executable_read_roots(custom.executable)),
-                          limits=replace(self.capability.limits, wall_seconds=custom.timeout_seconds))
+                          read_roots=(*self.capability.read_roots, *executable_read_roots(custom.executable),
+                                      *extra_roots),
+                          limits=replace(self.capability.limits, wall_seconds=custom.timeout_seconds,
+                                         output_bytes=4 << 20 if mcp_server is not None else self.capability.limits.output_bytes))
             requires_confirmation = False
             replay_class = custom.replay
         before = self._scan()
@@ -291,7 +304,12 @@ class ShellTool:
                     tape.complete(call_id=call_id, exit_code=None, observation=observation,
                                   post_manifest_digest=workspace_identity(before), env_identity=identity)
                     return ShellReply(observation)
-            result = self.session.run(argv, cap, cwd=self.root)
+            stdin = custom.request(tool_args) if custom is not None and mcp_server is not None else None
+            if mcp_server is not None:
+                from kernel_mcp_driver import exchange
+                result = exchange(json.loads(stdin), cap, self.root)
+            else:
+                result = self.session.run(argv, cap, cwd=self.root)
         except (ExecSessionError, OSError) as error:
             if "requires " in str(error) and "no unsandboxed fallback" in str(error):
                 observation = f"REFUSED SANDBOX_UNAVAILABLE: {error}"
@@ -320,7 +338,35 @@ class ShellTool:
         effects = reconcile(self.root, before, self._scan(), self.policy,
                             self.store, self.baseline_store)
         after_identity = self.identity()
-        output, omitted_bytes = normalize_output_delivery(result.output, total_bytes=result.output_total_bytes,
+        delivery_bytes = result.output
+        mcp_refusal = None
+        if custom is not None and mcp_server is not None and not result.timed_out:
+            from kernel_mcp_tools import result_text
+            try:
+                if result.output_truncated or result.exit_code != 0:
+                    raise ValueError("driver envelope exceeds output bound")
+                envelope = json.loads(result.output)
+                if not isinstance(envelope, dict) or type(envelope.get("ok")) is not bool:
+                    raise ValueError("invalid driver envelope")
+                if not envelope["ok"]:
+                    code = envelope.get("code")
+                    if code == "TIMEOUT":
+                        mcp_refusal = "REFUSED TIMEOUT: "
+                    else:
+                        mcp_refusal = "REFUSED MCP_PROTOCOL_ERROR: "
+                    delivery_bytes = str(envelope.get("error", "server protocol failed"))[:500].encode()
+                else:
+                    payload = envelope.get("result")
+                    if not isinstance(payload, dict) or not isinstance(payload.get("content"), list):
+                        raise ValueError("invalid tools/call envelope")
+                    delivery_bytes = result_text(payload).encode()
+                    if payload.get("isError") is True:
+                        mcp_refusal = "REFUSED MCP_TOOL_ERROR: "
+            except (UnicodeError, ValueError, TypeError, KeyError) as error:
+                mcp_refusal = "REFUSED MCP_PROTOCOL_ERROR: "
+                delivery_bytes = str(error)[:500].encode()
+        output, omitted_bytes = normalize_output_delivery(delivery_bytes,
+            total_bytes=len(delivery_bytes) if mcp_server is not None else result.output_total_bytes,
             replacements={str(self.run_dir / "shell-home"): "<scratch>",
                           str(self.run_dir): "<run>", str(Path.home()): "<home>"})
         observation = (f"$ {command[:200]}\nexit {'timeout' if result.timed_out else result.exit_code} | "
@@ -328,6 +374,9 @@ class ShellTool:
         if custom is not None:
             observation = (f"{name} exit {'timeout' if result.timed_out else result.exit_code} | "
                            f"{result.wall_seconds:.2f}s\n")
+        if mcp_server is not None:
+            observation = (mcp_refusal or "") + observation + (
+                f"external content from MCP server {mcp_server.name}; untrusted\n")
         if result.timed_out:
             observation = "REFUSED TIMEOUT: command exceeded its wall limit\n" + observation
         head = observation

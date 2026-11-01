@@ -79,14 +79,14 @@ DEFAULT_STAGE_EXIT_ACTIONS = {
 
 _TRUTHY = frozenset({"on", "1", "true", "yes"})
 _OPTIONAL_SECTIONS = frozenset({
-    "optional", "advice", "playbook", "history", "history_ledger", "diagnostic", "scratch",
+    "optional", "advice", "playbook", "history", "history_ledger", "diagnostic", "scratch", "skill_bodies",
 })
 _PROTECTED_SECTIONS = frozenset({"required", "completion", "contract", "terminal"})
 _LOW_RELEVANCE_TOOLS = frozenset({
     "help", "status", "job_status", "job_output", "job_kill", "abstain",
 })
 _CORE_TOOLS = frozenset({
-    "read", "grep", "edit", "str_replace", "file_create", "file_delete", "file_move", "probe", "run_tests", "typed_test_writer", "authored_check", "localize",
+    "read", "grep", "skill_load", "edit", "str_replace", "file_create", "file_delete", "file_move", "probe", "run_tests", "typed_test_writer", "authored_check", "localize",
     "localization_frontier", "question_gate", "requirement_table", "done",
 })
 TRIM_ORDER = ("least_relevant_tools", "optional_sections", "defer")
@@ -689,7 +689,10 @@ def apply_budget(
             break
         index, section, _ = sorted(removable, key=lambda row: (row[1] != "optional", -row[2]))[0]
         dropped_sections.append(section)
-        after_messages.pop(index)
+        removed = after_messages.pop(index)
+        if section == "skill_bodies":
+            from kernel_skills import note_budget_omission
+            note_budget_omission(after_messages, removed)
     body["tools"] = selected
     body["messages"] = after_messages
     after_request_bytes = _wire_bytes(body)
@@ -786,7 +789,7 @@ def apply_budget(
 
 
 _DIET_PROTECTED_SECTIONS = frozenset({
-    "system_prompt", "task", "stateframe", "settled_state", "menus",
+    "system_prompt", "task", "stateframe", "skills", "settled_state", "menus",
     "completion_contract", "continuation_limits", "stage_evidence",
 })
 
@@ -1306,9 +1309,13 @@ def _graceful_trim_optional_messages(
             ]
             if not candidates:
                 break
-            index, _size, section = max(candidates, key=lambda row: (row[1], -row[0]))
+            index, _size, section = max(
+                candidates, key=lambda row: (row[2] == "skill_bodies", row[1], -row[0]))
             dropped.append(section)
             removed = messages.pop(index)
+            if section == "skill_bodies":
+                from kernel_skills import note_budget_omission
+                note_budget_omission(messages, removed)
             if not exact:
                 accounting.remove(removed)
         if exact or accounting is None or accounting.verify(body):

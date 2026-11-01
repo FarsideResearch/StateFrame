@@ -2442,7 +2442,7 @@ _PROBE_TOOL = {"type": "function", "function": {
         "required": ["obligation", "code"]}}}
 
 TOOLS.append(SHELL_SCHEMA)
-from kernel_agent_schemas import BUILTIN_SCHEMAS
+from kernel_agent_schemas import BUILTIN_SCHEMAS  # noqa: E402 - schemas follow the base menu
 TOOLS.extend(BUILTIN_SCHEMAS)
 
 # Tool calls accept an optional `why`: one declared line
@@ -2636,7 +2636,7 @@ def _parse_r1_tool_calls(content: str) -> list:
     keys fill earlier gaps. Never raises; [] when nothing matches."""
     _TOOLS = ("grep", "read", "edit", "str_replace", "insert_before", "authored_check", "file_create", "file_delete", "file_move", "shell",
                "replace_module", "run_tests", "reproduce", "test", "probe", "done",
-               "where_defined", "who_calls", "references")
+               "where_defined", "who_calls", "references", "skill_load")
     # Fix round (rv_figure_it_out_REPORT.md finding 3): the three figure_it_out
     # operator names must only be recognized -- and so only turned into native
     # calls from this parser -- when STATEFRAME_FIGURE_IT_OUT is actually on.
@@ -6200,6 +6200,13 @@ def work(d, *, resume=None):
         _agent_tools = agent_tools_service()
         if _agent_tools is not None:
             _agent_tools.bind()
+            omitted = _agent_tools.shell.spec.get("mcp_omitted", ())
+            if omitted:
+                from kernel_mcp_tools import omission_note
+                note = omission_note(omitted)
+                if note:
+                    msgs[1]["content"] += "\n\n" + note
+                    baseline_messages[1]["content"] += "\n\n" + note
         created_this_run: set = set()
         action_anchor = len(msgs)     # conversation index just after the last real ACTION
         last_surgery_step = -99       # cooldown so back-to-back surgeries cannot thrash
@@ -7911,9 +7918,9 @@ def work(d, *, resume=None):
                                          if _frame_routes.ROUTES_ACTIVE else None)
                                 before_commit = None
                                 if route is not None and not _route_escalated:
-                                    from kernel_frame_routes import RouteEscalation, escalation_target
-                                    custom_writes = {name for name, tool in getattr(
-                                        _agent_tools, "custom", {}).items() if tool.writes == "workspace"}
+                                    from kernel_frame_routes import (RouteEscalation, escalation_target,
+                                                                     workspace_write_tools)
+                                    custom_writes = workspace_write_tools(_agent_tools)
 
                                     def before_commit(batch):
                                         target = escalation_target(route, batch,
@@ -8026,9 +8033,10 @@ def work(d, *, resume=None):
                                 calls = decision.calls
                                 content = ""
                             else:
-                                custom_writes = ({name for name, tool in getattr(
-                                    _agent_tools, "custom", {}).items() if tool.writes == "workspace"}
-                                    if getattr(first_capture, "frame_route", None) is not None else set())
+                                from kernel_frame_routes import workspace_write_tools
+                                custom_writes = (workspace_write_tools(_agent_tools)
+                                                 if getattr(first_capture, "frame_route", None) is not None
+                                                 else frozenset())
                                 _route_target = (escalation_target(getattr(first_capture, "frame_route", None), calls,
                                                             custom_writes=custom_writes)
                                           if not _route_escalated and native_batch is None else None)

@@ -557,12 +557,16 @@ def _child() -> None:
     body, encoding = encode_request(wire, gzip_enabled=packet.get("gzip") is True)
     identity, identity_headers = encode_request(wire, gzip_enabled=False)
     tracker = _AbortiveConnectionTracker()
-    handlers = [_AbortiveHTTPHandler(tracker), _AbortiveHTTPSHandler(tracker)]
     if "route_allow_remote" in packet:
         _require_routed_local(packet["endpoint"], packet["route_allow_remote"])
-        handlers.append(urllib.request.ProxyHandler({}))
-        handlers.append(_RoutedRedirects(packet["route_allow_remote"]))
-    opener = urllib.request.build_opener(*handlers)
+        opener = urllib.request.build_opener(
+            urllib.request.ProxyHandler({}),
+            _AbortiveHTTPHandler(tracker), _AbortiveHTTPSHandler(tracker),
+            _RoutedRedirects(packet["route_allow_remote"]))
+    else:
+        opener = urllib.request.build_opener(
+            urllib.request.ProxyHandler({}),
+            _AbortiveHTTPHandler(tracker), _AbortiveHTTPSHandler(tracker))
     response_complete = False
     attempts: list[dict[str, object]] = []
 

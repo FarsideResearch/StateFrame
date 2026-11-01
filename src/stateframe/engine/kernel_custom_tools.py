@@ -37,6 +37,14 @@ def _file_digest(path: Path) -> str:
     return digest.hexdigest()
 
 
+def resolve_executable(argv: Sequence[str], where: str) -> Path:
+    """Pin the executable selected by the host PATH, shared by trusted tools."""
+    executable = shutil.which(argv[0]) if not Path(argv[0]).is_absolute() else argv[0]
+    if not executable or not Path(executable).is_file() or not os.access(executable, os.X_OK):
+        _fail(where, "argv", "executable not found")
+    return Path(executable).resolve()
+
+
 def _canonical(value: object) -> bytes:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
 
@@ -237,6 +245,8 @@ def load_tool_files(paths: Sequence[Path], *, builtin_names: frozenset[str],
             if path.stat().st_size > 1 << 20:
                 _fail(str(path), "tools", "file exceeds 1 MiB")
             raw = path.read_bytes()
+            if len(raw) > 1 << 20:
+                _fail(str(path), "tools", "file exceeds 1 MiB")
             document = json.loads(raw, parse_constant=_json_constant, object_pairs_hook=_json_object)
         except CustomToolError:
             raise
@@ -277,10 +287,7 @@ def load_tool_files(paths: Sequence[Path], *, builtin_names: frozenset[str],
                         _fail(where, "argv", "placeholder properties must be required")
             if PLACEHOLDER.fullmatch(argv[0]):
                 _fail(where, "argv", "executable cannot be a placeholder")
-            executable = shutil.which(argv[0]) if not Path(argv[0]).is_absolute() else argv[0]
-            if not executable or not Path(executable).is_file() or not os.access(executable, os.X_OK):
-                _fail(where, "argv", "executable not found")
-            executable = Path(executable).resolve()
+            executable = resolve_executable(argv, where)
             network = definition.get("network", "none")
             if not isinstance(network, str) or network not in NETWORK_ORDER:
                 _fail(where, "network", "expected none, loopback, or full")

@@ -208,7 +208,7 @@ def _http_tokenize(content: str, url: str, *, deadline: float | None = None,
             raise TimeoutError("tokenizer request deadline expired")
         timeout = min(timeout, remaining)
     if route_allow_remote is None:
-        opener = urllib.request.urlopen
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
     else:
         from kernel_frame_routes import require_local
         require_local(url, allow_remote=route_allow_remote)
@@ -218,8 +218,8 @@ def _http_tokenize(content: str, url: str, *, deadline: float | None = None,
                 require_local(newurl, allow_remote=route_allow_remote)
                 return super().redirect_request(req, fp, code, msg, headers, newurl)
 
-        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), RoutedRedirects()).open
-    with opener(request, timeout=timeout) as response:
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), RoutedRedirects())
+    with opener.open(request, timeout=timeout) as response:
         raw = response.read(_MAX_TOKENIZE_RESPONSE_BYTES + 1)
     if len(raw) > _MAX_TOKENIZE_RESPONSE_BYTES:
         raise ValueError("oversized tokenizer response")
@@ -663,6 +663,8 @@ SECTION_NAMES = (
     "system_prompt",
     "task",
     "stateframe",
+    "skills",
+    "skill_bodies",
     "settled_state",
     "ship_tree",
     "failure_packet",
@@ -690,45 +692,45 @@ STAGE_SECTION_ALLOWLIST = {
     # tool ceilings, but never apply an S1 section policy to that request.
     "FREE": frozenset(SECTION_NAMES),
     "S1": frozenset({
-        "system_prompt", "task", "stateframe", "settled_state", "ship_tree",
+        "system_prompt", "task", "stateframe", "settled_state", "ship_tree", "skill_bodies", "skills",
         "failure_packet", "environment_state", "get_sure_state",
         "coordination_ledger", "passive_conclusions", "menus",
         "completion_contract", "continuation_limits", "stage_evidence", "file_excerpts",
     }),
     "S2": frozenset({
-        "system_prompt", "task", "stateframe", "settled_state", "failure_packet",
+        "system_prompt", "task", "stateframe", "settled_state", "failure_packet", "skill_bodies", "skills",
         "environment_state", "get_sure_state", "menus", "completion_contract",
         "continuation_limits", "stage_evidence", "file_excerpts", "file_reads",
     }),
     "S3": frozenset({
-        "system_prompt", "task", "stateframe", "failure_packet",
+        "system_prompt", "task", "stateframe", "failure_packet", "skill_bodies", "skills",
         "environment_state", "get_sure_state", "menus", "completion_contract",
         "continuation_limits", "stage_evidence", "file_excerpts",
     }),
     "S4": frozenset({
-        "system_prompt", "task", "stateframe", "settled_state", "environment_state",
+        "system_prompt", "task", "stateframe", "settled_state", "environment_state", "skill_bodies", "skills",
         "get_sure_state", "menus", "completion_contract", "continuation_limits",
         "stage_evidence", "passive_conclusions", "file_excerpts",
     }),
     "S5": frozenset({
-        "system_prompt", "task", "stateframe", "settled_state", "environment_state",
+        "system_prompt", "task", "stateframe", "settled_state", "environment_state", "skill_bodies", "skills",
         "get_sure_state", "menus", "completion_contract", "continuation_limits",
         "stage_evidence", "passive_conclusions", "file_excerpts",
     }),
     "S6": frozenset({
-        "system_prompt", "task", "stateframe", "settled_state", "environment_state",
+        "system_prompt", "task", "stateframe", "settled_state", "environment_state", "skill_bodies", "skills",
         "get_sure_state", "menus", "completion_contract", "continuation_limits",
         "stage_evidence", "passive_conclusions", "file_excerpts",
     }),
     "S7": frozenset({
-        "system_prompt", "task", "stateframe", "settled_state", "environment_state",
+        "system_prompt", "task", "stateframe", "settled_state", "environment_state", "skill_bodies", "skills",
         "get_sure_state", "menus", "completion_contract", "continuation_limits",
         "stage_evidence", "passive_conclusions", "file_excerpts",
     }),
 }
 
 _PROTECTED_SECTIONS = frozenset({
-    "system_prompt", "task", "stateframe", "settled_state", "menus",
+    "system_prompt", "task", "stateframe", "skills", "settled_state", "menus",
     "completion_contract", "continuation_limits", "stage_evidence",
 })
 _READ_EVIDENCE_SECTIONS = frozenset({"file_excerpts", "file_reads"})
@@ -765,7 +767,7 @@ def duplicated_source_eviction_enabled(
 
 _DROP_ORDER = (
     # Preserve the required eviction priority; reads are a separate last resort.
-    "history_ledger", "passive_conclusions", "coordination_ledger",
+    "skill_bodies", "history_ledger", "passive_conclusions", "coordination_ledger",
     "get_sure_state", "environment_state", "ship_tree", "failure_packet",
 )
 _OPTIONAL_EXPLICIT_SECTIONS = frozenset({
@@ -3084,6 +3086,9 @@ def apply_diet(
                 and not _is_protected_message(message, protected_contents, protected_messages, required_source_paths)):
             dropped_sections.append(section)
             dropped_items.append(f"{section}:{index}")
+            if section == "skill_bodies":
+                from kernel_skills import note_budget_omission
+                note_budget_omission(kept, message)
             continue
         kept.append(message)
 
@@ -3135,11 +3140,18 @@ def apply_diet(
                             and not _is_protected_message(
                                 message, protected_contents, protected_messages,
                                 required_source_paths))
+        removed_skill_messages = [message for index, message in enumerate(after["messages"])
+                                  if section_name(message, index) == "skill_bodies"
+                                  and not _is_protected_message(
+                                      message, protected_contents, protected_messages, required_source_paths)]
         after["messages"] = [
             message for index, message in enumerate(after["messages"])
             if (section_name(message, index) != section
                     or _is_protected_message(message, protected_contents, protected_messages, required_source_paths))
         ]
+        for removed_skill in removed_skill_messages:
+            from kernel_skills import note_budget_omission
+            note_budget_omission(after["messages"], removed_skill)
         try:
             request_tokens_after = measure_after(after)
         except _MeasurementModeChanged:
