@@ -21,8 +21,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-
-from kernel_http_fallback import send_with_gzip_fallback
+from typing import TypeVar
 
 MAX_RESPONSE_BYTES = 16 * 1024 * 1024
 MAX_ERROR_BYTES = 8 * 1024
@@ -297,6 +296,22 @@ def request_bytes(wire: bytes, endpoint: str, key: str, *,
 
 REQUEST_GZIP_ENV = "STATEFRAME_HTTP_GZIP"
 REQUEST_GZIP_MIN_BYTES = 32 * 1024
+_Response = TypeVar("_Response")
+
+
+def send_with_gzip_fallback(
+        send: Callable[[bytes, dict[str, str]], _Response],
+        body: bytes, headers: dict[str, str], identity: bytes,
+        identity_headers: dict[str, str],
+        on_refused: Callable[[urllib.error.HTTPError], bool]) -> _Response:
+    """Retry only the first HTTP 415 to a request actually encoded as gzip."""
+    try:
+        return send(body, headers)
+    except urllib.error.HTTPError as error:
+        if (error.code != 415 or headers.get("Content-Encoding") != "gzip"
+                or not on_refused(error)):
+            raise
+    return send(identity, identity_headers)
 
 
 def request_gzip_enabled(environ: dict[str, str] | None = None) -> bool:

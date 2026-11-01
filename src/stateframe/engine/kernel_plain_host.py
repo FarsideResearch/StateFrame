@@ -33,7 +33,7 @@ from kernel_plain_contracts import (
 )
 from kernel_plain_hooks import HookSettings, PlainHooks
 from kernel_plain_http import AbortiveHTTPTransport
-from kernel_http_fallback import send_with_gzip_fallback
+from kernel_bounded_http import send_with_gzip_fallback
 from kernel_plain_loop import (
     OUT_CAP, TOOLS, Limits, ProviderHTTPError, ProviderTransportError, run_loop,
 )
