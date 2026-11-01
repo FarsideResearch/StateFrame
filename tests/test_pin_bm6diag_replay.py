@@ -7,10 +7,11 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
-from kernel_read_exec import dispatch_live_read, execute_read, record_serialized_read_pages
+from kernel_read_exec import dispatch_live_read, execute_read
+from kernel_final_wire_allocation import publish_code_bookmark_transition
 from kernel_read_lockout import append_frame_line
 from kernel_request_tool_surface import _request_tool_floor_schemas
-from kernel_stateframe_runtime import StateFrameRuntime
+from kernel_stateframe_runtime import StateFrameRuntime, note_provider_request
 from kernel_tool_call_loop_breaker import UnboundedProgressWatch, stop_unbounded_no_progress
 
 
@@ -66,7 +67,8 @@ def _case(runtime, case, carry=None):
     frame = case["frame"]["state"]["framefit5"]
     runtime._framefit_action_context = {"framefit5": frame}
     runtime.edit_contract = {"edit_authority": case["frame"]["state"]["edit_authority"]}
-    runtime._code_bookmark_carry = list(carry if carry is not None else frame["code_bookmarks"])
+    publish_code_bookmark_transition(
+        runtime, (True, list(carry if carry is not None else frame["code_bookmarks"])))
     runtime.current_request_id = case["receipts"][0]["request_id"]
 
 
@@ -86,12 +88,16 @@ def _menu(runtime, case):
     runtime.available_tools = offered
     final_names, _schemas, _digest = _request_tool_floor_schemas(runtime, offered)
     assert ("read" in final_names) == ("read" in names)
+    if runtime.native_batch is None:
+        note_provider_request(runtime, messages)
     return names, json.dumps({"messages": messages, "tools": tools},
                              separators=(",", ":")).encode()
 
 
 def _prime_pages(runtime, recorded):
-    runtime._frame_budget_request_count = 12
+    for _ in range(11):
+        note_provider_request(runtime, [])
+    replies = []
     for prior in recorded["prior_reads"]:
         path = prior["path"]
         target = runtime.owner.root / path
@@ -104,7 +110,8 @@ def _prime_pages(runtime, recorded):
         assert delivery["revision"] == prior["revision"]
         assert delivery["effective_range"] == prior["effective_range"]
         assert delivery["requested_range"] == prior["requested_range"]
-        record_serialized_read_pages(runtime, [{"role": "tool", "content": text}], 12)
+        replies.append({"role": "tool", "content": text})
+    note_provider_request(runtime, replies)
 
 
 def _dispatch(runtime, case, index):
@@ -112,7 +119,6 @@ def _dispatch(runtime, case, index):
     path = case["calls"][index]["path"]
     runtime.current_request_id = (row["request_id"] if row is not None else
                                   f"request-{case['request']}-action-{index + 1}")
-    runtime._frame_budget_request_count = case["request"]
     result, observation, _source, delivery = dispatch_live_read(
         runtime.owner.root, runtime.owner.root / path, path, path, 0,
         args=case["calls"][index], measurement=runtime,
@@ -149,6 +155,7 @@ def _replay(tmp_path, monkeypatch):
                  if previous is not None else None)
         _case(runtime, case, carry=carry)
         names, wire = _menu(runtime, case)
+        assert runtime._frame_budget_request_count == case["request"]
         assert "read" in names and b"[Read lockout]" not in wire
         assert runtime._code_bookmarks_active is True
         assert case["frame"]["state"]["framefit5"]["code_bookmarks"]
@@ -194,7 +201,6 @@ def test_default_rereads_still_stall_in_bounded_requests(tmp_path, monkeypatch):
         runtime.current_request_id = request_id
         names, _ = _menu(runtime, case)
         if "read" in names:
-            runtime._frame_budget_request_count = 16 + requests
             path = case["calls"][0]["path"]
             result, _text, _source, delivery = dispatch_live_read(
                 runtime.owner.root, runtime.owner.root / path, path, path, 0,

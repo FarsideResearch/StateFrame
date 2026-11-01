@@ -2713,6 +2713,14 @@ def _authored_candidate_revision(runtime: object) -> str | None:
     return value or None
 
 
+def note_provider_request(runtime: object, messages: Sequence[Mapping[str, object]]) -> None:
+    """Advance the delivered-request clock on every qualified provider path."""
+    from kernel_read_exec import record_serialized_read_pages
+
+    runtime._frame_budget_request_count = getattr(runtime, "_frame_budget_request_count", 0) + 1
+    record_serialized_read_pages(runtime, messages, runtime._frame_budget_request_count)
+
+
 class StateFrameRuntime:
     def __setattr__(self, name: str, value: object) -> None:
         """Keep heuristic stop outcomes advisory while hard budgets remain authoritative."""
@@ -22396,7 +22404,6 @@ class StateFrameRuntime:
                 gear_blocks=result["gear_accounting"]["blocks"],
                 dropped=result["dropped"],
             )
-            self._frame_budget_request_count += 1
         if (provider_request and isinstance(tools, list)
                 and getattr(self, "stateframe_readiness_authority_mode", "off") == "on"
                 and getattr(self, "_readiness_full_tools", None)
@@ -24484,9 +24491,6 @@ class StateFrameRuntime:
                 raise RuntimeError("frame-only final menu binding failed") from error
         if provider_request:
             self._record_empirical_serialized_sources(prepared, tools)
-            from kernel_read_exec import record_serialized_read_pages
-            record_serialized_read_pages(
-                self, prepared, self._frame_budget_request_count)
         if provider_request and self.stateframe_trailing_panels_mode == "on":
             from kernel_cache_layout import track_tool_menu
             track_tool_menu(self, tools, request_id=capture.request_id)
@@ -24534,6 +24538,8 @@ class StateFrameRuntime:
                     dispatch=False,
                 )
                 raise RuntimeError("frame-only request final validation failed") from error
+        if provider_request and overflow is None:
+            note_provider_request(self, prepared)
         if framefit_on:
             prepared_event = emit_request_prepared_event()
             if (delivery_manifest_rendered

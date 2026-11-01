@@ -658,6 +658,7 @@ def test_watch_charges_one_unchanged_native_batch_and_restores_tail():
     legacy = watch.snapshot()
     legacy["schema"] = "unbounded-progress-watch/1"
     del legacy["batch_tail_pending"]
+    del legacy["seen_filter"]
     assert UnboundedProgressWatch.from_snapshot(legacy).streak == 6
 
 
@@ -697,13 +698,14 @@ def test_watch_charges_early_unchanged_reads_in_completed_mixed_batch():
     assert watch.streak == 4
 
 
-def test_bookmarks_off_watch_snapshot_uses_release_schema(monkeypatch):
+def test_bookmarks_off_watch_snapshot_persists_identity_filter(monkeypatch):
     monkeypatch.setenv("STATEFRAME_CODE_BOOKMARKS", "off")
     watch = UnboundedProgressWatch()
-    assert watch.snapshot() == {
-        "schema": "unbounded-progress-watch/1", "threshold": 32,
-        "streak": 0, "seen": [], "receipt_cursor": 0, "last_boundary": None,
-    }
+    snapshot = watch.snapshot()
+    assert snapshot["schema"] == "unbounded-progress-watch/3"
+    assert snapshot["seen"] == []
+    assert "batch_tail_pending" not in snapshot
+    assert UnboundedProgressWatch.from_snapshot(snapshot).snapshot() == snapshot
 
 
 def test_same_path_with_two_revisions_is_not_one_unchanged_batch(tmp_path):

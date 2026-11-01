@@ -68,6 +68,12 @@ Only the default 65,536-token slot is measured on long runs; other sizes are tes
 
 A profile is a JSON file (`"schema": "stateframe-product-profile/1"`) whose `switches` map sets the engine's `STATEFRAME_*` switches for a run. The default is the one profile shipped in `src/stateframe/profiles/`. `--profile NAME_OR_PATH` uses another. Many switches ship disabled; turning one on is a profile edit. Engine settings come only from the profile: the engine child drops inherited `STATEFRAME_*` variables, `--test-env` refuses them, and the engine refuses any switch it has no reader for.
 
+### Repeated source reads
+
+The shipped profile keeps source bookmarks on. A source page that was delivered in an earlier request can be returned as an unchanged notice when the same default read is repeated at the same revision. A completed batch made entirely of proved unchanged reads costs one no-progress watch unit.
+
+`STATEFRAME_READ_LOCKOUT=on` is an optional profile switch; it is off by default and requires bookmarks. After a completed request contains only proved unchanged source reads, the current failed check must still apply, an editable bookmarked source must be visible, and an edit and check route must be available. The next request then hides source-read routes and shows the unchanged-read reason. The restriction lasts at most two requests and releases sooner when new evidence appears or the repair route disappears. At the known 31/32 no-progress watch boundary, the run can stop before this restriction takes effect.
+
 ## Checkpoints and resume
 
 Resume replays the recorded run by default. Checkpoints for a faster restore are off by default in this release (`STATEFRAME_CHECKPOINT=save` turns them on: about one every 5 requests, the two newest kept, signed with a per-install key in `~/.stateframe/checkpoint.key`). See "Checkpoint settings" in the README for the switches. When a run finishes for good (its result was submitted, or it stopped on an error that would only repeat, so resume would refuse it), StateFrame removes its checkpoints and prints how much it freed; `--keep-checkpoints` (or `STATEFRAME_KEEP_CHECKPOINTS=1`) keeps them. Stopped, cancelled, killed and crashed runs always keep theirs.

@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Source bookmarks now number delivered pages on the shipped request path. Repeated unchanged source reads can return a notice, and a completed all-unchanged batch costs one no-progress watch unit. The optional read restriction remains off by default and is capped at two requests; see the running guide and known limitations.
+
 ## 0.1.0 preview
 
 First preview release.

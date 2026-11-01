@@ -23,7 +23,7 @@ from kernel_read_exec import _source_identity
 from kernel_read_lockout import append_frame_line
 from kernel_reread_result_truth import result_note
 from kernel_stateframe_framefit5 import _serialize_state_message
-from kernel_stateframe_runtime import StateFrameRuntime
+from kernel_stateframe_runtime import StateFrameRuntime, note_provider_request
 
 
 FIXTURE = Path(__file__).parent / "fixtures" / "pin_bm5_b"
@@ -115,7 +115,8 @@ def _replayed_actions(recorded, checks, root):
         path = row["target_path"]
         runtime.owner.workspace_revision = row["workspace_revision"]
         runtime.current_request_id = row["request_id"]
-        runtime._frame_budget_request_count = _request_number(row["turn"], starts)
+        while getattr(runtime, "_frame_budget_request_count", 0) < _request_number(row["turn"], starts):
+            note_provider_request(runtime, [])
         note = result_note(runtime, _source_identity(runtime.owner.root,
                            runtime.owner.root / path), str(row["workspace_revision"]),
                            row["delivery"]["revision"], row["turn"])

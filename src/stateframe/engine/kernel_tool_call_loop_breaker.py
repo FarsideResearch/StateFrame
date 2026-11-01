@@ -6,6 +6,8 @@ silently discard the action that exposed the loop.
 """
 from __future__ import annotations
 
+import base64
+import binascii
 import hashlib
 import json
 import os
@@ -216,7 +218,8 @@ class UnboundedProgressWatch:
 
     Only host revision/evidence novelty resets the streak. Model text, repeated
     refusals, counters and timestamps never establish progress. Memory stays
-    bounded independently of run length; productive runs have no lifetime cap.
+    bounded independently of run length. Membership is conservative once the
+    digest filter saturates; there is no fixed run-length cap.
     """
 
     def __init__(self, *, threshold: int = 32) -> None:
@@ -225,22 +228,24 @@ class UnboundedProgressWatch:
         self.threshold = threshold
         self.streak = 0
         self._seen: dict[str, None] = {}
+        # Monotone membership prevents an old identity becoming new when the
+        # exact recent cache evicts it. False positives only undercount novelty.
+        self._seen_filter = bytearray(128 * 1024)
         self._receipt_cursor = 0
         self._last_boundary: int | None = None
         self._batch_tail_pending: str | None = None
 
     def snapshot(self) -> dict[str, object]:
-        """Persist hashes only, in eviction order, in the worker checkpoint."""
-        from kernel_code_bookmarks import enabled as bookmarks_enabled
-        bookmarks_on = bookmarks_enabled()
+        """Persist recent hashes and monotone membership in the worker checkpoint."""
         state = {
-            "schema": "unbounded-progress-watch/2" if bookmarks_on
-                      else "unbounded-progress-watch/1", "threshold": self.threshold,
+            "schema": "unbounded-progress-watch/3", "threshold": self.threshold,
             "streak": self.streak, "seen": list(self._seen),
             "receipt_cursor": self._receipt_cursor,
             "last_boundary": self._last_boundary,
+            "seen_filter": base64.b64encode(self._seen_filter).decode("ascii"),
         }
-        if bookmarks_on:
+        from kernel_code_bookmarks import enabled as bookmarks_enabled
+        if bookmarks_enabled():
             state["batch_tail_pending"] = self._batch_tail_pending
         return state
 
@@ -251,6 +256,8 @@ class UnboundedProgressWatch:
                 or (state.get("schema"), frozenset(state)) not in {
                     ("unbounded-progress-watch/1", frozenset(old_fields)),
                     ("unbounded-progress-watch/2", frozenset(old_fields | {"batch_tail_pending"})),
+                    ("unbounded-progress-watch/3", frozenset(old_fields | {"seen_filter"})),
+                    ("unbounded-progress-watch/3", frozenset(old_fields | {"batch_tail_pending", "seen_filter"})),
                 }):
             raise ValueError("invalid progress watch snapshot")
         tail = state.get("batch_tail_pending")
@@ -272,6 +279,20 @@ class UnboundedProgressWatch:
         watch._receipt_cursor = state["receipt_cursor"]
         watch._last_boundary = boundary
         watch._seen = dict.fromkeys(seen)
+        if state["schema"] == "unbounded-progress-watch/3":
+            encoded = state["seen_filter"]
+            try:
+                decoded = base64.b64decode(encoded, validate=True) if isinstance(encoded, str) else b""
+            except (ValueError, binascii.Error) as error:
+                raise ValueError("invalid progress watch identities") from error
+            if len(decoded) != len(watch._seen_filter):
+                raise ValueError("invalid progress watch identities")
+            watch._seen_filter[:] = decoded
+            if any(not watch._remember_filter(key) for key in seen):
+                raise ValueError("invalid progress watch identities")
+        else:
+            for key in seen:
+                watch._remember_filter(key)
         watch._batch_tail_pending = tail
         return watch
 
@@ -279,12 +300,26 @@ class UnboundedProgressWatch:
         key = hashlib.sha256(json.dumps(
             value, sort_keys=True, separators=(",", ":"), default=str,
         ).encode("utf-8")).hexdigest()
+        if self._remember_filter(key):
+            return False
         if key in self._seen:
             return False
         self._seen[key] = None
         if len(self._seen) > 4096:
             del self._seen[next(iter(self._seen))]
         return True
+
+    def _remember_filter(self, key: str) -> bool:
+        """Return whether a digest was probably seen, without ever forgetting it."""
+        digest = bytes.fromhex(key)
+        size = len(self._seen_filter) * 8
+        indexes = [int.from_bytes(digest[offset:offset + 4], "big") % size
+                   for offset in range(0, 20, 4)]
+        seen = all(self._seen_filter[index // 8] & (1 << (index % 8))
+                   for index in indexes)
+        for index in indexes:
+            self._seen_filter[index // 8] |= 1 << (index % 8)
+        return seen
 
     @staticmethod
     def _unchanged_read_batch(receipts: list[dict]) -> bool:

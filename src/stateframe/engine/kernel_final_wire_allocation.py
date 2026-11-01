@@ -287,10 +287,15 @@ def build_qualified_request(capture, runtime, body, *, endpoint, key, deadline=N
     # Internal candidate construction may have no enclosing adapter. It does
     # not grant transport admission; physical send requires a bound gate.
     capture._qualified_request_gate_passed = callable(gate)
-    active, carry = capture._code_bookmark_transition
+    publish_code_bookmark_transition(runtime, capture._code_bookmark_transition)
+    return record
+
+
+def publish_code_bookmark_transition(runtime, transition) -> None:
+    """Publish only the bookmarks sealed with the qualified request."""
+    active, carry = transition
     runtime._code_bookmarks_active = active
     runtime._code_bookmark_carry = carry
-    return record
 
 
 def qualify_final_wire_allocation(capture, runtime, body, preparation, *, deadline=None):
