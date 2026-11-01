@@ -5,6 +5,7 @@ import copy
 import ast
 from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import io
 import json
 import os
 from pathlib import Path
@@ -293,6 +294,44 @@ def test_routed_http_redirect_is_refused_on_actual_transport():
         server.server_close()
 
 
+def test_routed_chat_ignores_environment_proxy(monkeypatch):
+    from stateframe.engine import kernel_bounded_http
+
+    wire = b'{"model":"reader","messages":[]}'
+    with _post_server(lambda _headers, _raw: (200, b'{"ok":true}')) as (target, target_seen):
+        with _post_server(lambda _headers, _raw: (502, b"")) as (proxy, proxy_seen):
+            proxy_url = proxy.split("/v1/")[0]
+            for name in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy"):
+                monkeypatch.setenv(name, proxy_url)
+            for name in ("no_proxy", "NO_PROXY"):
+                monkeypatch.delenv(name, raising=False)
+            reply = kernel_bounded_http.request_bytes(
+                wire, target, "route-secret", deadline=time.monotonic() + 10,
+                socket_timeout=5, route_meta={"role": "read"})
+            assert reply == b'{"ok":true}'
+            assert len(target_seen) == 1
+            assert target_seen[0][1] == wire
+            assert target_seen[0][0]["authorization"] == "Bearer route-secret"
+            assert proxy_seen == []
+
+
+def test_routed_tokenize_ignores_environment_proxy(monkeypatch):
+    from stateframe.engine import kernel_request_diet
+
+    with _post_server(lambda _headers, _raw: (200, b'{"tokens":[1,2]}')) as (target, target_seen):
+        with _post_server(lambda _headers, _raw: (502, b"")) as (proxy, proxy_seen):
+            proxy_url = proxy.split("/v1/")[0]
+            for name in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy"):
+                monkeypatch.setenv(name, proxy_url)
+            for name in ("no_proxy", "NO_PROXY"):
+                monkeypatch.delenv(name, raising=False)
+            assert kernel_request_diet._http_tokenize(
+                "routed prompt", target, route_allow_remote=False) == [1, 2]
+            assert len(target_seen) == 1
+            assert json.loads(target_seen[0][1])["content"] == "routed prompt"
+            assert proxy_seen == []
+
+
 def test_source_replan_wrapper_forwards_route_options_on_every_path():
     # Regression: FrameFit (on in the shipped profile) wraps prepare with a fixed signature that
     # dropped forced_route/frozen_route_capture, so every routed second leg died with a TypeError.
@@ -444,20 +483,42 @@ def test_gzip_415_after_deadline_is_not_resent():
     wire = _large_wire()
 
     def delayed_refusal(_headers, _raw):
-        time.sleep(0.2)
+        time.sleep(1.1)
         return 415, b""
 
     with _post_server(delayed_refusal) as (endpoint, seen):
         # Invoke the same child directly so the parent's deadline watchdog cannot mask its
         # own decision after it receives the empty 415 response.
         packet = {"wire": wire.decode(), "endpoint": endpoint, "key": "",
-                  "deadline": time.monotonic() + 0.05, "socket_timeout": 5, "gzip": True}
+                  "deadline": time.monotonic() + 1, "socket_timeout": 5, "gzip": True}
         result = subprocess.run(
             [sys.executable, "-I", "-B", kernel_bounded_http.__file__, "--http-child"],
             input=json.dumps(packet).encode(), capture_output=True, timeout=5, check=False)
     assert result.returncode != 0
     diagnostic = json.loads(result.stderr)
-    assert diagnostic["error_type"] == "HTTPError"
-    assert diagnostic["http_status"] == 415
+    assert diagnostic["error_type"] == "TimeoutError"
+    assert len(seen) == 1
+    assert seen[0][0].get("content-encoding") == "gzip"
+
+
+def test_gzip_415_cleanup_expiry_prevents_identity_resend(monkeypatch):
+    from stateframe.engine import kernel_bounded_http
+
+    clock = [time.monotonic()]
+    monkeypatch.setattr(kernel_bounded_http, "time", SimpleNamespace(monotonic=lambda: clock[0]))
+    finish_all = kernel_bounded_http._AbortiveConnectionTracker.finish_all
+
+    def expire_during_cleanup(self):
+        finish_all(self)
+        clock[0] += 1
+
+    monkeypatch.setattr(kernel_bounded_http._AbortiveConnectionTracker,
+                        "finish_all", expire_during_cleanup)
+    with _post_server(lambda _headers, _raw: (415, b"")) as (endpoint, seen):
+        packet = {"wire": _large_wire().decode(), "endpoint": endpoint, "key": "",
+                  "deadline": clock[0] + 0.5, "socket_timeout": 5, "gzip": True}
+        monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(packet)))
+        with pytest.raises(TimeoutError, match="HTTP absolute deadline exceeded before send"):
+            kernel_bounded_http._child()
     assert len(seen) == 1
     assert seen[0][0].get("content-encoding") == "gzip"

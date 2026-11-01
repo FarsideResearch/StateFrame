@@ -891,7 +891,7 @@ def _probe_routes(options: RunOptions, printer=print, *, resume_roles: dict | No
     if os.environ.get("LLAMA_CPP_TOKENIZE_URL") and mismatched:
         raise RunError(f"LLAMA_CPP_TOKENIZE_URL is set while route {mismatched[0]} uses another model; set "
                        f"{mismatched[0]}.tokenizer or unset LLAMA_CPP_TOKENIZE_URL")
-    checked: set[tuple[str, str]] = set()
+    checked: set[tuple[str, str, str | None]] = set()
     slots_by_endpoint: dict[str, object] = {}
     # Resolve default-endpoint auto pins before constructing probe endpoints. The
     # resolved table may be inactive, and Endpoint construction can print a warning.
@@ -936,7 +936,7 @@ def _probe_routes(options: RunOptions, printer=print, *, resume_roles: dict | No
                 and sources.get("slot") == "default"):
             # A pin discovered on the default server is not a pin on this one.
             settings["slot"] = None
-        identity = (endpoint.base_url, endpoint.model)
+        identity = (endpoint.base_url, endpoint.model, endpoint.api_key_env)
         if identity not in checked:
             try:
                 probe = endpoint.probe()

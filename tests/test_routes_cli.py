@@ -5,7 +5,7 @@ import time
 import pytest
 
 from stateframe import cli, routes, runner
-from stateframe.endpoint import Endpoint
+from stateframe.endpoint import Endpoint, EndpointError
 from stateframe.scripted_endpoint import Script, make_handler
 from http.server import ThreadingHTTPServer
 from threading import Thread
@@ -202,6 +202,28 @@ def test_routed_key_reaches_child_without_entering_spec(servers, monkeypatch):
     runner._probe_routes(options, lambda *_: None)
     assert runner._child_env(options)["ROUTE_TEST_KEY"] == "secret-not-for-spec"
     assert "secret-not-for-spec" not in json.dumps(options._routes.public())
+
+
+def test_routes_with_distinct_key_envs_are_probed_and_failure_names_role(servers, monkeypatch):
+    default, _ = servers
+    monkeypatch.setenv("ROUTE_FIRST_KEY", "first-secret")
+    monkeypatch.setenv("ROUTE_SECOND_KEY", "second-secret")
+    checked = []
+
+    def probe(endpoint):
+        checked.append(endpoint.api_key_env)
+        if endpoint.api_key_env == "ROUTE_SECOND_KEY":
+            raise EndpointError("authentication refused")
+        return {"model_found": True}
+
+    monkeypatch.setattr(Endpoint, "probe", probe)
+    monkeypatch.setattr(Endpoint, "get_slots", lambda _self: [])
+    options = runner.RunOptions(repo=None, task="task", endpoint=Endpoint(default, "base"),
+                                route_cli=["read.api_key_env=ROUTE_FIRST_KEY",
+                                           "plan.api_key_env=ROUTE_SECOND_KEY"])
+    with pytest.raises(runner.RunError, match="route plan authentication refused"):
+        runner._probe_routes(options, lambda *_: None)
+    assert checked == ["ROUTE_FIRST_KEY", "ROUTE_SECOND_KEY"]
 
 
 @pytest.mark.parametrize("source", ["test_env", "extra_env"])

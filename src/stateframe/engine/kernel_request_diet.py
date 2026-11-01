@@ -218,7 +218,7 @@ def _http_tokenize(content: str, url: str, *, deadline: float | None = None,
                 require_local(newurl, allow_remote=route_allow_remote)
                 return super().redirect_request(req, fp, code, msg, headers, newurl)
 
-        opener = urllib.request.build_opener(RoutedRedirects()).open
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), RoutedRedirects()).open
     with opener(request, timeout=timeout) as response:
         raw = response.read(_MAX_TOKENIZE_RESPONSE_BYTES + 1)
     if len(raw) > _MAX_TOKENIZE_RESPONSE_BYTES:

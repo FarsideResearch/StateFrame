@@ -121,7 +121,7 @@ stateframe run --repo ... --task "..." --route read.endpoint=http://127.0.0.1:18
 
 Watch for:
 
-- **Each role's server is checked at start**: its model must be listed, a pinned `slot` must exist, and its slot must be at least the run's context size (65,536 tokens by default).
+- **Each role's server is checked at start**, as far as it reports: its model must be among the models it lists, a pinned `slot` must be one of the slots it reports, and its slot must be at least the run's context size (65,536 tokens by default). A server that lists no models or reports no slots is not checked on that point.
 - **Mixing local and remote is per role.** A remote endpoint needs `allow_remote = true` on that role (or `STATEFRAME_ALLOW_REMOTE_ENDPOINT=1` for all) and prints a warning that your code will leave the machine. A redirect to a remote host is refused unless that role allows remote endpoints.
 - **Each role counts tokens on its own server** unless you set its `tokenizer`. If `LLAMA_CPP_TOKENIZE_URL` is set and a role uses another model, the run is refused until that role names its own `tokenizer` (or you unset the variable), so one model's counts never size another model's prompt.
 - **A small read model must still follow the tool protocol.** Most requests in a routed run are `read` requests, so a model that answers without a tool call, or rambles to its token limit, costs more time than it saves. In one check, a 1B read model turned a 3-request fix into a 38-request one. Cap `read.max_tokens` (for example 2048) and try your read model on a short task before a long one.

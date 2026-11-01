@@ -560,6 +560,7 @@ def _child() -> None:
     handlers = [_AbortiveHTTPHandler(tracker), _AbortiveHTTPSHandler(tracker)]
     if "route_allow_remote" in packet:
         _require_routed_local(packet["endpoint"], packet["route_allow_remote"])
+        handlers.append(urllib.request.ProxyHandler({}))
         handlers.append(_RoutedRedirects(packet["route_allow_remote"]))
     opener = urllib.request.build_opener(*handlers)
     response_complete = False
@@ -575,7 +576,10 @@ def _child() -> None:
                    "http_status": None}
         attempts.append(attempt)
         try:
-            with opener.open(request, timeout=packet["socket_timeout"]) as response:
+            remaining = packet["deadline"] - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError("HTTP absolute deadline exceeded before send")
+            with opener.open(request, timeout=min(packet["socket_timeout"], remaining)) as response:
                 attempt["http_status"] = response.status
                 if response.length is not None and response.length > MAX_RESPONSE_BYTES:
                     raise ValueError("HTTP response exceeds bounded transport limit")
