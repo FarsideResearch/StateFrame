@@ -199,11 +199,13 @@ def kill_launch_unit(process, family: Descendants | None = None,
     table = family.table if family is not None else ProcessTable()
     family = family if family is not None else Descendants(process.pid, table)
     family.update(table.snapshot())
-    try:
-        if os.getpgid(process.pid) == process.pid:
+    leader = family.members.get(process.pid)
+    current = table.identity(process.pid) if leader is not None else None
+    if current is not None and current.start == leader.start and not current.zombie and current.pgid == process.pid:
+        try:
             os.killpg(process.pid, signal.SIGKILL)
-    except (ProcessLookupError, PermissionError):
-        pass
+        except (ProcessLookupError, PermissionError):
+            pass
     try:
         process.kill()
     except ProcessLookupError:

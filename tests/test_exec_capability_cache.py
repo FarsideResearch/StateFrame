@@ -116,3 +116,73 @@ def test_cached_digest_matches_fresh_expansion(directories):
     fresh = _build(directories)
     assert cached.as_dict() == fresh.as_dict()
     assert cached.digest() == fresh.digest()
+
+
+def test_directory_scan_admits_exactly_what_is_file_and_x_ok_admit(tmp_path):
+    import os
+    target = _executable(tmp_path, "real")
+    _executable(tmp_path, "tool")
+    (tmp_path / "linked").symlink_to(target)
+    (tmp_path / "dangling").symlink_to(tmp_path / "missing")
+    (tmp_path / "loop").symlink_to(tmp_path / "loop")
+    (tmp_path / "plain.txt").write_text("not executable")
+    (tmp_path / "subdir").mkdir()
+    (tmp_path / "dirlink").symlink_to(tmp_path / "subdir")
+    expected = tuple(path for path in sorted(tmp_path.iterdir()) if path.is_file() and os.access(path, os.X_OK))
+    key, executables = capability._directory_executables(tmp_path)
+    assert executables == expected
+    assert [name for name, _, _ in key[2]] == ["linked", "real", "tool"]
+
+
+def test_directory_scan_fingerprints_link_and_target_separately(tmp_path):
+    first = _executable(tmp_path, "first")
+    second = _executable(tmp_path, "second")
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    link = bin_dir / "tool"
+    link.symlink_to(first)
+    (name, target, own), = capability._directory_executables(bin_dir)[0][2]
+    assert name == "tool"
+    assert target == capability._file_fingerprint(first.stat())
+    assert own == capability._file_fingerprint(link.lstat()) != target
+    link.unlink()
+    link.symlink_to(second)
+    (_, retarget, _), = capability._directory_executables(bin_dir)[0][2]
+    assert retarget == capability._file_fingerprint(second.stat()) != target
+
+
+def test_directory_scan_skips_entries_whose_metadata_is_denied(tmp_path, monkeypatch):
+    # macOS protects some /usr/sbin entries: stat raises EACCES and Path.is_file says False.
+    # Skipping narrows authority; the entry never becomes a read root.
+    import errno
+    denied_entry = _executable(tmp_path, "protected")
+    kept = _executable(tmp_path, "tool")
+    (tmp_path / "linked").symlink_to(denied_entry)
+    original_lstat, original_stat = Path.lstat, Path.stat
+
+    def denied_lstat(path):
+        if path.name == "protected":
+            raise PermissionError(errno.EACCES, "denied", str(path))
+        return original_lstat(path)
+
+    def denied_stat(path, **kwargs):
+        if path.name in {"protected", "linked"}:
+            raise PermissionError(errno.EACCES, "denied", str(path))
+        return original_stat(path, **kwargs)
+    monkeypatch.setattr(Path, "lstat", denied_lstat)
+    monkeypatch.setattr(Path, "stat", denied_stat)
+    assert capability._directory_executables(tmp_path)[1] == (kept,)
+
+
+def test_directory_scan_skips_entries_that_vanish(tmp_path, monkeypatch):
+    import errno
+    _executable(tmp_path, "gone")
+    kept = _executable(tmp_path, "kept")
+    original = Path.lstat
+
+    def vanished(path):
+        if path.name == "gone":
+            raise FileNotFoundError(errno.ENOENT, "gone", str(path))
+        return original(path)
+    monkeypatch.setattr(Path, "lstat", vanished)
+    assert capability._directory_executables(tmp_path)[1] == (kept,)

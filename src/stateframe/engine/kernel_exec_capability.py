@@ -9,6 +9,7 @@ import json
 import math
 import os
 from pathlib import Path
+from stat import S_ISLNK, S_ISREG
 import sys
 from threading import Lock
 from types import MappingProxyType
@@ -255,16 +256,25 @@ def clear_shell_capability_cache() -> None:
 
 def _directory_executables(directory: Path) -> tuple[tuple, tuple[Path, ...]]:
     stat = directory.stat()
-    executables = tuple(path for path in sorted(directory.iterdir())
-                        if path.is_file() and os.access(path, os.X_OK))
     # File metadata detects edits in place, permission changes and shebang edits.
     # Link metadata also detects replacement even when its target stays the same.
-    files = []
-    for path in executables:
-        target = path.stat()
-        link = path.lstat()
+    # One lstat per entry, plus a stat only for links: the admission test (a regular file
+    # after following links, executable by us) reads the same snapshot the fingerprint records.
+    executables, files = [], []
+    for path in sorted(directory.iterdir()):
+        try:
+            link = path.lstat()
+            target = path.stat() if S_ISLNK(link.st_mode) else link
+        except OSError:
+            # Vanished, dangling, looping or unreadable metadata (macOS protects some /usr/sbin
+            # entries with EACCES): not admitted, as Path.is_file reports. Skipping only narrows
+            # authority; the entry is never a read root.
+            continue
+        if not S_ISREG(target.st_mode) or not os.access(path, os.X_OK):
+            continue
+        executables.append(path)
         files.append((path.name, _file_fingerprint(target), _file_fingerprint(link)))
-    return (directory, _file_fingerprint(stat), tuple(files)), executables
+    return (directory, _file_fingerprint(stat), tuple(files)), tuple(executables)
 
 
 def shell_capability(*, workspace, run_env_dir, scratch_home, network, writable,

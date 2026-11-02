@@ -125,6 +125,43 @@ def test_unkillable_survivor_is_reported(monkeypatch):
         _cleanup(process, child)
 
 
+def test_kill_launch_unit_never_signals_a_reused_group_leader(monkeypatch):
+    original = tracker.ProcessIdentity(43210, 1, 43210, 43210, (1, 0), False)
+    reused = tracker.ProcessIdentity(43210, 1, 43210, 43210, (2, 0), False)
+
+    class Table:
+        def __init__(self):
+            self.current = original
+
+        def identity(self, _pid):
+            return self.current
+
+        def snapshot(self):
+            return {43210: self.current}
+
+    class Process:
+        pid = 43210
+
+        def kill(self):
+            pass
+
+        def wait(self, timeout):
+            return 0
+
+        def poll(self):
+            return 0
+
+    table = Table()
+    family = tracker.Descendants(43210, table)
+    table.current = reused
+    signaled = []
+    monkeypatch.setattr(tracker.os, "getpgid", lambda pid: pid)
+    monkeypatch.setattr(tracker.os, "killpg", lambda pid, sig: signaled.append((pid, sig)))
+
+    assert tracker.kill_launch_unit(Process(), family) == ()
+    assert signaled == []
+
+
 # --- structural half: every sandbox launch module routes its kills through the helper ---
 
 def _launch_kill_violations(source: str) -> list[int]:
