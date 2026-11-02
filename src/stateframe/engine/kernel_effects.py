@@ -417,6 +417,9 @@ def effect_policy_for_run(
             if row.get("scoped_edits") is False
             else lambda path: (
                 path in editable
+                # Files admitted by opt-in edit scope widening during the run
+                # (react_repair EDIT_SCOPE_WIDENED_KEY); absent unless widened.
+                or path in row.get("_edit_scope_widened", ())
                 or (path not in original_paths and _is_product_path(path, row))
             )
         ),

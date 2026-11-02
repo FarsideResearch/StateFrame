@@ -46,7 +46,20 @@ def revision(source: str) -> str:
 
 
 def current_revision(path: pathlib.Path) -> str:
+    from kernel_scope_widen_guard import admitted, read as guarded_read
+    if admitted(path):
+        return revision(guarded_read(path).decode("utf-8"))
     return revision(path.read_text(encoding="utf-8"))
+
+
+def _read_source(path: pathlib.Path, *, nonpy: bool) -> str:
+    from kernel_scope_widen_guard import admitted, read as guarded_read
+    if admitted(path):
+        return guarded_read(path).decode(
+            "utf-8", errors="surrogateescape" if nonpy else "strict")
+    if nonpy:
+        return path.read_bytes().decode("utf-8", errors="surrogateescape")
+    return path.read_text(encoding="utf-8")
 
 
 _CANDIDATES: dict[str, dict[str, object]] = {}
@@ -243,6 +256,10 @@ def _replace_qualified_source(current: str, tree: ast.Module, target: str,
 
 
 def _atomic_write(path: pathlib.Path, source: str, *, errors: str | None = None) -> None:
+    from kernel_scope_widen_guard import admitted, write as guarded_write
+    if admitted(path):
+        guarded_write(path, source.encode("utf-8", errors=errors or "strict"))
+        return
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = None
     try:
@@ -287,8 +304,7 @@ def validate_and_publish(path: pathlib.Path, source: str, *, root: pathlib.Path 
             from kernel_tokenlab_nonpy_edits import emit
             emit(path, operation=prefix, outcome="REJECTED", reason=str(exc))
         return _reject(path, source, str(exc), prefix)
-    existing = (path.read_bytes().decode("utf-8", errors="surrogateescape")
-                if nonpy else path.read_text(encoding="utf-8")) if path.exists() else None
+    existing = _read_source(path, nonpy=nonpy) if path.exists() else None
     if existing == source:
         return f"{prefix} NO-OP: replacement is identical"
     from kernel_destructive_edit_guard import guard_write
@@ -354,9 +370,7 @@ def validated_str_replace(path: pathlib.Path, old_str: str, new_str: str, *,
             fact = _workspace_truth.exists(root, str(path), journal=journal)
             return "str_replace REJECTED: " + _workspace_truth.render_fact(fact)
         return f"str_replace REJECTED: {path.name} does not exist."
-    current = (path.read_bytes().decode("utf-8", errors="surrogateescape")
-               if _v21_nonpy_enabled(path)
-               else path.read_text(encoding="utf-8"))
+    current = _read_source(path, nonpy=_v21_nonpy_enabled(path))
     count = current.count(old_str)
     if count != 1:
         reason = ("old_str not found. Copy the exact current text (check whitespace)"

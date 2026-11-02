@@ -516,6 +516,34 @@ def product_revision_change_from_parent(runtime: object) -> tuple[bool, str, str
     return False, revision, "parent_product_revision_unavailable"
 
 
+def admit_widened_editable_path(runtime: object, path: str) -> bool:
+    """Add one widened file to the parent identity, at its digest before the edit.
+
+    Opt-in edit scope widening calls this before the widened edit applies, so the
+    parent comparison sees a later change to that file as product work. Returns
+    False (and changes nothing) when the file cannot be hashed.
+    """
+    files = _workspace_product_file_digests(runtime, (path,))
+    if not files or files.get(path) is None:
+        return False
+    lock = getattr(runtime, "green_lock", None)
+    if lock is not None and isinstance(getattr(lock, "_starting_editable_product_files", None), dict):
+        paths = tuple(getattr(lock, "_starting_editable_product_paths", ()))
+        if lock._starting_editable_product_files and path not in paths:
+            lock._starting_editable_product_files[path] = files[path]
+            lock._starting_editable_product_paths = tuple(sorted({*paths, path}))
+    capture = getattr(runtime, "_parent_product_identity_capture", None)
+    if isinstance(capture, Mapping) and isinstance(capture.get("files"), Mapping):
+        if path not in capture["files"]:
+            merged = {**capture["files"], path: files[path]}
+            setattr(runtime, "_parent_product_identity_capture", {
+                **capture, "paths": tuple(merged), "files": merged,
+                "file_count": sum(value is not None for value in merged.values()),
+                "digest": _stable_product_identity(merged),
+            })
+    return True
+
+
 # Only a POSITIVE match proves the product is the untouched parent. "parent_product_revision_unavailable"
 # is unknown, NOT unchanged (fixtures and runs without parent identity must keep their prior post-green behaviour).
 PROVEN_PARENT_UNCHANGED = frozenset({"product_file_digests_match_parent", "product_revision_matches_parent"})

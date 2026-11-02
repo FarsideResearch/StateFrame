@@ -169,7 +169,8 @@ def file_delete(
     path, relative = admit_file_delete(
         root, raw_path, protected=protected, editable=editable
     )
-    path.unlink()
+    from kernel_scope_widen_guard import unlink as guarded_unlink
+    guarded_unlink(path)
     return FileOperationEffect((relative,), relative)
 
 
@@ -204,7 +205,10 @@ def file_move(
         new_file_allowed=new_file_allowed,
     )
     destination.parent.mkdir(parents=True, exist_ok=True)
-    if case_only and destination.exists():
+    from kernel_scope_widen_guard import admitted as widened_admitted, move as guarded_move
+    if widened_admitted(source):
+        guarded_move(source, destination, case_only=case_only)
+    elif case_only and destination.exists():
         temporary = source.with_name(f".stateframe-move-{secrets.token_hex(16)}")
         source.rename(temporary)
         try:

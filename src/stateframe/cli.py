@@ -95,6 +95,10 @@ def _add_task_arguments(command: argparse.ArgumentParser, *, for_run: bool = Fal
                               "repo over 200 source files only --target and --edit files are "
                               "editable, the rest of the repo is read-only context; without them a large "
                               "repo is scoped from the files the task and chosen checks name")
+    command.add_argument("--edit-scope", choices=("scoped", "widen"), default=None,
+                         help="in a scoped run, 'widen' lets the model edit another existing product "
+                              "file instead of being refused (same as STATEFRAME_EDIT_SCOPE_WIDEN=on; "
+                              "default: scoped)")
     command.add_argument("--hooks", action="append", default=[], metavar="FILE",
                          help="trusted hook configuration file (repeatable)")
     command.add_argument("--no-project-hooks", action="store_true",
@@ -244,6 +248,10 @@ def _run_options(args: argparse.Namespace, endpoint: Endpoint) -> RunOptions:
                        protected_test_globs=args.protected_test_glob,
                        protect_tests=args.protect_tests,
                       target=args.target, edit_paths=args.edit,
+                      extra_env=({"STATEFRAME_EDIT_SCOPE_WIDEN": "on"}
+                                 if getattr(args, "edit_scope", None) == "widen" else
+                                 {"STATEFRAME_EDIT_SCOPE_WIDEN": "off"}
+                                 if getattr(args, "edit_scope", None) == "scoped" else {}),
                       test_env=dict(args.test_env), pytest_plugins=args.pytest_plugins,
                       run_dir=getattr(args, "run_dir", None),
                       in_place=getattr(args, "in_place", False),
