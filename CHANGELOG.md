@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.3.10 (2026-11-02)
+
+- Add `STATEFRAME_SHELL_STATE` (opt-in, off by default): the shell keeps its working directory and exported variables between foreground calls, so `cd sub && export X=1` followed by `pwd; echo $X` prints `sub` and `1`. A directory outside the workspace or one that no longer exists falls back to the workspace root, shell-maintained and `STATEFRAME_*` variables are never carried, and a timed-out call keeps the previous state. The state is part of each call's replay record, so resume reproduces it and refuses a call started from a different state. Background jobs and custom or MCP tools are unchanged.
+- With the switch off, shell commands, request bytes and the tool tape are unchanged.
+
 ## 0.3.4 (2026-11-02)
 
 - A Linux sandbox no longer drops a read-only mount that crosses a host mount boundary. Since 0.2.12 a read-only path beneath a read-only-mounted parent is not mounted again; a recursive bind can omit unbindable submounts, so the child now keeps its own mount when the host has a mount point between the two. Paths under the sandbox's own `/dev` and `/proc` keep theirs too, and if the host mount table cannot be read, nothing is pruned.

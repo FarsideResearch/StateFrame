@@ -391,6 +391,7 @@ OPT_IN_SWITCHES = {
     "STATEFRAME_EVICTFIX": ("on", "legacy"),
     "STATEFRAME_MICROGRAPH": ("on", "off"),  # experimental; the engine defaults to off
     "STATEFRAME_STABLE_TOOL_HEAD": ("on", "off"),  # one cacheable tool list per run; gated tools are refused
+    "STATEFRAME_SHELL_STATE": ("on", "off"),  # shell cwd and exported variables persist between calls
 }
 # Accepted aliases -> the engine's own value (EVICTFIX "off" is sent as "legacy").
 OPT_IN_ALIASES = {"STATEFRAME_EVICTFIX": {"off": "legacy"}}
