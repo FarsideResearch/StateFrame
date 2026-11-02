@@ -28,9 +28,13 @@ from .engine.kernel_tool_tape import ToolTape, ToolTapeError
 ENGINE_LOCK = ".engine.lock"
 RUN_LOCK = ".run.lock"
 # Per-attempt files: moved to attempts/<n>/ on resume, so the resumed attempt writes its own.
-ATTEMPT_FILES = ("worker", "wire", "requests", "sends.jsonl", "engine.log", "engine-result.json",
+# The pending-verified marker moves first: an archive killed partway must never leave it at the run
+# root without the wire/ it proves (the next attempt would then retire a check it never ran).
+ATTEMPT_FILES = ("resume-pending-verified.json", "worker", "wire", "requests", "sends.jsonl",
+                 "engine.log", "engine-result.json",
                  "child-traceback.txt", "summary.json", "final.diff", "tests-after.txt",
-                 "resume-divergence.json", "workspace", "checks", "checkpoint-refused.json",
+                 "resume-divergence.json", "workspace", "checks",
+                 "checkpoint-refused.json",
                  "env", "env-sites.json", "shell-home", "shell-cache",
                  "shell-ask.json", "shell-answer.json", "hooks")
 
@@ -100,20 +104,89 @@ def _journal_lineage_ok(run: Path) -> str | None:
     return None
 
 
-def carry_forward(spec: dict, tape: list[dict[str, object]], diverged: bool) -> list[dict[str, object]]:
-    """The tape a resume should replay, given the stopped attempt's own completed exchanges.
+def _faithful_completed_request(own: dict[str, object], old: dict[str, object], *,
+                               routed: bool, route_changes: list[dict[str, object]]) -> bool:
+    if own.get("request_digest") == old.get("request_digest"):
+        return True
+    if not routed:
+        return False
+    swap = replay_tape.route_model_swap(old.get("route"), route_changes)
+    own_path, old_path = own.get("request"), old.get("request")
+    if swap is None or not isinstance(own_path, str) or not isinstance(old_path, str):
+        return False
+    try:
+        alternate = replay_tape.with_recorded_model(Path(own_path).read_bytes(),
+                                                    Path(old_path).read_bytes(), swap)
+    except OSError:
+        return False
+    return alternate is not None and replay_tape.normalized_digest(alternate) == old.get("request_digest")
 
-    An attempt that was itself a resume and stopped while still replaying (killed, power loss) recorded only the
-    prefix it got through; the rest of its tape is still valid and lives in the earlier attempt's archived files.
-    Its own exchanges must be a faithful prefix of that tape (same normalized request digests, no divergence);
-    otherwise its own exchanges are the whole truth and nothing is carried.
-    """
-    previous = (spec.get("resume") or {}).get("tape")
-    if diverged or not isinstance(previous, list) or len(tape) >= len(previous):
-        return tape
-    if any(own.get("request_digest") != old.get("request_digest") for own, old in zip(tape, previous)):
-        return tape
-    return tape + previous[len(tape):]
+
+def _interrupted_archive_tape(run: Path, spec: dict) -> list[dict[str, object]] | None:
+    """Recover the completed tape moved by a first archive killed before spec.json was updated."""
+    if not spec.get("routes") or "resume" in spec or not (run / "attempts").is_dir():
+        return None
+    folders = sorted((p for p in (run / "attempts").iterdir() if p.is_dir() and p.name.isdigit()),
+                     key=lambda p: int(p.name), reverse=True)
+    for folder in folders:
+        if (folder / "wire").is_dir():
+            return replay_tape.build(folder / "wire", folder / "sends.jsonl",
+                                     routes_required=bool(spec.get("routes")))
+    return []
+
+
+def _pending_marker_matches(wire_dir: Path, pending: dict[str, object],
+                            route_changes: list[dict[str, object]]) -> bool:
+    marker = wire_dir.parent / "resume-pending-verified.json"
+    try:
+        verified = json.loads(marker.read_bytes())
+    except (OSError, ValueError):
+        return False
+    if (not isinstance(verified, dict) or type(verified.get("send")) is not int
+            or verified.get("send") != pending.get("send")
+            or verified.get("recorded_route") != pending.get("route")
+            or not isinstance(verified.get("route"), dict)
+            or not isinstance(pending.get("route"), dict)
+            or not replay_tape.Replayer([], route_changes=route_changes)._route_matches(
+                pending["route"], verified["route"])):
+        return False
+    request_path = pending.get("request")
+    try:
+        request_sha256 = (hashlib.sha256(Path(request_path).read_bytes()).hexdigest()
+                          if isinstance(request_path, str) else None)
+    except OSError:
+        return False
+    return verified.get("request_sha256") == request_sha256
+
+
+def carry_forward_records(spec: dict, own_tape: list[dict[str, object]],
+                          own_pending: dict[str, object] | None, wire_dir: Path, *, diverged: bool,
+                          restart_live: bool = False,
+                          interrupted_archive_tape: list[dict[str, object]] | None = None
+                          ) -> tuple[list[dict[str, object]], dict[str, object] | None,
+                                     list[dict[str, object]], str | None]:
+    """Select replay records and trust a routed in-flight check only with direct proof."""
+    if restart_live:
+        return [], None, [], None
+    prior = spec.get("resume") or {}
+    previous = prior.get("tape") if "resume" in spec else interrupted_archive_tape
+    prior_route_changes = (prior.get("route_changes") or []) if spec.get("routes") else []
+    faithful = (not diverged and isinstance(previous, list) and len(own_tape) <= len(previous)
+                and all(_faithful_completed_request(own, old, routed=bool(spec.get("routes")),
+                                                   route_changes=prior_route_changes)
+                        for own, old in zip(own_tape, previous)))
+    tape = own_tape + previous[len(own_tape):] if faithful else own_tape
+    if not spec.get("routes"):
+        return tape, None, [], None
+    if "resume" not in spec and interrupted_archive_tape is None:
+        return own_tape, own_pending, prior_route_changes, None
+    if "resume" in spec and not diverged and isinstance(prior.get("pending"), dict) \
+            and _pending_marker_matches(wire_dir, prior["pending"], prior_route_changes):
+        return own_tape, own_pending, prior_route_changes, None
+    reason = ("interrupted_archive" if "resume" not in spec else "diverged" if diverged
+              else "no_pending_check" if not isinstance(prior.get("pending"), dict)
+              else "unverified_pending")
+    return tape, None, prior_route_changes, reason
 
 
 def model_swap_for(spec: dict, model: str | None) -> dict[str, object] | None:
@@ -267,8 +340,14 @@ def assess(run: Path, *, max_turns: int | None = None, model: str | None = None,
     if problem:
         raise ResumeRefused(f"the engine journal is damaged ({problem}); this run cannot be resumed")
     try:
-        tape = carry_forward(spec, replay_tape.build(run / "wire", run / "sends.jsonl"),
-                             (run / "resume-divergence.json").exists())
+        own_tape = replay_tape.build(run / "wire", run / "sends.jsonl",
+                                     routes_required=bool(spec.get("routes")))
+        tape, _, _, _ = carry_forward_records(
+            spec, own_tape, None, run / "wire",
+            diverged=(run / "resume-divergence.json").exists(),
+            interrupted_archive_tape=_interrupted_archive_tape(run, spec))
+        if spec.get("routes"):
+            replay_tape.pending_request(run / "wire", routes_required=True)
     except (OSError, replay_tape.TapeError) as error:
         raise ResumeRefused(f"the recorded model exchanges are damaged ({error}); "
                             "this run cannot be resumed") from None
@@ -372,6 +451,7 @@ def archive_attempt(state: dict[str, object], engine_dir: Path, *, use_checkpoin
     spec: dict = state["spec"]  # type: ignore[assignment]
     restart_live = int(state["max_turns"]) != int(spec["max_turns"])
     external = _tool_safety(run, spec, replay_external=replay_external) if restart_live else []
+    interrupted_archive_tape = _interrupted_archive_tape(run, spec) if not restart_live else None
     number = int(state["attempt"])
     folder = run / "attempts" / str(number)
     folder.mkdir(parents=True)
@@ -389,10 +469,19 @@ def archive_attempt(state: dict[str, object], engine_dir: Path, *, use_checkpoin
     # a live restart must archive it so fresh calls can reuse their original ids.
     if restart_live and (run / "tool-tape.jsonl").exists():
         os.replace(run / "tool-tape.jsonl", folder / "tool-tape.jsonl")
-    tape = ([] if restart_live else carry_forward(
-        spec, replay_tape.build(source / "wire", source / "sends.jsonl"),
-        (source / "resume-divergence.json").exists()))
-    checkpoint = select_checkpoint(run, tape, source / "wire") if use_checkpoint and not restart_live else None
+    own_tape = ([] if restart_live else replay_tape.build(
+        source / "wire", source / "sends.jsonl", routes_required=bool(spec.get("routes"))))
+    own_pending = (replay_tape.pending_request(source / "wire", routes_required=True)
+                   if spec.get("routes") and not restart_live else None)
+    tape, pending, prior_route_changes, skipped_reason = carry_forward_records(
+        spec, own_tape, own_pending, source / "wire",
+        diverged=(source / "resume-divergence.json").exists(),
+        restart_live=restart_live,
+        interrupted_archive_tape=interrupted_archive_tape)
+    # Checkpoint restore is not supported for routed runs: checkpoint selection reads the in-flight
+    # request from the archived wire, not from the carried, route-verified check. Routed runs replay.
+    checkpoint = (select_checkpoint(run, tape, source / "wire")
+                  if use_checkpoint and not restart_live and not spec.get("routes") else None)
     spec["max_turns"] = int(state["max_turns"])
     spec["environment"]["REACT_STEPS"] = str(spec["max_turns"])
     spec["engine_dir"] = str(engine_dir)  # same release (checked in assess), current install path
@@ -406,6 +495,10 @@ def archive_attempt(state: dict[str, object], engine_dir: Path, *, use_checkpoin
                       "previous_status": state.get("previous_status"),
                       "resumed": datetime.now(timezone.utc).isoformat(timespec="seconds"),
                       "tape": tape,
+                      **({"pending": pending} if pending is not None else {}),
+                      **({"pending_check": {"status": "skipped", "reason": skipped_reason}}
+                         if skipped_reason is not None else {}),
+                      **({"route_changes": prior_route_changes} if prior_route_changes else {}),
                       **({"restart_live": True} if restart_live else {}),
                       "archived_external_operations": (external if restart_live else
                           (spec.get("resume") or {}).get("archived_external_operations", [])),

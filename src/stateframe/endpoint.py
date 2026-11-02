@@ -35,15 +35,18 @@ def _is_loopback(url: str) -> bool:
     return (isinstance(address, ipaddress.IPv4Address) and address.is_loopback) or str(address) == "::1"
 
 
-def _require_local(url: str) -> None:
-    if not _is_loopback(url) and os.environ.get("STATEFRAME_ALLOW_REMOTE_ENDPOINT") != "1":
+def _require_local(url: str, allow_remote: bool = False) -> None:
+    if not _is_loopback(url) and not allow_remote and os.environ.get("STATEFRAME_ALLOW_REMOTE_ENDPOINT") != "1":
         raise EndpointError("local-only release: endpoint must use 127.0.0.0/8, ::1 or localhost; "
                             "remote endpoints require STATEFRAME_ALLOW_REMOTE_ENDPOINT=1")
 
 
 class _LocalRedirects(urllib.request.HTTPRedirectHandler):
+    def __init__(self, allow_remote: bool = False) -> None:
+        self.allow_remote = allow_remote
+
     def redirect_request(self, req, fp, code, msg, headers, newurl):
-        _require_local(newurl)
+        _require_local(newurl, self.allow_remote)
         return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
@@ -95,6 +98,7 @@ class Endpoint:
     model: str
     api_key_env: str | None = None
     timeout_s: float = 10.0
+    allow_remote: bool = False
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "base_url", normalize_base_url(self.base_url))
@@ -105,7 +109,7 @@ class Endpoint:
 
     def check_locality(self) -> None:
         """Validate without DNS resolution, before any transport can run."""
-        _require_local(self.base_url)
+        _require_local(self.base_url, self.allow_remote)
 
     @classmethod
     def from_args(cls, endpoint: str, model: str, api_key_env: str | None,
@@ -141,7 +145,7 @@ class Endpoint:
         request = urllib.request.Request(self.base_url + path, headers=self._headers(), method="GET")
         # Do not route loopback requests through an inherited HTTP proxy. Redirects
         # must pass the same local policy before urllib can make another request.
-        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _LocalRedirects())
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _LocalRedirects(self.allow_remote))
         with opener.open(request, timeout=self.timeout_s) as response:
             return json.loads(response.read(4 * 1024 * 1024))
 

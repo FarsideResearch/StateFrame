@@ -8,6 +8,8 @@ cannot fit its stage budget.
 """
 from __future__ import annotations
 
+import kernel_frame_routes as _frame_routes
+
 import copy
 import json
 import math
@@ -77,6 +79,19 @@ def resolve_tokenize_url(
         *, endpoint: str | None = None,
 ) -> str | None:
     """Resolve the llama.cpp tokenizer route from the request's endpoint."""
+    route = getattr(capture, "frame_route", None) if _frame_routes.ROUTES_ACTIVE else None
+    if route is not None:
+        endpoint = str(getattr(capture, "_tokenize_endpoint"))
+        from kernel_frame_routes import require_local
+        require_local(endpoint, allow_remote=bool(route.settings.get("allow_remote")))
+        parsed = urllib.parse.urlsplit(endpoint)
+        path = parsed.path.rstrip("/")
+        for suffix in ("/v1/chat/completions", "/chat/completions", "/v1"):
+            if path.endswith(suffix):
+                path = path[:-len(suffix)]
+                break
+        path = path if path.endswith("/tokenize") else (f"{path}/tokenize" if path else "/tokenize")
+        return urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, path, "", ""))
     # TOKURL: an explicitly set LLAMA_CPP_TOKENIZE_URL (process env, then an owner's declared environment) wins over every
     # derived endpoint, so tokenization can be co-located while generation stays remote. It only routes /tokenize; model id, template
     # and generation endpoints are untouched. Unset => the original order below, unchanged.
@@ -158,6 +173,11 @@ def _tokenization_content(body: Mapping[str, object]) -> str:
 
 def tokenizer_contract(runtime: object | None, capture: object | None) -> str:
     """Known served/configured tokenizer identity, without endpoint secrets."""
+    route = getattr(capture, "frame_route", None) if _frame_routes.ROUTES_ACTIVE else None
+    if route is not None:
+        return json.dumps({"model": route.model,
+                           "tokenizer": resolve_tokenize_url(capture=capture)},
+                          sort_keys=True, separators=(",", ":"))
     fields = ("model", "server_build", "tokenizer", "chat_template")
     manifest = getattr(getattr(capture, "journal", None), "manifest", None)
     contract = {key: manifest[key] for key in fields if isinstance(manifest, Mapping) and key in manifest}
@@ -168,7 +188,8 @@ def tokenizer_contract(runtime: object | None, capture: object | None) -> str:
     return json.dumps(contract, sort_keys=True, separators=(",", ":"))
 
 
-def _http_tokenize(content: str, url: str, *, deadline: float | None = None) -> Sequence[int]:
+def _http_tokenize(content: str, url: str, *, deadline: float | None = None,
+                   route_allow_remote: bool | None = None) -> Sequence[int]:
     payload = json.dumps({
         "content": content, "add_special": False, "parse_special": True,
     }, ensure_ascii=False).encode("utf-8")
@@ -187,7 +208,18 @@ def _http_tokenize(content: str, url: str, *, deadline: float | None = None) -> 
         if remaining <= 0:
             raise TimeoutError("tokenizer request deadline expired")
         timeout = min(timeout, remaining)
-    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    if route_allow_remote is None:
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    else:
+        from kernel_frame_routes import require_local
+        require_local(url, allow_remote=route_allow_remote)
+
+        class RoutedRedirects(urllib.request.HTTPRedirectHandler):
+            def redirect_request(self, req, fp, code, msg, headers, newurl):
+                require_local(newurl, allow_remote=route_allow_remote)
+                return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), RoutedRedirects())
     with opener.open(request, timeout=timeout) as response:
         raw = response.read(_MAX_TOKENIZE_RESPONSE_BYTES + 1)
     if len(raw) > _MAX_TOKENIZE_RESPONSE_BYTES:
@@ -206,12 +238,15 @@ class RequestTokenMeter:
             self, tokenizer: Callable[[str], object] | None = None,
             *, endpoint: str | None = None,
             template_overhead_tokens: int = TEMPLATE_OVERHEAD_TOKENS,
+            route_allow_remote: bool | None = None,
     ) -> None:
         if type(template_overhead_tokens) is not int or template_overhead_tokens < 0:
             raise ValueError("template overhead must be a non-negative integer")
         self._tokenizer = tokenizer
-        endpoint = resolve_tokenize_url(endpoint=endpoint) if endpoint else None
+        endpoint = (endpoint if route_allow_remote is not None
+                    else resolve_tokenize_url(endpoint=endpoint) if endpoint else None)
         self.endpoint = endpoint
+        self.route_allow_remote = route_allow_remote
         self.template_overhead_tokens = template_overhead_tokens
         self._availability = (
             "unknown" if tokenizer is not None or endpoint else "unavailable"
@@ -343,7 +378,8 @@ class RequestTokenMeter:
         if self._tokenizer is not None:
             result = self._tokenizer(content)
         elif self.endpoint is not None:
-            result = _http_tokenize(content, self.endpoint, deadline=self._deadline)
+            result = _http_tokenize(content, self.endpoint, deadline=self._deadline,
+                                    route_allow_remote=self.route_allow_remote)
         else:
             raise OSError("tokenizer endpoint unavailable")
         if type(result) is int:

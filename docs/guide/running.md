@@ -102,6 +102,64 @@ Watch for:
 
 Only the default 65,536-token slot is measured on long runs; other sizes are tested on short scripted runs.
 
+## Per-step models
+
+By default one endpoint and one model handle every request, and requests are byte-identical to a build without routing. You can instead send each kind of step to its own model: a small local model for reading, a stronger one for writing code. Each request is still built from the typed state frame, so switching models mid-run loses nothing; the frame is the handoff.
+
+Requests are sorted into roles mechanically, from what the engine already knows, never by asking a model:
+
+| Role | Which requests |
+|---|---|
+| `read` | The working default: navigating, reading, searching, running checks. |
+| `plan` | The first request of a run, and the request right after a failed test run on the current code. |
+| `edit` | Any step whose reply writes or changes files. |
+| `finish` | A step whose reply says the work is done. |
+| `decide2` | The engine's small internal decision request (rare). |
+| `unit`, `unit.<class>` | Requests made inside parallel work units. |
+
+The engine cannot tell before a reply whether a step will edit, because the tools it offers do not depend on the step's purpose. So `edit` and `finish` work by escalation: when a reply from another role's model edits files or says done, that reply is thrown away unrun, and the same step is asked again, with the same frame, of the `edit` (or `finish`) model. That costs one extra cheap request per edit step. Escalation never lowers a step: a write wins over done, done over read.
+
+Start from the commented example:
+
+```bash
+stateframe config init     # writes ~/.stateframe/routes.toml with every line commented out
+```
+
+Uncomment only what you need. Anything you leave out inherits the run's `--endpoint`, `--model` and other settings:
+
+```toml
+# Reading on a small local model; everything else stays on the default server.
+[roles.read]
+endpoint = "http://127.0.0.1:18601/v1"
+model = "minicpm5-1b"
+slot = 0
+cost_input_per_mtok = 0.0
+cost_output_per_mtok = 0.0
+
+[roles.edit]
+cost_input_per_mtok = 0.60
+cost_cached_input_per_mtok = 0.06
+cost_output_per_mtok = 2.40
+```
+
+Settings are read, highest first, from `--route ROLE.FIELD=VALUE` (repeatable), `STATEFRAME_ROUTE_<ROLE>_<FIELD>` variables, a routes file (`--routes PATH`, `STATEFRAME_ROUTES`, or `~/.stateframe/routes.toml`), and the profile. TOML and JSON files both work. Unknown roles, unknown fields, wrong types and out-of-range numbers stop the run before it starts, with a message that names the setting.
+
+```bash
+stateframe run --repo ... --task "..." --route read.endpoint=http://127.0.0.1:18601/v1 --route read.model=minicpm5-1b
+```
+
+Watch for:
+
+- **Each role's server is checked at start**, as far as it reports: its model must be among the models it lists, a pinned `slot` must be one of the slots it reports, and its slot must be at least the run's context size (65,536 tokens by default). A server that lists no models or reports no slots is not checked on that point.
+- **Mixing local and remote is per role.** A remote endpoint needs `allow_remote = true` on that role (or `STATEFRAME_ALLOW_REMOTE_ENDPOINT=1` for all) and prints a warning that your code will leave the machine. A redirect to a remote host is refused unless that role allows remote endpoints. Routed requests and tokenizer calls ignore `HTTP_PROXY` and system proxy settings, so they go only to the address you set.
+- **Shell commands are not escalated.** A `shell` call counts as a `read` step, so it runs on whichever role's model asked for it, including commands that write files. A `read` model can therefore change the working copy through `shell` without the `edit` model seeing that step. The sandbox and the effect checks still apply and record every change. To keep a small read model from writing this way, run with `--shell read-only`.
+- **Each role counts tokens on its own server** unless you set its `tokenizer`. If `LLAMA_CPP_TOKENIZE_URL` is set and a role uses another model, the run is refused until that role names its own `tokenizer` (or you unset the variable), so one model's counts never size another model's prompt.
+- **A small read model must still follow the tool protocol.** Most requests in a routed run are `read` requests, so a model that answers without a tool call, or rambles to its token limit, costs more time than it saves. In one check, a 1B read model turned a 3-request fix into a 38-request one. Cap `read.max_tokens` (for example 2048) and try your read model on a short task before a long one.
+- **Keys are named, never stored.** `api_key_env` names the variable that holds a role's key; the value is never written to the run directory.
+- **The run prints its effective routes at start**, and a per-role table at the end: sends, discarded replies, prompt, cached and completion tokens, and an estimated cost from your rates (unknown when you give none).
+- **A resumed run keeps its routes.** Changing a role's model, sampling or limits on resume is refused and names the setting. `stateframe resume --route` may move a role to a new endpoint address or rename its model, for when a server moves. Every replayed request must go to the role, endpoint and model it was recorded with, or resume stops before sending anything. The request that had no reply when the run stopped is checked against its rebuilt copy on the first resume; on later resumes only if the previous resume recorded that its own check passed. Otherwise, for example when a resumed run stops again before its check, StateFrame resumes by full replay without that check and prints a line saying so. If a rebuilt request's bytes differ, replay goes live early from that point, as it does without routes, still on the recorded route.
+- **Routed runs do not restore checkpoints.** With checkpoints enabled, a routed run still writes them, but its resume always replays the recorded run.
+
 ## Profiles and switches
 
 `STATEFRAME_HTTP_GZIP` and `STATEFRAME_PLAIN_GZIP` are `off` by default. Set either to `on` in a custom profile only when the endpoint is a relay that inflates gzip request bodies. A stock llama-server rejects them with HTTP 415. In the default run mode, a compressed request refused with HTTP 415 is resent once without compression within the original deadline.

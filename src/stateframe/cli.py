@@ -12,6 +12,7 @@ from .endpoint import CHAT_SUFFIX, Endpoint, EndpointError
 from .inspect_run import InspectError, overview, show_send
 from .resume import ResumeRefused
 from .runner import RunError, RunOptions, resume_run, run
+from . import routes
 from .task_row import TaskRowError
 from .workcopy import WorkCopyError
 from .engine.kernel_tool_settings import ToolSettings, ToolSettingsError
@@ -117,6 +118,9 @@ def _add_task_arguments(command: argparse.ArgumentParser, *, for_run: bool = Fal
     command.add_argument("--keep-checkpoints", action="store_true",
                          help="keep the run's checkpoints after it finishes (default: removed once finished)")
     command.add_argument("--slot", type=int, help="llama.cpp server slot to pin (optional)")
+    command.add_argument("--route", action="append", default=[], metavar="ROLE.FIELD=VALUE",
+                         help="override one model route field (repeatable)")
+    command.add_argument("--routes", type=Path, help="TOML or JSON route configuration file")
     command.add_argument("--timeout", type=float, default=None,
                          help="optional wall-clock limit in seconds (default: no limit; stop with Ctrl-C)")
     command.add_argument("--shell", choices=("off", "read-only", "standard", "unrestricted"),
@@ -174,6 +178,14 @@ def build_parser() -> argparse.ArgumentParser:
                             help="keep the run's checkpoints after it finishes (default: removed once finished)")
     resume_cmd.add_argument("--quiet", action="store_true", help="no live turn log")
     resume_cmd.add_argument("--json", action="store_true", help="print the summary as JSON")
+    resume_cmd.add_argument("--route", action="append", default=[], metavar="ROLE.FIELD=VALUE",
+                            help="relocate a role endpoint or rename its model")
+    resume_cmd.add_argument("--routes", type=Path, help="TOML or JSON route configuration file")
+
+    config_cmd = commands.add_parser("config", help="create a commented route configuration")
+    config_actions = config_cmd.add_subparsers(dest="config_command", required=True)
+    config_init = config_actions.add_parser("init", help="write an inactive routes.toml example")
+    config_init.add_argument("--path", type=Path, default=Path.home() / ".stateframe" / "routes.toml")
 
     inspect_cmd = commands.add_parser("inspect", help="show the frames and request bytes of a run")
     inspect_cmd.add_argument("run_dir", type=Path)
@@ -247,7 +259,8 @@ def _run_options(args: argparse.Namespace, endpoint: Endpoint) -> RunOptions:
                                     else project_instructions.DEFAULT_MODE),
                       hooks_files=tuple(Path(path).expanduser().resolve() for path in args.hooks),
                       no_project_hooks=args.no_project_hooks,
-                      hooks_repo=args.repo.resolve())
+                      hooks_repo=args.repo.resolve(),
+                      route_cli=args.route, routes_file=args.routes)
 
 
 def _print_summary(summary: dict) -> None:
@@ -312,6 +325,23 @@ def _print_summary(summary: dict) -> None:
                      summary.get("in_place_skipped", "nothing")))
     for label, value in rows:
         print(f"{label:>22}: {value}")
+    costs = summary.get("route_costs")
+    if isinstance(costs, dict):
+        print("=== model routes ===")
+        print("role          sends discarded   prompt   cached completion estimated cost")
+        for role, row in [*costs["roles"].items(), ("total", costs["total"])]:
+            cost = row["estimated_cost"]
+            display = f"${cost:.6f}" if cost is not None else "unknown"
+            counts = {key: "unknown" if row[key] is None else row[key]
+                      for key in ("escalated", "prompt_tokens", "cached_tokens", "completion_tokens")}
+            print(f"{role:<13} {row['requests']:>5} {counts['escalated']:>9} "
+                  f"{counts['prompt_tokens']:>8} {counts['cached_tokens']:>8} "
+                  f"{counts['completion_tokens']:>10} {display:>14}")
+        if costs.get("unattributed_sends"):
+            print(f"{costs['unattributed_sends']} send(s) missing route records; totals unknown")
+        if costs.get("all_at_edit_rates") is not None:
+            print(f"all at edit rates: ${costs['all_at_edit_rates']:.6f}; "
+                  f"estimated savings: ${costs['estimated_savings']:.6f}")
     if summary.get("succeeded"):
         print(result_line or
               "checks passed on the saved candidate; correctness not independently established")
@@ -346,6 +376,13 @@ def main(argv: list[str] | None = None) -> int:
             else:
                 print(out)
             return 0
+        if args.command == "config":
+            path = args.path.expanduser()
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with path.open("x", encoding="utf-8") as output:
+                output.write(routes.example())
+            print(f"wrote {path}")
+            return 0
         if args.command == "hooks":
             from .hook_host import trust_project_hooks
             trust_project_hooks(args.repo, remove=args.remove)
@@ -359,6 +396,7 @@ def main(argv: list[str] | None = None) -> int:
                     args.api_key_env or spec.get("api_key_env"))
             summary = resume_run(args.run_dir, endpoint=endpoint, max_turns=args.max_turns, model=args.model,
                                  timeout_s=args.timeout, quiet=args.quiet or args.json,
+                                 route_cli=args.route, routes_file=args.routes,
                                  keep_checkpoints=args.keep_checkpoints, replay_external=args.replay_external,
                                  printer=(lambda *_: None) if args.json else print)
             if args.json:

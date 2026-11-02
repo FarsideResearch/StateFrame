@@ -52,11 +52,29 @@ def emit(kind: str, **fields: object) -> None:
                                          default=str, separators=(",", ":")), flush=True)
 
 
+def emit_resume_pending_check(spec: dict, resume: dict | None) -> None:
+    """Record a routed resume that dropped an unproven in-flight check, on the child's event stream.
+
+    Kept out of the engine's task row: anything there can reach request bytes, and a changed
+    request would break the replay this resume depends on.
+    """
+    check = resume.get("pending_check") if spec.get("routes") and isinstance(resume, dict) else None
+    if isinstance(check, dict):
+        emit("routes_resume_pending_check_skipped", **check)
+
+
 def install_environment(spec: dict) -> None:
+    routed_keys: dict[str, str] = {}
+    if isinstance(spec.get("routes"), dict):
+        for settings in spec["routes"].get("roles", {}).values():
+            name = settings.get("api_key_env") if isinstance(settings, dict) else None
+            if isinstance(name, str) and name in os.environ:
+                routed_keys[name] = os.environ[name]
     for key in list(os.environ):
         if key.startswith(ENGINE_PREFIXES) and not key.startswith("STATEFRAME_TASK_"):
             del os.environ[key]
     os.environ.update({str(k): str(v) for k, v in spec["environment"].items()})
+    os.environ.update(routed_keys)
 
 
 def _install_direct_opener() -> None:
@@ -121,7 +139,7 @@ def _actions(response: object) -> list[str]:
 
 
 def install_wire_recorder(run: Path, chat_url: str, replayer: Replayer | None = None,
-                          hook_wiring=None) -> None:
+                          routed_endpoints: set[str] | None = None, hook_wiring=None) -> None:
     """Record every physical chat send: exact identity bytes, response bytes, usage.
 
     On ``stateframe resume`` a send the interrupted attempt already completed is answered from its
@@ -135,23 +153,56 @@ def install_wire_recorder(run: Path, chat_url: str, replayer: Replayer | None = 
     counter = {"n": 0}
     HOST_STATE["wire"] = counter
 
+    def atomic_bytes(path: Path, data: bytes) -> None:
+        with tempfile.NamedTemporaryFile(dir=path.parent, prefix=path.name + ".", delete=False) as stream:
+            temp = Path(stream.name)
+            stream.write(data)
+        try:
+            os.replace(temp, path)
+        finally:
+            temp.unlink(missing_ok=True)
+
     def recorded(wire: bytes, endpoint: str, key: str, **kwargs):
-        if endpoint != chat_url:
+        route = kwargs.pop("route_meta", None)
+        if routed_endpoints is None and endpoint != chat_url:
             return original(wire, endpoint, key, **kwargs)
+        if routed_endpoints is not None:
+            if endpoint not in routed_endpoints or not isinstance(route, dict):
+                raise ValueError("routed send has no authorized destination record")
+            if route.get("endpoint") != endpoint:
+                raise ValueError("routed send destination differs from route authority")
+            try:
+                wire_model = json.loads(wire).get("model")
+            except (ValueError, AttributeError) as error:
+                raise ValueError("routed send has no valid model field") from error
+            if wire_model != route.get("model"):
+                raise ValueError("routed send model differs from route authority")
         if replayer is not None and replayer.strict and replayer.diverged is not None:
             raise CheckpointUnfaithful("an earlier rebuilt request differed; nothing more is sent")
+        if replayer is not None and replayer.route_mismatch:
+            raise CheckpointUnfaithful("an earlier routed replay differed; nothing more is sent")
         counter["n"] += 1
         index = counter["n"]
         stem = wire_dir / f"{index:04d}"
-        stem.with_suffix(".request.json").write_bytes(wire)
+        if routed_endpoints is not None:
+            atomic_bytes(stem.with_suffix(".route.json"), json.dumps(
+                route, sort_keys=True, separators=(",", ":")).encode())
+            atomic_bytes(stem.with_suffix(".request.json"), wire)
+        else:
+            stem.with_suffix(".request.json").write_bytes(wire)
         started = time.monotonic()
         replayed = None
         # An in-flight request to verify keeps the replayer in the path even with no tail left to answer.
         if replayer is not None and (replayer.active or replayer.pending is not None):
-            replayed = replayer.answer(wire)
+            replayed = replayer.answer(wire, route=route)
+            if routed_endpoints is not None and replayer.pending_verified is not None:
+                atomic_bytes(run / "resume-pending-verified.json", json.dumps(
+                    replayer.pending_verified, sort_keys=True, separators=(",", ":")).encode())
             if replayed is None and replayer.diverged is not None:
                 (run / "resume-divergence.json").write_text(json.dumps(
                     {**replayer.diverged, "send": index, "checkpoint": replayer.strict}, indent=1))
+                if routed_endpoints is not None and replayer.route_mismatch:
+                    raise CheckpointUnfaithful(f"send {index}: {replayer.diverged['reason']}")
                 if (run / "tool-tape.jsonl").is_file() or hook_wiring is not None:
                     from kernel_tool_tape import ToolReplayRefused
                     raise ToolReplayRefused(f"send {index}: {replayer.diverged['reason']}")
@@ -181,7 +232,8 @@ def install_wire_recorder(run: Path, chat_url: str, replayer: Replayer | None = 
         transport_attempts: list[dict[str, object]] = []
         try:
             response = (replayed if replayed is not None else original(
-                wire, endpoint, key, record_attempts=transport_attempts.extend, **kwargs))
+                wire, endpoint, key, record_attempts=transport_attempts.extend,
+                **({**kwargs, "route_meta": route} if routed_endpoints is not None else kwargs)))
         except Exception as error:
             (wire_dir / f"{index:04d}.error.txt").write_text(type(error).__name__ + "\n")
             if transport_attempts:
@@ -740,9 +792,12 @@ def main(argv: list[str]) -> int:
         # Checkpoint resume: the engine restores its state as of send ``sends``; only the recorded
         # exchanges after it are replayed, strictly (any difference refuses before sending).
         tail = [item for item in resume.get("tape") or [] if int(item["send"]) > int(checkpoint["sends"])]
-        replayer = Replayer(tail, strict=True, pending=checkpoint.get("pending"))
+        replayer = Replayer(tail, strict=True, pending=checkpoint.get("pending"),
+                            route_changes=resume.get("route_changes"))
     else:
-        replayer = Replayer(resume.get("tape") or [], resume.get("model_swap")) if resume is not None else None
+        replayer = (Replayer(resume.get("tape") or [], resume.get("model_swap"),
+                             pending=resume.get("pending"), route_changes=resume.get("route_changes"))
+                    if resume is not None else None)
     install_environment(spec)
     # Keep all engine urlopen calls direct, including those outside the primary transport.
     _install_direct_opener()
@@ -776,6 +831,32 @@ def main(argv: list[str]) -> int:
     except Exception:  # noqa: BLE001 - repo map AST is optional; the engine falls back to its text scan
         pass
     sys.path.insert(0, str(engine))
+    routed_endpoints = None
+    if spec.get("routes") is not None:
+        import kernel_frame_routes
+        base = spec["chat_url"].removesuffix("/chat/completions")
+        environment = spec.get("environment", {})
+        baseline = {"endpoint": base, "model": spec["model"],
+                    "api_key_env": spec.get("api_key_env"),
+                    "temperature": float(environment.get("REACT_TEMP", 1.0)),
+                    "max_tokens": int(environment.get("REACT_MAX_OUTPUT_TOKENS", 24000)),
+                    "timeout_s": float(environment.get("REACT_REQUEST_TIMEOUT_S", 1800)),
+                    "slot": (spec.get("prompt_cache_slot") or {}).get("slot"),
+                    "context_tokens": int(environment.get("STATEFRAME_CONTEXT_TOKENS", 65536))}
+        kernel_frame_routes.install(spec["routes"], baseline=baseline)
+        # Same rule as stateframe.routes.uses_other_model (this module cannot import the package):
+        # decide2's built-in "decision-tier" alias is served by the default model.
+        if os.environ.get("LLAMA_CPP_TOKENIZE_URL") and any(
+                settings.get("model") not in {spec["model"], "decision-tier" if role == "decide2" else spec["model"]}
+                and not settings.get("tokenizer")
+                for role, settings in spec["routes"]["roles"].items()):
+            raise ValueError("LLAMA_CPP_TOKENIZE_URL conflicts with routed models; set each role tokenizer")
+        routed_endpoints = {spec["chat_url"]}
+        routed_endpoints.update(
+            str(settings["endpoint"]).rstrip("/") + "/chat/completions"
+            for settings in spec["routes"]["roles"].values())
+        HOST_STATE["frame_routes_last_action"] = kernel_frame_routes.LAST_CLOSED_ACTION
+        HOST_STATE["frame_routes_accounting"] = kernel_frame_routes.ACCOUNTING
     from kernel_custom_tools import CustomToolError, load_tool_files
     from kernel_mcp_tools import load_mcp_files
     from kernel_tool_settings import ToolSettingsError, load_tool_settings
@@ -855,13 +936,19 @@ def main(argv: list[str]) -> int:
         rr.REPOS["build"] = Path(spec["parent_snapshot"])
         install_repo_context(rr, Path(spec["parent_snapshot"]))
         install_compact_capture(Path(spec["parent_snapshot"]))
-        install_wire_recorder(run, spec["chat_url"], replayer, hook_wiring)
+        install_wire_recorder(run, spec["chat_url"], replayer, routed_endpoints, hook_wiring)
         previous_checks = Path(resume["previous_attempt"]) / "checks" if resume is not None else None
         install_check_recorder(run, replayer, previous_checks)
         install_token_count_warning()
         install_checked_ask(rr, spec, run, hook_wiring)
         install_test_log(rr)
         register_host_state(required=checkpoint is not None, secret=key)
+        if routed_endpoints is not None:
+            import kernel_checkpoint
+            for settings in spec["routes"]["roles"].values():
+                name = settings.get("api_key_env")
+                if isinstance(name, str) and os.environ.get(name):
+                    kernel_checkpoint.register_secret(os.environ[name])
         row = json.loads(json.dumps(spec["public_row"]))
         row.update(_skip_db=True, _bridge_ordinary_brief=row["msg"],
                    _bridge_capture=str(output / "candidates"),
@@ -869,6 +956,7 @@ def main(argv: list[str]) -> int:
                                        "initial_oracle_symptom": "OFF",
                                        "live_grader_feedback": "FINAL_ONLY",
                                        "target_disclosure": "PUBLIC_PATHS_UNLOCALIZED"})
+        emit_resume_pending_check(spec, resume)
         emit("engine_start", turns=rr.MAX_STEPS,
              **({"resume_attempt": resume.get("attempt"), "replay_sends": len(replayer.tape)}
                 if resume is not None and replayer is not None else {}))

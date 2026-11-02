@@ -109,6 +109,22 @@ def with_recorded_model(request: bytes, recorded: bytes, model_swap: dict | None
     return recorded[:theirs[1]] + request[ours[1]:]
 
 
+def route_model_swap(route: object, route_changes: list[dict[str, object]],
+                     model_swap: dict | None = None) -> dict | None:
+    """The allowed model-name substitution for a recorded route after ordered route moves."""
+    if not isinstance(route, dict):
+        return model_swap
+    recorded = route.get("model")
+    served = recorded
+    for change in route_changes:
+        if (change.get("role") == route.get("role") and change.get("field") == "model"
+                and change.get("from") == served):
+            served = change.get("to")
+    if served != recorded:
+        return {"served": served, "recorded": [recorded]}
+    return model_swap
+
+
 def _send_records(sends_path: Path) -> dict[int, dict]:
     """sends.jsonl by send index; a torn final line (process killed mid-append) is ignored."""
     if not sends_path.is_file():
@@ -138,7 +154,26 @@ def _response_ok(data: bytes) -> bool:
     return isinstance(parsed, dict) and isinstance(parsed.get("choices"), list) and bool(parsed["choices"])
 
 
-def build(wire_dir: Path, sends_path: Path) -> list[dict[str, object]]:
+def _route_record(path: Path) -> dict[str, object]:
+    try:
+        value = json.loads(path.read_bytes())
+    except (OSError, ValueError) as error:
+        raise TapeError(f"wire/{path.name} is not a valid route record") from error
+    if (not isinstance(value, dict) or not isinstance(value.get("role"), str)
+            or not isinstance(value.get("endpoint"), str)
+            or not isinstance(value.get("model"), str)
+            or not {"role", "scope", "unit_class", "endpoint", "model", "escalated_from"}.issubset(value)
+            or set(value) - {"role", "scope", "unit_class", "endpoint", "endpoint_host", "model",
+                             "escalated_from"}):
+        raise TapeError(f"wire/{path.name} is not a complete route record")
+    return value
+
+
+def _route_path(wire_dir: Path, index: int) -> Path:
+    return wire_dir / f"{index:04d}.route.json"
+
+
+def build(wire_dir: Path, sends_path: Path, *, routes_required: bool = False) -> list[dict[str, object]]:
     """Every completed model exchange of an attempt, in send order.
 
     A send that failed (``NNNN.error.txt``) is skipped: the engine retried it, and the retry is the
@@ -150,6 +185,14 @@ def build(wire_dir: Path, sends_path: Path) -> list[dict[str, object]]:
         return []
     records = _send_records(sends_path)
     indexes = sorted(int(p.name[:4]) for p in wire_dir.glob("[0-9][0-9][0-9][0-9].request.json"))
+    route_indexes = sorted(int(p.name[:4]) for p in wire_dir.glob("[0-9][0-9][0-9][0-9].route.json"))
+    if routes_required and indexes and not route_indexes:
+        raise TapeError("wire/ route records are required for this run")
+    if route_indexes and route_indexes != list(range(1, route_indexes[-1] + 1)):
+        raise TapeError("wire/ route files are not a contiguous sequence")
+    if route_indexes and (route_indexes[:-1] != indexes[:len(route_indexes) - 1]
+                          or route_indexes[-1] not in indexes + [len(indexes) + 1]):
+        raise TapeError("wire/ route record is missing or has no matching send index")
     if indexes and indexes != list(range(1, indexes[-1] + 1)):
         raise TapeError("wire/ request files are not a contiguous sequence")
     tape: list[dict[str, object]] = []
@@ -157,6 +200,10 @@ def build(wire_dir: Path, sends_path: Path) -> list[dict[str, object]]:
         stem = wire_dir / f"{index:04d}"
         request_path, response_path = stem.with_suffix(".request.json"), stem.with_suffix(".response.json")
         request = request_path.read_bytes()
+        route_path = _route_path(wire_dir, index)
+        route = _route_record(route_path) if route_path.is_file() else None
+        if route_indexes and route is None:
+            raise TapeError(f"wire/{route_path.name} missing for routed request")
         record = records.get(index)
         if record is not None and record.get("request_sha256") != hashlib.sha256(request).hexdigest():
             raise TapeError(f"wire/{request_path.name} does not match its sends.jsonl record")
@@ -173,16 +220,23 @@ def build(wire_dir: Path, sends_path: Path) -> list[dict[str, object]]:
                 break  # torn write at the kill
             raise TapeError(f"wire/{response_path.name} is not a valid chat response")
         tape.append({"send": index, "request": str(request_path), "response": str(response_path),
-                     "request_digest": normalized_digest(request),
-                     "response_sha256": hashlib.sha256(response).hexdigest()})
+                      "request_digest": normalized_digest(request),
+                      "response_sha256": hashlib.sha256(response).hexdigest(),
+                      **({"route": route} if route is not None else {})})
     return tape
 
 
-def pending_request(wire_dir: Path) -> dict[str, object] | None:
+def pending_request(wire_dir: Path, *, routes_required: bool = False) -> dict[str, object] | None:
     """The last request of an attempt that got neither a response nor an error (in flight at the stop)."""
     if not wire_dir.is_dir():
         return None
     indexes = sorted(int(p.name[:4]) for p in wire_dir.glob("[0-9][0-9][0-9][0-9].request.json"))
+    routes = sorted(int(p.name[:4]) for p in wire_dir.glob("[0-9][0-9][0-9][0-9].route.json"))
+    if routes_required and indexes and not routes:
+        raise TapeError("wire/ route records are required for pending send")
+    if routes and (not indexes or routes[-1] == indexes[-1] + 1):
+        route = _route_record(_route_path(wire_dir, routes[-1]))
+        return {"send": routes[-1], "route": route, "orphan_route": True}
     if not indexes:
         return None
     stem = wire_dir / f"{indexes[-1]:04d}"
@@ -192,18 +246,23 @@ def pending_request(wire_dir: Path) -> dict[str, object] | None:
     if response.is_file() and _response_ok(response.read_bytes()):
         return None
     request = stem.with_suffix(".request.json")
-    return {"send": indexes[-1], "request": str(request), "request_digest": normalized_digest(request.read_bytes())}
+    return {"send": indexes[-1], "request": str(request),
+            "request_digest": normalized_digest(request.read_bytes()),
+            **({"route": _route_record(_route_path(wire_dir, indexes[-1]))}
+               if _route_path(wire_dir, indexes[-1]).is_file() else {})}
 
 
 class Replayer:
     """Engine-child side: answer matching sends from the tape until it ends or diverges."""
 
     def __init__(self, tape: list[dict[str, object]], model_swap: dict | None = None, *,
-                 strict: bool = False, pending: dict[str, object] | None = None) -> None:
+                 strict: bool = False, pending: dict[str, object] | None = None,
+                 route_changes: list[dict[str, object]] | None = None) -> None:
         self.tape = list(tape)
         self.cursor = 0
         self.active = bool(self.tape)
         self.diverged: dict[str, object] | None = None
+        self.route_mismatch = False
         self.model_swap = model_swap if isinstance(model_swap, dict) else None
         self.model_swapped = 0  # replayed requests that matched only with the model name set back
         # strict (checkpoint resume): a divergence is a refusal, never a switch to live.
@@ -211,28 +270,72 @@ class Replayer:
         # The request that was in flight (sent, no response) when the attempt stopped: the first live
         # request after the tape must rebuild it byte for byte (checked once).
         self.pending = dict(pending) if pending else None
+        self.pending_verified: dict[str, object] | None = None
+        self.route_changes = list(route_changes or [])
 
-    def answer(self, request: bytes) -> bytes | None:
+    def _route_matches(self, expected: dict[str, object], actual: dict[str, object] | None) -> bool:
+        if actual is None:
+            return False
+        allowed = dict(expected)
+        for change in self.route_changes:
+            if change.get("role") == expected.get("role") and change.get("field") in {"endpoint", "model"}:
+                field = str(change["field"])
+                before = str(change.get("from"))
+                if field == "endpoint":
+                    before = before.rstrip("/") + "/chat/completions"
+                if allowed.get(field) != before:
+                    continue
+                value = str(change.get("to"))
+                allowed[field] = value.rstrip("/") + "/chat/completions" if field == "endpoint" else value
+                if field == "endpoint" and "endpoint_host" in allowed:
+                    from urllib.parse import urlsplit
+                    allowed["endpoint_host"] = urlsplit(value).netloc
+        return allowed == actual
+
+    def answer(self, request: bytes, *, route: dict[str, object] | None = None) -> bytes | None:
         """The recorded response for this request, or None to send it live."""
         if not self.active:
             if self.pending is not None and self.diverged is None:
                 expected, self.pending = self.pending, None
+                if "route" in expected and not self._route_matches(expected["route"], route):
+                    self.route_mismatch = True
+                    self.diverged = {"reason": "pending routed send destination or model differs",
+                                     "recorded_send": expected["send"]}
+                    return None
+                if expected.get("orphan_route"):
+                    self.pending_verified = {"send": expected["send"], "request_sha256": None,
+                                             "recorded_route": expected.get("route"), "route": route}
+                    return None
+                recorded = Path(str(expected["request"])).read_bytes()
                 digest = normalized_digest(request)
                 if digest != expected["request_digest"]:
-                    self.diverged = {
-                        "tape_position": self.cursor + 1, "tape_total": len(self.tape),
-                        "recorded_send": expected["send"], "recorded_digest": expected["request_digest"],
-                        "replayed_digest": digest,
-                        "reason": "the engine's rebuilt request differs from the request in flight when the "
-                                  "attempt stopped",
-                        "first_difference": first_difference(Path(str(expected["request"])).read_bytes(),
-                                                             request)}
+                    swap = self._route_model_swap(expected.get("route"))
+                    alternate = with_recorded_model(request, recorded, swap)
+                    if alternate is None or normalized_digest(alternate) != expected["request_digest"]:
+                        self.diverged = {
+                            "tape_position": self.cursor + 1, "tape_total": len(self.tape),
+                            "recorded_send": expected["send"], "recorded_digest": expected["request_digest"],
+                            "replayed_digest": digest,
+                            "reason": "the engine's rebuilt request differs from the request in flight when the "
+                                      "attempt stopped",
+                            "first_difference": first_difference(recorded, request)}
+                        return None
+                self.pending_verified = {"send": expected["send"],
+                                         "request_sha256": hashlib.sha256(recorded).hexdigest(),
+                                         "recorded_route": expected.get("route"), "route": route}
             return None
         item = self.tape[self.cursor]
+        if "route" in item and not self._route_matches(item["route"], route):
+            self.route_mismatch = True
+            self.active = False
+            self.diverged = {"reason": "routed send destination or model differs",
+                             "recorded_send": item["send"]}
+            return None
         digest = normalized_digest(request)
         compared = request
-        if digest != item["request_digest"] and self.model_swap is not None:
-            swapped = with_recorded_model(request, Path(str(item["request"])).read_bytes(), self.model_swap)
+        if digest != item["request_digest"]:
+            swapped = with_recorded_model(request, Path(str(item["request"])).read_bytes(),
+                                          self._route_model_swap(item.get("route")))
             if swapped is not None:
                 compared, digest = swapped, normalized_digest(swapped)
                 if digest == item["request_digest"]:
@@ -256,3 +359,6 @@ class Replayer:
         if self.cursor == len(self.tape):
             self.active = False
         return response
+
+    def _route_model_swap(self, route: object) -> dict | None:
+        return route_model_swap(route, self.route_changes, self.model_swap)

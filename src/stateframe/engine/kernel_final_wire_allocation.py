@@ -8,7 +8,29 @@ import json
 import time
 from collections.abc import Mapping
 
+import kernel_frame_routes as _frame_routes
+
 from kernel_request_seal import QualifiedRequest, OwnerPresentation, RequestSealError, freeze
+
+
+def publishes_runtime_token_meter(candidate) -> bool:
+    """Whether sealing copies the context meter back onto the runtime.
+
+    A routed request's meter lives on its capture only (kernel_request_budget._request_token_meter):
+    publishing it would hand the next request this route's tokenizer, and the routed context has none.
+    """
+    return not (_frame_routes.ROUTES_ACTIVE and getattr(candidate, "frame_route", None) is not None)
+
+
+def routed_tokenize_endpoint(capture) -> str | None:
+    """The tokenizer a routed capture was bound to at preparation (its route's tokenizer or endpoint).
+
+    Sealing must keep it: the chat endpoint differs whenever the route names its own tokenizer.
+    """
+    if not (_frame_routes.ROUTES_ACTIVE and getattr(capture, "frame_route", None) is not None):
+        return None
+    bound = getattr(capture, "_tokenize_endpoint", None)
+    return bound if isinstance(bound, str) and bound else None
 
 
 def _prepare_qualified_hook_body(context, body, request_id):
@@ -65,7 +87,7 @@ def build_qualified_request(capture, runtime, body, *, endpoint, key, deadline=N
     _request_token_meter(runtime, capture, tokenizer_endpoint=endpoint)
     candidate, context = detached_context(capture, runtime)
     candidate._tokenize_deadline = deadline
-    candidate._tokenize_endpoint = endpoint
+    candidate._tokenize_endpoint = routed_tokenize_endpoint(capture) or endpoint
     body = copy.deepcopy(body)
     truth = capture_context(candidate, context, body, side_call=False)
     if enabled():
@@ -261,7 +283,8 @@ def build_qualified_request(capture, runtime, body, *, endpoint, key, deadline=N
     from kernel_request_candidate import runtime_authority_fields
     runtime_updates = {name: copy.deepcopy(getattr(context, name))
                        for name in runtime_authority_fields(context) if hasattr(context, name)}
-    runtime_updates["_request_token_meter"] = context._request_token_meter
+    if publishes_runtime_token_meter(candidate):
+        runtime_updates["_request_token_meter"] = context._request_token_meter
     if deadline is not None and time.monotonic() >= deadline:
         raise TimeoutError("request deadline expired during qualification")
     capture_updates = {

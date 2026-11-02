@@ -426,22 +426,24 @@ def _delivered_text(messages: object) -> str:
 
 def prepare_with_commit(runtime: object, prepare, messages, *, uncapped, tools,
                         provider_request: bool = True,
-                        request_host_text_preparer: Callable[..., object] | None = None):
+                        request_host_text_preparer: Callable[..., object] | None = None,
+                        **route_options):
     """Run one real ``prepare``; commit a render's description budget only if its text is
     in the provider request that ``prepare`` returned (a dropped or preview render is not
-    a delivery)."""
+    a delivery). ``route_options`` (a routed second leg's forced role) pass through."""
     state = _state(runtime)
     state["pending"] = []
     setattr(runtime, "_notice_dedup_in_request", True)
     try:
         if request_host_text_preparer is None:
             prepared = prepare(runtime, messages, uncapped=uncapped, tools=tools,
-                               provider_request=provider_request)
+                               provider_request=provider_request, **route_options)
         else:
             prepared = prepare(
                 runtime, messages, uncapped=uncapped, tools=tools,
                 provider_request=provider_request,
                 request_host_text_preparer=request_host_text_preparer,
+                **route_options,
             )
     finally:
         setattr(runtime, "_notice_dedup_in_request", False)

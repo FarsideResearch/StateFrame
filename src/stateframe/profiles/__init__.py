@@ -41,6 +41,15 @@ def load(name: str) -> dict[str, str]:
     return {str(k): str(v) for k, v in switches.items()}
 
 
+def load_routes(name: str) -> object:
+    """Read a profile's optional routing table separately from engine switches."""
+    path = Path(name)
+    if not path.suffix:
+        path = HERE / f"{name}.json"
+    document = json.loads(path.read_text())
+    return document.get("routes", {})
+
+
 def engine_source_summary() -> dict[str, object]:
     path = HERE.parent / "engine" / "ENGINE_SOURCE.json"
     if not path.is_file():

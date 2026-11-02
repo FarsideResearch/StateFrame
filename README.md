@@ -32,7 +32,7 @@ Details: [ARCHITECTURE.md](ARCHITECTURE.md), [KNOWN_LIMITATIONS.md](KNOWN_LIMITA
 
 Upcoming, not in this release:
 
-- Choosing which model handles each kind of step, for example a small model for reading and a strong model for writing code.
+- Provider-specific adapters for routed roles (for example the Anthropic API). Routed roles speak the OpenAI-compatible chat API today.
 - Published agents-per-GPU benchmark (how many concurrent agents fit on one card).
 - Measurements over longer runs than the ranges tested so far.
 - Faster resume from checkpoints (on this release resume uses the full replay).
@@ -174,6 +174,7 @@ Check it before a run: send the same text to `/tokenize` on both servers and com
 ## Configuration
 
 - `--endpoint` and `--model` (or `STATEFRAME_ENDPOINT` and `STATEFRAME_MODEL`) choose the server and model. Only loopback addresses are allowed by default; a remote endpoint needs `STATEFRAME_ALLOW_REMOTE_ENDPOINT=1` and prints a warning that your code will leave the machine.
+- Optional per-step models: send reading to a small local model and edits to a stronger one, each with its own endpoint, sampling and cost rates. With no route settings every request goes to the one model above, unchanged. Shell commands run on whichever role's model asked for them, including commands that write files (`--shell read-only` prevents that). A routed run resumes by replay, never from a checkpoint, and when a run resumed more than once cannot prove its in-flight request was checked it resumes by full replay without that check and says so. `stateframe config init` writes a commented example; see [Per-step models](docs/guide/running.md#per-step-models).
 - StateFrame runs your checks before, during and after the fix. With no command, it uses repository pytest files when present. If there are no tests, it chooses an existing build or type check from Python project metadata, `package.json` scripts, `go.mod`, `Cargo.toml`, or a Makefile `check` or `build` target. If none exists, the agent may write a Python check that fails on the original and passes on the candidate; otherwise the result says `unverified: review the diff`. Pass an explicit `--check-cmd 'npm run build'` for a non-test check, or `--test-cmd 'node --test'`, `--test-cmd 'go test ./...'`, `--test-cmd 'cargo test'`, `--test-cmd 'make test'` or `--test-cmd 'sh scripts/check.sh'` for tests. In a repository without discovered test files, `--test-cmd` is labeled as a check command. Exit 0 passes; any other exit, a missing command or a timeout does not. Bounded failure output reaches the agent. Checks run in the existing sandbox.
 - StateFrame detects pytest commands automatically. Use `--runner-kind pytest` or `--runner-kind generic` when a wrapper hides the actual runner. Pytest keeps per-test selectors. Generic commands have one whole-command result; `--check PATH` on a generic run adds an existing check file to the protected set.
 - Use `go test -v ./...` when you need named passing tests in the result. Plain `go test ./...` reports package success but is labeled `verified by check command`. Go and Rust command paths are implemented, but their toolchains are not exercised on this project's automated gates.

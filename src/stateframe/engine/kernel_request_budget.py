@@ -6,6 +6,8 @@ the hard-ceiling check, so a later adapter cannot submit an oversized request.
 """
 from __future__ import annotations
 
+import kernel_frame_routes as _frame_routes
+
 import copy
 import hashlib
 import json
@@ -1100,7 +1102,8 @@ def _request_token_meter(
     resolved_endpoint = resolve_tokenize_url(
         runtime, capture, endpoint=(tokenizer_endpoint or getattr(capture, "_tokenize_endpoint", None)),
     )
-    holders = (runtime, capture)
+    routed = _frame_routes.ROUTES_ACTIVE and getattr(capture, "frame_route", None) is not None
+    holders = (capture,) if routed else (runtime, capture)
     meter = None
     for owner in holders:
         if owner is None:
@@ -1116,6 +1119,8 @@ def _request_token_meter(
         meter = RequestTokenMeter(
             tokenizer=tokenizer,
             endpoint=resolved_endpoint,
+            **({"route_allow_remote": bool(capture.frame_route.settings.get("allow_remote"))}
+               if routed else {}),
         )
         for owner in holders:
             if owner is None:

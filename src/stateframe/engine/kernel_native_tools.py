@@ -6,6 +6,8 @@ byte replay of the provider's original assistant message.
 """
 from __future__ import annotations
 
+import kernel_frame_routes as _frame_routes
+
 import copy
 import os
 
@@ -84,6 +86,7 @@ class NativeToolBatch:
                 if self.origin_response_event_id is not None else {})
 
     def next(self, ask, messages, **kwargs):
+        before_commit = kwargs.pop("before_commit", None) if _frame_routes.ROUTES_ACTIVE else None
         from kernel_measurement import ACTIVE_REQUEST
         capture = ACTIVE_REQUEST.get()
         if capture is None:
@@ -129,11 +132,11 @@ class NativeToolBatch:
         content = ''
         if not self.pending:
             content, calls = ask(messages, **kwargs)
-            # A completed fresh provider decision has consumed the previous
-            # batch's feedback. Local queued selections never clear it.
-            from kernel_native_prefix import enabled as prefix_enabled
-            if prefix_enabled():
-                self._consume_model_receipts()
+            if before_commit is None:
+                # Preserve the original unrouted ordering, including malformed batches.
+                from kernel_native_prefix import enabled as prefix_enabled
+                if prefix_enabled():
+                    self._consume_model_receipts()
             response_ref = getattr(capture, "selected_response_event_id", None)
             response_lineage = ({"origin_response_event_id": response_ref}
                                 if response_ref is not None else {})
@@ -169,6 +172,12 @@ class NativeToolBatch:
                                   dispatch=False, **response_lineage)
                 return ("Invalid tool-call batch: done must appear at most once, as the final call. "
                         "No calls from this batch were executed; submit a corrected batch."), []
+            if before_commit is not None and callable(before_commit):
+                before_commit(calls)
+            # Selection and feedback consumption commit only after routing accepts the full batch.
+            from kernel_native_prefix import enabled as prefix_enabled
+            if before_commit is not None and prefix_enabled():
+                self._consume_model_receipts()
             self.origin_response_event_id = response_ref
             self.pending = copy.deepcopy(calls)
             self.origin, self.index, self.size = capture.request_id, 0, len(calls)

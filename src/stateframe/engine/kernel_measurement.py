@@ -1,6 +1,8 @@
 """Durable experiment identity and wire-level evidence, independent of model advice."""
 from __future__ import annotations
 
+import kernel_frame_routes as _frame_routes
+
 import contextvars
 import copy
 import functools
@@ -3757,7 +3759,10 @@ class RequestCapture:
                 from kernel_bounded_http import request_bytes
                 raw_response = request_bytes(
                     wire, endpoint, key, deadline=attempt_deadline,
-                    socket_timeout=attempt_timeout)
+                    socket_timeout=attempt_timeout,
+                    **({"route_meta": self.frame_route.record(),
+                        "route_allow_remote": bool(self.frame_route.settings.get("allow_remote"))}
+                       if _frame_routes.ROUTES_ACTIVE and getattr(self, "frame_route", None) is not None else {}))
             except Exception as exc:
                 elapsed_ns = time.perf_counter_ns() - started
                 error_type, http_status, relay_error = _transport_metadata(exc)
@@ -4356,6 +4361,7 @@ class RequestCapture:
                     tools=copy.deepcopy(inputs["tools"]),
                     provider_request=inputs["provider_request"],
                     request_host_text_preparer=inputs["request_host_text_preparer"],
+                    **inputs.get("route_options", {}),
                 )
             replacement = prepared.capture
             from kernel_read_reuse_visibility import retire_changed_revision_candidates
@@ -5000,6 +5006,9 @@ class RequestCapture:
 
         if not _recovery_prepared:
             apply_to_request(body)
+        route_deadline = getattr(self, "route_deadline", None) if _frame_routes.ROUTES_ACTIVE else None
+        if route_deadline is not None:
+            deadline = route_deadline if deadline is None else min(deadline, route_deadline)
         admission = None
         if self.endpoint_profile is not None:
             from kernel_optional_engine_module import optional_module
@@ -5036,6 +5045,9 @@ class RequestCapture:
             deadline = derived_deadline if deadline is None else min(deadline, derived_deadline)
         if admission is None:
             socket_timeout, wall_timeout = request_timeouts()
+            if route_deadline is not None:
+                wall_timeout = max(0.001, route_deadline - time.monotonic())
+                socket_timeout = min(socket_timeout, wall_timeout)
             if deadline is None and per_request_timeout is not None:
                 total_wall_budget = max(
                     request_timeout_budget_seconds(), wall_timeout * 2)
@@ -5072,6 +5084,22 @@ class RequestCapture:
             body, endpoint, key = (prepared_call.body, prepared_call.endpoint,
                                    prepared_call.key)
             model_router.validate_final_request(self, body)
+        if _frame_routes.ROUTES_ACTIVE and not _recovery_prepared and getattr(self, "frame_route", None) is not None:
+            route = self.frame_route
+            from kernel_frame_routes import require_local
+            body["model"] = route.model
+            endpoint = route.endpoint
+            require_local(endpoint, allow_remote=bool(route.settings.get("allow_remote")))
+            key_name = route.settings.get("api_key_env")
+            key = os.environ.get(key_name, "") if isinstance(key_name, str) else ""
+            # One journal record per request, even when its body is built more than once.
+            if getattr(self, "_frame_route_journaled", None) != self.request_id:
+                self._frame_route_journaled = self.request_id
+                self.journal.emit("frame_route", request_id=self.request_id, role=route.role,
+                                  scope=route.scope, unit_class=route.unit_class,
+                                  endpoint_host=urllib.parse.urlsplit(endpoint).hostname,
+                                  model=route.model, overridden_fields=route.overridden_fields,
+                                  escalated_from=route.escalated_from, dispatch=False)
         if not _recovery_prepared:
             self._v43g_prepare_body(body)
         # Preserve the once-adapted transport input before budget/fact edits.
@@ -6718,6 +6746,16 @@ class RequestCapture:
                 self.parent_meter.record_response(
                     permit_id=sent.get("provider_permit_id"), journal=self.journal)
             self.accounting = accounting
+            if _frame_routes.ROUTES_ACTIVE and getattr(self, "frame_route", None) is not None:
+                usage = accounting.get("raw_usage", {}) if isinstance(accounting, Mapping) else {}
+                server_prompt = usage.get("prompt_tokens") if isinstance(usage, Mapping) else None
+                measured = getattr(getattr(self, "_request_measurement", None), "prompt_tokens", None)
+                self.journal.emit("frame_route_token_drift", request_id=self.request_id,
+                                  role=self.frame_route.role, server_prompt_tokens=server_prompt,
+                                  measured_prompt_tokens=measured,
+                                  delta=(server_prompt - measured
+                                         if type(server_prompt) is int and type(measured) is int else None),
+                                  dispatch=False)
             if cache_prefill_row is not None:
                 from cache_prefill_economics import record_response
                 record_response(self.journal, {
