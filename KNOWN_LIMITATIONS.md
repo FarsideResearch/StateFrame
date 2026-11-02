@@ -116,7 +116,7 @@ The engine normalizes volatile test and tool output (test-runner durations, memo
 
 ## Prompt cache reuse
 
-Prompt cache reuse is modest. The engine rebuilds a fixed-size frame for every request instead of appending to a history, so the server can reuse less of the previous request than a chat-history agent does. Measured: about 25% of prompt tokens reused on a real multi-step task (about 94% when a prompt repeats exactly). Each request therefore pays to process most of its prompt again. A cache-friendly frame layout is in the code but not active on the default path in this release; it did not improve reuse enough in testing.
+Prompt cache reuse is low. The engine rebuilds a fixed-size frame for every request instead of appending to a history, so the server can reuse less of the previous request than a chat-history agent does. On the default path the tool list also changes between steps, and the chat template renders it first, so measured reuse on recent releases was 0-3% of prompt tokens on real tasks. `STATEFRAME_STABLE_TOOL_HEAD=on` keeps the tools, system prompt and task cacheable (about 5-6k tokens per request; see [Running](docs/guide/running.md#prompt-cache-stable-tool-head)). On llama.cpp with a hybrid model such as Qwen3.6-35B-A3B, the server resumes only from the start of the message where two requests first differ, so the state frame, a single message that changes every turn, is re-read on every request. A cache-friendly frame layout is in the code but not active on the default path in this release; it did not improve reuse enough in testing.
 
 ## Token counting
 

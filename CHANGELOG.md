@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.2.13 (2026-11-02)
+
+- Add `STATEFRAME_STABLE_TOOL_HEAD` (opt-in, off by default): one append-only tool list per run, so the server can reuse the cached tools, system prompt and task between requests. Only the current step's tools can run; a listed but unavailable tool gets the usual not-offered reply, and a short note names the callable tools. With the switch off, request bytes are unchanged.
+- Measured so far on Qwen3.6-35B-A3B (llama.cpp): about 6k cached prompt tokens per request after the step where a new tool first appears (about 20% of the prompt on multi-file tasks, up to about 40% on small ones), against 0-3% reuse without the switch. Task outcomes matched in 3 paired runs on two tasks; the effect on total run time is not established. This is a small sample.
+
 ## 0.2.12 (2026-11-02)
 
 - Start faster: the engine ships its switch registry instead of parsing the engine source at every start, cutting process start to the first model request from about 90 s to about 45 s on a loaded Linux host. A fingerprint of the declared files guards the shipped registry; on any drift the engine falls back to the scan.

@@ -2011,6 +2011,13 @@ def _owner_menu_names(owner_contract: Mapping[str, object]) -> tuple[str, ...]:
     if action_names and schema_names and action_names != tuple(schema_names):
         raise FrameFit5Error("owner action menu differs from admitted tool schemas")
     names = action_names or tuple(schema_names)
+    # Stable tool head: the wire lists the run's tools, but the frame names only this turn's callable menu.
+    callable_actions = owner_contract.get("callable_actions")
+    if isinstance(callable_actions, Sequence) and not isinstance(callable_actions, (str, bytes, bytearray)):
+        callable_names = tuple(value for value in callable_actions if isinstance(value, str) and value)
+        if not callable_names or not set(callable_names).issubset(names):
+            raise FrameFit5Error("callable action menu is not a subset of the admitted tool schemas")
+        names = callable_names
     if len(names) != len(set(names)):
         raise FrameFit5Error("owner action menu contains duplicate tool names")
     return names
