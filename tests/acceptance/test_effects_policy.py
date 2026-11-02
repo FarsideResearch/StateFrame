@@ -1,6 +1,7 @@
 """Policy refusal, workspace reconciliation, and bounded observation cases."""
 from __future__ import annotations
 
+import re
 import uuid
 from pathlib import Path
 
@@ -83,9 +84,14 @@ def test_e12_small_bounded_fork_tree_exits(tmp_path):
 
 
 def test_e13_stdin_wait_receives_eof(tmp_path):
-    case = run_case(tmp_path, "one_shell.script.json",
-                    substitutions={"COMMAND": "cat"}, timeout=60)
+    # The hang this guards against is `cat` waiting forever on an inherited stdin. Judge the
+    # command's own reply: it must exit 0 well inside its limit. A whole-run 60 s budget was the
+    # wrong scale, since a full scripted run with before/after checks takes ~50 s on some hosts.
+    case = run_case(tmp_path, "one_shell.script.json", substitutions={"COMMAND": "cat"})
     case.assert_reply("exit 0")
+    match = re.search(r"\$ cat\\+n(?:\\+n)?exit 0 \| ([0-9.]+)s", case.transcript)
+    assert match, "no `$ cat` reply with its exit status and duration"
+    assert float(match.group(1)) < 10, match.group(0)
 
 
 def test_e14_ansi_is_stripped(tmp_path):

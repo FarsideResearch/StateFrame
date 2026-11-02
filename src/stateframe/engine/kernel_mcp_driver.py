@@ -15,11 +15,11 @@ import time
 
 if __package__:
     from .kernel_exec_session import CleanupReport, ExecResult, ExecSessionError
-    from .kernel_exec_tracker import Descendants, ProcessTable
+    from .kernel_exec_tracker import Descendants, ProcessTable, kill_launch_unit
     from .kernel_test_isolation import capability_command
 else:
     from kernel_exec_session import CleanupReport, ExecResult, ExecSessionError
-    from kernel_exec_tracker import Descendants, ProcessTable
+    from kernel_exec_tracker import Descendants, ProcessTable, kill_launch_unit
     from kernel_test_isolation import capability_command
 
 MAX_MESSAGE = 4 << 20
@@ -118,11 +118,13 @@ class _ContainmentMonitor:
                 if self.failure is None:
                     self.failure = ("timeout" if breach == "wall limit exceeded" else "resource", breach)
                 try:
-                    self.process.kill()
-                except ProcessLookupError:
-                    pass
+                    survivors = kill_launch_unit(self.process, self.family)
                 except OSError as error:
                     self.failure = ("supervision", f"cannot stop MCP server after resource breach: {error}")
+                else:
+                    if survivors:
+                        self.failure = ("supervision", "MCP server survived the breach kill: "
+                                        + ", ".join(str(pid) for pid in survivors))
                 return
             if self.process.poll() is not None:
                 return
@@ -321,20 +323,13 @@ def converse(request: dict, cap, cwd: Path) -> object:
         if selector is not None:
             selector.close()
         try:
-            try:
-                process.kill()
-            except ProcessLookupError:
-                pass
-            except PermissionError as error:
-                raise ExecSessionError("MCP server containment unit cannot be killed") from error
-            try:
-                process.wait(timeout=2)
-            except subprocess.TimeoutExpired as error:
-                raise ExecSessionError("MCP server cleanup deadline exceeded") from error
-            if process.poll() is None:
-                raise ExecSessionError("MCP server survived cleanup")
             if monitor is not None:
                 monitor.stop()
+            survivors = kill_launch_unit(process, monitor.family if monitor is not None else None)
+            if survivors:
+                raise ExecSessionError("MCP server survived cleanup: "
+                                       + ", ".join(str(pid) for pid in survivors))
+            if monitor is not None:
                 monitor.check()
         finally:
             if monitor is not None and monitor.thread.is_alive():

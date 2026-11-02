@@ -21,6 +21,13 @@ TEXT_SUFFIXES = {
     ".csv", ".sql", ".html", ".css", ".js", ".ts", ".sh", ".in",
 }
 TEST_FILE = re.compile(r"(^|/)(test_[^/]*\.py|[^/]*_test\.py)$")
+TASK_PATH = re.compile(r"(?<![\w./-])(?:[\w.-]+/)+[\w.-]*")
+TASK_ACTION = re.compile(r"\b(build|create|write|produce|save|generate|add|read|load|use)\b",
+                         re.IGNORECASE)
+NONPUBLIC_PARTS = frozenset({
+    "test", "tests", "testdata", "fixtures", "fixture", "private", "hidden",
+    "hidden_tests", "oracle", "gold", "grader", "reference",
+})
 
 
 class TaskRowError(ValueError):
@@ -69,6 +76,42 @@ def guess_entry(product: dict[str, str], checks: dict[str, str]) -> str | None:
         return python[0]
     # Non-Python repos (a static site, a create-from-scratch folder): start at the first file.
     return sorted(product)[0] if product else None
+
+
+def _public_hint(path: str) -> bool:
+    parsed = PurePosixPath(path.replace("\\", "/"))
+    parts = parsed.parts
+    if parsed.is_absolute() or ".." in parts or not parts or any(
+            part.startswith((".", "_")) or part.casefold() in NONPUBLIC_PARTS
+                        for part in parts[:-1]):
+        return False
+    name = parts[-1].casefold()
+    return not (name.startswith((".", "_")) and name != "__init__.py"
+                or name.startswith("test_") or name.endswith("_test.py")
+                or name in {"test.py", "conftest.py"})
+
+
+def _output_hint(task: str, product: dict[str, str]) -> str | None:
+    """Prefer an existing file beside a named output; permit a new named output."""
+    named = []
+    for match in TASK_PATH.finditer(task):
+        actions = list(TASK_ACTION.finditer(task, 0, match.start()))
+        action = actions[-1].group().casefold() if actions else ""
+        if action not in {"read", "load", "use"}:
+            named.append(match.group().rstrip(".,;:"))
+    for raw in named:
+        path = raw.rstrip("/")
+        if not _public_hint(path):
+            continue
+        parent = path if raw.endswith("/") else posixpath.dirname(path)
+        readme = f"{parent}/README.md" if parent else "README.md"
+        if readme in product and _public_hint(readme):
+            return readme
+    for raw in named:
+        path = raw.rstrip("/")
+        if _public_hint(path) and "." in PurePosixPath(path).name:
+            return path
+    return None
 
 
 # Above this many product files the engine is not handed every file as editable source: the
@@ -148,14 +191,21 @@ def build_row(work: WorkCopy, *, task: str, checks: list[str] | None = None,
         for path, text in texts.items():
             if path.startswith("tests/") and path not in public_tests:
                 public_tests[path] = text
-    if not product:
-        raise TaskRowError("repository has no product source files outside its tests")
     entry = target or guess_entry(product, {p: public_tests[p] for p in declared_checks})
     if entry is None:
-        raise TaskRowError("could not pick a starting file; pass --target <path>")
+        entry = _output_hint(task, product)
+    if entry is not None and not _public_hint(entry):
+        entry = _output_hint(task, product)
+        if entry is None:
+            entry = guess_entry({path: text for path, text in product.items()
+                                 if _public_hint(path)}, {})
+    if entry is None:
+        raise TaskRowError("could not pick a public starting file; name an output path in --task "
+                           "or pass --target for an existing product file")
+    new_roots = [entry.split("/", 1)[0]] if entry not in product else []
     # Product roots: each top-level directory, plus each top-level file by name (the engine
     # matches a root either exactly or as a directory prefix; "." would match nothing).
-    roots = sorted({path.split("/", 1)[0] for path in product})
+    roots = sorted({*(path.split("/", 1)[0] for path in product), *new_roots})
     digest = hashlib.sha256(task.encode("utf-8")).hexdigest()[:12]
     identifier = task_id or f"task-{digest}"
     first_check = declared_checks[0]
@@ -172,7 +222,7 @@ def build_row(work: WorkCopy, *, task: str, checks: list[str] | None = None,
         "public_tests": dict(sorted(public_tests.items())),
         "public_check_paths": list(declared_checks),
         "allowed_product_paths": roots,
-        "new_file_roots": [],
+        "new_file_roots": new_roots,
         "entry": {"fn": "", "path": entry},
         "path": entry,
         "rel": entry,
@@ -240,8 +290,6 @@ def _build_generic_row(work: WorkCopy, *, task: str, checks: list[str] | None,
             raise TaskRowError(f"the repository has {len(product)} source files; pass --target "
                                "(and --edit for any other file the fix may touch)")
         product = {path: product[path] for path in scope}
-    if not product:
-        raise TaskRowError("repository has no product source files outside its tests")
     source_files = {path: text for path, text in product.items() if path not in test_files}
     candidates = source_files or product
     entry = selected_target or next(
@@ -250,7 +298,16 @@ def _build_generic_row(work: WorkCopy, *, task: str, checks: list[str] | None,
                                   ".c", ".cc", ".cpp", ".sh"}
          and not path.endswith("/__init__.py")), None)
     entry = entry or guess_entry(candidates, {})
-    assert entry is not None
+    if entry is None:
+        entry = _output_hint(task, product)
+    if entry is not None and not _public_hint(entry):
+        entry = _output_hint(task, product)
+        if entry is None:
+            entry = guess_entry({path: text for path, text in product.items()
+                                 if _public_hint(path)}, {})
+    if entry is None:
+        raise TaskRowError("could not pick a starting file; name an output path in --task")
+    new_roots = [entry.split("/", 1)[0]] if entry not in product else []
     digest = hashlib.sha256(task.encode("utf-8")).hexdigest()[:12]
     identifier = task_id or f"task-{digest}"
     row = {
@@ -262,8 +319,9 @@ def _build_generic_row(work: WorkCopy, *, task: str, checks: list[str] | None,
         "public_tests": {},
         "protected_test_paths": sorted(protected),
         "runner_kind": "generic", "test_command": list(test_command),
-        "allowed_product_paths": sorted({path.split("/", 1)[0] for path in product}),
-        "new_file_roots": [], "entry": {"fn": "", "path": entry},
+        "allowed_product_paths": sorted({*(path.split("/", 1)[0] for path in product),
+                                         *new_roots}),
+        "new_file_roots": new_roots, "entry": {"fn": "", "path": entry},
         "path": entry, "rel": entry, "fn": "", "_skip_db": True,
     }
     if protect_tests != "all":

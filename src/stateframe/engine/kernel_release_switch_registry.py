@@ -163,11 +163,29 @@ def _declared_python_files(root: Path) -> tuple[Path, ...]:
     return tuple(sorted(files))
 
 
-@lru_cache(maxsize=4)
-def _release_registry(root_text: str) -> tuple[frozenset[str], str]:
-    root = Path(root_text).resolve()
+# Parsing every declared source took 22-24 s on a loaded host and ran in both the host and the
+# engine child, so the release ships the result: switch-registry.json records the switches, their
+# digest and a fingerprint of the exact source bytes they were derived from. Hashing the sources
+# takes a fraction of a second; any mismatch falls back to the full parse below.
+REGISTRY_FILE = "switch-registry.json"
+
+
+def _sources_fingerprint(root: Path, files: tuple[Path, ...]) -> str:
+    digest = hashlib.sha256()
+    for path in files:
+        digest.update(path.relative_to(root).as_posix().encode("utf-8") + b"\0")
+        digest.update(hashlib.sha256(path.read_bytes()).hexdigest().encode("ascii") + b"\n")
+    return "sha256:" + digest.hexdigest()
+
+
+def _switch_digest(switches: frozenset[str]) -> str:
+    encoded = json.dumps(sorted(switches), separators=(",", ":")).encode("utf-8")
+    return "sha256:" + hashlib.sha256(encoded).hexdigest()
+
+
+def _scan(files: tuple[Path, ...]) -> frozenset[str]:
     switches: set[str] = set()
-    for path in _declared_python_files(root):
+    for path in files:
         try:
             tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
         except (OSError, UnicodeError, SyntaxError):
@@ -175,10 +193,51 @@ def _release_registry(root_text: str) -> tuple[frozenset[str], str]:
         reader = _SwitchReaderVisitor()
         reader.visit(tree)
         switches.update(reader.switches())
-    frozen = frozenset(switches)
-    encoded = json.dumps(sorted(frozen), separators=(",", ":")).encode("utf-8")
-    digest = "sha256:" + hashlib.sha256(encoded).hexdigest()
-    return frozen, digest
+    return frozenset(switches)
+
+
+def _shipped_registry(root: Path, fingerprint: str) -> tuple[frozenset[str], str] | None:
+    """The shipped result when it is well formed and derived from exactly these sources."""
+    try:
+        document = json.loads((root / REGISTRY_FILE).read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, ValueError):
+        return None
+    if not isinstance(document, dict) or document.get("schema") != SCHEMA:
+        return None
+    listed = document.get("switches")
+    if (document.get("sources_sha256") != fingerprint or not isinstance(listed, list)
+            or not all(isinstance(name, str) and name.startswith("STATEFRAME_") for name in listed)):
+        return None
+    switches = frozenset(listed)
+    digest = _switch_digest(switches)
+    return (switches, digest) if document.get("digest") == digest else None
+
+
+def build_registry_document(root: Path) -> dict[str, object]:
+    """The registry for ``root`` computed by a full parse: what switch-registry.json must contain."""
+    root = Path(root).resolve()
+    files = _declared_python_files(root)
+    switches = _scan(files)
+    return {"schema": SCHEMA, "sources_sha256": _sources_fingerprint(root, files),
+            "switches": sorted(switches), "digest": _switch_digest(switches)}
+
+
+def write_registry(root: Path) -> Path:
+    """Regenerate switch-registry.json for a release (run after any engine source change)."""
+    path = Path(root).resolve() / REGISTRY_FILE
+    path.write_text(json.dumps(build_registry_document(root), indent=1) + "\n", encoding="utf-8")
+    return path
+
+
+@lru_cache(maxsize=4)
+def _release_registry(root_text: str) -> tuple[frozenset[str], str]:
+    root = Path(root_text).resolve()
+    files = _declared_python_files(root)
+    shipped = _shipped_registry(root, _sources_fingerprint(root, files))
+    if shipped is not None:
+        return shipped
+    frozen = _scan(files)
+    return frozen, _switch_digest(frozen)
 
 
 def release_stateframe_switches(root: Path | None = None) -> tuple[frozenset[str], str]:
@@ -227,6 +286,15 @@ def enforce_stateframe_switch_registry(
 
 
 __all__ = [
-    "SCHEMA", "StateFrameSwitchPreflightError", "enforce_stateframe_switch_registry",
-    "release_stateframe_switches", "unconsumed_stateframe_switches",
+    "REGISTRY_FILE", "SCHEMA", "StateFrameSwitchPreflightError", "build_registry_document",
+    "enforce_stateframe_switch_registry", "release_stateframe_switches",
+    "unconsumed_stateframe_switches", "write_registry",
 ]
+
+
+if __name__ == "__main__":
+    import sys
+
+    if sys.argv[1:] != ["--write"]:
+        raise SystemExit("usage: python -I kernel_release_switch_registry.py --write")
+    print(f"wrote {write_registry(Path(__file__).resolve().parent)}")

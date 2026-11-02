@@ -116,8 +116,8 @@ def public_parent_row(public_row: dict) -> dict:
     row = copy.deepcopy(public_row)
     files = row.get('files')
     if files is not None:
-        if not isinstance(files, dict) or not files:
-            raise ValueError('public multi-file row requires a nonempty files mapping')
+        if not isinstance(files, dict):
+            raise ValueError('public multi-file row requires a files mapping')
         normalized = {}
         for raw_path, payload in files.items():
             path = normalize_repo_path(raw_path, field='public files path')
@@ -129,12 +129,17 @@ def public_parent_row(public_row: dict) -> dict:
         entry = row.get('entry', {})
         if not isinstance(entry, dict):
             raise ValueError('public entry must be a mapping')
-        primary = entry.get('path', sorted(normalized)[0])
+        primary = entry.get('path') or (sorted(normalized)[0] if normalized else None)
+        if primary is None:
+            raise ValueError('public entry or declared file is required')
         primary = normalize_repo_path(primary, field='public entry path')
         if primary not in normalized:
-            raise ValueError('public entry is not a declared file')
+            roots = row.get('new_file_roots', ())
+            if not (row.get('tier') == 'USER-REPO' and isinstance(roots, list)
+                    and primary.split('/', 1)[0] in roots):
+                raise ValueError('public entry is not a declared file')
         row['files'] = normalized
-        row['parent_src'] = normalized[primary]['parent_src']
+        row['parent_src'] = normalized[primary]['parent_src'] if primary in normalized else ''
     if not isinstance(row.get('parent_src'), str):
         raise ValueError('public parent source required')
     row['fixed_src'] = row['parent_src']

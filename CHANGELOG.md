@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.2.12 (2026-11-02)
+
+- Start faster: the engine ships its switch registry instead of parsing the engine source at every start, cutting process start to the first model request from about 90 s to about 45 s on a loaded Linux host. A fingerprint of the declared files guards the shipped registry; on any drift the engine falls back to the scan.
+- Keep editable test files out of the starting-file hint for file-creation tasks. When a task names a new output, use a public file beside it or a declared new-file target without inventing a source file. Source-window budgeting skips non-public targets while the public-path validator stays strict.
+- Sweep runnable Quickstart and README commands and every bundled example from a clean install, with a broken-release positive control and a release-routine script.
+- The startup check of the model server (`/v1/models`, and `/slots` on llama.cpp) tries once more when the server takes longer than 10 seconds to answer, so a run no longer fails to start because a busy or shared server stalled one request. An HTTP error or a refused connection still stops the run at once.
+- The startup check of the engine and test interpreters tries once more, with twice the time limit (60 s, then 120 s), when it times out, so a run on a heavily loaded machine no longer fails with a healthy interpreter. If both attempts time out, the message says it timed out under load; an interpreter that exits with an error is reported at once as broken or incomplete.
+- Each execution supervisor request carries an id, and late replies to earlier requests are discarded. A reply that arrived after the timeout can no longer corrupt the next call ("startup probe could not run safely: Extra data"). The supervisor timeout is `STATEFRAME_EXEC_RPC_SECONDS` (default 15) scaled by host load per CPU (1 to 8).
+- System executable directories are scanned once per process instead of once per capability build. This removes 10 to 30 s of startup CPU on Linux, and the resulting capability is unchanged. `STATEFRAME_STARTUP_PROBE_SECONDS` (default 60, at most 300) sets the interpreter startup probe limit.
+- Sandboxed Linux commands now start in about 0.5 s instead of about 3 s. The inner sandbox no longer re-binds every executable on PATH under the already read-only /usr (7 mounts instead of about 425). The mount view and access set are unchanged, and a containment check confirms nothing escapes.
+- Linux: checks no longer fail with exit 127 when the test Python is a shared-library build under `/usr/local` (the official python container images, pyenv `--enable-shared`). The check sandbox now exposes the loader cache, as the shell sandbox already did, so `libpython` is found; the rest of `/etc` stays out.
+- Tests that kill engine processes now verify each process's start identity and command before signalling, and refuse invalid, own and own-group targets.
+
+### Security
+
+- On Linux, an MCP server whose launch ran past the MCP timeout while its sandbox was still being set up could outlive the timeout and keep running with no supervisor (no wall-clock or memory limit), though still confined by its sandbox namespaces and dropped capabilities. Affected: 0.2.4 through 0.2.10, MCP servers on Linux only. The shell tool was not affected, and neither was macOS, where the MCP server runs as the launched process itself and cannot fork.
+- Fix: a timed-out or stopped sandbox launch is now killed as a whole unit (the launcher, its process group and every tracked descendant), and cleanup fails instead of reporting success when any member survives. The same cleanup now covers the check and probe runners and the execution supervisor's shutdown.
+
 ## 0.2.9 (2026-11-01)
 
 - Add optional per-step models. Each request is assigned a role (`read`, `plan`, `edit`, `finish`, `decide2`, `unit`) from what the engine already knows, and each role can have its own endpoint, model, sampling, limits, slot, tokenizer and cost rates. Set them with `--route ROLE.FIELD=VALUE`, `STATEFRAME_ROUTE_<ROLE>_<FIELD>`, a TOML or JSON routes file, or the profile. `stateframe config init` writes a commented example.

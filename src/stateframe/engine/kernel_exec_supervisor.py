@@ -220,6 +220,31 @@ class Supervisor:
             return {"jobs": {ident: job.status() for ident, job in self.jobs.items()}}
         raise ValueError(f"unknown execution supervisor operation: {op}")
 
+    def reply(self, request):
+        has_rid = "rid" in request
+        rid = request.pop("rid", None)
+        try:
+            response = self.dispatch(request)
+        except (ValueError, TypeError, KeyError, OSError, RuntimeError) as error:
+            response = {"error": f"{type(error).__name__}: {error}"}
+        if has_rid:
+            response["rid"] = rid
+        return response
+
+    def _queue_replies(self):
+        while b"\n" in self.incoming:
+            line, _, rest = self.incoming.partition(b"\n")
+            self.incoming = bytearray(rest)
+            if len(line) + 1 > 1 << 20:
+                raise ValueError("execution control request exceeds 1 MiB")
+            try:
+                response = self.reply(json.loads(line))
+            except (ValueError, TypeError, KeyError, OSError, RuntimeError) as error:
+                response = {"error": f"{type(error).__name__}: {error}"}
+            self.outgoing.extend(json.dumps(response, separators=(",", ":")).encode() + b"\n")
+        if len(self.incoming) > 1 << 20:
+            raise ValueError("execution control request exceeds 1 MiB")
+
     def serve(self):
         connected = True
         try:
@@ -270,16 +295,7 @@ class Supervisor:
                                 job.stop(0.1)
                             continue
                         self.incoming.extend(chunk)
-                        if len(self.incoming) > 1 << 20:
-                            raise ValueError("execution control request exceeds 1 MiB")
-                        if b"\n" in self.incoming:
-                            line, _, rest = self.incoming.partition(b"\n")
-                            self.incoming = bytearray(rest)
-                            try:
-                                response = self.dispatch(json.loads(line))
-                            except (ValueError, TypeError, KeyError, OSError, RuntimeError) as error:
-                                response = {"error": f"{type(error).__name__}: {error}"}
-                            self.outgoing.extend(json.dumps(response, separators=(",", ":")).encode() + b"\n")
+                        self._queue_replies()
                     if connected and mask & selectors.EVENT_WRITE and self.outgoing:
                         try:
                             count = self.control.send(self.outgoing)

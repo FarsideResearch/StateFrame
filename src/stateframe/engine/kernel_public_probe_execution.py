@@ -10,6 +10,7 @@ import tempfile
 import time
 
 from capability_study_support import locked_test_process
+from kernel_exec_tracker import kill_launch_unit
 from kernel_test_isolation import isolated_command
 from kernel_test_python import selected_test_python
 from kernel_public_probe_sandbox import RUNNER_SOURCE
@@ -78,8 +79,7 @@ def execute_probe(root: Path, product_files: dict, source: str, output: Path, *,
                     try:
                         code = process.wait(timeout=allowance)
                     except subprocess.TimeoutExpired:
-                        os.killpg(process.pid, signal.SIGKILL)
-                        process.wait(timeout=5)
+                        kill_launch_unit(process, deadline_seconds=5)
                         code, timed_out = -1, True
         if any(not path.is_file() or hashlib.sha256(path.read_bytes()).hexdigest() != value
                for path, value in before.items()):

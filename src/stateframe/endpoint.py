@@ -12,6 +12,7 @@ import json
 import ipaddress
 import os
 import sys
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -20,8 +21,25 @@ from dataclasses import dataclass
 CHAT_SUFFIX = "/chat/completions"
 
 
+MAX_JSON_BYTES = 4 * 1024 * 1024
+
+
 class EndpointError(RuntimeError):
     """The endpoint is unusable for a run (bad URL, unreachable, auth refused)."""
+
+
+def _read_bounded(response, deadline: float) -> bytes:
+    """At most MAX_JSON_BYTES of the body, raising TimeoutError once ``deadline`` passes."""
+    data = bytearray()
+    read = getattr(response, "read1", None) or response.read
+    while len(data) < MAX_JSON_BYTES:
+        if time.monotonic() > deadline:
+            raise TimeoutError("server response exceeded the probe deadline")
+        chunk = read(min(65536, MAX_JSON_BYTES - len(data)))
+        if not chunk:
+            break
+        data.extend(chunk)
+    return bytes(data)
 
 
 def _is_loopback(url: str) -> bool:
@@ -140,14 +158,36 @@ class Endpoint:
             headers["Authorization"] = f"Bearer {key}"
         return headers
 
+    def _read_json(self, opener: urllib.request.OpenerDirector, url: str) -> object:
+        """GET ``url`` as JSON, retrying once when the server stalls past the timeout.
+
+        A loaded or shared server can stall one request for longer than the timeout and then
+        answer the next at once. Only a timeout is retried; an HTTP answer or a refused
+        connection fails immediately.
+        """
+        for attempt in (1, 2):
+            request = urllib.request.Request(url, headers=self._headers(), method="GET")
+            # The socket timeout bounds each wait, not the whole read: a server that trickles bytes
+            # could hold one attempt open forever. The body read stops at a wall-clock deadline, so an
+            # attempt is bounded (connect, headers and urllib's capped redirects each by one socket
+            # timeout, the body by the deadline plus at most one more wait), not exactly timeout_s.
+            deadline = time.monotonic() + self.timeout_s
+            try:
+                with opener.open(request, timeout=self.timeout_s) as response:
+                    return json.loads(_read_bounded(response, deadline))
+            except (TimeoutError, urllib.error.URLError) as error:
+                timed_out = isinstance(error, TimeoutError) or isinstance(getattr(error, "reason", None),
+                                                                           TimeoutError)
+                if attempt == 2 or not timed_out or isinstance(error, urllib.error.HTTPError):
+                    raise
+        raise AssertionError("unreachable")
+
     def get_json(self, path: str) -> object:
         self.check_locality()
-        request = urllib.request.Request(self.base_url + path, headers=self._headers(), method="GET")
         # Do not route loopback requests through an inherited HTTP proxy. Redirects
         # must pass the same local policy before urllib can make another request.
         opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _LocalRedirects(self.allow_remote))
-        with opener.open(request, timeout=self.timeout_s) as response:
-            return json.loads(response.read(4 * 1024 * 1024))
+        return self._read_json(opener, self.base_url + path)
 
     def get_slots(self) -> list[object] | None:
         """Read llama.cpp's root ``/slots`` endpoint when this endpoint is loopback.
@@ -159,11 +199,9 @@ class Endpoint:
             return None
         parsed = urllib.parse.urlsplit(self.base_url)
         url = urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, "/slots", "", ""))
-        request = urllib.request.Request(url, headers=self._headers(), method="GET")
         opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _LocalRedirects())
         try:
-            with opener.open(request, timeout=self.timeout_s) as response:
-                payload = json.loads(response.read(4 * 1024 * 1024))
+            payload = self._read_json(opener, url)
         except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError,
                 ConnectionError, OSError, EndpointError, json.JSONDecodeError, UnicodeError):
             return None

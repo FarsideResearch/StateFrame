@@ -30,7 +30,9 @@ def test_startup_capability_and_fail_closed_errors(tmp_path, monkeypatch, check,
             assert cap.sandboxed and not cap.workspace_writable and cap.network == 'none'
             assert cap.workspace != tmp_path.resolve() and kwargs['cwd'].resolve() == cap.workspace
             assert 'HOST_SECRET' not in cap.env and 'PYTHONPATH' not in cap.env
-            assert cap.limits.wall_seconds == runner.STARTUP_PROBE_SECONDS and cap.limits.output_bytes == 65536
+            # A timeout is retried once with double the wall; every other outcome gets one attempt.
+            assert cap.limits.wall_seconds == runner.STARTUP_PROBE_SECONDS * len(seen)
+            assert cap.limits.output_bytes == 65536
             assert tmp_path not in cap.write_roots
             if outcome == 'launch':
                 raise ExecSessionError('sandbox unavailable')
@@ -54,13 +56,13 @@ def test_startup_capability_and_fail_closed_errors(tmp_path, monkeypatch, check,
         with pytest.raises(ProbeCleanupError, match='cleanup failed'):
             invoke()
     elif outcome in {'timeout', 'flood', 'exit', 'launch'} or (outcome == 'version' and check == 'engine'):
-        expected = {'timeout': 'wall limit', 'flood': 'output limit', 'exit': 'cannot import pytest',
+        expected = {'timeout': 'timed out under load', 'flood': 'output limit', 'exit': 'cannot import pytest',
                     'launch': 'could not run safely', 'version': 'invalid Python version'}[outcome]
         with pytest.raises(runner.RunError, match=expected):
             invoke()
     else:
         assert invoke() == sys.executable
-    assert len(seen) == 1
+    assert len(seen) == (2 if outcome == 'timeout' else 1)
 
 
 @pytest.mark.host_sandbox
