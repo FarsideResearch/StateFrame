@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import sys
 from pathlib import Path
@@ -90,3 +91,48 @@ def test_instructions_compose_with_hooks_skills_mcp_and_test_runners(tmp_path, r
     left, right = normalise(without_slot), normalise(plain.requests[0])
     at = next((i for i, (x, y) in enumerate(zip(left, right)) if x != y), min(len(left), len(right)))
     assert left == right, (at, left[max(0, at - 200):at + 200], right[max(0, at - 200):at + 200])
+
+
+ROUTES = ("--route", "read.temperature=0.3", "--route", "plan.temperature=0.4",
+          "--route", "finish.temperature=0.5")
+
+
+@pytest.mark.parametrize("runner", sorted(RUNNERS))
+def test_instructions_compose_with_routes(tmp_path, runner):
+    # Per-step models on top of instructions, hooks, a skill, MCP and each test-runner mode: the one
+    # instructions block stays last in the system message, the task stays messages[1], every request
+    # carries a route record, and routing changes only sampling, never what the model is shown.
+    framed = _case(tmp_path, "framed", runner, "--instructions")
+    routed = _case(tmp_path, "routed", runner, "--instructions", *ROUTES)
+    # Per-role sampling is applied at send time, so check the bytes that went out (wire/), not the
+    # engine-side request records.
+    wire = lambda case: [json.loads(path.read_text())  # noqa: E731
+                         for path in sorted((case.run_dir / "wire").glob("*.request.json"))]
+    sent, framed_sent = wire(routed), wire(framed)
+    assert sent and len(sent) == len(framed_sent)
+    routes = [json.loads(path.read_text()) for path in sorted((routed.run_dir / "wire").glob("*.route.json"))]
+    assert len(routes) == len(sent)
+    assert routes[0]["role"] == "plan"
+    for request, route in zip(sent, routes):
+        messages = request["messages"]
+        assert messages[0]["role"] == "system" and _text(messages[0]).endswith("\nproject-instructions>>>")
+        assert sum(MARKER in _text(message) for message in messages) == 1
+        assert messages[1]["role"] == "user" and MARKER not in _text(messages[1])
+        expected = {"plan": 0.4, "read": 0.3, "finish": 0.5}.get(route["role"])
+        if expected is not None:
+            assert request.get("temperature") == expected, (route["role"], request.get("temperature"))
+    # Two separate runs differ only where any two runs without routes do (the documented determinism
+    # scope): run-scoped 20-hex ids (wire-truth handles, tool call ids, edit receipts), how long a tool
+    # call took, and the receipt hash over that duration. Mask those; messages and tools must match.
+    volatile = [(re.compile(r"(?<![0-9a-f])[0-9a-f]{20}(?![0-9a-f])"), "<ID>"),
+                (re.compile(r"\| \d+\.\d+s"), "| <SECONDS>"),
+                (re.compile(r'(result_sha256\\*":\\*")[0-9a-f]{64}'), r"\1<SHA>")]
+
+    def normalise(request, base):
+        text = json.dumps({"messages": request["messages"], "tools": request.get("tools")}, sort_keys=True)
+        text = text.replace(str(tmp_path / base), "<BASE>")
+        for pattern, replacement in volatile:
+            text = pattern.sub(replacement, text)
+        return text
+    assert ([normalise(request, "routed") for request in sent]
+            == [normalise(request, "framed") for request in framed_sent])
