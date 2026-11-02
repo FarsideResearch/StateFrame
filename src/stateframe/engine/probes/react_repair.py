@@ -6229,6 +6229,8 @@ def work(d, *, resume=None):
             _claim_rule_rendered = False
         else:
             _claim_rule_rendered = render_claim_rule_first_turn(msgs, _entry_ticket_text)
+            from kernel_project_instructions import install as install_project_instructions
+            msgs = install_project_instructions(msgs)
         if _lean_on:
             from kernel_lean import BoundedToolMessages
             msgs = BoundedToolMessages(msgs)

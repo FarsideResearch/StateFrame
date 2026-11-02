@@ -27,6 +27,8 @@ The installer puts StateFrame in `~/.stateframe/venv` and, if the name is free, 
 
 No model server? Start `python -m stateframe.scripted_endpoint --script examples/discount_bug.script.json --port 0` in the background; it prints a URL that answers with recorded tool calls (the example scripts also answer `/tokenize`); run with `--endpoint <that URL> --model scripted` (the URL already ends in `/v1`) to exercise the whole pipeline offline.
 
+Add `--instructions` to let a run read your repository's own `AGENTS.md` (else `CLAUDE.md`) as untrusted project instructions; `--instructions=FILE` picks a file. It is off by default.
+
 Your repository's tests run with your project's Python (`.venv/`, `venv/`, `env/`, else `python3` on PATH); `--test-python PATH` overrides it.
 
 `--test-cmd` accepts pytest or a whole-command check such as `node --test`, `go test -v ./...`, `cargo test`, or a shell script. `--check-cmd` declares a non-test check. When a repository has no tests, a declared build or type check or an agent-written check can verify the result; without evidence, the result is `unverified: review the diff`. Use `--protect-tests off` (default) to report editable test changes, `task` to lock judging tests, or `all` to lock every pre-existing test. Selecting protection explicitly advertises structured wrong-test evidence when supported; omitting new flags keeps 0.2.6 request bytes. Plain `go test` needs `-v` for named passing tests. Go and Rust toolchains are not exercised on this project's automated gates.

@@ -16,6 +16,7 @@ from . import routes
 from .task_row import TaskRowError
 from .workcopy import WorkCopyError
 from .engine.kernel_tool_settings import ToolSettings, ToolSettingsError
+from . import instructions as project_instructions
 from .skills import install as install_skill, list_installed, remove as remove_skill
 from datetime import datetime, timezone
 
@@ -133,6 +134,12 @@ def _add_task_arguments(command: argparse.ArgumentParser, *, for_run: bool = Fal
                          help="load a selected instruction bundle (repeatable)")
     command.add_argument("--trust-skill-tools", action="store_true",
                          help="offer selected skills' command definitions")
+    project = command.add_mutually_exclusive_group()
+    project.add_argument("--instructions", nargs="?", const="auto", default=None, metavar="FILE",
+                         help="read project instructions: FILE, or with no value the repo's AGENTS.md, "
+                              "else CLAUDE.md (default: off)")
+    project.add_argument("--no-instructions", action="store_true",
+                         help="do not read project instructions (the default)")
     command.add_argument("--shell-sandbox", choices=("on", "off"), default="on")
     for flag in ("run-env", "git-tool", "web"):
         command.add_argument("--" + flag, action=argparse.BooleanOptionalAction, default=None)
@@ -246,6 +253,10 @@ def _run_options(args: argparse.Namespace, endpoint: Endpoint) -> RunOptions:
                       quiet=getattr(args, "quiet", False) or getattr(args, "json", False),
                       tool_settings=settings, skills=tuple(args.skill),
                       trust_skill_tools=args.trust_skill_tools,
+                      instructions=("off" if args.no_instructions else
+                                    "auto" if args.instructions == "auto" else
+                                    str(Path(args.instructions).expanduser().resolve()) if args.instructions
+                                    else project_instructions.DEFAULT_MODE),
                       hooks_files=tuple(Path(path).expanduser().resolve() for path in args.hooks),
                       no_project_hooks=args.no_project_hooks,
                       hooks_repo=args.repo.resolve(),

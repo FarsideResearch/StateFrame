@@ -8,6 +8,7 @@ A diagram of how these fit together is in [ARCHITECTURE.md](../../ARCHITECTURE.m
 |---|---|
 | `cli.py` | The `run`, `resume`, `inspect` and `chat` commands and their flags. |
 | `skills.py` | Skill directory parsing, installation, path resolution and pinned digest checks. |
+| `instructions.py` | Project instructions: AGENTS.md / CLAUDE.md discovery, size bound and resume digest pin. |
 | `runner.py` | One run: preflight, run directory, spec, driving the engine child, before/after checks, the outcome. |
 | `hook_host.py` | Project hook trust and loading, pinned bundles, runner lifecycle events, terminal records and resume checks. |
 | `test_interpreter.py` | Choosing the Python that runs your tests (`--test-python`, project venv, `python3` on PATH). |
@@ -47,6 +48,7 @@ The engine is a flat package of modules, each owning one mechanism; `release-man
 | `kernel_effects.py`, `kernel_run_env.py` | Bounded full workspace effect reconciliation, including executable-bit restoration, and run-local dependency environments. |
 | `kernel_agent_schemas.py`, `kernel_agent_tools.py`, `kernel_agent_jobs.py`, `kernel_job_output.py` | Schemas, per-run tool registration and Git/web adapters, background jobs, frozen job snapshots, bounded output and schema budget admission. |
 | `kernel_skills.py` | Bounded skill catalog and user-role body loading. |
+| `kernel_project_instructions.py` | The framed project-instructions block appended to the end of the engine system message. |
 | `kernel_custom_tools.py`, `kernel_mcp_tools.py`, `kernel_mcp_driver.py`, `kernel_tool_tape.py` | Trusted command and MCP stdio definitions, bounded server exchanges and durable tool replay records. |
 | `kernel_execution_policy.py`, `kernel_test_isolation.py` | Sandboxed command and test execution. |
 | `kernel_git_view.py` | Pinned, sanitized Git history observations, commit-rooted `show`, run-baseline diffs and offline Git queries for repository indexing. |

@@ -3,7 +3,7 @@
 ## 0.2.9 (2026-11-01)
 
 - Add optional per-step models. Each request is assigned a role (`read`, `plan`, `edit`, `finish`, `decide2`, `unit`) from what the engine already knows, and each role can have its own endpoint, model, sampling, limits, slot, tokenizer and cost rates. Set them with `--route ROLE.FIELD=VALUE`, `STATEFRAME_ROUTE_<ROLE>_<FIELD>`, a TOML or JSON routes file, or the profile. `stateframe config init` writes a commented example.
-- With no route settings, requests are byte-identical to 0.2.7.
+- With no route settings, requests are byte-identical to 0.2.8.
 - A reply that edits files or says done from another role's model is discarded unrun and the same step is asked again of the `edit` or `finish` model, from the same frame.
 - Each role's server is checked at start. Remote endpoints need a per-role opt-in (or the global one), including on redirects. Routed requests never go through an HTTP proxy.
 - Runs print their effective routes at start and per-role sends, discarded replies, tokens and estimated cost at the end.
@@ -12,6 +12,11 @@
 - `shell` calls are not escalated: they run on whichever role's model asked for them, including commands that write files. `--shell read-only` prevents that.
 - Workspace-writing custom, skill and MCP tools escalate to the `edit` model like built-in edits.
 - After a failed test run on the current code, the next request goes to the `plan` model.
+
+## 0.2.8 (2026-11-01)
+
+- Add opt-in project instructions: `--instructions` gives the agent the repository's `AGENTS.md` (else `CLAUDE.md`), and `--instructions=FILE` a chosen file. The text is bounded to 6,144 bytes with a visible truncation note, appended once to the end of the system prompt so the request head stays cache-stable, framed as untrusted repository content that cannot change tools, the sandbox or engine rules, and pinned by SHA-256 so resume refuses a changed or missing file. Without the flag, requests are unchanged byte for byte.
+- Measured: on Qwen3.6-35B-A3B the three bundled examples passed 9 of 9 runs with and without a realistic `AGENTS.md` (27 and 28 model requests), so the feature ships off by default.
 
 ## 0.2.7 (2026-11-01)
 

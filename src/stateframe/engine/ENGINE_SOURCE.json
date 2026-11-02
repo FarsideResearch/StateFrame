@@ -1,6 +1,6 @@
 {
  "dropped_lab_only": 1,
- "file_count": 738,
+ "file_count": 739,
  "files": {
   "architecture/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
   "architecture/domain_ids.py": "b0aefd60ec4b876a45ff77f2badfdf12a4902af02cbb6506398b46da368106fd",
@@ -440,10 +440,11 @@
   "kernel_product_manifest.py": "b82110e29b9de0a578b35ff383d51640397b6e42e4d5235beccdba5822c88745",
   "kernel_progress_facts.py": "abb77f70526b6e7d8eea43d14bda232f773c13bed6f4640ff56c431d15731908",
   "kernel_progress_ledger.py": "351de3654abfe49111f8ee3f07161f1bc6084def715f7ee5f92375eeab6a764f",
+  "kernel_project_instructions.py": "fbbbdbb2261a7f33ea6e0d6db787a3b980805fe9807e4dcc7c1f7420cc03f9ae",
   "kernel_project_registries.py": "7ac48c5525c5fa62b8f10b75c18ca4ed45b9f7b5cc580db1f60ff873f7671dc3",
   "kernel_prompt_accounting.py": "9e4ec001298203d4160b5d68601efca936c7f4f62117f517c0250140386fa0b7",
   "kernel_prompt_cache.py": "890b5953a9d341b3723e49a4e0ec1730a82908c1fbe2cd1a7498b1c07bc85daa",
-  "kernel_prompt_compact.py": "46cafb3020e6c9433f50c25815be413270de8deaf40eff18cc5fc0b6e41cf739",
+  "kernel_prompt_compact.py": "0e8009188307887b54d8345d338e2db667c9d662e2b3c4795f1e9cca8cda2acc",
   "kernel_prompt_diet.py": "2a6b92a75df5a492b4bc380a6ee825d0f60e10bbca36ec7512960a4a73ff60a5",
   "kernel_protocol_spec.py": "d5bdb0d79776998fdb3404119901288a6321192e101e9979fc8862f9eb76d731",
   "kernel_provability.py": "60d0fa53538cbb303c2e633311f38a3182ccbe18ec54df9ea1b085fd521c37d1",
@@ -699,7 +700,7 @@
   "probes/converge.py": "17ef92d10c4df9d42181405b37a9940b7db12dfb76da9bc6663ea95dc828ab37",
   "probes/decoy_tools.py": "0bb0565c38074eaaa61f159907b306d8f438e2f243381addbc4e577b6d69a058",
   "probes/history_compaction.py": "ffcff144438ae29803ecb8e6112f682b189e9619990f1a679d8746dc74fffd4b",
-  "probes/react_repair.py": "12de35730382a91e28306d3134ffafd5ca88d61846cda8f3fe4a5445050ed534",
+  "probes/react_repair.py": "1b397c905a4db1f4f25121511162108c0b73b097c3e0073620206d64f61c2650",
   "probes/real_repo_baseline.py": "6e939651bde04dfd363301c72e93ff2117490e56bb0aada58040079a15ec7b9f",
   "probes/real_repo_baseline_v2.py": "19bd1441eb84e54c5cc7e69889940b92c01e7a3543d6dea289ba4e85434edfcb",
   "probes/real_repo_baseline_v3.py": "3c5fddaf49ca62a4efe6c2672ab03093102714044fa4efe20fa6e080bcbb697f",
@@ -710,7 +711,7 @@
   "protected_tree_guard.py": "4e7df88f540471a6b09329a8e026acf0d832d34dcd34e702505aef28c77e7879",
   "realtask_benchmark.py": "ed68f59f3334ba2eebbf776f322310a4f16d18443bf9995f216e4fc49b1a42d0",
   "realtask_worker_receipts.py": "7f358362d2b839957f2541961ce11b6e65bcb26fa60e5f3d28de22144d47421f",
-  "release-manifest.json": "cde645043cef76ded75599879ca1c525a758677d504546660f067347e51cf760",
+  "release-manifest.json": "3bcef2b25099fbfbecec537e575df54a976ce1ca03af4920f8df08fcab156ced",
   "sampler_config.py": "1549b3a60e0ebc8fbbad8ed5256f52477cd1bb2491a8da350c64c01e01c81b2d",
   "sf_launch.py": "689040e5eca182f32233a559577408eb96d1f0b70d71c4f96d71bced1cdb1f0c",
   "sidekick.py": "e07b5979271a5477cdb870fa42fa05baf5e5b463c5208562cbb8eaeb1b9b6d1e",
@@ -4674,7 +4675,7 @@
  "release_listed_but_absent_in_source": [],
  "release_manifest": "37f11a29d4ceccbc5ea3aa95d1e60249e41b93974fe1da74e347ccfad28f1374",
  "schema": "stateframe-engine-source/1",
- "shipped_hash": "2c5ab821f0a1f2253d90a0bbcfd88e68537cdf3781535be101e14f56a7193e7b",
+ "shipped_hash": "d60b63ed8d69a08a1c2e56f1fd1229daaca9807e13541bb9cd363bba4af60426",
  "source_hash": "1a75f27c6197deed9df5acd441902846aced5fd358729dab308577e184a077c4",
  "source_tree": "37f11a29d4ceccbc5ea3aa95d1e60249e41b93974fe1da74e347ccfad28f1374"
 }
