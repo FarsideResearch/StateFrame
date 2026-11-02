@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.2.14 (2026-11-02)
+## 0.3.1 (2026-11-02)
 
 - Fix runs on mid-size repositories failing before their first request with `FrameRequestAllocationError ... failures=closure_omissions_unreconciled`. Above about 12 candidate source files, the bounded source closure stops scanning and records the next file as "closure file limit reached". The final source proof counted that unopened file as undelivered source and refused the whole run. A file the walk never reached is now a scan-scope fact: the run proceeds, and the file stays listed in the frame's file inventory and repository map, where the agent can read it. The journal keeps the omission with its continuation handle. An omission on a path whose units were selected for delivery still refuses the request, as do unavailable and out-of-scope sources.
 - Requests on repositories under the closure limit are unchanged byte for byte.
