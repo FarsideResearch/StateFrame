@@ -29,11 +29,11 @@ from pathlib import Path
 
 if __package__:
     from .cache_metrics import normalize
-    from .replay_tape import CheckpointUnfaithful, Replayer, mask_volatile
+    from .replay_tape import CheckpointUnfaithful, ReplayUnfaithful, Replayer, mask_volatile
     from .skills import SkillError, skills_digest, verify_records
 else:  # Executed by path under the selected project interpreter.
     from cache_metrics import normalize
-    from replay_tape import CheckpointUnfaithful, Replayer, mask_volatile
+    from replay_tape import CheckpointUnfaithful, ReplayUnfaithful, Replayer, mask_volatile
     from skills import SkillError, skills_digest, verify_records
 
 # The wrappers' own state (send counters, the id stream position, ...). An engine checkpoint saves
@@ -64,6 +64,7 @@ def emit_resume_pending_check(spec: dict, resume: dict | None) -> None:
 
 
 def install_environment(spec: dict) -> None:
+    checkpoint_off = os.environ.get("STATEFRAME_CHECKPOINT", "").strip().lower() in {"off", "0"}
     routed_keys: dict[str, str] = {}
     if isinstance(spec.get("routes"), dict):
         for settings in spec["routes"].get("roles", {}).values():
@@ -74,7 +75,16 @@ def install_environment(spec: dict) -> None:
         if key.startswith(ENGINE_PREFIXES) and not key.startswith("STATEFRAME_TASK_"):
             del os.environ[key]
     os.environ.update({str(k): str(v) for k, v in spec["environment"].items()})
+    if checkpoint_off:
+        os.environ["STATEFRAME_CHECKPOINT"] = "off"
     os.environ.update(routed_keys)
+
+
+def _selected_resume_checkpoint(resume: dict | None) -> dict | None:
+    checkpoint = resume.get("checkpoint") if resume is not None else None
+    if not isinstance(checkpoint, dict) or checkpoint.get("status") == "skipped":
+        return None
+    return checkpoint
 
 
 def _install_direct_opener() -> None:
@@ -203,9 +213,6 @@ def install_wire_recorder(run: Path, chat_url: str, replayer: Replayer | None = 
                     {**replayer.diverged, "send": index, "checkpoint": replayer.strict}, indent=1))
                 if routed_endpoints is not None and replayer.route_mismatch:
                     raise CheckpointUnfaithful(f"send {index}: {replayer.diverged['reason']}")
-                if (run / "tool-tape.jsonl").is_file() or hook_wiring is not None:
-                    from kernel_tool_tape import ToolReplayRefused
-                    raise ToolReplayRefused(f"send {index}: {replayer.diverged['reason']}")
                 if replayer.strict:
                     emit("checkpoint_unfaithful", send=index, **{k: v for k, v in replayer.diverged.items()
                                                                  if k != "first_difference"})
@@ -213,6 +220,11 @@ def install_wire_recorder(run: Path, chat_url: str, replayer: Replayer | None = 
                         {"error": "CheckpointUnfaithful", "send": index, "reason": replayer.diverged["reason"]},
                         indent=1))
                     raise CheckpointUnfaithful(f"send {index}: {replayer.diverged['reason']}")
+                if replayer.pending_mismatch:
+                    raise ReplayUnfaithful(f"send {index}: {replayer.diverged['reason']}")
+                if (run / "tool-tape.jsonl").is_file() or hook_wiring is not None:
+                    from kernel_tool_tape import ToolReplayRefused
+                    raise ToolReplayRefused(f"send {index}: {replayer.diverged['reason']}")
                 emit("replay_diverged", send=index, **{k: v for k, v in replayer.diverged.items()
                                                        if k != "first_difference"})
             elif replayed is not None and not replayer.active:
@@ -581,7 +593,10 @@ def install_check_recorder(run: Path, replayer: Replayer | None, recorded_dir: P
     except Exception as error:  # noqa: BLE001 - recorder off, run unaffected
         emit("check_recorder_off", reason=f"{type(error).__name__}: {error}"[:200])
         return
-    counter = {"n": 0, "substituting": recorded_dir is not None, "on": True}
+    counter = {"n": 0, "on": True}
+    # This belongs to the new attempt's replay controller, not the saved run state. Restoring
+    # the old value (false on the original run) would lose recorded check timings in the tail.
+    substitution = {"enabled": recorded_dir is not None}
     HOST_STATE["checks"] = counter
 
     def masked(text: str) -> str:
@@ -615,7 +630,7 @@ def install_check_recorder(run: Path, replayer: Replayer | None, recorded_dir: P
                   "returncode": completed.returncode,
                   "stdout": completed.stdout if isinstance(completed.stdout, str) else None,
                   "stderr": completed.stderr if isinstance(completed.stderr, str) else None}
-        if counter["substituting"] and replayer is not None and replayer.active:
+        if substitution["enabled"] and replayer is not None and replayer.active:
             previous = recorded_check(index)
             if (previous is not None and previous.get("argv") == record["argv"]
                     and previous.get("returncode") == record["returncode"]
@@ -628,7 +643,7 @@ def install_check_recorder(run: Path, replayer: Replayer | None, recorded_dir: P
                     record.update(stdout=previous.get("stdout"), stderr=previous.get("stderr"),
                                   recorded_timings=True)
             else:
-                counter["substituting"] = False  # the replay's state differs from here on; never patch again
+                substitution["enabled"] = False  # the replay's state differs from here on; never patch again
         (folder / f"{index:04d}.json.z").write_bytes(zlib.compress(json.dumps(record).encode("utf-8")))
         return result
 
@@ -767,7 +782,7 @@ def register_host_state(*, required: bool, secret: str = "") -> None:
         if required:
             raise
         return
-    saving = os.environ.get("STATEFRAME_CHECKPOINT", "off").strip().lower() not in {"", "off", "0"}
+    saving = os.environ.get("STATEFRAME_CHECKPOINT", "on").strip().lower() not in {"off", "0"}
     if saving and hasattr(kernel_checkpoint, "register_signing_key"):
         key = checkpoint_key()
         if key is not None:
@@ -787,12 +802,16 @@ def main(argv: list[str]) -> int:
     lock = hold_engine_lock(run)  # noqa: F841 - held until exit
     spec = json.loads((run / "spec.json").read_text())
     resume = spec.get("resume") if isinstance(spec.get("resume"), dict) else None
-    checkpoint = resume.get("checkpoint") if resume is not None and isinstance(resume.get("checkpoint"), dict) else None
+    checkpoint = _selected_resume_checkpoint(resume)
+    recorded_mode = str(spec.get("environment", {}).get("STATEFRAME_CHECKPOINT", "")).strip().lower()
+    if (os.environ.get("STATEFRAME_CHECKPOINT", "").strip().lower() in {"off", "0"}
+            or recorded_mode in {"off", "0"}):
+        checkpoint = None
     if checkpoint is not None:
         # Checkpoint resume: the engine restores its state as of send ``sends``; only the recorded
         # exchanges after it are replayed, strictly (any difference refuses before sending).
         tail = [item for item in resume.get("tape") or [] if int(item["send"]) > int(checkpoint["sends"])]
-        replayer = Replayer(tail, strict=True, pending=checkpoint.get("pending"),
+        replayer = Replayer(tail, resume.get("model_swap"), strict=True, pending=checkpoint.get("pending"),
                             route_changes=resume.get("route_changes"))
     else:
         replayer = (Replayer(resume.get("tape") or [], resume.get("model_swap"),

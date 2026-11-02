@@ -104,6 +104,7 @@ class HookWiring:
             start_ids.append(event_id(spec["run_identity_seed"], entry.event, match))
         self.start_ids = tuple(start_ids)
         self._actions = {}
+        self.state["actions"] = self._actions
         self._last_panel = None
         self._panel_admission = None
         _ACTIVE = self
@@ -122,6 +123,15 @@ class HookWiring:
                 root, row, baseline_tests, hook_paths=self.protected_paths
             )
         )
+        self._open_runner(root, runtime, policy)
+        runtime.journal.emit(
+            "user_hook_config",
+            digest=self.hooks.digest,
+            count=len(self.hooks.definitions),
+            dispatch=False,
+        )
+
+    def _open_runner(self, root, runtime, policy):
         self.runner = HookRunner(
             self.run_dir,
             self.hooks,
@@ -137,12 +147,17 @@ class HookWiring:
         )
         self.runtime = runtime
         runtime._hook_wiring = self
-        runtime.journal.emit(
-            "user_hook_config",
-            digest=self.hooks.digest,
-            count=len(self.hooks.definitions),
-            dispatch=False,
-        )
+
+    def rebind_after_checkpoint(self, root, row, baseline_tests, runtime):
+        """Replace setup's workspace binding after checkpoint files and frame are restored."""
+        if self.runner is None:
+            raise RuntimeError("hook workspace is not bound")
+        self.runner.close()
+        self.runner = None
+        self._actions = self.state["actions"]
+        policy = effect_policy_for_run(root, row, baseline_tests,
+                                       hook_paths=self.protected_paths)
+        self._open_runner(root, runtime, policy)
 
     def _record_runs(self, result):
         for run in result.runs:

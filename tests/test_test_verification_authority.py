@@ -9,6 +9,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
+import pytest
+
 from stateframe.test_runners import declared_test_evidence, verification_evidence_for_tests
 
 
@@ -222,6 +224,7 @@ class TestVerificationAuthority(unittest.TestCase):
                     self.assertEqual((source, evidence),
                                      ("tests", True) if expected else ("command", False))
 
+    @pytest.mark.host_sandbox
     def test_offline_shell_receipt_has_exact_check_label(self):
         from acceptance._support import run_case
 

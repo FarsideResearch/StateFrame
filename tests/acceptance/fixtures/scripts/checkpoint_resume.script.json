@@ -1,0 +1,1 @@
+{"model":"scripted","steps":[{"tool":"str_replace","arguments":{"path":"app.py","old_str":"VALUE = \"before\"","new_str":"VALUE = \"after\""}},{"tool":"read","arguments":{"path":"app.py"}},{"tool":"run_tests","arguments":{"target":"tests/test_app.py"}},{"tool":"done","arguments":{"summary":"Value updated and verified."}}],"tokenize":{"mode":"ok"}}

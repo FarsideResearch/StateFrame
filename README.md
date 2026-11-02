@@ -21,7 +21,7 @@ Each point says whether it is **measured** (we have the number) or **by design**
 - **Several agents on one GPU.** *Measured:* with the default settings, 4 sessions ran at once on one 48 GB GPU (an RTX 4090 48 GB variant) serving Qwen3.6-35B-A3B (a mixture-of-experts model, 35B total, about 3B active, 4-bit): 4 of 4 passed and GPU memory held at about 26.4 GB the whole time, because the model and its shared 262,144-token cache are allocated up front. Sharing has a cost: each session ran about 2 times longer than alone, while total throughput was about 1.9 times one-at-a-time. Measured on short tasks; a stock 24 GB card was not tested.
 - **Any model can take any step.** Each request is self-contained (task, typed state, newest exchange), so nothing ties a run to one model's history. *By design.*
 - **Identical inputs, identical requests.** Request ids are not random and volatile test output is normalized. *Measured on the build just before this release:* two runs on the same input sent byte-identical requests on 40 of 40 requests, apart from three clock fields; in live runs an edit-receipt ID can also differ between otherwise identical runs. The same check on the build this release is cut from: 40 of 40.
-- **Crash-proof resume.** `stateframe resume` continues after Ctrl-C, `kill -9`, a crash or a lost server: it replays the recorded run without calling the model and checks the next request byte for byte before going live. *Measured on this release:* a killed long run resumed with its next request byte-identical.
+- **Resume after interruption.** `stateframe resume` continues after Ctrl-C, `kill -9`, a crash or a lost server: it restores a verified checkpoint when available, otherwise replays recorded responses without model calls before continuing live. *Measured on this release:* a killed long run resumed with its next request byte-identical.
 - **Steady memory on long runs.** Run history lives in the run directory on disk, not in memory. *Measured (short runs, release-candidate build):* the engine's memory footprint held at about 1.7 GB from request 10 to request 60, growing about 1 MB per request; the engine before this fix grew about 10.5 MB per request. The 1.7 GB is a fixed base for repository analysis and grows with repository size. Longer runs are being measured.
 - **You can see exactly what was sent.** Every request is recorded, with typed state, receipts and ledgers, and `stateframe inspect` shows the frame, the messages or the exact bytes of any request. *By design.*
 - **Local first.** It talks to any OpenAI-compatible server on your machine, such as llama.cpp, uses the server's prompt cache, and only allows loopback endpoints unless you opt in. *By design.*
@@ -35,7 +35,6 @@ Upcoming, not in this release:
 - Provider-specific adapters for routed roles (for example the Anthropic API). Routed roles speak the OpenAI-compatible chat API today.
 - Published agents-per-GPU benchmark (how many concurrent agents fit on one card).
 - Measurements over longer runs than the ranges tested so far.
-- Faster resume from checkpoints (on this release resume uses the full replay).
 - Smaller checkpoints.
 - Fully deterministic edit-receipt IDs.
 
@@ -84,6 +83,8 @@ engine finished: SUBMITTED in 100.7s
 stateframe chat --repo path/to/your-repo
 ```
 
+Runs save checkpoints by default, so an interrupted `--shell off` run resumes from where it stopped. Runs with the shell enabled, hooks, or per-step models resume by replaying the recorded exchanges instead. Runs with per-step models never restore a checkpoint. To skip checkpoints and their disk use, set `STATEFRAME_CHECKPOINT=off`; see [Checkpoint settings](#checkpoint-settings).
+
 ## Skills
 
 Install a reusable instruction bundle with `stateframe skill install path/to/skill`, then select it with `--skill NAME` on `run` or `chat`. The run shows a small catalog and loads the body only when it calls `skill_load`. Optional commands need `--trust-skill-tools`. The [skills guide](docs/guide/skills.md) covers the format, limits and resume rules.
@@ -130,7 +131,7 @@ The [agent tools guide](docs/guide/tools.md) lists the tool arguments, command p
 - **Source in view on multi-file work:** each request offers current product code before repeated-read and navigation bookkeeping. A coverage line for every editable product file tells you which lines are shown and whether they changed since the last read when that comparison is available. Files of at most 60 lines and 2 KiB may be shown whole when the budget allows. When a current failing check has a usable source location, code bookmarks keep its test code and related product code in view. *Measured:* an offline rebuild of one recorded request showed all 11 product files whole, up from 1 of 11, while request size fell from 85,664 to 77,017 bytes, below the 82,026-byte ceiling. In two live reruns of a multi-file task that had stopped on every previously observed build, both runs completed and were submitted with all 14 tests passing in 2 to 4 requests per run. This is an early two-run result, not a general success rate. See KNOWN_LIMITATIONS.md.
 - **Bounded requests:** every request is system instructions, tools, the task, typed task state and the newest exchange, inside a 33,344-token prompt budget on a 65,536-token server slot. No chat history is resent.
 - **No time or step limit:** a run continues until it is done or you stop it with Ctrl-C. `--max-turns N` caps the model turns and `--timeout <seconds>` caps the time, if you want either.
-- **Resume:** `stateframe resume <run-dir>` continues a run stopped by Ctrl-C, `kill`, `kill -9`, a crash or power loss, or a lost model server. It replays the recorded model responses (no model calls) up to where the run stopped, checks that the next request it rebuilds matches the recorded one byte for byte, then continues live in the same run directory; the stopped attempt's files are kept under `<run-dir>/attempts/`. A resume that is itself killed during its catch-up resumes again. *Measured on this release:* a killed long run resumed this way with its next request byte-identical and then continued live. Catch-up takes time in proportion to the run's length (on an earlier preview engine, a run killed at request 118 caught up in about 37 min; the original took about 2 h). Resume refuses with a reason when the run already finished, its records are damaged, or a different engine version is installed. If the server now lists the same model under a different name, add `--model <name it lists>`; replay still checks every recorded request byte for byte, with only the model name swapped. The engine can also save checkpoints for a faster restore, but they are off by default in this release because a checkpoint restore did not rebuild requests faithfully in our tests; see "Checkpoint settings" below. On the previous engine, where checkpoint restore was faithful, a run killed at request 150 restored in 31 s.
+- **Resume:** `stateframe resume <run-dir>` continues a run stopped by Ctrl-C, `kill`, `kill -9`, a crash or power loss, or a lost model server. Checkpoints are on by default. When a compatible checkpoint is available, resume restores it and compares every recorded request after the checkpoint, including the first in-flight request, as raw bytes before continuing live. If no checkpoint qualifies or restore is unfaithful, resume falls back to replaying the recorded run without new model calls. The stopped attempt's files are kept under `<run-dir>/attempts/`; old checkpoint payloads are released while their metadata and events remain. A resume interrupted during catch-up can be resumed again. In kill-and-resume checks at requests 2, 30, 60 and 110 of a 120-request run, and 30 and 60 of a 70-step run with real checks, every checkpoint restored and the next request was byte-identical. At request 110, restore took 72.9 seconds versus 463.6 seconds for full replay; at request 60 with checks, 385 seconds versus 679 seconds. Resume refuses with a reason when the run already finished, its records are damaged, or a different engine version is installed. If the server lists the same model under a different name, add `--model <name it lists>`; replay checks each recorded request with only the leading top-level model name swapped. See "Checkpoint settings" below.
 - **Prompt caching:** the server's prompt cache is used; reuse is modest (see KNOWN_LIMITATIONS.md).
 - **Speed** (measured on the preview engine before the final build; re-measure on the final engine pending): on one 48 GB GPU (RTX A6000 class) in one live run, model generation took about 89% of the wall time, and the engine added about 19 seconds per turn. Measured on one machine.
 - **Safety:** work happens on a copy, changes are applied only when you ask, and the task ledger is schema-validated. Test edits are reported separately; `--protect-tests all` locks existing tests.
@@ -139,16 +140,25 @@ The [agent tools guide](docs/guide/tools.md) lists the tool arguments, command p
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `STATEFRAME_CHECKPOINT` | `off` | `on`/`save` (or `1`) turns checkpoints on; `off` (or `0`) turns them off. |
-| `STATEFRAME_CHECKPOINT_EVERY` | `15` | Save at most once every N engine steps (about 2.8 steps per model request, so 15 is about one save per 5 requests). Lower saves more often (less to replay on resume, more host time); `1` saves after every request. |
+| `STATEFRAME_CHECKPOINT` | `on` | `on`/`save` (or `1`) saves checkpoints; `off` (or `0`) skips selection, restore and later saves on resume. |
+| `STATEFRAME_CHECKPOINT_EVERY` | `1` | Save at most once every N engine steps (about 2.8 steps per model request). The default saves at every step, so resume usually replays nothing; a save pauses the engine about 0.2 s and is written in the background, and a save is skipped while the previous one is still being written. Raise it to save less often. |
 | `STATEFRAME_CHECKPOINT_KEEP` | `2` | How many checkpoints to keep; older ones are deleted after each save. |
+| `STATEFRAME_CHECKPOINT_MIN_FREE_BYTES` | automatic | Minimum free bytes required before a save. The automatic floor is the greater of 1 GiB and three times the latest saved state size; before the first save it uses three times a conservative process-memory estimate. Set an integer byte count to override it, or `0` to disable the check. |
 
-Checkpoints are off by default in this release: in our tests a checkpoint restore did not rebuild the next
-request faithfully, so resume refused it and replayed anyway. Turning them on (`STATEFRAME_CHECKPOINT=save
-stateframe run ...`) is safe, because resume checks every restore and falls back to the full replay, but it
-costs disk: each checkpoint holds about 430-460 MB of engine state on a large repository (about 1.1 GB with
-the two newest kept, briefly about 1.7 GB while a new one is written). When a run with checkpoints finishes
-for good, StateFrame removes them; `--keep-checkpoints` (or `STATEFRAME_KEEP_CHECKPOINTS=1`) keeps them.
+Checkpoint restore applies only to `--shell off` runs; shell-enabled runs and runs with hooks resume by replay.
+On a scripted 120-request run, the 121 saves paused the engine 0.10 s each (median; 0.14 s at the 95th
+percentile), 13.4 s in total. Each checkpoint's state was 22.6 MB, the checkpoint folder peaked at 236 MB
+with two kept, and the run folder peaked at 323 MB versus 80 MB with checkpoints off. A save that fails,
+for example on a full disk, is recorded and the run continues with unchanged requests.
+Below the free-space floor, the engine skips checkpoint capture and records one low-disk event per episode;
+it resumes saving when space recovers. The check cannot reserve disk space, so a concurrent writer can still
+fill the disk during a save. The run continues if the free-space check itself fails.
+In the measured resume runs, state files were 3-21 MB each, checkpoint
+directories were 3-53 MB, and the checkpoint root reached about 175 MB with the default retention.
+On a larger repository, earlier measurements found 430-460 MB of engine state per checkpoint and
+about 1.1 GB with two kept, briefly about 1.7 GB during a save. Set `STATEFRAME_CHECKPOINT=off`
+to avoid that checkpoint disk cost and use full replay on resume. When a run finishes for good, StateFrame removes its
+checkpoints; `--keep-checkpoints` (or `STATEFRAME_KEEP_CHECKPOINTS=1`) keeps them.
 Checkpoints are signed with a per-install key in `~/.stateframe/checkpoint.key` (a private file); a checkpoint
 that was edited, copied from another machine, or written by another engine build is never loaded.
 

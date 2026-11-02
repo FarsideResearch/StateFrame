@@ -296,6 +296,48 @@ def test_completed_replay_served_without_execution(tmp_path, monkeypatch):
         )
 
 
+def test_completed_tape_record_refuses_duplicate_after_model_replay_ends(tmp_path, monkeypatch):
+    runner, _ = setup_runner(tmp_path)
+    calls = fake_session(monkeypatch, output=envelope(code=2, stderr=b"blocked"))
+    runner.run_event(
+        "pre_tool", boundary="pre_tool:c1", data={"tool": "shell"},
+        match={"tool": "shell"},
+    )
+    tape_before = runner.tape.path.read_bytes()
+
+    with pytest.raises(ValueError, match="duplicate or invalid hook intent"):
+        runner.run_event(
+            "pre_tool", boundary="pre_tool:c1", data={"tool": "shell"},
+            match={"tool": "shell"},
+        )
+    assert len(calls) == 1
+    assert runner.tape.path.read_bytes() == tape_before
+
+    with pytest.raises(ValueError, match="duplicate or invalid hook intent"):
+        runner.run_event(
+            "pre_tool", boundary="pre_tool:c1", data={"tool": "different"},
+            match={"tool": "shell"},
+        )
+    assert len(calls) == 1
+    assert runner.tape.path.read_bytes() == tape_before
+
+
+def test_incomplete_tape_intent_refuses_without_reappending(tmp_path, monkeypatch):
+    runner, _ = setup_runner(tmp_path)
+    calls = fake_session(monkeypatch)
+    ident = event_id("seed", "pre_tool:c1", 0)
+    runner.tape.intent(ident, {})
+    tape_before = runner.tape.path.read_bytes()
+
+    with pytest.raises(ValueError, match="duplicate or invalid hook intent"):
+        runner.run_event(
+            "pre_tool", boundary="pre_tool:c1", data={"tool": "shell"},
+            match={"tool": "shell"},
+        )
+    assert calls == []
+    assert runner.tape.path.read_bytes() == tape_before
+
+
 def test_on_error_continue_and_mutation_is_terminal(tmp_path, monkeypatch):
     runner, workspace = setup_runner(tmp_path, on_error="continue")
     fake_session(monkeypatch, output=envelope(code=1))

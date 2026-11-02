@@ -67,7 +67,7 @@ The model can say it is done; the engine decides. A candidate is stored only aft
 
 ```mermaid
 flowchart TB
-    RUN[Run in progress] -->|about every 5 requests| CP[Signed checkpoint]
+    RUN[Run in progress] -->|every engine step by default| CP[Signed checkpoint]
     RUN -->|every request| REC[Recorded request bytes and responses]
     X[Stopped: Ctrl-C, kill -9, crash, lost server] --> RS[stateframe resume]
     RS --> L{Newest checkpoint usable?}
@@ -80,7 +80,7 @@ flowchart TB
     CHK -->|no| DIV[Request divergence: record and continue live]
 ```
 
-Every request and response is recorded. With checkpoints turned on (off by default in this release), the engine also saves a signed checkpoint of its state about every 5 model requests. `stateframe resume` loads the newest usable checkpoint, replays the recorded exchanges after it (no model calls), and checks that the next request it rebuilds matches the recorded one byte for byte before going live. A missing, damaged or foreign checkpoint falls back to a full replay. Tool replay can still refuse an incomplete, divergent or unapproved external operation.
+Every request and response is recorded. Checkpoints are on by default: the engine attempts a signed save at every engine step boundary, skipping a save while its prior writer is still running, and keeps the newest two. `stateframe resume` loads the newest usable checkpoint. Every recorded exchange after it and the first request that was in flight are compared with the rebuilt request as raw bytes before going live. Only an explicitly requested model name swap may replace the leading top-level `model` value. A missing, damaged, foreign or unfaithful checkpoint falls back to full replay, which uses the same raw request comparison. Replayed operations can still refuse an incomplete, divergent or unapproved external effect.
 
 Shell-enabled runs replay from the start. The tool tape serves recorded observations, compares repeated local effects, and refuses an incomplete operation or external effect without `--replay-external`. Native file deletion and moves follow the edit replay path. Tool-tape divergence also refuses resume during checkpoint fallback.
 

@@ -270,7 +270,8 @@ class RequestTokenMeter:
         self._calibration_samples = 0
         self._last_fallback_rejection_bound: int | None = None
         self._pending_bytes: OrderedDict[str, int] = OrderedDict()
-        self._attached_journals: set[int] = set()
+        # Keep object identity across checkpoint serialization; id() changes on restore.
+        self._attached_journals: list[object] = []
         self._subscriber_name = f"request_token_meter_{id(self):x}"
         self._journal: object | None = None
         self._observer_failure_count = 0
@@ -495,18 +496,14 @@ class RequestTokenMeter:
         return estimated, "calibrated_bytes"
 
     def _emit_fallback(self) -> None:
-        """Publish once per affected request, or after late journal attachment."""
+        """Mark fallback without moving the identity-bearing journal position.
+
+        The next request_diet_applied record already carries journal_fields(),
+        including availability and failure reason. A separate fallback record
+        depends on tokenizer reachability, which can change across a resume
+        and shift every later wire ID and journal reference.
+        """
         if not self._fallback_pending or self._fallback_reported:
-            return
-        emit = getattr(self._journal, "emit", None)
-        if not callable(emit):
-            return
-        try:
-            emit("request_token_meter_fallback", request_id=self._request_id,
-                 measure_method="calibrated_bytes",
-                 **self.journal_fields("calibrated_bytes"))
-        except Exception as error:
-            self._record_observer_failure("request_token_meter_fallback", error)
             return
         self._fallback_reported = True
 
@@ -605,7 +602,7 @@ class RequestTokenMeter:
             self._pending_bytes.popitem(last=False)
 
     def attach_journal(self, journal: object | None) -> None:
-        if journal is None or id(journal) in self._attached_journals:
+        if journal is None or any(attached is journal for attached in self._attached_journals):
             return
         self._journal = journal
         subscribe = getattr(journal, "subscribe", None)
@@ -621,7 +618,7 @@ class RequestTokenMeter:
             self._record_observer_failure("journal_subscribe", error)
             self._flush_observer_failures()
             return
-        self._attached_journals.add(id(journal))
+        self._attached_journals.append(journal)
         self._flush_observer_failures()
         self._emit_fallback()
 
