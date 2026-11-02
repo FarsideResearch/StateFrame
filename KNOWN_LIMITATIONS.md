@@ -51,7 +51,7 @@ Go and Rust command paths are implemented but their toolchains are not exercised
 
 When tests exist, the default check uses pytest test files (`--check` names them), and its engine checks support per-test selectors. A non-pytest `--test-cmd` uses one whole-command result by exit code, with no per-test selector or collection evidence. A command that cannot start, exits 126 or 127, or times out cannot pass. Without tests or an explicit command, StateFrame tries a declared build or type check, then an agent-written check. With no check, the result is `unverified: review the diff`; it is not a test pass. Checks run under the existing sandbox. A generic check needs a usable Python interpreter for StateFrame itself, but that interpreter does not need pytest. The check can inspect output files, not only code (see "Tasks whose output is files" in the README). Test weakening detection for JavaScript, TypeScript, Go, Rust and shell is heuristic and can miss changes in meaning.
 
-In a repository with more than 200 source files, a run must name the files it may change with `--target` and `--edit`; the rest of the repository stays available as read-only context.
+In a repository with more than 200 source files, only a chosen set of files is editable: the ones named with `--target` and `--edit`, or else up to 12 files chosen from the task text and the chosen checks' imports. The rest of the repository stays available as read-only context, and a run cannot widen its editable set mid-run. If the automatic choice misses the file the fix needs, rerun with `--edit`.
 
 ## Optional analysis
 

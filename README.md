@@ -201,7 +201,7 @@ Check it before a run: send the same text to `/tokenize` on both servers and com
 
 ## Real repositories
 
-In a repository with more than 200 source files, say which files the change may touch: `--target` names the starting file and each `--edit` adds another editable file. The whole repository stays available as read-only context. Without them, StateFrame stops and asks for them.
+In a repository with more than 200 source files, say which files the change may touch: `--target` names the starting file and each `--edit` adds another editable file. The whole repository stays available as read-only context. Without them, StateFrame chooses up to 12 files from the paths your task names and the imports of the checks you chose, and prints the list; it stops and asks for the flags only when nothing points at a file.
 
 ```bash
 stateframe run --repo ~/code/shop --task "Discounts above 50% are rejected; allow up to 100%." \

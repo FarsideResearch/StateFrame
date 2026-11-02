@@ -93,7 +93,8 @@ def _add_task_arguments(command: argparse.ArgumentParser, *, for_run: bool = Fal
     command.add_argument("--edit", action="append", default=[], metavar="PATH",
                          help="another file the fix may change (repeatable); with --edit or in a "
                               "repo over 200 source files only --target and --edit files are "
-                              "editable, the rest of the repo is read-only context")
+                              "editable, the rest of the repo is read-only context; without them a large "
+                              "repo is scoped from the files the task and chosen checks name")
     command.add_argument("--hooks", action="append", default=[], metavar="FILE",
                          help="trusted hook configuration file (repeatable)")
     command.add_argument("--no-project-hooks", action="store_true",

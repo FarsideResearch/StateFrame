@@ -53,17 +53,23 @@ def _imported_modules(source: str) -> list[str]:
     return names
 
 
-def guess_entry(product: dict[str, str], checks: dict[str, str]) -> str | None:
-    """First product module the checks import; a starting-file hint, never a constraint."""
+def _module_index(product: dict[str, str]) -> dict[str, str]:
+    """Dotted module name -> product path, also with a src/ or package prefix stripped."""
     by_module: dict[str, str] = {}
-    for path in product:
+    for path in product:  # first path wins, in the caller's order (guess_entry depends on it)
         if not path.endswith(".py"):
             continue
         parts = list(PurePosixPath(path).with_suffix("").parts)
         if parts[-1] == "__init__":
             parts = parts[:-1]
-        for start in range(len(parts)):  # also match with a src/ or package prefix stripped
+        for start in range(len(parts)):
             by_module.setdefault(".".join(parts[start:]), path)
+    return by_module
+
+
+def guess_entry(product: dict[str, str], checks: dict[str, str]) -> str | None:
+    """First product module the checks import; a starting-file hint, never a constraint."""
+    by_module = _module_index(product)
     for check in sorted(checks):
         for module in _imported_modules(checks[check]):
             if module in by_module:
@@ -112,6 +118,50 @@ def _output_hint(task: str, product: dict[str, str]) -> str | None:
         if _public_hint(path) and "." in PurePosixPath(path).name:
             return path
     return None
+
+
+AUTO_SCOPE_LIMIT = 12
+AUTO_SCOPE_CHECK_LIMIT = 8
+
+
+def auto_scope(task: str, product: dict[str, str], checks: dict[str, str]) -> list[str]:
+    """Editable files chosen for an over-limit repository when no --target/--edit was given.
+
+    Product files the task names, then product modules the given checks import, then one more
+    import hop from those, at most AUTO_SCOPE_LIMIT in that order. An empty result leaves the
+    caller's refusal in place. Deterministic: the same repository and task give the same scope.
+    """
+    chosen: list[str] = []
+
+    def add(path: str) -> None:
+        if path in product and path not in chosen and len(chosen) < AUTO_SCOPE_LIMIT:
+            chosen.append(path)
+
+    for match in TASK_PATH.finditer(task):
+        add(match.group().rstrip(".,;:/"))
+    if len(checks) > AUTO_SCOPE_CHECK_LIMIT:
+        # A broad selector (`pytest tests/`) says nothing about where the fix lives.
+        return chosen
+    by_module = _module_index(product)
+
+    def imported(source: str) -> list[str]:
+        paths = []
+        for module in _imported_modules(source):
+            path = by_module.get(module)
+            if path is None:  # as guess_entry: fall back to the top package's module, never its __init__
+                head = by_module.get(module.split(".")[0])
+                path = head if head is not None and not head.endswith("__init__.py") else None
+            if path is not None:
+                paths.append(path)
+        return paths
+
+    first_hop = [path for check in sorted(checks) for path in imported(checks[check])]
+    for path in first_hop:
+        add(path)
+    for path in list(dict.fromkeys(first_hop)):
+        for nested in imported(product[path]):
+            add(nested)
+    return chosen
 
 
 # Above this many product files the engine is not handed every file as editable source: the
@@ -181,6 +231,11 @@ def build_row(work: WorkCopy, *, task: str, checks: list[str] | None = None,
         # Scoped mode: only these files are declared editable; the whole repository is still in
         # the sandbox as context. Other tests stay in the repository copy, not the row.
         scope = list(dict.fromkeys(([target] if target else []) + edits))
+        if not scope:
+            # Only explicitly chosen checks steer the scope: discovery lists every test in the repo.
+            steering = set(checks or ()) | set(judging_test_paths(tuple(test_files), test_command, ()))
+            scope = auto_scope(task, all_product, {path: texts[path] for path in sorted(steering)
+                                                   if path in texts})
         if not scope:
             raise TaskRowError(f"the repository has {len(all_product)} source files; pass --target "
                                "(and --edit for any other file the fix may touch)")
@@ -286,6 +341,10 @@ def _build_generic_row(work: WorkCopy, *, task: str, checks: list[str] | None,
     scoped = bool(edits or len(product) > DECLARE_ALL_LIMIT)
     if scoped:
         scope = list(dict.fromkeys(([selected_target] if selected_target else []) + edits))
+        if not scope:
+            steering = set(declared) | set(judging_test_paths(tuple(test_files), test_command, ()))
+            scope = auto_scope(task, product, {path: texts[path] for path in sorted(steering)
+                                               if path in texts})
         if not scope:
             raise TaskRowError(f"the repository has {len(product)} source files; pass --target "
                                "(and --edit for any other file the fix may touch)")
