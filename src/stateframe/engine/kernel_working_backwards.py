@@ -311,8 +311,8 @@ class GoldValidation:
 
 def _worker_spec(value: object) -> tuple[Path, Path, tuple[str, ...], Mapping[str, str], float, str]:
     spec = _mapping(value)
-    from kernel_test_python import test_python
-    python_value = spec.get("worker_python", spec.get("python", test_python()))
+    from kernel_test_python import selected_test_python
+    python_value = spec.get("worker_python", spec.get("python", selected_test_python()))
     workspace_value = spec.get("gold_workspace", spec.get("workspace"))
     if workspace_value is None:
         raise WorkingBackwardsError("worker workspace is required")

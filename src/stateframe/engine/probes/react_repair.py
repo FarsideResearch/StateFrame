@@ -527,6 +527,8 @@ def _materialize_build_test(root: pathlib.Path, row: Mapping[str, object],
 
 
 def _public_check_ids(row: Mapping[str, object], fn: str) -> list[str]:
+    if row.get("runner_kind") == "generic":
+        return []
     build_path = _build_test_path(row, fn)
     if build_path:
         return [build_path]
@@ -594,7 +596,10 @@ class FileSet:
             fixed_src = payload.get("fixed_src", parent_src)
             if not isinstance(parent_src, str) or not isinstance(fixed_src, str):
                 raise ValueError(f"row.files[{path}] needs parent_src and optional fixed_src")
-            if path.startswith("tests/") or path in declared_checks:
+            editable_test = (row.get("protect_tests") in {"task", "off"}
+                             and path in row.get("test_file_paths", ())
+                             and path not in row.get("protected_test_paths", ()))
+            if (path.startswith("tests/") or path in declared_checks) and not editable_test:
                 public_tests[path] = parent_src
                 continue
             parent[path] = parent_src
@@ -676,7 +681,8 @@ def _authored_check_snapshots(
         current = runtime.binding() if callable(getattr(runtime, "binding", None)) else {}
     except (AttributeError, OSError, RuntimeError, TypeError, ValueError):
         current = {}
-    parent = getattr(runtime, "_row_role_parent_binding", None)
+    parent = getattr(runtime, "_authored_check_parent_binding",
+                     getattr(runtime, "_row_role_parent_binding", None))
     if not isinstance(current, Mapping) or not isinstance(parent, Mapping):
         return {"revision": "", "files": {}}, {"revision": "", "files": {}}, "revision_binding_unavailable"
     current_files: dict[str, object] = {}
@@ -942,6 +948,12 @@ def _is_product_path(relative: str, row: Mapping[str, object]) -> bool:
     except (ImportError, ValueError):
         return False
     parts = pathlib.PurePosixPath(path).parts
+    if (row.get("protect_tests") in {"task", "off"}
+            and path in row.get("test_file_paths", ())
+            and path not in row.get("protected_test_paths", ())):
+        return True
+    if row.get("runner_kind") == "generic" and path in row.get("protected_test_paths", ()):
+        return False
     if any(part in {"__pycache__", ".pytest_cache", ".git", ".test-tmp",
                    "tests", "test", "probes", "scratch", "tmp", "private",
                    "hidden_tests"} for part in parts):
@@ -2524,6 +2536,30 @@ def _owner_coordinate_read_surface(selected: list[dict]) -> list[dict]:
         }
         break
     return result
+
+
+def _done_tool_surface(tools: list[dict], row: dict) -> list[dict]:
+    """Advertise wrong-test evidence only for an explicit protection selection."""
+    if (not row.get("test_wrong_wire")
+            or (row.get("protect_tests") not in {"task", "off"}
+                and row.get("runner_kind") != "generic")):
+        return tools
+    selected = [copy.deepcopy(tool) for tool in tools]
+    for tool in selected:
+        if tool.get("function", {}).get("name") != "done":
+            continue
+        function = tool["function"]
+        function["description"] += (
+            " To stop because a judging test is wrong, provide test_wrong evidence.")
+        function["parameters"]["properties"]["test_wrong"] = {
+            "type": "object", "properties": {
+                "path": {"type": "string"}, "test": {"type": "string"},
+                "assertion": {"type": "string"}, "why": {"type": "string"},
+                "observed": {"type": "string"}},
+            "required": ["path", "test", "assertion", "why", "observed"],
+            "additionalProperties": False}
+        break
+    return selected
 
 
 def _tools_for_probe_modes(*, probe_gate_on: bool,
@@ -4670,6 +4706,9 @@ def _host_refusal_observation(runtime, refusal: "_HostExecutionRefused", *, sele
 def _run_tests_impl(root: pathlib.Path, fn: str, explicit: str | None,
                     rel_hint: str | None = None, row=None) -> str:
     """rel_hint is the file under repair — used to tell OUR import failures from the agent's."""
+    if isinstance(row, Mapping) and row.get("runner_kind") == "generic":
+        from kernel_generic_check import check_result
+        return check_result(root, row)[0]
     _profile = None
     if os.environ.get("STATEFRAME_TEST_RUN_SPANS", "off").strip().lower() in {"shadow", "on"}:
         from kernel_test_run_spans import current_profile
@@ -4847,12 +4886,12 @@ def _run_tests_impl(root: pathlib.Path, fn: str, explicit: str | None,
         # precise rule: run normally; ONLY when the repo's conftest itself fails to
         # IMPORT (exit 4, AHA's Settings/DB-at-import world) retry oracle targets
         # without conftests — the conftest was unusable anyway, so nothing is lost.
-        from kernel_test_python import test_python
+        from kernel_test_python import selected_test_python
         executable = (
             row.get("python")
             if isinstance(row, dict) and isinstance(row.get("python"), str)
             and row.get("python")
-            else test_python()
+            else selected_test_python()
         )
         _cmd = ([executable, "-m", "pytest", "-x", "-q", "--no-header"]
                 + (["-k", kexpr] if kexpr else []) + ["-p", "no:cacheprovider"]
@@ -5243,7 +5282,7 @@ def run_tests(root: pathlib.Path, fn: str, explicit: str | None,
 
 
 def _selector_exit_code(observation: str) -> int | None:
-    match = re.search(r"pytest exit (\d+)", observation)
+    match = re.search(r"(?:pytest|check) exit (\d+)", observation)
     return int(match.group(1)) if match else None
 
 
@@ -5273,6 +5312,10 @@ def _record_prepared_provider_not_dispatched(
 def run_tests_for_selectors(root: pathlib.Path, fn: str, selectors: Sequence[str],
                             rel_hint: str | None = None, row=None) -> tuple[str, tuple[int, ...]]:
     """Run every logical oracle selector while preserving the legacy run_tests API."""
+    if isinstance(row, Mapping) and row.get("runner_kind") == "generic":
+        from kernel_generic_check import check_result
+        observation, code = check_result(root, row)
+        return observation, (code,)
     observations: list[str] = []
     codes: list[int] = []
     for selector in selectors:
@@ -5948,6 +5991,23 @@ def work(d, *, resume=None):
         _sweep_fixes_on = _sweep_fixes_enabled()
         _base_tools = work_record_tool_surface(
             _base_tools, intent_only=_host_closure_mode() == "on")
+        if d.get("runner_kind") == "generic":
+            _base_tools = [copy.deepcopy(tool) for tool in _base_tools]
+            for tool in _base_tools:
+                if tool.get("function", {}).get("name") == "run_tests":
+                    tool["function"]["description"] = (
+                        "Run the repository's configured check command. "
+                        "The whole command passes only on exit 0; target is ignored.")
+        _base_tools = _done_tool_surface(_base_tools, d)
+        if d.get("runner_kind") == "generic" and not d.get("test_command"):
+            _base_tools = [copy.deepcopy(tool) for tool in _base_tools]
+            for tool in _base_tools:
+                if tool.get("function", {}).get("name") == "authored_check":
+                    tool["function"]["description"] += (
+                        " With no repository checks, use a Python path under "
+                        "scratch/authored-check/, quote the user's task, and print "
+                        "__STATEFRAME_AUTHORED_OBSERVED__ before the behavior assertion. "
+                        "The same check must fail on the parent and pass on the candidate.")
         # replace_module is advertised only on its own opt-in switch: the 2B called it 0/~12
         # times, yet the extra tool text measurably perturbed the trajectory (autopsy jq110).
         if (os.environ.get("STATEFRAME_JQ_FINISH", "off") == "on"
@@ -6183,8 +6243,11 @@ def work(d, *, resume=None):
         # applied 37 such edits, 26 after red). Editing a PRE-EXISTING test is pure waste
         # here (grading overlays pristine tests) — reject outright. Tests the agent
         # CREATES this run (file_create) stay editable: that is legitimate repro work.
-        baseline_tests = {str(p) for p in root.rglob("test_*.py")} \
-            | {str(p) for p in root.rglob("conftest.py")}
+        baseline_tests = ({str(root / path) for path in d.get("protected_test_paths", ())}
+                          if d.get("runner_kind") == "generic" or
+                          d.get("protect_tests") in {"task", "off"} else
+                          {str(p) for p in root.rglob("test_*.py")} |
+                          {str(p) for p in root.rglob("conftest.py")})
         from kernel_shell_tool import service as shell_service
         _shell = shell_service()
         _hook_wiring_for_run = globals().get("_hook_wiring")
@@ -6721,6 +6784,8 @@ def work(d, *, resume=None):
             temperature=TEMPERATURE, source_resolver=fn_src,
             step_limit=_budget.tool_attempt_limit,
             multi_file=multifile, edit_contract=_edit_contract, workspace=continuation_workspace, resume=resume)
+        if d.get("runner_kind") == "generic" and not d.get("test_command") and resume is None:
+            measurement._authored_check_parent_binding = measurement.binding()
         if isinstance(fixture_initial_src, str) and isinstance(target, pathlib.Path):
             # Seed only after parent capture to reproduce a host/source divergence
             # that has no corresponding StepLedger edit in the current run.
@@ -7710,6 +7775,7 @@ def work(d, *, resume=None):
             tool_str_args = None          # (old_str, new_str) for the str_replace organ
             tool_insert_args = None       # revision-bound insert_before arguments
             tool_authored_check_args = None
+            _done_test_wrong = None
             tool_batch_args = None        # ordered str_replace edits; one parent receipt
             tool_replace_module_args = None  # (expected_revision, source, candidate_id)
             _pointer_read_path = None     # successful, authorized source delivery only
@@ -9036,6 +9102,7 @@ def work(d, *, resume=None):
                             line = "done"
                             # E333: carry the model's claim to the gate.
                             _done_summary = str(_args.get("summary") or "")
+                            _done_test_wrong = _args.get("test_wrong")
                             _done_no_change_paths = _args.get("no_change_paths")
                             if action_schema_mode:
                                 _done_claim = _args.get("claim")
@@ -9809,14 +9876,28 @@ def work(d, *, resume=None):
                                 extra_protected, (str, bytes, bytearray)):
                             protected.extend(str(item) for item in extra_protected)
                         authored_proposal["protected_paths"] = tuple(dict.fromkeys(protected))
-                        from kernel_clause_discriminator import execute_authored_check_proposal
-                        authored_result = execute_authored_check_proposal(
-                            measurement, authored_proposal,
-                            parent_snapshot=parent_snapshot,
-                            candidate_snapshot=candidate_snapshot,
-                        )
+                        if d.get("runner_kind") == "generic" and not d.get("test_command"):
+                            from kernel_agent_authored_check import run_agent_check
+                            authored_result = run_agent_check(
+                                authored_proposal, task=_task_public_brief(d),
+                                parent_snapshot=parent_snapshot,
+                                candidate_snapshot=candidate_snapshot, root=root)
+                        else:
+                            from kernel_clause_discriminator import execute_authored_check_proposal
+                            authored_result = execute_authored_check_proposal(
+                                measurement, authored_proposal,
+                                parent_snapshot=parent_snapshot,
+                                candidate_snapshot=candidate_snapshot,
+                            )
                 obs = json.dumps(authored_result, sort_keys=True, ensure_ascii=False, default=str)
                 authored_status = str(authored_result.get("status") or authored_result.get("result") or "UNKNOWN")
+                if (d.get("runner_kind") == "generic" and not d.get("test_command")
+                        and authored_result.get("status") == "PASS"
+                        and authored_result.get("certifies_clause") is True):
+                    _authored_verification = {
+                        "receipt_id": authored_result.get("receipt_id"),
+                        "candidate_revision": authored_result.get("candidate_revision"),
+                    }
                 bolt.receipt(
                     "test", "authored_check",
                     json.dumps({key: authored_args.get(key) for key in (
@@ -10179,6 +10260,19 @@ def work(d, *, resume=None):
                         break
                     continue
             if line.startswith("done"):
+                if isinstance(locals().get("_done_test_wrong"), Mapping):
+                    evidence = dict(_done_test_wrong)
+                    from test_wrong_evidence import validate_test_wrong
+                    observation = validate_test_wrong(evidence, d, root)
+                    if observation is None:
+                        measurement.journal.emit("test_reported_wrong", evidence=evidence,
+                                                 dispatch=False)
+                        measurement.system_outcome = "test_reported_wrong"
+                        _wrong_test_evidence = evidence
+                        break
+                    measurement.observe("done", observation)
+                    msgs.append(_tool_reply_for_call(msgs, tool_call_id, observation))
+                    continue
                 _jobs_stopped = (_agent_tools.stop_jobs(str(tool_call_id or f"done-{step}"))
                                  if _agent_tools is not None else "")
                 if _jobs_stopped:
@@ -10590,6 +10684,14 @@ def work(d, *, resume=None):
                     bolt.last_done_evidence_refs = list(_done_evidence_refs or [])
                 _completion_reason_codes = []
                 ok_finish, why = bolt.may_finish()
+                if d.get("runner_kind") == "generic" and d.get("test_command"):
+                    _generic_observation, _generic_codes = run_tests_for_selectors(
+                        root, fn, (), d["rel"], row=d)
+                    if _generic_codes != (0,):
+                        ok_finish, why = False, (
+                            "[check] DONE REFUSED: the configured command did not pass.\n"
+                            + _generic_observation[-4000:])
+                        _completion_reason_codes.append("GENERIC_CHECK_FAILED")
                 _repro_gate = getattr(measurement, "repro_first_gate", None)
                 if (__import__("kernel_repro_first").repro_first_gate_mode() == "on"
                         and _repro_gate is not None):
@@ -11887,7 +11989,7 @@ def work(d, *, resume=None):
                 # computed ~50 lines BELOW the receipt, so every test receipt carried the
                 # PREVIOUS run's verdict and anchor (stale-by-one). Hoisted here so the
                 # receipt, hypothesis-open, and nit-picker all see THIS run's truth.
-                _m_exit0 = re.search(r"pytest exit (\d+)", obs)
+                _m_exit0 = re.search(r"(?:pytest|check) exit (\d+)", obs)
                 bolt.last_test_exit = int(_m_exit0.group(1)) if _m_exit0 else None
                 if bolt.last_test_exit is not None:
                     from kernel_rejection_template_restrict import release_after_test_run
@@ -11928,7 +12030,8 @@ def work(d, *, resume=None):
                 # E417: every test run's COUNTS become expectations; deltas on the same
                 # enumeration render the "you saw N, now M — investigate" card (the
                 # consistent accounting for the expectation ledger).
-                if getattr(bolt, "expect", None) is not None and not _host_refused:
+                if (d.get("runner_kind") != "generic"
+                        and getattr(bolt, "expect", None) is not None and not _host_refused):
                     try:
                         from expectation_ledger import parse_pytest_result
                         _tsr = parse_pytest_result(
@@ -11997,6 +12100,9 @@ def work(d, *, resume=None):
                     run_test_result_class = "HARNESS_ERROR"  # host refusal: no verdict
                 elif obs.startswith("[selector] REFUSED_PREDISPATCH"):
                     run_test_result_class = "REFUSED_PREDISPATCH"
+                elif d.get("runner_kind") == "generic":
+                    from kernel_generic_check import result_class
+                    run_test_result_class = result_class(bolt.last_test_exit)
                 else:
                     run_test_result_class = (classify_run_test_exit(bolt.last_test_exit)
                                              if host_registry
@@ -13043,12 +13149,14 @@ def work(d, *, resume=None):
                 # control: overlaying replaces any test the agent edited. (The earlier version
                 # restored TODAY'S tests, which are era-incoherent with the parent sandbox.)
                 _sel = None
-                if ((d.get("repo") == "mc" and d.get("sha"))
+                if d.get("runner_kind") == "generic" and not d.get("test_command"):
+                    behaviour = "no_test_oracle"
+                elif ((d.get("repo") == "mc" and d.get("sha"))
                         or d.get("repo") == "build"
                         or (d.get("source_dataset") and d.get("base_commit"))):
                     if d.get("repo") == "build" and not multifile:
                         _materialize_build_test(root, d, fn)
-                    else:
+                    elif d.get("runner_kind") != "generic" and d.get("protect_tests", "all") == "all":
                         from converge import overlay_fix_tests
                         overlay_fix_tests(root, _grading_row)
                     # GRADE WITH THE PREFLIGHT'S SELECTOR (E288). With explicit=None,
@@ -13073,7 +13181,9 @@ def work(d, *, resume=None):
                         code == 0 for code in _after_codes)
                 else:
                     after = run_tests(root, fn, _sel, d["rel"], row=d)
-                    after_green = "pytest exit 0" in after
+                    after_green = (_selector_exit_code(after) == 0
+                                   if d.get("runner_kind") == "generic"
+                                   else "pytest exit 0" in after)
                 if after_green:
                     # Keep candidate-only modules out of the parent control
                     # leg, then restore the exact candidate tree afterwards.
@@ -13108,7 +13218,9 @@ def work(d, *, resume=None):
                                 code == 0 for code in _before_codes)
                         else:
                             before = run_tests(root, fn, _sel, d["rel"], row=d)
-                            before_green = "pytest exit 0" in before
+                            before_green = (_selector_exit_code(before) == 0
+                                            if d.get("runner_kind") == "generic"
+                                            else "pytest exit 0" in before)
                     finally:
                         if multifile:
                             for _path, _source in _candidate_sources.items():
@@ -13124,7 +13236,8 @@ def work(d, *, resume=None):
                     # behavioural leg is still authoritative evidence and is
                     # reported separately, but a synthetic/public oracle must
                     # not turn a nonexact candidate into an accepted patch.
-                elif "pytest exit" in after:
+                elif "pytest exit" in after or (d.get("runner_kind") == "generic"
+                                                 and "check exit" in after):
                     behaviour = "tests_fail"
                 else:
                     behaviour = "no_test_oracle"
@@ -13189,6 +13302,14 @@ def work(d, *, resume=None):
             "final_source_paths": [path for path, source in final_sources.items()
                                    if isinstance(source, str)],
         } if multifile else {})
+        if isinstance(locals().get("_wrong_test_evidence"), Mapping):
+            _multi_result["wrong_test_evidence"] = dict(_wrong_test_evidence)
+        if d.get("runner_kind") == "generic" and not d.get("test_command"):
+            authored = locals().get("_authored_verification")
+            current_binding = measurement.binding()
+            if (isinstance(authored, Mapping) and authored.get("receipt_id")
+                    and authored.get("candidate_revision") == current_binding.get("product_revision")):
+                _multi_result["authored_check_receipt_id"] = authored["receipt_id"]
         _finish_progress = _progress_facts()
         (tdir / f"{fn}.json").write_text(json.dumps(
             {"fn": fn, "result": _finish_result, "steps": _reported_steps(),
@@ -13283,6 +13404,12 @@ def work(d, *, resume=None):
                 "done_facts": measurement.done_facts_payload(),
                 "claims": measurement.done_facts_claims(),
             }
+        if isinstance(locals().get("_wrong_test_evidence"), Mapping):
+            return _attach_env_receipt(
+                dict(fn=fn, result="TEST_REPORTED_WRONG", steps=_reported_steps(),
+                     edits=_finish_progress.edits, tests=_finish_progress.checks,
+                     behaviour="test_reported_wrong", **_done_facts_fields,
+                     **_done_submit_fields, **_multi_result), measurement)
         if measurement.system_outcome:
             return _attach_env_receipt(
                 dict(fn=fn, result=measurement.system_outcome.upper(), steps=_reported_steps(),

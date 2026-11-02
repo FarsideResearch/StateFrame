@@ -86,7 +86,7 @@ def test_readonly_touch_refusal(tmp_path):
 
 def test_protected_test_restored(tmp_path):
     _, requests = run_script(tmp_path, [step("shell", command="printf 'assert False\\n' > tests/test_value.py"),
-                                      *finish()])
+                                      *finish()], flags=("--protect-tests", "all"))
     assert "restored (not allowed): tests/test_value.py" in requests
 
 

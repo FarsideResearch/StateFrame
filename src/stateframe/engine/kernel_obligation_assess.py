@@ -25,7 +25,7 @@ import sys
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from kernel_test_python import test_python
+from kernel_test_python import selected_test_python
 
 
 MODE_ENV = "STATEFRAME_HOST_CLOSURE"
@@ -3497,7 +3497,7 @@ def run_check(root: str | Path, check: CheckDefinition | Mapping[str, object], *
         # Read-only execution makes a copied workspace unnecessary and avoids
         # following repository symlinks while copying untrusted input.
         process = run_probe(
-            [test_python(), "-I", "-B", "-c",
+            [selected_test_python(), "-I", "-B", "-c",
              "import sys; sys.path.insert(0, sys.argv[1]); " + _script_for_check(check), str(root)],
             Path(root), timeout=timeout)
         if process.timed_out:

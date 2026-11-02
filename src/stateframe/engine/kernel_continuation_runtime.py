@@ -67,6 +67,15 @@ def tool_surface(tools: list[dict]) -> list[dict]:
             "additionalProperties": False}}}]
 
 
+def required_acceptance_selectors(runtime: object) -> list[str]:
+    """Keep the host command as one acceptance check when no node IDs exist."""
+    owner = runtime.owner
+    if getattr(owner, "task_row", {}).get("runner_kind") == "generic":
+        return runtime.required_public_selectors()
+    return [selector for selector in getattr(owner, "f2p_ids", ())
+            if (Path(owner.root) / selector.split("::")[0]).is_file()]
+
+
 class LiveContinuation:
     def __init__(self, runtime):
         self.runtime = runtime
@@ -501,8 +510,7 @@ class LiveContinuation:
             objective = getattr(owner, "task_row", {}).get("msg")
             if not isinstance(objective, str) or not objective.strip():
                 objective = str(messages[1].get("content", "")) if len(messages) > 1 else ""
-            required = [s for s in getattr(owner, "f2p_ids", ())
-                        if (Path(owner.root) / s.split("::")[0]).is_file()]
+            required = required_acceptance_selectors(self.runtime)
             self.engine.apply("create", new_id="root", objective=objective,
                 pending_decision="Complete the original objective and verify its public requirements.",
                 dependencies=binding_versions(current), turns=self.runtime.step_limit,

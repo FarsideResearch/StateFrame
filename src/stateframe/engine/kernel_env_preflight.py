@@ -25,7 +25,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
-from kernel_test_python import test_python
+from kernel_test_python import selected_test_python
 
 
 MODE_ENV = "KERNEL_ENV_PREFLIGHT"
@@ -418,10 +418,10 @@ def _workflow_recipe(root: Path) -> tuple[tuple[tuple[str, ...], ...], str]:
     if (root / "yarn.lock").is_file():
         return (("yarn", "install", "--frozen-lockfile"), "yarn.lock")
     if (root / "requirements.txt").is_file():
-        return ((test_python(), "-m", "pip", "install", "-r", "requirements.txt"),
+        return ((selected_test_python(), "-m", "pip", "install", "-r", "requirements.txt"),
                 "requirements.txt")
     if any((root / name).is_file() for name in ("pyproject.toml", "setup.py", "setup.cfg")):
-        return ((test_python(), "-m", "pip", "install", "-e", "."), "python-package")
+        return ((selected_test_python(), "-m", "pip", "install", "-e", "."), "python-package")
     return (), "none"
 
 
@@ -470,7 +470,7 @@ def _collection_command(root: Path, task: Mapping[str, object], explicit: object
         elif task.get("language") == "node" or (root / "package.json").is_file():
             command = ("node", "--test")
         else:
-            executable = task.get("python") or task.get("interpreter") or test_python()
+            executable = task.get("python") or task.get("interpreter") or selected_test_python()
             command = (str(executable), "-m", "pytest", "--collect-only", "-q", "--no-header")
     paths = task.get("test_paths", task.get("tests"))
     if isinstance(paths, str):

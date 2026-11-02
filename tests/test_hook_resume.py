@@ -227,7 +227,7 @@ def test_unstarted_start_hooks_run_during_resume_before_engine(tmp_path, monkeyp
 
     monkeypatch.setattr(runner.Endpoint, "check_locality", lambda _self: None)
     monkeypatch.setattr(runner.Endpoint, "probe", lambda _self: {"model_found": True})
-    monkeypatch.setattr(runner, "_check_python", lambda value: value)
+    monkeypatch.setattr(runner, "_check_python", lambda value, **_options: value)
     monkeypatch.setattr(runner, "check_slot_context", lambda *_args: None)
     monkeypatch.setattr(shell_host, "provision", lambda *_args: None)
 

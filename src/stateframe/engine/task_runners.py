@@ -170,8 +170,8 @@ def run_pytest(
             "no test file in this repository calls that function",
         )
 
-    from kernel_test_python import test_python
-    command = [test_python(), "-m", "pytest", "-x", "-q", "--no-header"]
+    from kernel_test_python import selected_test_python
+    command = [selected_test_python(), "-m", "pytest", "-x", "-q", "--no-header"]
     if kexpr:
         command.extend(["-k", kexpr])
     command.extend(["-p", "no:cacheprovider", *targets])

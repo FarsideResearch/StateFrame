@@ -16,7 +16,7 @@ import tempfile
 import textwrap
 from dataclasses import dataclass
 from typing import Iterable, Mapping, Sequence
-from kernel_test_python import test_python
+from kernel_test_python import selected_test_python
 
 import kernel_workspace_truth as _workspace_truth
 
@@ -649,7 +649,7 @@ def bounded_contract_audit(source: str, *, path: str = "candidate.py",
         try:
             from kernel_execution_policy import ExecutionPolicyError, run_sandboxed
             execution = run_sandboxed(
-                [test_python(), "-I", "-c", _AUDIT_WORKER],
+                [selected_test_python(), "-I", "-c", _AUDIT_WORKER],
                 root,
                 input_data=json.dumps({"path": str(target)}),
                 timeout=3.0,

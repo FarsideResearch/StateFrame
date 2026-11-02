@@ -40,7 +40,7 @@ from pathlib import Path
 from typing import Final
 
 from kernel_non_product_paths import is_non_product
-from kernel_test_python import test_python
+from kernel_test_python import selected_test_python
 from kernel_safe_probe import ProbeCleanupError
 
 
@@ -160,7 +160,7 @@ def _execute_smoke(root: Path, checked: Sequence[str], roots: Sequence[str], tim
     from kernel_exec_session import ExecSession, ExecSessionError
     from kernel_test_isolation import _interpreter_roots
 
-    selected = Path(test_python())
+    selected = Path(selected_test_python())
     with tempfile.TemporaryDirectory(prefix="stateframe-smoke-") as temporary:
         scratch = Path(temporary)
         home, env = scratch / "home", scratch / "env"
@@ -506,7 +506,7 @@ def run_smoke(root: Path, paths: Sequence[str], *, timeout_s: float = 20.0,
         import_roots = source_roots(root, checked)
     effective_dependencies = dependency_identity or {"roots": import_roots}
     effective_environment = environment_identity or {
-        "executable": test_python(),
+        "executable": selected_test_python(),
         "implementation": getattr(sys.implementation, "name", "python"),
         "version": tuple(sys.version_info[:3]),
     }

@@ -3,6 +3,11 @@
 | Message (or symptom) | Meaning | Fix |
 |---|---|---|
 | `test interpreter ... cannot import pytest` | The Python chosen for your tests has no pytest. | Install pytest in your project's environment, or pass `--test-python` with one that has it. |
+| `unverified: review the diff` | No tests, explicit check, declared build or type check, or successful agent-written check supplied verification. | Review the diff or pass `--check-cmd COMMAND` for an appropriate check. |
+| `check command not found`, exit 126/127 or check timeout | The configured command did not establish a passing result. | Install the runner, check the command and executable permissions, or fix a hanging check. |
+| A check file edit is refused | `--protect-tests all` locks existing tests, or `task` locks a judging test. | Edit product code, or select `task` or `off` at run start if the task requires test changes. |
+| `passed, but ... test file weakened` | One or more changed tests appear to remove coverage. Non-Python detection is heuristic. | Review each named file and test before applying the result. |
+| `stopped: test reported wrong, see evidence` | The agent supplied a judging test, its assertion, an explanation and observed behavior. No pass was claimed. | Inspect the structured evidence and decide whether to change the test or the product. |
 | `no interpreter for your tests` | No `.venv/`, `venv/` or `env/` in the repository, and no usable `python3` on PATH. | Pass `--test-python PATH`. |
 | Before-checks fail with import errors | The test Python lacks your project's dependencies. | Point `--test-python` at your project's environment. |
 | `endpoint does not serve model ...` | The server lists other model names. | Pass `--model` with a name it lists. |

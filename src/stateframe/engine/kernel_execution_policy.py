@@ -277,15 +277,18 @@ def _kill_group(process: subprocess.Popen[bytes]) -> bool:
 def _prepared(command: Sequence[object], root: Path, env: Mapping[object, object] | None,
               internal_env: Mapping[str, object] | None,
               readonly_workspace: bool, nproc: int,
+              generic_check: bool = False,
               isolation_builder: Callable[..., tuple[list[str], dict[str, str]]] = isolated_command,
               ) -> tuple[list[str], dict[str, str], CapabilityReport]:
     report = require_capabilities()
     arguments = _arguments(command)
-    nproc_budget = (int(_limit_value("nproc", nproc, maximum=256))
-                    if platform.system() == "Linux" else None)
-    isolated, clean = isolation_builder(
-        arguments, root, _safe_environment(env), readonly_workspace=readonly_workspace,
-        nproc_budget=nproc_budget)
+    isolation_options = {"readonly_workspace": readonly_workspace}
+    if generic_check:
+        isolation_options["generic_check"] = True
+    if platform.system() == "Linux":
+        isolation_options["nproc_budget"] = int(_limit_value("nproc", nproc, maximum=256))
+    isolated, clean = isolation_builder(arguments, root, _safe_environment(env),
+                                        **isolation_options)
     for key, value in (internal_env or {}).items():
         if not str(key).startswith("STATEFRAME_"):
             raise ExecutionPolicyError("internal execution variables must be STATEFRAME_*")
@@ -305,6 +308,7 @@ def sandboxed_popen(command: Sequence[object], root: str | os.PathLike[str], *,
                     stdout: object = subprocess.PIPE,
                     stderr: object = subprocess.PIPE,
                     readonly_workspace: bool = False,
+                    generic_check: bool = False,
                     pass_fds: Sequence[int] = (),
                     cgroup: Path | None = None,
                     isolation_builder: Callable[..., tuple[list[str], dict[str, str]]] = isolated_command,
@@ -313,6 +317,7 @@ def sandboxed_popen(command: Sequence[object], root: str | os.PathLike[str], *,
     contained = _contained_root(root)
     command_line, clean, report = _prepared(
         command, contained, env, internal_env, readonly_workspace, nproc,
+        generic_check=generic_check,
         isolation_builder=isolation_builder)
     factory = popen_factory or subprocess.Popen
     process = factory(
@@ -486,6 +491,7 @@ def run_sandboxed(command: Sequence[object], root: str | os.PathLike[str], *,
                   timeout: float = MAX_WALL_SECONDS,
                   output_limit: int = MAX_OUTPUT_BYTES,
                   readonly_workspace: bool = False,
+                  generic_check: bool = False,
                   cpu_seconds: float = DEFAULT_CPU_SECONDS,
                   memory_bytes: int = DEFAULT_MEMORY_BYTES,
                   file_bytes: int = DEFAULT_FILE_BYTES,
@@ -532,6 +538,8 @@ def run_sandboxed(command: Sequence[object], root: str | os.PathLike[str], *,
             "cpu_seconds": cpu_seconds, "memory_bytes": memory_bytes,
             "file_bytes": file_bytes, "nofile": nofile, "nproc": nproc,
         }
+        if generic_check:
+            spawn_options["generic_check"] = True
         if pass_fds:
             spawn_options["pass_fds"] = pass_fds
         if cgroup is not None:
