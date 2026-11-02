@@ -37,7 +37,7 @@ from kernel_bounded_http import send_with_gzip_fallback
 from kernel_plain_loop import (
     OUT_CAP, TOOLS, Limits, ProviderHTTPError, ProviderTransportError, run_loop,
 )
-from kernel_test_python import test_python
+from kernel_test_python import selected_test_python
 
 CHECK_TIMEOUT_S = 300
 GREP_TIMEOUT_S = 60
@@ -227,7 +227,7 @@ class PlainHost:
         config_span = profile.start_span("config_command_preparation") if profile else None
         config = [] if any(t in {"-c", "--config-file"} or t.startswith("--config-file=") for t in tokens) \
             else _nearest_config_args(self.root, selectors)
-        argv = [test_python(), "-m", "pytest", "-p", "no:cacheprovider", *config, *tokens]
+        argv = [selected_test_python(), "-m", "pytest", "-p", "no:cacheprovider", *config, *tokens]
         if profile:
             profile.end_span(config_span)
         binding_span = profile.start_span("pre_test_binding") if profile else None
@@ -347,7 +347,7 @@ def capability_preflight_argv(root: Path, row: Mapping[str, object]) -> list[str
         if isinstance(paths, list) else None
     if selector is None:
         return None
-    return [test_python(), "-m", "pytest", "-p", "no:cacheprovider", "--collect-only", "-q",
+    return [selected_test_python(), "-m", "pytest", "-p", "no:cacheprovider", "--collect-only", "-q",
             *_nearest_config_args(root, [selector]), selector]
 
 
@@ -389,7 +389,7 @@ def sandboxed_check_runner(lock_path: Path, audit_path: Path, *,
         return execute(argv, root)
 
     def execute(argv: Sequence[str], root: Path) -> CheckOutcome:
-        from capability_study_support import test_process_lock
+        from capability_study_support import locked_test_process
         from kernel_execution_policy import run_sandboxed
         from kernel_test_artifact_policy import prepare_pytest_command
         profile = _active_test_run_profile()
@@ -411,7 +411,7 @@ def sandboxed_check_runner(lock_path: Path, audit_path: Path, *,
             wait_span = profile.start_span("test_lock_wait", overlap_group="shared_lock")
         held_span = None
         try:
-            with test_process_lock(lock_path, audit_path):
+            with locked_test_process(lock_path, audit_path):
                 if profile:
                     profile.end_span(wait_span)
                     profile.mark("test_lock_acquired")

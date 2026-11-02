@@ -26,6 +26,9 @@ PUBLIC_FIELDS = {
     "public_test_src", "test_source", "changed_functions", "shape", "public_check_paths",
     "allowed_product_paths", "scoped_edits", "allow_new_files", "new_file_roots",
     "entry", "working_path", "_skip_db", "_oracle_preflight",
+    "runner_kind", "test_command", "protected_test_paths", "protect_tests", "test_file_paths",
+    "test_wrong_selectors", "test_wrong_sources", "test_wrong_hashes",
+    "test_wrong_keyword", "test_wrong_mark", "test_wrong_failed_nodes",
     "_bridge_ordinary_brief", "_bridge_capture", "information_policy",
 }
 _PUBLIC_NON_PRODUCT_PATH_PARTS = frozenset({

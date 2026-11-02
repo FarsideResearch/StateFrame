@@ -36,7 +36,7 @@ def split_tests(source: str, public_names: set[str]) -> tuple[str, str]:
 
 
 @contextlib.contextmanager
-def test_process_lock(path: Path, audit: Path, *, deadline: float | None = None):
+def locked_test_process(path: Path, audit: Path, *, deadline: float | None = None):
     """Serialize every study pytest across independent inference workers."""
     path.parent.mkdir(parents=True, exist_ok=True)
     started = time.monotonic()
@@ -80,18 +80,18 @@ def install_test_serialization(rr, lock_path: Path, audit_path: Path) -> None:
 
     def serialized(*args, **kwargs):
         if os.environ.get("STATEFRAME_TEST_RUN_SPANS", "off").strip().lower() not in {"shadow", "on"}:
-            with test_process_lock(lock_path, audit_path):
+            with locked_test_process(lock_path, audit_path):
                 return original(*args, **kwargs)
         from kernel_test_run_spans import profile_scope
         with profile_scope() as profile:
             if profile is None:
-                with test_process_lock(lock_path, audit_path):
+                with locked_test_process(lock_path, audit_path):
                     return original(*args, **kwargs)
             profile.mark("test_lock_requested")
             wait_span = profile.start_span("test_lock_wait")
             held_span = None
             try:
-                with test_process_lock(lock_path, audit_path):
+                with locked_test_process(lock_path, audit_path):
                     profile.end_span(wait_span)
                     profile.mark("test_lock_acquired")
                     held_span = profile.start_span("test_lock_hold")

@@ -87,7 +87,7 @@ def test_rename_only_submission(tmp_path):
 @pytest.mark.host_sandbox
 def test_refusals_are_typed_and_run_continues(tmp_path):
     repo, run_dir, summary = _run(
-        tmp_path, "move_repo", "refuse.script.json", edit=("--edit", "pkg/consumer.py"))
+        tmp_path, "move_repo", "refuse.script.json", edit=("--edit", "pkg/consumer.py", "--protect-tests", "all"))
     assert (repo / "pkg" / "old.py").exists()
     assert not (tmp_path / "escaped.py").exists()
     assert summary["files_changed"] == []

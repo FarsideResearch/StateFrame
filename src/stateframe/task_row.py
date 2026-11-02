@@ -2,8 +2,8 @@
 
 The row has the same shape the engine receives on its live release path (a "multi_file"
 build row): every text file of the repository as declared product source, the public check
-files separately, a ticket (``msg``), and a starting-file hint (``entry``). The engine runs
-the public checks with pytest inside its own sandboxed copy.
+files separately, a ticket (``msg``), and a starting-file hint (``entry``). Pytest rows
+carry public file selectors; generic rows carry one whole-command check.
 """
 from __future__ import annotations
 
@@ -14,6 +14,7 @@ import re
 from pathlib import Path, PurePosixPath
 
 from .workcopy import WorkCopy
+from .test_runners import is_test_file, judging_test_paths, protected_paths, validate_patterns
 
 TEXT_SUFFIXES = {
     ".py", ".pyi", ".txt", ".md", ".rst", ".toml", ".cfg", ".ini", ".json", ".yaml", ".yml",
@@ -87,7 +88,15 @@ def repo_relative(path: str) -> str:
 
 def build_row(work: WorkCopy, *, task: str, checks: list[str] | None = None,
               target: str | None = None, task_id: str | None = None,
-              edit_paths: list[str] | None = None) -> dict[str, object]:
+              edit_paths: list[str] | None = None, runner_kind: str = "pytest",
+              test_command: tuple[str, ...] = (),
+              protected_test_globs: tuple[str, ...] = (),
+              protect_tests: str = "all") -> dict[str, object]:
+    if runner_kind == "generic":
+        return _build_generic_row(
+            work, task=task, checks=checks, target=target, task_id=task_id,
+            edit_paths=edit_paths, test_command=test_command,
+            protected_test_globs=protected_test_globs, protect_tests=protect_tests)
     texts = {path: text for path, text in work.text_files().items()
              if Path(path).suffix in TEXT_SUFFIXES or Path(path).name in {"Makefile", "setup.py"}}
     if not task.strip():
@@ -102,8 +111,20 @@ def build_row(work: WorkCopy, *, task: str, checks: list[str] | None = None,
     if missing:
         raise TaskRowError("check file(s) not found in the repository: " + ", ".join(missing))
     public_tests = {path: texts[path] for path in declared_checks}
+    test_files = {path for path in texts if is_test_file(path)}
+    if protect_tests == "all":
+        locked_tests = test_files
+    elif protect_tests == "task":
+        command_tests = set(judging_test_paths(tuple(test_files), test_command, ()))
+        # A command without an explicit file can select any test via discovery or -k.
+        if test_command and not command_tests:
+            command_tests = test_files
+        locked_tests = set(declared_checks) | command_tests
+    else:
+        locked_tests = set()
     all_product = {path: text for path, text in texts.items()
-                   if path not in public_tests and not path.startswith("tests/")}
+                   if (path not in public_tests and not path.startswith("tests/"))
+                   or (protect_tests != "all" and path in test_files and path not in locked_tests)}
     if target is not None:
         target = target.strip()
         if target not in all_product:
@@ -138,7 +159,7 @@ def build_row(work: WorkCopy, *, task: str, checks: list[str] | None = None,
     digest = hashlib.sha256(task.encode("utf-8")).hexdigest()[:12]
     identifier = task_id or f"task-{digest}"
     first_check = declared_checks[0]
-    return {
+    row = {
         "task_id": identifier,
         "sha": identifier,
         "repo": "build",
@@ -160,3 +181,94 @@ def build_row(work: WorkCopy, *, task: str, checks: list[str] | None = None,
         "test_src": public_tests[first_check],
         "_skip_db": True,
     }
+    if protect_tests != "all":
+        row.update(protect_tests=protect_tests,
+                   test_file_paths=sorted(test_files),
+                   protected_test_paths=sorted(locked_tests))
+    return row
+
+
+def _build_generic_row(work: WorkCopy, *, task: str, checks: list[str] | None,
+                       target: str | None, task_id: str | None,
+                       edit_paths: list[str] | None, test_command: tuple[str, ...],
+                       protected_test_globs: tuple[str, ...],
+                       protect_tests: str) -> dict[str, object]:
+    if not task.strip():
+        raise TaskRowError("--task is empty")
+    patterns = validate_patterns(list(protected_test_globs))
+    texts = {path: text for path, text in work.text_files().items()
+             if Path(path).suffix in TEXT_SUFFIXES | {
+                 ".jsx", ".tsx", ".mjs", ".cjs", ".mts", ".cts", ".go", ".rs",
+                 ".c", ".h", ".cc", ".cpp", ".hpp",
+             } or Path(path).name in {"Makefile", "makefile", "GNUmakefile", "Cargo.toml"}}
+    declared = [repo_relative(path) for path in checks or []]
+    missing = [path for path in declared if path not in work.baseline]
+    if missing:
+        raise TaskRowError("check file(s) not found in the repository: " + ", ".join(missing))
+    all_protected = set(protected_paths(
+        tuple(work.baseline), kind="generic", extra_patterns=patterns,
+        command=test_command)) | set(declared)
+    test_files = {path for path in work.baseline if is_test_file(path)}
+    lock_note = None
+    if protect_tests == "all":
+        protected = all_protected
+    else:
+        protected = all_protected - test_files
+        if protect_tests == "task":
+            selected = judging_test_paths(tuple(test_files), test_command, ())
+            if test_command and not selected:
+                protected.update(test_files)
+                lock_note = "selector-free task check: all existing test files locked"
+            else:
+                protected.update(selected)
+            protected.update(declared)
+    product = {path: text for path, text in texts.items()
+               if path not in protected and (protect_tests != "all" or
+                   not path.startswith(("tests/", "test/", "__tests__/")))}
+    selected_target = repo_relative(target) if target else None
+    if selected_target is not None and selected_target not in product:
+        raise TaskRowError(f"--target {selected_target} is not a product source file in the repository")
+    edits = [repo_relative(path) for path in edit_paths or []]
+    bad = [path for path in edits if path not in product]
+    if bad:
+        raise TaskRowError("--edit file(s) are not product source files in the repository: "
+                           + ", ".join(bad))
+    scoped = bool(edits or len(product) > DECLARE_ALL_LIMIT)
+    if scoped:
+        scope = list(dict.fromkeys(([selected_target] if selected_target else []) + edits))
+        if not scope:
+            raise TaskRowError(f"the repository has {len(product)} source files; pass --target "
+                               "(and --edit for any other file the fix may touch)")
+        product = {path: product[path] for path in scope}
+    if not product:
+        raise TaskRowError("repository has no product source files outside its tests")
+    source_files = {path: text for path, text in product.items() if path not in test_files}
+    candidates = source_files or product
+    entry = selected_target or next(
+        (path for path in sorted(candidates)
+         if Path(path).suffix in {".py", ".js", ".jsx", ".ts", ".tsx", ".go", ".rs",
+                                  ".c", ".cc", ".cpp", ".sh"}
+         and not path.endswith("/__init__.py")), None)
+    entry = entry or guess_entry(candidates, {})
+    assert entry is not None
+    digest = hashlib.sha256(task.encode("utf-8")).hexdigest()[:12]
+    identifier = task_id or f"task-{digest}"
+    row = {
+        "task_id": identifier, "sha": identifier, "repo": "build",
+        "shape": "multi_file", "task_kind": "bug", "tier": "USER-REPO",
+        "msg": task.strip(),
+        "files": {path: {"parent_src": text} for path, text in sorted(product.items())},
+        "scoped_edits": scoped,
+        "public_tests": {},
+        "protected_test_paths": sorted(protected),
+        "runner_kind": "generic", "test_command": list(test_command),
+        "allowed_product_paths": sorted({path.split("/", 1)[0] for path in product}),
+        "new_file_roots": [], "entry": {"fn": "", "path": entry},
+        "path": entry, "rel": entry, "fn": "", "_skip_db": True,
+    }
+    if protect_tests != "all":
+        row["protect_tests"] = protect_tests
+        row["test_file_paths"] = sorted(test_files)
+    if lock_note:
+        row["test_lock_note"] = lock_note
+    return row

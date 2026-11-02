@@ -1,0 +1,30 @@
+{
+  "frame": {
+    "authority": "host",
+    "check_statuses": {},
+    "current_revision": "baseline-revision",
+    "edit_receipts": [
+      {
+        "revision": "baseline-revision",
+        "selector": "tests/test_app.py",
+        "status": "PASS"
+      }
+    ],
+    "green": true,
+    "green_lock": {
+      "state": "UNKNOWN"
+    },
+    "lock_state": "UNKNOWN",
+    "open_obligations": [],
+    "schema": "stateframe-truth/1",
+    "test_receipts": [
+      {
+        "revision": "baseline-revision",
+        "selector": "tests/test_app.py",
+        "status": "PASS"
+      }
+    ],
+    "verdict": "PASS"
+  },
+  "receipt_text": "CHECK_FAILURE_SUMMARY execution_id=baseline-check status=PASS outcome=PASS reached_observation=True failure_phase=NONE selector=tests/test_app.py selector_scope=['tests/test_app.py'] execution_complete=True termination_reason=EXITED output_truncated=False capture_complete=True capture_status=COMPLETE counts={'collected': 1, 'passed': 1} revision=baseline-revision assertion_context='1 passed' runner_tail='1 passed' stdout_bytes=8 stderr_bytes=0 assertion_context_omitted_bytes=0 stdout_omitted_bytes=0 stderr_omitted_bytes=0 wrapper_parse_error='' full_output_handle=check-receipt:baseline-check"
+}

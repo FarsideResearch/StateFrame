@@ -479,8 +479,8 @@ def smoke_named_elements(root: Path, target_path: str, brief: str | None,
         if isinstance(output, str):
             return _parse_smoke_output(output, target)
         return [f"HOST_OBSERVED: smoke execution at {target} returned no text result"]
-    from kernel_test_python import test_python
-    interpreter = executable if isinstance(executable, str) and executable else test_python()
+    from kernel_test_python import selected_test_python
+    interpreter = executable if isinstance(executable, str) and executable else selected_test_python()
     try:
         from kernel_execution_policy import ExecutionPolicyError, run_sandboxed
         execution = run_sandboxed(

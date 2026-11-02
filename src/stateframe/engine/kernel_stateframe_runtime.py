@@ -5469,10 +5469,18 @@ class StateFrameRuntime:
         self._probe_revision = (self.probe_gate.revision if self.probe_gate is not None
                                 else None)
         self.last_completed_receipt: dict = {}
-        self.protected_tests = {
-            path.resolve(): digest(path.read_bytes().hex())
-            for pattern in ("test_*.py", "conftest.py")
-            for path in Path(owner.root).rglob(pattern) if path.is_file()}
+        if (isinstance(getattr(owner, "task_row", None), Mapping)
+                and (owner.task_row.get("runner_kind") == "generic"
+                     or owner.task_row.get("protect_tests") in {"task", "off"})):
+            self.protected_tests = {
+                path.resolve(): digest(path.read_bytes().hex())
+                for relative in owner.task_row.get("protected_test_paths", ())
+                for path in (Path(owner.root) / str(relative),) if path.is_file()}
+        else:
+            self.protected_tests = {
+                path.resolve(): digest(path.read_bytes().hex())
+                for pattern in ("test_*.py", "conftest.py")
+                for path in Path(owner.root).rglob(pattern) if path.is_file()}
         self._action_before: tuple[Path, str] | None = None
         self._post_edit_before: tuple[Path, str | None] | None = None
         self._post_edit_baseline_import = None
@@ -8209,6 +8217,7 @@ class StateFrameRuntime:
         canonical_check_receipts: Sequence[Mapping[str, object]] | None = None,
         counts: Mapping[str, object] | None = None,
         typed_observation: Mapping[str, object] | None = None,
+        output_truncated: bool | None = None,
     ) -> None:
         replay_green = self._replay_green_observation(selectors)
         if replay_green is not None:
@@ -8304,6 +8313,7 @@ class StateFrameRuntime:
                 counts=counts or typed.get("counts"),
                 execution_complete=typed.get("execution_complete"),
                 termination_reason=typed.get("termination_reason"),
+                output_truncated=output_truncated,
                 producer="kernel_stateframe_runtime.test_observation",
                 finalize=not will_receive_native_detail,
             )
@@ -9222,8 +9232,10 @@ class StateFrameRuntime:
     def lifecycle(self, event: str) -> dict | None:
         if self.modes["sidekick"] == Mode.OFF:
             return None
-        required = [selector for selector in getattr(self.owner, "f2p_ids", ())
-                    if (Path(self.owner.root) / selector.split("::")[0]).is_file()]
+        required = (self.required_public_selectors()
+                    if getattr(self.owner, "task_row", {}).get("runner_kind") == "generic"
+                    else [selector for selector in getattr(self.owner, "f2p_ids", ())
+                          if (Path(self.owner.root) / selector.split("::")[0]).is_file()])
         finding = self.sidekick.observe(event, {
             "required_selectors": required, "current_binding": self.binding(),
             "test_receipts": self.test_receipts, "fault_receipts": self.fault_receipts,
@@ -9544,7 +9556,8 @@ class StateFrameRuntime:
         # When the boundary compiler is armed, use its public-ticket checks
         # here too; otherwise an off host-closure arm would silently have no
         # generated checks to evaluate at task start.
-        if getattr(self, "stateframe_boundary_checks_mode", "off") == "on":
+        if (row.get("runner_kind") != "generic"
+                and getattr(self, "stateframe_boundary_checks_mode", "off") == "on"):
             try:
                 from kernel_boundary_checks import compile_boundary_bundle
                 bundle = compile_boundary_bundle(
@@ -9565,7 +9578,8 @@ class StateFrameRuntime:
         try:
             from kernel_obligation_assess import load_check_bundle
             public_material = None
-            if getattr(self, "stateframe_check_generator_fixes_mode", "off") == "on":
+            if (row.get("runner_kind") != "generic"
+                    and getattr(self, "stateframe_check_generator_fixes_mode", "off") == "on"):
                 try:
                     from kernel_boundary_checks import public_material_from_row
                     public_brief, public_sources, public_tests = public_material_from_row(row)
@@ -9724,7 +9738,8 @@ class StateFrameRuntime:
                       else ("_bridge_ordinary_brief", "brief", "msg", "symptom", "clause"))
         clause = next((row.get(key) for key in brief_keys
                         if isinstance(row.get(key), str) and row.get(key).strip()), "")
-        if getattr(self, "stateframe_boundary_checks_mode", "off") == "on":
+        if (row.get("runner_kind") != "generic"
+                and getattr(self, "stateframe_boundary_checks_mode", "off") == "on"):
             from kernel_boundary_checks import compile_boundary_bundle
             try:
                 dynamic = compile_boundary_bundle(
@@ -9790,7 +9805,8 @@ class StateFrameRuntime:
                         pass
                     break
         public_material = None
-        if getattr(self, "stateframe_check_generator_fixes_mode", "off") == "on":
+        if (row.get("runner_kind") != "generic"
+                and getattr(self, "stateframe_check_generator_fixes_mode", "off") == "on"):
             try:
                 from kernel_boundary_checks import public_material_from_row
                 public_brief, public_sources, public_tests = public_material_from_row(row)
@@ -13240,6 +13256,12 @@ class StateFrameRuntime:
         return "[work] APPLIED: " + detail
 
     def required_public_selectors(self) -> list[str]:
+        task_row = getattr(self.owner, "task_row", None)
+        if isinstance(task_row, Mapping) and task_row.get("runner_kind") == "generic":
+            if not task_row.get("test_command"):
+                return []
+            from kernel_generic_check import CHECK_ID
+            return [CHECK_ID]
         continuation = getattr(self, "continuation", None)
         if continuation is not None:
             getter = getattr(continuation.engine, "active_acceptance_selectors", None)
@@ -20743,10 +20765,10 @@ class StateFrameRuntime:
             "dependency_content_digest": tree_digest(root, dependencies),
         }
         import_roots = tuple(str(path) for path in source_roots(root, checked))
-        from kernel_test_python import test_python
+        from kernel_test_python import selected_test_python
         environment_identity = {
             "python": tuple(sys.version_info[:3]),
-            "executable": test_python(),
+            "executable": selected_test_python(),
             "source_roots": import_roots,
         }
         resolver_identity = {
@@ -21702,8 +21724,11 @@ class StateFrameRuntime:
                     raise ValueError('declared public checks missing from live selector handoff')
                 self.live_projection = LiveProjection(
                     task_id=self.owner.task_id, symbol=self.owner.fn, path=path,
-                    brief=public_brief, selectors=[selector for selector in getattr(self.owner, "f2p_ids", ())
-                        if (Path(self.owner.root) / selector.split("::")[0]).is_file()],
+                    brief=public_brief, selectors=(
+                        self.required_public_selectors()
+                        if getattr(self.owner, "task_row", {}).get("runner_kind") == "generic"
+                        else [selector for selector in getattr(self.owner, "f2p_ids", ())
+                              if (Path(self.owner.root) / selector.split("::")[0]).is_file()]),
                     binding=binding)
             stored = self.live_projection.update(
                 list(uncapped), getattr(self.owner, "trace", []),
@@ -22594,6 +22619,14 @@ class StateFrameRuntime:
                         }
         estimate = token_estimate({"messages": prepared, "tools": tools})
         framefit_on = getattr(self, "stateframe_framefit_mode", "off") == "on"
+        task_row = getattr(self.owner, "task_row", None)
+        # The budget draft can still carry the repair protocol when a generic
+        # check turns green. The final FrameFit5 assembly installs this owner
+        # decision; its wire assertion below remains strict.
+        generic_framefit_preassembly = (
+            framefit_on and isinstance(task_row, Mapping)
+            and task_row.get("runner_kind") == "generic"
+        )
         if (f4_on and (getattr(self, "stateframe_f4_fit_mode", "off") == "on"
                        or framefit_on)
                 and estimate > self.frame_ceiling and frame_composed
@@ -23812,6 +23845,7 @@ class StateFrameRuntime:
                 request_action_contract = establish_request_action_contract(
                     self, prepared, tools, request_id=capture.request_id,
                     provider_request=provider_request,
+                    framefit5_preassembly=generic_framefit_preassembly,
                 )
             except Exception as error:  # noqa: BLE001 - owner finalization holds the request
                 from kernel_harden8 import record_failure
@@ -23836,6 +23870,7 @@ class StateFrameRuntime:
                 request_action_contract = assert_request_action_contract(
                     self, prepared, tools, request_id=capture.request_id,
                     boundary="prepared",
+                    framefit5_preassembly=generic_framefit_preassembly,
                     allow_host_stop=bool(
                         isinstance(request_action_contract, Mapping)
                         and request_action_contract.get("host_stop")),
@@ -24102,6 +24137,7 @@ class StateFrameRuntime:
                     surface = author_final_tool_surface(
                         capture, self, menu_body, request_id=capture.request_id,
                         bind_current_surface=True,
+                        framefit5_preassembly=generic_framefit_preassembly,
                     )
                     if not isinstance(surface, Mapping):
                         raise FrameFit5Error("final allocation tool surface unavailable")
