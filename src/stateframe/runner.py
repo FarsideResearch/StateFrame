@@ -937,6 +937,10 @@ def prepare(options: RunOptions, printer=print) -> tuple[Path, workcopy.WorkCopy
                      edit_paths=options.edit_paths or None, runner_kind=options.runner_kind,
                      test_command=test_argv, protected_test_globs=protected_globs,
                      protect_tests=options.protect_tests)
+    if row.get("scoped_edits") and not options.target and not options.edit_paths:
+        chosen = sorted(row["files"])
+        printer(f"edit scope: {len(chosen)} file(s) chosen from the task and its checks "
+                f"(pass --target/--edit to choose): {', '.join(chosen)}")
     if explicit_test_protection:
         row["test_wrong_wire"] = True
     if options.runner_kind == "generic":

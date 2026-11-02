@@ -19,7 +19,7 @@
 - `--runner-kind auto|pytest|generic`: detect pytest from the command by default, or choose the kind explicitly for a wrapper. Only pytest supports per-test selectors; generic commands run as a whole.
 - `--protect-tests off|task|all`: `off` (default) permits test edits and reports them; `task` locks tests named by the command or selectors and tests failing at the start; `all` locks every pre-existing test as in 0.2. If a generic command has no explicit test file selector, `task` locks every existing test file, including when the starting check passes. The result line reports this fallback.
 - `--protected-test-glob GLOB`: add a repository-relative pattern for test or check resources. Repeat as needed; it is locked when protection applies.
-- `--target`, `--edit`: in repositories over 200 source files, the files the change may touch; the rest is read-only context.
+- `--target`, `--edit`: in repositories over 200 source files, the files the change may touch; the rest is read-only context. Without them, StateFrame chooses up to 12 files: the ones the task names, then the modules imported by the checks you chose (`--check`, or test files named in `--test-cmd`), and one more import hop. It prints the list at startup. It stops and asks for the flags when nothing points at a file, or when more than 8 test files are selected (`pytest tests/` says nothing about where the fix lives).
 - `--in-place`: apply a passing result to your repository.
 - `--run-dir`: where to keep the run.
 - `--max-turns N`, `--timeout S`: optional caps; by default there are none.
