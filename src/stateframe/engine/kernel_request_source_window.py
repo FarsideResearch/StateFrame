@@ -27,6 +27,7 @@ from kernel_request_evidence_closure import (
     build_source_closure,
     closure_plan_for_runtime,
     initialization_fact,
+    omission_blocks_delivery,
     record_final_source_delivery,
     record_source_delivery,
     render_closure_receipt,
@@ -747,10 +748,7 @@ def _plan_omission_is_relevant(
     path = str(row.get("path", "")).strip()
     if not path:
         return True
-    return (
-        path not in covered_paths
-        and (path in selected_paths or str(row.get("status", "")).upper() != "NOT_SELECTED")
-    )
+    return path not in covered_paths and omission_blocks_delivery(row, selected_paths)
 
 
 def _plan_has_relevant_omissions(

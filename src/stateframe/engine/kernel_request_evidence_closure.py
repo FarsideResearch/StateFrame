@@ -1075,6 +1075,27 @@ class SourceClosure:
         }
 
 
+CLOSURE_SCAN_LIMIT = "closure_scan_limit"
+
+
+def omission_blocks_delivery(row: object, selected_paths: set[str] | frozenset[str]) -> bool:
+    """Whether a closure omission row is an undelivered source debt.
+
+    Rows on paths that carry selected units always block. Outside them, an
+    explicit NOT_SELECTED fact and a file the bounded walk never reached
+    (CLOSURE_SCAN_LIMIT) are scope facts, not failed deliveries; a large repo
+    must degrade to them rather than refuse the request.
+    """
+    if not isinstance(row, Mapping):
+        return True
+    path = str(row.get("path", "")).strip()
+    if not path or path in selected_paths:
+        return True
+    if str(row.get("status", "")).upper() == "NOT_SELECTED":
+        return False
+    return row.get("scope") != CLOSURE_SCAN_LIMIT
+
+
 def build_source_closure(root: Path, paths: Sequence[str], ticket: TicketIdentity | str,
                          *, target_path: str = "", max_files: int = 12,
                          max_units: int = 96,
@@ -1268,6 +1289,9 @@ def build_source_closure(root: Path, paths: Sequence[str], ticket: TicketIdentit
             }
             if not not_selected:
                 omission["continuation"] = "expand:file:" + hashlib.sha256(path.encode()).hexdigest()
+                # The walk never opened this file: a bounded scan scope, not a
+                # selected unit the frame failed to deliver.
+                omission["scope"] = CLOSURE_SCAN_LIMIT
             omissions.append(omission)
             skipped_files.append(dict(omission))
     deduped: list[SpanNeed] = []
@@ -1544,20 +1568,8 @@ def record_final_source_delivery(
         item.get("status") == "COMPLETE" for item in selected_results.values()
     )
     selected_paths = set(selected_results)
-    def relevant_omission(row: object) -> bool:
-        if not isinstance(row, Mapping):
-            return True
-        path = str(row.get("path", "")).strip()
-        # A declared dependency with no selected source unit is an explicit
-        # NOT_SELECTED fact, not a failed delivery of the required source.
-        if not path:
-            return True
-        if path in selected_paths:
-            return True
-        return str(row.get("status", "")).upper() != "NOT_SELECTED"
-
     plan_has_omissions = any(
-        relevant_omission(row)
+        omission_blocks_delivery(row, selected_paths)
         for key in ("omissions", "skipped_files")
         for row in (plan.get(key, ()) if isinstance(plan.get(key, ()), Sequence)
                     and not isinstance(plan.get(key, ()), (str, bytes, bytearray)) else ())

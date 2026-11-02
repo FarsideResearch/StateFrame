@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.14 (2026-11-02)
+
+- Fix runs on mid-size repositories failing before their first request with `FrameRequestAllocationError ... failures=closure_omissions_unreconciled`. Above about 12 candidate source files, the bounded source closure stops scanning and records the next file as "closure file limit reached". The final source proof counted that unopened file as undelivered source and refused the whole run. A file the walk never reached is now a scan-scope fact: the run proceeds, and the file stays listed in the frame's file inventory and repository map, where the agent can read it. The journal keeps the omission with its continuation handle. An omission on a path whose units were selected for delivery still refuses the request, as do unavailable and out-of-scope sources.
+- Requests on repositories under the closure limit are unchanged byte for byte.
+- Known limitation: on such repositories a longer run can still stop mid-run with `closure_units_undelivered` or `source_delivery_partial` once earlier read pages no longer fit. Measured live on a 22-file repository: 0.2.8 and 0.3.0 sent 0 requests; this release sent between 6 and 25 in four runs before stopping. See KNOWN_LIMITATIONS.md.
+
 ## 0.3.0 (2026-11-02)
 
 - Checkpoint saves now check free space before capture and skip low-disk saves without pausing the engine. The automatic floor is at least 1 GiB and three times the latest state size; `STATEFRAME_CHECKPOINT_MIN_FREE_BYTES` overrides it, including `0` to disable the check. Saving resumes after space recovers, and skip events stay out of model requests.
