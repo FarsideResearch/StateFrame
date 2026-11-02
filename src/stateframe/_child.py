@@ -888,7 +888,7 @@ def main(argv: list[str]) -> int:
                 raise ToolSettingsError("host tool settings file differs from the run spec")
             builtin_names = frozenset(("grep", "list_files", "read", "edit", "str_replace", "insert_before",
                 "authored_check", "file_create", "run_tests", "read_check_receipt", "recall", "done",
-                "shell", "job_wait", "job_output", "job_stop", "file_delete", "file_move", "git", "web_fetch", "skill_load"))
+                "shell", "job_wait", "job_output", "job_stop", "file_delete", "file_move", "git", "web_fetch", "git_commit", "git_branch", "skill_load"))
             custom = load_tool_files([Path(item["path"]) for item in settings.tools_files],
                                      builtin_names=builtin_names, shell_network=settings.shell_network)
             if custom.digest != spec.get("custom_tools_digest"):

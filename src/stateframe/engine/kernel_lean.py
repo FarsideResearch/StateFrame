@@ -46,6 +46,8 @@ _KNOWN_TOOL_NAMES = frozenset({
     "test", "replace_module", "decide", "where_defined", "who_calls",
     "references", "outline", "dependency_fact", "read_pointer", "abstain", "skill_load",
 })
+from kernel_git_commit import registered_names as _commit_names  # noqa: E402 - empty unless STATEFRAME_GIT_COMMIT=on
+_KNOWN_TOOL_NAMES = _KNOWN_TOOL_NAMES | _commit_names()
 _EVIDENCE_PIN_RE = re.compile(
     r"\[EVIDENCEPIN\].*?(?:\[/EVIDENCEPIN\]|$)", re.DOTALL,
 )

@@ -5007,6 +5007,8 @@ def _registry_schemas() -> tuple[tuple[str, dict[str, object]], ...]:
     schemas.append(("shell", SHELL_SCHEMA["function"]["parameters"]))
     from kernel_agent_schemas import BUILTIN_SCHEMAS
     schemas.extend((tool["function"]["name"], tool["function"]["parameters"]) for tool in BUILTIN_SCHEMAS)
+    from kernel_git_commit import registered_schemas
+    schemas.extend((tool["function"]["name"], tool["function"]["parameters"]) for tool in registered_schemas())
     add("run_tests", {**string("target")})
     add("reproduce", {
         **string("source", "test_name", "rationale"),
@@ -5257,7 +5259,8 @@ def _spec_for_tool(tool: Mapping[str, object], *, probe_modes: Sequence[str] | N
         return _make_tool_spec(name, copy.deepcopy(schema))
     if host_tools is not None and name in host_tools.names:
         from kernel_agent_schemas import BUILTIN_SCHEMAS
-        schema = next(item["function"]["parameters"] for item in BUILTIN_SCHEMAS
+        from kernel_git_commit import registered_schemas
+        schema = next(item["function"]["parameters"] for item in (*BUILTIN_SCHEMAS, *registered_schemas())
                       if item["function"]["name"] == name)
         # Per-run jobs own job_output while active; merging the legacy schema
         # would require both job and job_id and reject every new-API call.
@@ -5836,6 +5839,15 @@ def align_tools_to_completion_route(runtime: object, tools: Sequence[object]) ->
         if kept:
             aligned = kept + aligned
             aligned_names = tuple(_tool_name(tool) for tool in aligned)
+    # STATEFRAME_GIT_COMMIT: commit and branch tools only record snapshots and never change the
+    # workspace or its evidence, so a route that narrows the menu keeps them when they were offered.
+    from kernel_git_commit import registered_names
+    commit_names = registered_names()
+    commit_tools = [copy.deepcopy(dict(tool)) for tool in original
+                    if _tool_name(tool) in commit_names and _tool_name(tool) not in aligned_names]
+    if commit_tools:
+        aligned = aligned + commit_tools
+        aligned_names = tuple(_tool_name(tool) for tool in aligned)
     if "done" in aligned_names and "read" not in aligned_names:
         read_tool = _deferred_source_read_tool(runtime, [*original, *aligned])
         if read_tool is not None:

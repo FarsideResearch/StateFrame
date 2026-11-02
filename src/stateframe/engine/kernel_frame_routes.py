@@ -30,6 +30,8 @@ READ = frozenset({"grep", "list_files", "file_list", "read", "probe", "recall", 
                   "reproduce", "decide", "predict", "dependency_fact",
                   "dispute_check", "read_ticket", "dispute", "work", "test",
                   "BIND_QUANTITY", "CONTRACT_CASES", "TRACE_BEHAVIOR"})
+from kernel_git_commit import registered_names as _commit_names  # noqa: E402 - empty unless STATEFRAME_GIT_COMMIT=on
+READ = READ | _commit_names()
 
 
 def _digest(roles: object, overrides: object) -> str:
