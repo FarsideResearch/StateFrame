@@ -215,6 +215,8 @@ StateFrame is licensed under the GNU Affero General Public License v3.0 only (AG
 
 If you modify StateFrame and let others use it over a network, the AGPL requires offering them its source; a commercial license is the alternative.
 
+We do not grant other licenses (for example MIT) over email, for any of this code, including for code indexes, search hubs or training sets. If you need different terms, see COMMERCIAL-LICENSE.md or write to us.
+
 ## Contributing
 
 We'd genuinely love your help. Bug reports, small fixes, docs, new benchmarks, or a wild idea about how agents should keep state: all welcome. Open an issue or a pull request and we'll take a look. First-time contributors are very welcome too.
