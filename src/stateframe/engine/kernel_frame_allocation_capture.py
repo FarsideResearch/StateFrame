@@ -463,13 +463,10 @@ def source_refusal(plan, receipt, sources):
              or str(row.get("status", "")).upper() not in {"NOT_SELECTED", "UNKNOWN"})
     } if isinstance(receipt_paths, Mapping) else set()
 
+    from kernel_request_evidence_closure import omission_blocks_delivery
+
     def omission_is_relevant(row: Mapping[str, object]) -> bool:
-        path = str(row.get("path", "")).strip()
-        if not path:
-            return True
-        if path in selected_paths:
-            return True
-        return str(row.get("status", "")).upper() != "NOT_SELECTED"
+        return omission_blocks_delivery(row, selected_paths)
 
     omission_rows = [
         {key: row[key] for key in ("path", "status", "reason", "start_line", "end_line", "unit_handle")
