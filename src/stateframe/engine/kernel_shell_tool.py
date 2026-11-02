@@ -128,6 +128,9 @@ class ShellTool:
                                    Path(value["root"]) / "bin", value["env"], value["kind"])
                             if value else None)
         self.root = None
+        # STATEFRAME_SHELL_STATE: cwd and exported variables carried between foreground calls.
+        import kernel_shell_state
+        self.shell_state = kernel_shell_state.ShellState() if kernel_shell_state.enabled() else None
 
     def bind(self, workspace: Path, row: dict, baseline_tests: set[str], *, policy=None) -> None:
         if self.root is not None:
@@ -217,6 +220,18 @@ class ShellTool:
             command, name = args["command"], "shell"
             argv = ["/bin/sh", "-c", command]
             cap = replace(self.capability, limits=replace(self.capability.limits, wall_seconds=timeout))
+            if self.shell_state is not None:
+                import kernel_shell_state
+                state_dir = self.run_dir / "shell-home" / ".sf-shell-state"
+                state_dir.mkdir(mode=0o700, exist_ok=True)
+                if not self.shell_state.directory(self.root).is_dir():
+                    # A previous command removed its directory: start this one at the workspace root.
+                    self.shell_state = replace(self.shell_state, cwd=".")
+                state_prefix = state_dir / kernel_shell_state._safe(call_id)
+                argv = ["/bin/sh", "-c", kernel_shell_state.WRAPPER, "sf-shell",
+                        str(self.shell_state.directory(self.root)), str(state_prefix), command]
+                cap = replace(cap, env=self.shell_state.environment(cap.env))
+                state_args = {**args, "_shell_state": self.shell_state.as_dict()}
             requires_confirmation = admission.requires_confirmation
             replay_class = "external" if cap.network == "full" or not cap.sandboxed else "local"
             if self.settings.shell == "read-only":
@@ -259,7 +274,8 @@ class ShellTool:
         encoded = json.dumps(cap.as_dict(), sort_keys=True)
         for path, label in ((str(self.root), "<workspace>"), (str(self.run_dir), "<run>")):
             encoded = encoded.replace(path, label)
-        intent = dict(tool=name, args=args, replay_class=replay_class,
+        stateful = custom is None and self.shell_state is not None
+        intent = dict(tool=name, args=state_args if stateful else args, replay_class=replay_class,
                       capability_digest=hashlib.sha256(encoded.encode()).hexdigest(),
                       definition_digest=custom.definition_digest if custom else None, env_identity=identity,
                       pre_manifest_digest=workspace_identity(before))
@@ -285,6 +301,12 @@ class ShellTool:
             if reason:
                 raise ToolReplayRefused(reason)
             if decision.serve_taped and not decision.reexecute:
+                if stateful:
+                    import kernel_shell_state
+                    replayed = kernel_shell_state.load(self.run_dir, call_id)
+                    if replayed is None:
+                        raise ToolReplayRefused("shell state for a recorded call is missing")
+                    self.shell_state = replayed
                 return ShellReply(record.observation)
         else:
             tape.intent(call_id=call_id, **intent)
@@ -393,6 +415,16 @@ class ShellTool:
                 f"{e.path} ({reason})" for e, reason in effects.restored))
         if after_identity != identity:
             observation += f"\nenvironment changed: {after_identity[:12]} (check results from before are stale)"
+        if stateful:
+            import kernel_shell_state
+            next_state, state_note = kernel_shell_state.capture(
+                state_prefix, self.root, self.capability.env, self.shell_state)
+            kernel_shell_state.store(self.run_dir, call_id, next_state)
+            self.shell_state = next_state
+            if next_state.cwd != ".":
+                observation += f"\nshell cwd: {next_state.cwd}"
+            if state_note:
+                observation += f"\nshell state: {state_note}"
         from kernel_execution_reply_budget import record_delivery
         observation = record_delivery(self.run_dir, head, output, observation,
                                       omitted_bytes=omitted_bytes, call_id=call_id)
