@@ -22,6 +22,9 @@ def _binds(argv: list[str]) -> list[tuple[str, str]]:
 def _command(monkeypatch, cap: ExecCapability) -> list[str]:
     monkeypatch.setattr(isolation, "sandbox_executable", lambda name: "/usr/bin/bwrap")
     monkeypatch.setattr(isolation, "_bwrap_userns_guard_supported", lambda executable: True)
+    if not sys.platform.startswith("linux"):
+        # No /proc mount table off Linux, and an unreadable table prunes nothing; model a single root mount.
+        monkeypatch.setattr(isolation, "_host_mount_points", lambda: frozenset({Path("/")}))
     argv, _env = isolation.capability_command(["/bin/true"], cap, platform_backend="bwrap", shared_namespace=True)
     return argv
 

@@ -186,6 +186,8 @@ class RunOptions:
     test_python: str | None = None
     python_explicit: bool = False
     _test_python: str | None = field(default=None, init=False, repr=False)
+    # The exact interpreter path whose contained startup probe already imported pytest this run.
+    _pytest_proven: str | None = field(default=None, init=False, repr=False)
     keep_checkpoints: bool = False  # --keep-checkpoints / STATEFRAME_KEEP_CHECKPOINTS=1
     _context_tokens: int = field(default=65_536, init=False, repr=False)
     _prompt_budget: int = field(default=33_344, init=False, repr=False)
@@ -553,6 +555,13 @@ def use_run_env_python(options: RunOptions, run_env: object) -> None:
     options._capabilities["test_python"] = str(candidate)
 
 
+def _check_engine_python(options: RunOptions) -> None:
+    """Check the engine interpreter; a pytest runner's probe also proves pytest imports from it."""
+    pytest_runner = options.runner_kind != "generic"
+    options.python = _check_python(options.python, require_pytest=pytest_runner)
+    options._pytest_proven = options.python if pytest_runner else None
+
+
 def _select_test_python(options: RunOptions, printer=print) -> str:
     """Choose and check the interpreter for the repository's tests; never StateFrame's own silently."""
     try:
@@ -561,7 +570,10 @@ def _select_test_python(options: RunOptions, printer=print) -> str:
         python = preflight.resolve_interpreter(chosen, os.getcwd())
     except (test_interpreter.TestInterpreterError, preflight.PreflightError) as error:
         raise RunError(str(error)) from None
-    if options.runner_kind != "generic":
+    # The engine probe ran "import pytest" from this exact path under the same contained capability,
+    # so a second probe proves nothing new; a different path (even a symlink to the same binary,
+    # with its own site-packages) is probed.
+    if options.runner_kind != "generic" and python != options._pytest_proven:
         _startup_probe(python, "import pytest", label=f"test interpreter {python} ({reason})")
     printer(f"test interpreter: {python} ({reason})")
     if not engine_reads_test_python():
@@ -2421,8 +2433,7 @@ def _run(options: RunOptions, started: float, printer=print) -> dict[str, object
             raise ValueError("a generic runner requires --test-cmd")
     except ValueError as error:
         raise RunError(str(error)) from error
-    options.python = _check_python(options.python,
-                                   require_pytest=options.runner_kind != "generic")
+    _check_engine_python(options)
     options._capabilities = _probe_capabilities(options)
     printer(str(options._capabilities["display"]))
     options._test_python = _select_test_python(options, printer)

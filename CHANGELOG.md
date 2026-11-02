@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.3.4 (2026-11-02)
+
+- A Linux sandbox no longer drops a read-only mount that crosses a host mount boundary. Since 0.2.12 a read-only path beneath a read-only-mounted parent is not mounted again; a recursive bind can omit unbindable submounts, so the child now keeps its own mount when the host has a mount point between the two. Paths under the sandbox's own `/dev` and `/proc` keep theirs too, and if the host mount table cannot be read, nothing is pruned.
+- The test interpreter is no longer probed a second time when it is the exact path the engine interpreter probe already proved imports pytest. Any other path, including a symlink to the same binary, is still probed.
+- Scanning PATH directories for executables takes one `lstat` per entry plus a `stat` only for links, and admits exactly what it did before: a regular file after following links that the user can execute. Unreadable, vanished or dangling entries are skipped.
+- Stopping a sandboxed command no longer risks signalling an unrelated process group. The group kill now runs only when the launcher is still the same live process (same start time, not a zombie) and still leads its group; if its PID was reused, the group is left alone.
+- Request bytes are unchanged.
+
 ## 0.3.1 (2026-11-02)
 
 - Fix runs on mid-size repositories failing before their first request with `FrameRequestAllocationError ... failures=closure_omissions_unreconciled`. Above about 12 candidate source files, the bounded source closure stops scanning and records the next file as "closure file limit reached". The final source proof counted that unopened file as undelivered source and refused the whole run. A file the walk never reached is now a scan-scope fact: the run proceeds, and the file stays listed in the frame's file inventory and repository map, where the agent can read it. The journal keeps the omission with its continuation handle. An omission on a path whose units were selected for delivery still refuses the request, as do unavailable and out-of-scope sources.

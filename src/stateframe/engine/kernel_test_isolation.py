@@ -290,6 +290,55 @@ def _darwin_xcrun_filter() -> str:
                     for path in sorted(paths))
 
 
+_BWRAP_SPECIAL_MOUNTS = (Path("/dev"), Path("/proc"))
+
+
+def _mount_points_from(mountinfo: str) -> frozenset[Path] | None:
+    """Mount points (field 5) of a /proc/<pid>/mountinfo text; None when a line is malformed."""
+    points = set()
+    for line in mountinfo.splitlines():
+        fields = line.split(" ")
+        if len(fields) < 5 or not fields[4].startswith("/"):
+            return None
+        # The kernel escapes space, tab, newline and backslash as \ooo.
+        points.add(Path(re.sub(r"\\([0-7]{3})", lambda match: chr(int(match.group(1), 8)), fields[4])))
+    return frozenset(points)
+
+
+def _host_mount_points() -> frozenset[Path] | None:
+    """This mount namespace's mount points, read fresh per command; None when unreadable."""
+    try:
+        with open("/proc/self/mountinfo", encoding="utf-8", errors="surrogateescape") as stream:
+            return _mount_points_from(stream.read())
+    except OSError:
+        return None
+
+
+def _uncovered_mounts(mounts: dict[Path, str], mount_points: frozenset[Path] | None) -> list[Path]:
+    """Drop identity read-only binds that an identity read-only bind of an ancestor already shows.
+
+    bwrap binds recursively, so --ro-bind P P under the nearest mounted ancestor --ro-bind A A exposes
+    the same host tree, read-only, as A's mount already does; under a mostly-executable capability that
+    is hundreds of redundant mounts, and each one costs mount-namespace work under load. A bind is kept
+    when its nearest mounted ancestor is writable (the child narrows it) or /dev or /proc (bwrap's own),
+    and when a host mount point lies below A and at or above P: a recursive bind omits unbindable
+    submounts, so only a path inside A's own mount is guaranteed the same view. Without a readable mount
+    table nothing is dropped.
+    """
+    if mount_points is None:
+        return list(mounts)
+    kept = []
+    for path, flag in mounts.items():
+        nearest = next((parent for parent in path.parents
+                        if parent in mounts or parent in _BWRAP_SPECIAL_MOUNTS), None)
+        if flag == "--ro-bind" and nearest is not None and mounts.get(nearest) == "--ro-bind":
+            between = (path, *path.parents[:path.parents.index(nearest)])
+            if not any(point in mount_points for point in between):
+                continue
+        kept.append(path)
+    return kept
+
+
 def capability_command(command, cap, *, platform_backend=None, shared_namespace=False,
                        single_process=False, private_pid_unit=False):
     """Build a shell/job boundary from explicit authority, never host test policy.
@@ -370,15 +419,10 @@ def capability_command(command, cap, *, platform_backend=None, shared_namespace=
     links = executable_symlinks(tuple(reads))
     mounts = {p.resolve(strict=True): "--ro-bind" for p in reads}
     mounts.update({p: "--bind" for p in writes})
-    for path in sorted(mounts, key=lambda p: (len(p.parts), str(p))):
-        # A read-only bind beneath a read-only-bound ancestor (and no writable bind between them)
-        # adds nothing: bwrap binds recursively, so the path is already visible, read-only. Each
-        # bind is a mount in a fresh user namespace; capability roots list every PATH executable,
-        # and ~400 redundant mounts cost 1.5-3 s per command on Linux 7.0 (the nearest mounted
-        # ancestor decides the effective mode, so writable roots and their read-only carve-outs stay).
-        nearest = next((parent for parent in path.parents if parent in mounts), None)
-        if mounts[path] == "--ro-bind" and nearest is not None and mounts[nearest] == "--ro-bind":
-            continue
+    # Each bind is a mount in a fresh user namespace; capability roots list every PATH executable,
+    # and ~400 redundant mounts cost 1.5-3 s per command on Linux 7.0. Only binds that add something
+    # are emitted (see _uncovered_mounts for when a child bind is already covered).
+    for path in sorted(_uncovered_mounts(mounts, _host_mount_points()), key=lambda p: (len(p.parts), str(p))):
         arguments += [mounts[path], str(path), str(path)]
     system_links = {Path(p) for p in ("/bin", "/sbin", "/lib", "/lib32", "/lib64", "/libx32")
                     if os.path.islink(p)}
