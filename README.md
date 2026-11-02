@@ -88,6 +88,10 @@ stateframe chat --repo path/to/your-repo
 
 Install a reusable instruction bundle with `stateframe skill install path/to/skill`, then select it with `--skill NAME` on `run` or `chat`. The run shows a small catalog and loads the body only when it calls `skill_load`. Optional commands need `--trust-skill-tools`. The [skills guide](docs/guide/skills.md) covers the format, limits and resume rules.
 
+## Project instructions
+
+Add `--instructions` to `run` or `chat` to give the agent your repository's own `AGENTS.md` (or `CLAUDE.md` when there is no `AGENTS.md`), or `--instructions=FILE` to use a specific file. The text is added to the end of StateFrame's system prompt in every request, framed as untrusted repository content: it can describe conventions and commands, but it cannot add tools, widen the sandbox or override engine rules. It is off by default because a live comparison on the bundled examples showed no gain (see [known limitations](KNOWN_LIMITATIONS.md)). Details in [Running](docs/guide/running.md#project-instructions).
+
 ## What the agent can do
 
 - **Find and read:** search the code, list files, read files, and recall what it found earlier in the run.

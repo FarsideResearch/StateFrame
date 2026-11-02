@@ -16,6 +16,7 @@ Large tasks or repositories can require more state and source context than fits.
 
 - Very long tasks (roughly 25 or more model turns) and larger multi-file changes (around 10 files or more) can stop with a refusal when the task state no longer fits the prompt budget. Nothing is lost: the partial result is saved.
 - Shell, job and custom-command reply delivery shrinks against the measured whole request when a populated frame nears the prompt limit. The full taped observation remains on disk, subject to the command collector's output cap. If the authoritative minimum still cannot fit, the request is refused.
+- Project instructions (`--instructions`) are off by default. In a live comparison on Qwen3.6-35B-A3B, the three bundled examples passed 9 of 9 runs both with and without a realistic `AGENTS.md`, using 27 and 28 model requests in total, so no gain was measured; these examples are short enough that both arms are at the ceiling. At most 6,144 bytes of the file are shown, and the text is untrusted repository content, not a security boundary.
 - Selected skill descriptions are visible in the typed frame. Skill bodies are delivered only after `skill_load`, with at most two resident bodies. Other files in a skill directory are not shown to the model. Bodies may be omitted to fit the prompt budget, then loaded again. Skill text is user content, not a security boundary.
 
 ## Agent tools

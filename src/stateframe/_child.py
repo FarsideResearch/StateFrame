@@ -838,6 +838,8 @@ def main(argv: list[str]) -> int:
                                   resume_active=resume is not None)
         from kernel_skills import configure as configure_skills
         configure_skills(skill_records, skill_digest, spec.get("chat_url"))
+        from kernel_project_instructions import configure as configure_project_instructions
+        configure_project_instructions(spec.get("project_instructions"))
         from probes import react_repair as rr
         if hook_wiring is not None:
             rr._hook_wiring = hook_wiring

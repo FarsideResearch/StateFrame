@@ -33,6 +33,7 @@ from .task_row import build_row
 from .engine.kernel_custom_tools import CustomToolError, load_tool_files
 from .engine.kernel_mcp_tools import load_mcp_files, discover as discover_mcp
 from .engine.kernel_tool_settings import ToolSettings
+from . import instructions as project_instructions
 from .skills import SkillError, measured_skills_digest, resolve_skills, skills_digest, verify_records
 
 if TYPE_CHECKING:
@@ -195,6 +196,8 @@ class RunOptions:
     tool_settings: ToolSettings = field(default_factory=ToolSettings)
     skills: tuple[str, ...] = ()
     trust_skill_tools: bool = False
+    # "auto": the repo's AGENTS.md, else CLAUDE.md; "off": none; anything else: that file.
+    instructions: str = project_instructions.DEFAULT_MODE
     hooks_files: tuple[Path, ...] = ()
     no_project_hooks: bool = False
     hooks_repo: Path | None = None
@@ -845,6 +848,7 @@ def prepare(options: RunOptions, printer=print) -> tuple[Path, workcopy.WorkCopy
             raise RunError(str(error)) from error
     run.mkdir(parents=True)
     work = workcopy.create(options.repo, run / "workspace")
+    instructions_record = _resolve_project_instructions(options, work.copy, environment)
     # Read-only reference copy of the starting state; the engine's finish path reads it, and
     # diffs are taken against it (never against the live original, which may change meanwhile).
     shutil.copytree(work.copy, run / "parent", symlinks=False)
@@ -939,6 +943,7 @@ def prepare(options: RunOptions, printer=print) -> tuple[Path, workcopy.WorkCopy
         "custom_executables": {tool.name: tool.executable_digest for tool in custom.tools},
         "skills": records,
         "skills_digest": skills_record["skills_digest"],
+        **({"project_instructions": instructions_record} if instructions_record is not None else {}),
         **({"skills_measurements": measurements} if measurements is not None else {}),
         "environment": environment,
         "environment_sources": environment_sources,
@@ -1627,6 +1632,11 @@ def resume_run(run_dir: Path, *, endpoint: Endpoint | None = None, max_turns: in
                        spec.get("skills_measurements"))
     except SkillError as error:
         raise resume_module.ResumeRefused(str(error)) from error
+    if "project_instructions" in spec:
+        try:
+            project_instructions.verify_unchanged(spec["project_instructions"])
+        except project_instructions.InstructionsError as error:
+            raise resume_module.ResumeRefused(str(error)) from error
     start_context_missing = "hooks" in spec and "start_context" not in spec["hooks"]
     if start_context_missing:
         from .hook_host import rebuild_start_context
@@ -1856,6 +1866,32 @@ def _checkpoint_refusal(run_dir: Path, child_exit: object = None) -> str | None:
     if not isinstance(record, dict):
         return "checkpoint refusal record malformed"
     return f"{record.get('error')}: {record.get('reason') or record.get('detail') or ''}".strip()
+
+
+def _resolve_project_instructions(options: RunOptions, workspace: Path, environment: dict,
+                                  printer=print) -> dict[str, object] | None:
+    """Bounded, digest-pinned AGENTS.md / CLAUDE.md for this run (None: no slot, bytes unchanged)."""
+    mode = options.instructions
+    explicit = None if mode in ("auto", "off") else Path(mode)
+    loop = str(options.extra_env.get("STATEFRAME_AGENT_LOOP", environment.get("STATEFRAME_AGENT_LOOP", "full"))).lower()
+    lean = str(options.extra_env.get("STATEFRAME_LEAN", environment.get("STATEFRAME_LEAN", "off"))).lower() == "on"
+    try:
+        record = project_instructions.resolve(
+            options.repo, explicit, discover=(mode == "auto"),
+            # The working copy applies the sandbox read policy: an excluded file is never shown.
+            readable=lambda relative: (workspace / relative).is_file())
+    except project_instructions.InstructionsError as error:
+        raise RunError(str(error)) from error
+    if record is not None and (loop == "plain" or lean):
+        if explicit is not None:
+            raise RunError("--instructions requires the composed loop")
+        if not options.quiet:
+            printer(f"project instructions {record['source']} skipped: this loop does not support them")
+        return None
+    if record is not None and not options.quiet:
+        printer(f"project instructions: {record['source']} ({record['shown_bytes']} of {record['bytes']} bytes"
+                + (", truncated" if record["truncated"] else "") + ")")
+    return record
 
 
 def _session_end_is_final(summary: dict[str, object]) -> bool:

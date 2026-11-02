@@ -35,9 +35,23 @@
 - `--tools FILE`: repeatable trusted custom command definitions in `stateframe-tools/1` JSON.
 - `--hooks FILE`: repeatable lifecycle hook definitions in `stateframe-hooks/1` JSON. Project hooks at `.stateframe/hooks.json` require `stateframe hooks trust --repo R`; `--no-project-hooks` skips them for one `run` or `chat` command.
 - `--skill NAME_OR_PATH`: repeatable selected skill bundle. `--trust-skill-tools` offers its optional command definitions. See [Skills](skills.md).
+- `--instructions[=FILE]`: project instructions, off by default. With no value, the repository's `AGENTS.md`, else `CLAUDE.md`; with a value, that file. `--no-instructions` states the default explicitly. See [Project instructions](#project-instructions).
 - On `resume`, `--replay-external` explicitly repeats recorded external operations before continuing.
 
 Hook files named with `--hooks` are explicitly trusted by that command. Project hook files need a separate digest trust step, and edits to the file or its pinned scripts require trust again. The [hooks guide](hooks.md) describes the event contract and the sandbox boundary.
+
+## Project instructions
+
+`--instructions` reads the repository's `AGENTS.md` (or `CLAUDE.md` when there is no `AGENTS.md`) from the repository root; `--instructions=FILE` reads that file instead, which may live outside the repository. Write the value with `=` (or put the flag last) so the next argument is not taken as the file name.
+
+- The file must be a regular file of at most 1 MiB. An in-repository symlink is followed only when its target stays inside the repository, and a file the working copy excludes (for example a secret-named path) is never shown.
+- At most 6,144 bytes are shown, cut at a line boundary, with a visible note giving the shown and total byte counts. The model can read the rest of a file inside the repository with its normal read tools.
+- The text is appended once to the end of the engine's system message, after every engine rule and before the task, so the stable request head (and the server's prompt cache) is unchanged from one request to the next. Hook start context, the skill catalog and MCP tools keep their usual places.
+- In the last-resort compaction for an otherwise unfittable request, the engine shortens its whole system message to one line, and the instructions are dropped with it.
+- The text is framed as untrusted repository content. It cannot grant or remove tools, widen the sandbox or network, change protected tests or completion checks, or override engine rules.
+- The run records the file's SHA-256. `resume` refuses before replay when the file changed or is missing.
+- Without `--instructions`, or with it when no file exists, requests are byte for byte the same as without this feature.
+- The plain loop and lean mode do not support project instructions: an explicit `--instructions=FILE` is refused and a discovered file is skipped with a note.
 
 ## Which Python runs your tests
 
