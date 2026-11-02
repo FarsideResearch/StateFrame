@@ -18,6 +18,7 @@ from kernel_shell_tool import ShellReply, ShellCleanupFailed, workspace_identity
 from kernel_tool_tape import (replay_mode_active, tape_for_run, replay_decision,
                               verify_intent, ToolReplayRefused)
 from kernel_web_fetch import WebPolicy, fetch
+import kernel_git_commit
 
 
 class AgentTools:
@@ -60,7 +61,9 @@ class AgentTools:
                     with metadata.open("x") as record:
                         json.dump({"head_oid": self.git.head_oid, "git_dir": str(self.git.git_dir),
                                    "object_dirs": [str(p) for p in self.git.object_dirs]}, record, sort_keys=True)
-        self.names = OBSERVATION_NAMES | self.custom.keys()
+        # STATEFRAME_GIT_COMMIT: commit and branch tools, absent from every request when off.
+        self.commit_names = frozenset(kernel_git_commit.TOOL_NAMES) if kernel_git_commit.enabled() else frozenset()
+        self.names = OBSERVATION_NAMES | self.commit_names | self.custom.keys()
         from kernel_agent_schemas import measure_schemas
         self.schema_budget = measure_schemas(self.custom_schemas, endpoint=shell.spec.get("chat_url"))
         with tempfile.NamedTemporaryFile(mode="w", prefix="tool-schema-budget-", suffix=".json",
@@ -87,7 +90,7 @@ class AgentTools:
                 raise CustomToolError("MCP tool list or schema changed since host validation")
             self.custom.update({tool.name: tool for tool in found.tools})
             self.custom_schemas.extend(copy.deepcopy(found.schemas()))
-            self.names = OBSERVATION_NAMES | self.custom.keys()
+            self.names = OBSERVATION_NAMES | self.commit_names | self.custom.keys()
             from kernel_agent_schemas import measure_schemas
             self.schema_budget = measure_schemas(self.custom_schemas, endpoint=self.shell.spec.get("chat_url"))
             self.schema_budget_path.write_text(json.dumps(self.schema_budget, sort_keys=True))
@@ -105,11 +108,22 @@ class AgentTools:
             return skills_service() is not None
         if name == "web_fetch":
             return self.shell.settings.web
+        if name in kernel_git_commit.TOOL_NAMES:
+            return name in self.commit_names
         return name in self.custom
 
     def schemas(self):
-        return [copy.deepcopy(s) for s in (*BUILTIN_SCHEMAS, *self.custom_schemas)
+        commit_schemas = kernel_git_commit.SCHEMAS if self.commit_names else ()
+        return [copy.deepcopy(s) for s in (*BUILTIN_SCHEMAS, *commit_schemas, *self.custom_schemas)
                 if self.offered(s["function"]["name"])]
+
+    def _commit(self, name, args, call_id):
+        log = kernel_git_commit.CommitLog(self.shell.run_dir)
+        if name == "git_branch":
+            return kernel_git_commit.branch(log, call_id, args.get("name"))
+        manifest = self.shell._scan()
+        return kernel_git_commit.commit(log, self.shell.store, manifest, self.shell.root, call_id,
+                                        args.get("message"), excluded_path)
 
     def observation(self, name, args, call_id, operation, *, definition=None, capability=None):
         before = workspace_identity(self.shell._scan())
@@ -223,6 +237,15 @@ class AgentTools:
                 return self.shell._execute(args, call_id, custom=self.custom[name])
             except (EffectError, RunEnvError, ToolTapeError, OSError) as error:
                 raise ShellExecutionFailed(f"{type(error).__name__}: {error}") from error
+        if name in kernel_git_commit.TOOL_NAMES:
+            if not self.offered(name):
+                return ShellReply(f"REFUSED NOT_OFFERED: {name} needs {kernel_git_commit.MODE_ENV}=on")
+            params = {key: value for key, value in args.items() if key != "why"}
+            observation = self.observation(name, args, call_id, lambda: self._commit(name, params, call_id))
+            if (replay_mode_active() and not observation.startswith("REFUSED")
+                    and kernel_git_commit.CommitLog(self.shell.run_dir).by_call(call_id) is None):
+                raise ToolReplayRefused(f"{name} record for {call_id} is missing from the commit log")
+            return ShellReply(observation)
         if name == "git" and not self.offered(name):
             return ShellReply("REFUSED NOT_A_GIT_REPO: Git is disabled or the source is not a Git repository")
         if name == "web_fetch" and not self.offered(name):

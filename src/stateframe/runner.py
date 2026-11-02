@@ -392,6 +392,7 @@ OPT_IN_SWITCHES = {
     "STATEFRAME_MICROGRAPH": ("on", "off"),  # experimental; the engine defaults to off
     "STATEFRAME_STABLE_TOOL_HEAD": ("on", "off"),  # one cacheable tool list per run; gated tools are refused
     "STATEFRAME_SHELL_STATE": ("on", "off"),  # shell cwd and exported variables persist between calls
+    "STATEFRAME_GIT_COMMIT": ("on", "off"),  # git_commit/git_branch tools; patch series per branch after the run
 }
 # Accepted aliases -> the engine's own value (EVICTFIX "off" is sent as "legacy").
 OPT_IN_ALIASES = {"STATEFRAME_EVICTFIX": {"off": "legacy"}}
@@ -868,7 +869,7 @@ def prepare(options: RunOptions, printer=print) -> tuple[Path, workcopy.WorkCopy
             for skill in selected_skills if skill.tools_json_sha256)))
     builtin_names = frozenset(("grep", "list_files", "read", "edit", "str_replace", "insert_before",
         "authored_check", "file_create", "run_tests", "read_check_receipt", "recall", "done",
-        "shell", "job_wait", "job_output", "job_stop", "file_delete", "file_move", "git", "web_fetch", "skill_load"))
+        "shell", "job_wait", "job_output", "job_stop", "file_delete", "file_move", "git", "web_fetch", "git_commit", "git_branch", "skill_load"))
     try:
         custom = load_tool_files([Path(item["path"]) for item in settings.tools_files],
                                  builtin_names=builtin_names, shell_network=settings.shell_network)
@@ -2107,7 +2108,7 @@ def resume_run(run_dir: Path, *, endpoint: Endpoint | None = None, max_turns: in
             raise resume_module.ResumeRefused(f"recorded tool settings are invalid: {error}") from error
         builtin_names = frozenset(("grep", "list_files", "read", "edit", "str_replace", "insert_before",
             "authored_check", "file_create", "run_tests", "read_check_receipt", "recall", "done",
-            "shell", "job_wait", "job_output", "job_stop", "file_delete", "file_move", "git", "web_fetch", "skill_load"))
+            "shell", "job_wait", "job_output", "job_stop", "file_delete", "file_move", "git", "web_fetch", "git_commit", "git_branch", "skill_load"))
         for item in (*settings.tools_files, *settings.mcp_files):
             path = Path(item["path"])
             try:
@@ -2602,8 +2603,22 @@ def _execute(options: RunOptions, started: float, printer, run_dir: Path, work: 
             cancelled = True
     diff = workcopy.unified_diff(work)
     (run_dir / "final.diff").write_text(diff)
+    commits = None
+    if (run_dir / "commits.jsonl").is_file():
+        from .commit_export import CommitExportError, export_commits
+        try:
+            commits = export_commits(run_dir)
+        except (CommitExportError, OSError, ValueError, subprocess.TimeoutExpired) as error:
+            commits = {"error": str(error)}
     summary = summarize(run_dir, started)
     printer(str(summary["cached_share_display"]))
+    if commits is not None:
+        summary["commits"] = commits
+        if "error" in commits:
+            printer(f"commits: export failed: {commits['error']}")
+        else:
+            printer(f"commits: {commits['count']} in {commits['dir']} "
+                    f"(apply a branch with: git am {commits['dir']}/<branch>/*.patch)")
     summary.update({
         "run_dir": str(run_dir),
         "child_exit_code": child_exit,

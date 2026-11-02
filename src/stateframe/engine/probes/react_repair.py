@@ -2462,6 +2462,8 @@ _PROBE_TOOL = {"type": "function", "function": {
 TOOLS.append(SHELL_SCHEMA)
 from kernel_agent_schemas import BUILTIN_SCHEMAS  # noqa: E402 - schemas follow the base menu
 TOOLS.extend(BUILTIN_SCHEMAS)
+from kernel_git_commit import registered_schemas as _commit_schemas  # noqa: E402 - STATEFRAME_GIT_COMMIT=on only
+TOOLS.extend(_commit_schemas())
 
 # Tool calls accept an optional `why`: one declared line
 # of intent per action. The model narrates its plan as it works (a commitment device that

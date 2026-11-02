@@ -167,8 +167,9 @@ def runner_dispatchable(name: str, *, runtime: object | None = None) -> bool:
     """
     from kernel_agent_tools import service as agent_tools_service
     from kernel_agent_schemas import OBSERVATION_NAMES
+    from kernel_git_commit import registered_names
     host = agent_tools_service()
-    if name in OBSERVATION_NAMES or (host is not None and name in host.custom):
+    if name in OBSERVATION_NAMES or name in registered_names() or (host is not None and name in host.custom):
         return host is not None and host.offered(name)
     if name == "shell":
         from kernel_shell_tool import service

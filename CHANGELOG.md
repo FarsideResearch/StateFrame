@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.3.9 (2026-11-02)
+
+- Add `STATEFRAME_GIT_COMMIT` (opt-in, off by default): the agent can call `git_commit(message)` and `git_branch(name)` to split its work into reviewable commits. Commits are snapshots in the run folder; your repository and the working copy are never touched, and secret paths are never included. After the run, each branch is written as a `git format-patch` series under `<run-dir>/commits/<branch>/`, ready for `git am`. Commits are deterministic, an unchanged commit is refused, and resume serves recorded commits instead of committing again.
+- With the switch off, the tools are not offered and request bytes are unchanged.
+
 ## 0.3.8 (2026-11-02)
 
 - Add `STATEFRAME_SHELL_STATE` (opt-in, off by default): the shell keeps its working directory and exported variables between foreground calls, so `cd sub && export X=1` followed by `pwd; echo $X` prints `sub` and `1`. A directory outside the workspace or one that no longer exists falls back to the workspace root, shell-maintained and `STATEFRAME_*` variables are never carried, and a timed-out call keeps the previous state. The state is part of each call's replay record, so resume reproduces it and refuses a call started from a different state. Background jobs and custom or MCP tools are unchanged.

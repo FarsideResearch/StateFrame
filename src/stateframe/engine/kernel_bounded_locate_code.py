@@ -19,6 +19,8 @@ READ_TOOLS = frozenset({
     "references", "recall_evidence", "recall", "recall_generated_artifact", "read_ticket",
 })
 OBSERVATION_TOOLS = frozenset({*READ_TOOLS, "probe", "job_wait", "job_output", "job_stop", "git", "web_fetch", "skill_load"})
+from kernel_git_commit import registered_names as _commit_names  # noqa: E402 - empty unless STATEFRAME_GIT_COMMIT=on
+OBSERVATION_TOOLS = OBSERVATION_TOOLS | _commit_names()
 EDIT_TOOLS = frozenset({
     "edit", "str_replace", "file_create", "file_delete", "file_move", "shell", "replace_module", "write", "replace",
 })
