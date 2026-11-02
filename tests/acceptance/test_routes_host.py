@@ -393,3 +393,279 @@ def test_inactive_routes_keep_requests_byte_identical(tmp_path, monkeypatch, cap
     for run_dir in (plain_dir, example_dir):
         assert "routes" not in json.loads((run_dir / "spec.json").read_text())
         assert not list((run_dir / "wire").glob("*.route.json"))
+
+
+def _route_flags(cheap: Endpoint) -> list[str]:
+    return ["--route", f"plan.endpoint={cheap.url}", "--route", "plan.model=cheap",
+            "--route", f"read.endpoint={cheap.url}", "--route", "read.model=cheap"]
+
+
+def _script(tmp_path: Path, name: str, model: str, steps: list[dict],
+            *, request_log: Path | None = None) -> Path:
+    path = tmp_path / f"{name}.script.json"
+    document = {"model": model, "tokenize": {"mode": "ok"}, "steps": steps}
+    if request_log is not None:
+        document["request_log"] = str(request_log)
+    path.write_text(json.dumps(document))
+    return path
+
+
+def _shell_check_repo(tmp_path: Path) -> Path:
+    repo = tmp_path / "shell-repo"
+    repo.mkdir()
+    (repo / "app.sh").write_text("VALUE=bad\n")
+    (repo / "check.sh").write_text(
+        '#!/bin/sh\nset -eu\n. ./app.sh\n[ "$VALUE" = good ]\n')
+    return repo
+
+
+def _route_records(run_dir: Path) -> list[dict]:
+    return [json.loads(path.read_text())
+            for path in sorted((run_dir / "wire").glob("*.route.json"))]
+
+
+def _route_events(run_dir: Path) -> list[dict]:
+    paths = list((run_dir / "worker" / "measurement-runs").glob("*/events.jsonl"))
+    assert len(paths) == 1
+    return [json.loads(line) for line in paths[0].read_text().splitlines()]
+
+
+def _hook_config(tmp_path: Path, *, guard_reads: bool = False) -> Path:
+    hooks = [{"name": "context", "event": "session_start",
+              "argv": [PYTHON, "-c", "print('routed hook context')"]},
+             {"name": "audit", "event": "pre_tool",
+              "tools": ["read", "str_replace"] if guard_reads else ["str_replace"],
+              "argv": [PYTHON, "-c", "pass"]}]
+    path = tmp_path / "hooks.json"
+    path.write_text(json.dumps({"schema": "stateframe-hooks/1", "hooks": hooks}))
+    return path
+
+
+def test_routed_generic_shell_check_escalates_edit_and_passes(tmp_path):
+    repo = _shell_check_repo(tmp_path)
+    run_dir = tmp_path / "run"
+    cheap_log, default_log = tmp_path / "cheap.jsonl", tmp_path / "default.jsonl"
+    cheap_script = _script(tmp_path, "cheap", "cheap", [
+        {"tool": "read", "arguments": {"path": "app.sh"}},
+        {"tool": "str_replace", "arguments": {"path": "discarded.sh",
+                                                "old_str": "bad", "new_str": "wrong"}},
+        {"tool": "run_tests", "arguments": {"target": ""}},
+        {"tool": "done", "arguments": {"summary": "The shell check passes."}},
+    ], request_log=cheap_log)
+    default_script = _script(tmp_path, "default", "scripted", [
+        {"tool": "str_replace", "arguments": {"path": "app.sh",
+                                                "old_str": "VALUE=bad", "new_str": "VALUE=good"}},
+        {"tool": "done", "arguments": {"summary": "The shell check passes."}},
+    ], request_log=default_log)
+    with Endpoint(default_script) as default, Endpoint(cheap_script) as cheap:
+        process = subprocess.run([
+            PYTHON, "-m", "stateframe", "run", "--repo", str(repo),
+            "--task", "Read app.sh, fix its value, and run sh check.sh.",
+            "--endpoint", default.url, "--model", "scripted", "--run-dir", str(run_dir),
+            "--test-cmd", "sh check.sh", "--runner-kind", "generic", "--target", "app.sh",
+            "--max-turns", "8", "--quiet", *_route_flags(cheap)],
+            capture_output=True, text=True, env=environment(), timeout=300, check=False)
+    summary = json.loads((run_dir / "summary.json").read_text())
+    assert process.returncode == 0, process.stdout + process.stderr
+    assert summary["runner_kind"] == "generic"
+    assert summary["tests_before"]["passed"] is False
+    assert summary["tests_after"]["passed"] is True
+    assert summary["succeeded"] is True
+    assert summary["verification"] == "verified by check command"
+    assert (run_dir / "workspace" / "app.sh").read_text() == "VALUE=good\n"
+    routes = _route_records(run_dir)
+    assert [route["role"] for route in routes[:3]] == ["plan", "read", "edit"]
+    assert [route["model"] for route in routes[:3]] == ["cheap", "cheap", "scripted"]
+    cheap_host = cheap.url.removeprefix("http://").removesuffix("/v1")
+    assert all(route["endpoint_host"] == cheap_host for route in routes[:2])
+    assert routes[2]["endpoint_host"] == default.url.removeprefix("http://").removesuffix("/v1")
+    assert isinstance(routes[2]["escalated_from"], str) and routes[2]["escalated_from"]
+    assert any(route["role"] == "read" and route["model"] == "cheap"
+               for route in routes[3:])
+    assert any(route["role"] == "finish" and route["model"] == "scripted"
+               for route in routes)
+    discarded = [event for event in _route_events(run_dir)
+                 if event.get("kind") == "route_escalation_discarded"]
+    assert discarded
+    assert "discarded.sh" not in (run_dir / "final.diff").read_text()
+    tool_tape = run_dir / "tool-tape.jsonl"
+    if tool_tape.is_file():
+        assert "discarded.sh" not in tool_tape.read_text()
+    cheap_requests = [json.loads(line) for line in cheap_log.read_text().splitlines()]
+    default_requests = [json.loads(line) for line in default_log.read_text().splitlines()]
+    assert len(cheap_requests) >= 3 and default_requests
+    assert "discarded.sh" not in json.dumps(cheap_requests[2]["messages"])
+    assert default_requests[0]["model"] == "scripted"
+
+
+def test_routed_protect_all_refuses_escalated_test_edit(tmp_path):
+    repo = tmp_path / "pytest-repo"
+    (repo / "tests").mkdir(parents=True)
+    (repo / "value.py").write_text("VALUE = 'bad'\n")
+    test_file = repo / "tests" / "test_value.py"
+    test_file.write_text("from value import VALUE\n\ndef test_value():\n    assert VALUE == 'good'\n")
+    run_dir = tmp_path / "run"
+    cheap_script = _script(tmp_path, "cheap", "cheap", [
+        {"tool": "read", "arguments": {"path": "tests/test_value.py"}},
+        {"tool": "str_replace", "arguments": {"path": "tests/test_value.py",
+                                                "old_str": "'good'", "new_str": "'bad'"}},
+        {"tool": "str_replace", "arguments": {"path": "value.py",
+                                                "old_str": "'bad'", "new_str": "'wrong'"}},
+        {"tool": "run_tests", "arguments": {"target": "tests/test_value.py"}},
+        {"tool": "done", "arguments": {"summary": "The test passes."}},
+    ])
+    default_script = _script(tmp_path, "default", "scripted", [
+        {"tool": "str_replace", "arguments": {"path": "tests/test_value.py",
+                                                "old_str": "'good'", "new_str": "'bad'"}},
+        {"tool": "str_replace", "arguments": {"path": "value.py",
+                                                "old_str": "'bad'", "new_str": "'good'"}},
+        {"tool": "done", "arguments": {"summary": "The test passes."}},
+    ])
+    with Endpoint(default_script) as default, Endpoint(cheap_script) as cheap:
+        process = subprocess.run([
+            PYTHON, "-m", "stateframe", "run", "--repo", str(repo),
+            "--task", "Read the existing test, fix value.py, and run the test.",
+            "--endpoint", default.url, "--model", "scripted", "--run-dir", str(run_dir),
+            "--test-python", PYTHON, "--test-cmd", "python -m pytest -q tests/test_value.py",
+            "--protect-tests", "all", "--target", "value.py", "--max-turns", "10",
+            "--quiet", *_route_flags(cheap)], capture_output=True, text=True,
+            env=environment(), timeout=300, check=False)
+    assert process.returncode == 0, process.stdout + process.stderr
+    spec = json.loads((run_dir / "spec.json").read_text())
+    summary = json.loads((run_dir / "summary.json").read_text())
+    assert spec["protect_tests"] == summary["protect_tests"] == "all"
+    assert summary["succeeded"] is True and summary["tests_after"]["passed"] is True
+    assert (run_dir / "workspace" / "tests" / "test_value.py").read_bytes() == test_file.read_bytes()
+    routes = _route_records(run_dir)
+    assert [route["role"] for route in routes[:3]] == ["plan", "read", "edit"]
+    assert routes[2]["model"] == "scripted" and isinstance(routes[2]["escalated_from"], str) and routes[2]["escalated_from"]
+    receipts = [event["receipt"] for event in _route_events(run_dir)
+                if event.get("kind") == "action_receipt"]
+    assert [(receipt["attempt"]["target"], receipt["result_class"])
+            for receipt in receipts if isinstance(receipt.get("attempt"), dict)
+            and receipt["attempt"].get("target") == "tests/test_value.py"] == [
+                ("tests/test_value.py", "REJECTED")]
+    assert "REJECTED" in (run_dir / "wire" / "0004.request.json").read_text()
+    assert "tests/test_value.py" not in (run_dir / "final.diff").read_text()
+
+
+def test_routed_hook_runs_once_for_escalated_edit_and_context_reaches_each_route(tmp_path):
+    repo = _shell_check_repo(tmp_path)
+    run_dir = tmp_path / "run"
+    config = _hook_config(tmp_path)
+    cheap_script = _script(tmp_path, "cheap", "cheap", [
+        {"tool": "read", "arguments": {"path": "app.sh"}},
+        {"tool": "str_replace", "arguments": {"path": "app.sh",
+                                                "old_str": "VALUE=bad", "new_str": "VALUE=discarded"}},
+        {"tool": "run_tests", "arguments": {"target": ""}},
+        {"tool": "done", "arguments": {"summary": "Check passed."}},
+    ])
+    default_script = _script(tmp_path, "default", "scripted", [
+        {"tool": "str_replace", "arguments": {"path": "app.sh",
+                                                "old_str": "VALUE=bad", "new_str": "VALUE=good"}},
+        {"tool": "done", "arguments": {"summary": "Check passed."}},
+    ])
+    with Endpoint(default_script) as default, Endpoint(cheap_script) as cheap:
+        process = subprocess.run([
+            PYTHON, "-m", "stateframe", "run", "--repo", str(repo),
+            "--task", "Read app.sh, fix its value, and run sh check.sh.",
+            "--endpoint", default.url, "--model", "scripted", "--run-dir", str(run_dir),
+            "--test-cmd", "sh check.sh", "--runner-kind", "generic", "--target", "app.sh",
+            "--hooks", str(config), "--max-turns", "8", "--quiet", *_route_flags(cheap)],
+            capture_output=True, text=True, env=environment(), timeout=300, check=False)
+    assert process.returncode == 0, process.stdout + process.stderr
+    assert json.loads((run_dir / "summary.json").read_text())["succeeded"] is True
+    assert (run_dir / "workspace" / "app.sh").read_text() == "VALUE=good\n"
+    assert any(route["role"] == "edit" and route["model"] == "scripted"
+               for route in _route_records(run_dir))
+    records = [json.loads(line) for line in
+               (run_dir / "hooks" / "records.jsonl").read_text().splitlines()]
+    assert [(record["event"], record["hook"]) for record in records] == [
+        ("session_start", "context"), ("pre_tool", "audit")]
+    tape = [json.loads(line) for line in (run_dir / "hook-tape.jsonl").read_text().splitlines()]
+    assert len([row for row in tape if row["kind"] == "intent"
+                and row["identity"]["event"] == "pre_tool"]) == 1
+    assert len([row for row in tape if row["kind"] == "complete"]) == 2
+    # Hook context follows the release's own presentation (an unrouted run of this task omits the
+    # panel on request 2 as well). Routing must not change that: request 1 carries it, the escalated
+    # re-ask shows exactly what its discarded read-model leg showed, and later requests carry it again.
+    requests = sorted((run_dir / "wire").glob("*.request.json"))
+    shown = [b"[USER HOOKS]" in path.read_bytes() and b"routed hook context" in path.read_bytes()
+             for path in requests]
+    roles = [route["role"] for route in _route_records(run_dir)]
+    escalated = roles.index("edit")
+    assert shown[0] and shown[escalated] == shown[escalated - 1] and all(shown[escalated + 1:])
+    tool_tape = run_dir / "tool-tape.jsonl"
+    if tool_tape.is_file():
+        assert "VALUE=discarded" not in tool_tape.read_text()
+
+
+def test_routed_hooks_resume_after_discard_replays_tape_without_skipped_check(tmp_path):
+    repo = _shell_check_repo(tmp_path)
+    run_dir = tmp_path / "run"
+    config = _hook_config(tmp_path, guard_reads=True)
+    crash_python, arm, marker = _crash_python(tmp_path, "after_discard")
+    cheap_script = _script(tmp_path, "cheap", "cheap", [
+        {"tool": "read", "arguments": {"path": "app.sh"}},
+        {"tool": "str_replace", "arguments": {"path": "app.sh",
+                                                "old_str": "VALUE=bad", "new_str": "VALUE=discarded"}},
+        {"tool": "run_tests", "arguments": {"target": ""}},
+        {"tool": "done", "arguments": {"summary": "Check passed."}},
+    ])
+    default_script = _script(tmp_path, "default", "scripted", [
+        {"tool": "str_replace", "arguments": {"path": "app.sh",
+                                                "old_str": "VALUE=bad", "new_str": "VALUE=good"}},
+        {"tool": "done", "arguments": {"summary": "Check passed."}},
+    ])
+    with Endpoint(default_script) as default, Endpoint(cheap_script) as cheap:
+        process = subprocess.Popen([
+            PYTHON, "-m", "stateframe", "run", "--repo", str(repo),
+            "--task", "Read app.sh, fix its value, and run sh check.sh.",
+            "--endpoint", default.url, "--model", "scripted", "--run-dir", str(run_dir),
+            "--python", str(crash_python), "--test-cmd", "sh check.sh",
+            "--runner-kind", "generic", "--target", "app.sh", "--hooks", str(config),
+            "--max-turns", "8", "--quiet", *_route_flags(cheap)],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            env=environment(), start_new_session=True)
+        try:
+            cutoff = time.monotonic() + 120
+            while time.monotonic() < cutoff and process.poll() is None and not marker.is_file():
+                time.sleep(0.02)
+            assert marker.is_file() and process.poll() is None, process.communicate(timeout=3)
+            wire = run_dir / "wire"
+            assert (wire / "0002.response.json").is_file()
+            first_request = (wire / "0001.request.json").read_bytes()
+            second_request = (wire / "0002.request.json").read_bytes()
+            route_bytes = {path.name: path.read_bytes() for path in wire.glob("*.route.json")}
+            routes = json.loads((run_dir / "spec.json").read_text())["routes"]
+            old_tape = [json.loads(line) for line in (run_dir / "hook-tape.jsonl").read_text().splitlines()]
+            assert any(row["kind"] == "intent" and row["identity"]["event"] == "pre_tool"
+                       for row in old_tape)
+            assert all(row["kind"] == "complete" for row in old_tape[1::2])
+            _kill_run(process, run_dir)
+            arm.unlink()
+            resumed = subprocess.run([PYTHON, "-m", "stateframe", "resume", str(run_dir),
+                                      "--quiet"], capture_output=True, text=True,
+                                     env=environment(), timeout=300, check=False)
+        finally:
+            if process.poll() is None:
+                _kill_run(process, run_dir)
+    assert resumed.returncode == 0, resumed.stdout + resumed.stderr
+    assert "resuming by full replay without that check" not in resumed.stdout + resumed.stderr
+    assert not (run_dir / "resume-divergence.json").exists()
+    assert (run_dir / "wire" / "0001.request.json").read_bytes() == first_request
+    assert (run_dir / "wire" / "0002.request.json").read_bytes() == second_request
+    for name, data in route_bytes.items():
+        assert (run_dir / "wire" / name).read_bytes() == data
+    spec = json.loads((run_dir / "spec.json").read_text())
+    assert spec["routes"] == routes
+    assert spec["resume"].get("pending_check", {}).get("status") != "skipped"
+    tape = [json.loads(line) for line in (run_dir / "hook-tape.jsonl").read_text().splitlines()]
+    old_ids = {row["record_id"] for row in old_tape}
+    assert [row for row in tape if row["record_id"] in old_ids] == old_tape
+    records = [json.loads(line) for line in
+               (run_dir / "hooks" / "records.jsonl").read_text().splitlines()]
+    assert any(record["event"] == "pre_tool" and record["replayed"]
+               and record["event_id"] in old_ids for record in records)
+    assert (run_dir / "workspace" / "app.sh").read_text() == "VALUE=good\n"
+    assert json.loads((run_dir / "summary.json").read_text())["succeeded"] is True
