@@ -222,6 +222,29 @@ def test_carried_tape_skips_unverified_own_pending_send(tmp_path):
     assert resumed["pending_check"]["reason"] == "unverified_pending"
 
 
+def test_skipped_check_never_restores_a_checkpoint(tmp_path, monkeypatch):
+    # Fail closed means full replay: a usable checkpoint must not be selected for an unproven check.
+    run, spec = _interrupted_routed_run(tmp_path)
+    old_wire = run / "attempts" / "1" / "wire"
+    _write_send(old_wire, 1)
+    _write_send(old_wire, 2, completed=False)
+    _write_send(run / "wire", 1)
+    _write_send(run / "wire", 2, completed=False)
+    spec["resume"] = {"tape": replay_tape.build(old_wire, run / "attempts" / "1" / "sends.jsonl"),
+                      "pending": replay_tape.pending_request(old_wire)}
+    (run / "spec.json").write_text(json.dumps(spec))
+    calls = []
+    monkeypatch.setattr(resume, "select_checkpoint",
+                        lambda *args: calls.append(args) or {"dir": str(tmp_path / "ckpt"), "step": 5})
+
+    resume.archive_attempt({"run": run, "spec": spec, "attempt": 2, "max_turns": 8}, tmp_path,
+                           use_checkpoint=True)
+
+    resumed = json.loads((run / "spec.json").read_text())["resume"]
+    assert resumed["pending_check"]["status"] == "skipped"
+    assert calls == [] and "checkpoint" not in resumed
+
+
 def test_resume_without_carried_check_skips_its_own_pending(tmp_path):
     run, spec = _interrupted_routed_run(tmp_path)
     old_wire = run / "attempts" / "1" / "wire"
