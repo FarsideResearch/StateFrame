@@ -170,6 +170,42 @@ def auto_scope(task: str, product: dict[str, str], checks: dict[str, str]) -> li
 DECLARE_ALL_LIMIT = 200
 
 
+# Opt-in edit scope widening (STATEFRAME_EDIT_SCOPE_WIDEN / --edit-scope widen) admits at most
+# this many existing product files beyond a scoped run's declared files. The engine enforces the
+# same cap; the host re-checks every widened path before writing the candidate.
+EDIT_SCOPE_WIDEN_CAP = 24
+_NON_PRODUCT_PARTS = frozenset({"__pycache__", ".pytest_cache", ".git", ".test-tmp", "tests", "test",
+                                "probes", "scratch", "tmp", "private", "hidden_tests"})
+
+
+def widened_scope_paths(row: dict, candidate_paths, baseline, *, hook_paths=()) -> list[str]:
+    """Existing product files outside a scoped row's files that edit scope widening may write.
+
+    Host-side check, independent of the engine: the path existed in the repository, is not a
+    test or protected file. ``candidate_paths`` is in admission order.
+    """
+    if row.get("scoped_edits") is not True:
+        return []
+    declared = set(row.get("files") or ())
+    excluded = (set(row.get("protected_test_paths") or ())
+                | set(row.get("test_file_paths") or ())
+                | set(row.get("public_check_paths") or ())
+                | set(row.get("public_tests") or ()) | set(hook_paths))
+    chosen = []
+    for path in dict.fromkeys(candidate_paths):
+        if (path in declared or path not in baseline or path in excluded
+                or is_test_file(path) or PurePosixPath(path).is_absolute()
+                or ".." in PurePosixPath(path).parts):
+            continue
+        parts = PurePosixPath(path).parts
+        name = parts[-1] if parts else ""
+        if (not parts or any(part in _NON_PRODUCT_PARTS for part in parts)
+                or name.startswith("test_") or name.endswith("_test.py") or name == "conftest.py"):
+            continue
+        chosen.append(path)
+    return chosen[:EDIT_SCOPE_WIDEN_CAP]
+
+
 def repo_relative(path: str) -> str:
     """A repository path as the file map spells it: `./tests/x.py` and `tests//x.py` mean `tests/x.py`."""
     text = path.replace("\\", "/")

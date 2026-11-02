@@ -11,6 +11,7 @@ import secrets
 import shlex
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import queue
@@ -30,7 +31,7 @@ from .test_runners import (DECLARED_TEST_SOURCE, declared_test_evidence, discove
 from .test_changes import inspect_test_changes
 from . import resume as resume_module
 from .endpoint import CHAT_SUFFIX, Endpoint, EndpointError, _is_loopback
-from .task_row import build_row
+from .task_row import EDIT_SCOPE_WIDEN_CAP, build_row, widened_scope_paths
 from .engine.kernel_custom_tools import CustomToolError, load_tool_files
 from .engine.kernel_mcp_tools import load_mcp_files, discover as discover_mcp
 from .engine.kernel_tool_settings import ToolSettings
@@ -71,6 +72,79 @@ def checkpoint_env(profile_env=None):
     # An empty ambient value (`STATEFRAME_CHECKPOINT= stateframe run`) counts as unset, never as "off".
     return {key: os.environ.get(key, "").strip() or profile_env.get(key, default)
             for key, default in CHECKPOINT_ENV.items()}
+
+
+def edit_scope_widened(spec: dict) -> bool:
+    """Whether the run was started with opt-in edit scope widening."""
+    value = str((spec.get("environment") or {}).get("STATEFRAME_EDIT_SCOPE_WIDEN", "")).strip().lower()
+    return value == "on"
+
+
+def _widen_admissions(run_dir: Path, baseline: dict[str, str]) -> list[str]:
+    """Read the sole durable engine journal in admission order, failing closed."""
+    journals = list((run_dir / "worker" / "measurement-runs").glob("*/events.jsonl"))
+    if len(journals) != 1:
+        raise RunError("edit scope admission journal is missing or ambiguous")
+    admitted: list[str] = []
+    try:
+        with journals[0].open(encoding="utf-8") as source:
+            for line in source:
+                record = json.loads(line)
+                if record.get("kind") != "scope_widen":
+                    continue
+                path, digest = record.get("path"), record.get("pre_edit_sha256")
+                if (not isinstance(path, str) or not isinstance(digest, str)
+                        or digest != baseline.get(path) or path in admitted
+                        or len(admitted) >= EDIT_SCOPE_WIDEN_CAP):
+                    raise RunError("invalid edit scope admission")
+                admitted.append(path)
+    except (OSError, UnicodeError, ValueError, AttributeError) as error:
+        raise RunError(f"cannot verify edit scope admissions: {error}") from error
+    return admitted
+
+
+def _widen_hook_paths(spec: dict) -> frozenset[str]:
+    hooks = spec.get("hooks")
+    if not hooks:
+        return frozenset()
+    from .engine.kernel_hooks import HookSet
+    pinned = {key: hooks[key] for key in ("files", "definitions", "digest", "bundle_manifest")}
+    return HookSet.from_spec(pinned).protected_repo_paths(Path(spec["repo"]))
+
+
+def _admitted_candidate_paths(run_dir: Path, spec: dict, work: workcopy.WorkCopy,
+                              candidate: dict[str, bytes | None]) -> list[str]:
+    row = spec["public_row"]
+    if row.get("scoped_edits") is not True:
+        return []
+    declared = set(row["files"])
+    changed = [path for path, data in candidate.items()
+               if path in work.baseline and path not in declared
+               and (data is None or hashlib.sha256(data).hexdigest() != work.baseline[path])]
+    if not changed:
+        return []
+    admissions = _widen_admissions(run_dir, work.baseline)
+    hook_paths = _widen_hook_paths(spec)
+    allowed = widened_scope_paths(row, admissions, work.baseline, hook_paths=hook_paths)
+    if allowed != admissions:
+        raise RunError("edit scope journal contains an inadmissible path")
+    if not set(changed) <= set(allowed):
+        raise RunError("sealed candidate contains an unadmitted edit outside scope")
+    for path in changed:
+        with workcopy._parent_fd(work.copy, path) as parent:
+            name = Path(path).name
+            fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
+                         dir_fd=parent)
+            with os.fdopen(fd, "rb") as source:
+                identity = os.fstat(source.fileno())
+                if not stat.S_ISREG(identity.st_mode) or identity.st_nlink != 1:
+                    raise RunError(f"widened candidate source is not an isolated file: {path}")
+                current = source.read()
+            live = os.stat(name, dir_fd=parent, follow_symlinks=False)
+            if ((live.st_dev, live.st_ino) != (identity.st_dev, identity.st_ino)
+                    or hashlib.sha256(current).hexdigest() != work.baseline[path]):
+                raise RunError(f"widened candidate source changed before host apply: {path}")
+    return allowed
 
 
 def checkpoint_resume_off(spec: dict) -> bool:
@@ -393,6 +467,7 @@ OPT_IN_SWITCHES = {
     "STATEFRAME_STABLE_TOOL_HEAD": ("on", "off"),  # one cacheable tool list per run; gated tools are refused
     "STATEFRAME_SHELL_STATE": ("on", "off"),  # shell cwd and exported variables persist between calls
     "STATEFRAME_GIT_COMMIT": ("on", "off"),  # git_commit/git_branch tools; patch series per branch after the run
+    "STATEFRAME_EDIT_SCOPE_WIDEN": ("on", "off"),  # scoped runs admit an edited product file outside the scope
 }
 # Accepted aliases -> the engine's own value (EVICTFIX "off" is sent as "legacy").
 OPT_IN_ALIASES = {"STATEFRAME_EVICTFIX": {"off": "legacy"}}
@@ -2231,10 +2306,13 @@ def resume_run(run_dir: Path, *, endpoint: Endpoint | None = None, max_turns: in
             checkpoint_off = checkpoint_resume_off(spec)
             hooks_configured = "hooks" in spec
             routes_configured = "routes" in spec or options._routes is not None
+            # Widened edit scope lives in engine memory, not in a checkpoint; replay rebuilds it.
+            widen_configured = edit_scope_widened(spec)
             checkpoint_eligible = (same_limits and options.tool_settings.shell == "off"
                                    and not checkpoint_off)
             checkpoint_skip_reason = ("hooks_configured" if hooks_configured else
-                                      "routes_configured" if routes_configured else None)
+                                      "routes_configured" if routes_configured else
+                                      "edit_scope_widen" if widen_configured else None)
             checkpoint_skipped = checkpoint_eligible and checkpoint_skip_reason is not None
             if checkpoint_off:
                 spec["environment"]["STATEFRAME_CHECKPOINT"] = "off"
@@ -2282,6 +2360,9 @@ def resume_run(run_dir: Path, *, endpoint: Endpoint | None = None, max_turns: in
                 if checkpoint_skipped:
                     if checkpoint_skip_reason == "hooks_configured":
                         printer("checkpoint: not restored because hooks are configured for this run; "
+                                "replaying the recorded exchanges instead")
+                    elif checkpoint_skip_reason == "edit_scope_widen":
+                        printer("checkpoint: not restored because edit scope widening is on for this run; "
                                 "replaying the recorded exchanges instead")
                     else:
                         printer("checkpoint: not restored because per-step models are configured for this run; "
@@ -2578,6 +2659,8 @@ def _execute(options: RunOptions, started: float, printer, run_dir: Path, work: 
         candidate = final_candidate(run_dir)
         if candidate is not None:
             artifact_digest = _artifact_digest(candidate)
+            if edit_scope_widened(spec):
+                declared.update(_admitted_candidate_paths(run_dir, spec, work, candidate))
             written = workcopy.apply_files(work, candidate, declared=declared)
     except RunDeadlineExceeded:
         raise

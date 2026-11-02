@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.10 (2026-11-02)
+
+- New opt-in `--edit-scope widen` (or `STATEFRAME_EDIT_SCOPE_WIDEN=on`): edit and file-operation tools can admit up to 24 existing product files beyond a scoped run's starting set, in action order and across repository directories. Tests, named checks, hook inputs, links and special files remain refused. Each admission records its pre-edit digest in the durable journal; the host requires and rechecks it before carrying writes, deletions and moves into the result. New-file roots stay fixed; shell cannot initiate widening.
+- Before this, a `str_replace` on such a file could appear to apply and then be left out of the result; with widening on it is kept.
+- Runs with widening on resume by replay rather than from a checkpoint. With the option off, request bytes are unchanged.
+
 ## 0.3.9 (2026-11-02)
 
 - Add `STATEFRAME_GIT_COMMIT` (opt-in, off by default): the agent can call `git_commit(message)` and `git_branch(name)` to split its work into reviewable commits. Commits are snapshots in the run folder; your repository and the working copy are never touched, and secret paths are never included. After the run, each branch is written as a `git format-patch` series under `<run-dir>/commits/<branch>/`, ready for `git am`. Commits are deterministic, an unchanged commit is refused, and resume serves recorded commits instead of committing again.

@@ -326,6 +326,9 @@ def _source_for(root: Path, relative: str, overlays: Mapping[str, str] | None) -
     if overlays and relative in overlays:
         return overlays[relative]
     try:
+        from kernel_scope_widen_guard import admitted, read as guarded_read
+        if admitted(root / relative):
+            return guarded_read(root / relative).decode("utf-8", errors="surrogateescape")
         return (root / relative).read_text(encoding="utf-8", errors="surrogateescape")
     except (OSError, UnicodeError):
         return None
@@ -1450,7 +1453,8 @@ def _compute_tree_revision(root_path: Path, files: Sequence[str]) -> str:
         try:
             digest.update(relative.encode("utf-8"))
             digest.update(b"\0")
-            digest.update(path.read_bytes())
+            from kernel_scope_widen_guard import read as guarded_read
+            digest.update(guarded_read(path))
         except OSError:
             continue
     return "sha256:" + digest.hexdigest()
@@ -1830,7 +1834,8 @@ def _typed_authority(root: Path, plan: Mapping[str, object], *, journal: object 
                 )
                 raise CoordinatedChangeError(detail)
             raise CoordinatedChangeError(f"typed edit source is missing: {normalized}")
-        sources[normalized] = path.read_bytes()
+        from kernel_scope_widen_guard import read as guarded_read
+        sources[normalized] = guarded_read(path)
     edit_plan = EditPlan.from_mapping(plan)
     return EditPlan, EditAuthority(
         root=root, sources=sources, base_revision=edit_plan.base_revision,
@@ -1947,7 +1952,8 @@ def validate_batch(root: str | Path, edits: Sequence[object], *,
         edit_indexes.setdefault(relative, index)
         if relative not in originals:
             try:
-                originals[relative] = path.read_bytes()
+                from kernel_scope_widen_guard import read as guarded_read
+                originals[relative] = guarded_read(path)
             except OSError as error:
                 failures.append(BatchFailure(index, relative, "READ", f"cannot read file: {error}"))
                 continue
@@ -2062,7 +2068,8 @@ def apply_batch(root: str | Path, edits: Sequence[object], *,
     # Re-read all pre-images after validation.  A concurrent edit is a stale
     # transaction, never a reason to overwrite another agent's work.
     for relative, original in validation.original.items():
-        current = (root_path / relative).read_bytes()
+        from kernel_scope_widen_guard import read as guarded_read
+        current = guarded_read(root_path / relative)
         if current != original:
             failure = BatchFailure(0, relative, "CONCURRENT_CHANGE",
                                    f"workspace changed during preflight: {relative}")
@@ -2100,11 +2107,18 @@ def apply_batch(root: str | Path, edits: Sequence[object], *,
                 handle.flush()
                 os.fsync(handle.fileno())
         for relative, temporary in temporary_paths.items():
-            os.replace(temporary, root_path / relative)
+            from kernel_scope_widen_guard import admitted, write as guarded_write
+            target = root_path / relative
+            if admitted(target):
+                guarded_write(target, temporary.read_bytes())
+                temporary.unlink()
+            else:
+                os.replace(temporary, target)
             replaced.append(relative)
         for relative, source in validation.candidates.items():
             expected = source.encode("utf-8", errors="surrogateescape")
-            if (root_path / relative).read_bytes() != expected:
+            from kernel_scope_widen_guard import read as guarded_read
+            if guarded_read(root_path / relative) != expected:
                 raise OSError(f"post-publish verification failed for {relative}")
     except Exception as error:  # noqa: BLE001 - surface recovery, never hide it.
         for temporary in temporary_paths.values():

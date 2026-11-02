@@ -16,6 +16,7 @@ import os
 import pathlib
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -23,7 +24,7 @@ import textwrap
 import time
 import urllib.error
 import urllib.request
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass, field
 from types import SimpleNamespace
 from typing import Callable
@@ -879,7 +880,8 @@ def _apply_revision_bound_insertion(
         if not isinstance(target_ref, Mapping):
             raise EditPlanError("TARGET_REF", "insert_before requires a host-issued target_ref")
         relative = path.resolve().relative_to(root.resolve()).as_posix()
-        current = path.read_bytes()
+        from kernel_scope_widen_guard import read as guarded_read
+        current = guarded_read(path)
         authority_ref = str(target_ref.get("authority_ref") or "").strip()
         file_revision = str(target_ref.get("file_revision") or "").strip()
         if not authority_ref or not file_revision:
@@ -982,6 +984,128 @@ def _is_product_path(relative: str, row: Mapping[str, object]) -> bool:
 # The run loop imports kernel_green_lock.is_product_path under the same local name, so tool
 # handlers inside it must call the row-aware check through this alias.
 _row_is_product_path = _is_product_path
+
+# Opt-in edit scope widening. A scoped run rejects edits to existing product
+# files outside the EditAuthority; with STATEFRAME_EDIT_SCOPE_WIDEN=on the scope
+# grows to that one file instead. The decision depends only on the path, the
+# row, the workspace tree and the files widened so far, so a replayed resume
+# reaches the same scope by re-executing the same tool calls.
+EDIT_SCOPE_WIDEN_CAP = 24
+EDIT_SCOPE_WIDENED_KEY = "_edit_scope_widened"
+
+
+def _edit_scope_widen_enabled() -> bool:
+    return os.environ.get("STATEFRAME_EDIT_SCOPE_WIDEN", "off").strip().lower() == "on"
+
+
+def _edit_scope_widen_refusal(root: pathlib.Path, relative: object, row: Mapping[str, object],
+                              fileset: "FileSet", baseline_tests: Collection[str], *,
+                              protected: Callable[[str], bool] | None = None,
+                              baseline_root: pathlib.Path | None = None) -> str | None:
+    """Return why ``relative`` may not join the edit scope, or None when it may."""
+    if not isinstance(relative, str) or not relative or relative.startswith(("/", "\\")):
+        return "path is not relative"
+    try:
+        from build_tasks.multifile_row import normalize_repo_path
+        path = normalize_repo_path(relative, field="edit scope path")
+    except (ImportError, ValueError):
+        return "path is not a normalized workspace path"
+    if path != relative:
+        return "path is not a normalized workspace path"
+    if path in fileset.parent:
+        return "path is already editable"
+    widened = row.get(EDIT_SCOPE_WIDENED_KEY, ())
+    if len(widened) >= EDIT_SCOPE_WIDEN_CAP:
+        return f"edit scope widening cap of {EDIT_SCOPE_WIDEN_CAP} files reached"
+    base = root.resolve()
+    target = root / path
+    try:
+        info = os.lstat(target)
+        resolved = target.resolve(strict=True)
+    except OSError:
+        return "path is not an existing file"
+    if resolved != base / path:
+        return "path is outside the workspace or crosses a symlink"
+    if not stat.S_ISREG(info.st_mode):
+        return "path is not a regular file"
+    if info.st_nlink != 1:
+        return "path has hard links"
+    from stateframe.workcopy import _ignored
+    parts = pathlib.PurePosixPath(path).parts
+    if (any(part in {"__pycache__", ".pytest_cache", ".git", ".test-tmp",
+                    "tests", "test", "probes", "scratch", "tmp", "private",
+                    "hidden_tests"} or _ignored(part, True) for part in parts[:-1])
+            or _ignored(parts[-1], False)
+            or parts[-1].startswith("test_") or parts[-1].endswith("_test.py")
+            or parts[-1] == "conftest.py"):
+        return "path is not a product source file"
+    if (path in fileset.public_tests or path in row.get("public_tests", ())
+            or path in row.get("public_check_paths", ())
+            or path in row.get("test_file_paths", ())
+            or path in row.get("protected_test_paths", ())
+            or protected_test_path(target, set(baseline_tests))):
+        return "path is a protected test file"
+    if protected is not None and protected(path):
+        return "path is protected"
+    if baseline_root is not None:
+        try:
+            from kernel_scope_widen_guard import baseline_digest
+            if baseline_digest(baseline_root, path) != baseline_digest(root, path):
+                return "path differs from the repository baseline"
+        except OSError:
+            return "path is not in the repository baseline"
+    return None
+
+
+def _widen_edit_scope(root: pathlib.Path, relative: object, row: dict, fileset: "FileSet",
+                      baseline_tests: Collection[str], *, journal: object = None,
+                      protected: Callable[[str], bool] | None = None,
+                      baseline_root: pathlib.Path | None = None,
+                      reason: str = "edit outside the editable set") -> str | None:
+    """Widen the edit scope to one existing product file; return the model note or None.
+
+    Every editability source follows: FileSet.parent/fixed (``fileset.paths``, the
+    frame's EditAuthority), the row's ``files`` mapping, and the row's widened list
+    that the shell effect policy consults. Off by default; a refusal leaves the
+    caller's existing rejection unchanged.
+    """
+    if not (_edit_scope_widen_enabled() and fileset.is_multi_file
+            and row.get("scoped_edits") is True):
+        return None
+    refusal = _edit_scope_widen_refusal(root, relative, row, fileset, baseline_tests,
+                                        protected=protected, baseline_root=baseline_root)
+    if refusal is not None:
+        return None
+    path = str(relative)
+    try:
+        from kernel_scope_widen_guard import admit
+        data, pre_edit_sha256 = admit(root, path)
+        if baseline_root is not None:
+            from kernel_scope_widen_guard import baseline_digest
+            if baseline_digest(baseline_root, path) != pre_edit_sha256:
+                raise OSError("path differs from repository baseline")
+        source = data.decode("utf-8")
+        emit = getattr(journal, "emit", None)
+        if callable(emit):
+            emit("scope_widen", producer="react_repair", dispatch=False, path=path,
+                 pre_edit_sha256=pre_edit_sha256, reason=reason,
+                 widened_count=len(row.get(EDIT_SCOPE_WIDENED_KEY, ())) + 1,
+                 cap=EDIT_SCOPE_WIDEN_CAP)
+    except Exception:  # noqa: BLE001 - failed admission must keep the edit outside scope
+        from kernel_scope_widen_guard import forget
+        forget(root / path)
+        return None
+    # FileSet is a frozen dataclass whose maps are plain dicts built by from_row.
+    fileset.parent[path] = source
+    fileset.fixed[path] = source
+    files = row.get("files")
+    if isinstance(files, dict):
+        files[path] = {"parent_src": source}
+    widened = list(row.get(EDIT_SCOPE_WIDENED_KEY, ()))
+    widened.append(path)
+    row[EDIT_SCOPE_WIDENED_KEY] = widened
+    return (f"[edit scope widened] {path} was outside the EditAuthority's editable_paths and "
+            f"is now editable ({len(widened)}/{EDIT_SCOPE_WIDEN_CAP} widened this run).")
 
 
 def _product_source_paths(root: pathlib.Path, fileset: FileSet,
@@ -1599,7 +1723,8 @@ def _read_edit_source(path: pathlib.Path, verb: str) -> tuple[str, str | None]:
     model's edit, so the refusal says so and nothing is changed.
     """
     try:
-        raw = path.read_bytes()
+        from kernel_scope_widen_guard import read as guarded_read
+        raw = guarded_read(path)
     except OSError as error:
         return "", f"{verb} REJECTED: cannot read {path.name} ({type(error).__name__}). Nothing was changed."
     if b"\x00" in raw:
@@ -2049,7 +2174,8 @@ def _replace_file(path: pathlib.Path, new_source: str, *, root: pathlib.Path | N
     except SyntaxError as exc:
         return f"edit REJECTED: syntax error at line {exc.lineno}"
     try:
-        old_source = path.read_bytes().decode("utf-8")
+        from kernel_scope_widen_guard import read as guarded_read
+        old_source = guarded_read(path).decode("utf-8")
     except UnicodeDecodeError:
         return "edit REJECTED: source is not valid UTF-8; use an exact byte-preserving edit"
     if old_source == new_source:
@@ -3921,7 +4047,8 @@ def replace_fn(path: pathlib.Path, name: str, new_src: str,
         return _replace_file(path, new_src, root=root, public_brief=public_brief,
                              journal=journal)
     try:
-        txt = path.read_bytes().decode("utf-8")
+        from kernel_scope_widen_guard import read as guarded_read
+        txt = guarded_read(path).decode("utf-8")
         tree = ast.parse(txt)
     except Exception as e:                                      # noqa: BLE001
         return f"edit failed: cannot parse {path.name}: {type(e).__name__}"
@@ -4387,6 +4514,9 @@ def _effect_write(path: pathlib.Path, source: str, *, operation: str = "edit",
     def write():
         if prepare is not None:
             prepare()
+        from kernel_scope_widen_guard import admitted, write as guarded_write
+        if admitted(path):
+            return guarded_write(path, source.encode(encoding or "utf-8"))
         if encoding is None:
             return path.write_text(source)
         return path.write_text(source, encoding=encoding)
@@ -4394,7 +4524,8 @@ def _effect_write(path: pathlib.Path, source: str, *, operation: str = "edit",
     if not _effect_boundary_enabled():
         write()
         return True, None
-    before = path.read_text(errors="ignore") if path.exists() else "<absent>"
+    from kernel_scope_widen_guard import read as guarded_read
+    before = guarded_read(path).decode(errors="ignore") if path.exists() else "<absent>"
     applied, _value, rendered = _effect_application(
         operation,
         {"path": str(path), "before": before, "after": source},
@@ -4415,7 +4546,8 @@ def _effect_write_bytes(path: pathlib.Path, source: bytes, *, operation: str = "
     def write():
         if prepare is not None:
             prepare()
-        return path.write_bytes(source)
+        from kernel_scope_widen_guard import write as guarded_write
+        return guarded_write(path, source)
 
     if not _effect_boundary_enabled():
         write()
@@ -6288,6 +6420,36 @@ def work(d, *, resume=None):
                     msgs[1]["content"] += "\n\n" + note
                     baseline_messages[1]["content"] += "\n\n" + note
         created_this_run: set = set()
+
+        def _scope_widen(relative):
+            """Opt-in: admit one existing product file into a scoped run's edit scope."""
+            if not multifile:
+                return None
+            if relative in fileset.paths:
+                return None
+            _hooks = _hook_wiring_for_run
+            note = _widen_edit_scope(
+                root, relative, d, fileset, baseline_tests,
+                journal=getattr(measurement, "journal", None),
+                baseline_root=REPOS.get("build") if d.get("repo") == "build" else None,
+                protected=((lambda path: bool(_hooks.protected(root / path)))
+                           if _hooks is not None else None))
+            if note is not None:
+                # The parent identity and the EditAuthority the frame renders follow the scope.
+                from kernel_green_lock import admit_widened_editable_path
+                admit_widened_editable_path(measurement, relative)
+                for _contract in (_edit_contract, getattr(measurement, "edit_contract", None)):
+                    _authority = (_contract.get("edit_authority")
+                                  if isinstance(_contract, dict) else None)
+                    _listed = (_authority.get("editable_paths")
+                               if isinstance(_authority, dict) else None)
+                    if isinstance(_listed, list) and relative not in _listed:
+                        _listed.append(relative)
+                _scope_widen_notes.append(note)
+            return note
+
+        # Model-visible widening notes, delivered with the action's observation.
+        _scope_widen_notes: list[str] = []
         action_anchor = len(msgs)     # conversation index just after the last real ACTION
         last_surgery_step = -99       # cooldown so back-to-back surgeries cannot thrash
         # KERNEL BOLT-ON. The agent DRIVES; these cylinders only answer deterministically,
@@ -8875,6 +9037,13 @@ def work(d, *, resume=None):
 
                             _source_arg = _args.get("path") if _name == "file_delete" else _args.get("source")
                             _dest_arg = _args.get("destination") if _name == "file_move" else None
+                            if multifile and isinstance(_source_arg, str):
+                                _scope_widen(_source_arg)
+                            _file_scope_refused = (
+                                _edit_scope_widen_enabled() and multifile
+                                and isinstance(_source_arg, str)
+                                and _source_arg not in fileset.paths
+                                and str(root / _source_arg) not in created_this_run)
                             _paths = ()
                             _file_replay = FileOperationReplay(
                                 root, _name, _args, tool_call_id,
@@ -8891,6 +9060,9 @@ def work(d, *, resume=None):
                                            "new_file_roots": d.get("new_file_roots")},
                                 environment_identity=_shell.identity() if _shell is not None else "disabled")
                             try:
+                                if _file_scope_refused:
+                                    raise FileOperationRefused(
+                                        "NOT_EDITABLE", "source is outside editable_paths")
                                 def _protected(path):
                                     if (_hook_wiring_for_run is not None
                                             and _hook_wiring_for_run.protected(path)):
@@ -9484,6 +9656,7 @@ def work(d, *, resume=None):
                         obs = "edit REJECTED: " + _bound_refusal
                     elif multifile:
                         _pending_rel = str(pending_edit_path.relative_to(root))
+                        _scope_widen(_pending_rel)
                         if _pending_rel not in fileset.paths:
                             obs = _typed_edit_rejection(
                                 "NOT_EDITABLE", pending_edit_path, root=root,
@@ -9552,6 +9725,9 @@ def work(d, *, resume=None):
                             _pending_gate.observe(_pending_record)
                         measurement.completed_receipt(_pending_record, blocks[-1].strip())
                     obs = _append_structure_fact_observation(measurement, bolt, obs, "edit")
+                    if _scope_widen_notes:
+                        obs = obs + "\n" + "\n".join(_scope_widen_notes)
+                        _scope_widen_notes.clear()
                     measurement.observe("edit " + _pending_rel, obs)
                     msgs.append({"role": "user", "content": obs})
                     _edit_nturn_after_action("edit " + _pending_rel, obs, step)
@@ -11543,15 +11719,26 @@ def work(d, *, resume=None):
                         try:
                             _batch_path = resolve_tool_path(root, _batch_raw_path)
                             if protected_test_path(_batch_path, baseline_tests):
-                                _batch_reason = "protected public test paths are immutable"
+                                _batch_reason = (
+                                    "NOT_EDITABLE: protected public test paths are immutable"
+                                    if _edit_scope_widen_enabled() else
+                                    "protected public test paths are immutable")
                             else:
                                 _batch_reason = _bound_edit_refusal(
                                     root, _batch_path, _batch_edit.get("target_ref"))
+                                if (_edit_scope_widen_enabled() and multifile
+                                        and _batch_reason is None):
+                                    _batch_relative = _batch_path.relative_to(root).as_posix()
+                                    _scope_widen(_batch_relative)
+                                    if _batch_relative not in fileset.paths:
+                                        _batch_reason = "NOT_EDITABLE: path is outside editable_paths"
                         except (AmbiguousToolPath, OSError, ValueError) as _batch_error:
                             _batch_reason = str(_batch_error)
                         if _batch_reason:
                             _batch_guard_failure = BatchFailure(
-                                _batch_index, _batch_raw_path, "BOUND_REFUSAL",
+                                _batch_index, _batch_raw_path,
+                                "NOT_EDITABLE" if str(_batch_reason).startswith("NOT_EDITABLE")
+                                else "BOUND_REFUSAL",
                                 str(_batch_reason))
                             break
                 if _batch_guard_failure is not None:
@@ -11625,13 +11812,21 @@ def work(d, *, resume=None):
                         "NOT_EDITABLE", p, root=root,
                         hint="replace_module cannot edit a protected pre-existing test file")
                 else:
-                    if _hook_gate_route("replace_module", {"path": str(p)}):
+                    if multifile:
+                        _scope_widen(resolved_path)
+                    if (_edit_scope_widen_enabled() and multifile
+                            and resolved_path not in fileset.paths):
+                        obs = _typed_edit_rejection(
+                            "NOT_EDITABLE", p, root=root,
+                            hint="path is not listed in editable_paths")
+                    elif _hook_gate_route("replace_module", {"path": str(p)}):
                         continue
-                    expected, source, candidate_id = tool_replace_module_args
-                    obs = replace_module(
-                        p, expected, source=source, candidate_id=candidate_id,
-                        root=root, protected_paths=baseline_tests,
-                        public_brief=_task_public_brief(d))
+                    else:
+                        expected, source, candidate_id = tool_replace_module_args
+                        obs = replace_module(
+                            p, expected, source=source, candidate_id=candidate_id,
+                            root=root, protected_paths=baseline_tests,
+                            public_brief=_task_public_brief(d))
                 obs = _normalize_edit_rejection(obs, p, root=root)
                 bolt.receipt(
                     "edit", f"replace_module {p.name}",
@@ -11677,14 +11872,22 @@ def work(d, *, resume=None):
                             "NOT_EDITABLE", p, root=root,
                             hint="insert_before cannot modify a protected pre-existing test file")
                     else:
-                        if _hook_gate_route("insert_before", {"path": str(p)}):
+                        if multifile:
+                            _scope_widen(resolved_path)
+                        if (_edit_scope_widen_enabled() and multifile
+                                and resolved_path not in fileset.paths):
+                            obs = _typed_edit_rejection(
+                                "NOT_EDITABLE", p, root=root,
+                                hint="path is not listed in editable_paths")
+                        elif _hook_gate_route("insert_before", {"path": str(p)}):
                             continue
-                        obs = _apply_revision_bound_insertion(
-                            p, str(tool_insert_args.get("new_str") or ""),
-                            tool_insert_args.get("target_ref"), root=root,
-                            protected_paths=baseline_tests,
-                            check_refs=tool_insert_args.get("check_refs", ()),
-                            public_brief=_task_public_brief(d))
+                        else:
+                            obs = _apply_revision_bound_insertion(
+                                p, str(tool_insert_args.get("new_str") or ""),
+                                tool_insert_args.get("target_ref"), root=root,
+                                protected_paths=baseline_tests,
+                                check_refs=tool_insert_args.get("check_refs", ()),
+                                public_brief=_task_public_brief(d))
                     from kernel_action_identity import canonical_edit
                     _insert_attempt = canonical_edit(
                         bolt, p, dialect="insert_before", old="",
@@ -11732,6 +11935,9 @@ def work(d, *, resume=None):
                             after=_source_snapshot(root, fileset.paths),
                             selectors=tuple(getattr(bolt, "f2p_ids", ())),
                             failure_tail=obs)
+                    if _scope_widen_notes:
+                        obs = obs + "\n" + "\n".join(_scope_widen_notes)
+                        _scope_widen_notes.clear()
                     measurement.observe(line, obs)
                     msgs.append(_tool_reply_for_call(msgs, tool_call_id, obs) if tool_call_id else
                                 {"role": "user", "content": obs})
@@ -11758,6 +11964,8 @@ def work(d, *, resume=None):
                     # above): under KERNEL_MODE=retry_predispatch:ENFORCE, a DENY
                     # verdict blocks dispatch entirely -- str_replace_edit() is never
                     # called for that turn.
+                    if multifile:
+                        _scope_widen(resolved_path)
                     _pdg = getattr(bolt, "predispatch_gate", None)
                     _predispatch_blocked = False
                     _bound_reason = _bound_edit_refusal(root, p, tool_target_ref)
@@ -11774,7 +11982,12 @@ def work(d, *, resume=None):
                             _predispatch_blocked = True
                     _edit_before = (_source_snapshot(root, fileset.paths)
                                     if multifile else {})
-                    if _bound_reason is not None:
+                    if (_edit_scope_widen_enabled() and multifile
+                            and resolved_path not in fileset.paths):
+                        obs = _typed_edit_rejection(
+                            "NOT_EDITABLE", p, root=root,
+                            hint="path is not listed in editable_paths")
+                    elif _bound_reason is not None:
                         pass
                     elif _predispatch_blocked:
                         # WIRE CONNECTED: the editing tool is never invoked -- the
@@ -11987,6 +12200,7 @@ def work(d, *, resume=None):
                             hint=(_pd_outcome2.decision.message or
                                   "retry denied before dispatch."))
                     elif multifile:
+                        _scope_widen(resolved_path)
                         if resolved_path not in fileset.paths:
                             obs = _typed_edit_rejection(
                                 "NOT_EDITABLE", p, root=root,
@@ -12914,6 +13128,9 @@ def work(d, *, resume=None):
             if line.split() and line.split()[0] == "test":
                 from kernel_wire_identity import public_wire_text
                 obs = public_wire_text(obs, measurement.journal)
+            if _scope_widen_notes:
+                obs = obs + "\n" + "\n".join(_scope_widen_notes)
+                _scope_widen_notes.clear()
             measurement.observe(line, obs)
             delivered_obs = obs
             if line.split() and line.split()[0] == "test":
