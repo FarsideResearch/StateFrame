@@ -222,7 +222,12 @@ def isolated_command(command: list[str], root: Path, env: dict[str, str], *,
     for value in ("/usr", "/bin", "/lib", "/lib64"):
         if Path(value).exists():
             arguments.extend(["--ro-bind", value, value])
-    prefixes = {str(Path(sys.prefix).resolve()), str(Path(sys.base_prefix).resolve())}
+    # The loader finds libraries outside /lib and /usr/lib (a shared-library Python's
+    # /usr/local/lib/libpython*.so) only through its cache, which holds library paths and
+    # nothing secret. Without it such an interpreter cannot start and every check exits 127.
+    if os.path.isfile("/etc/ld.so.cache"):
+        arguments.extend(["--ro-bind", "/etc/ld.so.cache", "/etc/ld.so.cache"])
+    prefixes ={str(Path(sys.prefix).resolve()), str(Path(sys.base_prefix).resolve())}
     if selected != Path(sys.executable):
         prefixes.update((str(selected), str(resolved_selected)))
         prefixes.update(interpreter_roots)
@@ -366,6 +371,14 @@ def capability_command(command, cap, *, platform_backend=None, shared_namespace=
     mounts = {p.resolve(strict=True): "--ro-bind" for p in reads}
     mounts.update({p: "--bind" for p in writes})
     for path in sorted(mounts, key=lambda p: (len(p.parts), str(p))):
+        # A read-only bind beneath a read-only-bound ancestor (and no writable bind between them)
+        # adds nothing: bwrap binds recursively, so the path is already visible, read-only. Each
+        # bind is a mount in a fresh user namespace; capability roots list every PATH executable,
+        # and ~400 redundant mounts cost 1.5-3 s per command on Linux 7.0 (the nearest mounted
+        # ancestor decides the effective mode, so writable roots and their read-only carve-outs stay).
+        nearest = next((parent for parent in path.parents if parent in mounts), None)
+        if mounts[path] == "--ro-bind" and nearest is not None and mounts[nearest] == "--ro-bind":
+            continue
         arguments += [mounts[path], str(path), str(path)]
     system_links = {Path(p) for p in ("/bin", "/sbin", "/lib", "/lib32", "/lib64", "/libx32")
                     if os.path.islink(p)}

@@ -22,6 +22,7 @@ import uuid
 from collections.abc import Mapping, Sequence
 from typing import Callable
 
+from kernel_exec_tracker import kill_launch_unit
 from kernel_test_isolation import isolated_command, sandbox_executable
 from sf_launch import _command_cgroup
 
@@ -260,18 +261,9 @@ def _resource_preexec(cpu_seconds: float, memory_bytes: int,
 
 
 def _kill_group(process: subprocess.Popen[bytes]) -> bool:
-    killed = False
-    try:
-        os.killpg(process.pid, signal.SIGKILL)
-        killed = True
-    except (OSError, ProcessLookupError):
-        pass
-    try:
-        process.kill()
-        killed = True
-    except (OSError, ProcessLookupError):
-        pass
-    return killed
+    # The whole launch unit, not only the group: a bwrap child still setting up its
+    # sandbox, or one that already left the group, must not outlive the timeout.
+    return not kill_launch_unit(process)
 
 
 def _prepared(command: Sequence[object], root: Path, env: Mapping[object, object] | None,

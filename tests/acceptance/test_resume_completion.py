@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import json
-import os
 import signal
 import subprocess
 import time
@@ -10,6 +9,7 @@ import time
 import pytest
 
 from ._support import Endpoint, FIXTURES, PYTHON, copy_repo, environment, read_requests, run_case
+from fixtures.process_signals import record_identity, signal_verified
 
 
 pytestmark = pytest.mark.host_sandbox
@@ -40,6 +40,7 @@ def _interrupted_run(tmp_path, *, network="none", script_name="resume.script.jso
         assert endpoint.stdout is not None
         url = endpoint.stdout.readline().strip()
         assert url.startswith("http://127.0.0.1:")
+        launched_after = time.time()
         runner = subprocess.Popen(
             [PYTHON, "-m", "stateframe", "run", "--repo", str(repo), "--task",
              task, "--endpoint", url, "--model", "scripted",
@@ -47,7 +48,7 @@ def _interrupted_run(tmp_path, *, network="none", script_name="resume.script.jso
              "--test-cmd", "python -m unittest discover -s tests -q",
              "--max-turns", "32", "--quiet",
              "--shell-network", network], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            text=True, env=environment())
+            text=True, env=environment(), start_new_session=True)
         deadline = time.monotonic() + 90
         while time.monotonic() < deadline and not marker.exists():
             if runner.poll() is not None:
@@ -59,7 +60,8 @@ def _interrupted_run(tmp_path, *, network="none", script_name="resume.script.jso
         assert len(requests_before) >= 2
         child = _engine_child(runner.pid)
         assert child is not None
-        os.kill(child, signal.SIGKILL)
+        identity = record_identity(child, launched_after=launched_after, command_fragment="_child.py")
+        signal_verified(child, identity, signal.SIGKILL)
         runner.communicate(timeout=30)
         return repo, run_dir, requests_before[1]
     finally:

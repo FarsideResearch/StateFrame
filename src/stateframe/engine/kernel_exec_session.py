@@ -19,10 +19,12 @@ import uuid
 
 if __package__:
     from .kernel_exec_capability import ExecCapability
+    from .kernel_exec_tracker import kill_launch_unit
     from .kernel_test_isolation import sandbox_executable
     from .sf_launch import _current_cgroup
 else:
     from kernel_exec_capability import ExecCapability
+    from kernel_exec_tracker import kill_launch_unit
     from kernel_test_isolation import sandbox_executable
     from sf_launch import _current_cgroup
 
@@ -58,6 +60,27 @@ def _grace(value: float) -> float:
     if not math.isfinite(value) or not 0 <= value <= 10:
         raise ValueError("cleanup grace must be finite and between 0 and 10 seconds")
     return value
+
+
+def _host_load() -> tuple[float, int]:
+    cpus = os.cpu_count() or 1
+    try:
+        load = os.getloadavg()[0]
+    except (AttributeError, OSError):
+        load = 0.0
+    return (load if math.isfinite(load) else 0.0), cpus
+
+
+def rpc_timeout_seconds() -> float:
+    """Allow longer supervisor waits when the host's runnable load exceeds its CPU count."""
+    try:
+        base = float(os.environ.get("STATEFRAME_EXEC_RPC_SECONDS", "15"))
+    except ValueError:
+        base = 15.0
+    if not math.isfinite(base) or base <= 0:
+        base = 15.0
+    load, cpus = _host_load()
+    return base * min(8.0, max(1.0, load / cpus))
 
 
 class JobHandle:
@@ -114,6 +137,8 @@ class ExecSession:
             prefix="exec-" + uuid.uuid4().hex + "-", dir=self.run_dir))
         self._process = None
         self._control = None
+        self._receive = bytearray()
+        self._next_rid = 0
         self._log = None
         self._lock = threading.RLock()
         self._closed = False
@@ -182,32 +207,47 @@ class ExecSession:
             raise ExecSessionError(f"cannot launch execution supervisor: {error}") from error
         finally:
             child.close()
-        parent.settimeout(15)
+        parent.settimeout(rpc_timeout_seconds())
         self._control = parent
 
     def _rpc(self, request: dict) -> dict:
         with self._lock:
             if self._closed or self._control is None:
                 raise ExecSessionError("execution session is not open")
-            payload = json.dumps(request, separators=(",", ":")).encode() + b"\n"
+            self._next_rid += 1
+            payload = json.dumps({**request, "rid": self._next_rid}, separators=(",", ":")).encode() + b"\n"
             if len(payload) > 1 << 20:
                 raise ValueError("execution control request exceeds 1 MiB")
             try:
                 self._control.sendall(payload)
-                response = bytearray()
-                while not response.endswith(b"\n"):
-                    part = self._control.recv(65536)
-                    if not part:
-                        raise ExecSessionError(f"execution supervisor exited; inspect {self._directory / 'supervisor.log'}")
-                    response.extend(part)
-                    if len(response) > 6 << 20:
-                        raise ExecSessionError("execution supervisor response exceeds bound")
+                while True:
+                    if b"\n" not in self._receive:
+                        try:
+                            part = self._control.recv(65536)
+                        except socket.timeout as error:
+                            load, cpus = _host_load()
+                            seconds = self._control.gettimeout()
+                            raise ExecSessionError(
+                                f"execution supervisor did not answer within {seconds:g} s "
+                                f"(host load {load:g} on {cpus} CPUs); retry when the machine is less busy "
+                                "or raise STATEFRAME_EXEC_RPC_SECONDS") from error
+                        if not part:
+                            raise ExecSessionError(f"execution supervisor exited; inspect {self._directory / 'supervisor.log'}")
+                        self._receive.extend(part)
+                        if len(self._receive) > 6 << 20:
+                            raise ExecSessionError("execution supervisor response exceeds bound")
+                    if b"\n" not in self._receive:
+                        continue
+                    line, _, rest = self._receive.partition(b"\n")
+                    self._receive = bytearray(rest)
+                    value = json.loads(line)
+                    if value.get("rid") != self._next_rid:
+                        continue
+                    if "error" in value:
+                        raise ExecSessionError(value["error"])
+                    return value
             except OSError as error:
                 raise ExecSessionError(f"execution supervisor communication failed: {error}") from error
-            value = json.loads(response)
-            if "error" in value:
-                raise ExecSessionError(value["error"])
-            return value
 
     def _spawn(self, argv, cap, *, cwd=None, stdin=None) -> JobHandle:
         if isinstance(argv, (str, bytes)):
@@ -290,9 +330,11 @@ class ExecSession:
                 try:
                     self._process.wait(timeout=5)
                 except subprocess.TimeoutExpired:
-                    self._process.kill()
-                    self._process.wait(timeout=5)
-                    raise ExecSessionError("execution supervisor did not terminate after cleanup")
+                    # Kill the whole launch unit: the outer bwrap alone can leave a
+                    # supervisor that is still setting up its sandbox alive.
+                    survivors = kill_launch_unit(self._process, deadline_seconds=5)
+                    detail = f"; survivors {', '.join(map(str, survivors))}" if survivors else ""
+                    raise ExecSessionError("execution supervisor did not terminate after cleanup" + detail)
             if self._log is not None:
                 self._log.close()
         if report is not None and not report.ok:

@@ -33,7 +33,7 @@ from kernel_request_evidence_closure import (
     ticket_identity_for_runtime,
     units_for_path,
 )
-from kernel_aha11_native_honesty import reserve_source_unit
+from kernel_aha11_native_honesty import _public_path, reserve_source_unit
 from kernel_measurement import profile_active_host_span, profiled_function_span
 import kernel_workspace_truth as _workspace_truth
 from kernel_evictfix_mode import enabled as evictfix_enabled
@@ -2539,7 +2539,29 @@ def bound_runtime_sources(
         and not isinstance(raw_deferred_paths, (str, bytes, bytearray))
         else ()
     ))
-    if target is None or root is None or path is None or not Path(target).is_file():
+    if target is None or root is None or path is None:
+        return {"changed": False, "windowed": 0, "paths": ()}
+    try:
+        _public_path(path)
+    except ValueError:
+        return {"changed": False, "windowed": 0, "paths": ()}
+    if not Path(target).is_file():
+        owner = getattr(runtime, "owner", None)
+        row = getattr(owner, "task_row", {})
+        roots = row.get("new_file_roots", ()) if isinstance(row, Mapping) else ()
+        if (not Path(target).exists() and isinstance(roots, (list, tuple))
+                and path.split("/", 1)[0] in roots and not editable_product_paths(runtime)):
+            ticket = _ticket_text(runtime)
+            if ticket:
+                plan = build_source_closure(Path(root), (), ticket).as_dict()
+                plan["new_output_target"] = path
+                plan["workspace_authorization"] = {
+                    "scope": str(getattr(runtime, "workspace_scope", root)),
+                    "generation": str(getattr(runtime, "workspace_revision",
+                                              getattr(runtime, "product_revision", "0"))),
+                }
+                plan["deferred_paths"] = []
+                setattr(runtime, "_request_source_closure", plan)
         return {"changed": False, "windowed": 0, "paths": ()}
     try:
         source = Path(target).read_text(encoding="utf-8")
@@ -3526,6 +3548,11 @@ def verify_final_source_delivery(
     if dropped_paths and not selected_paths and not proof_failure and receipt.get("status") == "UNKNOWN":
         receipt["status"] = "COMPLETE"
         receipt["dropped_source_claims_verified"] = True
+    if (plan.get("new_output_target") and not selected_paths and not declared_paths
+            and not revision_paths and not deferred_paths and not proof_failure
+            and receipt.get("status") == "UNKNOWN"):
+        receipt["status"] = "COMPLETE"
+        receipt["new_output_without_source"] = True
     receipt["context_digest"] = context_digest
     receipt["submitted_http_bytes_digest"] = submitted_http_bytes_digest or "UNVERIFIED"
     receipt["workspace_authorization"] = {

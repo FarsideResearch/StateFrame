@@ -2,6 +2,7 @@ from dataclasses import replace
 import errno
 import fcntl
 import os
+import subprocess
 import sys
 import time
 
@@ -99,8 +100,9 @@ else:
     pid = int(result.output.strip())
     # Linux PID is namespace-local and cannot be probed from the host.
     if sys.platform == "darwin":
-        with pytest.raises(ProcessLookupError):
-            os.kill(pid, 0)
+        probe = subprocess.run(["ps", "-p", str(pid), "-o", "pid="],
+                               capture_output=True, text=True, check=False)
+        assert probe.returncode != 0 or not probe.stdout.strip()
 
 
 @pytest.mark.parametrize("sandboxed", [False, True])
@@ -143,9 +145,6 @@ try:
         time.sleep(5)
         print("limit-not-enforced", flush=True)
 finally:
-    for pid in children:
-        try: os.kill(pid, 9)
-        except ProcessLookupError: pass
     for pid in children: os.waitpid(pid, 0)
 ''')
     cap = replace(cap, sandboxed=sandboxed, limits=replace(cap.limits, nproc=8, wall_seconds=10))

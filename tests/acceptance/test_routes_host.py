@@ -13,6 +13,8 @@ from pathlib import Path
 
 import pytest
 
+from fixtures.process_signals import record_identity, signal_owned, signal_verified
+
 from ._support import Endpoint, PYTHON, ROOT, copy_repo, environment
 
 
@@ -24,8 +26,10 @@ pytestmark = [pytest.mark.host_sandbox,
 
 def _kill_run(process: subprocess.Popen[str], run_dir: Path | None = None) -> None:
     """Kill the CLI and, like a machine crash, the engine: it runs in its own session and holds the run lock."""
+    # The lock holder is matched by its engine command and re-verified before the signal.
+    launched_after = 0.0
     if process.poll() is None:
-        os.killpg(process.pid, signal.SIGKILL)
+        signal_owned(process, signal.SIGKILL)
     process.communicate(timeout=5)
     if run_dir is None:
         return
@@ -34,8 +38,10 @@ def _kill_run(process: subprocess.Popen[str], run_dir: Path | None = None) -> No
     cutoff = time.monotonic() + 15
     while (holder := _lock_holder(run_dir / ENGINE_LOCK)) is not None and time.monotonic() < cutoff:
         try:
-            os.killpg(os.getpgid(int(holder)), signal.SIGKILL)
-        except (ProcessLookupError, PermissionError, ValueError):
+            pid = int(holder)
+            identity = record_identity(pid, launched_after=launched_after, command_fragment="_child.py")
+            signal_verified(pid, identity, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError, ValueError, RuntimeError):
             pass
         time.sleep(0.1)
     assert _lock_holder(run_dir / ENGINE_LOCK) is None, "engine survived the simulated crash"

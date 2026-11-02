@@ -167,6 +167,9 @@ def public_solver_row(public_row: Mapping[str, object], *, discovered: Mapping[s
     row = scrub(public_row)
     if not isinstance(row, dict):
         raise ValueError("public solver row must be a mapping")
+    if (public_row.get("tier") == "USER-REPO" and public_row.get("new_file_roots")
+            and isinstance(public_row.get("files"), Mapping) and not public_row["files"]):
+        row["files"] = {}
     localization = public_localization(row, discovered=discovered)
     row["path"] = localization.path
     row["rel"] = localization.path

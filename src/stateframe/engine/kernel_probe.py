@@ -22,6 +22,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Mapping
 
+from kernel_exec_tracker import kill_launch_unit
 from kernel_test_isolation import isolated_command
 from kernel_non_product_paths import NON_PRODUCT_PARTS, is_non_product
 
@@ -454,18 +455,9 @@ sys.exit(_exit)
 
 
 def _kill_group(process: subprocess.Popen) -> bool:
-    killed = False
-    try:
-        os.killpg(process.pid, signal.SIGKILL)
-        killed = True
-    except (OSError, ProcessLookupError):
-        pass
-    try:
-        process.kill()
-        killed = True
-    except (OSError, ProcessLookupError):
-        pass
-    return killed
+    # The whole launch unit, not only the group: a bwrap child still setting up its
+    # sandbox, or one that already left the group, must not outlive the timeout.
+    return not kill_launch_unit(process)
 
 
 def _collect_process(process: subprocess.Popen, wall_seconds: float,

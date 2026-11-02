@@ -11,7 +11,9 @@ import errno
 import os
 from pathlib import Path
 import signal
+import subprocess
 import sys
+import time
 
 
 @dataclass(frozen=True)
@@ -181,3 +183,43 @@ class Descendants:
                 # Keep the member live so the supervisor reports a survivor.
                 self.signal_errors[row.pid] = "signal permission denied"
         return signalled
+
+
+def kill_launch_unit(process, family: Descendants | None = None,
+                     deadline_seconds: float = 2.0) -> tuple[int, ...]:
+    """SIGKILL a launched process and every descendant; return the PIDs that survived.
+
+    Killing only the launcher is not containment. A bwrap launcher killed while its inner
+    child is still setting up the sandbox leaves that child alive (--die-with-parent had
+    not taken effect); it reparents away and execs the payload with no supervisor. The
+    family is snapshotted while the launcher is still alive, so children that already
+    left its process group or session are still linked by parent PID; a monitor's family
+    adds anything it saw earlier. Identities guard every signal against PID reuse.
+    """
+    table = family.table if family is not None else ProcessTable()
+    family = family if family is not None else Descendants(process.pid, table)
+    family.update(table.snapshot())
+    try:
+        if os.getpgid(process.pid) == process.pid:
+            os.killpg(process.pid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):
+        pass
+    try:
+        process.kill()
+    except ProcessLookupError:
+        pass
+    until = time.monotonic() + deadline_seconds
+    while True:
+        try:
+            process.wait(timeout=.02)
+        except subprocess.TimeoutExpired:
+            pass
+        live = [row for row in family.update(table.snapshot()) if row.pid != process.pid]
+        family.signal(live, signal.SIGKILL)
+        if not live and process.poll() is not None:
+            return ()
+        if time.monotonic() >= until:
+            survivors = {row.pid for row in live}
+            if process.poll() is None:
+                survivors.add(process.pid)
+            return tuple(sorted(survivors))

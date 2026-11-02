@@ -1,6 +1,7 @@
 """Immutable host-issued execution authority, independent of test policy."""
 from __future__ import annotations
 
+from collections import OrderedDict
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass
 import hashlib
@@ -9,6 +10,7 @@ import math
 import os
 from pathlib import Path
 import sys
+from threading import Lock
 from types import MappingProxyType
 from typing import Literal
 
@@ -237,6 +239,34 @@ def system_runtime_read_roots() -> tuple[Path, ...]:
     return tuple(sorted(set(roots)))
 
 
+_SHELL_DIRECTORY_CACHE: OrderedDict[Path, tuple[tuple, frozenset[Path]]] = OrderedDict()
+_SHELL_DIRECTORY_CACHE_LOCK = Lock()
+
+
+def _file_fingerprint(stat: os.stat_result) -> tuple[int, int, int, int]:
+    return stat.st_ino, stat.st_mtime_ns, stat.st_ctime_ns, stat.st_mode
+
+
+def clear_shell_capability_cache() -> None:
+    """Discard process-local executable authority snapshots."""
+    with _SHELL_DIRECTORY_CACHE_LOCK:
+        _SHELL_DIRECTORY_CACHE.clear()
+
+
+def _directory_executables(directory: Path) -> tuple[tuple, tuple[Path, ...]]:
+    stat = directory.stat()
+    executables = tuple(path for path in sorted(directory.iterdir())
+                        if path.is_file() and os.access(path, os.X_OK))
+    # File metadata detects edits in place, permission changes and shebang edits.
+    # Link metadata also detects replacement even when its target stays the same.
+    files = []
+    for path in executables:
+        target = path.stat()
+        link = path.lstat()
+        files.append((path.name, _file_fingerprint(target), _file_fingerprint(link)))
+    return (directory, _file_fingerprint(stat), tuple(files)), executables
+
+
 def shell_capability(*, workspace, run_env_dir, scratch_home, network, writable,
                      extra_read_roots=(), path_dirs=()) -> ExecCapability:
     home = Path(scratch_home).resolve(strict=True)
@@ -249,11 +279,6 @@ def shell_capability(*, workspace, run_env_dir, scratch_home, network, writable,
     system_gitconfig = Path("/etc/gitconfig")
     # Freeze executable and shebang authority for shell, jobs and derived custom
     # capabilities. Runtime libraries retain the existing resolved-root policy.
-    for directory in dict.fromkeys(paths):
-        if directory.is_dir():
-            for executable in sorted(directory.iterdir()):
-                if executable.is_file() and os.access(executable, os.X_OK):
-                    roots.extend(executable_read_roots(executable))
     if network == "full":
         roots += [Path(p).resolve() for p in ("/etc/hosts", "/etc/resolv.conf",
                   "/etc/nsswitch.conf", "/etc/ssl", "/etc/pki") if Path(p).exists()]
@@ -267,6 +292,38 @@ def shell_capability(*, workspace, run_env_dir, scratch_home, network, writable,
     if sys.platform == "darwin" and not system_gitconfig.is_file():
         # An absent file outside the read roots yields EPERM rather than ENOENT.
         env["GIT_CONFIG_NOSYSTEM"] = "1"
-    admitted = {root for path in roots for root in executable_read_roots(Path(path))}
+    expanded: dict[Path, tuple[Path, ...]] = {}
+
+    def read_roots(path: Path) -> tuple[Path, ...]:
+        if path not in expanded:
+            expanded[path] = executable_read_roots(path)
+        return expanded[path]
+
+    admitted = {root for path in roots for root in read_roots(Path(path))}
+    run_roots = (run_env, home, Path(workspace).resolve(strict=True))
+    for directory in dict.fromkeys(paths):
+        if not directory.is_dir():
+            continue
+        cacheable = not any(directory == root or root in directory.parents for root in run_roots)
+        key, executables = _directory_executables(directory)
+        with _SHELL_DIRECTORY_CACHE_LOCK:
+            cached = _SHELL_DIRECTORY_CACHE.get(directory) if cacheable else None
+            if cached is not None and cached[0] == key:
+                _SHELL_DIRECTORY_CACHE.move_to_end(directory)
+            else:
+                cached = None
+        if cached is None:
+            first = {root for executable in executables for root in read_roots(executable)}
+            directory_roots = frozenset(root for path in first for root in read_roots(path))
+            current = directory.stat()
+            if cacheable and _file_fingerprint(current) == key[1]:
+                with _SHELL_DIRECTORY_CACHE_LOCK:
+                    _SHELL_DIRECTORY_CACHE[directory] = (key, directory_roots)
+                    _SHELL_DIRECTORY_CACHE.move_to_end(directory)
+                    if len(_SHELL_DIRECTORY_CACHE) > 64:
+                        _SHELL_DIRECTORY_CACHE.popitem(last=False)
+        else:
+            directory_roots = cached[1]
+        admitted.update(directory_roots)
     return ExecCapability("shell", Path(workspace), writable, tuple(admitted),
                           (run_env, home), network, env, ExecLimits())

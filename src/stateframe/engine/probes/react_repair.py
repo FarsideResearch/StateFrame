@@ -562,6 +562,7 @@ class FileSet:
     entry_path: str | None = None
     entry_fn: str | None = None
     public_tests: Mapping[str, str] = field(default_factory=dict)
+    new_entry: bool = False
 
     @classmethod
     def from_row(cls, row) -> "FileSet":
@@ -617,6 +618,7 @@ class FileSet:
                     changed[path] = tuple(str(name) for name in names if str(name))
 
         entry_path = entry_fn = None
+        new_entry = False
         entry = row.get("entry")
         if not isinstance(entry, Mapping) and isinstance(row.get("working_path"), str):
             entry = {"path": row["working_path"]}
@@ -627,7 +629,11 @@ class FileSet:
             entry_fn = (str(entry["fn"]) if isinstance(entry.get("fn"), str)
                         and entry.get("fn") else None)
             if entry_path not in parent:
-                raise ValueError(f"row.entry.path is not declared in files: {entry_path}")
+                roots = row.get("new_file_roots", ())
+                if not (row.get("tier") == "USER-REPO" and isinstance(roots, list)
+                        and entry_path.split("/", 1)[0] in roots):
+                    raise ValueError(f"row.entry.path is not declared in files: {entry_path}")
+                new_entry = True
 
         # Separate public-test declarations are authoritative when tests are not
         # included in the product ``files`` mapping.
@@ -638,7 +644,7 @@ class FileSet:
             # Legacy rows may only provide test_src; the single-file path keeps
             # its historical materialization route below.
             pass
-        return cls(True, parent, fixed, changed, entry_path, entry_fn, public_tests)
+        return cls(True, parent, fixed, changed, entry_path, entry_fn, public_tests, new_entry)
 
     @property
     def is_multi_file(self) -> bool:
@@ -650,7 +656,7 @@ class FileSet:
 
     @property
     def primary_path(self) -> str | None:
-        if self.entry_path in self.parent:
+        if self.entry_path in self.parent or self.new_entry:
             return self.entry_path
         return None
 

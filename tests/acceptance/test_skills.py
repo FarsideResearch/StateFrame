@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import json
-import os
 import select
 import signal
 import subprocess
@@ -12,6 +11,7 @@ from pathlib import Path
 import pytest
 
 from ._support import Endpoint, PYTHON, copy_repo, environment, read_requests, run_case
+from fixtures.process_signals import record_identity, signal_verified
 
 
 pytestmark = pytest.mark.host_sandbox
@@ -175,12 +175,14 @@ def test_unchanged_skill_resume_rebuilds_loaded_body(tmp_path, first_mode, resum
         ready, _, _ = select.select([endpoint.stdout], [], [], 15)
         assert ready
         url = endpoint.stdout.readline().strip()
+        launched_after = time.time()
         runner = subprocess.Popen(
             [PYTHON, "-m", "stateframe", "run", "--repo", str(repo), "--task", "Change app value",
              "--endpoint", url, "--model", "scripted", "--run-dir", str(run_dir),
              "--test-python", PYTHON, "--test-cmd", "python -m unittest discover -s tests -q",
              "--max-turns", "8", "--skill", str(selected), "--quiet"],
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=environment())
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=environment(),
+            start_new_session=True)
         deadline = time.monotonic() + 90
         while time.monotonic() < deadline and not marker.exists():
             if runner.poll() is not None:
@@ -199,7 +201,8 @@ def test_unchanged_skill_resume_rebuilds_loaded_body(tmp_path, first_mode, resum
         assert [row["kind"] for row in tape if row["call_id"] == intents[0]["call_id"]] == ["intent", "complete"]
         child = _engine_child(runner.pid)
         assert child is not None
-        os.kill(child, signal.SIGKILL)
+        identity = record_identity(child, launched_after=launched_after, command_fragment="_child.py")
+        signal_verified(child, identity, signal.SIGKILL)
         runner.communicate(timeout=30)
     finally:
         if runner is not None and runner.poll() is None:

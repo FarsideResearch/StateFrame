@@ -255,27 +255,54 @@ def run_test_cmd(command: str, cwd: Path, timeout_s: float = 900,
 STARTUP_PROBE_SECONDS = 60
 
 
+def _startup_probe_seconds() -> float:
+    name = "STATEFRAME_STARTUP_PROBE_SECONDS"
+    raw = os.environ.get(name)
+    if raw is None:
+        return STARTUP_PROBE_SECONDS
+    try:
+        seconds = float(raw)
+    except ValueError:
+        seconds = 0.0
+    if not math.isfinite(seconds) or seconds <= 0 or seconds > 300:
+        raise RunError(f"{name}={raw!r} must be a positive number of seconds at most 300 "
+                       "(the retry limit is 600); set it or unset it")
+    return seconds
+
+
 def _startup_probe(python: str, code: str, *, label: str) -> bytes:
-    """Contain interpreter startup itself, before importing any project packages."""
-    from .engine.kernel_safe_probe import run_probe
+    """Contain interpreter startup itself, before importing any project packages.
+
+    A heavily loaded host can push a healthy interpreter past the wall limit, so a timeout (and
+    only a timeout) is retried once with double the wall. A non-zero exit or an oversized output is
+    a real failure and is reported at once.
+    """
+    from .engine import kernel_safe_probe
     from .engine.kernel_exec_session import ExecSessionError
 
-    try:
-        with tempfile.TemporaryDirectory(prefix="stateframe-startup-") as directory:
-            result = run_probe([python, "-I", "-B", "-c", code], Path(directory),
-                               timeout=STARTUP_PROBE_SECONDS)
-    except (OSError, ExecSessionError, ValueError) as error:
-        raise RunError(f"{label} startup probe could not run safely: {error}") from error
-    if result.timed_out:
-        raise RunError(f"{label} startup probe exceeded its {STARTUP_PROBE_SECONDS} second wall limit")
+    base_wall = _startup_probe_seconds()
+    walls = (base_wall, 2 * base_wall)
+    for wall in walls:
+        try:
+            with tempfile.TemporaryDirectory(prefix="stateframe-startup-") as directory:
+                result = kernel_safe_probe.run_probe([python, "-I", "-B", "-c", code], Path(directory),
+                                                     timeout=wall)
+        except (OSError, ExecSessionError, ValueError) as error:
+            raise RunError(f"{label} startup probe could not run safely: {error}") from error
+        if not result.timed_out:
+            break
+    else:
+        raise RunError(f"{label} startup probe timed out under load: it did not finish within "
+                       f"{walls[0]} s and then {walls[1]} s. The interpreter may be fine and the "
+                       "host overloaded; retry when the machine is less busy")
     if result.output_truncated:
         raise RunError(f"{label} startup probe exceeded its 65536 byte output limit")
     if result.exit_code != 0:
         detail = result.output.decode("utf-8", "replace").strip()[-1000:]
         failure = ("cannot import pytest" if "pytest" in code else "could not start")
         install = "install pytest in that environment; " if "pytest" in code else ""
-        raise RunError(f"{label} {failure} in the isolated startup probe "
-                       f"(exit {result.exit_code}); {install}"
+        raise RunError(f"{label} {failure} in the isolated startup probe; the interpreter is broken "
+                       f"or incomplete (exit {result.exit_code}, not a timeout); {install}"
                        f"sandbox restrictions must permit interpreter startup: {detail or 'no diagnostic output'}")
     return result.output
 
@@ -382,11 +409,28 @@ def resolve_opt_in_switches(engine_dir: Path = ENGINE_DIR) -> dict[str, str]:
     return chosen
 
 
+def resolve_exec_rpc_env() -> dict[str, str]:
+    """Pass an explicitly configured supervisor timeout to the isolated engine child."""
+    name = "STATEFRAME_EXEC_RPC_SECONDS"
+    raw = os.environ.get(name)
+    if raw is None:
+        return {}
+    value = raw.strip()
+    try:
+        seconds = float(value)
+    except ValueError:
+        seconds = 0.0
+    if not math.isfinite(seconds) or seconds <= 0:
+        raise RunError(f"{name}={raw!r} must be a positive number of seconds; set it or unset it")
+    return {name: value}
+
+
 # Every STATEFRAME_* name the product reads from the user's shell. Any other STATEFRAME_* set there never
 # reaches the engine (the child drops inherited ones), so the runner says so instead of ignoring it silently.
 SHELL_SETTINGS = frozenset({
     "STATEFRAME_ENDPOINT", "STATEFRAME_MODEL", "STATEFRAME_ALLOW_REMOTE_ENDPOINT", "STATEFRAME_KEEP_CHECKPOINTS",
     "STATEFRAME_CONTEXT_TOKENS", "STATEFRAME_PROMPT_BUDGET", "STATEFRAME_ROUTES",
+    "STATEFRAME_EXEC_RPC_SECONDS", "STATEFRAME_STARTUP_PROBE_SECONDS",
     *CHECKPOINT_ENV, *OPT_IN_SWITCHES,
 })
 
@@ -911,6 +955,7 @@ def prepare(options: RunOptions, printer=print) -> tuple[Path, workcopy.WorkCopy
     skills_file.write_text(json.dumps(skills_record, indent=1, sort_keys=True))
     skills_file.chmod(0o600)
     environment.update(options._context_env)
+    environment.update(resolve_exec_rpc_env())
     opt_in = resolve_opt_in_switches()
     environment.update(opt_in)
     environment.update(options.extra_env)
@@ -1901,6 +1946,7 @@ def _step_limit_line(options: RunOptions) -> str:
 
 def run(options: RunOptions, printer=print) -> dict[str, object]:
     _validate_timeout(options.timeout_s)
+    _startup_probe_seconds()
     started = time.monotonic()
     options._deadline = started + options.timeout_s if options.timeout_s is not None else None
     try:
