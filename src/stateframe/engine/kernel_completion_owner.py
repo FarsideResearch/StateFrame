@@ -5304,6 +5304,35 @@ def validate_tool_arguments(tools: object, name: str, arguments: object) -> tupl
     return tuple(rendered)
 
 
+def callable_tool_schemas(contract: object) -> list[dict]:
+    """The contract's admitted schemas restricted to its advertised (callable) actions.
+
+    Identical to ``admitted_tool_schemas`` unless the stable tool head lists tools that are gated this turn.
+    """
+    if not isinstance(contract, Mapping):
+        return []
+    schemas = contract.get("admitted_tool_schemas")
+    if not isinstance(schemas, list):
+        return []
+    names = callable_action_names(contract)
+    allowed = set(names) if names is not None else None
+    return [copy.deepcopy(dict(tool)) for tool in schemas
+            if isinstance(tool, Mapping)
+            and (allowed is None or _contract_tool_name(tool) in allowed)]
+
+
+def callable_action_names(contract: object) -> tuple[str, ...] | None:
+    """This turn's callable actions: ``callable_actions`` when the stable tool head lists a wider set,
+    else ``advertised_actions`` (the two are the same menu without it). None when the contract has neither."""
+    if not isinstance(contract, Mapping):
+        return None
+    for key in ("callable_actions", "advertised_actions"):
+        names = contract.get(key)
+        if isinstance(names, (list, tuple)):
+            return tuple(str(name) for name in names)
+    return None
+
+
 def dispatch_tool_call(tools: object, name: str, arguments: object) -> ToolDispatch:
     """Validate and route one native call through its owning ToolSpec."""
     surface = _contract_tools(tools)
@@ -6764,6 +6793,16 @@ def bind_final_tool_surface(
 
         contract["admitted_tool_schemas"] = copy.deepcopy(schemas)
         contract["advertised_actions"] = normalized_names
+        contract.pop("callable_actions", None)
+        from kernel_stable_tool_head import enabled as stable_tool_head_enabled
+        listed_names = [_contract_tool_name(tool) for tool in schemas]
+        if stable_tool_head_enabled() and listed_names != normalized_names:
+            # The wire lists the run's tools (advertised == schemas == wire, as every surface check expects);
+            # only this turn's menu may execute. The route above was decided from that callable menu.
+            if not set(normalized_names).issubset(listed_names):
+                return False
+            contract["advertised_actions"] = listed_names
+            contract["callable_actions"] = normalized_names
         contract["tool_schema_digest"] = _digest(schemas)
         revision_mode = _request_contract_revision_rebind_mode(runtime)
         legacy_contract = copy.deepcopy(contract)
@@ -6791,7 +6830,11 @@ def bind_final_tool_surface(
         frozen = _freeze_contract(contract)
         setattr(runtime, "_completion_owner_request_contract", frozen)
         setattr(capture, "request_action_contract", copy.deepcopy(contract))
-        setattr(runtime, "_completion_owner_dispatch_tools", copy.deepcopy(schemas))
+        # Dispatch may only route this turn's advertised actions. The schemas equal them unless the stable
+        # tool head lists the run's wider tool set (kernel_stable_tool_head).
+        from kernel_stable_tool_head import enabled as stable_tool_head_enabled
+        setattr(runtime, "_completion_owner_dispatch_tools",
+                callable_tool_schemas(contract) if stable_tool_head_enabled() else copy.deepcopy(schemas))
         if contract.get("contract_kind") != LEAN_REQUEST_CONTRACT_KIND:
             setattr(runtime, "completion_menu", tuple(normalized_names))
             setattr(runtime, "offered_tools", tuple(normalized_names))
@@ -7072,7 +7115,7 @@ def request_action_presentation_contract(
         and state.get("final_submit_request_pending"))
     frozen = request_action_contract(runtime)
     if frozen is not None:
-        frozen_names = [str(name) for name in frozen.get("advertised_actions", ())]
+        frozen_names = list(callable_action_names(frozen) or ())
         frozen_terminal_done = (
             str(frozen.get("route", "")) == "submit"
             and bool(frozen.get("terminal_text"))
@@ -8371,8 +8414,8 @@ def request_menu_action_admissible(
     contract = getattr(runtime, "_completion_owner_request_contract", None)
     if (current_id is not None and isinstance(contract, Mapping)
             and contract.get("request_id") == current_id):
-        names = contract.get("advertised_actions")
-        if isinstance(names, Sequence) and not isinstance(names, (str, bytes, bytearray)):
+        names = callable_action_names(contract)
+        if names is not None:
             return str(tool_name or "").strip() in names
     from kernel_rejection_template_restrict import active_menu_tools
 

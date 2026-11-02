@@ -644,13 +644,24 @@ def author_final_tool_surface(
         if (not names or any(not name for name in names)
                 or len(names) != len(set(names))):
             raise _SurfaceUnavailable("invalid_tool_surface")
-        digest = schema_digest(final_tools)
+        # STATEFRAME_STABLE_TOOL_HEAD: the provider sees the run's append-only tool list so the
+        # prompt head stays cacheable; ``names`` (this turn's callable menu) stays the dispatch authority.
+        from kernel_stable_tool_head import enabled as stable_tool_head_enabled
+        listed_tools = final_tools
+        dispatch_tools = final_tools
+        if stable_tool_head_enabled():
+            from kernel_stable_tool_head import callable_subset, listed_tools as stable_listed_tools
+            listed_tools = stable_listed_tools(runtime, final_tools)
+            dispatch_tools = callable_subset(listed_tools, names)
+            if set(_tool_names(dispatch_tools)) != set(names):
+                raise _SurfaceUnavailable("stable_tool_head_unbound")
+        digest = schema_digest(listed_tools)
         surface: dict[str, object] = {
             "schema": SURFACE_SCHEMA,
             "request_id": request_key,
             "candidate_exists": candidate_exists,
             "source_tool_schema_digest": incoming_digest,
-            "tools": copy.deepcopy(final_tools),
+            "tools": copy.deepcopy(listed_tools),
             "names": list(names),
             "tool_schema_digest": digest,
         }
@@ -660,7 +671,10 @@ def author_final_tool_surface(
 
         # The body and every authority below are consumers of this one surface.
         body["tools"] = copy.deepcopy(surface["tools"])
-        runtime._completion_owner_dispatch_tools = copy.deepcopy(surface["tools"])
+        if listed_tools is not final_tools:
+            from kernel_stable_tool_head import apply_menu_note
+            apply_menu_note(body, listed_tools, names)
+        runtime._completion_owner_dispatch_tools = copy.deepcopy(dispatch_tools)
         # Ownerless completion reads this finalized request-local menu directly.
         runtime._stateframe_current_request_tool_names = tuple(names)
         runtime.completion_menu = tuple(names)

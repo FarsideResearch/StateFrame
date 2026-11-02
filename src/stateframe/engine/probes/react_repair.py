@@ -7988,7 +7988,12 @@ def work(d, *, resume=None):
             request_contract = getattr(measurement, "_completion_owner_request_contract", None)
             if isinstance(request_contract, Mapping):
                 admitted_tools = request_contract.get("admitted_tool_schemas")
-                if isinstance(admitted_tools, list):
+                from kernel_stable_tool_head import enabled as _stable_tool_head_enabled
+                if isinstance(admitted_tools, list) and _stable_tool_head_enabled():
+                    # The provider lists the run's tools; only this turn's advertised actions may execute.
+                    from kernel_completion_owner import callable_tool_schemas
+                    _request_tools = callable_tool_schemas(request_contract)
+                elif isinstance(admitted_tools, list):
                     _request_tools = [copy.deepcopy(dict(tool)) for tool in admitted_tools
                                       if isinstance(tool, Mapping)]
                 else:

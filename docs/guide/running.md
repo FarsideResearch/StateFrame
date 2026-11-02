@@ -174,6 +174,12 @@ A completed batch made entirely of proved unchanged reads costs one no-progress 
 
 `STATEFRAME_READ_LOCKOUT=on` is an independent optional profile switch; it is off by default and requires bookmarks. After a completed batch of unchanged reads, the current failing check must still apply, editable bookmarked source must be visible, and an edit and check route must be available. The next request then hides source-reading routes. The restriction lasts at most two requests and releases sooner when new evidence appears or the repair route disappears. If the no-progress watch is one step from its limit, the run can stop before this restriction takes effect.
 
+### Prompt cache: stable tool head
+
+`STATEFRAME_STABLE_TOOL_HEAD=on` (off by default; set it in the shell you start StateFrame from, or in a custom profile) lists one tool list for the whole run instead of the current step's menu. Chat templates such as Qwen's render the tools before the system prompt, so a menu that changes between steps makes the server re-read the whole prompt. With the switch on, the list only grows: a tool keeps the position and schema it had when first offered, and new tools are added at the end. Only the current step's tools can run; calling a listed tool that is not available this step gets the usual "not offered for the current state" reply, and a short note at the end of the request names the callable tools. Request bytes are unchanged when the switch is off.
+
+Measured on a llama.cpp server with Qwen3.6-35B-A3B: after the step where a new tool first appears, each request reuses the cached tools, system prompt and task (about 5-6k tokens; about 17-20% of a multi-file request and up to about 40% of a small one), against 0-3% without the switch. Task outcomes matched in the runs so far (3 matched pairs on two tasks); the effect on total run time is not established.
+
 ## Checkpoints and resume
 
 Resume replays the recorded run by default. Checkpoints for a faster restore are off by default in this release (`STATEFRAME_CHECKPOINT=save` turns them on: about one every 5 requests, the two newest kept, signed with a per-install key in `~/.stateframe/checkpoint.key`). See "Checkpoint settings" in the README for the switches. When a run finishes for good (its result was submitted, or it stopped on an error that would only repeat, so resume would refuse it), StateFrame removes its checkpoints and prints how much it freed; `--keep-checkpoints` (or `STATEFRAME_KEEP_CHECKPOINTS=1`) keeps them. Stopped, cancelled, killed and crashed runs always keep theirs.

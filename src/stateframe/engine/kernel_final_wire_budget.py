@@ -339,9 +339,14 @@ def reconcile_frozen_budget(capture, runtime, body, *, frozen_inputs=None):
     if not receipt["messages"] or not receipt["tools"]:
         failures.append("invalid_provider_surface")
 
+    from kernel_stable_tool_head import callable_subset, enabled as stable_tool_head_enabled
+    # A listed-but-gated tool (stable tool head) is not a dispatchable route for this request.
+    dispatch_surface = (callable_subset(tools, names)
+                        if stable_tool_head_enabled() and isinstance(tools, list) else tools)
+
     def dispatchable(name, arguments):
         try:
-            dispatch_tool_call(tools, name, arguments)
+            dispatch_tool_call(dispatch_surface, name, arguments)
             return True
         except (AttributeError, OSError, RuntimeError, TypeError, ValueError):
             return False
