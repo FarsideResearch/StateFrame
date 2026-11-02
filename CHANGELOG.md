@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.3.6 (2026-11-02)
+
+- MCP servers on a busy Linux host no longer fail discovery with "cannot identify private MCP PID namespace for supervision". After `initialize`, StateFrame waited at most 0.2 s for its resource monitor to find the server's private PID namespace, and one monitor sample walks the whole host process table. The wait is now 2 s, scaled up to 16 s when the host's load exceeds its CPU count, and never past the call's deadline. It still ends at once if the monitor fails or the server exits.
+- Request bytes are unchanged.
+
 ## 0.3.5 (2026-11-02)
 
 - Fix runs stopping mid-run with `FrameRequestAllocationError ... failures=source_delivery_partial` after the agent re-read a file that an earlier, fuller request had deferred. The old deferral notice stays in the request's stable prefix, so the source proof still saw a declared deferral, skipped the file because it was now complete, found nothing left to defer and returned before marking the delivery complete. The request was refused with no actual source missing. A delivery whose deferred files are all complete and verified on the final wire is now marked complete, the same way a delivery without a deferral notice already was.

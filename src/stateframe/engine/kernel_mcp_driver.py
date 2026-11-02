@@ -14,11 +14,11 @@ import threading
 import time
 
 if __package__:
-    from .kernel_exec_session import CleanupReport, ExecResult, ExecSessionError
+    from .kernel_exec_session import CleanupReport, ExecResult, ExecSessionError, _host_load
     from .kernel_exec_tracker import Descendants, ProcessTable, kill_launch_unit
     from .kernel_test_isolation import capability_command
 else:
-    from kernel_exec_session import CleanupReport, ExecResult, ExecSessionError
+    from kernel_exec_session import CleanupReport, ExecResult, ExecSessionError, _host_load
     from kernel_exec_tracker import Descendants, ProcessTable, kill_launch_unit
     from kernel_test_isolation import capability_command
 
@@ -27,8 +27,17 @@ MAX_STDOUT = 8 << 20
 VERSIONS = {"2025-06-18", "2025-03-26", "2024-11-05"}
 
 
+NAMESPACE_WAIT_SECONDS = 2.0
+
+
 class ProtocolError(ValueError):
     pass
+
+
+def namespace_wait_seconds() -> float:
+    """2 s, scaled up to 8x when the host's runnable load exceeds its CPU count."""
+    load, cpus = _host_load()
+    return NAMESPACE_WAIT_SECONDS * min(8.0, max(1.0, load / cpus))
 
 
 class _ContainmentMonitor:
@@ -68,11 +77,23 @@ class _ContainmentMonitor:
             raise ProtocolError(detail)
 
     def require_namespace(self, deadline):
-        if sys.platform == "linux":
-            self.namespace_ready.wait(max(0, min(.2, deadline - time.monotonic())))
+        """Wait for the monitor to find the server's private PID namespace.
+
+        One sample walks the whole host process table, which can take well over 0.2 s on a busy
+        host, so the wait scales with load (namespace_wait_seconds) and is capped by the call's
+        deadline. It ends early when the monitor fails or stops (the server exited)."""
+        if sys.platform != "linux":
+            return
+        limit = min(deadline, time.monotonic() + namespace_wait_seconds())
+        while not self.namespace_ready.is_set():
             self.check()
-            if self.namespace is None:
-                raise ExecSessionError("cannot identify private MCP PID namespace for supervision")
+            remaining = limit - time.monotonic()
+            if remaining <= 0 or not self.thread.is_alive():
+                break
+            self.namespace_ready.wait(min(.05, remaining))
+        self.check()
+        if self.namespace is None:
+            raise ExecSessionError("cannot identify private MCP PID namespace for supervision")
 
     def _sample(self):
         if time.monotonic() - self.started >= self.cap.limits.wall_seconds:
