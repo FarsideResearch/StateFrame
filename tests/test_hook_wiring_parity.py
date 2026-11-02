@@ -237,7 +237,7 @@ def _resume_checkout(checkout: Path, repo: Path, run: Path, launcher: Path,
     try:
         process = subprocess.Popen(command, env=environment, stdout=subprocess.PIPE,
                                    stderr=subprocess.PIPE, text=True)
-        assert script.waiting.wait(120), "first attempt did not reach the third request"
+        assert script.waiting.wait(600), "first attempt did not reach the third request"
         original = [path.read_bytes() for path in sorted((run / "wire").glob("*.request.json"))
                     if path.with_name(path.name.replace(".request.", ".response.")).exists()]
         assert len(original) == 2

@@ -718,8 +718,13 @@ def test_child_records_pending_verification_before_live_send(tmp_path, monkeypat
     _child.install_wire_recorder(run, URL, replayer=replay,
                                  routed_endpoints={URL} if case != "unrouted" else None)
     kwargs = {"route_meta": route} if case != "unrouted" else {}
-    assert kernel_bounded_http.request_bytes(wire, URL, "", deadline=1000000,
-                                             socket_timeout=10, **kwargs) == RESPONSE
+    if case == "failing":
+        with pytest.raises(replay_tape.ReplayUnfaithful, match="request in flight"):
+            kernel_bounded_http.request_bytes(wire, URL, "", deadline=1000000,
+                                              socket_timeout=10, **kwargs)
+    else:
+        assert kernel_bounded_http.request_bytes(wire, URL, "", deadline=1000000,
+                                                 socket_timeout=10, **kwargs) == RESPONSE
     if case in {"passing", "model_move", "orphan"}:
         assert json.loads(marker.read_text()) == {
             "send": 3, "request_sha256": None if case == "orphan" else hashlib.sha256(WIRE).hexdigest(),

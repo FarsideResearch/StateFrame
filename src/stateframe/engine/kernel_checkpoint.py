@@ -16,12 +16,13 @@ caller proves fidelity by comparing the first rebuilt request with the recorded 
 any refusal or mismatch falls back to replay resume.  Nothing here is trusted
 silently: every unsupported object fails the save, which then records why.
 
-Switch: STATEFRAME_CHECKPOINT = off (default) | save | probe.
+Switch: STATEFRAME_CHECKPOINT = on (default) | off | probe.
 Restore: STATEFRAME_CHECKPOINT_RESTORE=<checkpoint dir> (set by the product resume).
 Stdlib only.
 """
 from __future__ import annotations
 
+import ctypes
 import contextvars
 import hashlib
 import io
@@ -32,6 +33,7 @@ import pickle
 import random
 import re
 import shutil
+import stat
 import sys
 import threading
 import time
@@ -45,13 +47,17 @@ MODE_ENV = "STATEFRAME_CHECKPOINT"
 RESTORE_ENV = "STATEFRAME_CHECKPOINT_RESTORE"
 EVERY_ENV = "STATEFRAME_CHECKPOINT_EVERY"
 KEEP_ENV = "STATEFRAME_CHECKPOINT_KEEP"
+MIN_FREE_ENV = "STATEFRAME_CHECKPOINT_MIN_FREE_BYTES"
 STATE_FILE = "state.pkl"
 META_FILE = "checkpoint.json"
 # Run-dir entries never copied into a checkpoint (inputs, history, or the checkpoints themselves).
-# engine.log is the runner's live log of this attempt: it is never snapshotted or replaced.
+# Hook bundles are pinned read-only inputs. Hook records, delivery history and scratch are live
+# per-attempt data; the hook tape keeps the logical-run history across attempts. None may be
+# replaced by an older snapshot. The tool tape and engine log are live for the same reason.
 SKIP_RUN_ENTRIES = frozenset({"checkpoints", "attempts", "parent", ".engine.lock", ".run.lock",
                               "spec.json", "child-traceback.txt", "engine-result.json", "summary.json",
-                              "engine.log", "checkpoint-refused.json"})
+                              "engine.log", "checkpoint-refused.json", "tool-tape.jsonl",
+                              "hook-tape.jsonl", "hook-bundle", "hooks", "hook-scratch"})
 
 
 class CheckpointError(RuntimeError):
@@ -70,7 +76,7 @@ REFUSAL_FILE = "checkpoint-refused.json"
 
 
 def mode() -> str:
-    value = os.environ.get(MODE_ENV, "").strip().lower() or "off"  # empty = unset = off
+    value = os.environ.get(MODE_ENV, "").strip().lower() or "on"  # empty = unset = on
     value = {"on": "save", "1": "save", "0": "off"}.get(value, value)  # on = save
     if value not in {"off", "save", "probe"}:
         raise ValueError(f"{MODE_ENV} must be off, on/save or probe")
@@ -218,12 +224,18 @@ DROP_GLOBALS = {
 }
 # Host configuration the product child sets on the engine before work() runs. The new process's
 # host sets them again (possibly to new values: a raised --max-turns), and KEY is a credential that
-# must never be written to disk.
+# must never be written to disk. Replay control also belongs to the new process, whose tape can
+# include recorded operations after the saved boundary.
 HOST_GLOBALS = frozenset(
     (module, name)
     for module in ("probes.react_repair", "react_repair")
     for name in ("KEY", "API", "MODEL", "MAX_STEPS", "POC", "OUT")
-)
+) | frozenset({
+    # The host creates these for the resumed attempt before restore. The new tape includes the
+    # recorded tail; the saved tape stops at this boundary and replay was off in the old process.
+    ("kernel_tool_tape", "_active_tape"),
+    ("kernel_tool_tape", "_replay_active"),
+})
 # Instance attributes that are caches keyed by id() of live objects: after a restore those ids
 # name nothing (or, by reuse, the wrong object), so they are dropped and rebuilt.
 DROP_ATTRS = {
@@ -302,8 +314,14 @@ def _class_state(cls: type) -> dict[str, object]:
     out = {}
     if issubclass(cls, enum.Enum):
         return out  # members are pickled by reference; an Enum class cannot be reassigned
+    native_layout = issubclass(cls, (ctypes.Structure, ctypes.Union))
+    native_fields = {field[0] for field in vars(cls).get("_fields_", ())} if native_layout else set()
     for key, value in list(vars(cls).items()):
         if key.startswith("__") and key.endswith("__") or key == "_abc_impl":
+            continue
+        if native_layout and (key == "_fields_" or key in native_fields):
+            # ctypes fixes its layout at import; generated field types and CField descriptors
+            # cannot be pickled or reassigned during restore. Other class data remains state.
             continue
         if isinstance(value, (staticmethod, classmethod, property, types.MemberDescriptorType,
                               types.GetSetDescriptorType)):
@@ -557,6 +575,17 @@ def _lease_state(obj) -> dict:
     state = dict(vars(obj))
     state["_fd"] = None if state.get("_fd") is None else "OPEN"
     state.pop("_pid", None)
+    return state
+
+
+def _workspace_state(obj) -> dict:
+    state = _lease_state(obj)
+    root = _SAVE.get("root")
+    if root is not None:
+        try:
+            state["_checkpoint_directory"] = obj.directory.relative_to(root.parent).as_posix()
+        except ValueError:
+            pass  # A lease outside this run keeps its absolute location.
     return state
 
 
@@ -988,16 +1017,30 @@ def _rebuild_workspace(obj, state):
     import fcntl
     import stat as stat_module
     was_open = state.pop("_fd") == "OPEN"
+    relative = state.pop("_checkpoint_directory", None)
     obj.__dict__.update(state)
     obj._fd = None
     obj._pid = os.getpid()
+    if relative is not None and not _STATE.get("probe_load"):
+        if not isinstance(relative, str):
+            raise CheckpointError("invalid restored workspace directory")
+        path = Path(relative)
+        run_dir = _SAVE.get("load_run_dir")
+        if not path.parts or path.is_absolute() or ".." in path.parts or run_dir is None:
+            raise CheckpointError("invalid restored workspace directory")
+        obj.directory = run_dir / path
     if was_open and not _STATE.get("probe_load"):
-        value = obj.directory.lstat()
         fd = os.open(obj.directory / "owner.lock", os.O_RDWR | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK)
         try:
-            if not stat_module.S_ISREG(os.fstat(fd).st_mode):
+            opened = os.fstat(fd)
+            if not stat_module.S_ISREG(opened.st_mode):
                 raise CheckpointError("restored workspace lease is not a regular file")
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            value = obj.directory.lstat()
+            lock = (obj.directory / "owner.lock").lstat()
+            if (not stat_module.S_ISDIR(value.st_mode)
+                    or (lock.st_dev, lock.st_ino) != (opened.st_dev, opened.st_ino)):
+                raise CheckpointError("restored workspace ownership changed while acquiring lease")
         except BaseException:
             os.close(fd)
             raise
@@ -1076,7 +1119,7 @@ class _Pickler(pickle.Pickler):
                 return result
         rebuild = LEASE_TYPES.get((type(obj).__module__, type(obj).__qualname__))
         if rebuild is not None:
-            state = _journal_state(obj) if rebuild is _rebuild_journal else _lease_state(obj)
+            state = _journal_state(obj) if rebuild is _rebuild_journal else _workspace_state(obj)
             return (_new_instance, (type(obj),), state, None, None, rebuild)
         frozen = _frozen_sequence(obj)
         if frozen is not None:
@@ -1410,7 +1453,7 @@ def probe(frame, step: int, out_dir: Path) -> dict:
 # --------------------------------------------------------------------------- save
 
 _STATE = {"saved": 0, "failed": 0, "restored_step": None, "disabled": None, "last_sends": None,
-          "child": None, "child_tmp": None, "consecutive_failed": 0}
+          "child": None, "child_tmp": None, "consecutive_failed": 0, "low_disk": False}
 # Saving stops after this many failures in a row (a full disk would otherwise retry, and leave a
 # partial copy, at every boundary for the rest of the run).
 MAX_CONSECUTIVE_FAILURES = 3
@@ -1510,7 +1553,8 @@ def _is_pooled(relative: str) -> bool:
     return relative in POOLED_DIRS or _is_blob_store(relative)
 
 
-def _snapshot_tree(source: Path, target: Path, relative: str, pool: Path, manifests: dict) -> None:
+def _snapshot_tree(source: Path, target: Path, relative: str, pool: Path, manifests: dict,
+                   new_pool_files: list[Path]) -> None:
     """Clone ``source`` into ``target`` with as few clonefile calls as possible, pooling write-once dirs."""
     entries = list(os.scandir(source)) if _is_pooled(relative) and source.is_dir() else None
     if entries is not None and all(entry.is_file(follow_symlinks=False) for entry in entries):
@@ -1528,6 +1572,8 @@ def _snapshot_tree(source: Path, target: Path, relative: str, pool: Path, manife
                     os.link(source / name, store / name)
                 except FileExistsError:
                     pass
+                else:
+                    new_pool_files.append(store / name)
                 known[name] = size
         manifests[relative] = [[name, known[name]] for name in names]
         return
@@ -1535,13 +1581,15 @@ def _snapshot_tree(source: Path, target: Path, relative: str, pool: Path, manife
             relative.startswith("worker/measurement-runs/") and relative.count("/") == 2):
         target.mkdir()
         for entry in os.scandir(source):
-            _snapshot_tree(Path(entry.path), target / entry.name, f"{relative}/{entry.name}", pool, manifests)
+            _snapshot_tree(Path(entry.path), target / entry.name, f"{relative}/{entry.name}", pool,
+                           manifests, new_pool_files)
         return
     if not _clonefile(source, target):
         _clone(source, target)
 
 
-def _copy_tree(source: Path, target: Path, previous: Path | None) -> dict[str, int]:
+def _copy_tree(source: Path, target: Path, previous: Path | None,
+               durable_inodes: set[tuple[int, int]]) -> dict[str, int]:
     """Copy ``source`` to ``target``; a file unchanged since the previous checkpoint is hard-linked.
 
     Checkpoint copies are never modified after they are written, so linking to one is safe; a file
@@ -1573,6 +1621,7 @@ def _copy_tree(source: Path, target: Path, previous: Path | None) -> dict[str, i
                     prior = None
                 if prior is not None and prior.st_size == info.st_size and prior.st_mtime_ns == info.st_mtime_ns:
                     os.link(old, destination)
+                    durable_inodes.add((prior.st_dev, prior.st_ino))
                     counts["linked"] += 1
                     continue
             if info.st_size >= _BIG_FILE and sys.platform == "darwin":
@@ -1604,6 +1653,59 @@ def _fsync_dir(path: Path) -> None:
         pass
     finally:
         os.close(fd)
+
+
+def _fsync_file(path: Path) -> None:
+    fd = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def _fsync_snapshot(root: Path, new_pool_files: list[Path],
+                    durable_inodes: set[tuple[int, int]] | None = None) -> None:
+    """Flush snapshot data in the writer before LATEST can name it or old data is pruned."""
+    seen: set[tuple[int, int]] = set(durable_inodes or ())
+    for directory, _, filenames in os.walk(root, followlinks=False):
+        for name in filenames:
+            path = Path(directory) / name
+            info = path.lstat()
+            if not stat.S_ISREG(info.st_mode):
+                continue
+            identity = (info.st_dev, info.st_ino)
+            if identity not in seen:
+                _fsync_file(path)
+                seen.add(identity)
+    for path in new_pool_files:
+        info = path.stat()
+        identity = (info.st_dev, info.st_ino)
+        if identity not in seen:
+            _fsync_file(path)
+            seen.add(identity)
+    for directory, _, _ in os.walk(root, topdown=False, followlinks=False):
+        _fsync_dir(Path(directory))
+    for directory in {path.parent for path in new_pool_files}:
+        _fsync_dir(directory)
+    if new_pool_files:
+        _fsync_dir(new_pool_files[0].parent.parent)
+
+
+def _unpublished_pool_files(previous: Path | None, root: Path,
+                            manifests: dict[str, list]) -> list[Path]:
+    """Pool links absent from the last published snapshot may be left by a failed writer."""
+    try:
+        old = json.loads((previous / MANIFEST_FILE).read_text()) if previous is not None else {}
+    except (OSError, ValueError):
+        old = {}
+    if not isinstance(old, dict):
+        old = {}
+    files = []
+    for relative, rows in manifests.items():
+        old_names = {row[0] for row in old.get(relative, ())}
+        store = root / POOL_DIR / relative.replace("/", "__")
+        files.extend(store / name for name, _size in rows if name not in old_names)
+    return files
 
 
 def _record(run_dir: Path, **fields) -> None:
@@ -1670,11 +1772,13 @@ def _save_into(payload, ctx, step, run_dir, root, final, tmp, clocks, started, c
     previous = latest(run_dir)
     copied = {"linked": 0, "copied": 0, "cloned": 0}
     manifests: dict[str, list] = {}
+    new_pool_files: list[Path] = []
+    durable_inodes: set[tuple[int, int]] = set()
     for name in entries:
         source, destination = run_dir / name, tmp / "run" / name
         if (name == "worker" or name in POOLED_DIRS) and source.is_dir() and not source.is_symlink() \
                 and sys.platform == "darwin":
-            _snapshot_tree(source, destination, name, root / POOL_DIR, manifests)
+            _snapshot_tree(source, destination, name, root / POOL_DIR, manifests, new_pool_files)
             copied["cloned"] += 1
             continue
         if _clonefile(source, destination):
@@ -1682,11 +1786,12 @@ def _save_into(payload, ctx, step, run_dir, root, final, tmp, clocks, started, c
             continue
         prior = previous / "run" / name if previous is not None else None
         if source.is_dir() and not source.is_symlink():
-            for key, value in _copy_tree(source, destination, prior).items():
+            for key, value in _copy_tree(source, destination, prior, durable_inodes).items():
                 copied[key] += value
         else:
             _clone(source, destination)
     manifest_bytes = json.dumps(manifests, sort_keys=True, separators=(",", ":")).encode()
+    new_pool_files.extend(_unpublished_pool_files(previous, root, manifests))
     with os.fdopen(os.open(tmp / MANIFEST_FILE, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "wb") as stream:
         stream.write(manifest_bytes)
     files_done = time.perf_counter()
@@ -1731,7 +1836,6 @@ def _save_into(payload, ctx, step, run_dir, root, final, tmp, clocks, started, c
                 writer = _StateWriter(stream)
                 index = dump(writer)
             stream.flush()
-            os.fsync(stream.fileno())
         meta.update(state_bytes=writer.count, state_sha256=writer.digest.hexdigest(),
                     chunk_index=index,
                     chunks=sorted(row[0] for rows in index.values() for row in rows))
@@ -1739,12 +1843,15 @@ def _save_into(payload, ctx, step, run_dir, root, final, tmp, clocks, started, c
         meta["signature"] = _signature(meta, meta["state_sha256"])
         with os.fdopen(os.open(tmp / META_FILE, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "w") as stream:
             stream.write(json.dumps(meta, indent=1, sort_keys=True))
-        _fsync_dir(tmp)
+        _fsync_snapshot(tmp, new_pool_files, durable_inodes)
+        if (root / CACHE_DIR).is_dir():
+            _fsync_dir(root / CACHE_DIR)
         if final.exists():
             raise CheckpointError(f"checkpoint {final.name} already exists")
         os.rename(tmp, final)
         latest_tmp = root / f".LATEST.{os.getpid()}"
         latest_tmp.write_text(final.name + "\n")
+        _fsync_file(latest_tmp)
         os.replace(latest_tmp, root / "LATEST")
         _fsync_dir(root)
         for old in _checkpoints(root)[:-_keep()]:
@@ -1771,6 +1878,44 @@ def _rss_mb() -> float | None:
         return round(peak / (1 << 20) if sys.platform == "darwin" else peak / 1024, 1)
     except (ImportError, OSError, ValueError):
         return None
+
+
+def _minimum_free_bytes(run_dir: Path) -> int:
+    """Reserve space for another state image; the process peak is a conservative first estimate."""
+    raw = os.environ.get(MIN_FREE_ENV, "").strip()
+    if raw:
+        try:
+            value = int(raw)
+            if value < 0:
+                raise ValueError("negative free-space floor")
+            return value
+        except ValueError:
+            _warn_once("min_free", f"{MIN_FREE_ENV} must be a non-negative integer; using the automatic floor")
+    previous = latest(run_dir)
+    if previous is not None:
+        try:
+            estimate = (previous / STATE_FILE).stat().st_size
+        except OSError:
+            estimate = 0
+    else:
+        estimate = 0
+    if not estimate:
+        estimate = int((_rss_mb() or 0) * (1 << 20))
+    return max(1 << 30, 3 * estimate)
+
+
+def _low_disk_space(run_dir: Path) -> tuple[int, int] | None:
+    """Return (free, floor) only below the floor; unknown free space permits saving."""
+    floor = _minimum_free_bytes(run_dir)
+    if floor == 0:
+        return None
+    root = run_dir / "checkpoints"
+    try:
+        filesystem = os.statvfs(root if root.is_dir() else run_dir)
+    except OSError:
+        return None
+    free = filesystem.f_bavail * filesystem.f_frsize
+    return (free, floor) if free < floor else None
 
 
 def _reap() -> bool:
@@ -1998,6 +2143,15 @@ def _save_point(frame, step: int, poc, entered: float) -> None:
             _STATE["last_sends"] = previous_sends  # still writing the last one: try at the next boundary
             _record(run_dir, event="checkpoint_skipped", step=step, reason="previous writer still running")
             return
+        low_disk = _low_disk_space(run_dir)
+        if low_disk is not None:
+            _STATE["last_sends"] = previous_sends
+            if not _STATE.get("low_disk", False):
+                _record(run_dir, event="checkpoint_skipped_low_disk", step=step,
+                        free_bytes=low_disk[0], floor_bytes=low_disk[1])
+            _STATE["low_disk"] = True
+            return
+        _STATE["low_disk"] = False
         started = time.perf_counter()
         # No cyclic-GC pass inside the pause: capture allocates many small objects, and on a 2 GB heap
         # one triggered gen-2 collection took seconds (pauses up to 2.8 s at 100 sends with fork <=25 ms).
@@ -2132,6 +2286,11 @@ def validate(checkpoint: Path) -> dict:
 
 
 def _restore_files(checkpoint: Path, run_dir: Path, meta: dict) -> None:
+    # Refuse old or damaged snapshots before moving any new-attempt files aside. In particular,
+    # a snapshot must never replace the pinned bundle or the live hook delivery records.
+    for name in meta["entries"]:
+        if name in SKIP_RUN_ENTRIES:
+            raise CheckpointError(f"checkpoint includes live run entry {name!r}")
     discard = run_dir / "checkpoints" / f"setup-discard.{os.getpid()}"
     for path in list(run_dir.iterdir()):
         if path.name in SKIP_RUN_ENTRIES:
@@ -2162,7 +2321,8 @@ def restore(frame, checkpoint: Path, run_dir: Path) -> dict:
     cells, funcs = _frame_maps(frame)
     ctx = {"framecells": cells, "framefuncs": funcs}
     _SAVE.clear()
-    _SAVE.update(load_root=checkpoint.parent, load_index=meta.get("chunk_index", {}) or {})
+    _SAVE.update(load_root=checkpoint.parent, load_run_dir=run_dir,
+                 load_index=meta.get("chunk_index", {}) or {})
     try:
         payload = _Unpickler(io.BytesIO((checkpoint / STATE_FILE).read_bytes()), ctx).load()
     finally:
@@ -2210,6 +2370,17 @@ def restore(frame, checkpoint: Path, run_dir: Path) -> dict:
     proxy = frame.f_locals
     for name, value in payload["frame"].items():
         proxy[name] = value
+    if isinstance(frame, types.FrameType) and isinstance(proxy, dict):
+        # Before PEP 667, f_locals is a snapshot. Push the restored values into
+        # the suspended frame's fast locals and closure cells before it resumes.
+        import ctypes
+        try:
+            sync_locals = ctypes.pythonapi.PyFrame_LocalsToFast
+        except AttributeError as error:
+            raise CheckpointError("runtime cannot restore frame locals") from error
+        sync_locals.argtypes = (ctypes.py_object, ctypes.c_int)
+        sync_locals.restype = None
+        sync_locals(frame, 0)
     t3 = time.perf_counter()
     install_continuous_clock(meta["clocks"])
     meta["restore_phases"] = {"validate": round(t1 - t0, 3), "files": round(t2 - t1, 3),
@@ -2284,7 +2455,19 @@ def install_continuous_clock(saved: dict) -> None:
                     pass
 
 
-def restore_point(frame, poc) -> None:
+def refuse_restored_setup(run_dir: Path, error: Exception, *, source: str = "") -> None:
+    """Refuse a checkpoint if process-bound setup cannot be rebound before the next request."""
+    detail = f"{type(error).__name__}: {str(error)[:300]}"
+    try:
+        (run_dir / REFUSAL_FILE).write_text(json.dumps(
+            {"error": "RestoreRefused", "detail": detail, "checkpoint": source}, indent=1))
+    except OSError:
+        pass
+    _record(run_dir, event="checkpoint_restore_refused", detail=detail, source=source)
+    raise RestoreRefused(detail) from error
+
+
+def restore_point(frame, poc) -> bool:
     """Loop-entry hook: load the checkpoint named by STATEFRAME_CHECKPOINT_RESTORE, if any.
 
     Raises CheckpointError (before any model request) when it cannot restore faithfully;
@@ -2302,19 +2485,12 @@ def restore_point(frame, poc) -> None:
             _record(run_dir, event="checkpoint_stale_temporaries_removed", count=swept)
     source = os.environ.pop(RESTORE_ENV, "")
     if not source:
-        return
+        return False
     started = time.perf_counter()
     try:
         meta = restore(frame, Path(source), run_dir)
     except Exception as error:  # noqa: BLE001 - every failure is a refusal, never a partial state
-        detail = f"{type(error).__name__}: {str(error)[:300]}"
-        try:
-            (run_dir / REFUSAL_FILE).write_text(json.dumps(
-                {"error": "RestoreRefused", "detail": detail, "checkpoint": str(source)}, indent=1))
-        except OSError:
-            pass
-        _record(run_dir, event="checkpoint_restore_refused", detail=detail, source=str(source))
-        raise RestoreRefused(detail) from error
+        refuse_restored_setup(run_dir, error, source=source)
     _STATE["restored_step"] = meta["step"]
     _STATE["last_sends"] = meta["sends"]
     _record(run_dir, event="checkpoint_restored", step=meta["step"], sends=meta["sends"],
@@ -2322,6 +2498,7 @@ def restore_point(frame, poc) -> None:
             source=str(source),
             # measured on the real clock: restore installed the shifted one mid-way
             seconds=round(_REAL_CLOCKS.get("perf_counter", time.perf_counter)() - started, 3))
+    return True
 
 
 __all__ = ["CheckpointError", "RestoreRefused", "SCHEMA", "register_participant", "register_secret",

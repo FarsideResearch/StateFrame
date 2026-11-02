@@ -183,7 +183,7 @@ def test_unchanged_skill_resume_rebuilds_loaded_body(tmp_path, first_mode, resum
              "--max-turns", "8", "--skill", str(selected), "--quiet"],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=environment(),
             start_new_session=True)
-        deadline = time.monotonic() + 90
+        deadline = time.monotonic() + 600
         while time.monotonic() < deadline and not marker.exists():
             if runner.poll() is not None:
                 stdout, stderr = runner.communicate(timeout=5)

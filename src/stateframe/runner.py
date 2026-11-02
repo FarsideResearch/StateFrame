@@ -53,8 +53,9 @@ USER_ENV = ("LLAMA_CPP_TOKENIZE_URL",)
 # The engine child's test interpreter (absolute path); the engine's test_python() helper reads exactly this key.
 TEST_PYTHON_ENV = "STATEFRAME_TEST_PYTHON"
 # Engine checkpoint switches the runner copies into the run's environment (kernel_checkpoint).
-CHECKPOINT_ENV = {"STATEFRAME_CHECKPOINT": "save", "STATEFRAME_CHECKPOINT_EVERY": "15",
-                  "STATEFRAME_CHECKPOINT_KEEP": "2"}
+CHECKPOINT_ENV = {"STATEFRAME_CHECKPOINT": "save", "STATEFRAME_CHECKPOINT_EVERY": "1",
+                  "STATEFRAME_CHECKPOINT_KEEP": "2",
+                  "STATEFRAME_CHECKPOINT_MIN_FREE_BYTES": ""}
 
 
 def checkpoint_env(profile_env=None):
@@ -70,6 +71,13 @@ def checkpoint_env(profile_env=None):
     # An empty ambient value (`STATEFRAME_CHECKPOINT= stateframe run`) counts as unset, never as "off".
     return {key: os.environ.get(key, "").strip() or profile_env.get(key, default)
             for key, default in CHECKPOINT_ENV.items()}
+
+
+def checkpoint_resume_off(spec: dict) -> bool:
+    """An explicit current or recorded opt-out blocks restore and all later saves."""
+    current = os.environ.get("STATEFRAME_CHECKPOINT", "").strip().lower()
+    recorded = str(spec.get("environment", {}).get("STATEFRAME_CHECKPOINT", "")).strip().lower()
+    return current in {"off", "0"} or recorded in {"off", "0"}
 
 
 class RunError(RuntimeError):
@@ -2202,12 +2210,29 @@ def resume_run(run_dir: Path, *, endpoint: Endpoint | None = None, max_turns: in
             same_limits = (int(state["max_turns"]) == int(spec["max_turns"])
                            and endpoint.chat_url == spec["chat_url"] and not isinstance(swap, dict)
                            and not route_changes)
+            checkpoint_off = checkpoint_resume_off(spec)
+            hooks_configured = "hooks" in spec
+            routes_configured = "routes" in spec or options._routes is not None
+            checkpoint_eligible = (same_limits and options.tool_settings.shell == "off"
+                                   and not checkpoint_off)
+            checkpoint_skip_reason = ("hooks_configured" if hooks_configured else
+                                      "routes_configured" if routes_configured else None)
+            checkpoint_skipped = checkpoint_eligible and checkpoint_skip_reason is not None
+            if checkpoint_off:
+                spec["environment"]["STATEFRAME_CHECKPOINT"] = "off"
             if int(state["max_turns"]) != int(spec["max_turns"]):
                 printer(step_limit_restart_warning(int(spec["max_turns"]), int(state["max_turns"])))
             previous = resume_module.archive_attempt(
-                state, ENGINE_DIR, use_checkpoint=same_limits and options.tool_settings.shell == "off",
+                state, ENGINE_DIR, use_checkpoint=checkpoint_eligible and not checkpoint_skipped,
                 replay_external=replay_external)
             spec = _resume_spec(run_dir, endpoint)
+            if checkpoint_skipped:
+                spec["resume"]["checkpoint"] = {"status": "skipped", "reason": checkpoint_skip_reason}
+                events = run_dir / "checkpoints" / "events.jsonl"
+                events.parent.mkdir(parents=True, exist_ok=True)
+                with events.open("a") as stream:
+                    stream.write(json.dumps({"ts": round(time.time(), 3), "event": "checkpoint_skipped",
+                                             "reason": checkpoint_skip_reason}) + "\n")
             if options._routes is not None:
                 spec["routes"] = options._routes.public()
             _compose_resume_route_changes(spec, route_changes)
@@ -2231,11 +2256,18 @@ def resume_run(run_dir: Path, *, endpoint: Endpoint | None = None, max_turns: in
             if spec["resume"].get("restart_live"):
                 printer("restart live: the changed step limit starts at request 1; previous model and tool "
                         "exchanges remain archived")
-            elif checkpoint:
+            elif checkpoint and checkpoint.get("status") != "skipped":
                 printer(f"checkpoint: engine state restored as of send {checkpoint['sends']} (step "
                         f"{checkpoint['step']}); {checkpoint['tail']} later recorded exchange(s) are replayed "
                         "and checked byte for byte, then the run continues live")
             else:
+                if checkpoint_skipped:
+                    if checkpoint_skip_reason == "hooks_configured":
+                        printer("checkpoint: not restored because hooks are configured for this run; "
+                                "replaying the recorded exchanges instead")
+                    else:
+                        printer("checkpoint: not restored because per-step models are configured for this run; "
+                                "replaying the recorded exchanges instead")
                 printer(f"replay: {state['tape_count']} recorded model exchanges are answered from the run's "
                         "records, then the run continues live")
             from .shell_host import provision
@@ -2265,7 +2297,7 @@ def resume_run(run_dir: Path, *, endpoint: Endpoint | None = None, max_turns: in
                     raise resume_module.ResumeRefused(str(error)) from error
             summary = _execute(options, started, printer, run_dir, work, spec)
             refused = (summary.get("checkpoint_refused") or _checkpoint_refusal(run_dir, summary.get("child_exit_code"))
-                       if checkpoint else None)
+                       if checkpoint and checkpoint.get("status") != "skipped" else None)
             if refused is None:
                 return summary
             # Fail open: a checkpoint that cannot be restored faithfully is never continued from. Keep the
@@ -2512,7 +2544,8 @@ def _execute(options: RunOptions, started: float, printer, run_dir: Path, work: 
         child_exit, cancelled = 130, True
     except OSError as error:
         raise RunError(f"could not start engine: {error}") from error
-    if (spec.get("resume") or {}).get("checkpoint") and not cancelled:
+    checkpoint = (spec.get("resume") or {}).get("checkpoint")
+    if checkpoint and checkpoint.get("status") != "skipped" and not cancelled:
         refused = _checkpoint_refusal(run_dir, child_exit)
         if refused is not None:
             # A refused checkpoint restore sent nothing live and produced no result: hand straight back to the

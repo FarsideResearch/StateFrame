@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.3.0 (2026-11-02)
+
+- Checkpoint saves now check free space before capture and skip low-disk saves without pausing the engine. The automatic floor is at least 1 GiB and three times the latest state size; `STATEFRAME_CHECKPOINT_MIN_FREE_BYTES` overrides it, including `0` to disable the check. Saving resumes after space recovers, and skip events stay out of model requests.
+- Mid-request resume now verifies the in-flight request byte for byte on both full replay and checkpoint restore. Tokenizer fallback telemetry no longer advances the journal sequence, which could shift check IDs and edit receipts when tokenizer availability changed between attempts. An in-flight mismatch now stops before a live send.
+- Checkpoint restore now preserves the resumed attempt's replay control, complete recorded tail, and check timing. The token meter had tracked journal subscriptions by `id()`, which changes on restore; duplicate subscriptions shifted edit receipt IDs. Tracking journal objects preserves the IDs, and kill-and-resume checks verified byte-identical next requests.
+- On Python 3.11 and 3.12, checkpoint restore did not reach the running engine. Before Python 3.13 a frame's locals are a snapshot, so the saved values went into a copy and the engine continued with the new attempt's setup objects; on Linux this stopped the run with "workspace ownership changed". Restore now writes the saved values into the suspended frame, and the workspace lease is re-derived from the original run folder and locked again.
+- Checkpoints are saved at every step by default (was every 15 steps), so resume usually replays nothing. Each save pauses the engine about 0.2 s and is written in the background. At request 110 of a 120-request run, resume reached the next request in 47 s, versus 72 s with the old cadence.
+- Checkpoints are on by default. Set `STATEFRAME_CHECKPOINT=off` to opt out; an unfaithful restore still falls back to full replay.
+- Runs with hooks resume by replay and never restore a checkpoint. Restoring could re-run hooks that had already fired between the checkpoint and the interruption. A resume with hooks configured records `resume.checkpoint` as skipped with reason `hooks_configured`, writes a `checkpoint_skipped` event and prints one line saying it is replaying instead. Checkpoint restore applies only to `--shell off` runs.
+- Runs with per-step models also resume by replay and never restore a checkpoint. The resume records `routes_configured` as the skip reason, unless hooks are configured too, and keeps the request and route checks during replay.
+- Measured from a clean install on Qwen3.6-35B-A3B, killed at the second model request: without hooks, the checkpoint restored and verified, the resumed request was byte-identical, and resume reached it in 23.2 s versus 27.8 s by full replay. With hooks on all six events, resume replayed and the resumed request was byte-identical.
+
 ## 0.2.13 (2026-11-02)
 
 - Add `STATEFRAME_STABLE_TOOL_HEAD` (opt-in, off by default): one append-only tool list per run, so the server can reuse the cached tools, system prompt and task between requests. Only the current step's tools can run; a listed but unavailable tool gets the usual not-offered reply, and a short note names the callable tools. With the switch off, request bytes are unchanged.

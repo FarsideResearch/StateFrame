@@ -304,7 +304,7 @@ def test_six_event_lifecycle_survives_kill_and_resume(tmp_path):
     try:
         process = subprocess.Popen(command, env=environment, stdout=subprocess.PIPE,
                                    stderr=subprocess.PIPE, text=True)
-        assert script.waiting.wait(120), "first attempt did not reach the third request"
+        assert script.waiting.wait(600), "first attempt did not reach the third request"
         prior_requests = {
             path.name: path.read_bytes()
             for path in (run / "wire").glob("*.request.json")

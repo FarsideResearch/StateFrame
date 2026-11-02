@@ -3,7 +3,7 @@
 A run stopped before it finished (Ctrl-C, ``kill``, ``kill -9``, a laptop that slept or crashed, a model
 server that went away) keeps everything resume needs in its run directory: the frozen run spec (engine
 settings, task, endpoint), the read-only start snapshot ``parent/``, and every model exchange under
-``wire/``. Resume moves that attempt's files to ``attempts/<n>/`` (nothing is deleted), gives the engine a
+``wire/``. Resume moves that attempt's files to ``attempts/<n>/``, gives the engine a
 fresh working copy of the start state, and restarts the SAME engine with the SAME settings. The engine is
 answered from the recorded responses until it reaches the point where the attempt stopped
 (``replay_tape``), then continues live. Requests stay frame-only throughout: no history is added.
@@ -19,6 +19,7 @@ import hashlib
 import json
 import os
 import shutil
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -102,6 +103,39 @@ def _journal_lineage_ok(run: Path) -> str | None:
             return f"journal lineage broken at record {number}"
         previous, expected = record["record_hash"], expected + 1
     return None
+
+
+def carry_forward(spec: dict, tape: list[dict[str, object]], diverged: bool,
+                  pending: dict[str, object] | None = None) -> list[dict[str, object]]:
+    """The tape a resume should replay, given the stopped attempt's own completed exchanges.
+
+    An attempt that was itself a resume and stopped while still replaying (killed, power loss) recorded only the
+    prefix it got through; the rest of its tape is still valid and lives in the earlier attempt's archived files.
+    Its own exchanges and any pending next request must be a faithful prefix of that tape
+    (same raw requests, no divergence);
+    otherwise its own exchanges are the whole truth and nothing is carried.
+    """
+    previous = (spec.get("resume") or {}).get("tape")
+    if diverged or not isinstance(previous, list) or len(tape) >= len(previous):
+        return tape
+    swap = (spec.get("resume") or {}).get("model_swap")
+    for own, old in zip(tape, previous):
+        try:
+            current = Path(str(own["request"])).read_bytes()
+            recorded = Path(str(old["request"])).read_bytes()
+        except (KeyError, OSError):
+            return tape
+        if current != recorded and replay_tape.with_recorded_model(current, recorded, swap) != recorded:
+            return tape
+    if pending is not None:
+        try:
+            current = Path(str(pending["request"])).read_bytes()
+            recorded = Path(str(previous[len(tape)]["request"])).read_bytes()
+        except (KeyError, OSError):
+            return tape
+        if current != recorded and replay_tape.with_recorded_model(current, recorded, swap) != recorded:
+            return tape
+    return tape + previous[len(tape):]
 
 
 def _faithful_completed_request(own: dict[str, object], old: dict[str, object], *,
@@ -360,15 +394,26 @@ def assess(run: Path, *, max_turns: int | None = None, model: str | None = None,
             "attempt": (attempts[-1] if attempts else 0) + 1}
 
 
+def _record_checkpoint_refusal(root: Path, folder: Path, detail: str) -> None:
+    """Keep preflight corruption visible after the run falls back to full replay."""
+    record = {"ts": round(datetime.now(timezone.utc).timestamp(), 3),
+              "event": "checkpoint_restore_refused", "source": str(folder), "detail": detail}
+    try:
+        with (root / "events.jsonl").open("a") as stream:
+            stream.write(json.dumps(record, separators=(",", ":")) + "\n")
+    except OSError as error:
+        print(f"checkpoint refusal could not be recorded: {error}", file=sys.stderr)
+
+
 def select_checkpoint(run: Path, tape: list[dict[str, object]], wire_dir: Path) -> dict[str, object] | None:
     """The newest intact engine checkpoint whose next request was recorded (so it can be verified).
 
-    A checkpoint (``checkpoints/<step>/``, written by the engine about once every 5 requests:
-    STATEFRAME_CHECKPOINT_EVERY=15, counted in engine steps) holds the
+    A checkpoint (``checkpoints/<step>/``, written by the engine at every step boundary by default:
+    STATEFRAME_CHECKPOINT_EVERY=1, counted in engine steps) holds the
     engine's whole state at a step boundary plus a copy of the run files. Resuming from it skips the
     replay of everything before it; the recorded exchanges after it are replayed strictly, and the
-    first rebuilt request must match the recorded one byte for byte (apart from run ids and
-    durations), or the resume falls back to replaying the whole run. A checkpoint with no recorded
+    first rebuilt request must match the recorded one byte for byte, or the resume falls back to
+    replaying the whole run. A checkpoint with no recorded
     request after it cannot be verified that way and is skipped. Returns None when none qualifies.
     """
     root = run / "checkpoints"
@@ -382,6 +427,8 @@ def select_checkpoint(run: Path, tape: list[dict[str, object]], wire_dir: Path) 
         return None
     pending = replay_tape.pending_request(wire_dir)
     recorded = {int(item["send"]) for item in tape}
+    if pending is not None and int(pending["send"]) <= max(recorded, default=0):
+        pending = None  # already verified against a carried-forward recorded exchange
     candidates = []
     for folder in folders:
         try:
@@ -399,12 +446,14 @@ def select_checkpoint(run: Path, tape: list[dict[str, object]], wire_dir: Path) 
                 continue
             state = folder / "state.pkl"
             if state.stat().st_size != meta.get("state_bytes"):
+                _record_checkpoint_refusal(root, folder, "checkpoint state checksum mismatch")
                 continue
             digest = hashlib.sha256()
             with state.open("rb") as handle:
                 for block in iter(lambda: handle.read(1 << 20), b""):
                     digest.update(block)
             if digest.hexdigest() != meta.get("state_sha256"):
+                _record_checkpoint_refusal(root, folder, "checkpoint state checksum mismatch")
                 continue
             if not _blobs_intact(folder, meta):
                 continue  # the engine would refuse it (blob manifest / pool); try the next-older one
@@ -471,13 +520,24 @@ def archive_attempt(state: dict[str, object], engine_dir: Path, *, use_checkpoin
         os.replace(run / "tool-tape.jsonl", folder / "tool-tape.jsonl")
     own_tape = ([] if restart_live else replay_tape.build(
         source / "wire", source / "sends.jsonl", routes_required=bool(spec.get("routes"))))
-    own_pending = (replay_tape.pending_request(source / "wire", routes_required=True)
-                   if spec.get("routes") and not restart_live else None)
-    tape, pending, prior_route_changes, skipped_reason = carry_forward_records(
-        spec, own_tape, own_pending, source / "wire",
-        diverged=(source / "resume-divergence.json").exists(),
-        restart_live=restart_live,
-        interrupted_archive_tape=interrupted_archive_tape)
+    if spec.get("routes"):
+        own_pending = (replay_tape.pending_request(source / "wire", routes_required=True)
+                       if not restart_live else None)
+        tape, pending, prior_route_changes, skipped_reason = carry_forward_records(
+            spec, own_tape, own_pending, source / "wire",
+            diverged=(source / "resume-divergence.json").exists(),
+            restart_live=restart_live,
+            interrupted_archive_tape=interrupted_archive_tape)
+    else:
+        pending = replay_tape.pending_request(source / "wire") if not restart_live else None
+        # A moved model name may preserve request semantics, but a later resume cannot
+        # prove the archived exchange's raw bytes without the route-specific record.
+        moved_model = isinstance((spec.get("resume") or {}).get("model_swap"), dict)
+        tape = ([] if restart_live else own_tape if moved_model else carry_forward(
+            spec, own_tape, (source / "resume-divergence.json").exists(), pending))
+        if len(tape) > len(own_tape):
+            pending = None
+        prior_route_changes, skipped_reason = [], None
     # Checkpoint restore is not supported for routed runs: checkpoint selection reads the in-flight
     # request from the archived wire, not from the carried, route-verified check. Routed runs replay.
     checkpoint = (select_checkpoint(run, tape, source / "wire")
@@ -506,11 +566,30 @@ def archive_attempt(state: dict[str, object], engine_dir: Path, *, use_checkpoin
     if checkpoint is not None:
         spec["resume"]["checkpoint"] = checkpoint
     elif (run / "checkpoints").is_dir():
-        # A replayed attempt rebuilds its own lineage: earlier checkpoints stay with the attempt that
-        # made them (kept, never deleted) instead of being offered to a later resume.
+        # A replayed attempt rebuilds its own lineage. Preserve checkpoint metadata and events for
+        # diagnosis, but release state, run snapshots and pools so repeated resumes stay bounded.
         os.replace(run / "checkpoints", folder / "checkpoints")
+        _compact_archived_checkpoints(folder / "checkpoints")
     (run / "spec.json").write_text(json.dumps(spec, indent=1, sort_keys=True))
     return folder
+
+
+def _compact_archived_checkpoints(root: Path) -> None:
+    for child in root.iterdir():
+        if child.is_symlink() or not child.is_dir():
+            continue
+        if child.name.startswith(".") and child.name.endswith(".tmp"):
+            shutil.rmtree(child)
+        elif (child / "checkpoint.json").is_file():
+            for name in ("state.pkl", "run"):
+                payload = child / name
+                if payload.is_dir() and not payload.is_symlink():
+                    shutil.rmtree(payload)
+                elif payload.exists() or payload.is_symlink():
+                    payload.unlink()
+        elif child.name in {"blob-pool", "journal-cache"}:
+            shutil.rmtree(child)
+    (root / "LATEST").unlink(missing_ok=True)
 
 
 def fresh_workcopy(run: Path, repo: Path) -> workcopy.WorkCopy:

@@ -8,12 +8,14 @@ its state (the typed StateFrame, receipts, journal) is rebuilt by the engine its
 recorded response the run continues live.
 
 A recorded response is served only while the engine's new request matches the recorded request byte
-for byte, apart from run-scoped identifiers (fresh 32-hex run ids and handles) and test durations.
+for byte.
 A resume that continues under another model NAME (``stateframe resume --model``: the same weights served
 under a different name) also compares with the request's leading top-level ``model`` value set back to
 the recorded one; that field and nothing else.
-On the first mismatch replay stops and the run continues live from that point: frame-only means the
-current frame is the whole state, so a faithful prefix is always a valid place to continue from.
+On a completed exchange mismatch replay stops and the run continues live from that point: frame-only
+means the current frame is the whole state, so a faithful prefix is always a valid place to continue
+from. The request that was in flight when the attempt stopped is checked separately; a mismatch there
+refuses the resume before any live send.
 
 Imported by the runner as ``stateframe.replay_tape`` and by the engine child by file path.
 """
@@ -25,13 +27,6 @@ import re
 from pathlib import Path
 
 SCHEMA = "stateframe-resume/1"
-# A uuid4 hex run id or handle, the only per-process difference between two identical runs.
-_RUN_ID = re.compile(rb"(?<![0-9a-f])[0-9a-f]{32}(?![0-9a-f])")
-# pytest's wall-clock duration in a test summary ("1 failed in 0.05s").
-_DURATION = re.compile(rb" in [0-9]+\.[0-9]+s\b")
-_ADDRESS = re.compile(rb"\bat 0x[0-9a-fA-F]+")
-
-
 _MODEL_FIELD = b'{"model": '
 
 
@@ -51,6 +46,10 @@ class CheckpointUnfaithful(BaseException):
     """
 
 
+class ReplayUnfaithful(BaseException):
+    """A full replay rebuilt its in-flight request differently; refuse before a live send."""
+
+
 _TEXT_RUN_ID = re.compile(r"(?<![0-9a-f])[0-9a-f]{32}(?![0-9a-f])")
 _TEXT_DURATION = re.compile(r" in [0-9]+(?:\.[0-9]+)?s(?: \(\d+:\d\d:\d\d\))?")
 # A Python object's memory address in a repr ("<MonkeyPatch object at 0x106cd7360>"), printed in tracebacks.
@@ -63,18 +62,14 @@ def mask_volatile(text: str) -> str:
     return _TEXT_ADDRESS.sub("at 0x<addr>", _TEXT_DURATION.sub(" in <t>s", _TEXT_RUN_ID.sub("<id>", text)))
 
 
-def _normalized(request: bytes) -> bytes:
-    return _ADDRESS.sub(b"at 0x<addr>", _DURATION.sub(b" in <t>s", _RUN_ID.sub(b"<id>", request)))
-
-
 def normalized_digest(request: bytes) -> str:
-    """Request identity for replay matching: exact bytes except run ids and test durations."""
-    return "sha256:" + hashlib.sha256(_normalized(request)).hexdigest()
+    """Legacy API name: request identity is the exact wire bytes."""
+    return "sha256:" + hashlib.sha256(request).hexdigest()
 
 
 def first_difference(recorded: bytes, replayed: bytes, context: int = 160) -> dict[str, object]:
-    """Where two requests first differ after normalization, with a short window of each (for the run record)."""
-    a, b = _normalized(recorded), _normalized(replayed)
+    """Where requests first differ, with a short window of each for the run record."""
+    a, b = recorded, replayed
     offset = next((i for i, (x, y) in enumerate(zip(a, b)) if x != y), min(len(a), len(b)))
     start = max(0, offset - context // 2)
     return {"byte_offset": offset, "recorded_bytes": len(recorded), "replayed_bytes": len(replayed),
@@ -270,6 +265,7 @@ class Replayer:
         # The request that was in flight (sent, no response) when the attempt stopped: the first live
         # request after the tape must rebuild it byte for byte (checked once).
         self.pending = dict(pending) if pending else None
+        self.pending_mismatch = False
         self.pending_verified: dict[str, object] | None = None
         self.route_changes = list(route_changes or [])
 
@@ -307,19 +303,22 @@ class Replayer:
                                              "recorded_route": expected.get("route"), "route": route}
                     return None
                 recorded = Path(str(expected["request"])).read_bytes()
-                digest = normalized_digest(request)
-                if digest != expected["request_digest"]:
-                    swap = self._route_model_swap(expected.get("route"))
-                    alternate = with_recorded_model(request, recorded, swap)
-                    if alternate is None or normalized_digest(alternate) != expected["request_digest"]:
-                        self.diverged = {
-                            "tape_position": self.cursor + 1, "tape_total": len(self.tape),
-                            "recorded_send": expected["send"], "recorded_digest": expected["request_digest"],
-                            "replayed_digest": digest,
-                            "reason": "the engine's rebuilt request differs from the request in flight when the "
-                                      "attempt stopped",
-                            "first_difference": first_difference(recorded, request)}
-                        return None
+                compared = request
+                if request != recorded:
+                    swapped = with_recorded_model(request, recorded,
+                                                  self._route_model_swap(expected.get("route")))
+                    if swapped is not None:
+                        compared = swapped
+                if compared != recorded:
+                    self.pending_mismatch = True
+                    self.diverged = {
+                        "tape_position": self.cursor + 1, "tape_total": len(self.tape),
+                        "recorded_send": expected["send"], "recorded_digest": self._digest(recorded),
+                        "replayed_digest": self._digest(compared),
+                        "reason": "the engine's rebuilt request differs from the request in flight when the "
+                                  "attempt stopped",
+                        "first_difference": first_difference(recorded, compared)}
+                    return None
                 self.pending_verified = {"send": expected["send"],
                                          "request_sha256": hashlib.sha256(recorded).hexdigest(),
                                          "recorded_route": expected.get("route"), "route": route}
@@ -331,24 +330,26 @@ class Replayer:
             self.diverged = {"reason": "routed send destination or model differs",
                              "recorded_send": item["send"]}
             return None
-        digest = normalized_digest(request)
+        recorded = Path(str(item["request"])).read_bytes()
+        recorded_digest = self._digest(recorded)
+        digest = self._digest(request)
         compared = request
-        if digest != item["request_digest"]:
-            swapped = with_recorded_model(request, Path(str(item["request"])).read_bytes(),
+        if request != recorded:
+            swapped = with_recorded_model(request, recorded,
                                           self._route_model_swap(item.get("route")))
             if swapped is not None:
-                compared, digest = swapped, normalized_digest(swapped)
-                if digest == item["request_digest"]:
+                compared, digest = swapped, self._digest(swapped)
+                if swapped == recorded:
                     self.model_swapped += 1
-        if digest != item["request_digest"]:
+        if compared != recorded:
             self.active = False
+            self.pending = None  # the later in-flight request belongs to the abandoned replay path
             self.diverged = {"tape_position": self.cursor + 1, "tape_total": len(self.tape),
                              "recorded_send": item["send"],
-                             "recorded_digest": item["request_digest"], "replayed_digest": digest,
+                             "recorded_digest": recorded_digest, "replayed_digest": digest,
                              "reason": "the engine's rebuilt request differs from the recorded request",
                              # With a model swap, the window shows the difference beyond the model name.
-                             "first_difference": first_difference(Path(str(item["request"])).read_bytes(),
-                                                                  compared)}
+                             "first_difference": first_difference(recorded, compared)}
             if self.model_swap is not None:
                 self.diverged["model_swap"] = dict(self.model_swap, swapped_matches=self.model_swapped)
             return None
@@ -359,6 +360,10 @@ class Replayer:
         if self.cursor == len(self.tape):
             self.active = False
         return response
+
+    def _digest(self, request: bytes) -> str:
+        """Both replay paths compare exact request bytes."""
+        return normalized_digest(request)
 
     def _route_model_swap(self, route: object) -> dict | None:
         return route_model_swap(route, self.route_changes, self.model_swap)

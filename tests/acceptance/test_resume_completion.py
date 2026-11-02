@@ -26,49 +26,70 @@ def _engine_child(parent_pid):
 
 
 def _interrupted_run(tmp_path, *, network="none", script_name="resume.script.json", repo=None,
-                     task="Format app.py and verify it"):
+                     task="Format app.py and verify it", wait_for_checkpoint=False,
+                     checkpoint_task=None, pause_at=None, tokenize_off_marker=None):
     repo = repo or copy_repo(tmp_path)
     run_dir = tmp_path / "run"
     marker = tmp_path / "paused"
-    script = FIXTURES / "scripts" / script_name
+    script = FIXTURES / "scripts" / ("checkpoint_resume.script.json" if wait_for_checkpoint else script_name)
+    pause_at = pause_at or (3 if wait_for_checkpoint else 2)
+    endpoint_args = [PYTHON, str(FIXTURES / "pause_endpoint.py"), "--script", str(script),
+                     "--marker", str(marker), "--pause-at", str(pause_at),
+                     "--pause-seconds", "600" if wait_for_checkpoint else "30"]
+    if tokenize_off_marker is not None:
+        endpoint_args.extend(("--tokenize-off-marker", str(tokenize_off_marker)))
     endpoint = subprocess.Popen(
-        [PYTHON, str(FIXTURES / "pause_endpoint.py"), "--script", str(script),
-         "--marker", str(marker)], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        endpoint_args,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         text=True, env=environment())
     runner = None
+    retain_endpoint = False
+    run_task = task
+    if wait_for_checkpoint:
+        run_task = checkpoint_task or "Set app.py VALUE to after and verify it"
     try:
         assert endpoint.stdout is not None
         url = endpoint.stdout.readline().strip()
         assert url.startswith("http://127.0.0.1:")
         launched_after = time.time()
         runner = subprocess.Popen(
-            [PYTHON, "-m", "stateframe", "run", "--repo", str(repo), "--task",
-             task, "--endpoint", url, "--model", "scripted",
+            [PYTHON, "-m", "stateframe", "run", "--repo", str(repo), "--task", run_task,
+             "--endpoint", url, "--model", "scripted",
              "--run-dir", str(run_dir), "--test-python", PYTHON,
              "--test-cmd", "python -m unittest discover -s tests -q",
              "--max-turns", "32", "--quiet",
-             "--shell-network", network], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+             "--shell-network", network, "--shell", "off" if wait_for_checkpoint else "standard"],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             text=True, env=environment(), start_new_session=True)
-        deadline = time.monotonic() + 90
+        deadline = time.monotonic() + 600  # generous: a loaded machine slows the run, not the behavior checked
         while time.monotonic() < deadline and not marker.exists():
             if runner.poll() is not None:
                 stdout, stderr = runner.communicate(timeout=5)
                 raise AssertionError(f"run ended before interruption: {stdout} {stderr}")
             time.sleep(0.1)
-        assert marker.exists(), "second model request was not reached"
+        assert marker.exists(), "paused model request was not reached"
         requests_before = read_requests(run_dir)
-        assert len(requests_before) >= 2
+        paused_index = pause_at - 1
+        assert len(requests_before) > paused_index
+        if wait_for_checkpoint:
+            pointer = run_dir / "checkpoints" / "LATEST"
+            while time.monotonic() < deadline and not pointer.is_file():
+                time.sleep(0.1)
+            assert pointer.is_file(), "checkpoint was not saved before the paused request"
         child = _engine_child(runner.pid)
         assert child is not None
         identity = record_identity(child, launched_after=launched_after, command_fragment="_child.py")
         signal_verified(child, identity, signal.SIGKILL)
         runner.communicate(timeout=30)
-        return repo, run_dir, requests_before[1]
+        if wait_for_checkpoint:
+            retain_endpoint = True
+            return repo, run_dir, requests_before[paused_index], endpoint, url
+        return repo, run_dir, requests_before[paused_index]
     finally:
         if runner is not None and runner.poll() is None:
             runner.kill()
             runner.wait(timeout=5)
-        if endpoint.poll() is None:
+        if not retain_endpoint and endpoint.poll() is None:
             endpoint.terminate()
             try:
                 endpoint.wait(timeout=5)
@@ -92,6 +113,119 @@ def test_e16_local_shell_resume_replays_identical_next_request(tmp_path):
     assert summary["succeeded"] is True
     assert 'VALUE = "after"' in (run_dir / "workspace" / "app.py").read_text()
     assert 'VALUE = "before"' in (repo / "app.py").read_text()
+
+
+def test_checkpoint_restores_and_verifies_paused_request(tmp_path, monkeypatch):
+    monkeypatch.setenv("STATEFRAME_CHECKPOINT", "save")
+    monkeypatch.setenv("STATEFRAME_CHECKPOINT_EVERY", "1")
+    _, run_dir, expected, endpoint, url = _interrupted_run(tmp_path, wait_for_checkpoint=True)
+    try:
+        resumed = subprocess.run(
+            [PYTHON, "-m", "stateframe", "resume", str(run_dir), "--endpoint", url,
+             "--model", "scripted", "--quiet"], capture_output=True, text=True,
+            env=environment(), timeout=240, check=False)
+    finally:
+        endpoint.terminate()
+        try:
+            endpoint.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            endpoint.kill()
+            endpoint.wait(timeout=5)
+    assert resumed.returncode == 0, resumed.stdout + resumed.stderr + (run_dir / "engine.log").read_text()
+    actual = read_requests(run_dir)[2]
+    assert actual["messages"] == expected["messages"]
+    assert actual["tools"] == expected["tools"]
+    assert '"kind":"checkpoint_verified"' in (run_dir / "engine.log").read_text()
+
+
+def test_full_replay_verifies_check_receipt_request_in_flight(tmp_path, monkeypatch):
+    monkeypatch.setenv("STATEFRAME_CHECKPOINT", "off")
+    _, run_dir, _ = _interrupted_run(
+        tmp_path, script_name="checkpoint_resume.script.json",
+        task="Set app.py VALUE to after and verify it")
+    recorded = (run_dir / "wire" / "0002.request.json").read_bytes()
+    assert b"check-execution:" in recorded and b"check-receipt:" in recorded
+    remaining = json.loads((FIXTURES / "scripts" / "resume_remaining.script.json").read_text())
+    remaining.pop("tokenize")
+    script = tmp_path / "remaining.json"
+    script.write_text(json.dumps(remaining))
+    with Endpoint(script) as endpoint:
+        resumed = subprocess.run(
+            [PYTHON, "-m", "stateframe", "resume", str(run_dir), "--endpoint", endpoint.url,
+             "--model", "scripted", "--quiet"], capture_output=True, text=True,
+            env=environment(), timeout=240, check=False)
+    assert resumed.returncode == 0, resumed.stdout + resumed.stderr
+    assert (run_dir / "wire" / "0002.request.json").read_bytes() == recorded
+    assert not (run_dir / "resume-divergence.json").exists()
+
+
+def test_checkpoint_verifies_check_receipt_request_in_flight(tmp_path, monkeypatch):
+    monkeypatch.setenv("STATEFRAME_CHECKPOINT", "save")
+    monkeypatch.setenv("STATEFRAME_CHECKPOINT_EVERY", "1")
+    tokenize_off = tmp_path / "tokenize_off"
+    _, run_dir, _, endpoint, url = _interrupted_run(
+        tmp_path, wait_for_checkpoint=True, pause_at=2,
+        tokenize_off_marker=tokenize_off)
+    recorded = (run_dir / "wire" / "0002.request.json").read_bytes()
+    assert b"check-execution:" in recorded and b"check-receipt:" in recorded
+    tokenize_off.write_text("off\n")
+    try:
+        resumed = subprocess.run(
+            [PYTHON, "-m", "stateframe", "resume", str(run_dir), "--endpoint", url,
+             "--model", "scripted", "--quiet"], capture_output=True, text=True,
+            env=environment(), timeout=240, check=False)
+    finally:
+        endpoint.terminate()
+        endpoint.wait(timeout=5)
+    assert resumed.returncode == 0, resumed.stdout + resumed.stderr
+    assert (run_dir / "wire" / "0002.request.json").read_bytes() == recorded
+    assert '"kind":"checkpoint_verified"' in (run_dir / "engine.log").read_text()
+    assert not (run_dir / "resume-divergence.json").exists()
+
+
+def test_checkpoint_off_on_resume_skips_restore_and_later_saves(tmp_path, monkeypatch):
+    monkeypatch.setenv("STATEFRAME_CHECKPOINT", "save")
+    _, run_dir, _, endpoint, url = _interrupted_run(tmp_path, wait_for_checkpoint=True)
+    try:
+        env = environment()
+        env["STATEFRAME_CHECKPOINT"] = "off"
+        resumed = subprocess.run(
+            [PYTHON, "-m", "stateframe", "resume", str(run_dir), "--endpoint", url,
+             "--model", "scripted", "--quiet"], capture_output=True, text=True,
+            env=env, timeout=240, check=False)
+    finally:
+        endpoint.terminate()
+        endpoint.wait(timeout=5)
+    assert resumed.returncode == 0, resumed.stdout + resumed.stderr
+    assert json.loads((run_dir / "spec.json").read_text())["environment"]["STATEFRAME_CHECKPOINT"] == "off"
+    assert not (run_dir / "checkpoints").exists()
+    assert '"kind":"checkpoint_verified"' not in (run_dir / "engine.log").read_text()
+
+
+def test_checkpoint_hex_mismatch_refuses_after_fallback(tmp_path, monkeypatch):
+    monkeypatch.setenv("STATEFRAME_CHECKPOINT", "save")
+    original_hex = "a" * 32
+    task = f"Set app.py VALUE to after and verify it. Reference {original_hex}."
+    _, run_dir, _, endpoint, url = _interrupted_run(
+        tmp_path, wait_for_checkpoint=True, checkpoint_task=task)
+    pending = run_dir / "wire" / "0003.request.json"
+    raw = pending.read_bytes()
+    assert original_hex.encode() in raw
+    pending.write_bytes(raw.replace(original_hex.encode(), b"b" * 32))
+    try:
+        resumed = subprocess.run(
+            [PYTHON, "-m", "stateframe", "resume", str(run_dir), "--endpoint", url,
+             "--model", "scripted", "--quiet"], capture_output=True, text=True,
+            env=environment(), timeout=240, check=False)
+    finally:
+        endpoint.terminate()
+        endpoint.wait(timeout=5)
+    assert resumed.returncode != 0, resumed.stdout + resumed.stderr
+    spec = json.loads((run_dir / "spec.json").read_text())
+    assert "CheckpointUnfaithful" in spec["resume"]["checkpoint_refused"]
+    assert (run_dir / "attempts" / "2" / "checkpoint-refused.json").is_file()
+    assert "ReplayUnfaithful" in (run_dir / "engine.log").read_text()
+    assert json.loads((run_dir / "summary.json").read_text())["succeeded"] is False
 
 
 def test_e23_full_network_shell_requires_replay_external(tmp_path):

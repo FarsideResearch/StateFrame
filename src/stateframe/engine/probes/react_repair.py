@@ -7693,7 +7693,12 @@ def work(d, *, resume=None):
 
         # True save/load resume (kernel_checkpoint): restore before the loop, snapshot at each boundary.
         import kernel_checkpoint as _kernel_checkpoint
-        _kernel_checkpoint.restore_point(sys._getframe(), POC)
+        _checkpoint_restored = _kernel_checkpoint.restore_point(sys._getframe(), POC)
+        if _checkpoint_restored and _hook_wiring_for_run is not None:
+            try:
+                _hook_wiring_for_run.rebind_after_checkpoint(root, d, baseline_tests, measurement)
+            except Exception as _error:  # noqa: BLE001 - a failed rebind must fall back to replay
+                _kernel_checkpoint.refuse_restored_setup(POC.parent, _error)
         for step in step_indices(step + 1, _loop_limit):
             if _hook_wiring_for_run is not None and _pending_hook_action is not None:
                 _hook_name, _hook_args, _hook_call_id, _hook_toolcall = _pending_hook_action
