@@ -828,7 +828,7 @@ def _apply_deferred_delivery_status(
     verified_complete_set = _verified_complete_final_wire_paths(receipt, selected_paths)
     if isinstance(plan, dict):
         _prune_verified_complete_path_omissions(plan, verified_complete_set)
-    if not notice_verified:
+    def promote_complete() -> tuple[str, ...]:
         if (
             selected_paths
             and selected_paths.issubset(verified_complete_set)
@@ -839,6 +839,9 @@ def _apply_deferred_delivery_status(
         ):
             _mark_complete_delivery_status(plan, receipt)
         return ()
+
+    if not notice_verified:
+        return promote_complete()
     delivery = plan.get("delivery")
     revisions = plan.get("revisions")
     revisions = revisions if isinstance(revisions, Mapping) else {}
@@ -888,7 +891,9 @@ def _apply_deferred_delivery_status(
             })
         verified.append(path)
     if not verified:
-        return ()
+        # Every declared deferral was re-read and is complete on this wire; the
+        # historical notice in the stable prefix must not keep the receipt PARTIAL.
+        return promote_complete()
 
     verified_set = set(verified)
     has_omissions = _plan_has_relevant_omissions(

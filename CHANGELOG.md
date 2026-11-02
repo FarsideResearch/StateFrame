@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.3.5 (2026-11-02)
+
+- Fix runs stopping mid-run with `FrameRequestAllocationError ... failures=source_delivery_partial` after the agent re-read a file that an earlier, fuller request had deferred. The old deferral notice stays in the request's stable prefix, so the source proof still saw a declared deferral, skipped the file because it was now complete, found nothing left to defer and returned before marking the delivery complete. The request was refused with no actual source missing. A delivery whose deferred files are all complete and verified on the final wire is now marked complete, the same way a delivery without a deferral notice already was.
+- Measured on a recorded failing run replayed through a scripted endpoint at the default budget: 0.3.4 refused the 7th request; this release sent all 37 and finished. Runs that never hit the case send the same requests byte for byte.
+
 ## 0.3.4 (2026-11-02)
 
 - A Linux sandbox no longer drops a read-only mount that crosses a host mount boundary. Since 0.2.12 a read-only path beneath a read-only-mounted parent is not mounted again; a recursive bind can omit unbindable submounts, so the child now keeps its own mount when the host has a mount point between the two. Paths under the sandbox's own `/dev` and `/proc` keep theirs too, and if the host mount table cannot be read, nothing is pruned.
