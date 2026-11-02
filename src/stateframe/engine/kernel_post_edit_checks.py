@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from kernel_stub_gate import duplicate_definitions, unimplemented_functions
-from kernel_test_python import test_python
+from kernel_test_python import selected_test_python
 
 
 MODE_ENV = "STATEFRAME_POST_EDIT_CHECKS"
@@ -464,7 +464,7 @@ def import_status(checkout: Path, path: Path, *, source: str | None = None) -> I
             "sys.modules[name] = module; "
             "exec(compile(sys.stdin.read(), filename, 'exec'), module.__dict__)"
         )
-    command = [test_python(), "-I", "-B", "-c", code, str(checkout), module, str(path)]
+    command = [selected_test_python(), "-I", "-B", "-c", code, str(checkout), module, str(path)]
     try:
         result = run_probe(command, checkout, timeout=10,
                            stdin=source.encode() if source is not None else None)

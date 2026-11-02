@@ -647,8 +647,8 @@ class ProbeRunner:
         self.wall_seconds = min(MAX_WALL_SECONDS, max(0.001, float(wall_seconds)))
         self.cpu_seconds = min(MAX_CPU_SECONDS, max(0.001, float(cpu_seconds)))
         self.memory_bytes = min(MAX_MEMORY_BYTES, max(1, int(memory_bytes)))
-        from kernel_test_python import test_python
-        self.executable = executable if isinstance(executable, str) and executable else test_python()
+        from kernel_test_python import selected_test_python
+        self.executable = executable if isinstance(executable, str) and executable else selected_test_python()
 
     def _definition(self, code: str, question: str | None,
                     revision: str) -> ProbeDefinition:

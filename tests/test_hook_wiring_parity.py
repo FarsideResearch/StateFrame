@@ -23,6 +23,8 @@ from stateframe.scripted_endpoint import Script, ScriptStepUnavailable, serve
 CURRENT = Path(__file__).resolve().parents[1]
 _baseline_path = os.environ.get("SF_TEST_PARITY_BASELINE")
 BASELINE = Path(_baseline_path).expanduser().resolve() if _baseline_path else None
+RUNNER_SPEC_FIELDS = {"check_cmd", "check_source", "protect_tests",
+                      "protected_test_globs", "runner_kind"}
 pytestmark = [
     pytest.mark.host_sandbox,
     pytest.mark.skipif(
@@ -162,7 +164,8 @@ def test_no_hooks_raw_requests_and_journal_match_release(tmp_path):
     current = _run_checkout(
         CURRENT, repo, run, launcher, wrapper, tmp_path / "current_modules.json"
     )
-    assert current[:4] == baseline[:4]
+    assert current[:3] == baseline[:3]
+    assert current[3] == baseline[3] | RUNNER_SPEC_FIELDS
     assert current[5], "fixture did not exercise request-diet journal payloads"
     assert current[5] == baseline[5]
     assert "hooks" not in current[3]
@@ -190,7 +193,8 @@ def test_no_hooks_regular_stateframe_file_matches_release(tmp_path):
     baseline = _run_checkout(BASELINE, repo, run, launcher, wrapper, tmp_path / "baseline.json")
     run.rename(tmp_path / "baseline_run")
     current = _run_checkout(CURRENT, repo, run, launcher, wrapper, tmp_path / "current.json")
-    assert current[:4] == baseline[:4]
+    assert current[:3] == baseline[:3]
+    assert current[3] == baseline[3] | RUNNER_SPEC_FIELDS
     assert current[5] == baseline[5]
 
 

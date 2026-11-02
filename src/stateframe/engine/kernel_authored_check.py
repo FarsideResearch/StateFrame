@@ -696,8 +696,8 @@ class PythonUnittestAdapter:
                 }
                 environment["PYTHONPATH"] = str(root)
                 environment.setdefault("PYTHONNOUSERSITE", "1")
-                from kernel_test_python import test_python
-                command = [test_python(), "-B", "-m", "unittest",
+                from kernel_test_python import selected_test_python
+                command = [selected_test_python(), "-B", "-m", "unittest",
                            self._unittest_target(_text(check.get("selector")))]
                 runner = self._runner
                 if runner is None:

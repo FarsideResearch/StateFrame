@@ -2124,7 +2124,7 @@ def run_manifest(*, model: str, tools: object, consumers: Mapping[str, object],
     from kernel_context import SELECTION_POLICY_VERSION
     from kernel_intervention_policy import interventions_enabled
     from kernel_step_contract import working_view_mode
-    from kernel_test_python import test_python
+    from kernel_test_python import selected_test_python
     selected_reasoning = reasoning_profile()
     try:
         from kernel_idealpath import enabled as idealpath_enabled
@@ -2174,7 +2174,7 @@ def run_manifest(*, model: str, tools: object, consumers: Mapping[str, object],
         "tool_output_token_limits": dict(zip(('initial', 'maximum'), output_token_limits())),
         "seed": int(os.environ["REACT_SEED"]) if "REACT_SEED" in os.environ else MISSING,
         "python": platform.python_version(), "platform": platform.platform(),
-        "project_test_python": test_python(),
+        "project_test_python": selected_test_python(),
         "source_digests": source_digests,
         "deployed_source_digest": digest(source_digests),
         "reasoning_profile": selected_reasoning.to_dict(),

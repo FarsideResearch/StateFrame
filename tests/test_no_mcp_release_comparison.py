@@ -42,7 +42,13 @@ def test_no_mcp_requests_match_release_0_2_3(tmp_path):
     script = ROOT / "examples/discount_bug.script.json"
     previous = capture(baseline, sys.executable, launcher, script, repo, run_dir)
     run_dir.rename(tmp_path / "baseline-run")
-    current = capture(ROOT, sys.executable, launcher, script, repo, run_dir)
+    # The default now treats unittest as a generic check and permits test edits.
+    # It must still send a request; pin the old modes only for byte comparison.
+    default = capture(ROOT, sys.executable, launcher, script, repo, run_dir)
+    assert default
+    run_dir.rename(tmp_path / "default-run")
+    current = capture(ROOT, sys.executable, launcher, script, repo, run_dir,
+                      legacy_mode=True)
     previous_sha = hashlib.sha256(previous).hexdigest()
     current_sha = hashlib.sha256(current).hexdigest()
     assert previous == current, (f"0.2.3 commit {BASELINE_COMMIT} tree {tree}: "

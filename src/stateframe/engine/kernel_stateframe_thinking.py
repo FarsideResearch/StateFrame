@@ -16,7 +16,7 @@ import re
 import tempfile
 from collections.abc import Mapping, Sequence
 from pathlib import Path
-from kernel_test_python import test_python
+from kernel_test_python import selected_test_python
 
 MODE_ENV = "STATEFRAME_THINK"
 VALID_MODES = {"off", "shadow", "assisted"}
@@ -237,7 +237,7 @@ def fresh_isolated_import(source: str, path: str = "candidate.py", *, timeout_s:
         try:
             from kernel_execution_policy import ExecutionPolicyError, run_sandboxed
             execution = run_sandboxed(
-                [test_python(), "-I", "-c", _IMPORT_PROBE],
+                [selected_test_python(), "-I", "-c", _IMPORT_PROBE],
                 root,
                 input_data=json.dumps(payload),
                 timeout=max(0.05, float(timeout_s)),
@@ -519,7 +519,7 @@ def _run_timeline(source: str, path: str, sequence: Sequence[object], *, timeout
         try:
             from kernel_execution_policy import ExecutionPolicyError, run_sandboxed
             execution = run_sandboxed(
-                [test_python(), "-I", "-c", _TIMELINE_WORKER],
+                [selected_test_python(), "-I", "-c", _TIMELINE_WORKER],
                 root,
                 input_data=json.dumps(payload),
                 timeout=max(0.05, float(timeout_s)),

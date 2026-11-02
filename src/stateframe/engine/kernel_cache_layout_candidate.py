@@ -16,17 +16,24 @@ _COMMIT_LOCK = threading.RLock()
 
 
 def registered_done_for_wire(capture, registered, tools):
-    """Resolve only the current N4 description projection of registered done."""
-    from kernel_stateframe_tool_stable import ToolSurfacePending, _semantic_schema
+    """Resolve a description projection from the current bound final surface."""
+    from kernel_request_tool_surface import SURFACE_SCHEMA
+    from kernel_stateframe_tool_stable import _semantic_schema
 
-    pending = getattr(capture, "_stateframe_tool_surface_pending", None)
-    if (not isinstance(pending, ToolSurfacePending) or pending.stable_mode != "on"
-            or pending.request_id != getattr(capture, "request_id", None)
-            or pending.candidate_state.run_id != getattr(getattr(capture, "journal", None), "run_id", None)
+    # Recovery can replace a request after its provisional receipt is made.
+    # The bound final surface is current; parameter changes remain inadmissible.
+    surface = getattr(capture, "final_tool_surface", None)
+    if (not isinstance(surface, Mapping)
+            or surface.get("schema") != SURFACE_SCHEMA
+            or surface.get("tools") is not tools
+            or surface.get("request_id") != getattr(capture, "request_id", None)
             or not isinstance(tools, list)):
         return registered
-    projected = dict(pending.candidate_state.schemas).get("done")
-    if (isinstance(projected, Mapping) and projected in tools
+    projected = next((tool for tool in tools
+                      if isinstance(tool, Mapping)
+                      and isinstance(tool.get("function"), Mapping)
+                      and tool["function"].get("name") == "done"), None)
+    if (isinstance(projected, Mapping)
             and _semantic_schema(projected) == _semantic_schema(registered)):
         return copy.deepcopy(projected)
     return registered

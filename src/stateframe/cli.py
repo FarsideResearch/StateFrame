@@ -71,11 +71,18 @@ def _add_task_arguments(command: argparse.ArgumentParser, *, for_run: bool = Fal
     command.add_argument("--max-turns", type=_turns, default=None,
                          help="model turn limit; 0 = no limit (default: the profile's step limit)")
     command.add_argument("--test-cmd",
-                         help="command that decides pass/fail before and after "
-                              "(default: python -m pytest -q <checks>)")
+                         help="command that decides pass/fail before, during and after "
+                               "(default: python -m pytest -q <checks>)")
+    command.add_argument("--check-cmd", help="explicit non-test check command for a repository without tests")
+    command.add_argument("--runner-kind", choices=("auto", "pytest", "generic"), default="auto",
+                         help="check runner kind (default: detect pytest from --test-cmd)")
+    command.add_argument("--protected-test-glob", action="append", default=[], metavar="GLOB",
+                          help="also protect existing generic-runner test files matching this relative glob")
+    command.add_argument("--protect-tests", choices=("task", "all", "off"),
+                         help="which existing tests to lock (default: profile setting)")
     command.add_argument("--check", action="append", default=[], metavar="PATH",
-                         help="pytest file the engine runs as its public check (repeatable; "
-                              "default: every test_*.py / *_test.py)")
+                         help="pytest file the engine runs as its public check, or an additional "
+                              "protected file for a generic command (repeatable)")
     command.add_argument("--test-env", action="append", default=[], type=_key_value,
                          metavar="KEY=VALUE",
                          help="environment for your tests (engine checks and --test-cmd), e.g. "
@@ -101,8 +108,8 @@ def _add_task_arguments(command: argparse.ArgumentParser, *, for_run: bool = Fal
     command.add_argument("--profile", default=profiles.DEFAULT,
                          help=f"switch profile (default {profiles.DEFAULT}; or a profile file)")
     command.add_argument("--test-python", metavar="PATH",
-                         help="interpreter that runs your tests: the one with your project's "
-                              "dependencies and pytest (default: the repo's .venv/, venv/ or env/, "
+                         help="interpreter for Python checks: the one with your project's "
+                              "dependencies and pytest when using pytest (default: the repo's .venv/, venv/ or env/, "
                               "else python3 on PATH)")
     command.add_argument("--python", default=None,
                          help="interpreter for the engine AND your tests (older option; prefer "
@@ -218,7 +225,11 @@ def _run_options(args: argparse.Namespace, endpoint: Endpoint) -> RunOptions:
                             mcp_files=tuple({"path": str(Path(path).expanduser().resolve()), "digest": "pending"}
                                             for path in args.mcp))
     return RunOptions(repo=args.repo, task=getattr(args, "task", ""), endpoint=endpoint,
-                      max_turns=args.max_turns, test_cmd=args.test_cmd, checks=args.check,
+                       max_turns=args.max_turns, test_cmd=args.test_cmd, check_cmd=args.check_cmd,
+                       checks=args.check,
+                      runner_kind=args.runner_kind,
+                       protected_test_globs=args.protected_test_glob,
+                       protect_tests=args.protect_tests,
                       target=args.target, edit_paths=args.edit,
                       test_env=dict(args.test_env), pytest_plugins=args.pytest_plugins,
                       run_dir=getattr(args, "run_dir", None),
@@ -249,15 +260,27 @@ def _print_summary(summary: dict) -> None:
     print(title)
     print(diff if diff else "(no changes)")
     before, after = summary["tests_before"], summary["tests_after"]
-    print("=== tests ===")
-    print(f"before: {'PASS' if before['passed'] else 'FAIL'}  after: "
+    print("=== tests ===" if summary.get("check_source") == "tests" else "=== checks ===")
+    print(f"before: {'PASS' if before['passed'] else 'FAIL' if before['passed'] is False else 'NOT RUN'}  after: "
           f"{summary.get('check_outcome', 'not_run').upper()}  ({after['command']})")
     print("=== run summary ===")
     cached = summary.get("cached_tokens")
     share = summary.get("cached_share")
+    result_line = summary.get("verification")
+    if result_line and summary.get("verification_detail"):
+        result_line += f" ({summary['verification_detail']})"
+    if result_line and summary.get("test_files_changed"):
+        changed = summary["test_files_changed"]
+        test_paths = ", ".join(item["path"] for item in changed)
+        result_line += f"; {len(changed)} test file{'s' if len(changed) != 1 else ''} changed: {test_paths}"
+    if result_line and summary.get("test_lock_note"):
+        result_line += f"; {summary['test_lock_note']}"
     rows = [
         ("outcome", f"runtime={summary['runtime_outcome']} checks={summary['check_outcome']} "
          f"artifact={summary['artifact']}"),
+        *([("result", result_line)] if result_line else []),
+        *([("test evidence", json.dumps(summary["wrong_test_evidence"], sort_keys=True))]
+          if summary.get("wrong_test_evidence") else []),
         ("engine result", summary.get("engine_result")),
         *([("engine error", summary["engine_error_reason"])] if summary.get("engine_error_reason") else []),
         *([("hook containment", summary["hook_containment"])] if summary.get("hook_containment") else []),
@@ -271,6 +294,10 @@ def _print_summary(summary: dict) -> None:
         ("completion tokens", summary.get("completion_tokens")),
         ("wall time", f"{summary.get('wall_seconds')} s"),
         ("files changed", ", ".join(summary.get("files_changed") or []) or "none"),
+        *([("product files changed", ", ".join(summary.get("product_files_changed") or []) or "none"),
+           ("test files changed", f"{len(summary['test_files_changed'])}: " +
+            (", ".join(item["path"] for item in summary["test_files_changed"]) or "none"))]
+          if "test_files_changed" in summary else []),
         ("run directory", summary["run_dir"]),
     ]
     resumed = summary.get("resume")
@@ -286,7 +313,8 @@ def _print_summary(summary: dict) -> None:
     for label, value in rows:
         print(f"{label:>22}: {value}")
     if summary.get("succeeded"):
-        print("checks passed on the saved candidate; correctness not independently established")
+        print(result_line or
+              "checks passed on the saved candidate; correctness not independently established")
     terminal = summary.get("engine_terminal") or {}
     labels = terminal.get("labels") if isinstance(terminal.get("labels"), dict) else {}
     facts = terminal.get("done_facts") if isinstance(terminal.get("done_facts"), dict) else {}

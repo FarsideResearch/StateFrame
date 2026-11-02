@@ -56,6 +56,9 @@ def _options(repo: Path, run_dir: Path, *, hooks=(), in_place=False) -> runner.R
         endpoint=Endpoint.from_args("http://127.0.0.1:8080/v1", "test", None),
         max_turns=1,
         test_cmd="true",
+        # prepare() runs after _run() resolves the check; a plain command resolves to the generic runner.
+        runner_kind="generic",
+        check_source=runner.DECLARED_TEST_SOURCE,
         checks=["tests/test_sample.py"],
         target="sample.py",
         run_dir=run_dir,
@@ -141,6 +144,8 @@ def test_no_hooks_prepare_has_no_hook_spec_or_files(tmp_path):
         "prompt_cache_slot", "test_cmd", "run_identity_seed", "repo", "in_place",
         # Since 0.2.4 every run pins its (possibly empty) skill selection.
         "skills", "skills_digest",
+        # Since 0.2.7 every run pins its resolved check and test-protection settings for resume.
+        "check_cmd", "check_source", "runner_kind", "protected_test_globs", "protect_tests",
     }
     assert json.loads((run / "tool-settings.json").read_text(encoding="utf-8")) == spec["tool_settings"]
     assert not any((run / name).exists() for name in ("hooks", "hook-bundle", "hook-tape.jsonl"))
@@ -231,7 +236,7 @@ def test_prompt_submit_denial_precedes_baseline_and_child(tmp_path, monkeypatch)
     monkeypatch.setattr(hook_host, "HookRunner", DenyingRunner)
     monkeypatch.setattr(Endpoint, "check_locality", lambda _self: None)
     monkeypatch.setattr(Endpoint, "probe", lambda _self: {"model_found": True})
-    monkeypatch.setattr(runner, "_check_python", lambda value: value)
+    monkeypatch.setattr(runner, "_check_python", lambda value, **_options: value)
     monkeypatch.setattr(runner, "_probe_capabilities", lambda _options: {"display": "caps"})
     monkeypatch.setattr(runner, "_select_test_python", lambda _options, _printer: sys.executable)
     monkeypatch.setattr(runner, "check_slot_context", lambda *_args: None)

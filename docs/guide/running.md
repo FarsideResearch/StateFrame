@@ -13,8 +13,12 @@
 ## Common flags
 
 - `--endpoint`, `--model` (or `STATEFRAME_ENDPOINT`, `STATEFRAME_MODEL`): the server and model. Loopback only unless `STATEFRAME_ALLOW_REMOTE_ENDPOINT=1`.
-- `--check PATH` (repeatable): the pytest files that decide pass or fail; default every `test_*.py` / `*_test.py`.
-- `--test-cmd`: the outer before/after command only; it does not replace the engine's checks.
+- `--check PATH` (repeatable): pytest files selected for the default check; for a generic command, extra existing check files to protect.
+- `--test-cmd COMMAND`: run repository tests before, during and after a task. Without it, StateFrame uses `python -m pytest -q` when pytest files exist. A non-pytest command passes only on exit 0. Missing commands, exits 126/127 and timeouts do not pass.
+- `--check-cmd COMMAND`: an explicit non-test command to verify a task, such as `npm run build`. It uses the same sandbox, output bounds and exit-code rules.
+- `--runner-kind auto|pytest|generic`: detect pytest from the command by default, or choose the kind explicitly for a wrapper. Only pytest supports per-test selectors; generic commands run as a whole.
+- `--protect-tests off|task|all`: `off` (default) permits test edits and reports them; `task` locks tests named by the command or selectors and tests failing at the start; `all` locks every pre-existing test as in 0.2. If a generic command has no explicit test file selector, `task` locks every existing test file, including when the starting check passes. The result line reports this fallback.
+- `--protected-test-glob GLOB`: add a repository-relative pattern for test or check resources. Repeat as needed; it is locked when protection applies.
 - `--target`, `--edit`: in repositories over 200 source files, the files the change may touch; the rest is read-only context.
 - `--in-place`: apply a passing result to your repository.
 - `--run-dir`: where to keep the run.
@@ -51,7 +55,13 @@ Hook files named with `--hooks` are explicitly trusted by that command. Project 
 
 ## Which Python runs your tests
 
-The engine runs on StateFrame's own Python. Your tests run on your project's: `--test-python PATH` if given, else the repository's `.venv/`, `venv/` or `env/`, else `python3` on PATH. StateFrame never falls back to its own environment silently, prints the choice at the start of each run, and stops with a clear message if the chosen Python cannot import pytest. `--python PATH` sets one interpreter for both the engine and your tests.
+The engine runs on StateFrame's own Python. Pytest runs on your project's: `--test-python PATH` if given, else the repository's `.venv/`, `venv/` or `env/`, else `python3` on PATH. StateFrame prints the choice and stops if that Python cannot import pytest. A generic check does not import pytest. `--python PATH` sets one interpreter for both the engine and Python checks.
+
+With no tests or explicit command, StateFrame uses the first declared check it finds: Python project metadata selects `python -m compileall -q` over product Python sources; `package.json` selects `typecheck`, then `build`, then `lint` using the lockfile's package manager or npm; `go.mod` selects `go build ./...`; `Cargo.toml` selects `cargo check`; a Makefile selects `check`, then `build`. If none exists, an agent-written Python check can provide evidence only when it fails on the original and passes on the candidate in the check sandbox. With no check at all, the result says `unverified: review the diff`. Result labels distinguish tests, check commands, builds and agent-written checks. An explicit `--test-cmd` in a repository with no discovered test files is labeled a check command, not a test pass.
+
+Test discovery covers existing `test_*.py`, `*_test.py`, `conftest.py`, `*.test.*`, `*.spec.*`, `*_test.go`, `test*.sh`, `check*.sh`, and files under `tests/`, `test/` or `__tests__/`. In `all` mode, a script directly named in a generic command, `package.json`, `Makefile`, `Cargo.toml`, and Vitest, Jest and Playwright config files are protected too. Pytest's `all` mode retains its 0.2 protection. In `off` and `task`, each changed test is reported separately. Potentially removed assertions or tests, constant-true assertions, dropped Python predicate checks, new skip/xfail/only/todo markers and loosened comparisons are flagged by file and test. Python is checked with syntax analysis; other languages use a line heuristic, which can miss semantic changes. A run with a weakening finding includes it in the result line and summary.
+
+For example, `stateframe run --repo ~/code/shop --task "Fix the failing check" --test-cmd 'npm test' --protect-tests all --protected-test-glob 'scripts/verify-*'` uses the package test command and locks matching scripts alongside the defaults. The command must be executable in the check sandbox. Its exit code decides whether the check passed; the result says `verified by tests` only when the completed command prints a recognized positive test-count receipt. Otherwise it says `verified by check command`. Per-test selectors are available only with pytest. In generic mode, or with pytest and `--protect-tests task` or `off`, an agent can report a wrong judging test with its path, name, assertion, reason and observed behavior; the run stops without claiming a pass. The pytest `all` done-tool schema remains frozen and does not advertise `test_wrong`.
 
 Example, a project with its own virtual environment somewhere else:
 

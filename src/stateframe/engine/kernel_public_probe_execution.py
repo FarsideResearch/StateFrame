@@ -9,9 +9,9 @@ import subprocess
 import tempfile
 import time
 
-from capability_study_support import test_process_lock
+from capability_study_support import locked_test_process
 from kernel_test_isolation import isolated_command
-from kernel_test_python import test_python
+from kernel_test_python import selected_test_python
 from kernel_public_probe_sandbox import RUNNER_SOURCE
 
 
@@ -52,7 +52,7 @@ def execute_probe(root: Path, product_files: dict, source: str, output: Path, *,
         logfile.parent.mkdir(parents=True, exist_ok=True)
         lock = Path(os.environ.get('CAPABILITY_TEST_LOCK', str(output / 'public-probe-pytest.lock')))
         timed_out = False
-        with test_process_lock(lock, output / 'public-probe-test-lock.jsonl', deadline=deadline):
+        with locked_test_process(lock, output / 'public-probe-test-lock.jsonl', deadline=deadline):
             allowance = 15 if deadline is None else min(15, deadline - time.monotonic())
             if allowance <= 0:
                 raise TimeoutError('public probe deadline expired before execution')
@@ -60,7 +60,7 @@ def execute_probe(root: Path, product_files: dict, source: str, output: Path, *,
                 from kernel_execution_policy import sandboxed_popen
                 with sandboxed_popen(
                     [
-                        test_python(), '-I', '-c', RUNNER_SOURCE, '-q', '-x', '--noconftest',
+                        selected_test_python(), '-I', '-c', RUNNER_SOURCE, '-q', '-x', '--noconftest',
                         '-c', '/dev/null', '--rootdir', str(scratch), '-p', 'no:cacheprovider',
                         '-o', f'pythonpath={scratch}', 'tests/test_public_probe.py',
                     ],

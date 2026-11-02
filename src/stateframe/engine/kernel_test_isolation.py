@@ -23,9 +23,11 @@ import subprocess
 import sys
 
 if __package__:
-    from .kernel_test_python import test_python
+    from .kernel_exec_capability import system_runtime_read_roots
+    from .kernel_test_python import selected_test_python
 else:
-    from kernel_test_python import test_python
+    from kernel_exec_capability import system_runtime_read_roots
+    from kernel_test_python import selected_test_python
 
 
 # Host task policy is read LAZILY at sandbox-build time, never frozen at import: a module imported
@@ -113,6 +115,7 @@ def _interpreter_roots(selected: Path) -> set[str]:
 
 def isolated_command(command: list[str], root: Path, env: dict[str, str], *,
                      readonly_workspace: bool = False,
+                     generic_check: bool = False,
                      nproc_budget: int | None = None) -> tuple[list[str], dict[str, str]]:
     executable = backend()
     root = root.resolve()
@@ -140,7 +143,7 @@ def isolated_command(command: list[str], root: Path, env: dict[str, str], *,
     if host_task_pytest_plugins() == "installed":
         clean.pop("PYTEST_DISABLE_PLUGIN_AUTOLOAD", None)
     relay_dir = _declared_relay_dir(clean)
-    selected = Path(test_python())
+    selected = Path(selected_test_python())
     resolved_selected = selected.resolve()
     interpreter_roots = (_interpreter_roots(selected)
                          if selected != Path(sys.executable) else set())
@@ -149,6 +152,30 @@ def isolated_command(command: list[str], root: Path, env: dict[str, str], *,
                     sys.prefix, sys.base_prefix, str(Path(sys.executable).parent),
                     str(Path(sys.prefix).resolve()), str(Path(sys.base_prefix).resolve()),
                     str(Path(sys.executable).resolve().parent), str(root)}
+        if generic_check:
+            readable.update(map(str, system_runtime_read_roots()))
+        # sandbox-exec resolves a bare argv[0] itself. Admit only the host-declared
+        # executable and its symlink target so PATH commands outside Python's roots
+        # (for example /bin/sh or a Homebrew tool) can start.
+        program = command[0]
+        if generic_check and "/" in program and not Path(program).is_absolute():
+            resolved_program = str((root / program).resolve())
+        else:
+            resolved_program = (program if Path(program).is_absolute() else
+                                shutil.which(program, path=clean.get("PATH")))
+        # Package-manager launchers commonly use /usr/bin/env node. Admit that
+        # one installed interpreter for a host-selected package-manager command.
+        if generic_check and Path(program).name in {"npm", "npx", "pnpm", "yarn"}:
+            node = shutil.which("node", path=clean.get("PATH"))
+            if node:
+                for node_path in (Path(node), Path(node).resolve()):
+                    if node_path.is_file():
+                        readable.add(str(node_path))
+        if resolved_program and Path(resolved_program).is_absolute():
+            for executable_path in (Path(resolved_program), Path(resolved_program).resolve()):
+                if (executable_path.is_file() and
+                        not any(executable_path.is_relative_to(Path(allowed)) for allowed in readable)):
+                    readable.add(str(executable_path))
         if selected != Path(sys.executable):
             # A selected executable can sit directly under HOME. Permit the file,
             # not its entire parent directory, before adding verified Python roots.

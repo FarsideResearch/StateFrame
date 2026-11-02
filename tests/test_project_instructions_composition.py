@@ -1,4 +1,4 @@
-"""Project instructions composed with hooks, a selected skill and an MCP server in one run."""
+"""Project instructions composed with hooks, a selected skill, an MCP server and test-runner checks."""
 from __future__ import annotations
 
 import json
@@ -39,11 +39,22 @@ def _inputs(tmp_path: Path) -> tuple[Path, tuple[str, ...]]:
     return repo, flags, script
 
 
-def _case(tmp_path: Path, name: str, *extra: str):
+# Test-runner modes: the default non-pytest --test-cmd (unittest) with each protection setting,
+# and an explicit --check-cmd with no test command.
+RUNNERS = {
+    "test-cmd-protect-all": (("--protect-tests", "all"), True),
+    "test-cmd-protect-task": (("--protect-tests", "task"), True),
+    "check-cmd": (("--check-cmd", "python -m py_compile app.py"), False),
+}
+
+
+def _case(tmp_path: Path, name: str, runner: str, *extra: str):
     base = tmp_path / name
     base.mkdir()
     repo, flags, script = _inputs(base)
-    case = run_case(base, str(script), repo=repo, flags=(*flags, *extra))
+    runner_flags, default_test_cmd = RUNNERS[runner]
+    case = run_case(base, str(script), repo=repo, flags=(*flags, *runner_flags, *extra),
+                    default_test_cmd=default_test_cmd)
     assert case.process.returncode == 0, (case.process.stdout, case.process.stderr, case.summary)
     assert case.summary and case.summary["succeeded"], case.summary
     return case
@@ -53,9 +64,10 @@ def _text(message: dict) -> str:
     return str(message.get("content") or "")
 
 
-def test_instructions_compose_with_hooks_skills_and_mcp(tmp_path):
-    plain = _case(tmp_path, "plain")
-    framed = _case(tmp_path, "framed", "--instructions")
+@pytest.mark.parametrize("runner", sorted(RUNNERS))
+def test_instructions_compose_with_hooks_skills_mcp_and_test_runners(tmp_path, runner):
+    plain = _case(tmp_path, "plain", runner)
+    framed = _case(tmp_path, "framed", runner, "--instructions")
     assert framed.requests and len(framed.requests) == len(plain.requests)
     for request in framed.requests:
         messages = request["messages"]

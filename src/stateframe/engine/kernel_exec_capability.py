@@ -205,6 +205,38 @@ def _macos_developer_roots() -> list[Path]:
     return roots
 
 
+def system_runtime_read_roots() -> tuple[Path, ...]:
+    """Read-only system files needed by shell commands and generic checks."""
+    # macOS resolves /bin/sh through /private/var/select/sh; hiding that link
+    # makes shell-script checks fail before they can inspect the repository.
+    roots = [Path(p) for p in ("/usr", "/bin", "/sbin", "/lib", "/lib64",
+                               "/System", "/Library/Apple", "/private/var/select")
+             if Path(p).exists()]
+    roots += _macos_developer_roots()
+    if sys.platform == "darwin":
+        gitconfig = Path("/etc/gitconfig")
+        if gitconfig.is_file():
+            roots.extend(symlink_hops(gitconfig))
+        # Node and OpenSSL load configuration outside their installed-code
+        # roots. Admit only SSL configuration, never all of /etc or Homebrew etc.
+        ssl = Path("/etc/ssl")
+        if ssl.exists():
+            roots.extend(symlink_hops(ssl))
+        for prefix in (Path("/opt/homebrew"), Path("/usr/local")):
+            etc = prefix / "etc"
+            if etc.is_dir():
+                for path in etc.glob("openssl*"):
+                    if path.is_dir() or path.is_file():
+                        roots.extend(symlink_hops(path))
+    # Installed libraries may be in sibling formulae, not the executable's
+    # directory. Homebrew var and the user's home are never admitted.
+    for prefix in (Path("/opt/homebrew"), Path("/usr/local")):
+        if (prefix / "Cellar").is_dir():
+            roots.extend(path for name in ("Cellar", "opt", "lib")
+                         if (path := prefix / name).is_dir())
+    return tuple(sorted(set(roots)))
+
+
 def shell_capability(*, workspace, run_env_dir, scratch_home, network, writable,
                      extra_read_roots=(), path_dirs=()) -> ExecCapability:
     home = Path(scratch_home).resolve(strict=True)
@@ -212,23 +244,9 @@ def shell_capability(*, workspace, run_env_dir, scratch_home, network, writable,
     paths = [run_env / "bin", *(Path(p).resolve(strict=True) for p in path_dirs),
              Path("/usr/bin"), Path("/bin"), Path("/usr/sbin"), Path("/sbin")]
     # Runtime libraries are explicit authority in the resulting capability/hash.
-    # /private/var/select holds macOS's /bin/sh selection link (sh -> bash|dash); without it
-    # every /bin/sh start prints "Error opening /private/var/select/sh".
-    roots = [Path(p) for p in ("/usr", "/bin", "/sbin", "/lib", "/lib64",
-                              "/System", "/Library/Apple", "/private/var/select") if Path(p).exists()]
-    roots += [Path(sys.base_prefix), Path(sys.prefix),
-              Path(sys.executable), *extra_read_roots]
-    roots += _macos_developer_roots()
+    roots = [*system_runtime_read_roots(), Path(sys.base_prefix), Path(sys.prefix),
+             Path(sys.executable), *extra_read_roots]
     system_gitconfig = Path("/etc/gitconfig")
-    if sys.platform == "darwin" and system_gitconfig.is_file():
-        roots.extend(symlink_hops(system_gitconfig))
-    # Homebrew binaries and Python extensions load libraries from sibling
-    # formulae, not just executable directories. Match the test boundary's
-    # installed-code roots; never admit Homebrew var or the user's home.
-    for prefix in (Path("/opt/homebrew"), Path("/usr/local")):
-        if (prefix / "Cellar").is_dir():
-            roots.extend(path for name in ("Cellar", "opt", "lib")
-                         if (path := prefix / name).is_dir())
     # Freeze executable and shebang authority for shell, jobs and derived custom
     # capabilities. Runtime libraries retain the existing resolved-root policy.
     for directory in dict.fromkeys(paths):

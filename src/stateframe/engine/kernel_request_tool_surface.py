@@ -425,6 +425,7 @@ def author_final_tool_surface(
         side_call: bool = False,
         bind_current_surface: bool = False,
         stabilize_cache_tools: bool = False,
+        framefit5_preassembly: bool = False,
 ) -> Mapping[str, object] | None:
     """Project once, then bind the exact schemas, names and digest to each gate."""
     request_key = str(request_id or "")
@@ -673,7 +674,8 @@ def author_final_tool_surface(
                 raise FrameAllocationReplanNeeded("final tool schema changed after frame allocation")
         from kernel_completion_owner import bind_final_tool_surface
         if not bind_final_tool_surface(
-                runtime, capture, surface, messages=body.get("messages")):
+                runtime, capture, surface, messages=body.get("messages"),
+                framefit5_preassembly=framefit5_preassembly):
             raise _SurfaceUnavailable("completion_owner_contract_unbound")
 
         frozen = getattr(runtime, "_greenlock_frozen_menu", None)

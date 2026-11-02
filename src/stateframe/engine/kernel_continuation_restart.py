@@ -1127,7 +1127,10 @@ def restore_runtime(runtime):
     runtime.protected_tests = {root / name: sha for name, sha in initial["protected_tests"].items()}
     runtime.live_projection = LiveProjection(task_id=runtime.owner.task_id,
         symbol=runtime.owner.fn, path=runtime.target.relative_to(root).as_posix(),
-        brief=runtime.information.ordinary_brief, selectors=list(runtime.owner.f2p_ids),
+        brief=runtime.information.ordinary_brief, selectors=(
+            runtime.required_public_selectors()
+            if getattr(runtime.owner, "task_row", {}).get("runner_kind") == "generic"
+            else list(runtime.owner.f2p_ids)),
         binding=initial["binding"])
     projection = saved["projection"]
     if projection is not None:

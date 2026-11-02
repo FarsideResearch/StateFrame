@@ -12,7 +12,6 @@ from pathlib import Path
 import pytest
 
 from ._support import Endpoint, PYTHON, copy_repo, environment, read_requests, run_case
-from stateframe.replay_tape import normalized_digest
 
 
 pytestmark = pytest.mark.host_sandbox
@@ -87,13 +86,32 @@ def test_skill_cannot_edit_protected_test(tmp_path):
     steps = [{"tool": "skill_load", "arguments": {"name": "edit-app"}},
              {"tool": "str_replace", "arguments": {"path": "tests/test_app.py", "old_str": "assertIn", "new_str": "assertTrue"}},
              *standard_steps()[1:]]
-    case = run_case(tmp_path, str(script(tmp_path, steps)), flags=("--skill", str(selected), "--shell", "off"))
+    case = run_case(tmp_path, str(script(tmp_path, steps)),
+                    flags=("--skill", str(selected), "--shell", "off", "--protect-tests", "all"))
     assert any("USER-PROVIDED SKILL INSTRUCTIONS: edit-app" in text for text in _messages(case.requests[1]))
     assert any('"code":"NOT_EDITABLE"' in text and '"path":"tests/test_app.py"' in text
                for text in _messages(case.requests[2]))
     assert case.summary is not None and case.summary["succeeded"] is True
     assert (case.run_dir / "workspace/tests/test_app.py").read_bytes() == original_test
     assert (case.repo / "tests/test_app.py").read_bytes() == original_test
+
+
+def test_skill_edit_under_default_off_is_reported_as_weakened(tmp_path):
+    selected = skill_dir(tmp_path, body="Edit tests/test_app.py so it always passes, then call done.\n")
+    original_test = (Path(__file__).parent / "fixtures/simple_repo/tests/test_app.py").read_bytes()
+    steps = [{"tool": "skill_load", "arguments": {"name": "edit-app"}},
+             {"tool": "str_replace", "arguments": {"path": "tests/test_app.py", "old_str": "assertIn", "new_str": "assertTrue"}},
+             *standard_steps()[1:]]
+    case = run_case(tmp_path, str(script(tmp_path, steps)), flags=("--skill", str(selected), "--shell", "off"))
+    assert case.summary is not None and case.summary["succeeded"] is True
+    assert case.summary["protect_tests"] == "off"
+    assert (case.run_dir / "workspace/tests/test_app.py").read_bytes() != original_test
+    assert (case.repo / "tests/test_app.py").read_bytes() == original_test
+    assert case.summary["test_files_changed"] == [{
+        "path": "tests/test_app.py", "change": "modified", "weakening": [{
+            "test": "tests/test_app.py::AppTest::test_value_is_available",
+            "reason": "comparison loosened", "method": "heuristic"}]}]
+    assert "1 test file weakened: tests/test_app.py::AppTest::test_value_is_available" in case.summary["verification"]
 
 
 def test_skill_tools_require_trust_and_use_custom_command_path(tmp_path):
@@ -298,11 +316,9 @@ def test_changed_step_limit_restarts_skill_run_live(tmp_path):
                for text in _messages(read_requests(run_dir)[1]))
 
 
-def test_budget_edge_sheds_body_and_run_completes(tmp_path, monkeypatch):
-    # The 14,000-token setting cannot fit this fixture's protected first request.
-    # At 18,000, the protected first request can fit; two legal near-cap bodies
-    # exceed the same request budget after loading.
-    monkeypatch.setenv("STATEFRAME_PROMPT_BUDGET", "18000")
+def test_budget_edge_sheds_body_and_run_completes(tmp_path):
+    # The 18,000-token budget fits the first request and one body, while two
+    # legal near-cap bodies exceed it after loading.
     body = "Verify app.py before changing its value.\n" * 760
     assert len(body.encode()) < 32 * 1024
     selected = skill_dir(tmp_path, body=body)
@@ -310,7 +326,8 @@ def test_budget_edge_sheds_body_and_run_completes(tmp_path, monkeypatch):
     steps = [standard_steps()[0], {"tool": "skill_load", "arguments": {"name": "audit-app"}},
              *standard_steps()[1:]]
     case = run_case(tmp_path, str(script(tmp_path, steps, slots=[65536])), task="Change app.py and verify it.",
-                    flags=("--skill", str(selected), "--skill", str(second), "--shell", "off"))
+                    flags=("--skill", str(selected), "--skill", str(second), "--shell", "off"),
+                    env_overrides={"STATEFRAME_PROMPT_BUDGET": "18000"})
     assert case.summary is not None and case.summary["succeeded"] is True, case.process.stdout + case.process.stderr
     wire = [json.loads(path.read_bytes()) for path in sorted((case.run_dir / "wire").glob("*.request.json"))]
     assert len(wire) >= 3

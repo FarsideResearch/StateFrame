@@ -634,6 +634,16 @@ def _prepare_replacement_candidate(runtime: object, original: object, preparatio
         framefit5_sources = None
     if not isinstance(framefit5_sources, Mapping):
         framefit5_sources = None
+    from kernel_stateframe_framefit5 import (
+        assemble_framefit5_request,
+        has_framefit5_state,
+        validate_product_request,
+    )
+    task_row = getattr(getattr(runtime, "owner", None), "task_row", None)
+    generic_framefit_preassembly = (
+        has_framefit5_state(messages) and isinstance(task_row, Mapping)
+        and task_row.get("runner_kind") == "generic"
+    )
     from kernel_read_lockout import append_frame_line, filter_tools as filter_locked_reads
     tools = filter_locked_reads(runtime, tools)
     body["tools"] = tools
@@ -648,7 +658,8 @@ def _prepare_replacement_candidate(runtime: object, original: object, preparatio
     else:
         contract = establish_request_action_contract(runtime, messages, tools,
             request_id=fresh.request_id, provider_request=True,
-            preserve_input_surface=boundary_recovery)
+            preserve_input_surface=boundary_recovery,
+            framefit5_preassembly=generic_framefit_preassembly)
     if boundary_recovery:
         from kernel_greenlock_menu_authority import (
             applies as greenlock_menu_applies,
@@ -665,11 +676,6 @@ def _prepare_replacement_candidate(runtime: object, original: object, preparatio
         runtime.offered_tools = final_names
         runtime._completion_owner_dispatch_tools = copy.deepcopy(tools)
         runtime._completion_owner_actionable = True
-    from kernel_stateframe_framefit5 import (
-        assemble_framefit5_request,
-        has_framefit5_state,
-        validate_product_request,
-    )
     framefit5_validation = None
     if has_framefit5_state(messages):
         from kernel_request_seal import OwnerPresentation

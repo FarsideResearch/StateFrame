@@ -102,6 +102,21 @@ def test_outer_policy_passes_budget_to_builder_without_host_count(monkeypatch, t
     assert received["nproc_budget"] == 64
 
 
+def test_generic_check_keeps_linux_nproc_budget(monkeypatch, tmp_path):
+    received = {}
+    monkeypatch.setattr(policy.platform, "system", lambda: "Linux")
+    monkeypatch.setattr(policy, "require_capabilities", lambda: object())
+
+    def build(command, root, env, **kwargs):
+        received.update(kwargs)
+        return command, env
+
+    policy._prepared(["/bin/true"], tmp_path, {}, None, True, 32,
+                     generic_check=True, isolation_builder=build)
+    assert received == {"readonly_workspace": True, "generic_check": True,
+                        "nproc_budget": 32}
+
+
 def test_outer_command_installs_nproc_after_bwrap(monkeypatch, tmp_path):
     monkeypatch.setattr(isolation, "backend", lambda: "/usr/bin/bwrap")
     monkeypatch.setattr(isolation.platform, "system", lambda: "Linux")

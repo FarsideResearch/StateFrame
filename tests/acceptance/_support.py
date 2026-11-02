@@ -48,7 +48,9 @@ class Case:
 
 
 def environment() -> dict[str, str]:
-    env = os.environ.copy()
+    # Acceptance runs must observe the packaged profile, not a caller's switch overrides.
+    env = {key: value for key, value in os.environ.items()
+           if not key.startswith("STATEFRAME_")}
     env["PYTHONPATH"] = os.pathsep.join((str(ROOT / "src"),
                                         str(ROOT / "src" / "stateframe" / "engine")))
     env["PYTHONDONTWRITEBYTECODE"] = "1"
@@ -125,7 +127,9 @@ def read_requests(run_dir: Path) -> tuple[dict, ...]:
 def run_case(tmp_path: Path, script: str, *, repo_name: str = "simple_repo",
              substitutions: dict[str, str] | None = None, flags: tuple[str, ...] = (),
              repo: Path | None = None, task: str = "Exercise the requested tool and verify the result.",
-             timeout: int = 240, force_missing_tool: bool = False) -> Case:
+             timeout: int = 240, force_missing_tool: bool = False,
+             default_test_cmd: bool = True,
+             env_overrides: dict[str, str] | None = None) -> Case:
     repo = repo or copy_repo(tmp_path, repo_name)
     run_dir = tmp_path / "run"
     script = str(script_path(tmp_path, script, substitutions))
@@ -133,9 +137,11 @@ def run_case(tmp_path: Path, script: str, *, repo_name: str = "simple_repo",
         process = subprocess.run(
             [PYTHON, "-m", "stateframe", "run", "--repo", str(repo), "--task", task,
              "--endpoint", endpoint.url, "--model", "scripted", "--run-dir", str(run_dir),
-             "--test-python", PYTHON, "--test-cmd", "python -m unittest discover -s tests -q",
+             "--test-python", PYTHON,
+             *(["--test-cmd", "python -m unittest discover -s tests -q"] if default_test_cmd else []),
              "--max-turns", "32",
-             "--quiet", *flags], capture_output=True, text=True, env=environment(),
+             "--quiet", *flags], capture_output=True, text=True,
+            env={**environment(), **(env_overrides or {})},
             timeout=timeout, check=False)
     path = run_dir / "summary.json"
     summary = json.loads(path.read_text()) if path.is_file() else None

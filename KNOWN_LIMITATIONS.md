@@ -44,7 +44,11 @@ If a process is killed while a hook has a durable intent but no completion recor
 
 ## Checks
 
-The engine checks its work with pytest test files from the repository, so a repository needs at least one (`--check` names them). `--test-cmd` changes only the outer before-and-after command used to report pass or fail; it does not replace the engine's pytest checks, so a repository without pytest tests cannot be used yet. The interpreter selected for a run must be able to invoke pytest and the repository's required test dependencies. The check file can inspect any output file, not only Python (see "Tasks whose output is files" in the README).
+Ordinary non-verbose `go test` output reports package success without a positive test count, so it receives the weaker `verified by check command` label. Use `go test -v` to include named passing tests for test verification.
+
+Go and Rust command paths are implemented but their toolchains are not exercised on this project's automated gates. A repository with no tests can still finish from a passing declared build or type check, an agent-written check with a failing parent and passing candidate, or an unverified result when no check exists. Structured wrong-test evidence is advertised on an explicit `--protect-tests task|off` selection, or `all` for a generic runner; omitting the new flags preserves the 0.2.6 request schema.
+
+When tests exist, the default check uses pytest test files (`--check` names them), and its engine checks support per-test selectors. A non-pytest `--test-cmd` uses one whole-command result by exit code, with no per-test selector or collection evidence. A command that cannot start, exits 126 or 127, or times out cannot pass. Without tests or an explicit command, StateFrame tries a declared build or type check, then an agent-written check. With no check, the result is `unverified: review the diff`; it is not a test pass. Checks run under the existing sandbox. A generic check needs a usable Python interpreter for StateFrame itself, but that interpreter does not need pytest. The check can inspect output files, not only code (see "Tasks whose output is files" in the README). Test weakening detection for JavaScript, TypeScript, Go, Rust and shell is heuristic and can miss changes in meaning.
 
 In a repository with more than 200 source files, a run must name the files it may change with `--target` and `--edit`; the rest of the repository stays available as read-only context.
 

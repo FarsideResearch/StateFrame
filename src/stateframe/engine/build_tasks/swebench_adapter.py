@@ -48,7 +48,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from kernel_test_python import test_python  # noqa: E402
+from kernel_test_python import selected_test_python  # noqa: E402
 
 
 DATASET_ID = "SWE-bench/SWE-bench_Lite"
@@ -1272,7 +1272,7 @@ def verify_instance(
     test_src_value = row.get("test_src")
     if not isinstance(test_src_value, str):
         raise AdapterError("row.test_src must contain the generated runner file")
-    executable = python_executable or test_python()
+    executable = python_executable or selected_test_python()
     parent = _run_overlay(base_dir, test_path, test_src_value, executable, timeout)
     gold = _run_overlay(gold_dir, test_path, test_src_value, executable, timeout)
     return VerificationResult(instance_id=instance_id, parent=parent, gold=gold)
