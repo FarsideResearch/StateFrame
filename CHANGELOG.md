@@ -3,11 +3,34 @@
 ## Unreleased
 
 - Add optional per-step models. Each request is assigned a role (`read`, `plan`, `edit`, `finish`, `decide2`, `unit`) from what the engine already knows, and each role can have its own endpoint, model, sampling, limits, slot, tokenizer and cost rates. Set them with `--route ROLE.FIELD=VALUE`, `STATEFRAME_ROUTE_<ROLE>_<FIELD>`, a TOML or JSON routes file, or the profile. `stateframe config init` writes a commented example.
-- With no route settings, requests are byte-identical to 0.2.5.
+- With no route settings, requests are byte-identical to 0.2.7.
 - A reply that edits files or says done from another role's model is discarded unrun and the same step is asked again of the `edit` or `finish` model, from the same frame.
 - Each role's server is checked at start. Remote endpoints need a per-role opt-in (or the global one), including on redirects. Routed requests never go through an HTTP proxy.
 - Runs print their effective routes at start and per-role sends, discarded replies, tokens and estimated cost at the end.
 - Resume records each request's route before it is sent and verifies it on replay. Changing a route on resume is refused; `stateframe resume --route` may move an endpoint or rename a model.
+
+## 0.2.7 (2026-11-01)
+
+- Use non-pytest `--test-cmd` commands as the engine's whole-command check, with exit-code results and bounded failure output in the frame.
+- Discover common Python, JavaScript, TypeScript, Go, Rust and shell test files, plus configured check resources, for edit protection and change reporting.
+- Keep pytest selector checks and their existing behavior for pytest commands.
+- On macOS, allow the host-declared check executable through the existing sandbox read policy when it is outside Python's installed roots.
+- Keep generic checks available through worker projection, edits and completion; label a successful generic run "verified by check command".
+- Allow repositories without tests: use an explicit `--check-cmd`, a declared build or type check, or an agent-written check; label runs with no evidence `unverified: review the diff`.
+- Change test protection from 0.2's lock on all pre-existing tests to `--protect-tests off` by default. Use `--protect-tests all` for the old behavior or `task` to lock judging tests. Report every changed test separately and qualify results when tests appear weakened.
+- Let a run stop with structured evidence when a judging test is reported wrong, without claiming verification.
+- Classify test verification from the command actually run; lock command-selected and initially failing task tests; detect Python suite-wide skips and assertion comparison changes; accept wrong-test evidence for strict pytest runs.
+- Selected skills never bypass `task` or `all` test protection. With protection `off`, skill-driven test edits are reported and possible weakening qualifies the result, just like other test edits.
+- Start generic runs at a source file when an empty package initializer would otherwise prevent the first request from being allocated.
+- Keep no-flag request bytes identical to 0.2.6; advertise structured wrong-test evidence on explicit protection selection in editable modes and generic runs.
+
+## 0.2.6 (2026-11-01)
+
+- Add opt-in lifecycle hooks for start context, tool guards and notes, submission gates, and terminal notifications. Hooks run in the sandbox, use explicit configuration or digest-trusted project files, and replay completed results from the run tape. See [Hooks](docs/guide/hooks.md).
+- `pre_tool` and `post_tool` hooks also see `skill_load` and MCP tool calls. An MCP call is checked against the arguments it will actually send, including a `why` field the server declares.
+- With no hooks configured, the request bytes, tool tape and journal event kinds match 0.2.5; the child does not import the hook modules.
+- On Linux, hook network mode `loopback` is a private network namespace, as it is for shell commands. A hook that must reach a service on the host's loopback needs `full`.
+- Measured so far: two live runs on Qwen3.6-35B-A3B from a clean install, with hooks on all six events, were each submitted in 4 requests with their checks passing. In both, every event fired and the stop hook's one veto reached the model. This is a small sample on one small task.
 
 ## 0.2.5 (2026-11-01)
 

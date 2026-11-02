@@ -36,7 +36,7 @@ def write_launcher(path: Path) -> None:
 
 
 def capture(tree: Path, python: str, launcher: Path, script: Path,
-            repo: Path, run_dir: Path) -> bytes:
+            repo: Path, run_dir: Path, *, legacy_mode: bool = False) -> bytes:
     environment = source_env(tree)
     endpoint = subprocess.Popen([python, "-m", "stateframe.scripted_endpoint",
         "--script", str(script), "--port", "0"], cwd=tree, env=environment,
@@ -53,7 +53,8 @@ def capture(tree: Path, python: str, launcher: Path, script: Path,
             "--task", "Fix the pricing code so the tests pass.", "--endpoint", url,
             "--model", "scripted", "--run-dir", str(run_dir), "--test-python", python,
             "--test-cmd", "python -m unittest discover -s tests -q", "--max-turns", "32",
-            "--no-run-env", "--quiet"]
+            "--no-run-env", "--quiet",
+            *(("--runner-kind", "pytest", "--protect-tests", "all") if legacy_mode else ())]
         result = subprocess.run(command, cwd=tree, env=environment, capture_output=True,
                                 text=True, timeout=300, check=False)
         # The comparison is about request bytes, so a run whose checks fail still counts;

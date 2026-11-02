@@ -21,8 +21,6 @@ _BASELINE_COMMIT = "33c6c511611cc249b90b47930905a8e60648c05c"
 
 
 _EDIT_RECEIPT = re.compile(rb'(edit_receipt\\*":\\*")[0-9a-f]{20}')
-
-
 def _raw_tools(request: bytes) -> bytes:
     """Extract the top-level tools value without changing its serialized bytes."""
     source = request.decode("utf-8")
@@ -56,7 +54,8 @@ def _raw_tools(request: bytes) -> bytes:
     raise AssertionError("request has no tools array")
 
 
-def _run_tree(root: Path, case: Path, repo: Path, script: Path) -> tuple[bytes, ...]:
+def _run_tree(root: Path, case: Path, repo: Path, script: Path, *,
+              legacy_mode: bool = False) -> tuple[bytes, ...]:
     case.mkdir()
     run_dir = case / "run"
     env = environment()
@@ -67,7 +66,9 @@ def _run_tree(root: Path, case: Path, repo: Path, script: Path) -> tuple[bytes, 
              "--task", "Change app value and verify it", "--endpoint", endpoint.url,
              "--model", "scripted", "--run-dir", str(run_dir), "--test-python", PYTHON,
              "--test-cmd", "python -m unittest discover -s tests -q", "--max-turns", "8",
-             "--shell", "off", "--quiet"], capture_output=True, text=True,
+             "--shell", "off", "--quiet",
+             *(("--runner-kind", "pytest", "--protect-tests", "all") if legacy_mode else ())],
+            capture_output=True, text=True,
             env=env, timeout=240, check=False)
     requests = tuple(path.read_bytes() for path in sorted((run_dir / "wire").glob("*.request.json")))
     assert result.returncode == 0 and requests, result.stdout + result.stderr
@@ -96,7 +97,9 @@ def test_no_skills_wire_matches_023(tmp_path):
     repo_root.mkdir()
     repo = copy_repo(repo_root)
     old = _run_tree(baseline, tmp_path / "old", repo, script)
-    current = _run_tree(ROOT, tmp_path / "current", repo, script)
+    # 0.2.5 intentionally treats unittest as a generic command and defaults to
+    # editable tests. Pin the old runner and protection modes for exact bytes.
+    current = _run_tree(ROOT, tmp_path / "current", repo, script, legacy_mode=True)
     assert len(current) == len(old)
     assert current[0] == old[0], first_difference(old[0], current[0])
     for number, (expected, actual) in enumerate(zip(old, current), 1):
@@ -107,3 +110,6 @@ def test_no_skills_wire_matches_023(tmp_path):
             number, first_difference(expected, actual))
         assert normalized_digest(_EDIT_RECEIPT.sub(rb"\1<receipt>", actual)) == normalized_digest(
             _EDIT_RECEIPT.sub(rb"\1<receipt>", expected)), number
+    default = _run_tree(ROOT, tmp_path / "default", repo, script)
+    assert default[0] != old[0]
+    assert b"no public selector was declared" in default[0]

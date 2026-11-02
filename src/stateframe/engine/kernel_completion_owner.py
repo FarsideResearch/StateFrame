@@ -1329,17 +1329,23 @@ def host_public_check_arguments(
 
     The completion owner is the last authority before a menu is rendered.  It
     therefore cannot pass through decision metadata that mixes a real selector
-    with prose such as ``target exists: ...``.  Each selector must be one exact
-    target accepted by the public dispatcher, point at an existing ``tests/``
-    file, and survive validation again after the target list is assembled.
+    with prose such as ``target exists: ...``. Pytest selectors must point at
+    existing public test files. Generic checks use the host-owned whole-command
+    identity and an empty target so no file selector is invented.
 
     ``{}`` means no host selector source was available, preserving reduced test
     doubles and legacy control actions.  ``None`` means a host selector source
     existed but contained no dispatcher-valid public selector and the action
     must not be rendered.
     """
-    provider = getattr(runtime, "required_public_selectors", None)
     owner = getattr(runtime, "owner", None)
+    task_row = getattr(owner, "task_row", None)
+    if isinstance(task_row, Mapping) and task_row.get("runner_kind") == "generic":
+        if not task_row.get("test_command"):
+            return None
+        from kernel_generic_check import CHECK_ID
+        return {"target": "", "selectors": [CHECK_ID]}
+    provider = getattr(runtime, "required_public_selectors", None)
     host_source = None
     if callable(provider):
         try:
@@ -6334,6 +6340,7 @@ def establish_request_action_contract(
         request_id: str | None = None,
         provider_request: bool = True,
         preserve_input_surface: bool = False,
+        framefit5_preassembly: bool = False,
 ) -> dict[str, object]:
     """Create exactly one immutable owner decision for one prepared request."""
     current_id = str(request_id) if request_id is not None else None
@@ -6531,7 +6538,7 @@ def establish_request_action_contract(
         or "Final step: call done now to submit this revision (owner-admitted submit route)."
         if route == "submit" else None
     )
-    if (_terminal_line_requires_wire(terminal_line)
+    if (not framefit5_preassembly and _terminal_line_requires_wire(terminal_line)
             and not _framefit5_terminal_line_present(messages, str(terminal_line))):
         _contract_error(
             runtime,
@@ -6702,6 +6709,7 @@ def bind_final_tool_surface(
         surface: Mapping[str, object],
         *,
         messages: object,
+        framefit5_preassembly: bool = False,
 ) -> bool:
     """Bind final request schemas and recompute any route derived from that menu."""
     schemas = surface.get("tools")
@@ -6744,7 +6752,7 @@ def bind_final_tool_surface(
             if route_error:
                 return False
             terminal_line = contract.get("terminal_line")
-            if (_terminal_line_requires_wire(terminal_line)
+            if (not framefit5_preassembly and _terminal_line_requires_wire(terminal_line)
                     and not _framefit5_terminal_line_present(messages, str(terminal_line))):
                 return False
             contract["route"] = route
@@ -6804,6 +6812,7 @@ def assert_request_action_contract(
         allow_host_stop: bool = False,
         frozen_contract: Mapping[str, object] | None = None,
         read_only: bool = False,
+        framefit5_preassembly: bool = False,
 ) -> dict[str, object]:
     """Fail closed if presentation, serialization, or dispatch drifted."""
     if isinstance(frozen_contract, Mapping):
@@ -6986,7 +6995,7 @@ def assert_request_action_contract(
                 route=str(contract.get("route", "")), tool_names=names,
                 boundary_recovery_eligible=False)
     expected_terminal_line = str(contract.get("terminal_line") or "").strip()
-    if (_terminal_line_requires_wire(expected_terminal_line)
+    if (not framefit5_preassembly and _terminal_line_requires_wire(expected_terminal_line)
             and not _framefit5_terminal_line_present(messages, expected_terminal_line)):
         message = "serialized terminal owner line was removed or changed"
         if runtime is None:
@@ -8301,6 +8310,14 @@ def terminal_result(runtime: object, result: Mapping[str, object]) -> dict[str, 
     if sealed is not None:
         return join_terminal(
             runtime, sealed, writer="kernel_completion_owner.terminal_result",
+        )
+    hook_terminal = str(result.get("result", "")).upper()
+    if hook_terminal in {"HOOK_BLOCKED", "HOOK_CONTAINMENT"}:
+        terminal = dict(result)
+        terminal["accepted"] = False
+        terminal["certified"] = False
+        return join_terminal(
+            runtime, terminal, writer="kernel_completion_owner.terminal_result",
         )
     terminal = _legacy_terminal_result(runtime, result)
     from kernel_done_readiness_authority import (

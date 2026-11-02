@@ -1071,8 +1071,8 @@ class LocalWitnessRunner:
     def __init__(self, store: ContentStore, python_executable: str = None,
                  workdir: str = None):
         self.store = store
-        from kernel_test_python import test_python
-        self.python = python_executable or test_python()
+        from kernel_test_python import selected_test_python
+        self.python = python_executable or selected_test_python()
         self._workdir = workdir
         self._prepared = {}          # base key -> verified manifest digest
 

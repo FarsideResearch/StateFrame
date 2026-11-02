@@ -51,6 +51,36 @@ def _journal_safe_fields(payload):
     return journal_safe_fields(payload)
 
 
+def _without_private_message_keys(body: Mapping[str, object]) -> dict[str, object]:
+    """Copy a provider body without internal message classification fields."""
+    wire_body = dict(body)
+    messages = body.get("messages")
+    if isinstance(messages, list):
+        wire_body["messages"] = [
+            {
+                key: value for key, value in message.items()
+                if not (isinstance(key, str) and key.startswith("_"))
+            }
+            if isinstance(message, dict) else message
+            for message in messages
+        ]
+    return wire_body
+
+
+def _serialize_final_request_body(
+        body: Mapping[str, object], runtime: object | None,
+        request_id: str) -> bytes:
+    """Serialize the provider body, omitting private message metadata only for hook runs."""
+    wiring = getattr(runtime, "_hook_wiring", None) if runtime is not None else None
+    if wiring is None:
+        return json.dumps(body).encode()
+
+    wire_body = _without_private_message_keys(body)
+    wire = json.dumps(wire_body).encode()
+    wiring.admit_panel(body, wire, request_id)
+    return wire
+
+
 def _emit_scope_turns_final_wire_events(
         journal: object, wire: bytes, parsed_messages: object, *,
         runtime: object | None, request_id: str | None, submission_event_id: str,
@@ -2096,7 +2126,7 @@ def run_manifest(*, model: str, tools: object, consumers: Mapping[str, object],
     from kernel_context import SELECTION_POLICY_VERSION
     from kernel_intervention_policy import interventions_enabled
     from kernel_step_contract import working_view_mode
-    from kernel_test_python import test_python
+    from kernel_test_python import selected_test_python
     selected_reasoning = reasoning_profile()
     try:
         from kernel_idealpath import enabled as idealpath_enabled
@@ -2146,7 +2176,7 @@ def run_manifest(*, model: str, tools: object, consumers: Mapping[str, object],
         "tool_output_token_limits": dict(zip(('initial', 'maximum'), output_token_limits())),
         "seed": int(os.environ["REACT_SEED"]) if "REACT_SEED" in os.environ else MISSING,
         "python": platform.python_version(), "platform": platform.platform(),
-        "project_test_python": test_python(),
+        "project_test_python": selected_test_python(),
         "source_digests": source_digests,
         "deployed_source_digest": digest(source_digests),
         "reasoning_profile": selected_reasoning.to_dict(),
@@ -5440,7 +5470,7 @@ class RequestCapture:
                     and final_tool_surface.get("source_tool_schema_digest")
                     != final_tool_surface.get("tool_schema_digest")):
                 enforce_context_capacity(self, body, endpoint=endpoint, key=key)
-            wire = json.dumps(body).encode()  # matches the legacy serializer exactly
+            wire = _serialize_final_request_body(body, wire_truth_runtime, self.request_id)
             if _boundary_state is not None:
                 _boundary_state.phase = "final_serialization_validation"
                 _boundary_state.body_digest = "sha256:" + hashlib.sha256(wire).hexdigest()
@@ -5921,7 +5951,7 @@ class RequestCapture:
                         refresh_headcarry=False,
                         frame_request_allocation=self.frame_request_allocation,
                     )
-            wire = json.dumps(body).encode()
+            wire = _serialize_final_request_body(body, wire_truth_runtime, self.request_id)
             if _boundary_state is not None:
                 _boundary_state.phase = "final_serialization_validation"
                 _boundary_state.body_digest = "sha256:" + hashlib.sha256(wire).hexdigest()
@@ -6189,7 +6219,9 @@ class RequestCapture:
                     "final FrameFit5 recovery lost its shared frame state")
 
             if framefit5_request:
-                wire = json.dumps(body).encode()
+                wire = _serialize_final_request_body(
+                    body, wire_truth_runtime, self.request_id,
+                )
                 try:
                     self._assert_wire_string_hygiene(wire)
                 except RequestPreparationContractError as error:

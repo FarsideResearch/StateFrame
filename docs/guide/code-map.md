@@ -9,6 +9,7 @@ A diagram of how these fit together is in [ARCHITECTURE.md](../../ARCHITECTURE.m
 | `cli.py` | The `run`, `resume`, `inspect` and `chat` commands and their flags. |
 | `skills.py` | Skill directory parsing, installation, path resolution and pinned digest checks. |
 | `runner.py` | One run: preflight, run directory, spec, driving the engine child, before/after checks, the outcome. |
+| `hook_host.py` | Project hook trust and loading, pinned bundles, runner lifecycle events, terminal records and resume checks. |
 | `test_interpreter.py` | Choosing the Python that runs your tests (`--test-python`, project venv, `python3` on PATH). |
 | `_child.py` | The engine child process: installs the run's environment and runs one task. |
 | `workcopy.py` | The safe working copy and `--in-place` apply. |
@@ -32,6 +33,9 @@ The engine is a flat package of modules, each owning one mechanism; `release-man
 |---|---|
 | `probes/react_repair.py` | The agent loop and the tool definitions (`TOOLS`: `grep`, `list_files`, `read`, `edit`, `str_replace`, `insert_before`, `authored_check`, `file_create`, `file_delete`, `file_move`, `shell`, `run_tests`, `read_check_receipt`, `recall`, `done`) and their handlers. |
 | `kernel_file_ops.py`, `kernel_done_is_submit_authority.py` | Guarded file removal and moves, including refusal of executable moves; versioned sealed candidate writes and deletions. |
+| `kernel_hooks.py` | Hook definitions, strict loading, bundle pins, matchers, payloads, output handling and the optional request panel. |
+| `kernel_hook_exec.py`, `kernel_hook_driver.py` | Sandboxed hook execution, process and stream bounds, durable replay records, scoped formatter effects and raw output files. |
+| `kernel_hook_wiring.py` | Child event seams, pre-tool decisions, post-tool notes, stop gates and checkpointed hook state. |
 | `kernel_stateframe_runtime.py` | `StateFrameRuntime`: building, fitting and qualifying each request (`prepare`) and recording what each action observed. |
 | `kernel_code_bookmarks.py`, `kernel_read_lockout.py` | Current-failure source bookmarks and optional bounded read restriction after unchanged reads. |
 | `kernel_frame_*.py` | The frame's sections and how they are budgeted. |
@@ -46,7 +50,7 @@ The engine is a flat package of modules, each owning one mechanism; `release-man
 | `kernel_custom_tools.py`, `kernel_mcp_tools.py`, `kernel_mcp_driver.py`, `kernel_tool_tape.py` | Trusted command and MCP stdio definitions, bounded server exchanges and durable tool replay records. |
 | `kernel_execution_policy.py`, `kernel_test_isolation.py` | Sandboxed command and test execution. |
 | `kernel_git_view.py` | Pinned, sanitized Git history observations, commit-rooted `show`, run-baseline diffs and offline Git queries for repository indexing. |
-| `kernel_plain_host.py`, `kernel_plain_loop.py` | The alternate plain loop: foreground shell only from the new tool set; skills, Git, web, custom and MCP settings are refused. |
+| `kernel_plain_host.py`, `kernel_plain_loop.py` | The alternate plain loop: foreground shell only from the new tool set; selected skills and Git, web, custom and MCP settings are refused. |
 | `kernel_safe_probe.py`, `kernel_ship_tree_smoke.py` | Sandboxed, read-only repository-code diagnostics and provisioning, including imports before the first request and after edits; cleanup failures stop the run. |
 | `kernel_web_fetch.py` | Direct-IP, SSRF-checked web observations with bounded text extraction. |
 | `kernel_release_switch_registry.py` | Which `STATEFRAME_*` switches this engine reads; a setting with no reader is refused. |

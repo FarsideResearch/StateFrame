@@ -26,6 +26,8 @@ _UNCERTIFIED_RESULTS = frozenset({
     "STOPPED_INCOMPLETE",
     "BLOCKED",
     "NEEDS_WORK",
+    "HOOK_BLOCKED",
+    "HOOK_CONTAINMENT",
     "HARNESS_ERROR",
     "ENVIRONMENT_BROKEN",
 })
@@ -153,6 +155,8 @@ def _stop_reason(result: Mapping[str, object], terminal: str, *, accepted: bool)
         # reason with D2 off; without the alias it fell through to FINALIZATION_ERROR and the
         # settlement treated a real (uncertified) submission as an operational error.
         "UNCERTIFIED_SUBMIT": "UNCERTIFIED_SUBMIT",
+        "HOOK_BLOCKED": "HOOK_BLOCKED",
+        "HOOK_CONTAINMENT": "HOOK_CONTAINMENT",
     }
     if value in aliases:
         return aliases[value]

@@ -429,7 +429,7 @@ def test_resume_refuses_malformed_recorded_routes(servers, monkeypatch, tmp_path
             "routes": {"schema": routes.SCHEMA, "roles": bad_roles}}
     monkeypatch.setattr(runner.resume_module, "assess", lambda *args, **kwargs: {
         "spec": spec, "max_turns": 1})
-    monkeypatch.setattr(runner, "_check_python", lambda python: python)
+    monkeypatch.setattr(runner, "_check_python", lambda python, **_kwargs: python)
     monkeypatch.setattr(runner, "check_slot_context", lambda *args, **kwargs: None)
     with pytest.raises(runner.resume_module.ResumeRefused, match=fragment):
         runner.resume_run(tmp_path, endpoint=endpoint, printer=lambda *_: None)
@@ -447,7 +447,7 @@ def test_resume_run_skips_unproven_pending_across_endpoint_moves_and_refusal(tmp
         default, original, moved, latest = [f"http://127.0.0.1:{server.server_port}/v1"
                                              for server, _ in active]
         monkeypatch.delenv("LLAMA_CPP_TOKENIZE_URL", raising=False)
-        monkeypatch.setattr(runner, "_check_python", lambda python: python)
+        monkeypatch.setattr(runner, "_check_python", lambda python, **_kwargs: python)
         repo = tmp_path / "repo"
         repo.mkdir()
         (repo / "app.py").write_text("value = 1\n")
@@ -546,7 +546,7 @@ def test_three_resumes_skip_unproven_pending_through_chained_endpoint_and_model_
         urls = [f"http://127.0.0.1:{server.server_port}/v1" for server, _ in active]
         default, original, middle, latest, final = urls
         monkeypatch.delenv("LLAMA_CPP_TOKENIZE_URL", raising=False)
-        monkeypatch.setattr(runner, "_check_python", lambda python: python)
+        monkeypatch.setattr(runner, "_check_python", lambda python, **_kwargs: python)
         repo = tmp_path / "repo"
         repo.mkdir()
         (repo / "app.py").write_text("value = 1\n")
@@ -630,7 +630,7 @@ def test_three_resumes_skip_unproven_pending_through_chained_endpoint_and_model_
 
 def test_unrouted_resume_never_prints_skipped_check(tmp_path, servers, monkeypatch):
     default, _ = servers
-    monkeypatch.setattr(runner, "_check_python", lambda python: python)
+    monkeypatch.setattr(runner, "_check_python", lambda python, **_kwargs: python)
     repo = tmp_path / "repo"
     repo.mkdir()
     (repo / "app.py").write_text("value = 1\n")

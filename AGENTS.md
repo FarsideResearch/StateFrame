@@ -29,7 +29,11 @@ No model server? Start `python -m stateframe.scripted_endpoint --script examples
 
 Your repository's tests run with your project's Python (`.venv/`, `venv/`, `env/`, else `python3` on PATH); `--test-python PATH` overrides it.
 
+`--test-cmd` accepts pytest or a whole-command check such as `node --test`, `go test -v ./...`, `cargo test`, or a shell script. `--check-cmd` declares a non-test check. When a repository has no tests, a declared build or type check or an agent-written check can verify the result; without evidence, the result is `unverified: review the diff`. Use `--protect-tests off` (default) to report editable test changes, `task` to lock judging tests, or `all` to lock every pre-existing test. Selecting protection explicitly advertises structured wrong-test evidence when supported; omitting new flags keeps 0.2.6 request bytes. Plain `go test` needs `-v` for named passing tests. Go and Rust toolchains are not exercised on this project's automated gates.
+
 The shipped product profile uses the composed loop; lean mode is not supported by that profile. The plain loop allows foreground shell but refuses Git, web, custom tools and background jobs. Command replies shrink to the measured request budget, with omitted byte counts and the full taped observation retained within collector limits. Executable-bit effects are refused and restored because the sealed candidate does not transport them.
+
+Lifecycle hooks (`--hooks FILE`, or a digest-trusted `.stateframe/hooks.json`) run in the sandbox at six run boundaries and are replayed from `hook-tape.jsonl` on resume. With no hook source enabled the child never imports the hook modules, so request bytes match a release without hooks; `tests/test_hook_wiring_parity.py` checks this against an untouched checkout named by `SF_TEST_PARITY_BASELINE`.
 
 ## Where to go next
 
@@ -39,6 +43,7 @@ The shipped product profile uses the composed loop; lean mode is not supported b
 - [Code map](docs/guide/code-map.md): which module owns what.
 - [Running](docs/guide/running.md): CLI, profiles, flags, test interpreter, resume, determinism scope.
 - [Agent tools](docs/guide/tools.md): command, job, file, Git, web and custom tool contracts and safety.
+- [Hooks](docs/guide/hooks.md): lifecycle events, configuration, project trust, sandbox and replay behavior.
 - [Extending](docs/guide/extending.md): tools, profiles, tests.
 - [Troubleshooting](docs/guide/troubleshooting.md): common errors and what they mean.
 - [Design rationale](docs/guide/design.md): why it is built this way.

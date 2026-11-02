@@ -289,6 +289,7 @@ _FRAMEFIT5_HOST_CONTEXT_PREFIXES = (
     "[COMPLETION OWNER]",
     "[WIRE_READ_CONTRACT]",
     "[NATIVE BATCH RECEIPTS]",
+    "[USER HOOKS]",
 )
 
 
@@ -302,6 +303,8 @@ def _is_framefit5_host_context_panel(message: Mapping[str, object]) -> bool:
         message.get("role") == "user"
         and isinstance(content, str)
         and content.startswith(_FRAMEFIT5_HOST_CONTEXT_PREFIXES)
+        and (not content.startswith("[USER HOOKS]")
+             or message.get("_request_budget_section") == "user_hooks")
     )
 
 
@@ -2612,7 +2615,8 @@ def validate_product_request(
         raise FrameFit5Error("request does not satisfy the frame-only message contract")
     if any(
             "STATEFRAME_FRAMEFIT_KEEP_K" in str(message.get("content") or "")
-            for message in messages):
+            for message in messages
+            if message.get("_request_budget_section") != "user_hooks"):
         raise FrameFit5Error("diagnostic KEEP_K leaked into the product request")
     roles = [message.get("role") for message in messages]
     system_count = next(

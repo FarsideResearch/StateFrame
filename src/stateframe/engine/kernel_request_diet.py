@@ -15,6 +15,7 @@ import json
 import math
 import os
 import re
+import sys
 import time
 import urllib.parse
 import urllib.request
@@ -729,6 +730,23 @@ STAGE_SECTION_ALLOWLIST = {
     }),
 }
 
+
+def _hooks_enabled() -> bool:
+    # Hook wiring is loaded only for configured runs. Avoid importing it here.
+    wiring = sys.modules.get("kernel_hook_wiring")
+    return wiring is not None and getattr(wiring, "_ACTIVE", None) is not None
+
+
+def _section_names() -> tuple[str, ...]:
+    if not _hooks_enabled():
+        return SECTION_NAMES
+    return (*SECTION_NAMES[:3], "user_hooks", *SECTION_NAMES[3:])
+
+
+def _stage_allowlist(stage: str) -> frozenset[str]:
+    base = STAGE_SECTION_ALLOWLIST[stage]
+    return base | {"user_hooks"} if _hooks_enabled() else base
+
 _PROTECTED_SECTIONS = frozenset({
     "system_prompt", "task", "stateframe", "skills", "settled_state", "menus",
     "completion_contract", "continuation_limits", "stage_evidence",
@@ -767,7 +785,7 @@ def duplicated_source_eviction_enabled(
 
 _DROP_ORDER = (
     # Preserve the required eviction priority; reads are a separate last resort.
-    "skill_bodies", "history_ledger", "passive_conclusions", "coordination_ledger",
+    "user_hooks", "skill_bodies", "history_ledger", "passive_conclusions", "coordination_ledger",
     "get_sure_state", "environment_state", "ship_tree", "failure_packet",
 )
 _OPTIONAL_EXPLICIT_SECTIONS = frozenset({
@@ -876,7 +894,7 @@ def section_name(message: Mapping[str, object], index: int = 0) -> str:
     stripped = content.lstrip()
     lowered = stripped.lower()
     explicit = _explicit_section(message)
-    if explicit in SECTION_NAMES or explicit in _OPTIONAL_EXPLICIT_SECTIONS:
+    if explicit in _section_names() or explicit in _OPTIONAL_EXPLICIT_SECTIONS:
         return explicit
     if role in {"system", "developer"} and index == 0:
         return "system_prompt"
@@ -2741,7 +2759,7 @@ def _protected_request_sizes(
 
 
 def _section_for_messages(messages: Sequence[Mapping[str, object]]) -> dict[str, list[dict[str, object]]]:
-    grouped = {name: [] for name in SECTION_NAMES}
+    grouped = {name: [] for name in _section_names()}
     for index, message in enumerate(messages):
         section = section_name(message, index)
         grouped.setdefault(section, []).append(dict(message))
@@ -2762,7 +2780,7 @@ def _section_stats(body: Mapping[str, object]) -> dict[str, dict[str, int]]:
             "tokens": sum(token_estimate(message) for message in grouped.get(name, [])),
             "messages": len(grouped.get(name, [])),
         }
-        for name in SECTION_NAMES
+        for name in _section_names()
         if name not in {"schemas", "request_framing"}
     }
     message_array = _wire_bytes(message_list)
@@ -2798,7 +2816,7 @@ def breakdown(body: Mapping[str, object], stage: str = "S1") -> dict[str, object
         "request_bytes": _wire_bytes(body),
         "request_tokens_proxy": token_estimate(body),
         "sections": stats,
-        "allowlist": sorted(STAGE_SECTION_ALLOWLIST[stage]),
+        "allowlist": sorted(_stage_allowlist(stage)),
     }
 
 
@@ -2822,7 +2840,7 @@ def _audit(before: Mapping[str, object], after: Mapping[str, object], stage: str
             and _message_content(message).splitlines()
         ]
     rows = []
-    for name in SECTION_NAMES:
+    for name in _section_names():
         left = before_stats.get(name, {"bytes": 0, "tokens": 0, "messages": 0})
         right = after_stats.get(name, {"bytes": 0, "tokens": 0, "messages": 0})
         rows.append({
@@ -2849,7 +2867,7 @@ def _audit(before: Mapping[str, object], after: Mapping[str, object], stage: str
         "dropped_items": list(dropped_items),
         "duplicate_items": list(duplicate_items),
         "stale_read_indices": list(stale_indices),
-        "allowlist": sorted(STAGE_SECTION_ALLOWLIST[stage]),
+        "allowlist": sorted(_stage_allowlist(stage)),
         "required_evidence_ids": list(evidence_ids),
         "menu_actions": list(menu),
         "source_headers": source_headers,
@@ -3075,7 +3093,7 @@ def apply_diet(
         messages, evidence_ids, protected_contents, protected_messages,
         native_tools, required_source_paths,
     )
-    allowlist = STAGE_SECTION_ALLOWLIST[stage]
+    allowlist = _stage_allowlist(stage)
     kept: list[dict[str, object]] = []
     dropped_sections: list[str] = []
     dropped_items: list[str] = []

@@ -2689,7 +2689,7 @@ class TestImpact:
         return sorted({s.split("::", 1)[0] for s in self.selected_tests})
 
 
-def test_impact(graph: CodeGraph, changed_files: Iterable[str]) -> TestImpact:
+def compute_test_impact(graph: CodeGraph, changed_files: Iterable[str]) -> TestImpact:
     """Map a changed file set to the tests that exercise it + the coverage gaps.
 
     selected_tests  — test_* functions whose transitive callees include a symbol
@@ -3028,7 +3028,7 @@ def blast_radius(
         )
 
     impacted = graph.multi_source_impact(seed_ids, depth=depth)
-    ti = test_impact(graph, set(changed_files))
+    ti = compute_test_impact(graph, set(changed_files))
 
     rollup: dict[str, int] = {}
     for ref, _hop in impacted:

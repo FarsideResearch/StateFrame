@@ -3,6 +3,11 @@
 | Message (or symptom) | Meaning | Fix |
 |---|---|---|
 | `test interpreter ... cannot import pytest` | The Python chosen for your tests has no pytest. | Install pytest in your project's environment, or pass `--test-python` with one that has it. |
+| `unverified: review the diff` | No tests, explicit check, declared build or type check, or successful agent-written check supplied verification. | Review the diff or pass `--check-cmd COMMAND` for an appropriate check. |
+| `check command not found`, exit 126/127 or check timeout | The configured command did not establish a passing result. | Install the runner, check the command and executable permissions, or fix a hanging check. |
+| A check file edit is refused | `--protect-tests all` locks existing tests, or `task` locks a judging test. | Edit product code, or select `task` or `off` at run start if the task requires test changes. |
+| `passed, but ... test file weakened` | One or more changed tests appear to remove coverage. Non-Python detection is heuristic. | Review each named file and test before applying the result. |
+| `stopped: test reported wrong, see evidence` | The agent supplied a judging test, its assertion, an explanation and observed behavior. No pass was claimed. | Inspect the structured evidence and decide whether to change the test or the product. |
 | `no interpreter for your tests` | No `.venv/`, `venv/` or `env/` in the repository, and no usable `python3` on PATH. | Pass `--test-python PATH`. |
 | Before-checks fail with import errors | The test Python lacks your project's dependencies. | Point `--test-python` at your project's environment. |
 | `endpoint does not serve model ...` | The server lists other model names. | Pass `--model` with a name it lists. |
@@ -40,3 +45,10 @@
 | `REFUSED BAD_ARGUMENTS` or `TOOL_CHANGED` | A custom command's arguments fail its schema, or its executable changed since the run started. | Match the declared arguments. Start a new run after changing a tool definition or executable. |
 | `external operation ... requires --replay-external` | Resume reached a full-network, host-mode or external custom operation. | Reconcile the outside effect first. Pass `--replay-external` only if repeating it is acceptable. |
 | `operation ... may or may not have happened` or `environment diverged at tool call ...` | A tool lacks a completed tape record or a repeated local operation does not match its recorded exit, workspace or environment. | Inspect the run and outside systems. Start a new run after reconciling; resume refuses to guess. |
+| `project hooks not loaded: ... is not trusted (or changed)` | The repository hook file or one of its pinned inputs does not match a digest you trusted. | Review `.stateframe/hooks.json` and its scripts, then run `stateframe hooks trust --repo PATH`. Use `--no-project-hooks` to skip it for one run. |
+| `REFUSED HOOK_DENIED` | A `prompt_submit`, `pre_tool` or `stop` hook exited with status 2 and denied the operation. | Read the named hook's reason. Review its matcher and script; a denied action was not executed. |
+| `REFUSED HOOK_FAILED` | A gating hook failed, timed out, or returned invalid output. Gating errors block by default. | Inspect `hooks/records.jsonl` and the hook's bounded `.out` and `.err` files; fix the hook or set `on_error: "continue"` only when allowing failures is acceptable. |
+| `HOOK_BLOCKED` | A stop hook kept vetoing until its configured block limit was reached. | Inspect the stop hook's reason and `blocks_so_far`; the candidate was not submitted or applied. |
+| `HOOK_CONTAINMENT` | The engine could not confirm hook process cleanup or workspace restoration. | Inspect the run before continuing. Containment outcomes are terminal and cannot be resumed. |
+| `hook ... may or may not have run; start a new run` | A durable hook intent has no completion record, so a killed process may have produced an outside effect. | Reconcile any outside effect and start a new run. Completed hooks are replayed from their records. |
+| `[USER HOOKS]` context is missing | The hook produced no context, the optional panel did not fit, or the relevant event did not match. | Inspect `hooks/records.jsonl`, `hooks/delivery.jsonl`, and the exact request with `stateframe inspect RUN --send 1 --messages`. |

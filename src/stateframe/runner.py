@@ -22,9 +22,12 @@ from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from itertools import chain
 from pathlib import Path
-from typing import Callable
+from typing import TYPE_CHECKING, Callable
 
 from . import cache_metrics, outer_checks, outcomes, preflight, profiles, routes, test_interpreter, workcopy
+from .test_runners import (DECLARED_TEST_SOURCE, declared_test_evidence, discover_check,
+                            lock_initial_failing_tests, parse_command, validate_patterns)
+from .test_changes import inspect_test_changes
 from . import resume as resume_module
 from .endpoint import CHAT_SUFFIX, Endpoint, EndpointError, _is_loopback
 from .task_row import build_row
@@ -32,6 +35,9 @@ from .engine.kernel_custom_tools import CustomToolError, load_tool_files
 from .engine.kernel_mcp_tools import load_mcp_files, discover as discover_mcp
 from .engine.kernel_tool_settings import ToolSettings
 from .skills import SkillError, measured_skills_digest, resolve_skills, skills_digest, verify_records
+
+if TYPE_CHECKING:
+    from .engine.kernel_hooks import HookSet
 
 PACKAGE = Path(__file__).resolve().parent
 ENGINE_DIR = PACKAGE / "engine"
@@ -67,6 +73,18 @@ def checkpoint_env(profile_env=None):
 
 class RunError(RuntimeError):
     pass
+
+
+class HookContainmentRunError(RunError):
+    """Hook containment failed after the run directory was created."""
+
+
+class HookRefusedRunError(RunError):
+    """A runner gating hook refused the prompt before the engine started."""
+
+    def __init__(self, message: str, *, result: str):
+        super().__init__(message)
+        self.result = result
 
 
 class RunDeadlineExceeded(RunError):
@@ -142,6 +160,11 @@ class RunOptions:
     endpoint: Endpoint | None
     max_turns: int | None = None  # None: the profile's REACT_STEPS
     test_cmd: str | None = None
+    check_cmd: str | None = None
+    check_source: str | None = None
+    runner_kind: str = "auto"
+    protected_test_globs: list[str] = field(default_factory=list)
+    protect_tests: str | None = None
     checks: list[str] = field(default_factory=list)
     edit_paths: list[str] = field(default_factory=list)
     target: str | None = None
@@ -173,6 +196,12 @@ class RunOptions:
     tool_settings: ToolSettings = field(default_factory=ToolSettings)
     skills: tuple[str, ...] = ()
     trust_skill_tools: bool = False
+    hooks_files: tuple[Path, ...] = ()
+    no_project_hooks: bool = False
+    hooks_repo: Path | None = None
+    project_hooks: HookSet | None = field(default=None, repr=False)
+    project_hooks_digest: str | None = field(default=None, repr=False)
+    project_hooks_resolved: bool = field(default=False, repr=False)
     shell_confirm: Callable[[str], bool] | None = field(default=None, repr=False)
     _deadline: float | None = field(default=None, init=False, repr=False)
     route_cli: list[str] = field(default_factory=list)
@@ -203,7 +232,8 @@ def default_run_dir(repo: Path) -> Path:
 def run_test_cmd(command: str, cwd: Path, timeout_s: float = 900,
                  test_env: dict[str, str] | None = None, *, python: str = sys.executable,
                  pytest_plugins: str | None = None,
-                 deadline: float | None = None, test_python: str | None = None) -> dict[str, object]:
+                 deadline: float | None = None, test_python: str | None = None,
+                 runner_kind: str = "pytest", capture_output: bool = False) -> dict[str, object]:
     """Check a throwaway copy through the engine policy in a fresh interpreter.
 
     ``test_python``: the interpreter the command runs, handed to an engine that reads STATEFRAME_TEST_PYTHON so its
@@ -211,7 +241,8 @@ def run_test_cmd(command: str, cwd: Path, timeout_s: float = 900,
     try:
         return outer_checks.run(command, cwd, python=python, timeout_s=timeout_s,
                                 deadline=deadline, test_env=validate_test_env(test_env or {}),
-                                pytest_plugins=pytest_plugins, test_python=test_python)
+                                pytest_plugins=pytest_plugins, test_python=test_python,
+                                runner_kind=runner_kind, capture_output=capture_output)
     except (outer_checks.OuterCheckError, OSError) as error:
         raise RunError(str(error)) from error
 
@@ -238,20 +269,23 @@ def _startup_probe(python: str, code: str, *, label: str) -> bytes:
         raise RunError(f"{label} startup probe exceeded its 65536 byte output limit")
     if result.exit_code != 0:
         detail = result.output.decode("utf-8", "replace").strip()[-1000:]
-        raise RunError(f"{label} cannot import pytest in the isolated startup probe "
-                       f"(exit {result.exit_code}); install pytest in that environment; "
+        failure = ("cannot import pytest" if "pytest" in code else "could not start")
+        install = "install pytest in that environment; " if "pytest" in code else ""
+        raise RunError(f"{label} {failure} in the isolated startup probe "
+                       f"(exit {result.exit_code}); {install}"
                        f"sandbox restrictions must permit interpreter startup: {detail or 'no diagnostic output'}")
     return result.output
 
 
-def _check_python(python: str) -> str:
+def _check_python(python: str, *, require_pytest: bool = True) -> str:
     """Resolve --python to an absolute executable (relative to the caller's cwd, BEFORE any chdir)
     and check it can run the engine and the checks. Returns the absolute path."""
     try:
         python = preflight.resolve_interpreter(python, os.getcwd())
     except preflight.PreflightError as error:
         raise RunError(str(error)) from None
-    output = _startup_probe(python, "import sys, json, pytest; print(json.dumps(list(sys.version_info[:3])))",
+    imports = "import sys, json, pytest" if require_pytest else "import sys, json"
+    output = _startup_probe(python, imports + "; print(json.dumps(list(sys.version_info[:3])))",
                             label=f"engine interpreter {python}")
     try:
         version = json.loads(output)
@@ -471,7 +505,8 @@ def _select_test_python(options: RunOptions, printer=print) -> str:
         python = preflight.resolve_interpreter(chosen, os.getcwd())
     except (test_interpreter.TestInterpreterError, preflight.PreflightError) as error:
         raise RunError(str(error)) from None
-    _startup_probe(python, "import pytest", label=f"test interpreter {python} ({reason})")
+    if options.runner_kind != "generic":
+        _startup_probe(python, "import pytest", label=f"test interpreter {python} ({reason})")
     printer(f"test interpreter: {python} ({reason})")
     if not engine_reads_test_python():
         # Honest scope: --test-cmd before/after use it; this engine's own checks do not yet.
@@ -595,7 +630,119 @@ def profile_steps(profile: str) -> int:
     return int(profiles.load(profile)["REACT_STEPS"])
 
 
-def prepare(options: RunOptions) -> tuple[Path, workcopy.WorkCopy, dict]:
+def _write_hook_spec(run_dir: Path, spec: dict) -> None:
+    """Publish hook state atomically after its durable tape records are complete."""
+    path = run_dir / "spec.json"
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(mode="wb", prefix=".spec-", dir=run_dir,
+                                         delete=False) as target:
+            temporary = Path(target.name)
+            target.write(json.dumps(spec, indent=1, sort_keys=True).encode("utf-8"))
+            target.flush()
+            os.fsync(target.fileno())
+        os.replace(temporary, path)
+        directory = os.open(run_dir, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+    except OSError as error:
+        raise RunError(f"cannot publish hook state to {path}: {error}") from error
+    finally:
+        if temporary is not None:
+            try:
+                temporary.unlink()
+            except FileNotFoundError:
+                pass
+
+
+def _write_hook_terminal_summary(run_dir: Path, *, runtime_outcome: str, engine_result: str,
+                                 refusal: str | None = None, containment_error: str | None = None,
+                                 printer=print) -> str | None:
+    """Persist an outcome that stops before the normal engine summary path."""
+    from . import hook_host
+
+    try:
+        counts = hook_host.hook_record_summary(run_dir)
+    except hook_host.HookRecordsError as error:
+        containment_error = containment_error or str(error)
+        counts = {"runs": 0, "denied": 0, "vetoes": 0, "errors": 1,
+                  "last_error": containment_error}
+        printer(f"hooks: records error: {json.dumps(str(error), ensure_ascii=False)}")
+    if containment_error and counts["last_error"] != containment_error:
+        counts["errors"] = int(counts["errors"]) + 1
+        counts["last_error"] = containment_error
+    summary = {
+        "run_dir": str(run_dir),
+        "runtime_outcome": "hook_containment" if containment_error else runtime_outcome,
+        "engine_result": "HOOK_CONTAINMENT" if containment_error else engine_result,
+        "hook_refusal": refusal,
+        "hook_containment": containment_error,
+        "check_outcome": "not_run",
+        "artifact": "none",
+        "exit_code": 2,
+        "succeeded": False,
+        "hooks": counts,
+    }
+    (run_dir / "summary.json").write_text(json.dumps(summary, indent=1))
+    printer(f"hooks: {counts['runs']} runs, {counts['denied']} denied, "
+            f"{counts['vetoes']} vetoes, {counts['errors']} errors")
+    return containment_error
+
+
+def _finish_prompt_refusal(options: RunOptions, run_dir: Path, spec: dict,
+                           refusal: str, printer) -> str | None:
+    """Run terminal hooks and persist their counts after a pre-engine refusal."""
+    from . import __version__, hook_host
+
+    containment_error = None
+    try:
+        hook_host.run_session_end(
+            run_dir,
+            spec["hooks"],
+            run_dir / "workspace",
+            data={
+                "outcome": "hook_refused",
+                "stop_reason": "prompt_submit",
+                "applied": False,
+                "changed_paths": [],
+                "run_dir": str(run_dir),
+            },
+            shell_network=options.tool_settings.shell_network,
+            run_seed=str(spec["run_identity_seed"]),
+            run_id=str(spec["run_identity_seed"]),
+            version=__version__,
+            printer=printer,
+        )
+    except (hook_host.HookContainmentError, hook_host.HookConfigError, OSError, ValueError) as error:
+        containment_error = str(error)
+        printer(f"hooks: containment: {json.dumps(containment_error, ensure_ascii=False)}")
+
+    result = "HOOK_CONTAINMENT" if containment_error else (
+        "HOOK_FAILED" if refusal.startswith("HOOK_FAILED:") else "HOOK_DENIED")
+    containment_error = _write_hook_terminal_summary(
+        run_dir,
+        runtime_outcome="hook_containment" if containment_error else "hook_refused",
+        engine_result=result,
+        refusal=refusal,
+        containment_error=containment_error,
+        printer=printer,
+    )
+    return containment_error
+
+
+def prepare(options: RunOptions, printer=print) -> tuple[Path, workcopy.WorkCopy, dict]:
+    explicit_test_protection = options.protect_tests is not None
+    try:
+        options.runner_kind, test_argv = parse_command(options.test_cmd, options.runner_kind)
+        protected_globs = validate_patterns(options.protected_test_globs)
+        if options.runner_kind == "generic" and not test_argv and options.check_source != "none":
+            raise ValueError("a generic runner requires --test-cmd")
+        if options.runner_kind == "pytest" and protected_globs:
+            raise ValueError("--protected-test-glob requires a generic runner")
+    except ValueError as error:
+        raise RunError(str(error)) from error
     _validate_timeout(options.timeout_s)
     _remaining(options)
     environment = profiles.load(options.profile)
@@ -605,6 +752,10 @@ def prepare(options: RunOptions) -> tuple[Path, workcopy.WorkCopy, dict]:
         collision = sorted(name for name in stored_names if name in routed_keys)
         if collision:
             raise RunError(f"{collision[0]} is a routed api_key_env; remove that spec environment value")
+    options.protect_tests = options.protect_tests or environment.get("STATEFRAME_PROTECT_TESTS", "all")
+    if options.protect_tests not in {"task", "all", "off"}:
+        raise RunError("--protect-tests must be task, all, or off")
+    environment.pop("STATEFRAME_PROTECT_TESTS", None)
     if options.max_turns is None:
         options.max_turns = profile_steps(options.profile)
     if options.max_turns == 0:
@@ -664,12 +815,49 @@ def prepare(options: RunOptions) -> tuple[Path, workcopy.WorkCopy, dict]:
                       for item in settings.mcp_files)
     settings = replace(settings, tools_files=files, mcp_files=mcp_files)
     options.tool_settings = settings
+    from . import hook_host
+    hook_repo = (options.hooks_repo or options.repo).resolve()
+    if options.project_hooks_resolved:
+        project_hooks = hook_host.ProjectHookSelection(
+            repo=hook_repo,
+            hooks=options.project_hooks,
+            digest=options.project_hooks_digest,
+            message=None,
+        )
+    else:
+        try:
+            project_hooks = hook_host.resolve_project_hooks(
+                hook_repo,
+                shell_network=settings.shell_network,
+                no_project_hooks=options.no_project_hooks,
+            )
+        except (hook_host.HookTrustError, hook_host.HookConfigError) as error:
+            raise RunError(str(error)) from error
+        options.project_hooks = project_hooks.hooks
+        options.project_hooks_digest = project_hooks.digest
+        options.project_hooks_resolved = True
+        if project_hooks.message:
+            printer(project_hooks.message)
+    try:
+        hooks = hook_host.load_hooks(
+            options.hooks_files,
+            repo=hook_repo,
+            shell_network=settings.shell_network,
+            project=project_hooks,
+        )
+    except (hook_host.HookTrustError, hook_host.HookConfigError) as error:
+        raise RunError(str(error)) from error
     run = (options.run_dir or default_run_dir(options.repo)).resolve()
     if run.exists():
         raise RunError(f"run directory already exists: {run}")
     # Checked BEFORE anything is created: a run never writes into the user's repository.
     if run.is_relative_to(options.repo.resolve()):
         raise RunError(f"--run-dir must be outside the repository: {run}")
+    if hooks is not None:
+        try:
+            hook_host.refuse_run_dir_under_roots(run, hooks)
+        except hook_host.HookConfigError as error:
+            raise RunError(str(error)) from error
     run.mkdir(parents=True)
     work = workcopy.create(options.repo, run / "workspace")
     # Read-only reference copy of the starting state; the engine's finish path reads it, and
@@ -677,7 +865,13 @@ def prepare(options: RunOptions) -> tuple[Path, workcopy.WorkCopy, dict]:
     shutil.copytree(work.copy, run / "parent", symlinks=False)
     work.snapshot = run / "parent"
     row = build_row(work, task=options.task, checks=options.checks or None, target=options.target,
-                    edit_paths=options.edit_paths or None)
+                     edit_paths=options.edit_paths or None, runner_kind=options.runner_kind,
+                     test_command=test_argv, protected_test_globs=protected_globs,
+                     protect_tests=options.protect_tests)
+    if explicit_test_protection:
+        row["test_wrong_wire"] = True
+    if options.runner_kind == "generic":
+        row["check_source"] = options.check_source
     try:
         mcp = discover_mcp(mcp_servers, work.copy, run,
                            shell_network=settings.shell_network,
@@ -772,6 +966,11 @@ def prepare(options: RunOptions) -> tuple[Path, workcopy.WorkCopy, dict]:
                         "slot discovery has not run")),
         },
         "test_cmd": options.test_cmd,
+        "check_cmd": options.check_cmd,
+        "check_source": options.check_source,
+        "runner_kind": options.runner_kind,
+        "protected_test_globs": list(protected_globs),
+        "protect_tests": options.protect_tests,
         # The engine's run-scoped ids derive from this (see _child.install_run_identity), so a resume can
         # rebuild the run's requests byte for byte.
         "run_identity_seed": secrets.token_hex(16),
@@ -783,7 +982,49 @@ def prepare(options: RunOptions) -> tuple[Path, workcopy.WorkCopy, dict]:
     if mcp is not None:
         spec.update(mcp_tools_digest=mcp.digest, mcp_omitted=list(mcp.omitted),
                     mcp_tools=[tool.name for tool in mcp.tools])
-    (run / "spec.json").write_text(json.dumps(spec, indent=1, sort_keys=True))
+    if hooks is not None:
+        try:
+            manifest = hook_host.create_bundle(hooks, run / "hook-bundle")
+            hooks_spec = hooks.as_spec(manifest)
+            # Persist the pinned definitions before invoking any hook so a crash can resume
+            # from the durable runner tape instead of silently skipping or repeating a hook.
+            spec["hooks"] = hooks_spec
+            _write_hook_spec(run, spec)
+            printer(f"hooks: {len(hooks.definitions)} loaded from {len(hooks.files)} files")
+            from . import __version__
+            hooks_spec["start_context"] = hook_host.run_start_hooks(
+                run,
+                hooks_spec,
+                run / "workspace",
+                task=options.task,
+                repo=hook_repo,
+                shell_network=settings.shell_network,
+                run_seed=spec["run_identity_seed"],
+                run_id=spec["run_identity_seed"],
+                version=__version__,
+                printer=printer,
+            )
+            _write_hook_spec(run, spec)
+        except hook_host.HookRunRefused as error:
+            containment = _finish_prompt_refusal(options, run, spec, str(error), printer)
+            if containment:
+                raise HookContainmentRunError(f"HOOK_CONTAINMENT: {containment}") from error
+            result = "HOOK_FAILED" if str(error).startswith("HOOK_FAILED:") else "HOOK_DENIED"
+            raise HookRefusedRunError(f"hook refused run: {error}", result=result) from error
+        except hook_host.HookContainmentError as error:
+            detail = str(error)
+            _write_hook_terminal_summary(
+                run,
+                runtime_outcome="hook_containment",
+                engine_result="HOOK_CONTAINMENT",
+                containment_error=detail,
+                printer=printer,
+            )
+            raise HookContainmentRunError(f"HOOK_CONTAINMENT: {error}") from error
+        except hook_host.HookConfigError as error:
+            raise RunError(str(error)) from error
+    if hooks is None:
+        (run / "spec.json").write_text(json.dumps(spec, indent=1, sort_keys=True))
     return run, work, spec
 
 
@@ -1597,6 +1838,10 @@ def summarize(run: Path, started: float) -> dict[str, object]:
         "result", "reason_code", "error", "error_type", "error_message", "failure_origin", "behaviour",
         "done_facts", "submission", "labels", "claims")
         if key in result}
+    if isinstance(result.get("wrong_test_evidence"), dict):
+        summary["wrong_test_evidence"] = result["wrong_test_evidence"]
+    if isinstance(result.get("authored_check_receipt_id"), str):
+        summary["authored_check_receipt_id"] = result["authored_check_receipt_id"]
     for key in ("steps", "edits", "tests"):
         if key in result:
             summary[key] = result[key]
@@ -1762,6 +2007,17 @@ def resume_run(run_dir: Path, *, endpoint: Endpoint | None = None, max_turns: in
                        spec.get("skills_measurements"))
     except SkillError as error:
         raise resume_module.ResumeRefused(str(error)) from error
+    start_context_missing = "hooks" in spec and "start_context" not in spec["hooks"]
+    if start_context_missing:
+        from .hook_host import rebuild_start_context
+        try:
+            context = rebuild_start_context(run_dir, spec["hooks"],
+                                            run_seed=str(spec["run_identity_seed"]))
+        except ValueError as error:
+            raise resume_module.ResumeRefused(str(error)) from error
+        if context is not None:
+            spec["hooks"]["start_context"] = context
+            _write_hook_spec(run_dir, spec)
     if "tool_settings" in spec:
         try:
             settings = ToolSettings.from_dict(spec["tool_settings"])
@@ -1821,6 +2077,10 @@ def resume_run(run_dir: Path, *, endpoint: Endpoint | None = None, max_turns: in
     options = RunOptions(
         repo=Path(spec["repo"]), task=str(spec["public_row"].get("msg", "")), endpoint=endpoint,
         max_turns=int(state["max_turns"]), test_cmd=spec.get("test_cmd"), run_dir=run_dir,
+        check_cmd=spec.get("check_cmd"), check_source=spec.get("check_source"),
+        runner_kind=str(spec.get("runner_kind") or "auto"),
+        protected_test_globs=list(spec.get("protected_test_globs") or ()),
+        protect_tests=spec.get("protect_tests", "all"),
         in_place=bool(spec.get("in_place")), profile=str(spec.get("profile") or profiles.DEFAULT),
         python=str((spec.get("capabilities") or {}).get("python") or sys.executable),
         timeout_s=timeout_s, quiet=quiet, test_env={k: environment[k] for k in keys if k in environment},
@@ -1835,7 +2095,8 @@ def resume_run(run_dir: Path, *, endpoint: Endpoint | None = None, max_turns: in
             printer(_time_limit_line(options))
             printer(_step_limit_line(options))
             options.endpoint.check_locality()
-            options.python = _check_python(options.python)
+            options.python = _check_python(options.python,
+                                           require_pytest=options.runner_kind != "generic")
             options._capabilities = dict(spec.get("capabilities") or {})
             started_env = spec.get("environment") or {}
             options._context_tokens = int(started_env.get(CONTEXT_TOKENS_ENV) or DEFAULT_CONTEXT_TOKENS)
@@ -1923,6 +2184,28 @@ def resume_run(run_dir: Path, *, endpoint: Endpoint | None = None, max_turns: in
             from .shell_host import provision
             provision(options, run_dir, spec)
             work = resume_module.fresh_workcopy(run_dir, options.repo)
+            if start_context_missing and "start_context" not in spec["hooks"]:
+                from . import __version__, hook_host
+                try:
+                    spec["hooks"]["start_context"] = hook_host.resume_start_hooks(
+                        run_dir,
+                        spec["hooks"],
+                        work.copy,
+                        task=options.task,
+                        repo=options.repo,
+                        shell_network=options.tool_settings.shell_network,
+                        run_seed=str(spec["run_identity_seed"]),
+                        run_id=str(spec["run_identity_seed"]),
+                        version=__version__,
+                        printer=printer,
+                    )
+                    _write_hook_spec(run_dir, spec)
+                except hook_host.HookRunRefused as error:
+                    raise resume_module.ResumeRefused(f"hook refused run: {error}") from error
+                except hook_host.HookContainmentError as error:
+                    raise RunError(f"HOOK_CONTAINMENT: {error}") from error
+                except (hook_host.HookConfigError, OSError, ValueError) as error:
+                    raise resume_module.ResumeRefused(str(error)) from error
             summary = _execute(options, started, printer, run_dir, work, spec)
             refused = (summary.get("checkpoint_refused") or _checkpoint_refusal(run_dir, summary.get("child_exit_code"))
                        if checkpoint else None)
@@ -1986,11 +2269,45 @@ def _checkpoint_refusal(run_dir: Path, child_exit: object = None) -> str | None:
     return f"{record.get('error')}: {record.get('reason') or record.get('detail') or ''}".strip()
 
 
+def _session_end_is_final(summary: dict[str, object]) -> bool:
+    # session_end belongs to the logical run's terminal attempt. Incomplete and cancelled attempts
+    # may be resumed, and replay must not collide with a second session_end event id.
+    terminal = summary.get("engine_terminal") or {}
+    result = terminal.get("result") if isinstance(terminal, dict) else None
+    return isinstance(result, str) and (result in {"SUBMITTED", "HOOK_BLOCKED"} | outcomes.SEAL_FAILURES)
+
+
 def _run(options: RunOptions, started: float, printer=print) -> dict[str, object]:
     if options.endpoint is None:
         raise RunError("an endpoint is required")
     options.endpoint.check_locality()
-    options.python = _check_python(options.python)
+    try:
+        if options.test_cmd and options.check_cmd:
+            raise ValueError("pass either --test-cmd or --check-cmd, not both")
+        if options.check_cmd:
+            options.test_cmd = options.check_cmd
+            options.runner_kind = "generic"
+            options.check_source = "command"
+        elif options.test_cmd:
+            options.check_source = DECLARED_TEST_SOURCE
+        else:
+            detected, source, has_tests = discover_check(options.repo)
+            if detected:
+                options.test_cmd = detected
+                options.runner_kind = "generic"
+                options.check_source = source
+            elif not has_tests:
+                options.runner_kind = "generic"
+                options.check_source = "none"
+            else:
+                options.check_source = DECLARED_TEST_SOURCE
+        options.runner_kind, command_argv = parse_command(options.test_cmd, options.runner_kind)
+        if options.runner_kind == "generic" and not command_argv and options.check_source != "none":
+            raise ValueError("a generic runner requires --test-cmd")
+    except ValueError as error:
+        raise RunError(str(error)) from error
+    options.python = _check_python(options.python,
+                                   require_pytest=options.runner_kind != "generic")
     options._capabilities = _probe_capabilities(options)
     printer(str(options._capabilities["display"]))
     options._test_python = _select_test_python(options, printer)
@@ -2001,7 +2318,7 @@ def _run(options: RunOptions, started: float, printer=print) -> dict[str, object
     check_slot_context(options, printer)
     _select_prompt_cache_slot(options, printer)
     _probe_routes(options, printer)
-    run_dir, work, spec = prepare(options)
+    run_dir, work, spec = prepare(options, printer=printer)
     from .shell_host import provision
     provision(options, run_dir, spec)
     printer(f"run directory: {run_dir}")
@@ -2059,16 +2376,51 @@ def _execute(options: RunOptions, started: float, printer, run_dir: Path, work: 
              spec: dict) -> dict[str, object]:
     printer(f"working copy: {work.copy} ({len(work.baseline)} files; original untouched"
             f"{' until the end (--in-place)' if options.in_place else ''})")
-    printer(f"starting file hint: {spec['public_row']['entry']['path']}; "
-            f"checks: {', '.join(spec['public_row']['public_check_paths'])}")
+    if options.runner_kind != "generic":
+        printer(f"starting file hint: {spec['public_row']['entry']['path']}; "
+                f"checks: {', '.join(spec['public_row']['public_check_paths'])}")
+    else:
+        printer(f"starting file hint: {spec['public_row']['entry']['path']}; "
+                f"check: {options.test_cmd}")
     test_cmd = options.test_cmd or ("python -m pytest -q " + " ".join(
-        shlex.quote(p) for p in spec["public_row"]["public_check_paths"]))
-    before = run_test_cmd(test_cmd.replace("python ", shlex.quote(_tests_python(options)) + " ", 1)
+        shlex.quote(p) for p in spec["public_row"]["public_check_paths"])) \
+        if options.runner_kind != "generic" else options.test_cmd
+    before = ({"command": None, "exit_code": None, "passed": None, "tail": "no check available"}
+              if test_cmd is None else run_test_cmd(
+                  test_cmd.replace("python ", shlex.quote(_tests_python(options)) + " ", 1)
                           if test_cmd.startswith("python ") else test_cmd, work.copy,
                           test_env=options.test_env, python=_tests_python(options),
                           pytest_plugins=options.pytest_plugins, deadline=options._deadline,
-                          timeout_s=min(900, _remaining(options)), test_python=_outer_test_python(options))
-    printer(f"before: {test_cmd} -> {'PASS' if before['passed'] else 'FAIL'} (exit {before['exit_code']})")
+                          timeout_s=min(900, _remaining(options)), test_python=_outer_test_python(options),
+                           runner_kind=options.runner_kind,
+                           capture_output=options.protect_tests in {"task", "off"}))
+    printer(f"before: {test_cmd or '(none)'} -> "
+            f"{'PASS' if before['passed'] else 'FAIL' if before['passed'] is False else 'NOT RUN'} "
+            f"(exit {before['exit_code']})")
+    if options.protect_tests == "task" and before["passed"] is False:
+        row = spec["public_row"]
+        lock_initial_failing_tests(row, before)
+        (run_dir / "spec.json").write_text(json.dumps(spec, indent=1, sort_keys=True))
+    if options.protect_tests in {"task", "off"} or options.runner_kind == "generic":
+        from .test_runners import failing_test_nodes, is_test_file, judging_test_selection
+        row = spec["public_row"]
+        check_argv = parse_command(test_cmd, options.runner_kind)[1] if test_cmd else ()
+        test_paths = tuple(row.get("test_file_paths") or
+                           sorted(path for path in work.baseline if is_test_file(path)))
+        failed_output = (str(before.get("output") or before.get("tail") or "")
+                         if before.get("passed") is False else "")
+        selection = judging_test_selection(test_paths, check_argv, failed_output=failed_output)
+        row["test_wrong_failed_nodes"] = failing_test_nodes(test_paths, failed_output)
+        for index, arg in enumerate(check_argv):
+            if arg in {"-k", "-m"} and index + 1 < len(check_argv):
+                row[f"test_wrong_{'keyword' if arg == '-k' else 'mark'}"] = check_argv[index + 1]
+        original = work.snapshot or work.original
+        row["test_wrong_selectors"] = selection
+        row["test_wrong_sources"] = {
+            path: (original / path).read_text(encoding="utf-8", errors="replace")
+            for path in selection}
+        row["test_wrong_hashes"] = {path: work.baseline[path] for path in selection}
+        (run_dir / "spec.json").write_text(json.dumps(spec, indent=1, sort_keys=True))
     cancelled = False
     _remaining(options)
     try:
@@ -2100,14 +2452,16 @@ def _execute(options: RunOptions, started: float, printer, run_dir: Path, work: 
         candidate_error = str(error)
     digest = candidate_digest(work.copy) if candidate is not None and not candidate_error else None
     after = {"command": test_cmd, "exit_code": None, "passed": None, "tail": "checks not run"}
-    if digest and not cancelled:
+    if (digest and not cancelled and test_cmd is not None
+            and terminal.get("result") != "TEST_REPORTED_WRONG"):
         try:
             after = run_test_cmd(test_cmd.replace("python ", shlex.quote(_tests_python(options)) + " ", 1)
                                  if test_cmd.startswith("python ") else test_cmd, work.copy,
                                  test_env=options.test_env, python=_tests_python(options),
                                  pytest_plugins=options.pytest_plugins, deadline=options._deadline,
                                  timeout_s=min(900, _remaining(options)),
-                                 test_python=_outer_test_python(options))
+                                  test_python=_outer_test_python(options), runner_kind=options.runner_kind,
+                                  capture_output=True)
             if candidate_digest(work.copy) == digest:
                 after["candidate_sha256"] = digest
             else:
@@ -2130,15 +2484,32 @@ def _execute(options: RunOptions, started: float, printer, run_dir: Path, work: 
         "tests_before": {k: before[k] for k in ("command", "exit_code", "passed")},
         "tests_after": {k: after[k] for k in ("command", "exit_code", "passed", "candidate_sha256")
                         if k in after},
+        "runner_kind": spec.get("runner_kind", "pytest"),
+        "check_source": options.check_source,
+        **({"test_lock_note": spec["public_row"]["test_lock_note"]}
+           if "test_lock_note" in spec["public_row"] else {}),
+        "protect_tests": spec.get("protect_tests", "all"),
         "endpoint": options.endpoint.public(),
         "profile": options.profile,
         "engine_source_hash": spec["engine_source"].get("source_hash"),
         "engine_shipped_hash": spec["engine_source"].get("shipped_hash"),
     })
+    if options.protect_tests in {"task", "off"}:
+        test_changes = inspect_test_changes(work)
+        test_paths = {item["path"] for item in test_changes}
+        summary["test_files_changed"] = test_changes
+        summary["product_files_changed"] = sorted(set(summary["files_changed"]) - test_paths)
+        summary["test_weakening_findings"] = [finding for item in test_changes
+                                               for finding in item["weakening"]]
     if isinstance(spec.get("resume"), dict):
         summary["resume"] = _resume_record(run_dir, spec["resume"], summary)
     (run_dir / "tests-after.txt").write_text(after["tail"])
-    summary.update(outcomes.project(summary, cancelled=cancelled, timed_out=child_exit == 124))
+    summary.update(outcomes.project(
+        summary, cancelled=cancelled, timed_out=child_exit == 124,
+        check_output=str(after.get("output") or after.get("tail") or ""),
+        check_repo=work.copy,
+        declared_test_command=declared_test_evidence(
+            options.test_cmd, options.check_cmd, options.check_source, options.runner_kind)))
     summary["exit_code"] = outcomes.exit_code(summary)
     summary["succeeded"] = succeeded(summary)
     if options.in_place and diff:
@@ -2157,6 +2528,62 @@ def _execute(options: RunOptions, started: float, printer, run_dir: Path, work: 
             summary["in_place_skipped"] = (
                 f"candidate not promoted: runtime={summary['runtime_outcome']}, "
                 f"checks={summary['check_outcome']}, artifact={summary['artifact']}")
+    if "hooks" in spec:
+        from . import __version__, hook_host
+        containment_error = None
+        if (summary.get("runtime_outcome") != "hook_containment"
+                and _session_end_is_final(summary)):
+            terminal = summary.get("engine_terminal") or {}
+            stop_reason = terminal.get("reason_code") or terminal.get("result") or "unknown"
+            end_data = {
+                "outcome": str(summary.get("runtime_outcome") or "unknown"),
+                "stop_reason": str(stop_reason),
+                "applied": bool(summary.get("applied_in_place")),
+                "changed_paths": list(summary.get("files_changed") or []),
+                "run_dir": str(run_dir),
+            }
+            try:
+                hook_host.run_session_end(
+                    run_dir,
+                    spec["hooks"],
+                    work.copy,
+                    data=end_data,
+                    shell_network=options.tool_settings.shell_network,
+                    run_seed=str(spec["run_identity_seed"]),
+                    run_id=str(spec["run_identity_seed"]),
+                    version=__version__,
+                    printer=printer,
+                )
+            except (hook_host.HookContainmentError, hook_host.HookConfigError, OSError, ValueError) as error:
+                containment_error = str(error)
+                printer(f"hooks: containment: {json.dumps(containment_error, ensure_ascii=False)}")
+                summary["runtime_outcome"] = "hook_containment"
+                summary["hook_containment"] = containment_error
+                summary["exit_code"] = 2
+                summary["succeeded"] = False
+        if summary.get("runtime_outcome") == "hook_containment":
+            terminal = summary.get("engine_terminal") or {}
+            containment_error = str(summary.get("hook_containment") or terminal.get("error_message")
+                                    or terminal.get("reason") or terminal.get("reason_code")
+                                    or "hook execution containment failed")
+            summary["hook_containment"] = containment_error
+        try:
+            hook_summary = hook_host.hook_record_summary(run_dir)
+        except hook_host.HookRecordsError as error:
+            containment_error = containment_error or str(error)
+            summary["runtime_outcome"] = "hook_containment"
+            summary["hook_containment"] = containment_error
+            summary["exit_code"] = 2
+            summary["succeeded"] = False
+            hook_summary = {"runs": 0, "denied": 0, "vetoes": 0, "errors": 1,
+                            "last_error": containment_error}
+            printer(f"hooks: records error: {json.dumps(str(error), ensure_ascii=False)}")
+        if containment_error and hook_summary["last_error"] != containment_error:
+            hook_summary["errors"] = int(hook_summary["errors"]) + 1
+            hook_summary["last_error"] = containment_error
+        summary["hooks"] = hook_summary
+        printer(f"hooks: {hook_summary['runs']} runs, {hook_summary['denied']} denied, "
+                f"{hook_summary['vetoes']} vetoes, {hook_summary['errors']} errors")
     (run_dir / "summary.json").write_text(json.dumps(summary, indent=1))
     removed = clean_finished_checkpoints(run_dir, keep=options.keep_checkpoints)
     if removed is not None:

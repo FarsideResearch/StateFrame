@@ -5,10 +5,12 @@ import json
 import re
 from pathlib import Path
 
+from .test_runners import parse_command, verification_evidence_for_tests
+
 
 # Explicit statuses from the engine stop taxonomy; unknown statuses fail closed.
 BUDGET_STOPS = {"RESPONSE_BUDGET_EXHAUSTED", "ATTEMPT_BUDGET_EXHAUSTED", "BUDGET_EXHAUSTED"}
-INCOMPLETE = {"RUN_INCOMPLETE", "STOPPED_INCOMPLETE"}
+INCOMPLETE = {"RUN_INCOMPLETE", "STOPPED_INCOMPLETE", "TEST_REPORTED_WRONG"}
 # The engine could not build/seal its next request (a harness contract or finalization failure): an engine
 # error with a named reason, never a silently "missing" result.
 SEAL_FAILURES = {"HARNESS_CONTRACT", "FINALIZATION_ERROR"}
@@ -78,13 +80,20 @@ def sealed_artifact_digest(terminal: dict[str, object]) -> str | None:
 
 
 def project(summary: dict[str, object], *, cancelled: bool = False,
-            timed_out: bool = False) -> dict[str, object]:
+            timed_out: bool = False, check_output: str = "",
+            check_repo: Path | None = None, declared_test_command: bool = False) -> dict[str, object]:
     terminal = summary.get("engine_terminal") or {}
     status = terminal.get("result")
     child = summary.get("child_exit_code")
     recovered = (status == "SUBMITTED" and terminal.get("reason_code") == RECOVERED_FROM_JOURNAL
                  and not summary.get("candidate_error"))
-    if cancelled or child in (130, -2) or status in ("CANCELLED", "CANCELED"):
+    if summary.get("runtime_outcome") == "hook_containment" or summary.get("hook_containment"):
+        runtime = "hook_containment"
+    elif status == "HOOK_CONTAINMENT":
+        runtime = "hook_containment"
+    elif status == "HOOK_BLOCKED":
+        runtime = "hook_blocked"
+    elif cancelled or child in (130, -2) or status in ("CANCELLED", "CANCELED"):
         runtime = "cancelled"
     elif recovered:
         # The engine sealed and stored its submission before it was stopped: that is a submission.
@@ -121,6 +130,43 @@ def project(summary: dict[str, object], *, cancelled: bool = False,
     else:
         artifact = "partial"
     projected = {"runtime_outcome": runtime, "check_outcome": check, "artifact": artifact}
+    source = summary.get("check_source")
+    after_command = after.get("command")
+    kind = str(summary.get("runner_kind") or "")
+    try:
+        command = parse_command(after_command, kind)[1] if isinstance(after_command, str) else ()
+    except ValueError:
+        command = ()
+    final_source, test_label, evidence = verification_evidence_for_tests(
+        source if isinstance(source, str) else None, kind, command, check_output,
+        passed=check == "pass", declared=declared_test_command, repo=check_repo)
+    projected["check_source"] = final_source
+    projected["test_execution_evidence"] = evidence
+    if summary.get("runner_kind") == "generic" and runtime == "completed" and artifact == "saved":
+        if check == "pass":
+            projected["verification"] = test_label or {"build": "verified by build only",
+                                                        "command": "verified by check command"}.get(
+                                                            final_source, "verified by check command")
+        elif final_source == "none":
+            projected["verification"] = ("verified by an agent-written check"
+                                         if summary.get("authored_check_receipt_id") else
+                                         "unverified: review the diff")
+    elif (summary.get("runner_kind") == "pytest" and summary.get("protect_tests") != "all"
+          and runtime == "completed" and check == "pass" and artifact == "saved"):
+        projected["verification"] = test_label or "verified by check command"
+    if projected.get("verification") and summary.get("test_weakening_findings"):
+        findings = summary["test_weakening_findings"]
+        detail = "; ".join(f"{item['test']} ({item['reason']}; heuristic)" for item in findings)
+        count = len({item["test"].split("::", 1)[0] for item in findings})
+        projected["verification"] += f", but {count} test file weakened: {detail}"
+    if status == "TEST_REPORTED_WRONG" and summary.get("wrong_test_evidence"):
+        projected["verification"] = "stopped: test reported wrong, see evidence"
+    elif projected.get("verification"):
+        projected["verification_detail"] = (
+            f"exit {after.get('exit_code')}: {after_command}"
+            if after_command and after.get("exit_code") is not None else
+            f"check receipt {summary['authored_check_receipt_id']}"
+            if summary.get("authored_check_receipt_id") else "no check command ran")
     reason = engine_error_reason(summary)
     if runtime == "engine_error" and reason:
         projected["engine_error_reason"] = reason
@@ -142,12 +188,20 @@ def exit_code(summary: dict[str, object]) -> int:
     runtime = summary.get("runtime_outcome")
     if runtime == "cancelled":
         return 130
+    if runtime == "hook_containment":
+        return 2
+    if runtime == "hook_blocked":
+        return 1
     if summary.get("apply_error"):
         return 2
     if runtime in ("engine_error", "missing_result") or runtime is None:
         return 2
     if (runtime == "completed" and summary.get("engine_result") == "SUBMITTED"
-            and summary.get("artifact") == "saved" and summary.get("check_outcome") == "pass"
+            and summary.get("artifact") == "saved"
+            and (summary.get("check_outcome") == "pass"
+                 or (summary.get("runner_kind") == "generic"
+                     and summary.get("check_source") == "none"
+                     and summary.get("check_outcome") == "not_run"))
             and (summary.get("child_exit_code") == 0
                  or (summary.get("engine_terminal") or {}).get("reason_code") == RECOVERED_FROM_JOURNAL)):
         return 0

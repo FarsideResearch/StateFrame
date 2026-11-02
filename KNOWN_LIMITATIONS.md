@@ -35,9 +35,19 @@ Large tasks or repositories can require more state and source context than fits.
 - Workspace reconciliation stops without promoting command effects when any regular file exceeds 16 MiB, aggregate regular-file bytes exceed 256 MiB, or the tree exceeds 20,000 entries. These bounds also apply before execution when the snapshot is captured.
 - The shipped product profile uses the composed loop. The plain loop accepts foreground shell but refuses background jobs and Git, web or custom tool settings before execution. Lean mode is not supported by the product profile.
 
+## Lifecycle hooks
+
+Hooks always use the execution sandbox. There is no host-execution option or unsandboxed fallback; a sandbox startup failure is a hook error. Windows is unsupported. Linux desktop notifications cannot reach the user's D-Bus session from the sandbox; use an explicitly configured webhook instead. On Linux, network mode `loopback` gives a hook its own private loopback, so a service listening on the host's loopback needs `full`. The macOS notification and webhook samples are examples and are not exercised by the automated end-to-end tests.
+
+If a process is killed while a hook has a durable intent but no completion record, StateFrame cannot know whether an outside effect occurred and refuses to resume that run. Completed hook decisions are served from the run tape. A hook script is pinned, but a hook that deliberately runs project code from the mutable working copy can be influenced by the agent's edits to that code. The `[USER HOOKS]` label describes the text's source; it does not make that text a prompt-injection boundary. See [Lifecycle hooks](docs/guide/hooks.md) for the write, network and size limits.
+
 ## Checks
 
-The engine checks its work with pytest test files from the repository, so a repository needs at least one (`--check` names them). `--test-cmd` changes only the outer before-and-after command used to report pass or fail; it does not replace the engine's pytest checks, so a repository without pytest tests cannot be used yet. The interpreter selected for a run must be able to invoke pytest and the repository's required test dependencies. The check file can inspect any output file, not only Python (see "Tasks whose output is files" in the README).
+Ordinary non-verbose `go test` output reports package success without a positive test count, so it receives the weaker `verified by check command` label. Use `go test -v` to include named passing tests for test verification.
+
+Go and Rust command paths are implemented but their toolchains are not exercised on this project's automated gates. A repository with no tests can still finish from a passing declared build or type check, an agent-written check with a failing parent and passing candidate, or an unverified result when no check exists. Structured wrong-test evidence is advertised on an explicit `--protect-tests task|off` selection, or `all` for a generic runner; omitting the new flags preserves the 0.2.6 request schema.
+
+When tests exist, the default check uses pytest test files (`--check` names them), and its engine checks support per-test selectors. A non-pytest `--test-cmd` uses one whole-command result by exit code, with no per-test selector or collection evidence. A command that cannot start, exits 126 or 127, or times out cannot pass. Without tests or an explicit command, StateFrame tries a declared build or type check, then an agent-written check. With no check, the result is `unverified: review the diff`; it is not a test pass. Checks run under the existing sandbox. A generic check needs a usable Python interpreter for StateFrame itself, but that interpreter does not need pytest. The check can inspect output files, not only code (see "Tasks whose output is files" in the README). Test weakening detection for JavaScript, TypeScript, Go, Rust and shell is heuristic and can miss changes in meaning.
 
 In a repository with more than 200 source files, a run must name the files it may change with `--target` and `--edit`; the rest of the repository stays available as read-only context.
 

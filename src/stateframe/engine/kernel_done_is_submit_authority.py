@@ -526,6 +526,24 @@ def capture_and_seal(runtime: object, *, destination: str | Path, task_id: objec
     intent = getattr(runtime, "_done_submit_pending", None)
     if not isinstance(intent, DoneSubmitIntent):
         intent = request_submission(runtime, source="model")
+    hook_wiring = getattr(runtime, "_hook_wiring", None)
+    if hook_wiring is not None:
+        from kernel_hook_wiring import HookBlockedError
+        candidate = artifact_digest(sources)
+        gate = hook_wiring.state["gate"]
+        if gate is None or gate["source"] != intent.source:
+            hook_wiring.stop(runtime, source=intent.source,
+                             candidate_digest=candidate,
+                             changed_paths=tuple(sorted(
+                                 path for path, value in sources.items()
+                                 if value != parent_sources.get(path))))
+            gate = hook_wiring.state["gate"]
+        if gate is not None and gate["decision"] == "deny":
+            runtime.system_outcome = "hook_blocked"
+            raise HookBlockedError("hook vetoed this submission")
+        if gate is None or gate["decision"] != "continue" or gate["digest"] != candidate:
+            raise DoneCaptureError("hook stop gate record does not match this submission")
+        hook_wiring.state["gate"] = None
     stored = store_candidate(destination, task_id, sources)
     label = label_for_candidate(
         str(stored["artifact_digest"]), artifact_digest(parent_sources),

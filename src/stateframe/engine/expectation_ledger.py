@@ -946,8 +946,8 @@ def run_typed_suite(
             targets = (*target_selectors, *_safe_targets(root, test_roots)) or (".",)
     except ValueError as exc:
         return _error_result(scope=scope, status=SuiteStatus.HARNESS_ERROR, selected=(), command=(), detail=str(exc))
-    from kernel_test_python import test_python
-    command = (test_python(), "-m", "pytest", "-q", "--no-header", "-p", "no:cacheprovider", *targets)
+    from kernel_test_python import selected_test_python
+    command = (selected_test_python(), "-m", "pytest", "-q", "--no-header", "-p", "no:cacheprovider", *targets)
     process_env = os.environ.copy()
     if env:
         process_env.update({str(key): str(value) for key, value in env.items()})

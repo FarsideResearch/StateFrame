@@ -22,8 +22,9 @@ from pathlib import Path
 CHECK_TIMEOUT = 900.0
 OUTPUT_LIMIT = 256 * 1024
 SANDBOX_FORK_RETRIES = 2  # extra attempts after a transient bwrap fork EAGAIN
-# JSON may escape each retained byte as six ASCII characters.
-WIRE_LIMIT = OUTPUT_LIMIT * 6 + 16384
+# JSON may escape each retained byte as six ASCII characters; task mode also
+# sends a second copy of the final 4 KiB in the legacy tail field.
+WIRE_LIMIT = (OUTPUT_LIMIT + 4000) * 6 + 16384
 PASS_ENV = ("PATH", "LANG", "LC_ALL", "LC_CTYPE", "SYSTEMROOT")
 
 
@@ -42,7 +43,8 @@ def _kill_group(pid: int | None) -> None:
 
 def run(command: str, cwd: Path, *, python: str, timeout_s: float = CHECK_TIMEOUT,
         deadline: float | None = None, test_env: dict[str, str] | None = None,
-        pytest_plugins: str | None = None, test_python: str | None = None) -> dict[str, object]:
+        pytest_plugins: str | None = None, test_python: str | None = None,
+        runner_kind: str = "pytest", capture_output: bool = False) -> dict[str, object]:
     """Copy and check in a fresh helper, bounding both IPC and execution time.
 
     ``test_python`` is the interpreter the check command runs. The engine's sandbox admits only the test
@@ -59,8 +61,11 @@ def run(command: str, cwd: Path, *, python: str, timeout_s: float = CHECK_TIMEOU
         raise OuterCheckError("run deadline exhausted before outer check")
     if pytest_plugins not in (None, "installed"):
         raise OuterCheckError("--pytest-plugins only accepts 'installed'")
+    if runner_kind not in {"pytest", "generic"}:
+        raise OuterCheckError("check runner kind must be pytest or generic")
     spec = {"command": command, "cwd": str(cwd.resolve()), "deadline": end,
-            "test_env": test_env or {}, "pytest_plugins": pytest_plugins, "test_python": test_python}
+            "test_env": test_env or {}, "pytest_plugins": pytest_plugins, "test_python": test_python,
+            "runner_kind": runner_kind, "capture_output": capture_output}
     env = {key: os.environ[key] for key in PASS_ENV if key in os.environ}
     env["PYTHONHASHSEED"] = "0"
     env["PYTHONDONTWRITEBYTECODE"] = "1"
@@ -203,7 +208,8 @@ def _helper() -> int:
                     result = policy.run_sandboxed(shlex.split(spec["command"]), copy,
                                                   env=env, timeout=min(CHECK_TIMEOUT, check_budget),
                                                   cpu_seconds=min(CHECK_TIMEOUT, remaining),
-                                                  output_limit=OUTPUT_LIMIT)
+                                                  output_limit=OUTPUT_LIMIT,
+                                                  generic_check=spec["runner_kind"] == "generic")
                     # bwrap's own clone() can hit a transient EAGAIN on a loaded host; that is
                     # "try again", not "no sandbox". Retry briefly within the same deadline only.
                     stderr = result.completed.stderr
@@ -240,6 +246,8 @@ def _helper() -> int:
                        "timed_out": result.timed_out, "output_truncated": result.output_truncated,
                        "output_bytes": len(output),
                        "process_group_killed": result.process_group_killed}
+            if spec.get("capture_output"):
+                payload["output"] = output.decode("utf-8", errors="replace")
             print(json.dumps({"result": payload}), flush=True)
     except (RuntimeError, OSError, ValueError) as error:
         print(json.dumps({"error": str(error)}), flush=True)
