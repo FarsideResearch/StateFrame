@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.3.8 (2026-11-02)
+
+- Add `STATEFRAME_SHELL_STATE` (opt-in, off by default): the shell keeps its working directory and exported variables between foreground calls, so `cd sub && export X=1` followed by `pwd; echo $X` prints `sub` and `1`. A directory outside the workspace or one that no longer exists falls back to the workspace root, shell-maintained and `STATEFRAME_*` variables are never carried, and a timed-out call keeps the previous state. The state is part of each call's replay record, so resume reproduces it and refuses a call started from a different state. Background jobs and custom or MCP tools are unchanged.
+- With the switch off, shell commands, request bytes and the tool tape are unchanged.
+
 ## 0.3.7 (2026-11-02)
 
 - A repository with more than 200 source files no longer needs `--target`/`--edit` when the task or its chosen checks point at the files. StateFrame chooses up to 12 editable files: those the task names, then the modules imported by the checks you chose (`--check`, or test files named in `--test-cmd`), then one more import hop. It prints the list at startup. With nothing to go on, or with more than 8 selected test files, it stops and asks for the flags as before. `--target` and `--edit` still decide when given.
