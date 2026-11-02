@@ -48,6 +48,38 @@ def _mark_pending_verified(run, pending, *, route=ROUTE):
     (run / "resume-pending-verified.json").write_text(json.dumps(marker))
 
 
+def test_routed_resume_never_restores_a_checkpoint_even_with_a_proven_check(tmp_path, monkeypatch):
+    # KNOWN_LIMITATIONS "Per-step models": checkpoint restore of routed runs is not supported; they
+    # replay. This is the first resume of the original run (case 1, check carried normally).
+    run, spec = _interrupted_routed_run(tmp_path)
+    _write_send(run / "wire", 1)
+    _write_send(run / "wire", 2, completed=False)
+    calls = []
+    monkeypatch.setattr(resume, "select_checkpoint",
+                        lambda *args: calls.append(args) or {"dir": str(tmp_path / "ckpt"), "step": 5})
+
+    resume.archive_attempt({"run": run, "spec": spec, "attempt": 1, "max_turns": 8}, tmp_path,
+                           use_checkpoint=True)
+
+    resumed = json.loads((run / "spec.json").read_text())["resume"]
+    assert calls == [] and "checkpoint" not in resumed
+    assert resumed["pending"]["send"] == 2 and "pending_check" not in resumed
+
+
+def test_unrouted_resume_still_selects_checkpoints(tmp_path, monkeypatch):
+    run, spec = _interrupted_routed_run(tmp_path)
+    spec.pop("routes")
+    (run / "spec.json").write_text(json.dumps(spec))
+    _write_send(run / "wire", 1)
+    calls = []
+    monkeypatch.setattr(resume, "select_checkpoint", lambda *args: calls.append(args) or None)
+
+    resume.archive_attempt({"run": run, "spec": spec, "attempt": 1, "max_turns": 8}, tmp_path,
+                           use_checkpoint=True)
+
+    assert len(calls) == 1
+
+
 def test_second_resume_keeps_route_move_for_carried_tape(tmp_path):
     run, spec = _interrupted_routed_run(tmp_path)
     old_wire = run / "attempts" / "1" / "wire"

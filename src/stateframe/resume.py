@@ -478,8 +478,10 @@ def archive_attempt(state: dict[str, object], engine_dir: Path, *, use_checkpoin
         diverged=(source / "resume-divergence.json").exists(),
         restart_live=restart_live,
         interrupted_archive_tape=interrupted_archive_tape)
+    # Checkpoint restore is not supported for routed runs: checkpoint selection reads the in-flight
+    # request from the archived wire, not from the carried, route-verified check. Routed runs replay.
     checkpoint = (select_checkpoint(run, tape, source / "wire")
-                  if use_checkpoint and not restart_live and skipped_reason is None else None)
+                  if use_checkpoint and not restart_live and not spec.get("routes") else None)
     spec["max_turns"] = int(state["max_turns"])
     spec["environment"]["REACT_STEPS"] = str(spec["max_turns"])
     spec["engine_dir"] = str(engine_dir)  # same release (checked in assess), current install path
