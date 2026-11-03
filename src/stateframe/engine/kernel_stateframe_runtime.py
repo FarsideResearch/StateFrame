@@ -11793,6 +11793,8 @@ class StateFrameRuntime:
         return tool_allowed(name, runtime=self)
 
     def tool_menu(self, tools: list[dict], messages: Sequence[dict]) -> list[dict]:
+        from kernel_stable_tool_head import remember_offerable_tools
+        remember_offerable_tools(self, tools)
         from kernel_agent_tools import service, project_menu
         host = service()
         if host is not None:

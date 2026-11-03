@@ -178,6 +178,7 @@ class ToolLayout:
         self._schemas: dict[str, dict] = {}
         self.additions = 0
         self.replacements = 0
+        self._seeded = False
 
     def observe(self, tools: Sequence[Mapping[str, object]]) -> None:
         for tool in tools or ():
@@ -192,6 +193,23 @@ class ToolLayout:
             else:
                 continue                    # description-only churn (verbose <-> "Host X action."): keep
             self._schemas[name] = copy.deepcopy(dict(tool))
+
+    def seed(self, tools: Sequence[Mapping[str, object]]) -> None:
+        """Add the run's initial offerable schemas after the current menu, once.
+
+        Current tools establish the existing first-seen order. Seed-only tools have no
+        observed request order yet, so names provide a deterministic order for them.
+        Later tools that were not in the seed still use ordinary ``observe`` order.
+        """
+        if self._seeded:
+            return
+        pending: dict[str, Mapping[str, object]] = {}
+        for tool in tools or ():
+            name = _tool_name(tool)
+            if name and name not in self._schemas and name not in pending:
+                pending[name] = tool
+        self.observe([pending[name] for name in sorted(pending)])
+        self._seeded = True
 
     def tools(self) -> list[dict]:
         return [copy.deepcopy(self._schemas[name]) for name in self._order]

@@ -4,11 +4,13 @@ Runs the bundled scripted discount_bug example offline (needs the host sandbox a
 """
 from __future__ import annotations
 
+import io
 import json
 import os
 import shutil
 import subprocess
 import sys
+import tarfile
 from pathlib import Path
 
 import pytest
@@ -47,17 +49,132 @@ def _wire(run: Path) -> list[dict]:
     return [json.loads(path.read_bytes()) for path in sorted((run / "wire").glob("*.request.json"))]
 
 
+def _raw_tool_arrays(run: Path) -> list[bytes]:
+    arrays = []
+    for path in sorted((run / "wire").glob("*.request.json")):
+        source = path.read_bytes().decode("utf-8")
+        decoder = json.JSONDecoder()
+        offset = 1
+        while True:
+            while source[offset].isspace():
+                offset += 1
+            if source[offset] == "}":
+                raise AssertionError(f"{path.name} has no top-level tools array")
+            key, offset = decoder.raw_decode(source, offset)
+            while source[offset].isspace():
+                offset += 1
+            assert source[offset] == ":"
+            offset += 1
+            while source[offset].isspace():
+                offset += 1
+            start = offset
+            value, offset = decoder.raw_decode(source, offset)
+            if key == "tools":
+                assert isinstance(value, list)
+                arrays.append(source[start:offset].encode("utf-8"))
+                break
+            while source[offset].isspace():
+                offset += 1
+            if source[offset] == ",":
+                offset += 1
+            elif source[offset] == "}":
+                raise AssertionError(f"{path.name} has no top-level tools array")
+    return arrays
+
+
+def _tool_array_bytes(request: dict) -> bytes:
+    return json.dumps(
+        request["tools"], ensure_ascii=False, separators=(",", ":"), allow_nan=False,
+    ).encode("utf-8")
+
+
+def _assert_tool_arrays_identical(requests: list[dict]) -> None:
+    assert requests
+    first = _tool_array_bytes(requests[0])
+    for index, request in enumerate(requests[1:], start=2):
+        assert _tool_array_bytes(request) == first, f"request {index} changed the tool array"
+
+
+def _archive_revision(revision: str, destination: Path) -> Path:
+    archive = subprocess.run(
+        ["git", "-C", str(ROOT), "archive", revision, "src", "examples"],
+        capture_output=True, check=True,
+    ).stdout
+    destination.mkdir()
+    with tarfile.open(fileobj=io.BytesIO(archive), mode="r:") as contents:
+        for member in contents:
+            target = destination / member.name
+            if (not target.resolve().is_relative_to(destination.resolve())
+                    or member.issym() or member.islnk()):
+                raise AssertionError(f"unsafe baseline archive entry: {member.name}")
+            contents.extract(member, destination)
+    return destination
+
+
 def test_unset_defaults_on_and_the_run_still_succeeds(tmp_path):
     result, run = _run(tmp_path, None)
     assert result.returncode == 0, result.stdout + result.stderr
     requests = _wire(run)
     assert len(requests) >= 2
-    for previous, current in zip(requests, requests[1:]):
-        before, after = previous["tools"], current["tools"]
-        # Every earlier tool keeps its exact bytes and position; new tools are appended.
-        assert json.dumps(after[:len(before)]) == json.dumps(before)
+    _assert_tool_arrays_identical(requests)
+    raw_arrays = _raw_tool_arrays(run)
+    assert len(raw_arrays) == len(requests)
+    assert all(array == raw_arrays[0] for array in raw_arrays[1:])
+    first_names = {item["function"]["name"] for item in requests[0]["tools"]}
+    assert "authored_check" in first_names
     summary = json.loads((run / "summary.json").read_text())
     assert summary.get("succeeded") is True
+
+
+def test_identical_array_assertion_catches_a_planted_late_append():
+    def tool(name: str) -> dict:
+        return {"type": "function", "function": {
+            "name": name, "description": "d",
+            "parameters": {"type": "object", "properties": {}, "required": []}}}
+
+    requests = [
+        {"tools": [tool("read")]},
+        {"tools": [tool("read"), tool("authored_check")]},
+    ]
+    with pytest.raises(AssertionError, match="request 2 changed the tool array"):
+        _assert_tool_arrays_identical(requests)
+
+
+def test_raw_tool_array_extractor_preserves_serialized_bytes(tmp_path):
+    run = tmp_path / "run"
+    wire = run / "wire"
+    wire.mkdir(parents=True)
+    request = b'{"model":"scripted","tools" : [ {"name":"read"} ],"messages":[]}'
+    (wire / "0001.request.json").write_bytes(request)
+
+    assert _raw_tool_arrays(run) == [b'[ {"name":"read"} ]']
+
+
+def test_switch_off_requests_match_the_released_baseline(tmp_path):
+    from tools.compare_no_mcp_requests import capture, write_launcher
+
+    repo = tmp_path / "repo"
+    shutil.copytree(ROOT / "examples/discount_bug", repo)
+    launcher = tmp_path / "fixed_seed_run.py"
+    write_launcher(launcher)
+    script = ROOT / "examples/discount_bug.script.json"
+    run_dir = tmp_path / "run"
+
+    # Only a published release commit: a local or unmerged revision is missing from other clones and CI.
+    for index, revision in enumerate(("5140116",)):
+        baseline = _archive_revision(revision, tmp_path / f"baseline-{index}")
+        expected = capture(
+            baseline, sys.executable, launcher, script, repo, run_dir,
+            stable_tool_head="off",
+        )
+        run_dir.rename(tmp_path / f"baseline-run-{index}")
+        actual = capture(
+            ROOT, sys.executable, launcher, script, repo, run_dir,
+            stable_tool_head="off",
+        )
+        run_dir.rename(tmp_path / f"candidate-run-{index}")
+
+        assert actual == expected, f"STATEFRAME_STABLE_TOOL_HEAD=off changed requests vs {revision}"
 
 
 def test_switch_off_keeps_per_turn_menus(tmp_path):

@@ -7,6 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 
+import kernel_agent_tools as agent_tools
 import kernel_stable_tool_head as head
 from kernel_completion_owner import callable_tool_schemas, validate_tool_arguments
 
@@ -65,6 +66,99 @@ def test_listed_tools_grow_append_only_and_never_reorder_across_phases():
     grown = head.listed_tools(runtime, [tool("authored_check"), tool("edit")])
     assert names(grown) == ["read", "edit", "done", "authored_check"]
     assert json.dumps(grown[:3]) == json.dumps(first)
+
+
+def test_seed_uses_only_offerable_tools_after_current_menu_in_deterministic_order():
+    runtime = SimpleNamespace()
+    current = [tool("read"), tool("edit")]
+    offerable = [tool("skill_load"), tool("authored_check"), tool("read"), tool("edit")]
+
+    seeded = head.listed_tools(runtime, current, offerable)
+
+    assert names(seeded) == ["read", "edit", "authored_check", "skill_load"]
+    assert seeded[:2] == current
+
+
+def test_seed_uses_filtered_run_registry_and_does_not_reseed_later(monkeypatch):
+    monkeypatch.setenv(head.MODE_ENV, "on")
+
+    class RunTools:
+        names = frozenset({"skill_load", "web_fetch", "git_commit", "mcp_disabled", "custom_disabled"})
+
+        @staticmethod
+        def schemas():
+            return [tool("custom_enabled")]
+
+    monkeypatch.setattr(agent_tools, "_active", RunTools())
+    admitted = agent_tools.project_menu([
+        tool("read"), tool("authored_check"), tool("skill_load"), tool("web_fetch"),
+        tool("git_commit"), tool("mcp_disabled"), tool("custom_disabled"),
+    ])
+    runtime = SimpleNamespace()
+    head.remember_offerable_tools(runtime, admitted)
+
+    seeded = head.listed_tools(runtime, [tool("read")], head.run_offerable_tools(runtime))
+    head.remember_offerable_tools(runtime, [tool("late_offer")])
+    later = head.listed_tools(
+        runtime, [tool("late_tool"), tool("read")], head.run_offerable_tools(runtime))
+
+    assert names(seeded) == ["read", "authored_check", "custom_enabled"]
+    assert not {"skill_load", "web_fetch", "git_commit", "mcp_disabled", "custom_disabled"} & set(names(seeded))
+    assert "mcp_disabled" not in names(later)
+    assert names(later) == ["read", "authored_check", "custom_enabled", "late_tool"]
+
+
+def test_offerable_sources_merge_once_with_registered_schema_priority(monkeypatch):
+    monkeypatch.setenv(head.MODE_ENV, "on")
+    runtime = SimpleNamespace(_completion_owner_full_tools=[
+        tool("shared", description="registered"), tool("owner_only"),
+    ], _readiness_full_tools=[tool("readiness_only"), tool("shared", description="readiness")])
+
+    head.remember_offerable_tools(runtime, [tool("shared", description="initial"), tool("initial_only")])
+    head.remember_offerable_tools(runtime, [tool("ignored_late_surface")])
+
+    assert head.run_offerable_tools(runtime) == [
+        tool("shared", description="registered"), tool("owner_only"),
+        tool("readiness_only"), tool("initial_only"),
+    ]
+
+
+def test_final_surface_seeds_request_one_without_changing_callable_names(monkeypatch):
+    import kernel_completion_owner as completion_owner
+    import kernel_done_is_submit_authority as done_authority
+    import kernel_read_lockout
+    import kernel_request_tool_surface as request_surface
+
+    monkeypatch.setenv(head.MODE_ENV, "on")
+    monkeypatch.setenv("STATEFRAME_TOOL_MENU_MEMO", "off")
+    monkeypatch.setattr(done_authority, "enabled", lambda _runtime: False)
+    monkeypatch.setattr(done_authority, "candidate_exists", lambda _runtime: False)
+    monkeypatch.setattr(kernel_read_lockout, "filter_tools", lambda _runtime, tools: list(tools))
+    monkeypatch.setattr(completion_owner, "bind_final_tool_surface", lambda *args, **kwargs: True)
+
+    runtime = SimpleNamespace()
+    head.remember_offerable_tools(runtime, [
+        tool("read"), tool("edit"), tool("authored_check"),
+    ])
+    capture = SimpleNamespace()
+
+    def author(request_id: str, current: list[dict]) -> tuple[dict, dict]:
+        body = {"messages": [{"role": "user", "content": "task"}],
+                "tools": copy.deepcopy(current)}
+        surface = request_surface.author_final_tool_surface(
+            capture, runtime, body, request_id=request_id, bind_current_surface=True)
+        assert surface is not None
+        return surface, body
+
+    first, first_body = author("request-1", [tool("read"), tool("edit")])
+    second, second_body = author(
+        "request-2", [tool("edit"), tool("read"), tool("authored_check")])
+
+    assert names(first_body["tools"]) == ["read", "edit", "authored_check"]
+    assert first_body["tools"] == second_body["tools"]
+    assert first["names"] == ["read", "edit"]
+    assert second["names"] == ["edit", "read", "authored_check"]
+    assert names(runtime._completion_owner_dispatch_tools) == ["read", "edit", "authored_check"]
 
 
 def test_listed_tools_are_idempotent_within_a_request():
