@@ -31,9 +31,12 @@ from kernel_evidence_contracts import (
     SourceSnapshot,
     CoverageStatus,
 )
+from kernel_tree_digest import compatible_revision, read_row
 
 
 SCHEMA = "stateframe-request-evidence-closure/1"
+# Domain of the typed encoding used only when a dependency is missing or unreadable.
+DEPENDENCY_DIGEST_FORMAT = "stateframe.dependency_revision/2"
 TICKET_SCHEMA = "stateframe-authorized-ticket/1"
 TICKET_HEADER = "[AUTHORIZED TICKET"
 CLOSURE_HEADER = "[SOURCE CLOSURE RECEIPT"
@@ -752,14 +755,10 @@ def _is_test_path(path: str) -> bool:
 
 
 def dependency_revision(root: Path, paths: Sequence[str]) -> str:
-    digest = hashlib.sha256()
-    for path in sorted(dict.fromkeys(str(item) for item in paths)):
-        digest.update(path.encode("utf-8") + b"\0")
-        try:
-            digest.update((root / path).read_bytes())
-        except (OSError, UnicodeError):
-            digest.update(b"<unavailable>")
-    return "sha256:" + digest.hexdigest()
+    # Rendered as dependency_revision=... in fact blocks: request-compatible encoding
+    # (regular files hash exactly as before; missing/unreadable are typed, never "<unavailable>").
+    rows = [read_row(root / path, path) for path in sorted(dict.fromkeys(str(item) for item in paths))]
+    return "sha256:" + compatible_revision(DEPENDENCY_DIGEST_FORMAT, rows)
 
 
 class RevisionAwareFactCache:
@@ -1104,7 +1103,7 @@ def build_source_closure(root: Path, paths: Sequence[str], ticket: TicketIdentit
     root_resolved = root.resolve()
     safe_path_cache: dict[str, str | None] = {}
     source_cache: dict[str, tuple[str, str | None]] = {}
-    dependency_bytes: dict[str, bytes | None] = {}
+    dependency_rows: dict[str, tuple[str, bytes | None, str]] = {}
 
     def safe_path(raw: str) -> str | None:
         raw_text = str(raw)
@@ -1122,17 +1121,12 @@ def build_source_closure(root: Path, paths: Sequence[str], ticket: TicketIdentit
         return source_cache[safe]
 
     def revision_for_paths(revision_paths: Sequence[str]) -> str:
-        digest = hashlib.sha256()
+        rows = []
         for relative in sorted(dict.fromkeys(str(item) for item in revision_paths)):
-            digest.update(relative.encode("utf-8") + b"\0")
-            if relative not in dependency_bytes:
-                try:
-                    dependency_bytes[relative] = (root_resolved / relative).read_bytes()
-                except (OSError, UnicodeError):
-                    dependency_bytes[relative] = None
-            contents = dependency_bytes[relative]
-            digest.update(contents if contents is not None else b"<unavailable>")
-        return "sha256:" + digest.hexdigest()
+            if relative not in dependency_rows:
+                dependency_rows[relative] = read_row(root_resolved / relative, relative)
+            rows.append(dependency_rows[relative])
+        return "sha256:" + compatible_revision(DEPENDENCY_DIGEST_FORMAT, rows)
 
     declared: list[str] = []
     omissions: list[dict[str, object]] = []

@@ -37,6 +37,7 @@ from kernel_request_evidence_closure import (
 from kernel_aha11_native_honesty import _public_path, reserve_source_unit
 from kernel_measurement import profile_active_host_span, profiled_function_span
 import kernel_workspace_truth as _workspace_truth
+from kernel_tree_digest import compatible_revision, read_row
 from kernel_evictfix_mode import enabled as evictfix_enabled
 
 
@@ -4594,17 +4595,13 @@ def _parent_sources(runtime: object) -> dict[str, str]:
 
 
 def _revision12(root: Path, paths: Sequence[str]) -> str:
-    digest = hashlib.sha256()
-    for path in sorted(paths):
-        digest.update(path.encode("utf-8") + b"\0")
-        try:
-            digest.update((Path(root) / path).read_bytes())
-        except OSError:
-            digest.update(b"<missing>")
     # Keep the historical helper name for callers, but expose the complete
     # revision. Truncation would make entry/import facts collision-prone and
-    # could leave a dependency-backed cache apparently current.
-    return "sha256:" + digest.hexdigest()
+    # could leave a dependency-backed cache apparently current.  The value is
+    # rendered into fact blocks, so it uses the request-compatible encoding:
+    # regular files hash exactly as before; a missing file is typed, not "<missing>".
+    rows = [read_row(Path(root) / path, path) for path in sorted(paths)]
+    return "sha256:" + compatible_revision("stateframe.request_source_revision/2", rows)
 
 
 def render_literal_inventory(sites: Sequence[Site], tokens: Sequence[str], *,

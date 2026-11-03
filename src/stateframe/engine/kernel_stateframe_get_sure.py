@@ -20,6 +20,7 @@ from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 
 import kernel_parse_cache as _parse_cache
+from kernel_tree_digest import path_entry, tree_digest as canonical_tree_digest
 
 
 MODE_ENV = "STATEFRAME_GET_SURE"
@@ -606,18 +607,15 @@ def _copy_ignore(directory: str, names: list[str]) -> set[str]:
 
 
 def _workspace_fingerprint(root: Path) -> str:
-    digest = hashlib.sha256()
+    entries = []
     if not root.exists():
-        return digest.hexdigest()
+        return canonical_tree_digest("stateframe.get_sure_workspace/2", entries)
     for path in sorted(root.rglob("*")):
-        if not path.is_file() or any(part in {".git", "__pycache__", ".pytest_cache"} for part in path.parts):
+        if not (path.is_file() or path.is_symlink()) or any(
+                part in {".git", "__pycache__", ".pytest_cache"} for part in path.parts):
             continue
-        try:
-            digest.update(path.relative_to(root).as_posix().encode())
-            digest.update(path.read_bytes())
-        except OSError:
-            continue
-    return digest.hexdigest()
+        entries.append(path_entry(path, path.relative_to(root).as_posix()))
+    return canonical_tree_digest("stateframe.get_sure_workspace/2", entries)
 
 
 def _candidate_result_rows(table: ClauseTable, raw: object, public_status: str) -> list[dict[str, object]]:

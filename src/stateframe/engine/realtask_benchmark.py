@@ -29,12 +29,14 @@ from typing import Any, TypeAlias
 
 from task_manifest import ManifestValidationError, validate_public_manifest
 from realtask_worker_receipts import WorkerReceipt, make_worker_receipt
+from kernel_tree_digest import dir_entry, file_entry, symlink_entry, tree_digest as canonical_tree_digest
 
 
 MODE_ENV = "STATEFRAME_REAL_TASK_BENCHMARK"
 SCHEMA = "realtask-benchmark/1"
 VALIDATION_SCHEMA = "realtask-validation/2"
 CONTROLLER_SCHEMA = "realtask-controller/1"
+DIGEST_FORMAT = "stateframe.realtask_tree/2"
 PENDING_SCHEMA = "realtask-pending/1"
 TICKET_FIELDS = ("trigger", "observed", "expected")
 TICKET_HEADER = "[Real-task symptom v1]"
@@ -231,6 +233,7 @@ class ArchiveSnapshot:
     def public_dict(self) -> dict[str, object]:
         return {
             "schema": "git-archive/v1",
+            "digest_format": DIGEST_FORMAT,
             "tree_digest": self.tree_digest,
             "docs_stripped": True,
             "file_count": self.file_count,
@@ -257,23 +260,20 @@ def _safe_link_target(value: str) -> str:
 
 
 def _tree_digest(root: Path) -> tuple[str, int]:
-    digest = hashlib.sha256()
+    digest_entries = []
     files = 0
     entries = sorted(root.rglob("*"), key=lambda item: item.as_posix())
     for item in entries:
         relative = item.relative_to(root).as_posix()
         if item.is_symlink():
             files += 1
-            digest.update(f"F:{relative}\0".encode())
-            digest.update(f"L:{os.readlink(item)}\0".encode())
+            digest_entries.append(symlink_entry(relative, os.readlink(item)))
         elif item.is_dir():
-            digest.update(f"D:{relative}\0".encode())
+            digest_entries.append(dir_entry(relative))
         else:
             files += 1
-            digest.update(f"F:{relative}\0".encode())
-            digest.update(item.read_bytes())
-            digest.update(b"\0")
-    return digest.hexdigest(), files
+            digest_entries.append(file_entry(relative, item.read_bytes()))
+    return canonical_tree_digest(DIGEST_FORMAT, digest_entries), files
 
 
 def git_archive_snapshot(
@@ -346,16 +346,29 @@ def _write_snapshot_tar(root: Path, destination: Path) -> None:
 
 def persist_snapshot(root: Path, snapshot_dir: str | Path, tree_digest: str) -> Path:
     """Store a stripped parent world under its tree digest (idempotent)."""
+    if _tree_digest(root)[0] != tree_digest:
+        raise BenchmarkError("snapshot tree digest uses an old or incorrect format")
     target = Path(snapshot_dir) / f"{tree_digest}.tar"
     if not target.exists():
         _write_snapshot_tar(root, target)
     return target
 
 
+def _require_digest_format(row: Mapping[str, object]) -> None:
+    # Old base_digest values and <digest>.tar names use ambiguous concatenation.
+    # Refuse them before any snapshot lookup or parent/bundle comparison.
+    if row.get("digest_format") != DIGEST_FORMAT:
+        raise BenchmarkError("legacy realtask tree digest format; rebuild task and snapshot")
+    snapshot = row.get("snapshot")
+    if isinstance(snapshot, Mapping) and snapshot.get("digest_format") != DIGEST_FORMAT:
+        raise BenchmarkError("legacy realtask snapshot digest format; rebuild task and snapshot")
+
+
 def materialize_task_world(row: Mapping[str, object], snapshot_dir: str | Path,
                            destination: str | Path) -> Path:
     """Rebuild a task's full parent world from the saved snapshot, verify its
     digest against the public ``base_digest``, then overlay the public tests."""
+    _require_digest_format(row)
     digest = row.get("base_digest")
     if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest):
         raise BenchmarkError("task row has no base_digest")
@@ -405,7 +418,7 @@ class TaskPrivate:
 
     def controller_record(self, task_id: str, tree_digest: str) -> dict[str, object]:
         """Controller-only provenance to revalidate without re-mining a moving HEAD."""
-        return {"schema": CONTROLLER_SCHEMA, "task_id": task_id,
+        return {"schema": CONTROLLER_SCHEMA, "digest_format": DIGEST_FORMAT, "task_id": task_id,
                 "repository": self.repository, "subtree": self.subtree,
                 "parent_revision": self.parent_revision,
                 "gold_revision": self.gold_revision, "base_digest": tree_digest}
@@ -587,6 +600,7 @@ def _public_task(
         "rung": "dev",
         "world": "git-archive",
         "base_digest": base_snapshot.tree_digest,
+        "digest_format": DIGEST_FORMAT,
         "snapshot": base_snapshot.public_dict(),
         "files": [{"path": path, "source": source} for path, source in files],
         "public_tests": [
@@ -610,6 +624,7 @@ def _public_task(
 def validate_public_task(row: Mapping[str, object]) -> None:
     """Validate one public row without accepting any controller-only fields."""
 
+    _require_digest_format(row)
     leaked = _private_key_paths(row)
     if leaked:
         raise BenchmarkError(
@@ -800,6 +815,7 @@ def _validate_in_root(
     timeout: float,
     snapshot_dir: str | Path | None = None,
 ) -> RealTaskWorkerValidation:
+    _require_digest_format(bundle.public)
     base_root = root / "parent"
     gold_root = root / "gold"
     private = bundle.private

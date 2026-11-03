@@ -20770,7 +20770,8 @@ class StateFrameRuntime:
 
     def ship_tree_smoke(self):
         """N14: run or reuse smoke only for the same parent/dependency context."""
-        from kernel_ship_tree_smoke import python_paths, run_smoke, source_roots, tree_digest
+        from kernel_ship_tree_smoke import (TREE_DIGEST_FORMAT, python_paths, run_smoke,
+                                            source_roots, tree_digest)
         root = Path(getattr(self.owner, "root", Path.cwd())).resolve()
         paths = self._rulebook_entrypoints()
         checked = python_paths(root, paths)
@@ -20815,7 +20816,8 @@ class StateFrameRuntime:
         environment_key = json.dumps(environment_identity, sort_keys=True, default=str)
         resolver_key = json.dumps(resolver_identity, sort_keys=True, default=str)
         cached = getattr(self, "_ship_tree_smoke_result", None)
-        if (cached is not None and cached.checked == checked
+        if (cached is not None and getattr(cached, "digest_format", "") == TREE_DIGEST_FORMAT
+                and cached.checked == checked
                 and cached.tree_digest == current_digest
                 and cached.dependency_identity == dependency_key
                 and cached.environment_identity == environment_key
@@ -20823,7 +20825,8 @@ class StateFrameRuntime:
             return cached
         baseline = getattr(self, "_ship_tree_baseline", None)
         if (baseline is not None
-                and (baseline.dependency_identity != dependency_key
+                and (getattr(baseline, "digest_format", "") != TREE_DIGEST_FORMAT
+                     or baseline.dependency_identity != dependency_key
                      or baseline.environment_identity != environment_key
                      or baseline.resolver_identity != resolver_key)):
             self.journal.emit(
