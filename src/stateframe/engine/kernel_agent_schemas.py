@@ -31,13 +31,17 @@ BUILTIN_SCHEMAS = (
 )
 
 
-def measure_schemas(custom_schemas=(), *, mcp_schemas=(), endpoint=None, tokenizer=None):
+def measure_schemas(custom_schemas=(), *, mcp_schemas=(), endpoint=None, tokenizer=None,
+                    auth_key=None, generation_endpoint=None):
     """Use the request meter's tokenizer transport, recording fallback explicitly."""
     from kernel_request_diet import RequestTokenMeter
     from kernel_shell_tool import SHELL_SCHEMA
     from kernel_custom_tools import CustomToolError
 
-    meter = RequestTokenMeter(tokenizer, endpoint=endpoint, template_overhead_tokens=0)
+    meter = RequestTokenMeter(
+        tokenizer, endpoint=endpoint, template_overhead_tokens=0,
+        auth_key=auth_key, generation_endpoint=generation_endpoint,
+    )
     result = {}
     for item in (SHELL_SCHEMA, *BUILTIN_SCHEMAS):
         count, method = meter.measure({"messages": [], "tools": [item]})

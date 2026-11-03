@@ -498,6 +498,10 @@ class HookWiring:
         if not entries:
             return None
         meter = getattr(runtime, "_request_token_meter", None)
+        bind_tokenizer_auth = getattr(meter, "bind_tokenizer_auth", None)
+        if callable(bind_tokenizer_auth):
+            from kernel_request_diet import request_tokenizer_credentials
+            bind_tokenizer_auth(*request_tokenizer_credentials())
 
         def count(content):
             if meter is not None:

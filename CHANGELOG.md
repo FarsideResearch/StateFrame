@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.24 (2026-11-03)
+
+- Token counting now works against a llama.cpp server started with `--api-key`. StateFrame called `/tokenize` without the key, the server refused it, and every request was sized by an 82 KB byte estimate instead of real token counts. That estimate is tighter than the token budget, so source the model had just read could be left out of the next request. The key is now sent to `/tokenize` when it is on the same origin as the model endpoint, and never to a different host or across a redirect.
+- When token counting does fall back, the `token_counting_unavailable` event now says why: `unauthorized`, `http_error`, `connection`, `timeout`, `bad_response`, `no_url` or `disabled`.
+- Against a server without a key, request bytes are unchanged.
+
 ## 0.3.23 (2026-11-03)
 
 - A shell command that only creates directories (for example `mkdir -p pkg/batch`) no longer leaves its effect unresolved. Directories are not recorded as file changes, so the effect stayed `unknown` and every later tool call except `done` was refused with "no typed repair action on the live menu", a dead end present since 0.3.0. The effect now settles as applied from its journaled shell receipt when it belongs to the same run and effect and every recorded path is a valid workspace-relative path. As before, the exit code does not decide this.

@@ -305,7 +305,7 @@ def install_token_count_warning() -> None:
         result = original(self, body)
         if result[1] == "calibrated_bytes" and not warned["done"]:
             warned["done"] = True
-            emit("token_counting_unavailable")
+            emit("token_counting_unavailable", reason=self.unavailable_reason())
         return result
 
     measured._stateframe_fallback_warning = True
@@ -974,7 +974,7 @@ def main(argv: list[str]) -> int:
             configure_agent_tools(shell_service(), custom, mcp_servers,
                                   resume_active=resume is not None)
         from kernel_skills import configure as configure_skills
-        configure_skills(skill_records, skill_digest, spec.get("chat_url"))
+        configure_skills(skill_records, skill_digest, spec.get("chat_url"), auth_key=key or None)
         from kernel_project_instructions import configure as configure_project_instructions
         configure_project_instructions(spec.get("project_instructions"))
         from probes import react_repair as rr

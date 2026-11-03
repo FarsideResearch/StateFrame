@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import argparse
 import gzip
+import hmac
 import json
 import threading
 import time
@@ -60,13 +61,34 @@ class Script:
         self.lock = threading.Lock()
         self.requests: list[dict] = []
         self.request_log = Path(document["request_log"]) if isinstance(document.get("request_log"), str) else None
+        chat = document.get("chat")
+        if chat is None:
+            chat = {}
+        if not isinstance(chat, dict):
+            raise ValueError("chat settings must be an object")
+        self.chat_require_key = chat.get("require_key")
+        if self.chat_require_key is not None and (
+                not isinstance(self.chat_require_key, str) or not self.chat_require_key):
+            raise ValueError("chat require_key must be a non-empty string")
+        self.chat_authorization_present: list[bool] = []
+        self.chat_authorized: list[bool] = []
         # Optional llama.cpp-style POST .../tokenize, for tests of the token meter. Absent = 404
         # (the meter then uses its conservative estimate). Modes:
         #   {"mode": "ok"}                          answer every call
         #   {"mode": "fail", "status": 503}         error every call
         #   {"mode": "slow", "delay": 3.0}          answer every call after a delay
         #   {"mode": "slow_once", "delay": 0.5}     delay only the first call, then answer
+        #   {"mode": "bad_json"}                     return invalid JSON
+        #   {"mode": "no_tokens"}                    return JSON with no tokens
         self.tokenize = dict(document.get("tokenize") or {})
+        self.record_tokenize_request_bytes = self.tokenize.get("record_request_bytes") is True
+        required_tokenize_key = self.tokenize.get("require_key")
+        if required_tokenize_key is not None and (
+                not isinstance(required_tokenize_key, str) or not required_tokenize_key):
+            raise ValueError("tokenize require_key must be a non-empty string")
+        self.tokenize_authorization_present: list[bool] = []
+        self.tokenize_authorized: list[bool] = []
+        self.tokenize_request_bytes: list[bytes] = []
         # Optional llama.cpp-style GET /slots: a list of per-slot n_ctx, e.g. [32768] (absent = 404).
         self.slots = [int(n) for n in document.get("slots") or []]
         self.tokenize_calls = 0
@@ -135,6 +157,17 @@ def make_handler(script: Script):
             if mode == "fail":
                 self._send(int(config.get("status", 503)), {"error": {"message": "tokenizer unavailable"}})
                 return
+            if mode == "bad_json":
+                raw_response = b"not-json"
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(raw_response)))
+                self.end_headers()
+                self.wfile.write(raw_response)
+                return
+            if mode == "no_tokens":
+                self._send(200, {})
+                return
             if mode == "slow" or (mode == "slow_once" and first):
                 time.sleep(float(config.get("delay", 3.0)))
             try:
@@ -165,10 +198,35 @@ def make_handler(script: Script):
             if self.headers.get("Content-Encoding") == "gzip":
                 raw = gzip.decompress(raw)
             if self.path.rstrip("/").endswith("/tokenize") and script.tokenize:
+                authorization = self.headers.get("Authorization") or ""
+                required_key = script.tokenize.get("require_key")
+                authorized = (
+                    required_key is None
+                    or hmac.compare_digest(authorization, f"Bearer {required_key}")
+                )
+                with script.lock:
+                    script.tokenize_authorization_present.append(bool(authorization))
+                    script.tokenize_authorized.append(authorized)
+                    if script.record_tokenize_request_bytes:
+                        script.tokenize_request_bytes.append(raw)
+                if not authorized:
+                    self._send(401, {"error": {"message": "unauthorized"}})
+                    return
                 self._tokenize(raw)
                 return
             if self.path.rstrip("/") != "/v1/chat/completions":
                 self._send(404, {"error": {"message": "not found"}})
+                return
+            authorization = self.headers.get("Authorization") or ""
+            authorized = (
+                script.chat_require_key is None
+                or hmac.compare_digest(authorization, f"Bearer {script.chat_require_key}")
+            )
+            with script.lock:
+                script.chat_authorization_present.append(bool(authorization))
+                script.chat_authorized.append(authorized)
+            if not authorized:
+                self._send(401, {"error": {"message": "unauthorized"}})
                 return
             try:
                 body = json.loads(raw)
