@@ -9,6 +9,7 @@ import shlex
 import stat
 from dataclasses import asdict, dataclass
 from pathlib import Path
+from .state_dirs import private_directory
 
 from .engine.kernel_hook_exec import (
     HookContainmentError,
@@ -78,24 +79,11 @@ def _reject_constant(value: str) -> object:
 def _stateframe_dir(*, create: bool) -> Path | None:
     directory = Path.home() / ".stateframe"
     try:
-        info = directory.lstat()
-    except FileNotFoundError:
-        if not create:
+        if not create and not directory.exists() and not directory.is_symlink():
             return None
-        try:
-            directory.mkdir(mode=0o700, parents=True)
-        except FileExistsError:
-            pass
-        except OSError as error:
-            raise HookTrustError(f"cannot create hook trust directory {directory}: {error}") from error
-        try:
-            info = directory.lstat()
-        except OSError as error:
-            raise HookTrustError(f"cannot inspect hook trust directory {directory}: {error}") from error
+        private_directory(directory)
     except OSError as error:
-        raise HookTrustError(f"cannot inspect hook trust directory {directory}: {error}") from error
-    if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
-        raise HookTrustError(f"hook trust path is not a real directory: {directory}")
+        raise HookTrustError(f"cannot use hook trust directory {directory}: {error}") from error
     return directory
 
 

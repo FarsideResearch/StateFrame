@@ -14,6 +14,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Sequence
 
+if __package__:
+    from .state_dirs import private_directory
+else:  # Loaded by the engine child as a sibling module.
+    from state_dirs import private_directory
+
 NAME = re.compile(r"^[a-z][a-z0-9-]{1,40}$")
 MAX_BODY_BYTES = 32 * 1024
 MAX_DIRECTORY_BYTES = 1 << 20
@@ -308,7 +313,7 @@ def install(path: Path, *, force: bool = False) -> Skill:
         raise SkillError(f"SKILL_TOO_LARGE: skill {skill.name} body has {count} calibrated_bytes tokens; maximum 8000")
     _check_tree(skill.path)
     home = user_skills_dir()
-    home.mkdir(parents=True, exist_ok=True)
+    private_directory(home.parent, home.name)
     destination = home / skill.name
     if destination.is_symlink():
         raise SkillError(f"{destination}: linked installation destination is not allowed")

@@ -2,6 +2,7 @@
 
 | Message (or symptom) | Meaning | Fix |
 |---|---|---|
+| `warning: checkpoints are off for this run: ...` | StateFrame could not use the checkpoint key, saving failed repeatedly, or checkpoints were disabled by configuration. Resume uses full replay. Owned state directories and keys with loose permissions are tightened automatically. | Check the reason in the warning. Replace a linked or foreign-owned state path with a directory you own, or correct the checkpoint setting. |
 | `test interpreter ... cannot import pytest` | The Python chosen for your tests has no pytest. | Install pytest in your project's environment, or pass `--test-python` with one that has it. |
 | `unverified: review the diff` | No tests, explicit check, declared build or type check, or successful agent-written check supplied verification. | Review the diff or pass `--check-cmd COMMAND` for an appropriate check. |
 | `check command not found`, exit 126/127 or check timeout | The configured command did not establish a passing result. | Install the runner, check the command and executable permissions, or fix a hanging check. |

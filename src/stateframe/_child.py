@@ -31,10 +31,12 @@ if __package__:
     from .cache_metrics import normalize
     from .replay_tape import CheckpointUnfaithful, ReplayUnfaithful, Replayer, mask_volatile
     from .skills import SkillError, skills_digest, verify_records
+    from .state_dirs import private_directory
 else:  # Executed by path under the selected project interpreter.
     from cache_metrics import normalize
     from replay_tape import CheckpointUnfaithful, ReplayUnfaithful, Replayer, mask_volatile
     from skills import SkillError, skills_digest, verify_records
+    from state_dirs import private_directory
 
 # The wrappers' own state (send counters, the id stream position, ...). An engine checkpoint saves
 # these by value and a checkpoint restore refills them in place (kernel_checkpoint participants), so
@@ -697,6 +699,7 @@ def watch_parent() -> None:
 
 
 CHECKPOINT_KEY = Path(".stateframe") / "checkpoint.key"  # under the user's home
+KEY_LINK_SETTLE_S = 2.0  # how long a reader waits out publish()'s temporary second link
 
 
 def checkpoint_key() -> bytes | None:
@@ -704,7 +707,7 @@ def checkpoint_key() -> bytes | None:
     owned by this user, outside every run directory. Created on first use; None if unusable
     (then no checkpoint is written, and resume replays). The directory and the key are opened without
     following symlinks and checked by fstat on the open descriptors, so an existing directory that is
-    a symlink, another user's, or group/other accessible is refused, not trusted."""
+    a symlink or another user's is refused, not trusted. Owned loose modes are repaired."""
     import secrets
     import stat as stat_module
 
@@ -715,48 +718,79 @@ def checkpoint_key() -> bytes | None:
         return None
     path = home / CHECKPOINT_KEY
 
-    def publish(replace: bool) -> None:
+    def publish(replace: bool, directory_fd: int) -> None:
         # Complete key in a private temp file first, then link/replace it into place: a crash can never
         # leave a short key behind, and a concurrent reader never sees a partial one.
-        fd, temp = tempfile.mkstemp(prefix=".checkpoint.key.", dir=path.parent)
+        temp = ".checkpoint.key." + secrets.token_hex(16)
+        fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | nofollow,
+                     0o600, dir_fd=directory_fd)
         try:
             with os.fdopen(fd, "wb") as stream:
+                os.fchmod(stream.fileno(), 0o600)
                 stream.write(secrets.token_bytes(32))
                 stream.flush()
                 os.fsync(stream.fileno())
             if replace:
-                os.replace(temp, path)
+                os.replace(temp, CHECKPOINT_KEY.name,
+                           src_dir_fd=directory_fd, dst_dir_fd=directory_fd)
             else:
                 try:
-                    os.link(temp, path)
+                    os.link(temp, CHECKPOINT_KEY.name,
+                            src_dir_fd=directory_fd, dst_dir_fd=directory_fd,
+                            follow_symlinks=False)
                 except FileExistsError:
                     pass  # another process won the race: use its key
         finally:
-            if os.path.exists(temp):
-                os.unlink(temp)
+            try:
+                os.unlink(temp, dir_fd=directory_fd)
+            except FileNotFoundError:
+                pass
 
-    def private(info: os.stat_result, kind) -> bool:
-        return kind(info.st_mode) and info.st_uid == os.getuid() and not info.st_mode & 0o077
+    def settled_fstat(fd: int) -> os.stat_result:
+        # publish() links its temp file to the key name and unlinks the temp right after, so a
+        # concurrent reader can briefly see two links. Wait that window out; a key that stays
+        # hard-linked past it is still refused by the caller.
+        info = os.fstat(fd)
+        waited = 0.0
+        while info.st_nlink > 1 and waited < KEY_LINK_SETTLE_S:
+            time.sleep(0.02)
+            waited += 0.02
+            info = os.fstat(fd)
+        return info
 
     nofollow = getattr(os, "O_NOFOLLOW", 0)
     directory_fd = key_fd = None
     try:
-        path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        private_directory(path.parent)
         directory_fd = os.open(path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | nofollow)
-        if not private(os.fstat(directory_fd), stat_module.S_ISDIR):
+        directory_info = os.fstat(directory_fd)
+        if (not stat_module.S_ISDIR(directory_info.st_mode)
+                or directory_info.st_uid != os.getuid()
+                or stat_module.S_IMODE(directory_info.st_mode) != 0o700):
             emit("checkpoint_key_unusable", reason="key directory is not a private directory of this user")
             return None
-        if not os.path.lexists(path):
-            publish(replace=False)
-        info = os.lstat(path)
-        if stat_module.S_ISREG(info.st_mode) and info.st_uid == os.getuid() and info.st_size < 32:
-            # No checkpoint can be signed with a short key (the engine refuses one), so nothing is lost.
-            print("stateframe: checkpoint key was incomplete (an earlier crash?); replaced it", file=sys.stderr)
-            publish(replace=True)
-        key_fd = os.open(CHECKPOINT_KEY.name, os.O_RDONLY | nofollow, dir_fd=directory_fd)
-        if not private(os.fstat(key_fd), stat_module.S_ISREG):
+        try:
+            key_fd = os.open(CHECKPOINT_KEY.name, os.O_RDONLY | nofollow, dir_fd=directory_fd)
+        except FileNotFoundError:
+            publish(replace=False, directory_fd=directory_fd)
+            key_fd = os.open(CHECKPOINT_KEY.name, os.O_RDONLY | nofollow, dir_fd=directory_fd)
+        info = settled_fstat(key_fd)
+        if not stat_module.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_nlink != 1:
             emit("checkpoint_key_unusable", reason="key file is not a private file of this user")
             return None
+        if stat_module.S_IMODE(info.st_mode) != 0o600:
+            os.fchmod(key_fd, 0o600)
+        if info.st_size < 32:
+            # No checkpoint can be signed with a short key, so nothing is lost.
+            os.close(key_fd)
+            key_fd = None
+            print("stateframe: checkpoint key was incomplete (an earlier crash?); replaced it", file=sys.stderr)
+            publish(replace=True, directory_fd=directory_fd)
+            key_fd = os.open(CHECKPOINT_KEY.name, os.O_RDONLY | nofollow, dir_fd=directory_fd)
+            info = settled_fstat(key_fd)
+            if not stat_module.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_nlink != 1:
+                emit("checkpoint_key_unusable", reason="key file is not a private file of this user")
+                return None
         chunks = []
         while True:
             chunk = os.read(key_fd, 4096)
@@ -771,7 +805,10 @@ def checkpoint_key() -> bytes | None:
         for fd in (key_fd, directory_fd):
             if fd is not None:
                 os.close(fd)
-    return key if len(key) >= 32 else None
+    if len(key) < 32:
+        emit("checkpoint_key_unusable", reason="key file is incomplete")
+        return None
+    return key
 
 
 def register_host_state(*, required: bool, secret: str = "") -> None:

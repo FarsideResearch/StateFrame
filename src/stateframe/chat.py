@@ -20,6 +20,7 @@ from typing import TYPE_CHECKING
 from . import outcomes, workcopy
 from .endpoint import EndpointError
 from .runner import HookContainmentRunError, HookRefusedRunError, RunError, RunOptions, run, succeeded
+from .state_dirs import private_directory
 from .task_row import TaskRowError
 
 if TYPE_CHECKING:
@@ -83,7 +84,12 @@ class Session:
 
     def start(self, printer=print) -> None:
         self._resolve_project_hooks(printer)
-        self.home.mkdir(parents=True)
+        state_root = Path.home() / ".stateframe"
+        if self.home.parent == state_root / "sessions":
+            private_directory(state_root, "sessions", self.home.name)
+        else:
+            self.home.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            private_directory(self.home)
         work = workcopy.create(self.repo, self.copy)
         self.baseline = dict(work.baseline)
         shutil.copytree(self.copy, self.start_snapshot)  # immutable session-start state

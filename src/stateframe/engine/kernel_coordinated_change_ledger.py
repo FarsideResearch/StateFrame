@@ -23,7 +23,7 @@ import re
 import sys
 import tempfile
 import threading
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from collections import OrderedDict
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -1883,7 +1883,8 @@ _TYPED_TRANSACTIONS: dict[str, object] = {}
 
 
 def apply_typed_plan(root: str | Path, plan: Mapping[str, object], *,
-                     publish: bool | None = None, journal: object = None) -> BatchResult:
+                     publish: bool | None = None, journal: object = None,
+                     scope_refused: Callable[[str], bool] | None = None) -> BatchResult:
     """Stage or pointer-publish a typed plan; never materialize partial files."""
     root_path = Path(root).resolve()
     from kernel_revision_bound_edit import CandidateTransaction
@@ -1898,6 +1899,12 @@ def apply_typed_plan(root: str | Path, plan: Mapping[str, object], *,
                 json.dumps(edit_plan.to_dict(), sort_keys=True).encode()).hexdigest()[:16])
             _TYPED_TRANSACTIONS[identity] = transaction
         generation = transaction.prepare(edit_plan)
+        for relative, source in generation.sources.items():
+            if (source != authority.sources.get(relative) and scope_refused is not None
+                    and scope_refused(relative)):
+                failure = BatchFailure(0, relative, "NOT_EDITABLE", "path is outside editable_paths")
+                return BatchResult("REJECTED", identity, authority.source_revision,
+                                   failures=(failure,))
         do_publish = edit_plan.publish if publish is None else publish
         if not do_publish:
             return BatchResult("STAGED" if not generation.diagnostics else "REJECTED", identity,
@@ -1999,7 +2006,8 @@ def apply_batch(root: str | Path, edits: Sequence[object], *,
                 protected_paths: Iterable[object] = (),
                 publish: bool = True,
                 change_set: str | None = None,
-                plan: Mapping[str, object] | None = None) -> BatchResult:
+                plan: Mapping[str, object] | None = None,
+                scope_refused: Callable[[str], bool] | None = None) -> BatchResult:
     """Validate one retained generation and optionally publish it.
 
     Preflight is all-or-nothing.  A publish failure is reported as recovery
@@ -2007,7 +2015,8 @@ def apply_batch(root: str | Path, edits: Sequence[object], *,
     generation and never emits fake per-file completion receipts.
     """
     if plan is not None:
-        result = apply_typed_plan(root, plan, publish=publish, journal=journal)
+        result = apply_typed_plan(root, plan, publish=publish, journal=journal,
+                                  scope_refused=scope_refused)
         _emit(journal, APPLY_EVENT, action="typed-plan", status=result.status,
               batch_id=result.batch_id, changed_paths=list(result.changed_paths),
               failures=[item.to_dict() for item in result.failures])
@@ -2065,6 +2074,13 @@ def apply_batch(root: str | Path, edits: Sequence[object], *,
               batch_id=batch_id, failures=[row.to_dict() for row in validation.failures],
               warnings=list(validation.warnings))
         return result
+    for relative in validation.candidates:
+        if scope_refused is not None and scope_refused(relative):
+            failure = BatchFailure(0, relative, "NOT_EDITABLE", "path is outside editable_paths")
+            result = BatchResult("REJECTED", batch_id, tree_revision(root_path), failures=(failure,))
+            _emit(journal, APPLY_EVENT, action="preflight", status=result.status,
+                  batch_id=batch_id, failures=[failure.to_dict()])
+            return result
     # Re-read all pre-images after validation.  A concurrent edit is a stale
     # transaction, never a reason to overwrite another agent's work.
     for relative, original in validation.original.items():
@@ -2149,14 +2165,17 @@ def apply_batch(root: str | Path, edits: Sequence[object], *,
     return result
 
 
-def atomic_apply(root: str | Path, arguments: Mapping[str, object], **kwargs: object) -> BatchResult:
+def atomic_apply(root: str | Path, arguments: Mapping[str, object], *,
+                 scope_refused: Callable[[str], bool] | None = None,
+                 **kwargs: object) -> BatchResult:
     if not atomic_enabled():
         return BatchResult("DISABLED", "batch:disabled", tree_revision(root))
     typed_plan = arguments.get("plan") if isinstance(arguments, Mapping) else None
     if isinstance(typed_plan, Mapping):
         return apply_typed_plan(root, typed_plan,
                                 publish=bool(arguments.get("publish", typed_plan.get("publish", False))),
-                                journal=kwargs.get("journal"))
+                                journal=kwargs.get("journal"),
+                                scope_refused=scope_refused)
     if isinstance(arguments, Mapping) and isinstance(arguments.get("edits"), Sequence):
         raw_edits = arguments.get("edits")
         if any(isinstance(item, Mapping) and (
@@ -2172,16 +2191,19 @@ def atomic_apply(root: str | Path, arguments: Mapping[str, object], **kwargs: ob
                 "check_refs": arguments.get("check_refs", ()),
                 "publish": bool(arguments.get("publish", False)),
             }
-            return apply_typed_plan(root, plan, journal=kwargs.get("journal"))
+            return apply_typed_plan(root, plan, journal=kwargs.get("journal"),
+                                    scope_refused=scope_refused)
     edits = arguments.get("edits") if isinstance(arguments, Mapping) else None
     publish = bool(arguments.get("publish", True)) if isinstance(arguments, Mapping) else True
     change_set = str(arguments.get("change_set", "") or "") if isinstance(arguments, Mapping) else ""
     if edits == [] and publish and change_set:
-        return apply_batch(root, (), publish=True, change_set=change_set, **kwargs)
+        return apply_batch(root, (), publish=True, change_set=change_set,
+                           scope_refused=scope_refused, **kwargs)
     if not isinstance(edits, Sequence) or isinstance(edits, (str, bytes, bytearray)):
         failure = BatchFailure(0, "", "REQUEST", "atomic_apply requires an edits list")
         return BatchResult("REJECTED", "batch:invalid", tree_revision(root), failures=(failure,))
-    return apply_batch(root, edits, publish=publish, change_set=change_set or None, **kwargs)
+    return apply_batch(root, edits, publish=publish, change_set=change_set or None,
+                       scope_refused=scope_refused, **kwargs)
 
 
 def augment_str_replace_tool(tools: Sequence[dict]) -> list[dict]:

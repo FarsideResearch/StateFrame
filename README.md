@@ -161,6 +161,9 @@ to avoid that checkpoint disk cost and use full replay on resume. When a run fin
 checkpoints; `--keep-checkpoints` (or `STATEFRAME_KEEP_CHECKPOINTS=1`) keeps them.
 Checkpoints are signed with a per-install key in `~/.stateframe/checkpoint.key` (a private file); a checkpoint
 that was edited, copied from another machine, or written by another engine build is never loaded.
+StateFrame creates `~/.stateframe` with mode 0700 and the key with mode 0600 whatever your umask is, and
+tightens its own folder or key if they are too open. If checkpoints are off for a run for any reason, it
+prints one warning line saying why.
 
 Precedence: an environment variable wins over a profile setting, which wins over the default. An engine
 without checkpoint support ignores these settings and resume replays.
@@ -201,7 +204,7 @@ Check it before a run: send the same text to `/tokenize` on both servers and com
 
 ## Real repositories
 
-In a repository with more than 200 source files, say which files the change may touch: `--target` names the starting file and each `--edit` adds another editable file. The whole repository stays available as read-only context. Without them, StateFrame chooses up to 12 files from the paths your task names and the imports of the checks you chose, and prints the list; it stops and asks for the flags only when nothing points at a file.
+In a repository with more than 200 source files, say which files the change may touch: `--target` names the starting file and each `--edit` adds another editable file. The whole repository stays available as read-only context. Without them, StateFrame chooses up to 12 files from the paths your task names and the imports of the checks you chose, and prints the list; it stops and asks for the flags only when nothing points at a file. An edit to an existing file outside that set is refused before anything is written, and the model is told which flag would allow it (`--edit PATH`, or `--edit-scope widen`).
 
 ```bash
 stateframe run --repo ~/code/shop --task "Discounts above 50% are rejected; allow up to 100%." \

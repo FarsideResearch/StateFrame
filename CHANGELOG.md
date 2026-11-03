@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.3.11 (2026-11-02)
+
+- Scoped runs now refuse edits to existing product files outside their editable set before changing the workspace. The refusal names the file and how to widen the scope; new product files remain allowed under the existing rules.
+- The host warns and marks a run unsuccessful if a sealed candidate contains changed existing files it cannot apply. Shell writes restored for being outside scope now say REFUSED in the model reply.
+- Checkpoints now remain available when StateFrame starts under a permissive umask. Its own state directories and checkpoint key are created with private permissions; existing owned directories and keys with loose permissions are tightened safely.
+- A run whose checkpoints are disabled now prints one warning on stderr with the reason. Normal runs keep the same request bytes and output.
+
 ## 0.3.10 (2026-11-02)
 
 - New opt-in `--edit-scope widen` (or `STATEFRAME_EDIT_SCOPE_WIDEN=on`): edit and file-operation tools can admit up to 24 existing product files beyond a scoped run's starting set, in action order and across repository directories. Tests, named checks, hook inputs, links and special files remain refused. Each admission records its pre-edit digest in the durable journal; the host requires and rechecks it before carrying writes, deletions and moves into the result. New-file roots stay fixed; shell cannot initiate widening.

@@ -387,7 +387,11 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if args.command == "config":
             path = args.path.expanduser()
-            path.parent.mkdir(parents=True, exist_ok=True)
+            if path.parent == Path.home() / ".stateframe":
+                from .state_dirs import private_directory
+                private_directory(path.parent)
+            else:
+                path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
             with path.open("x", encoding="utf-8") as output:
                 output.write(routes.example())
             print(f"wrote {path}")

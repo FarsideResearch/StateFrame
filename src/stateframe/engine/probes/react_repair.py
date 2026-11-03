@@ -1598,7 +1598,8 @@ def _edit_path_label(path: pathlib.Path, root: pathlib.Path | None = None) -> st
 def _typed_edit_rejection(code: str, path: pathlib.Path, *,
                           root: pathlib.Path | None = None,
                           hint: str = "", symbol: str | None = None,
-                          definitions: Sequence[Mapping[str, object]] | None = None) -> str:
+                          definitions: Sequence[Mapping[str, object]] | None = None,
+                          include_hint: bool = False) -> str:
     """Return the JSON edit-rejection envelope shown to the model and frame.
 
     The executor is the authority for the target path.  Keeping the alternative in the
@@ -1639,6 +1640,8 @@ def _typed_edit_rejection(code: str, path: pathlib.Path, *,
         "path": path_text,
         "status": "REJECTED",
     }
+    if include_hint and hint:
+        alternative["hint"] = str(hint).strip()[:600]
     if symbol:
         payload["symbol"] = str(symbol)
     if definitions is not None:
@@ -2518,6 +2521,13 @@ _JQ_REPLACE_MODULE_TOOL = {"type": "function", "function": {
         "source": {"type": "string"},
         "candidate_id": {"type": "string"}},
         "required": ["path", "expected_revision"]}}}
+
+# Every shipped workspace writer must use the run loop's scope predicate before
+# dispatch. Shell and authored checks have separate effect/write authorities.
+SCOPED_WRITE_TOOLS = frozenset({
+    "edit", "str_replace", "insert_before", "replace_module",
+    "file_create", "file_delete", "file_move",
+})
 
 def _nonpy_neutralize_tool_surface(tools: Sequence[Mapping[str, object]]) -> list:
     """Make user-facing action descriptions describe changes, not only repairs."""
@@ -6448,6 +6458,32 @@ def work(d, *, resume=None):
                 _scope_widen_notes.append(note)
             return note
 
+        def _outside_edit_scope(relative):
+            """Existing files outside a scoped run cannot reach a workspace writer."""
+            if not (multifile and d.get("scoped_edits") is True):
+                return False
+            if not isinstance(relative, str) or relative in fileset.paths:
+                return False
+            try:
+                from build_tasks.multifile_row import normalize_repo_path
+                if normalize_repo_path(relative, field="edit scope path") != relative:
+                    return False
+            except ValueError:
+                return False
+            path = root / relative
+            if not path.resolve().is_relative_to(root.resolve()):
+                return False
+            if protected_test_path(path, baseline_tests):
+                return False
+            return str(path) not in created_this_run and path.is_file()
+
+        def _scope_rejection(relative):
+            return _typed_edit_rejection(
+                "NOT_EDITABLE", root / relative, root=root,
+                hint=(f"{relative} is not listed in the EditAuthority's editable_paths. "
+                      f"The scoped run can include it with --edit {relative} on a new run "
+                      "or --edit-scope widen."), include_hint=True)
+
         # Model-visible widening notes, delivered with the action's observation.
         _scope_widen_notes: list[str] = []
         action_anchor = len(msgs)     # conversation index just after the last real ACTION
@@ -7801,7 +7837,9 @@ def work(d, *, resume=None):
                     return protected_test_path(path, baseline_tests)
 
                 def _hook_file_editable(relative):
-                    return (relative in fileset.paths or str(root / relative) in created_this_run)
+                    return (not _outside_edit_scope(relative)
+                            and (relative in fileset.paths
+                                 or str(root / relative) in created_this_run))
 
                 try:
                     if name == "file_delete":
@@ -9039,11 +9077,7 @@ def work(d, *, resume=None):
                             _dest_arg = _args.get("destination") if _name == "file_move" else None
                             if multifile and isinstance(_source_arg, str):
                                 _scope_widen(_source_arg)
-                            _file_scope_refused = (
-                                _edit_scope_widen_enabled() and multifile
-                                and isinstance(_source_arg, str)
-                                and _source_arg not in fileset.paths
-                                and str(root / _source_arg) not in created_this_run)
+                            _file_scope_refused = _outside_edit_scope(_source_arg)
                             _paths = ()
                             _file_replay = FileOperationReplay(
                                 root, _name, _args, tool_call_id,
@@ -9071,8 +9105,9 @@ def work(d, *, resume=None):
                                     return protected_test_path(path, baseline_tests)
 
                                 def _editable(relative):
-                                    return (relative in fileset.paths
-                                            or str(root / relative) in created_this_run)
+                                    return (not _outside_edit_scope(relative)
+                                            and (relative in fileset.paths
+                                                 or str(root / relative) in created_this_run))
                                 if _name == "file_delete":
                                     _effect = file_delete(root, _source_arg, protected=_protected,
                                                           editable=_editable)
@@ -9101,7 +9136,10 @@ def work(d, *, resume=None):
                                 edits += 1
                                 _result = "APPLIED"
                             except FileOperationRefused as _error:
-                                _obs = _error.reply()
+                                # File operations keep their "REFUSED <code>:" reply contract;
+                                # the typed scope rejection rides after it.
+                                _obs = ("REFUSED NOT_EDITABLE: " + _scope_rejection(_source_arg)
+                                        if _file_scope_refused else _error.reply())
                                 _result = "REFUSED"
                             except OSError as _error:
                                 _obs = f"{_name} FAILED: {type(_error).__name__}: {_error}"
@@ -9157,6 +9195,8 @@ def work(d, *, resume=None):
                             tool_call_id_fc = tool_call_id
                             if _create_error:
                                 _obs = f"file_create REJECTED: {_create_error}"
+                            elif _outside_edit_scope(_create_rel):
+                                _obs = _scope_rejection(_create_rel)
                             elif _fc.exists():
                                 if protected_test_path(_fc, baseline_tests):
                                     _obs = (f"file_create REFUSED: {_fc.name} is a protected "
@@ -9657,11 +9697,8 @@ def work(d, *, resume=None):
                     elif multifile:
                         _pending_rel = str(pending_edit_path.relative_to(root))
                         _scope_widen(_pending_rel)
-                        if _pending_rel not in fileset.paths:
-                            obs = _typed_edit_rejection(
-                                "NOT_EDITABLE", pending_edit_path, root=root,
-                                hint=(f"{_pending_rel} is not listed in the EditAuthority's "
-                                      "editable_paths"))
+                        if _outside_edit_scope(_pending_rel) or _pending_rel not in fileset.paths:
+                            obs = _scope_rejection(_pending_rel)
                         elif protected_test_path(pending_edit_path, baseline_tests):
                             obs = _typed_edit_rejection(
                                 "NOT_EDITABLE", pending_edit_path, root=root,
@@ -11710,6 +11747,7 @@ def work(d, *, resume=None):
                     atomic_apply, tree_revision,
                 )
                 _batch_guard_failure = None
+                _batch_scope_rejection = None
                 _batch_edits = tool_batch_args.get("edits", [])
                 if isinstance(_batch_edits, list):
                     for _batch_index, _batch_edit in enumerate(_batch_edits):
@@ -11726,11 +11764,11 @@ def work(d, *, resume=None):
                             else:
                                 _batch_reason = _bound_edit_refusal(
                                     root, _batch_path, _batch_edit.get("target_ref"))
-                                if (_edit_scope_widen_enabled() and multifile
-                                        and _batch_reason is None):
+                                if multifile and _batch_reason is None:
                                     _batch_relative = _batch_path.relative_to(root).as_posix()
                                     _scope_widen(_batch_relative)
-                                    if _batch_relative not in fileset.paths:
+                                    if _outside_edit_scope(_batch_relative):
+                                        _batch_scope_rejection = _scope_rejection(_batch_relative)
                                         _batch_reason = "NOT_EDITABLE: path is outside editable_paths"
                         except (AmbiguousToolPath, OSError, ValueError) as _batch_error:
                             _batch_reason = str(_batch_error)
@@ -11755,9 +11793,15 @@ def work(d, *, resume=None):
                 else:
                     _batch_result = atomic_apply(
                         root, tool_batch_args, journal=measurement.journal,
-                        protected_paths=baseline_tests)
-                obs = json.dumps(_batch_result.to_dict(), sort_keys=True,
-                                 ensure_ascii=False)
+                        protected_paths=baseline_tests,
+                        scope_refused=_outside_edit_scope)
+                if _batch_scope_rejection is None:
+                    for _failure in _batch_result.failures:
+                        if _failure.code == "NOT_EDITABLE":
+                            _batch_scope_rejection = _scope_rejection(_failure.path)
+                            break
+                obs = (_batch_scope_rejection or json.dumps(
+                    _batch_result.to_dict(), sort_keys=True, ensure_ascii=False))
                 _batch_status = _batch_result.status
                 bolt.receipt(
                     "edit", "str_replace batch", json.dumps(tool_batch_args, sort_keys=True),
@@ -11814,11 +11858,8 @@ def work(d, *, resume=None):
                 else:
                     if multifile:
                         _scope_widen(resolved_path)
-                    if (_edit_scope_widen_enabled() and multifile
-                            and resolved_path not in fileset.paths):
-                        obs = _typed_edit_rejection(
-                            "NOT_EDITABLE", p, root=root,
-                            hint="path is not listed in editable_paths")
+                    if _outside_edit_scope(resolved_path):
+                        obs = _scope_rejection(resolved_path)
                     elif _hook_gate_route("replace_module", {"path": str(p)}):
                         continue
                     else:
@@ -11874,11 +11915,8 @@ def work(d, *, resume=None):
                     else:
                         if multifile:
                             _scope_widen(resolved_path)
-                        if (_edit_scope_widen_enabled() and multifile
-                                and resolved_path not in fileset.paths):
-                            obs = _typed_edit_rejection(
-                                "NOT_EDITABLE", p, root=root,
-                                hint="path is not listed in editable_paths")
+                        if _outside_edit_scope(resolved_path):
+                            obs = _scope_rejection(resolved_path)
                         elif _hook_gate_route("insert_before", {"path": str(p)}):
                             continue
                         else:
@@ -11982,11 +12020,8 @@ def work(d, *, resume=None):
                             _predispatch_blocked = True
                     _edit_before = (_source_snapshot(root, fileset.paths)
                                     if multifile else {})
-                    if (_edit_scope_widen_enabled() and multifile
-                            and resolved_path not in fileset.paths):
-                        obs = _typed_edit_rejection(
-                            "NOT_EDITABLE", p, root=root,
-                            hint="path is not listed in editable_paths")
+                    if _outside_edit_scope(resolved_path):
+                        obs = _scope_rejection(resolved_path)
                     elif _bound_reason is not None:
                         pass
                     elif _predispatch_blocked:
@@ -12201,11 +12236,8 @@ def work(d, *, resume=None):
                                   "retry denied before dispatch."))
                     elif multifile:
                         _scope_widen(resolved_path)
-                        if resolved_path not in fileset.paths:
-                            obs = _typed_edit_rejection(
-                                "NOT_EDITABLE", p, root=root,
-                                hint=(f"{resolved_path} is not listed in the EditAuthority's "
-                                      "editable_paths"))
+                        if _outside_edit_scope(resolved_path) or resolved_path not in fileset.paths:
+                            obs = _scope_rejection(resolved_path)
                         elif (fileset.entry_path and fileset.entry_fn) or _definition_mode:
                             _definition_name, _definition_error = _top_level_definition_name(
                                 blocks[-1].strip())
