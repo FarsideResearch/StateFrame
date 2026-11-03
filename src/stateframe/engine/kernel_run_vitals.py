@@ -399,6 +399,16 @@ class RunVitalsAccumulator:
         }
 
 
+def _checkpoint_vitals() -> dict[str, object]:
+    """Failed checkpoint saves and whether saving was turned off; None when checkpoints never loaded."""
+    import sys
+    checkpoint = sys.modules.get("kernel_checkpoint")
+    summary = getattr(checkpoint, "failure_summary", None)
+    if not callable(summary):
+        return {"checkpoint_failures": None, "checkpoint_saving_disabled": None}
+    return summary()
+
+
 def emit_run_vitals(journal: object) -> dict[str, object] | None:
     """Emit one terminal summary when enabled; never let telemetry affect the run."""
     if not enabled() or getattr(journal, "_run_vitals_emitted", False):
@@ -414,6 +424,7 @@ def emit_run_vitals(journal: object) -> dict[str, object] | None:
             "run_vitals",
             producer="kernel_run_vitals",
             **accumulator.snapshot(observer_failed=observer_failed),
+            **_checkpoint_vitals(),
         )
     except Exception:
         return None

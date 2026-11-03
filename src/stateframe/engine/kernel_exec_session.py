@@ -125,6 +125,27 @@ class JobHandle:
             time.sleep(min(0.02, max(0, deadline - time.monotonic())))
 
 
+class RestoredJobHandle:
+    """A job handle restored from a checkpoint. Checkpoints refuse live jobs, so the job had
+    already finished in the saving process; nothing is left to read, poll or stop."""
+
+    def __init__(self, ident: str, lost_bytes: int):
+        self.id = ident
+        self.lost_bytes = lost_bytes
+
+    def poll(self) -> int | None:
+        raise ExecSessionError("job finished before the checkpoint; it has no live process")
+
+    def read_available(self) -> bytes:
+        return b""
+
+    def stop(self, grace_seconds=2.0) -> CleanupReport:
+        return CleanupReport(True, 0, (), "job finished before the checkpoint")
+
+    def wait(self, timeout: float) -> int | None:
+        raise ExecSessionError("job finished before the checkpoint; it has no live process")
+
+
 class ExecSession:
     def __init__(self, run_dir: Path, *, platform_backend: str | None = None):
         self.run_dir = Path(run_dir).resolve(strict=True)

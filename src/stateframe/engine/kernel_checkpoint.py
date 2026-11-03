@@ -1053,10 +1053,32 @@ def _rebuild_workspace(obj, state):
         obj._identity = (value.st_dev, value.st_ino)
 
 
-# Process-bound engine classes: (module, qualname) -> state setter (obj, state) that re-acquires.
+def _restored_job_handle(ident, lost_bytes):
+    from kernel_exec_session import RestoredJobHandle
+    return RestoredJobHandle(ident, lost_bytes)
+
+
+def _exec_session_state(obj) -> dict:
+    """ExecSession: keep only what a fresh session needs. The supervisor process, its control
+    socket, log file and lock belong to the saving process; live jobs already make a step
+    checkpoint-ineligible, so no job handle outlives the save."""
+    return {"run_dir": str(obj.run_dir), "backend": obj.backend,
+            "capability": obj._initial_capability, "closed": obj._closed}
+
+
+def _rebuild_exec_session(obj, state):
+    """Restore an unstarted session in a fresh exec directory; it launches its supervisor lazily."""
+    fresh = type(obj)(Path(state["run_dir"]), platform_backend=state["backend"])
+    obj.__dict__.update(fresh.__dict__)
+    obj._initial_capability = state["capability"]
+    obj._closed = state["closed"]
+
+
+# Process-bound engine classes: (module, qualname) -> (state getter, state setter that re-acquires).
 LEASE_TYPES = {
-    ("kernel_continuation_journal", "ContinuationJournal"): _rebuild_journal,
-    ("kernel_continuation_workspace", "ContinuationWorkspace"): _rebuild_workspace,
+    ("kernel_continuation_journal", "ContinuationJournal"): (_journal_state, _rebuild_journal),
+    ("kernel_continuation_workspace", "ContinuationWorkspace"): (_workspace_state, _rebuild_workspace),
+    ("kernel_exec_session", "ExecSession"): (_exec_session_state, _rebuild_exec_session),
 }
 
 
@@ -1108,6 +1130,10 @@ class _Pickler(pickle.Pickler):
         if isinstance(obj, _ListRef):
             return (_load_list, (obj.key, obj.length))
         owner_key = (type(obj).__module__, type(obj).__qualname__)
+        if owner_key == ("kernel_exec_session", "JobHandle"):
+            # Live jobs make a step checkpoint-ineligible, so this job finished in the saving
+            # process; restore it detached instead of bound to a supervisor that no longer exists.
+            return (_restored_job_handle, (obj.id, obj.lost_bytes))
         if owner_key == ("kernel_capability_projection", "CapabilityProjection"):
             return obj.__reduce_ex__(5)
         if owner_key[0] == "kernel_history_receipts" and owner_key[1] in {"ReceiptDict", "ReceiptList"}:
@@ -1122,10 +1148,10 @@ class _Pickler(pickle.Pickler):
             result = chunked(obj)
             if result is not NotImplemented:
                 return result
-        rebuild = LEASE_TYPES.get((type(obj).__module__, type(obj).__qualname__))
-        if rebuild is not None:
-            state = _journal_state(obj) if rebuild is _rebuild_journal else _workspace_state(obj)
-            return (_new_instance, (type(obj),), state, None, None, rebuild)
+        lease = LEASE_TYPES.get((type(obj).__module__, type(obj).__qualname__))
+        if lease is not None:
+            get_state, rebuild = lease
+            return (_new_instance, (type(obj),), get_state(obj), None, None, rebuild)
         frozen = _frozen_sequence(obj)
         if frozen is not None:
             return (_new_frozen, (type(obj), frozen, frozen(obj)), dict(getattr(obj, "__dict__", {}) or {}) or None,
@@ -1323,6 +1349,49 @@ def dumps(payload, ctx, protocol=5) -> bytes:
 def dump_to(stream, payload, ctx, protocol=5) -> None:
     """Serialize with the same pickler as dumps(), directly into a writable stream."""
     _Pickler(stream, ctx, protocol).dump(payload)
+
+
+_PATH_NODE_LIMIT = 500_000
+
+
+def _process_bound_path(root) -> str:
+    """Breadth-first path to the first process-bound object (socket, lock, open file, child
+    process) in a payload that failed to pickle; bounded so a failure report stays cheap."""
+    import socket
+    import subprocess
+    import _thread
+    bound = (socket.socket, io.IOBase, subprocess.Popen, _thread.LockType, _thread.RLock)
+    seen: set[int] = set()
+    queue = [(root, "payload")]
+    while queue and len(seen) < _PATH_NODE_LIMIT:
+        obj, where = queue.pop(0)
+        if id(obj) in seen:
+            continue
+        seen.add(id(obj))
+        if isinstance(obj, bound):
+            return f"{where} ({type(obj).__name__})"
+        if isinstance(obj, (str, bytes, int, float, type, types.ModuleType)):
+            continue
+        if isinstance(obj, dict):
+            queue.extend((value, f"{where}[{key!r}]"[:300]) for key, value in obj.items())
+        elif isinstance(obj, (list, tuple, set, frozenset)):
+            queue.extend((value, f"{where}[{index}]") for index, value in enumerate(obj))
+        else:
+            fields = getattr(obj, "__dict__", None)
+            if isinstance(fields, dict):
+                queue.extend((value, f"{where}<{type(obj).__qualname__}>.{name}")
+                             for name, value in fields.items())
+    return "not found"
+
+
+def _failure_detail(error: BaseException) -> str:
+    """Error, its object-path note and the innermost traceback frames for checkpoint_failed."""
+    import traceback
+    notes = " | ".join(getattr(error, "__notes__", ()) or ())
+    frames = traceback.extract_tb(error.__traceback__)[-3:]
+    where = " <- ".join(f"{Path(frame.filename).name}:{frame.lineno}" for frame in reversed(frames))
+    detail = f"{type(error).__name__}: {str(error)[:300]}"
+    return detail + (f" [{notes[:600]}]" if notes else "") + (f" at {where}" if where else "")
 
 
 class _StateWriter:
@@ -1826,6 +1895,10 @@ def _save_into(payload, ctx, step, run_dir, root, final, tmp, clocks, started, c
             try:
                 dump_to(writer, payload, ctx)
                 return dict(_SAVE.get("index_out", {}))
+            except (TypeError, pickle.PicklingError) as error:
+                # One failed save, not a probe loop: name where the unpicklable object sits.
+                error.add_note("object path: " + _process_bound_path(payload))
+                raise
             finally:
                 _SAVE.clear()
         with os.fdopen(os.open(tmp / STATE_FILE, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "wb") as stream:
@@ -1947,6 +2020,12 @@ def _reap() -> bool:
     return True
 
 
+def failure_summary() -> dict[str, object]:
+    """Failed saves so far in this process and whether saving was turned off (for run vitals)."""
+    return {"checkpoint_failures": int(_STATE.get("failed", 0) or 0),
+            "checkpoint_saving_disabled": bool(_STATE.get("disabled"))}
+
+
 def _note_failure(run_dir, reason: str) -> None:
     """Count a failed save; after MAX_CONSECUTIVE_FAILURES in a row, stop saving (said once)."""
     _STATE["failed"] += 1
@@ -2020,7 +2099,7 @@ def _fork_writer(run_dir: Path, step: int, final: Path, write, tmp: Path) -> Non
         except BaseException as error:  # noqa: BLE001 - recorded, then exit
             shutil.rmtree(tmp, ignore_errors=True)
             _record(run_dir, event="checkpoint_failed", step=step, background=True,
-                    error=f"{type(error).__name__}: {str(error)[:300]}")
+                    error=_failure_detail(error))
         finally:
             os._exit(code)
     _STATE["child"], _STATE["child_tmp"], _STATE["child_run_dir"] = pid, tmp, run_dir
@@ -2185,8 +2264,7 @@ def _save_point(frame, step: int, poc, entered: float) -> None:
     except Exception as error:  # noqa: BLE001 - fail open, never break the run
         if current == "save":
             _STATE["last_sends"] = previous_sends  # nothing was saved: the next boundary may retry
-        _record(run_dir, event="checkpoint_failed", step=step,
-                error=f"{type(error).__name__}: {str(error)[:300]}")
+        _record(run_dir, event="checkpoint_failed", step=step, error=_failure_detail(error))
         _note_failure(run_dir, type(error).__name__)
 
 

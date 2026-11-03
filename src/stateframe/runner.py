@@ -2380,8 +2380,10 @@ def resume_run(run_dir: Path, *, endpoint: Endpoint | None = None, max_turns: in
             routes_configured = "routes" in spec or options._routes is not None
             # Widened edit scope lives in engine memory, not in a checkpoint; replay rebuilds it.
             widen_configured = edit_scope_widened(spec)
-            checkpoint_eligible = (same_limits and options.tool_settings.shell == "off"
-                                   and not checkpoint_off)
+            # Shell-enabled runs restore too: a checkpoint copies the run directory (workspace, run
+            # environment, shell home and baseline), saves the execution session unstarted, and is
+            # refused while a job is live; recorded exchanges after it replay through the tool tape.
+            checkpoint_eligible = same_limits and not checkpoint_off
             checkpoint_skip_reason = ("hooks_configured" if hooks_configured else
                                       "routes_configured" if routes_configured else
                                       "edit_scope_widen" if widen_configured else None)
