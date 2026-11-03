@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.3.15 (2026-11-03)
 
 - Process-group cleanup now uses the leader identity captured when the process starts. A reused PID cannot authorize a later group signal, including when cleanup runs without a descendant monitor. Request bytes are unchanged.
 - Outer checks now clean their own check group and acknowledge cleanup. Run, hook and check cleanup stop surviving group members before reaping an exited leader; Linux retains the launch identity when pidfds are unavailable.
