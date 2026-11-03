@@ -74,9 +74,25 @@ def _original_from_child_wrapper(value):
     return value
 
 
+# Import-time installers set watched globals the moment their module is first imported. That state is the
+# process baseline, not a test leak, so those modules are imported before the pristine snapshot. Collection no
+# longer reliably imports them first (11-03, v0.3.29: a test that first imported kernel_stateframe_runtime was
+# reported as leaking kernel_measurement._v30_accounting_patch). See tests/_import_time_installers.py.
 @pytest.fixture(scope="session")
-def pristine_installer_attributes():
-    # Session fixture setup follows collection, when test-module imports are complete.
+def import_time_installer_state():
+    """Run every import-time installer once, so the pristine snapshot includes its process-global state."""
+    import importlib
+
+    from _import_time_installers import IMPORT_TIME_INSTALLER_MODULES
+
+    for module_name in IMPORT_TIME_INSTALLER_MODULES:
+        importlib.import_module(module_name)
+
+
+@pytest.fixture(scope="session")
+def pristine_installer_attributes(import_time_installer_state):
+    # Session fixture setup follows collection, when test-module imports are complete, and runs after the
+    # import-time installers so their state is the baseline.
     return _imported_installer_attributes()
 
 
