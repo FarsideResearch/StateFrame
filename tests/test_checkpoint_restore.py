@@ -137,6 +137,7 @@ def test_checkpoint_request_mismatch_refuses_with_operation_tape(tmp_path, monke
     pending = {"send": 1, "request": str(request),
                "request_digest": replay_tape.normalized_digest(recorded)}
     player = replay_tape.Replayer([], strict=True, pending=pending)
+    monkeypatch.setattr(_child, "HOST_STATE", dict(_child.HOST_STATE))
     monkeypatch.setattr(kernel_bounded_http, "request_bytes", lambda *_args, **_kwargs: b"unused")
     _child.install_wire_recorder(run, "http://127.0.0.1:1/v1/chat/completions", player)
     with pytest.raises(replay_tape.CheckpointUnfaithful):
@@ -169,6 +170,7 @@ def test_full_replay_pending_mismatch_refuses_before_live_send(tmp_path, monkeyp
                "request_digest": replay_tape.normalized_digest(recorded)}
     player = replay_tape.Replayer([], pending=pending)
     live_calls = []
+    monkeypatch.setattr(_child, "HOST_STATE", dict(_child.HOST_STATE))
     monkeypatch.setattr(kernel_bounded_http, "request_bytes",
                         lambda *_args, **_kwargs: live_calls.append(True))
     _child.install_wire_recorder(tmp_path, "http://127.0.0.1:1/v1/chat/completions", player)

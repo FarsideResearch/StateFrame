@@ -670,6 +670,7 @@ def test_route_record_precedes_request_and_submission(tmp_path, monkeypatch):
         return RESPONSE
 
     monkeypatch.setattr(_child.os, "replace", observed_replace)
+    monkeypatch.setattr(_child, "HOST_STATE", dict(_child.HOST_STATE))
     monkeypatch.setattr(kernel_bounded_http, "request_bytes", physical)
     _child.install_wire_recorder(run, URL, routed_endpoints={URL})
     assert kernel_bounded_http.request_bytes(WIRE, URL, "", deadline=1000000,
@@ -714,6 +715,7 @@ def test_child_records_pending_verification_before_live_send(tmp_path, monkeypat
         return RESPONSE
 
     monkeypatch.setattr(_child.os, "replace", observed_replace)
+    monkeypatch.setattr(_child, "HOST_STATE", dict(_child.HOST_STATE))
     monkeypatch.setattr(kernel_bounded_http, "request_bytes", physical)
     _child.install_wire_recorder(run, URL, replayer=replay,
                                  routed_endpoints={URL} if case != "unrouted" else None)
@@ -791,6 +793,7 @@ def test_routed_recorder_refuses_unlisted_destination_before_writing(tmp_path, m
 
     run = tmp_path / "run"
     run.mkdir()
+    monkeypatch.setattr(_child, "HOST_STATE", dict(_child.HOST_STATE))
     monkeypatch.setattr(kernel_bounded_http, "request_bytes", lambda *args, **kwargs: RESPONSE)
     _child.install_wire_recorder(run, URL, routed_endpoints={URL})
     with pytest.raises(ValueError, match="authorized destination"):
@@ -821,6 +824,7 @@ def test_routed_replay_mismatch_refuses_before_physical_send(tmp_path, monkeypat
     endpoint = actual["endpoint"]
     wire = json.dumps({"model": actual["model"], "messages": []}).encode()
     sent = []
+    monkeypatch.setattr(_child, "HOST_STATE", dict(_child.HOST_STATE))
     monkeypatch.setattr(kernel_bounded_http, "request_bytes",
                         lambda *args, **kwargs: sent.append(args) or RESPONSE)
     _child.install_wire_recorder(run, URL, replayer=replay_tape.Replayer(

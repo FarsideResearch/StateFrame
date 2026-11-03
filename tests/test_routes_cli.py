@@ -557,6 +557,8 @@ def test_three_resumes_skip_unproven_pending_through_chained_endpoint_and_model_
         runner._probe_routes(options, lambda *_: None)
         runner.prepare(options)
         physical = kernel_bounded_http.request_bytes
+        monkeypatch.setattr(kernel_bounded_http, "request_bytes", physical)
+        monkeypatch.setattr(_child, "HOST_STATE", dict(_child.HOST_STATE))
 
         def route(url, model):
             return {"role": "read", "scope": "run", "unit_class": None,

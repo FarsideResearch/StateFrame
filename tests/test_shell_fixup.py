@@ -70,14 +70,16 @@ def test_replay_uuid_does_not_reuse_execution_directory(tmp_path, monkeypatch):
     assert marker.read_text() == "previous attempt evidence"
 
 
-def test_live_and_resume_workspace_identity_ignores_generated_caches(tmp_path):
+def test_live_and_resume_workspace_identity_ignores_generated_caches(tmp_path, monkeypatch):
     import py_compile
     import shutil
     from stateframe import workcopy
     from stateframe.resume import fresh_workcopy
-    from stateframe._child import install_repo_context
+    from stateframe import _child
     from kernel_effects import scan, diff
     from kernel_shell_tool import workspace_identity
+
+    monkeypatch.setattr(_child, "HOST_STATE", dict(_child.HOST_STATE))
 
     source = tmp_path / 'source'
     source.mkdir()
@@ -93,7 +95,7 @@ def test_live_and_resume_workspace_identity_ignores_generated_caches(tmp_path):
         # The child materializes the immutable parent, then checks/imports may
         # create bytecode whose embedded absolute source path varies on resume.
         child = SimpleNamespace(_materialize_public_tests=lambda *args: None)
-        install_repo_context(child, run / 'parent')
+        _child.install_repo_context(child, run / 'parent')
         root = run / 'worker/repo'
         root.mkdir(parents=True)
         child._materialize_public_tests(root, None, {})

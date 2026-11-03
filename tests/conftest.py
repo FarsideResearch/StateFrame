@@ -29,6 +29,107 @@ def _isolated_stateframe_home(tmp_path_factory):
         os.environ.pop("STATEFRAME_HOME", None)
 
 
+# _child installers patch these process globals directly. A test must register the
+# pristine value with monkeypatch before invoking an installer (or restore it in finally).
+_MISSING = object()
+_INSTALLER_ATTRIBUTES = (
+    ("kernel_bounded_http", (), "request_bytes"),
+    ("kernel_request_diet", ("RequestTokenMeter",), "measure"),
+    ("kernel_bridge_evidence", (), "capture_candidate"),
+    ("kernel_execution_policy", (), "run_sandboxed"),
+    ("kernel_measurement", (), "_v30_accounting_patch"),
+    ("probes.react_repair", (), "ask_tools"),
+    ("probes.react_repair", (), "_materialize_public_tests"),
+    ("probes.react_repair", (), "run_tests"),
+    ("uuid", (), "uuid4"),
+)
+
+
+def _imported_installer_attributes():
+    """Snapshot loaded modules without importing the engine as a fixture side effect."""
+    found = {}
+    for module_name, owner_path, attribute in _INSTALLER_ATTRIBUTES:
+        module = sys.modules.get(module_name)
+        if module is None:
+            continue
+        owner = module
+        for part in owner_path:
+            owner = getattr(owner, part, None)
+            if owner is None:
+                break
+        if owner is not None:
+            found[(module_name, owner_path, attribute)] = (
+                module, owner, getattr(owner, attribute, _MISSING))
+    return found
+
+
+def _original_from_child_wrapper(value):
+    """Recover a pre-install callable when its module was first imported in this test."""
+    while getattr(value, "__module__", None) == "stateframe._child":
+        closure = dict(zip(value.__code__.co_freevars, value.__closure__ or ()))
+        original = closure.get("original", closure.get("original_ask"))
+        if original is None:
+            break
+        value = original.cell_contents
+    return value
+
+
+@pytest.fixture(scope="session")
+def pristine_installer_attributes():
+    # Session fixture setup follows collection, when test-module imports are complete.
+    return _imported_installer_attributes()
+
+
+@pytest.fixture(autouse=True)
+def guard_child_installer_globals(request, pristine_installer_attributes):
+    """Name the leaking test, then repair globals before another test can inherit them."""
+    baseline = dict(pristine_installer_attributes)
+    for name, value in _imported_installer_attributes().items():
+        baseline.setdefault(name, value)
+    child = sys.modules.get("stateframe._child")
+    host_state = child.HOST_STATE if child is not None else None
+    host_entries = dict(host_state) if host_state is not None else None
+
+    yield
+
+    leaked = []
+    for (module_name, owner_path, attribute), (module, owner, original) in baseline.items():
+        if sys.modules.get(module_name) is not module:
+            continue
+        if getattr(owner, attribute, _MISSING) is not original:
+            leaked.append(f"{module_name}.{'.'.join((*owner_path, attribute))}")
+            if original is _MISSING:
+                delattr(owner, attribute)
+            else:
+                setattr(owner, attribute, original)
+    # A test can import an engine module inside its body, after the setup snapshot.
+    # Child wrappers retain their prior callable in a closure, so detect and unwind them.
+    for name, (_, owner, value) in _imported_installer_attributes().items():
+        if name in baseline:
+            continue
+        original = _original_from_child_wrapper(value)
+        if original is not value:
+            module_name, owner_path, attribute = name
+            leaked.append(f"{module_name}.{'.'.join((*owner_path, attribute))}")
+            setattr(owner, attribute, original)
+    if child is not None and sys.modules.get("stateframe._child") is child:
+        current = child.HOST_STATE
+        if current is not host_state or (host_entries is not None and
+                                         (current.keys() != host_entries.keys() or
+                                          any(current[key] is not value for key, value in host_entries.items()))):
+            leaked.append("stateframe._child.HOST_STATE")
+            host_state.clear()
+            host_state.update(host_entries)
+            child.HOST_STATE = host_state
+    elif child is None:
+        newly_imported_child = sys.modules.get("stateframe._child")
+        if newly_imported_child is not None and newly_imported_child.HOST_STATE:
+            leaked.append("stateframe._child.HOST_STATE")
+            newly_imported_child.HOST_STATE.clear()
+    if leaked:
+        pytest.fail(f"{request.node.nodeid} leaked child installer state: {', '.join(leaked)}", pytrace=False)
+
+
 def pytest_configure(config):
     config.addinivalue_line(
         "markers", "host_sandbox: starts an OS sandbox (sandbox-exec/bwrap) or a local socket service")
