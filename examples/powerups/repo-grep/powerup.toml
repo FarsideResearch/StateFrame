@@ -1,0 +1,9 @@
+schema = "stateframe-powerup/1"
+name = "repo-grep"
+version = "1.0.0"
+summary = "Search repository text with a bounded read-only command."
+default = "off"
+
+[offer]
+task_matches = ["(?i)\\bfind", "(?i)\\bsearch"]
+loops = ["composed"]

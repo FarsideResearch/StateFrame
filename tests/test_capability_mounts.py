@@ -10,6 +10,8 @@ from pathlib import Path
 
 import pytest
 
+from _portable import TRUE
+
 import kernel_test_isolation as isolation
 from kernel_exec_capability import ExecCapability, ExecLimits, shell_capability
 
@@ -25,7 +27,7 @@ def _command(monkeypatch, cap: ExecCapability) -> list[str]:
     if not sys.platform.startswith("linux"):
         # No /proc mount table off Linux, and an unreadable table prunes nothing; model a single root mount.
         monkeypatch.setattr(isolation, "_host_mount_points", lambda: frozenset({Path("/")}))
-    argv, _env = isolation.capability_command(["/bin/true"], cap, platform_backend="bwrap", shared_namespace=True)
+    argv, _env = isolation.capability_command([TRUE], cap, platform_backend="bwrap", shared_namespace=True)
     return argv
 
 
@@ -33,7 +35,7 @@ def test_redundant_read_only_binds_are_dropped_and_carve_outs_kept(tmp_path, mon
     system = tmp_path / "system"
     tool = system / "bin" / "tool"
     tool.parent.mkdir(parents=True)
-    tool.write_text("#!/bin/true\n")
+    tool.write_text(f"#!{TRUE}\n")
     # Merged-/usr shape: a PATH entry reached through a directory symlink (/bin -> usr/bin). The
     # capability keeps such roots (their parent is not canonical), and each resolves under /usr.
     linked = tmp_path / "bin"

@@ -7,6 +7,8 @@ import sys
 
 import pytest
 
+from _portable import TRUE
+
 from kernel_exec_capability import ExecLimits
 import sf_launch
 
@@ -133,7 +135,7 @@ def test_launcher_file_limit(tmp_path):
 def test_macos_launcher_requires_memory_supervision(tmp_path):
     if sys.platform != "darwin":
         return
-    spec = {"argv": ["/bin/true"], "cwd": str(tmp_path), "env": {}, "limits": asdict(ExecLimits())}
+    spec = {"argv": [TRUE], "cwd": str(tmp_path), "env": {}, "limits": asdict(ExecLimits())}
     result = subprocess.run([sys.executable, "-I", str(LAUNCH), json.dumps(spec)],
                             capture_output=True, timeout=5)
     assert result.returncode == 125

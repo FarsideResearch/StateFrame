@@ -294,6 +294,9 @@ class RunOptions:
     # "auto": the repo's AGENTS.md, else CLAUDE.md; "off": none; anything else: that file.
     instructions: str = project_instructions.DEFAULT_MODE
     hooks_files: tuple[Path, ...] = ()
+    powerup_requests: tuple[str, ...] = ()
+    powerup_sets: tuple[str, ...] = ()
+    no_powerups: bool = False
     no_project_hooks: bool = False
     hooks_repo: Path | None = None
     project_hooks: HookSet | None = field(default=None, repr=False)
@@ -925,6 +928,13 @@ def prepare(options: RunOptions, printer=print) -> tuple[Path, workcopy.WorkCopy
         raise RunError("--max-turns must be 0 (no limit) or between 1 and 500")
     if not ENGINE_DIR.is_dir():
         raise RunError("engine directory missing from the package; reinstall stateframe")
+    from . import hook_host, powerups
+    from .powerup_prepare import prepare_run_inputs
+    user_tool_count = len(options.tool_settings.tools_files)
+    try:
+        powerup_selection = prepare_run_inputs(options, environment, printer)
+    except (powerups.PowerupError, SkillError, CustomToolError, OSError, ValueError) as error:
+        raise RunError(str(error)) from error
     try:
         selected_skills = resolve_skills(options.skills, trusted=options.trust_skill_tools)
     except SkillError as error:
@@ -956,9 +966,10 @@ def prepare(options: RunOptions, printer=print) -> tuple[Path, workcopy.WorkCopy
             sys.path.remove(str(ENGINE_DIR))
     settings = options.tool_settings
     if options.trust_skill_tools:
-        settings = replace(settings, tools_files=(*settings.tools_files, *(
-            {"path": str(skill.path / "tools.json"), "digest": "pending"}
-            for skill in selected_skills if skill.tools_json_sha256)))
+        skill_files = tuple({"path": str(skill.path / "tools.json"), "digest": "pending"}
+                            for skill in selected_skills if skill.tools_json_sha256)
+        settings = replace(settings, tools_files=(*settings.tools_files[:user_tool_count],
+                                                *skill_files, *settings.tools_files[user_tool_count:]))
     builtin_names = frozenset(("grep", "list_files", "read", "edit", "str_replace", "insert_before",
         "authored_check", "file_create", "run_tests", "read_check_receipt", "recall", "done",
         "shell", "job_wait", "job_output", "job_stop", "file_delete", "file_move", "git", "web_fetch", "git_commit", "git_branch", "skill_load"))
@@ -977,7 +988,6 @@ def prepare(options: RunOptions, printer=print) -> tuple[Path, workcopy.WorkCopy
                       for item in settings.mcp_files)
     settings = replace(settings, tools_files=files, mcp_files=mcp_files)
     options.tool_settings = settings
-    from . import hook_host
     hook_repo = (options.hooks_repo or options.repo).resolve()
     if options.project_hooks_resolved:
         project_hooks = hook_host.ProjectHookSelection(
@@ -1152,6 +1162,8 @@ def prepare(options: RunOptions, printer=print) -> tuple[Path, workcopy.WorkCopy
         "repo": str(options.repo.resolve()),
         "in_place": options.in_place,
     }
+    if powerup_selection.active or powerup_selection.skipped:
+        spec["powerups"] = powerup_selection.record()
     if options._routes is not None:
         spec["routes"] = options._routes.public()
     if mcp is not None:
@@ -2224,6 +2236,12 @@ def resume_run(run_dir: Path, *, endpoint: Endpoint | None = None, max_turns: in
     state = resume_module.assess(run_dir, max_turns=max_turns, model=model,
                                  replay_external=replay_external)
     spec: dict = state["spec"]  # type: ignore[assignment]
+    if "powerups" in spec:
+        from . import powerups
+        try:
+            powerups.verify_records(spec["powerups"])
+        except powerups.PowerupError as error:
+            raise resume_module.ResumeRefused(str(error)) from error
     try:
         verify_records(spec.get("skills", []), spec.get("skills_digest", skills_digest([])),
                        spec.get("skills_measurements"))

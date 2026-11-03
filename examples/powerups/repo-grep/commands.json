@@ -1,0 +1,22 @@
+{
+  "schema": "stateframe-tools/1",
+  "tools": [
+    {
+      "name": "grep_repo",
+      "description": "Find literal text in repository files with bounded output.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "pattern": {"type": "string", "maxLength": 200},
+          "glob": {"type": "string", "maxLength": 100}
+        },
+        "required": ["pattern", "glob"]
+      },
+      "argv": ["grep_repo.py", "{pattern}", "{glob}"],
+      "network": "none",
+      "writes": "none",
+      "replay": "local",
+      "timeout_seconds": 15
+    }
+  ]
+}

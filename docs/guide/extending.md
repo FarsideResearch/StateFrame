@@ -25,6 +25,10 @@ Read the switch in engine code with a literal name, for example `os.environ.get(
 
 Hooks are user configuration, not new model-callable engine tools. Use `stateframe-hooks/1` definitions for run events, project trust, sandbox capabilities, formatter write scope and replay behavior. Start with the [hooks guide](hooks.md) and the working files under `examples/hooks/`. Changes to the hook engine itself belong in `kernel_hooks.py`, `kernel_hook_exec.py`, `kernel_hook_driver.py` or `kernel_hook_wiring.py`; add tests for every changed boundary and update both engine manifests for new modules.
 
+## Package a powerup
+
+To keep a skill, command tools, hooks and an MCP definition together and switch them on per user, profile, project or run, package them as a powerup. The host expands it into the same loaders at run start, so no engine change is needed. See the [powerups guide](powerups.md) and `examples/powerups/`.
+
 ## Tests
 
 - The package does not ship its own test suite. Test your changes with pytest in your checkout, and use the pieces below.

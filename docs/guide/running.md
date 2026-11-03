@@ -36,6 +36,7 @@
 - `--tools FILE`: repeatable trusted custom command definitions in `stateframe-tools/1` JSON.
 - `--hooks FILE`: repeatable lifecycle hook definitions in `stateframe-hooks/1` JSON. Project hooks at `.stateframe/hooks.json` require `stateframe hooks trust --repo R`; `--no-project-hooks` skips them for one `run` or `chat` command.
 - `--skill NAME_OR_PATH`: repeatable selected skill bundle. `--trust-skill-tools` offers its optional command definitions. See [Skills](skills.md).
+- `--powerup NAME[=MODE]|PATH`: repeatable powerup selection for this command; MODE is `off`, `offer`, `on` or `auto`. `--powerup-set NAME.KEY=VALUE` overrides one setting, and `--no-powerups` turns every powerup off. See [Powerups](powerups.md).
 - `--instructions[=FILE]`: project instructions, off by default. With no value, the repository's `AGENTS.md`, else `CLAUDE.md`; with a value, that file. `--no-instructions` states the default explicitly. See [Project instructions](#project-instructions).
 - On `resume`, `--replay-external` explicitly repeats recorded external operations before continuing.
 

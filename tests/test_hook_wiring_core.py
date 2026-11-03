@@ -13,6 +13,8 @@ from unittest.mock import patch
 
 import pytest
 
+from _portable import FALSE, TRUE
+
 from kernel_done_is_submit_authority import capture_and_seal
 from kernel_completion_owner import terminal_result
 from kernel_effects import (
@@ -198,7 +200,7 @@ def _wiring(tmp_path: Path, *, start_context=(), protected=False):
         HookDefinition(
             entry["hook"],
             entry["event"],
-            ("/usr/bin/true",),
+            (TRUE,),
             (),
             ("*",),
             False,
@@ -433,8 +435,8 @@ def test_native_receipt_scope_excludes_concurrent_mutation(tmp_path):
 def test_writer_skips_when_applied_effects_are_unavailable(tmp_path):
     wiring, repo = _wiring(tmp_path)
     writer = HookDefinition(
-        "fmt", "post_tool", ("/usr/bin/false",), (), ("edit",), True,
-        (), 30, "none", "block", 3, 0, "/usr/bin/false", "missing",
+        "fmt", "post_tool", (FALSE,), (), ("edit",), True,
+        (), 30, "none", "block", 3, 0, FALSE, "missing",
         writes="changed",
     )
     wiring.runner.hooks = HookSet((), (writer,), "writer")
@@ -833,7 +835,7 @@ def test_command_tool_admission_drops_engine_why():
     class Command:
         def build_argv(self, arguments):
             seen.append(dict(arguments))
-            return ["/bin/true"]
+            return [TRUE]
 
         def verify_executable(self):
             return None

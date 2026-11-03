@@ -9,6 +9,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from _portable import TRUE
+
 from kernel_exec_capability import ExecLimits, shell_capability, capability_from_dict
 from kernel_test_isolation import capability_command
 from kernel_exec_capability import executable_read_roots, symlink_hops
@@ -64,13 +66,13 @@ def test_missing_backend_fails_closed(cap, monkeypatch):
     monkeypatch.setattr("kernel_test_isolation.shutil.which", lambda name: None)
     monkeypatch.setattr("kernel_test_isolation._SANDBOX_DIRS", ())
     with pytest.raises(RuntimeError, match="no unsandboxed fallback"):
-        capability_command(["/bin/true"], cap)
+        capability_command([TRUE], cap)
 
 
 def test_launcher_file_is_explicit_readable(cap):
     # On this host profile generation is a pure operation, no sandbox is started.
     if sys.platform == "darwin":
-        command, env = capability_command(["/bin/true"], cap)
+        command, env = capability_command([TRUE], cap)
         assert "sf_launch.py" in command[2]
         assert env == dict(cap.env)
 
@@ -80,7 +82,7 @@ def test_linux_builder_network_and_mount_contract(cap, monkeypatch, network):
     monkeypatch.setattr("kernel_test_isolation._bwrap_userns_guard_supported", lambda path: True)
     monkeypatch.setattr("kernel_test_isolation.shutil.which", lambda name: "/usr/bin/bwrap")
     cap = replace(cap, network=network, workspace_writable=False)
-    command, env = capability_command(["/bin/true"], cap, platform_backend="bwrap")
+    command, env = capability_command([TRUE], cap, platform_backend="bwrap")
     assert "--unshare-all" in command and "--die-with-parent" in command
     assert "--new-session" in command
     assert "--disable-userns" in command and "--assert-userns-disabled" in command
@@ -90,7 +92,7 @@ def test_linux_builder_network_and_mount_contract(cap, monkeypatch, network):
     index = command.index(str(cap.workspace))
     assert command[index - 1] == "--ro-bind"
     assert env == dict(cap.env)
-    nested, _ = capability_command(["/bin/true"], cap, platform_backend="bwrap", shared_namespace=True)
+    nested, _ = capability_command([TRUE], cap, platform_backend="bwrap", shared_namespace=True)
     # DELIBERATE CHANGE (0.2.0, Linux procfs fix): nested commands used to share the supervisor's PID namespace
     # with an empty tmpfs on /proc, which broke df, ps, free and mount. Each nested command now gets its own PID
     # namespace and a fresh procfs of only its own processes; the supervisor still sees every descendant from the
@@ -132,7 +134,7 @@ def test_old_bwrap_keeps_shell_boundary_without_guard(cap, monkeypatch):
     monkeypatch.setattr("kernel_test_isolation.shutil.which", lambda name: "/old/bwrap")
     monkeypatch.setattr("kernel_test_isolation._bwrap_userns_guard_supported", lambda path: False)
     for shared in (False, True):
-        command, _ = capability_command(["/bin/true"], cap, platform_backend="bwrap",
+        command, _ = capability_command([TRUE], cap, platform_backend="bwrap",
                                         shared_namespace=shared)
         assert "--disable-userns" not in command
         assert "--assert-userns-disabled" not in command
@@ -237,7 +239,7 @@ def test_darwin_cache_filter_only_matches_cache_basename(cap, tmp_path, monkeypa
                  directory / 'xcrun_db-dir/child', directory / 'prefix-xcrun_db-a',
                  directory.parent / 'other/xcrun_db-a'):
         assert not any(re.fullmatch(pattern, str(path)) for pattern in patterns)
-    command, _ = capability_command(['/bin/true'], cap, platform_backend='sandbox-exec')
+    command, _ = capability_command([TRUE], cap, platform_backend='sandbox-exec')
     assert command[2].count(cache_filter) == 2
     assert f'(subpath {json.dumps(str(directory))})' not in command[2]
 

@@ -1,0 +1,22 @@
+{
+  "schema": "stateframe-hooks/1",
+  "hooks": [
+    {
+      "name": "py-format-availability",
+      "event": "session_start",
+      "argv": ["python3", "format.py", "--check"],
+      "files": ["format.py"],
+      "network": "none"
+    },
+    {
+      "name": "py-format-changed",
+      "event": "post_tool",
+      "argv": ["python3", "format.py", "--line-length", "{setting:line_length}", "{paths}"],
+      "files": ["format.py"],
+      "paths": ["*.py"],
+      "writes": "changed",
+      "network": "none",
+      "timeout": 65
+    }
+  ]
+}
