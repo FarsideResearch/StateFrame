@@ -43,9 +43,9 @@ def _declared_third_party() -> set[str]:
     return {w.lower().replace("-", "_").split(".")[0] for w in words}
 
 
-def _foreign_imports() -> dict[str, set[str]]:
+def _foreign_imports(package: Path = PACKAGE) -> dict[str, set[str]]:
     own, foreign = _own_names(), {}
-    for path in PACKAGE.rglob("*.py"):
+    for path in package.rglob("*.py"):
         tree = ast.parse(path.read_text(encoding="utf-8"))
         for node in ast.walk(tree):
             if isinstance(node, ast.Import):
@@ -57,7 +57,7 @@ def _foreign_imports() -> dict[str, set[str]]:
             for module in modules:
                 top = module.split(".")[0]
                 if top not in sys.stdlib_module_names and top not in own:
-                    foreign.setdefault(top, set()).add(str(path.relative_to(ROOT)))
+                    foreign.setdefault(top, set()).add(str(path.relative_to(package.parent)))
     return foreign
 
 
@@ -69,11 +69,26 @@ def test_every_third_party_import_is_declared_with_its_license():
     assert not undeclared, f"undeclared third-party imports (add to THIRD_PARTY_LICENSES.md or remove): {undeclared}"
 
 
-def test_guard_detects_a_planted_undeclared_import(tmp_path, monkeypatch):
+def _plant_probe(tmp_path: Path) -> Path:
+    # The probe lives in a temporary package, never the shipped tree, so a concurrent
+    # worker scanning PACKAGE (pytest -n) cannot see it.
+    package = tmp_path / "stateframe"
+    package.mkdir()
+    (package / "_license_guard_probe.py").write_text("import definitely_not_a_declared_package\n")
+    return package
+
+
+def test_guard_detects_a_planted_undeclared_import(tmp_path):
     # Non-vacuous: a planted import of an unknown package must be reported.
-    planted = PACKAGE / "_license_guard_probe.py"
-    planted.write_text("import definitely_not_a_declared_package\n")
-    try:
-        assert "definitely_not_a_declared_package" in _foreign_imports()
-    finally:
-        planted.unlink()
+    assert "definitely_not_a_declared_package" in _foreign_imports(_plant_probe(tmp_path))
+
+
+def test_planted_probe_never_reaches_a_concurrent_shipped_scan(tmp_path):
+    from concurrent.futures import ThreadPoolExecutor
+    planted = _plant_probe(tmp_path)
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        probes = [pool.submit(_foreign_imports, planted) for _ in range(2)]
+        shipped = [pool.submit(_foreign_imports) for _ in range(2)]
+        assert all("definitely_not_a_declared_package" in f.result() for f in probes)
+        assert all("definitely_not_a_declared_package" not in f.result() for f in shipped)
+    assert not any(PACKAGE.rglob("_license_guard_probe.py"))
