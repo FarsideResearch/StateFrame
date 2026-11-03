@@ -4,7 +4,7 @@ import subprocess
 
 import pytest
 
-from acceptance._support import FIXTURES, copy_repo, run_case
+from acceptance._support import FIXTURES, copy_repo, read_measurement_events, run_case
 from stateframe.profiles import load
 
 pytestmark = pytest.mark.host_sandbox
@@ -58,8 +58,7 @@ def test_capability_matrix(tmp_path, loop, name):
     case.assert_offered(name, request=len(setup))
     case.assert_reply(expected)
     case.assert_reply("matrix-next-frame")
-    records = [json.loads(line) for path in (case.run_dir / "worker").rglob("events.jsonl")
-               for line in path.read_text().splitlines()]
+    records = read_measurement_events(case.run_dir)
     assert any(record.get("kind") == "action_receipt" and
                (record.get("receipt", {}).get("kind") in {name, "shell_effect"}
                 or record.get("data", {}).get("receipt", {}).get("kind") in {name, "shell_effect"})

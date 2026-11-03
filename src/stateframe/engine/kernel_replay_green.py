@@ -64,7 +64,10 @@ def _read_source(source: str) -> str:
         except (OSError, KeyError, tarfile.TarError, UnicodeError) as error:
             raise ReplayGreenError("cannot read replay archive member") from error
     try:
-        return Path(source).read_text(encoding="utf-8")
+        from kernel_measurement import open_journal
+
+        with open_journal(source) as stream:
+            return stream.read()
     except (OSError, UnicodeError) as error:
         raise ReplayGreenError("cannot read replay journal") from error
 

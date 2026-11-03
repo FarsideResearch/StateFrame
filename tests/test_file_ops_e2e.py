@@ -8,6 +8,8 @@ from pathlib import Path
 
 import pytest
 
+from stateframe.request_records import list_request_records, read_request_record
+
 
 ROOT = Path(__file__).resolve().parents[1]
 FIXTURES = ROOT / "tests" / "e2e"
@@ -92,8 +94,8 @@ def test_refusals_are_typed_and_run_continues(tmp_path):
     assert not (tmp_path / "escaped.py").exists()
     assert summary["files_changed"] == []
     # The refusals must reach the model: check the recorded request bodies, not a debug log.
-    log = "\n".join(path.read_text(errors="replace")
-                    for path in sorted((run_dir / "requests").glob("*.json")))
+    log = "\n".join(read_request_record(run_dir, name).decode(errors="replace")
+                    for name in list_request_records(run_dir))
     for code in ("PROTECTED_TEST", "PATH_NOT_FOUND", "OUTSIDE_WORKSPACE",
                  "DESTINATION_EXISTS", "NOT_EDITABLE"):
         assert f"REFUSED {code}:" in log

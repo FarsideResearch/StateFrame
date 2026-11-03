@@ -212,10 +212,14 @@ def set_aside_request(case: Path, run: Path, point: int, original: bytes) -> Pat
 
 
 def event_rows(path: Path, field: str) -> list[str]:
-    if not path.is_file():
+    from stateframe.engine.kernel_measurement import _journal_file, open_journal
+
+    if not _journal_file(path).is_file():
         return []
     rows = []
-    for line in path.read_text().splitlines():
+    with open_journal(path) as stream:
+        lines = stream.read().splitlines()
+    for line in lines:
         if field == "kind" and line.startswith("[sf] "):
             line = line[5:]
         try:
@@ -271,8 +275,8 @@ def resume(case: Path, run: Path, point: int, original: bytes, checkpoints: bool
                          for path in (run / "attempts").glob("*/engine.log")}
         checkpoint_events = event_rows(run / "checkpoints" / "events.jsonl", "event")
         attempt_checkpoint_events = {
-            path.parent.parent.name: event_rows(path, "event")
-            for path in (run / "attempts").glob("*/checkpoints/events.jsonl")}
+            path.parent.name: event_rows(path, "event")
+            for path in (run / "attempts").glob("*/checkpoints")}
         all_kinds = kinds + [kind for events in attempt_kinds.values() for kind in events]
         all_checkpoint_events = (checkpoint_events
                                  + [event for events in attempt_checkpoint_events.values() for event in events])

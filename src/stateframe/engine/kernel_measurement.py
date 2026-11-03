@@ -26,6 +26,20 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
+# The journal store owns the on-disk layout. The second group is re-exported for readers and
+# tests that historically reached the journal through this module.
+from kernel_journal_store import (
+    _JOURNAL_BLOB_MAX_BYTES,
+    _read_packed_blob,
+)
+from kernel_journal_store import (  # noqa: F401
+    _journal_file,
+    journal_paths,
+    open_journal,
+    pack_blobs,
+    seal_measurement_run,
+)
+
 from kernel_effect_boundary import Mode
 from kernel_frame_request_allocation import FrameRequestAllocation
 from kernel_launch_identity_cost import (
@@ -350,7 +364,6 @@ def framefit_receipt_projection(event: Mapping[str, object]) -> dict[str, object
 
 
 JOURNAL_BLOB_THRESHOLD_BYTES = 4096
-_JOURNAL_BLOB_MAX_BYTES = 256 * 1024 * 1024
 
 
 def _blob_reference(value: object) -> tuple[str, int] | None:
@@ -399,6 +412,8 @@ def _ensure_journal_blob_directory(journal_path: str | os.PathLike[str]) -> Path
 
 
 def _read_journal_blob(journal_path: str | os.PathLike[str], blob_hash: str) -> bytes:
+    if len(blob_hash) != 64 or any(char not in "0123456789abcdef" for char in blob_hash):
+        raise ValueError("journal blob hash is invalid")
     journal_location = os.fspath(journal_path)
     if "::" in journal_location:
         import tarfile
@@ -422,17 +437,21 @@ def _read_journal_blob(journal_path: str | os.PathLike[str], blob_hash: str) -> 
             compressed_size = member.size
             compressed = extracted.read(compressed_size + 1)
     else:
-        blob_path = _journal_blob_directory(journal_path) / f"{blob_hash}.zlib"
+        blob_dir = _journal_blob_directory(journal_path)
+        blob_path = blob_dir / f"{blob_hash}.zlib"
         flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK
-        fd = os.open(blob_path, flags)
-        with os.fdopen(fd, "rb") as handle:
-            info = os.fstat(handle.fileno())
-            if not stat.S_ISREG(info.st_mode) or info.st_size > _JOURNAL_BLOB_MAX_BYTES:
-                raise ValueError("journal blob is not a bounded regular file")
-            # Buffered reads can allocate the requested size up front. Reading
-            # the 256 MiB cap for every tiny blob defeats bounded journal reads.
-            compressed_size = info.st_size
-            compressed = handle.read(compressed_size + 1)
+        try:
+            fd = os.open(blob_path, flags)
+        except FileNotFoundError:
+            compressed = _read_packed_blob(blob_dir, blob_hash)
+            compressed_size = len(compressed)
+        else:
+            with os.fdopen(fd, "rb") as handle:
+                info = os.fstat(handle.fileno())
+                if not stat.S_ISREG(info.st_mode) or info.st_size > _JOURNAL_BLOB_MAX_BYTES:
+                    raise ValueError("journal blob is not a bounded regular file")
+                compressed_size = info.st_size
+                compressed = handle.read(compressed_size + 1)
     if len(compressed) != compressed_size:
         raise ValueError("journal blob size changed while reading")
     if len(compressed) > _JOURNAL_BLOB_MAX_BYTES:

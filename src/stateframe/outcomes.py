@@ -37,13 +37,16 @@ def journal_submission(run: Path) -> dict[str, object]:
     finishing up, so engine-result.json never appeared. Recovery requires a stored done_sealed and a
     matching done_submission_stored; the export still re-verifies the artifact bytes against the digest.
     """
-    journals = sorted((run / "worker" / "measurement-runs").glob("*/events.jsonl"))
+    from .engine.kernel_journal_store import journal_paths, open_journal
+
+    journals = journal_paths(run / "worker" / "measurement-runs")
     if len(journals) != 1:
         return {}
     sealed: dict[str, object] | None = None
     stored: dict[str, object] | None = None
     try:
-        lines = journals[0].read_text(encoding="utf-8").splitlines()
+        with open_journal(journals[0]) as source:
+            lines = source.read().splitlines()
     except (OSError, UnicodeError):
         return {}
     for line in lines:

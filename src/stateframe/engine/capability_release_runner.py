@@ -44,7 +44,10 @@ def _resume_descriptor(run: Path, follow_up: str | None):
     try:
         initialized = json.loads((directory / "initialized.json").read_text())
         journal_path = Path(initialized["journal_path"])
-        lines = journal_path.read_bytes().splitlines()
+        from kernel_measurement import open_journal
+
+        with open_journal(journal_path, binary=True) as source:
+            lines = source.read().splitlines()
         head = json.loads(lines[-1]).get("record_hash") if lines else None
     except (KeyError, OSError, TypeError, ValueError, UnicodeDecodeError) as error:
         raise ValueError("resume journal head is unreadable") from error
@@ -276,13 +279,15 @@ def _postflight_effective_config(run: Path, spec: Mapping[str, object]) -> None:
         }
         for key in sorted(expected_keys)
     }
-    journals = sorted((run / "worker" / "measurement-runs").glob("*/events.jsonl"))
+    from kernel_measurement import journal_paths, open_journal
+
+    journals = journal_paths(run / "worker" / "measurement-runs")
     events: list[dict[str, object]] = []
     from kernel_measurement import resolve_journal_blob_refs
 
     for path in journals:
         blob_cache: dict[str, object] = {}
-        with path.open("r", encoding="utf-8") as source:
+        with open_journal(path) as source:
             for line in source:
                 if not line.strip():
                     continue

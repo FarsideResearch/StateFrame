@@ -15,6 +15,7 @@ import kernel_project_instructions as slot
 from kernel_tool_settings import ToolSettings
 from stateframe import instructions as host
 from stateframe import runner
+from stateframe.request_records import list_request_records, read_request_record
 from stateframe.endpoint import Endpoint
 from stateframe.runner import RunError, RunOptions, prepare
 
@@ -268,7 +269,8 @@ def _scripted_run(tmp_path: Path, name: str, agents_text: str | None, *extra: st
     finally:
         endpoint.terminate()
         endpoint.wait(timeout=10)
-    requests = [json.loads(path.read_text()) for path in sorted((run_dir / "requests").glob("*.json"))]
+    requests = [json.loads(read_request_record(run_dir, name))
+                for name in list_request_records(run_dir)]
     return [request.get("body", request) for request in requests]
 
 

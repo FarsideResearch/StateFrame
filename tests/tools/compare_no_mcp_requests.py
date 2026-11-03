@@ -19,6 +19,10 @@ import subprocess
 import sys
 import tempfile
 
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT / "src"))
+from stateframe.request_records import list_request_records, read_request_record
+
 
 def source_env(tree: Path, stable_tool_head: str | None, *,
                source_on_pythonpath: bool = True) -> dict[str, str]:
@@ -75,11 +79,11 @@ def capture(tree: Path, python: str, launcher: Path, script: Path,
                                 text=True, timeout=300, check=False)
         # The comparison is about request bytes, so a run whose checks fail still counts;
         # only a run that never wrote its summary or requests is a capture failure.
-        files = sorted((run_dir / "requests").glob("*.json"))
-        if not files or not (run_dir / "summary.json").is_file():
+        names = list_request_records(run_dir)
+        if not names or not (run_dir / "summary.json").is_file():
             raise RuntimeError(f"{tree}: run produced no requests or summary ({result.returncode}):\n"
                                f"{result.stdout[-2000:]}\n{result.stderr[-2000:]}")
-        return b"\n".join(path.read_bytes() for path in files)
+        return b"\n".join(read_request_record(run_dir, name) for name in names)
     finally:
         endpoint.terminate()
         try:

@@ -12,6 +12,8 @@ from pathlib import Path
 import pytest
 
 from stateframe.scripted_endpoint import Script, serve
+from stateframe.request_records import list_request_records, read_request_record
+import kernel_measurement as measurement
 
 ROOT = Path(__file__).resolve().parents[1]
 pytestmark = pytest.mark.host_sandbox
@@ -61,7 +63,8 @@ def run_script(tmp_path, steps, *, failing=False, flags=(), prepare=None):
         assert result.returncode == 0, result.stdout + result.stderr + str(summary)
         assert summary["succeeded"], summary
         script.assert_consumed()
-        requests = "\n".join(p.read_text() for p in sorted((run / "requests").glob("*.json")))
+        requests = "\n".join(read_request_record(run, name).decode()
+                               for name in list_request_records(run))
         return run, requests
     finally:
         server.shutdown()
@@ -96,8 +99,11 @@ def test_shell_product_edit_refreshes_read_and_final_diff(tmp_path):
         step("read", path="pkg/value.py"), *finish()], failing=True)
     assert "+VALUE = 2" in (run / "final.diff").read_text()
     assert "files changed by this command: modified: pkg/value.py" in requests
-    events = "\n".join(p.read_text() for p in (run / "worker").rglob("events.jsonl"))
-    assert '"shell_effect"' in events
+    events = []
+    for path in measurement.journal_paths(run / "worker" / "measurement-runs"):
+        with measurement.open_journal(path) as stream:
+            events.extend(stream)
+    assert '"shell_effect"' in "".join(events)
     # The read after the shell edit must see a NEW revision with the new bytes, not the stale page.
     revisions = re.findall(r"\[read page\] path=pkg/value\.py revision=(sha256:[0-9a-f]+)", requests)
     assert len(set(revisions)) >= 2, revisions
@@ -186,7 +192,7 @@ def test_kill_resume_serves_byte_identical_next_request(tmp_path):
         assert tape[0]["call_id"] == tape[1]["call_id"]
         process.send_signal(signal.SIGTERM)
         process.wait(timeout=20)
-        original = {p.name: p.read_bytes() for p in (run / "requests").glob("*.json")}
+        original = {name: read_request_record(run, name) for name in list_request_records(run)}
         assert original and (run / "tool-tape.jsonl").exists()
         script.pause = False
         script.release.set()
@@ -200,7 +206,7 @@ def test_kill_resume_serves_byte_identical_next_request(tmp_path):
                                  "--endpoint", url, "--model", "scripted", "--quiet"],
                                 env=environment(), capture_output=True, text=True, timeout=240)
         assert result.returncode == 0, result.stdout + result.stderr
-        rebuilt = {p.name: p.read_bytes() for p in (run / "requests").glob("*.json")}
+        rebuilt = {name: read_request_record(run, name) for name in list_request_records(run)}
         assert original.keys() <= rebuilt.keys()
         for name, body in original.items():
             assert rebuilt[name] == body, name
@@ -248,7 +254,7 @@ def test_kill_resume_preserves_repeated_read_request_bytes(tmp_path):
         while not script.arrived.wait(0.1) and process.poll() is None:
             assert time.monotonic() < deadline, "provider request timed out"
         assert script.arrived.is_set(), (tmp_path / "first.log").read_text()
-        original = {p.name: p.read_bytes() for p in (run / "requests").glob("*.json")}
+        original = {name: read_request_record(run, name) for name in list_request_records(run)}
         assert len(original) >= 3
         assert any(b"unchanged since request" in body for body in original.values())
         process.send_signal(signal.SIGTERM)
@@ -263,7 +269,7 @@ def test_kill_resume_preserves_repeated_read_request_bytes(tmp_path):
                                  "--endpoint", url, "--model", "scripted", "--quiet"],
                                 env=env, capture_output=True, text=True, timeout=240)
         assert result.returncode == 0, result.stdout + result.stderr
-        rebuilt = {p.name: p.read_bytes() for p in (run / "requests").glob("*.json")}
+        rebuilt = {name: read_request_record(run, name) for name in list_request_records(run)}
         assert original.keys() <= rebuilt.keys()
         for name, body in original.items():
             assert rebuilt[name] == body, name

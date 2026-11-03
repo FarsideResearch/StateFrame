@@ -6,7 +6,7 @@ import shutil
 
 import pytest
 
-from ._support import environment, run_case
+from ._support import environment, read_measurement_events, run_case
 
 
 pytestmark = pytest.mark.host_sandbox
@@ -38,9 +38,9 @@ def _steps(tmp_path, steps):
 
 
 def _journal(case):
-    paths = list((case.run_dir / "worker" / "measurement-runs").glob("*/events.jsonl"))
-    assert len(paths) == 1
-    return [json.loads(line) for line in paths[0].read_text().splitlines()]
+    rows = read_measurement_events(case.run_dir)
+    assert rows
+    return rows
 
 
 def _assert_shipped_spec(case, protection: str):

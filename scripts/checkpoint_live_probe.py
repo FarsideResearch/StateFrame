@@ -87,7 +87,10 @@ def checkpoint_state(run: Path) -> dict | None:
     if state.stat().st_size != meta["state_bytes"]:
         raise RuntimeError("checkpoint state size differs from metadata")
     try:
-        lines = (pointer.parent / "events.jsonl").read_text().splitlines()
+        from stateframe.engine.kernel_measurement import open_journal
+
+        with open_journal(pointer.parent) as stream:
+            lines = stream.read().splitlines()
     except FileNotFoundError:
         return None
     saved = []

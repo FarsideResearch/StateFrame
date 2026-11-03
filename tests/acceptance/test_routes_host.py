@@ -15,7 +15,7 @@ import pytest
 
 from fixtures.process_signals import record_identity, signal_owned, signal_verified
 
-from ._support import Endpoint, PYTHON, ROOT, copy_repo, environment
+from ._support import Endpoint, PYTHON, ROOT, copy_repo, environment, read_measurement_events
 
 
 pytestmark = [pytest.mark.host_sandbox,
@@ -119,8 +119,7 @@ def test_failed_check_replans_then_read_action_returns_to_read_route(tmp_path):
     routes = [json.loads((wire / f"{index:04d}.route.json").read_text())
               for index in (1, 2, 3)]
     assert [route["role"] for route in routes] == ["plan", "plan", "read"]
-    events = [json.loads(line) for path in (run_dir / "worker" / "measurement-runs").glob("*/events.jsonl")
-              for line in path.read_text().splitlines()]
+    events = read_measurement_events(run_dir)
     assert any(event.get("kind") == "test_subprocess_completed" and event.get("exit_code") == 1
                for event in events)
 
@@ -179,8 +178,7 @@ def test_read_edit_reply_is_discarded_and_reasked_on_default(tmp_path):
     assert routes[0]["role"] == "plan" and routes[0]["endpoint_host"] == cheap_host
     assert any(route["role"] == "edit" and route["endpoint_host"] == default_host
                for route in routes)
-    event_files = list((run_dir / "worker" / "measurement-runs").glob("*/events.jsonl"))
-    events = [json.loads(line) for path in event_files for line in path.read_text().splitlines()]
+    events = read_measurement_events(run_dir)
     discarded = [event for event in events if event.get("kind") == "route_escalation_discarded"]
     assert discarded
     receipts = [event for event in events if "receipt" in event.get("kind", "")]
@@ -327,8 +325,7 @@ def test_escalation_without_second_response_allowance_stops_before_dispatch(tmp_
     assert not (run_dir / "wire" / "0002.request.json").exists()
     assert not default_log.exists()
     assert "discarded.txt" not in (run_dir / "final.diff").read_text()
-    event_files = list((run_dir / "worker" / "measurement-runs").glob("*/events.jsonl"))
-    events = [json.loads(line) for path in event_files for line in path.read_text().splitlines()]
+    events = read_measurement_events(run_dir)
     retained = [event for event in events if event.get("kind", "").startswith("passive_retention")]
     assert "discarded.txt" not in json.dumps(retained)
 
@@ -431,9 +428,9 @@ def _route_records(run_dir: Path) -> list[dict]:
 
 
 def _route_events(run_dir: Path) -> list[dict]:
-    paths = list((run_dir / "worker" / "measurement-runs").glob("*/events.jsonl"))
-    assert len(paths) == 1
-    return [json.loads(line) for line in paths[0].read_text().splitlines()]
+    rows = read_measurement_events(run_dir)
+    assert rows
+    return list(rows)
 
 
 def _hook_config(tmp_path: Path, *, guard_reads: bool = False) -> Path:

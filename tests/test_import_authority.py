@@ -50,6 +50,10 @@ def test_metadata_cannot_authorize_home_descendants(tmp_path, monkeypatch, kind)
     with pytest.raises(RunEnvError, match='external import path lacks host read authorization'):
         create_run_env(tmp_path / 'run', source / 'bin/python', source_repo=repo)
     assert not (tmp_path / 'run/env-sites.json').exists()
+    # A refused environment must not stay on disk: the host turns the run env off and nothing
+    # would ever use or clean the half-built copy.
+    assert not (tmp_path / 'run/env').exists()
+    assert not (tmp_path / 'run/env-seed.json').exists()
 
 
 @pytest.mark.parametrize('kind', ['absolute', 'relative', 'finder'])
@@ -106,7 +110,11 @@ def test_refused_pth_cannot_make_credentials_readable_in_shell(tmp_path, monkeyp
     scratch.mkdir()
     session_dir = run / 'session'
     session_dir.mkdir()
-    cap = shell_capability(workspace=run / 'workspace', run_env_dir=run / 'env', scratch_home=scratch,
+    # With the run env refused, the shell tool binds shell-cache (kernel_shell_tool.ShellTool.bind).
+    assert not (run / 'env').exists()
+    cache = run / 'shell-cache'
+    cache.mkdir(mode=0o700)
+    cap = shell_capability(workspace=run / 'workspace', run_env_dir=cache, scratch_home=scratch,
                            network='none', writable=False,
                            extra_read_roots=tuple(map(Path, saved['shell_read_roots'])))
     with ExecSession(session_dir) as session:

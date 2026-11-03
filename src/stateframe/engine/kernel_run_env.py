@@ -254,6 +254,19 @@ def _check_clone_paths(source: Path) -> None:
                     raise RunEnvError(f"executable .pth cannot be safely cloned: {path.name}")
 
 
+def relocation_roots(interpreter: Path, root: Path,
+                     authorized_read_roots: tuple[Path, ...] = ()) -> tuple[Path, ...]:
+    """Roots a cloned env's import metadata may point into: host grants plus interpreter prefixes."""
+    if __package__:
+        from .kernel_test_isolation import _interpreter_roots
+    else:
+        from kernel_test_isolation import _interpreter_roots
+    return tuple(sorted({path.resolve(strict=True) for path in authorized_read_roots} |
+                        {Path(sys.prefix).resolve(), Path(sys.base_prefix).resolve()} |
+                        {Path(path).resolve(strict=True) for path in _interpreter_roots(interpreter)} |
+                        {path.resolve(strict=True) for path in root.glob("lib/python*/site-packages")}))
+
+
 def create_run_env(run_dir: Path, test_python: Path, *, source_repo: Path | None = None,
                    authorized_read_roots: tuple[Path, ...] = ()) -> RunEnv:
     root = Path(run_dir).absolute() / "env"
@@ -265,53 +278,75 @@ def create_run_env(run_dir: Path, test_python: Path, *, source_repo: Path | None
     if root.exists() or root.is_symlink():
         raise RunEnvError(f"run environment already exists: {root}")
     root.parent.mkdir(parents=True, exist_ok=True)
-    if clone:
-        assert source is not None
-        if __package__:
-            from .kernel_test_isolation import _interpreter_roots
+    try:
+        if clone:
+            assert source is not None
+            _check_clone_paths(source)
+            # Copy links as links; no source interpreter or startup hook is run.
+            seed_mode = os.environ.get("STATEFRAME_ENV_SEED", "auto").strip().lower()
+            if seed_mode == "copy":
+                shutil.copytree(source, root, symlinks=True)
+            elif seed_mode == "auto":
+                if __package__:
+                    from .kernel_env_seed import clone as clone_seed
+                else:
+                    from kernel_env_seed import clone as clone_seed
+
+                seed_events: list[dict] = []
+
+                try:
+                    seed = clone_seed(source, root, interpreter, source_repo, authorized_read_roots,
+                                      event=seed_events.append)
+                except OSError as error:
+                    if root.exists() or root.is_symlink():
+                        raise RunEnvError(f"cannot seed run environment: {error}") from error
+                    shutil.copytree(source, root, symlinks=True)
+                else:
+                    (root.parent / "env-seed.json").write_text(json.dumps(
+                        {"path": str(seed), "events": seed_events}))
+            else:
+                raise RunEnvError("STATEFRAME_ENV_SEED must be auto or copy")
+            authorized = relocation_roots(interpreter, root, authorized_read_roots)
+            external_roots = _relocate(source.resolve(), root, source_repo, workspace, authorized)
+            kind: Literal["clone", "system-site"] = "clone"
         else:
-            from kernel_test_isolation import _interpreter_roots
-        _check_clone_paths(source)
-        # Copy links as links; no source interpreter or startup hook is run.
-        shutil.copytree(source, root, symlinks=True)
-        authorized = tuple(sorted({path.resolve(strict=True) for path in authorized_read_roots} |
-                                  {Path(sys.prefix).resolve(), Path(sys.base_prefix).resolve()} |
-                                  {Path(path).resolve(strict=True) for path in _interpreter_roots(interpreter)} |
-                                  {path.resolve(strict=True) for path in root.glob("lib/python*/site-packages")}))
-        external_roots = _relocate(source.resolve(), root, source_repo, workspace, authorized)
-        kind: Literal["clone", "system-site"] = "clone"
-    else:
-        root.mkdir()
-        _run([str(interpreter), "-I", "-S", "-m", "venv", "--system-site-packages", str(root)],
-             workspace=root, destination=root)
-        kind = "system-site"
-        external_roots = ()
-    bin_dir = root / "bin"
-    python = bin_dir / "python"
-    cache = root / "cache"
-    overrides = {
-        "VIRTUAL_ENV": str(root),
-        "PATH": str(bin_dir) + os.pathsep + os.defpath,
-        "PIP_CACHE_DIR": str(cache / "pip"),
-        "npm_config_cache": str(cache / "npm"),
-        "CARGO_HOME": str(cache / "cargo"),
-        "GOPATH": str(cache / "go"),
-        "GOMODCACHE": str(cache / "go" / "pkg" / "mod"),
-        "PYTHONDONTWRITEBYTECODE": "1",
-    }
-    run_env = RunEnv(root, python, bin_dir, overrides, kind, external_roots)
-    _run([str(python), "-I", "-B", "-m", "pip", "--version"], workspace=root,
-         destination=root, env=overrides, read_roots=external_roots)
-    # Site roots are host-derived metadata, never paths printed by package code.
-    sites = {str(path.resolve()) for path in root.glob("lib/python*/site-packages")}
-    config = dict(line.split("=", 1) for line in (root / "pyvenv.cfg").read_text().splitlines()
-                  if "=" in line)
-    config = {key.strip(): value.strip() for key, value in config.items()}
-    if config.get("include-system-site-packages", "false").lower() == "true":
-        prefix = interpreter.resolve(strict=True).parent.parent
-        sites.update(str(path.resolve()) for path in prefix.glob("lib/python*/site-packages"))
-    (root.parent / "env-sites.json").write_text(json.dumps(sorted(sites)))
-    return run_env
+            root.mkdir()
+            _run([str(interpreter), "-I", "-S", "-m", "venv", "--system-site-packages", str(root)],
+                 workspace=root, destination=root)
+            kind = "system-site"
+            external_roots = ()
+        bin_dir = root / "bin"
+        python = bin_dir / "python"
+        cache = root / "cache"
+        overrides = {
+            "VIRTUAL_ENV": str(root),
+            "PATH": str(bin_dir) + os.pathsep + os.defpath,
+            "PIP_CACHE_DIR": str(cache / "pip"),
+            "npm_config_cache": str(cache / "npm"),
+            "CARGO_HOME": str(cache / "cargo"),
+            "GOPATH": str(cache / "go"),
+            "GOMODCACHE": str(cache / "go" / "pkg" / "mod"),
+            "PYTHONDONTWRITEBYTECODE": "1",
+        }
+        run_env = RunEnv(root, python, bin_dir, overrides, kind, external_roots)
+        _run([str(python), "-I", "-B", "-m", "pip", "--version"], workspace=root,
+             destination=root, env=overrides, read_roots=external_roots)
+        # Site roots are host-derived metadata, never paths printed by package code.
+        sites = {str(path.resolve()) for path in root.glob("lib/python*/site-packages")}
+        config = dict(line.split("=", 1) for line in (root / "pyvenv.cfg").read_text().splitlines()
+                      if "=" in line)
+        config = {key.strip(): value.strip() for key, value in config.items()}
+        if config.get("include-system-site-packages", "false").lower() == "true":
+            prefix = interpreter.resolve(strict=True).parent.parent
+            sites.update(str(path.resolve()) for path in prefix.glob("lib/python*/site-packages"))
+        (root.parent / "env-sites.json").write_text(json.dumps(sorted(sites)))
+        return run_env
+    except BaseException:
+        # The host turns a refused run env off and never uses or cleans this copy; remove it.
+        if root.is_dir() and not root.is_symlink():
+            shutil.rmtree(root, ignore_errors=True)
+        (root.parent / "env-seed.json").unlink(missing_ok=True)
+        raise
 
 
 def env_identity(run_env: RunEnv) -> str:

@@ -12,6 +12,9 @@ from typing import Mapping
 
 
 SCHEMA = "stateframe-switch-registry/1"
+# Host setup and retention switches are read before engine creation and are never
+# handed to the engine child, even when their literals appear in engine modules.
+HOST_ONLY_SWITCHES = frozenset({"STATEFRAME_ENV_SEED"})
 
 
 class StateFrameSwitchPreflightError(RuntimeError):
@@ -193,7 +196,7 @@ def _scan(files: tuple[Path, ...]) -> frozenset[str]:
         reader = _SwitchReaderVisitor()
         reader.visit(tree)
         switches.update(reader.switches())
-    return frozenset(switches)
+    return frozenset(switches - HOST_ONLY_SWITCHES)
 
 
 def _shipped_registry(root: Path, fingerprint: str) -> tuple[frozenset[str], str] | None:

@@ -443,10 +443,10 @@ class GeneratedArtifactIndex:
             raise ValueError("invalid event cutoff")
         index = cls(run_id)
         hasher = hashlib.sha256()
-        from kernel_measurement import resolve_journal_blob_refs
+        from kernel_measurement import open_journal, resolve_journal_blob_refs
 
         blob_cache: dict[str, object] = {}
-        with path.open("rb") as handle:
+        with open_journal(path, binary=True) as handle:
             for line in handle:
                 hasher.update(line)
                 if cutoff is not None and index.sequence >= cutoff:

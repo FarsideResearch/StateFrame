@@ -38,6 +38,7 @@ from .engine.kernel_tool_settings import ToolSettings
 from . import instructions as project_instructions
 from .skills import SkillError, measured_skills_digest, resolve_skills, skills_digest, verify_records
 from .state_dirs import private_directory
+from .request_records import RequestRecordsError, list_request_records
 
 if TYPE_CHECKING:
     from .engine.kernel_hooks import HookSet
@@ -83,12 +84,14 @@ def edit_scope_widened(spec: dict) -> bool:
 
 def _widen_admissions(run_dir: Path, baseline: dict[str, str]) -> list[str]:
     """Read the sole durable engine journal in admission order, failing closed."""
-    journals = list((run_dir / "worker" / "measurement-runs").glob("*/events.jsonl"))
+    from .engine.kernel_journal_store import journal_paths, open_journal
+
+    journals = journal_paths(run_dir / "worker" / "measurement-runs")
     if len(journals) != 1:
         raise RunError("edit scope admission journal is missing or ambiguous")
     admitted: list[str] = []
     try:
-        with journals[0].open(encoding="utf-8") as source:
+        with open_journal(journals[0]) as source:
             for line in source:
                 record = json.loads(line)
                 if record.get("kind") != "scope_widen":
@@ -273,6 +276,7 @@ class RunOptions:
     # The exact interpreter path whose contained startup probe already imported pytest this run.
     _pytest_proven: str | None = field(default=None, init=False, repr=False)
     keep_checkpoints: bool = False  # --keep-checkpoints / STATEFRAME_KEEP_CHECKPOINTS=1
+    keep_run_env: bool = False  # --keep-run-env / STATEFRAME_KEEP_RUN_ENV=on
     _context_tokens: int = field(default=65_536, init=False, repr=False)
     _prompt_budget: int = field(default=33_344, init=False, repr=False)
     _context_env: dict[str, str] = field(default_factory=dict, init=False, repr=False)
@@ -472,6 +476,8 @@ DEFAULT_PROMPT_BUDGET = 33_344
 # Engine switches a user may set in the shell: exactly these names and values,
 # ambient over the profile. Never a blanket STATEFRAME_* passthrough.
 OPT_IN_SWITCHES = {
+    "STATEFRAME_ENV_SEED": ("auto", "copy"),  # host-side run environment creation policy
+    "STATEFRAME_KEEP_RUN_ENV": ("on", "off"),  # host-side finished-run retention policy
     "STATEFRAME_CACHE_LAYOUT": ("on", "off"),
     "STATEFRAME_SLOT_AFFINITY": ("on", "off"),
     "STATEFRAME_TOOL_ORDER": ("stable", "legacy"),
@@ -488,6 +494,8 @@ OPT_IN_SWITCHES = {
 }
 # Accepted aliases -> the engine's own value (EVICTFIX "off" is sent as "legacy").
 OPT_IN_ALIASES = {"STATEFRAME_EVICTFIX": {"off": "legacy"}}
+# These settings are read by the host before the engine child starts; they must not enter the engine spec.
+HOST_ONLY_SWITCHES = frozenset({"STATEFRAME_ENV_SEED", "STATEFRAME_KEEP_RUN_ENV"})
 # Legacy unless the user opts in, on every engine that reads the switch (read eviction fix: slower on long runs
 # in this release, and no measured edit gain). Applied by the runner so the default never depends on the engine's own.
 OPT_IN_RUNNER_DEFAULTS = {"STATEFRAME_EVICTFIX": "legacy"}
@@ -517,10 +525,16 @@ def resolve_opt_in_switches(engine_dir: Path = ENGINE_DIR) -> dict[str, str]:
             chosen[name] = raw
             continue
         value = raw.lower()
+        if name == "STATEFRAME_KEEP_RUN_ENV" and value in {"1", "true", "yes"}:
+            value = "on"
+        elif name == "STATEFRAME_KEEP_RUN_ENV" and value in {"0", "false", "no"}:
+            value = "off"
         value = OPT_IN_ALIASES.get(name, {}).get(value, value)
         allowed = OPT_IN_SWITCHES[name]
         if value not in allowed:
             raise RunError(f"{name}={raw!r} must be {' or '.join(allowed)}; unset it to keep the default")
+        if name in HOST_ONLY_SWITCHES:
+            continue
         if name not in engine_switches(engine_dir):
             raise RunError(f"{name} is set, but this engine does not support it; unset it to run")
         chosen[name] = value
@@ -1584,9 +1598,11 @@ def _warn_checkpoint_event(event: dict, warned: set[str]) -> None:
 
 
 def _warn_checkpoint_journal(run: Path, warned: set[str]) -> None:
+    from .engine.kernel_journal_store import open_journal
+
     path = run / "checkpoints" / "events.jsonl"
     try:
-        with path.open(encoding="utf-8") as stream:
+        with open_journal(path) as stream:
             for line in stream:
                 try:
                     event = json.loads(line)
@@ -1783,7 +1799,7 @@ def clean_finished_checkpoints(run_dir: Path, *, keep: bool = False) -> int | No
     journal and summary are written. Returns the bytes removed, or None when nothing was removed. Stopped,
     cancelled, killed and crashed runs keep their checkpoints: those are the runs resume needs."""
     root = run_dir / "checkpoints"
-    if keep_checkpoints_requested(keep) or not root.is_dir() or not resume_module.finished_for_good(run_dir):
+    if keep_checkpoints_requested(keep) or not root.is_dir() or not resume_module.run_finished_for_good(run_dir):
         return None
     size = 0
     for path in root.rglob("*"):
@@ -1792,8 +1808,58 @@ def clean_finished_checkpoints(run_dir: Path, *, keep: bool = False) -> int | No
                 size += path.stat().st_size
         except OSError:
             pass
-    shutil.rmtree(root, ignore_errors=True)
+    from .storage_gc import remove_tree
+    remove_tree(root)
     return None if root.exists() else size
+
+
+def keep_run_env_requested(flag: bool = False, environ=None) -> bool:
+    """Whether the finished run environment should be kept, matching checkpoint retention aliases."""
+    environ = os.environ if environ is None else environ
+    raw = str(environ.get("STATEFRAME_KEEP_RUN_ENV", "")).strip().lower()
+    if raw and raw not in {"on", "off", "1", "0", "true", "false", "yes", "no"}:
+        raise RunError("STATEFRAME_KEEP_RUN_ENV must be on or off")
+    return flag or raw in {"on", "1", "true", "yes"}
+
+
+def clean_finished_run_env(run_dir: Path, *, keep: bool = False) -> int | None:
+    """Write env-manifest.json and remove env/ only after resume can no longer use it."""
+    if keep_run_env_requested(keep) or not resume_module.run_finished_for_good(run_dir):
+        return None
+    from .storage_gc import remove_run_env
+    return remove_run_env(run_dir, require_finished=False)
+
+
+def finish_run_storage(run_dir: Path, *, keep_checkpoints: bool = False,
+                       keep_run_env: bool = False, printer=print) -> dict[str, int | None]:
+    """Apply finish-time storage actions without allowing cleanup errors to change the result."""
+    removed: dict[str, int | None] = {"checkpoints": None, "env": None}
+    try:
+        if not resume_module.run_finished_for_good(run_dir):
+            return removed
+    except Exception as error:
+        printer(f"warning: finished-run storage was not checked: {type(error).__name__}: {error}")
+        return removed
+    try:
+        removed["checkpoints"] = clean_finished_checkpoints(run_dir, keep=keep_checkpoints)
+    except Exception as error:
+        printer(f"warning: checkpoints were not removed: {type(error).__name__}: {error}")
+    try:
+        removed["env"] = clean_finished_run_env(run_dir, keep=keep_run_env)
+    except Exception as error:
+        printer(f"warning: run environment was not removed: {type(error).__name__}: {error}")
+    try:
+        from . import storage_gc
+    except Exception as error:
+        printer(f"warning: run storage helpers could not load: {type(error).__name__}: {error}")
+        return removed
+    for label, seal in (("measurement storage", storage_gc.seal_measurements),
+                        ("preflight requests", storage_gc.seal_requests)):
+        try:
+            seal(run_dir, printer=printer)
+        except Exception as error:
+            printer(f"warning: {label} was not sealed: {type(error).__name__}: {error}")
+    return removed
 
 
 def _stop_group(process: subprocess.Popen) -> None:
@@ -2069,7 +2135,10 @@ def summarize(run: Path, started: float) -> dict[str, object]:
     total_prompt = _known_total(metrics, "total")
     cached_prompt = _known_total(metrics, "cached")
     uncached_prompt = _known_total(metrics, "uncached")
-    requests = len(list((run / "requests").glob("*.json"))) if (run / "requests").is_dir() else 0
+    try:
+        requests = len(list_request_records(run))
+    except (OSError, RequestRecordsError):
+        requests = None
     slot_info: dict[str, object] = {"slot": None, "selection": "not_recorded",
                                    "reason": "run did not record slot selection"}
     capabilities: dict[str, object] = {}
@@ -2265,7 +2334,7 @@ def _compose_resume_route_changes(spec: dict, changes: list[dict[str, object]]) 
 
 def resume_run(run_dir: Path, *, endpoint: Endpoint | None = None, max_turns: int | None = None,
                 timeout_s: float | None = None, quiet: bool = False, model: str | None = None,
-                keep_checkpoints: bool = False, replay_external: bool = False,
+                keep_checkpoints: bool = False, keep_run_env: bool = False, replay_external: bool = False,
                 route_cli: list[str] | None = None, routes_file: Path | None = None,
                 printer=print) -> dict[str, object]:
     """Continue an interrupted run in place (see ``stateframe.resume``).
@@ -2375,7 +2444,8 @@ def resume_run(run_dir: Path, *, endpoint: Endpoint | None = None, max_turns: in
         in_place=bool(spec.get("in_place")), profile=str(spec.get("profile") or profiles.DEFAULT),
         python=str((spec.get("capabilities") or {}).get("python") or sys.executable),
         timeout_s=timeout_s, quiet=quiet, test_env={k: environment[k] for k in keys if k in environment},
-         pytest_plugins=environment.get("STATEFRAME_TASK_PYTEST_PLUGINS"), keep_checkpoints=keep_checkpoints)
+         pytest_plugins=environment.get("STATEFRAME_TASK_PYTEST_PLUGINS"),
+         keep_checkpoints=keep_checkpoints, keep_run_env=keep_run_env)
     options.route_cli = route_cli or []
     options.routes_file = routes_file
     if "tool_settings" in spec:
@@ -2961,9 +3031,14 @@ def _execute(options: RunOptions, started: float, printer, run_dir: Path, work: 
         printer(f"hooks: {hook_summary['runs']} runs, {hook_summary['denied']} denied, "
                 f"{hook_summary['vetoes']} vetoes, {hook_summary['errors']} errors")
     (run_dir / "summary.json").write_text(json.dumps(summary, indent=1))
-    removed = clean_finished_checkpoints(run_dir, keep=options.keep_checkpoints)
-    if removed is not None:
-        printer(f"Removed checkpoints ({removed / 1e6:,.0f} MB); run finished. Use --keep-checkpoints to keep them.")
+    removed = finish_run_storage(run_dir, keep_checkpoints=options.keep_checkpoints,
+                                 keep_run_env=options.keep_run_env, printer=printer)
+    if removed["checkpoints"] is not None:
+        printer(f"Removed checkpoints ({removed['checkpoints'] / 1e6:,.0f} MB); run finished. "
+                "Use --keep-checkpoints to keep them.")
+    if removed["env"] is not None:
+        printer(f"Removed run env ({removed['env'] / 1e6:,.0f} MB); run finished. "
+                "Use --keep-run-env to keep it.")
     if (summary["runtime_outcome"] in ("cancelled", "engine_error", "missing_result", "budget_stop")
             and not summary.get("engine_error_reason")):  # a seal failure would only repeat on resume
         limit = " --max-turns <more>" if summary["runtime_outcome"] == "budget_stop" else ""

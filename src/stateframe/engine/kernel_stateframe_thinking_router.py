@@ -403,16 +403,16 @@ class ThinkingRouter:
 def _load_events(source: object) -> tuple[list[dict[str, object]], str | None]:
     if isinstance(source, (str, Path)):
         path = Path(source)
-        from kernel_measurement import resolve_journal_blob_refs
+        from kernel_measurement import open_journal, resolve_journal_blob_refs
 
         events: list[dict[str, object]] = []
         blob_cache: dict[str, object] = {}
         try:
-            handle = path.open("r", encoding="utf-8")
+            handle = open_journal(path)
         except OSError as error:
             raise ValueError(f"cannot read event journal: {path}") from error
-        with handle:
-            for line_number, line in enumerate(handle, 1):
+        with handle as stream:
+            for line_number, line in enumerate(stream, 1):
                 if not line.strip():
                     continue
                 try:

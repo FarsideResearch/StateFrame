@@ -9,6 +9,8 @@ import hashlib
 import json
 from pathlib import Path
 
+from .request_records import RequestRecordsError, list_request_records
+
 FRAME_MARKER = "[StateFrame]"
 
 
@@ -58,6 +60,11 @@ def overview(run: Path) -> str:
     files = _wire_files(run)
     sends = _sends(run)
     lines = [f"run: {run}"]
+    try:
+        preflight_count = str(len(list_request_records(run)))
+    except RequestRecordsError:
+        preflight_count = "unavailable"
+    lines.append(f"preflight records: {preflight_count} (preflight data, not wire requests)")
     summary_path = run / "summary.json"
     if summary_path.exists():
         summary = json.loads(summary_path.read_text())

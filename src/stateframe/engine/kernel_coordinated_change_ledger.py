@@ -2573,14 +2573,16 @@ def run_compatibility_check(root: str | Path, item: ChangeItem,
 def extract_public_journal(path: str | Path) -> dict[str, object]:
     """Extract only public task/source text from a crawl journal."""
     journal_path = Path(path)
-    from kernel_measurement import resolve_journal_blob_refs
+    from kernel_measurement import open_journal, resolve_journal_blob_refs
 
     if any(part.casefold() in _FORBIDDEN_PARTS for part in journal_path.parts):
         raise CoordinatedChangeError("refusing a private or prohibited journal path")
     ticket = ""
     sources: dict[str, str] = {}
     blob_cache: dict[str, object] = {}
-    for line in journal_path.read_text(encoding="utf-8").splitlines():
+    with open_journal(journal_path) as stream:
+        lines = stream.read().splitlines()
+    for line in lines:
         try:
             row = json.loads(line)
         except json.JSONDecodeError:
