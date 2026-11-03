@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 from tools.compare_no_mcp_requests import capture, write_launcher
+from acceptance._support import assert_tree_imports, tree_python
 
 ROOT = Path(__file__).resolve().parents[1]
 BASELINE_COMMIT = "33c6c511611cc249b90b47930905a8e60648c05c"
@@ -40,16 +41,23 @@ def test_no_mcp_requests_match_release_0_2_3(tmp_path):
     write_launcher(launcher)
     run_dir = tmp_path / "run"
     script = ROOT / "examples/discount_bug.script.json"
-    previous = capture(baseline, sys.executable, launcher, script, repo, run_dir, stable_tool_head=None)
+    baseline_python = tree_python(baseline / "src", tmp_path / "baseline-python")
+    assert_tree_imports(baseline_python, baseline / "src", tmp_path)
+    previous = capture(baseline, baseline_python, launcher, script, repo, run_dir, stable_tool_head=None,
+                       source_on_pythonpath=False, test_python=sys.executable)
     run_dir.rename(tmp_path / "baseline-run")
+    current_python = tree_python(ROOT / "src", tmp_path / "current-python")
+    assert_tree_imports(current_python, ROOT / "src", tmp_path)
     # The default now treats unittest as a generic check and permits test edits.
     # Leave the stable tool head unset here to exercise the new default; pin it off only for byte comparison.
-    default = capture(ROOT, sys.executable, launcher, script, repo, run_dir,
-                      stable_tool_head=None)
+    default = capture(ROOT, current_python, launcher, script, repo, run_dir,
+                      stable_tool_head=None, source_on_pythonpath=False,
+                      test_python=sys.executable)
     assert default
     run_dir.rename(tmp_path / "default-run")
-    current = capture(ROOT, sys.executable, launcher, script, repo, run_dir,
-                      legacy_mode=True, stable_tool_head="off")
+    current = capture(ROOT, current_python, launcher, script, repo, run_dir,
+                      legacy_mode=True, stable_tool_head="off", source_on_pythonpath=False,
+                      test_python=sys.executable)
     previous_sha = hashlib.sha256(previous).hexdigest()
     current_sha = hashlib.sha256(current).hexdigest()
     assert previous == current, (f"0.2.3 commit {BASELINE_COMMIT} tree {tree}: "

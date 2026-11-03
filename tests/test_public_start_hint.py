@@ -12,6 +12,7 @@ import pytest
 
 from stateframe.task_row import TaskRowError, _public_hint, build_row
 from stateframe.workcopy import create
+from acceptance._support import assert_tree_imports, tree_python
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -164,13 +165,15 @@ def test_tests_only_repo_can_submit_declared_output(tmp_path, protection):
         {"tool": "done", "required": True,
          "arguments": {"summary": "Created the requested output."}},
     ], "tokenize": {"mode": "ok"}})
-    server = serve(script)
     run = tmp_path / "run"
-    environment = {**os.environ, "PYTHONPATH": os.pathsep.join(
-        (str(ROOT / "src"), str(ROOT / "src/stateframe/engine")))}
+    python = tree_python(ROOT / "src", tmp_path / "current-python")
+    assert_tree_imports(python, ROOT / "src", tmp_path)
+    environment = dict(os.environ)
+    environment.pop("PYTHONPATH", None)
+    server = serve(script)
     try:
         result = subprocess.run(
-            [sys.executable, "-m", "stateframe", "run", "--repo", str(repo),
+            [python, "-m", "stateframe", "run", "--repo", str(repo),
              "--task", "Create output/result.txt. Make tests/test_output.py pass.",
              "--endpoint", f"http://127.0.0.1:{server.server_port}/v1", "--model", "scripted",
              "--test-python", sys.executable, "--run-dir", str(run),
@@ -204,8 +207,14 @@ def test_existing_discount_requests_match_untouched_0_2_8(tmp_path):
     write_launcher(launcher)
     run_dir = tmp_path / "run"
     script = ROOT / "examples/discount_bug.script.json"
-    before = capture(baseline, sys.executable, launcher, script, repo, run_dir, stable_tool_head=None)
+    baseline_python = tree_python(baseline / "src", tmp_path / "baseline-python")
+    assert_tree_imports(baseline_python, baseline / "src", tmp_path)
+    before = capture(baseline, baseline_python, launcher, script, repo, run_dir, stable_tool_head=None,
+                     source_on_pythonpath=False, test_python=sys.executable)
     run_dir.rename(tmp_path / "baseline-run")
+    current_python = tree_python(ROOT / "src", tmp_path / "current-python")
+    assert_tree_imports(current_python, ROOT / "src", tmp_path)
     # 0.3.13 turned the stable tool head on by default; switched off, request bytes stay those of 0.2.8.
-    after = capture(ROOT, sys.executable, launcher, script, repo, run_dir, stable_tool_head="off")
+    after = capture(ROOT, current_python, launcher, script, repo, run_dir, stable_tool_head="off",
+                    source_on_pythonpath=False, test_python=sys.executable)
     assert before == after

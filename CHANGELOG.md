@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- Release-comparison tests run each compared tree under its own interpreter and check which `stateframe` package it imports before comparing bytes. The engine's child process drops `PYTHONPATH`, so a shared interpreter could import an installed copy instead of the tree under test.
+- `test_hook_wiring_parity` and the edit-scope parity test pin the stable tool head off on both sides; since 0.3.13 the base release defaults it on, and only the candidate side had been pinned.
+- Tests that compare request bytes with an older release must now state every switch whose default has changed since then. `tests/tools/changed_defaults.py` lists those switches (so far the stable tool head, from 0.3.13), and `tests/test_cross_version_pins.py` fails if a comparison helper is called without one. A planted omission is checked to fail.
+- The request comparison tool (`tests/tools/compare_no_mcp_requests.py`) now compares with the same 0.2.3 tree and settings as its test, so its byte-identical result holds from the command line; `--current-defaults` shows how today's defaults differ instead.
+
 ## 0.3.16 (2026-11-03)
 
 - Two slow acceptance tests (`test_e19_volatile_shell_observation_is_byte_identical_on_resume` and `test_no_skills_wire_matches_023`) no longer time out on loaded test hosts. Their subprocess timeouts are now 1.5 times the slowest wall time measured on the slowest gate host under heavy load, recorded next to the measurement in `tests/acceptance/_support.py`, instead of a fixed 240 seconds. A guard test fails if either test goes back to a bare timeout or a measurement goes unused.

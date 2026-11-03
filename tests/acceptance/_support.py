@@ -1,13 +1,16 @@
 """Run the public CLI against a real scripted endpoint and inspect durable artifacts."""
 from __future__ import annotations
 
+import importlib.metadata
 import json
 import math
 import os
 import select
 import shutil
+import site
 import subprocess
 import sys
+import sysconfig
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -15,6 +18,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
 PYTHON = sys.executable
+_PASS_ENV = ("PATH", "HOME", "LANG", "TMPDIR")
 
 # Slowest stateframe subprocess wall time per case, in seconds, from 3 reps on the slowest gate host
 # (2x Xeon E5-2680 v1 container, 1 worker; 850db00 at load5 61-70 and f8e8925 at load5 70-90, 2026-11-03).
@@ -71,6 +75,85 @@ def environment() -> dict[str, str]:
                                         str(ROOT / "src" / "stateframe" / "engine")))
     env["PYTHONDONTWRITEBYTECODE"] = "1"
     return env
+
+
+def pass_environment() -> dict[str, str]:
+    """Return only variables the engine child is allowed to inherit for import checks."""
+    return {key: os.environ[key] for key in _PASS_ENV if key in os.environ}
+
+
+def _copy_startup_pytest(site_packages: Path) -> None:
+    """Keep pytest's startup imports inside the interpreter prefix admitted by probes."""
+    for name in ("pytest", "pluggy", "iniconfig", "packaging", "pygments"):
+        distribution = importlib.metadata.distribution(name)
+        for relative in distribution.files or ():
+            if relative.is_absolute() or ".." in relative.parts or relative.suffix in {".pyc", ".pth"}:
+                continue
+            source = Path(distribution.locate_file(relative))
+            if source.is_file():
+                target = site_packages / relative
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(source, target)
+
+
+def tree_python(tree_src: Path, work: Path) -> str:
+    """Create a Python that imports one source tree and shares only installed packages."""
+    tree_src = Path(tree_src).resolve()
+    if not tree_src.is_dir():
+        raise ValueError(f"tree source directory does not exist: {tree_src}")
+
+    work = Path(work).resolve()
+    work.mkdir(parents=True, exist_ok=True)
+    venv = work / "python-venv"
+    if venv.exists():
+        raise FileExistsError(f"tree Python environment already exists: {venv}")
+
+    base_python = str(Path(getattr(sys, "_base_executable", sys.executable)).resolve())
+    subprocess.run([base_python, "-m", "venv", "--without-pip", str(venv)],
+                   check=True, env=pass_environment())
+    python = venv / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+    site_result = subprocess.run(
+        [str(python), "-B", "-c", "import sysconfig; print(sysconfig.get_path('purelib'))"],
+        check=True, capture_output=True, text=True, env=pass_environment())
+    venv_site = Path(site_result.stdout.strip()).resolve()
+    if not venv_site.is_dir():
+        raise RuntimeError(f"tree Python site-packages directory is missing: {venv_site}")
+    _copy_startup_pytest(venv_site)
+
+    current_paths = [*site.getsitepackages()]
+    configured_paths = sysconfig.get_paths()
+    current_paths.extend(configured_paths.get(name) for name in ("purelib", "platlib"))
+    import_paths = [tree_src]
+    seen = {tree_src}
+    for candidate in current_paths:
+        if not candidate:
+            continue
+        path = Path(candidate).resolve()
+        if path.is_dir() and path not in seen:
+            import_paths.append(path)
+            seen.add(path)
+
+    if any("\n" in str(path) or "\r" in str(path) for path in import_paths):
+        raise ValueError("Python import paths cannot contain line breaks")
+    # Plain path entries expose dependencies without processing their editable-install .pth files.
+    with (venv_site / "stateframe-tree-paths.pth").open("x", encoding="utf-8") as stream:
+        stream.writelines(f"{path}\n" for path in import_paths)
+    # Keep the venv path: resolving its symlink can make Python ignore the venv prefix.
+    return str(python)
+
+
+def assert_tree_imports(python: str, tree_src: Path, cwd: Path) -> None:
+    """Fail unless an isolated interpreter imports StateFrame from its source tree."""
+    tree_src = Path(tree_src).resolve()
+    cwd = Path(cwd).resolve()
+    tree_root = tree_src.parent
+    assert not cwd.is_relative_to(tree_root), (cwd, tree_root)
+    preflight = subprocess.run(
+        [python, "-B", "-c", "import stateframe.workcopy; print(stateframe.workcopy.__file__)"],
+        capture_output=True, text=True, cwd=cwd, env=pass_environment(), check=False)
+    assert preflight.returncode == 0, preflight.stdout + preflight.stderr
+    imported = Path(preflight.stdout.strip()).resolve()
+    assert imported.is_relative_to(tree_src), (imported, tree_src)
 
 
 def copy_repo(tmp_path: Path, name: str = "simple_repo") -> Path:

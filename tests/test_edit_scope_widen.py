@@ -549,7 +549,7 @@ def test_switch_off_request_bytes_match_base_release(tmp_path):
     _write_launchers(launcher, wrapper)
     run = tmp_path / "run"
     base_requests = _run_checkout(baseline, repo, run, launcher, wrapper,
-                                  tmp_path / "base_modules.json")[0]
+                                  tmp_path / "base_modules.json", stable_tool_head="off")[0]
     run.rename(tmp_path / "base_run")
     current_requests = _run_checkout(current, repo, run, launcher, wrapper,
                                      tmp_path / "current_modules.json",
