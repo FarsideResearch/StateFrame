@@ -5,6 +5,7 @@ from collections.abc import Mapping
 from heapq import merge
 import os
 
+from build_tasks.multifile_row import normalize_repo_path
 from kernel_continuation_state import ContinuationError, ContinuationState, text
 from kernel_measurement import digest
 from kernel_verdict import SATISFIED, _selectors, evaluate_required_tests
@@ -261,6 +262,16 @@ def binding_versions(binding: object) -> dict[str, str]:
 
 # Leaves room for "workspace" plus both groups inside the 256-entry dependency bound.
 _PER_FILE_VERSION_LIMIT = 120
+
+
+def _is_workspace_relative_path(value: object) -> bool:
+    if not isinstance(value, str) or not value.strip():
+        return False
+    try:
+        normalize_repo_path(value, field="shell effect path")
+    except ValueError:
+        return False
+    return True
 
 
 class HostEvidence:
@@ -676,8 +687,28 @@ class HostEvidence:
                       and record.get("before_binding") == current and not record.get("changes")
                       and any(r.get("kind") == "test" and r.get("result_class") == result for r in matching)):
                     status = "not_applied"
-                elif result == "APPLIED" and record.get("changes"):
-                    status = "applied"
+                elif result == "APPLIED":
+                    shell_effects = effect.tool == "shell" and any(
+                        receipt.get("kind") == "shell_effect"
+                        and receipt.get("result_class") == "APPLIED"
+                        and isinstance(receipt.get("effects"), (list, tuple))
+                        and bool(receipt["effects"])
+                        and all(
+                            isinstance(entry, Mapping)
+                            and _is_workspace_relative_path(entry.get("path"))
+                            for entry in receipt["effects"]
+                        )
+                        and any(
+                            isinstance(entry, Mapping)
+                            and entry.get("change") in {
+                                "created", "modified", "deleted", "mode", "type",
+                            }
+                            for entry in receipt["effects"]
+                        )
+                        for receipt in matching
+                    )
+                    if record.get("changes") or shell_effects:
+                        status = "applied"
                 elif (effect.read_only and record.get("before_binding") == current
                       and not record.get("changes")
                       and result in READ_OUTCOMES.get(effect.tool, frozenset())

@@ -162,7 +162,7 @@
   "kernel_context.py": "b6b7067632f35808f41383a959d59a6e72379c56bc240e6e8738826cede1dbaf",
   "kernel_context_capacity.py": "36a885967b5c0635653de4e7f490c222bdd9a6ed2750b67bc2ce01404b51bdc9",
   "kernel_context_scope.py": "3aadfe93ac16e1961d4a2b8d8cacd362b83b549250286875268e049d7d195374",
-  "kernel_continuation_evidence.py": "ee78a0860b9c0bf31202b3e9f847a3ad2af4bc83dd9a545e89d107cbf39a1f34",
+  "kernel_continuation_evidence.py": "54aa550527e8e4ffab5f260d0d5c7a2239b0e057f1a190c557e11aa4413d137e",
   "kernel_continuation_executive.py": "d501a7f0416811aaea8ee7e633b28e3cac178125f3229a3f44d294d1333e8214",
   "kernel_continuation_journal.py": "4bf88f3a13bd1016e79d136ffc116c2413adfae1c4b124151c6d2aa23e803059",
   "kernel_continuation_menu_authority.py": "94281811a504c9e04236ebee56646b88037e82efb2a149ed3e1b27f5e81666f4",

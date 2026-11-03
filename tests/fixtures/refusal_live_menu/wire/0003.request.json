@@ -1,0 +1,1 @@
+{"messages":[{"role":"assistant","tool_calls":[{"id":"call-next","type":"function","function":{"name":"read","arguments":"{}"}}]},{"role":"tool","tool_call_id":"call-next","content":"Source page returned."}],"tools":[{"type":"function","function":{"name":"read","parameters":{"type":"object"}}},{"type":"function","function":{"name":"done","parameters":{"type":"object"}}}]}

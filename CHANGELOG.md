@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.3.23 (2026-11-03)
+
+- A shell command that only creates directories (for example `mkdir -p pkg/batch`) no longer leaves its effect unresolved. Directories are not recorded as file changes, so the effect stayed `unknown` and every later tool call except `done` was refused with "no typed repair action on the live menu", a dead end present since 0.3.0. The effect now settles as applied from its journaled shell receipt when it belongs to the same run and effect and every recorded path is a valid workspace-relative path. As before, the exit code does not decide this.
+- A new test (`tests/test_refusal_names_live_action.py`) checks that every recorded refusal names an action offered on the next request's tool menu. Fences that can still leave no such action are listed by name in `KNOWN_DEAD_END_FENCES`.
+
 ## 0.3.22 (2026-11-03)
 
 - Fix (macOS, regression in 0.3.15-0.3.21): background jobs and execution sessions whose process started a child in a new session (setsid) ended the run with ENGINE_ERROR "descendants survived SIGKILL; signal permission denied", because cleanup never signalled that detached child. Cleanup now stops it with a signal the kernel delivers only if the process's PID generation still matches, so a reused PID is never signalled, and the cleanup error names the real cause instead of always saying "signal permission denied". If that kernel signal is unavailable, cleanup re-checks the process identity immediately before a PID signal and labels that path. Tests in `test_launch_unit_kill.py` that asserted the setsid child survives on macOS encoded this bug and now assert no survivor on every platform. Cleanup also keeps adopting members of the launch process group after the leader exits (members born before the leader was reaped), so a fork burst whose parents die between scans no longer leaves an untracked process holding the output pipe ("output pipe held by untracked descendant").
