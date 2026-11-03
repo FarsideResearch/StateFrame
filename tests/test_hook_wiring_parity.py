@@ -2,7 +2,8 @@
 
 Set SF_TEST_PARITY_BASELINE to the release this branch is based on. The name stays outside the
 STATEFRAME_ namespace: the CLI reports every unknown STATEFRAME_ variable, which would add a line to
-the output of every CLI test in the same session.
+the output of every CLI test in the same session. Candidate parity runs explicitly disable the stable
+tool head to preserve the released per-step request bytes.
 """
 
 from __future__ import annotations
@@ -70,7 +71,8 @@ def _write_launchers(launcher: Path, wrapper: Path) -> None:
 
 
 def _run_checkout(
-    checkout: Path, repo: Path, run: Path, launcher: Path, wrapper: Path, trace: Path
+    checkout: Path, repo: Path, run: Path, launcher: Path, wrapper: Path, trace: Path,
+    *, stable_tool_head: str | None = None,
 ):
     script = Script(
         json.loads((CURRENT / "examples/discount_bug.script.json").read_text())
@@ -80,6 +82,9 @@ def _run_checkout(
         **os.environ,
         "PYTHONPATH": str(checkout / "src"),
     }
+    environment.pop("STATEFRAME_STABLE_TOOL_HEAD", None)
+    if stable_tool_head is not None:
+        environment["STATEFRAME_STABLE_TOOL_HEAD"] = stable_tool_head
     try:
         command = [
             sys.executable,
@@ -162,7 +167,8 @@ def test_no_hooks_raw_requests_and_journal_match_release(tmp_path):
     )
     run.rename(tmp_path / "baseline_run")
     current = _run_checkout(
-        CURRENT, repo, run, launcher, wrapper, tmp_path / "current_modules.json"
+        CURRENT, repo, run, launcher, wrapper, tmp_path / "current_modules.json",
+        stable_tool_head="off",
     )
     assert current[:3] == baseline[:3]
     assert current[3] == baseline[3] | RUNNER_SPEC_FIELDS
@@ -192,14 +198,16 @@ def test_no_hooks_regular_stateframe_file_matches_release(tmp_path):
     run = tmp_path / "run"
     baseline = _run_checkout(BASELINE, repo, run, launcher, wrapper, tmp_path / "baseline.json")
     run.rename(tmp_path / "baseline_run")
-    current = _run_checkout(CURRENT, repo, run, launcher, wrapper, tmp_path / "current.json")
+    current = _run_checkout(CURRENT, repo, run, launcher, wrapper, tmp_path / "current.json",
+                            stable_tool_head="off")
     assert current[:3] == baseline[:3]
     assert current[3] == baseline[3] | RUNNER_SPEC_FIELDS
     assert current[5] == baseline[5]
 
 
 def _resume_checkout(checkout: Path, repo: Path, run: Path, launcher: Path,
-                     wrapper: Path, trace: Path) -> tuple[list[bytes], list[bytes]]:
+                     wrapper: Path, trace: Path, *,
+                     stable_tool_head: str | None = None) -> tuple[list[bytes], list[bytes]]:
     class InterruptAfterTwoActions(Script):
         def __init__(self):
             super().__init__({"model": "scripted", "steps": [
@@ -229,6 +237,9 @@ def _resume_checkout(checkout: Path, repo: Path, run: Path, launcher: Path,
     endpoint = f"http://127.0.0.1:{server.server_port}/v1"
     environment = {**os.environ, "PYTHONPATH": os.pathsep.join(
         (str(checkout / "src"), str(checkout / "src/stateframe/engine")))}
+    environment.pop("STATEFRAME_STABLE_TOOL_HEAD", None)
+    if stable_tool_head is not None:
+        environment["STATEFRAME_STABLE_TOOL_HEAD"] = stable_tool_head
     command = [sys.executable, str(launcher), str(wrapper), str(trace), "run",
                "--repo", str(repo), "--task", "Fix the pricing code so the tests pass.",
                "--endpoint", endpoint, "--model", "scripted", "--run-dir", str(run),
@@ -274,5 +285,6 @@ def test_no_hooks_resume_rebuilt_requests_match_release(tmp_path):
     run = tmp_path / "run"
     baseline = _resume_checkout(BASELINE, repo, run, launcher, wrapper, tmp_path / "baseline.json")
     run.rename(tmp_path / "baseline_run")
-    current = _resume_checkout(CURRENT, repo, run, launcher, wrapper, tmp_path / "current.json")
+    current = _resume_checkout(CURRENT, repo, run, launcher, wrapper, tmp_path / "current.json",
+                               stable_tool_head="off")
     assert current == baseline

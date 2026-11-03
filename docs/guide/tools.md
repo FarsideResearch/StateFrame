@@ -6,6 +6,8 @@ If no repository tests exist, a declared build or type check can verify the resu
 
 The existing file and check tools are `grep`, `list_files`, `read`, `edit`, `str_replace`, `insert_before`, `authored_check`, `file_create`, `run_tests`, `read_check_receipt`, `recall` and `done`. Some runs also offer probe and whole-module operations. The following tools add command execution, file housekeeping and outside observations. Each accepts an optional `why` string.
 
+By default, `STATEFRAME_STABLE_TOOL_HEAD` keeps provider-visible tool definitions in first-seen order after they are first offered. A listed tool is not necessarily callable on the current step: dispatch still follows that step's callable menu. Calls outside the menu are refused with `not offered for the current state`, and the request names the callable tools. Set the switch to `off` to restore per-step lists; see [Running](running.md#prompt-cache-stable-tool-head).
+
 When a run selects a [skill](skills.md), `skill_load(name)` is also offered. It loads a bounded user-role instruction body and creates a settled observation. It grants no source-read or check evidence. Skill command definitions are offered only with `--trust-skill-tools` and follow the custom command rules below.
 
 ## Shell and jobs

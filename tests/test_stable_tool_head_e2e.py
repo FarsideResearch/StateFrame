@@ -1,4 +1,4 @@
-"""End to end: with STATEFRAME_STABLE_TOOL_HEAD=on the provider tool list only ever grows by appending.
+"""End to end: the default stable tool head keeps the provider tool list append-only.
 
 Runs the bundled scripted discount_bug example offline (needs the host sandbox and a local socket).
 """
@@ -47,8 +47,8 @@ def _wire(run: Path) -> list[dict]:
     return [json.loads(path.read_bytes()) for path in sorted((run / "wire").glob("*.request.json"))]
 
 
-def test_listed_tools_only_append_and_the_run_still_succeeds(tmp_path):
-    result, run = _run(tmp_path, "on")
+def test_unset_defaults_on_and_the_run_still_succeeds(tmp_path):
+    result, run = _run(tmp_path, None)
     assert result.returncode == 0, result.stdout + result.stderr
     requests = _wire(run)
     assert len(requests) >= 2
@@ -61,7 +61,7 @@ def test_listed_tools_only_append_and_the_run_still_succeeds(tmp_path):
 
 
 def test_switch_off_keeps_per_turn_menus(tmp_path):
-    result, run = _run(tmp_path, None)
+    result, run = _run(tmp_path, "off")
     assert result.returncode == 0, result.stdout + result.stderr
     assert not any(str(message.get("content", "")).startswith("[Tool menu | this turn]")
                    for request in _wire(run) for message in request["messages"])

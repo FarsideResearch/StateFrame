@@ -55,11 +55,15 @@ def _raw_tools(request: bytes) -> bytes:
 
 
 def _run_tree(root: Path, case: Path, repo: Path, script: Path, *,
-              legacy_mode: bool = False) -> tuple[bytes, ...]:
+              legacy_mode: bool = False,
+              stable_tool_head: str | None = None) -> tuple[bytes, ...]:
     case.mkdir()
     run_dir = case / "run"
     env = environment()
     env["PYTHONPATH"] = os.pathsep.join((str(root / "src"), str(root / "src/stateframe/engine")))
+    env.pop("STATEFRAME_STABLE_TOOL_HEAD", None)
+    if stable_tool_head is not None:
+        env["STATEFRAME_STABLE_TOOL_HEAD"] = stable_tool_head
     with Endpoint(script) as endpoint:
         result = subprocess.run(
             [PYTHON, "-m", "stateframe", "run", "--repo", str(repo),
@@ -98,8 +102,9 @@ def test_no_skills_wire_matches_023(tmp_path):
     repo = copy_repo(repo_root)
     old = _run_tree(baseline, tmp_path / "old", repo, script)
     # 0.2.5 intentionally treats unittest as a generic command and defaults to
-    # editable tests. Pin the old runner and protection modes for exact bytes.
-    current = _run_tree(ROOT, tmp_path / "current", repo, script, legacy_mode=True)
+    # editable tests. Pin the old runner, protection and tool-list modes for exact bytes.
+    current = _run_tree(ROOT, tmp_path / "current", repo, script, legacy_mode=True,
+                        stable_tool_head="off")
     assert len(current) == len(old)
     assert current[0] == old[0], first_difference(old[0], current[0])
     for number, (expected, actual) in enumerate(zip(old, current), 1):

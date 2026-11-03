@@ -9,6 +9,7 @@
 | A check file edit is refused | `--protect-tests all` locks existing tests, or `task` locks a judging test. | Edit product code, or select `task` or `off` at run start if the task requires test changes. |
 | `passed, but ... test file weakened` | One or more changed tests appear to remove coverage. Non-Python detection is heuristic. | Review each named file and test before applying the result. |
 | `stopped: test reported wrong, see evidence` | The agent supplied a judging test, its assertion, an explanation and observed behavior. No pass was claimed. | Inspect the structured evidence and decide whether to change the test or the product. |
+| `not offered for the current state` | A listed tool is not callable in this step's current menu. | Use one of the callable tools named in the request, or make the needed lookup earlier in the run. See [Agent tools](tools.md). |
 | `no interpreter for your tests` | No `.venv/`, `venv/` or `env/` in the repository, and no usable `python3` on PATH. | Pass `--test-python PATH`. |
 | Before-checks fail with import errors | The test Python lacks your project's dependencies. | Point `--test-python` at your project's environment. |
 | `endpoint does not serve model ...` | The server lists other model names. | Pass `--model` with a name it lists. |

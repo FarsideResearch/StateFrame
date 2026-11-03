@@ -4,7 +4,8 @@ Why: llama.cpp reuses the longest common token prefix between consecutive reques
 template renders the tool list before the system prompt. When the per-phase menu changes membership or order,
 nothing after the tool list can be reused, so every turn re-reads the whole prompt.
 
-With the switch on, the final tool surface separates two things the engine used to keep identical:
+With the switch on, which is the default when the variable is unset, the final tool surface separates two
+things the engine used to keep identical:
 
 * the LISTED tools (what the provider sees): every tool this run has been offered, in first-seen order, with
   the schema first seen for it (a parameter change replaces it in place; a description-only change keeps the
@@ -13,7 +14,7 @@ With the switch on, the final tool surface separates two things the engine used 
 
 Dispatch keeps using the callable names (the request contract's ``advertised_actions``), so a listed but gated
 call is refused with the existing "not offered for the current state; choose one of: ..." reply, and a short note
-in the volatile tail names the callable tools. With the switch off nothing here runs.
+in the volatile tail names the callable tools. Set the variable to ``off`` to keep the per-step tool list.
 """
 from __future__ import annotations
 
@@ -32,7 +33,7 @@ _MODES = frozenset({"off", "on"})
 
 def mode(environ: Mapping[str, str] | None = None) -> str:
     source = os.environ if environ is None else environ
-    value = str(source.get(MODE_ENV, "off")).strip().lower()
+    value = str(source.get(MODE_ENV, "on")).strip().lower()
     if value not in _MODES:
         raise ValueError(f"{MODE_ENV} must be off or on")
     return value

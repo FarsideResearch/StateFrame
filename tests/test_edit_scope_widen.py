@@ -202,7 +202,8 @@ def test_file_operations_on_admitted_source(tmp_path, widen_on):
     from kernel_file_ops import file_delete, file_move
     root, row, fileset = _workspace(tmp_path)
     assert _widen_edit_scope(root, "app/rates.py", row, fileset, set())
-    allowed = lambda relative: relative in fileset.paths
+    def allowed(relative):
+        return relative in fileset.paths
     moved = file_move(root, "app/rates.py", "app/renamed.py",
                       protected=lambda _: False, editable=allowed,
                       new_file_allowed=lambda path: path == "app/renamed.py")
@@ -551,5 +552,6 @@ def test_switch_off_request_bytes_match_base_release(tmp_path):
                                   tmp_path / "base_modules.json")[0]
     run.rename(tmp_path / "base_run")
     current_requests = _run_checkout(current, repo, run, launcher, wrapper,
-                                     tmp_path / "current_modules.json")[0]
+                                     tmp_path / "current_modules.json",
+                                     stable_tool_head="off")[0]
     assert current_requests == base_requests

@@ -22,11 +22,37 @@ def names(tools: list[dict]) -> list[str]:
     return [item["function"]["name"] for item in tools]
 
 
-def test_mode_is_strict_off_or_on():
-    assert head.mode({}) == "off"
-    assert head.enabled({head.MODE_ENV: "on"})
+def test_mode_defaults_on_when_unset(monkeypatch):
+    monkeypatch.delenv(head.MODE_ENV, raising=False)
+    assert head.mode() == "on"
+    assert head.enabled()
+
+
+def test_mode_off_disables_stable_tool_head(monkeypatch):
+    monkeypatch.setenv(head.MODE_ENV, "off")
+    assert head.mode() == "off"
+    assert not head.enabled()
+
+
+def test_mode_rejects_invalid_value(monkeypatch):
+    monkeypatch.setenv(head.MODE_ENV, "yes")
     with pytest.raises(ValueError):
-        head.mode({head.MODE_ENV: "yes"})
+        head.mode()
+
+
+def test_runner_forwards_shell_off_into_run_spec(tmp_path, monkeypatch):
+    from stateframe.endpoint import Endpoint
+    from stateframe.runner import RunOptions, prepare
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "sample.py").write_text("VALUE = 1\n")
+    (repo / "test_sample.py").write_text("def test_sample():\n    assert True\n")
+    monkeypatch.setenv(head.MODE_ENV, "off")
+    endpoint = Endpoint.from_args("http://127.0.0.1:8080/v1", "scripted", None)
+    _run_dir, _copy, spec = prepare(RunOptions(
+        repo=repo, task="inspect sample", endpoint=endpoint, run_dir=tmp_path / "run"))
+    assert spec["environment"][head.MODE_ENV] == "off"
 
 
 def test_listed_tools_grow_append_only_and_never_reorder_across_phases():

@@ -1,4 +1,4 @@
-"""Compare raw no-server model request files against a 0.2.1 source tree.
+"""Compare raw no-server request files against a 0.2.1 source tree with stable tool head off.
 
 Run with --baseline /path/to/97cd52d --candidate /path/to/this/tree.
 Both runs use the same temporary repository and run-directory path in sequence.
@@ -17,10 +17,13 @@ import sys
 import tempfile
 
 
-def source_env(tree: Path) -> dict[str, str]:
+def source_env(tree: Path, stable_tool_head: str | None) -> dict[str, str]:
     environment = dict(os.environ)
     environment["PYTHONPATH"] = os.pathsep.join((str(tree / "src"),
         str(tree / "src/stateframe/engine")))
+    environment.pop("STATEFRAME_STABLE_TOOL_HEAD", None)
+    if stable_tool_head is not None:
+        environment["STATEFRAME_STABLE_TOOL_HEAD"] = stable_tool_head
     return environment
 
 
@@ -36,8 +39,9 @@ def write_launcher(path: Path) -> None:
 
 
 def capture(tree: Path, python: str, launcher: Path, script: Path,
-            repo: Path, run_dir: Path, *, legacy_mode: bool = False) -> bytes:
-    environment = source_env(tree)
+            repo: Path, run_dir: Path, *, legacy_mode: bool = False,
+            stable_tool_head: str | None = None) -> bytes:
+    environment = source_env(tree, stable_tool_head)
     endpoint = subprocess.Popen([python, "-m", "stateframe.scripted_endpoint",
         "--script", str(script), "--port", "0"], cwd=tree, env=environment,
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
@@ -93,7 +97,8 @@ def main() -> int:
         run_dir = root / "run"
         previous = capture(baseline, args.python, launcher, script, repo, run_dir)
         run_dir.rename(root / "baseline-run")
-        current = capture(candidate, args.python, launcher, script, repo, run_dir)
+        current = capture(candidate, args.python, launcher, script, repo, run_dir,
+                          stable_tool_head="off")
         for label, body in (("0.2.1", previous), ("candidate", current)):
             print(f"{label}: {len(body)} bytes sha256={hashlib.sha256(body).hexdigest()}")
         if previous == current:
