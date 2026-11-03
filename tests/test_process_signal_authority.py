@@ -18,6 +18,11 @@ REVIEWED_SIGNALS = {
         "The row is this supervisor's direct child and only its serve loop reaps it.",
     ("stateframe/engine/kernel_exec_tracker.py", "os.killpg(launch_identity.pid, sig)"):
         "The captured leader is held unreaped under its Popen wait lock.",
+    ("stateframe/engine/kernel_exec_tracker.py", "os.kill(expected.pid, sig)"):
+        "macOS fallback only when proc_signal_with_audittoken is missing or unsupported: the "
+        "full flavor-18 identity (pid, uid, start, status, PID generation) is re-read and must "
+        "match immediately before the call; the residual PID-reuse window is documented in "
+        "KNOWN_LIMITATIONS.",
     ("stateframe/engine/kernel_hook_driver.py", "os.killpg(process.pid, signal.SIGKILL)"):
         "The driver signals its own unreaped Popen child (session leader).",
     ("stateframe/outer_checks.py", "process.send_signal(signal.SIGTERM)"):

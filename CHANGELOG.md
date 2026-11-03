@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.3.22 (2026-11-03)
+
+- Fix (macOS, regression in 0.3.15-0.3.21): background jobs and execution sessions whose process started a child in a new session (setsid) ended the run with ENGINE_ERROR "descendants survived SIGKILL; signal permission denied", because cleanup never signalled that detached child. Cleanup now stops it with a signal the kernel delivers only if the process's PID generation still matches, so a reused PID is never signalled, and the cleanup error names the real cause instead of always saying "signal permission denied". If that kernel signal is unavailable, cleanup re-checks the process identity immediately before a PID signal and labels that path. Tests in `test_launch_unit_kill.py` that asserted the setsid child survives on macOS encoded this bug and now assert no survivor on every platform. Cleanup also keeps adopting members of the launch process group after the leader exits (members born before the leader was reaped), so a fork burst whose parents die between scans no longer leaves an untracked process holding the output pipe ("output pipe held by untracked descendant").
+
 ## 0.3.21 (2026-11-03)
 
 - Stage 2 fixes `chains.tree_hash` (NUL and lone-surrogate collisions), `behavior_bridge._files_hash`, `kernel_state_owner_inventory._source_revision_vector`, `swebench_env._dependency_manifest_digest`, the expert-gap closure freshness check, `kernel_remaining_sites.current_workspace_revision`, `long_horizon_protocol._staged_digest`, and both workspace-truth fact revisions. The digest guard now has an empty allowlist and detects NUL-tagged ticket payloads.

@@ -190,10 +190,102 @@ class _BSDInfo(ctypes.Structure):
     _fields_ += [("start_sec", ctypes.c_uint64), ("start_usec", ctypes.c_uint64)]
 
 
+class _UniqueInfo(ctypes.Structure):
+    _fields_ = [("uuid", ctypes.c_ubyte * 16), ("uniqueid", ctypes.c_uint64),
+                ("parent_uniqueid", ctypes.c_uint64), ("idversion", ctypes.c_int32),
+                ("reserved2", ctypes.c_uint32), ("reserved3", ctypes.c_uint64),
+                ("reserved4", ctypes.c_uint64)]
+
+
+class _BSDInfoWithUnique(ctypes.Structure):
+    _fields_ = [("bsd", _BSDInfo), ("unique", _UniqueInfo)]
+
+
+MAC_KERNEL_SIGNAL_PATH = "pid-generation kernel signal"
+MAC_FALLBACK_SIGNAL_PATH = "fallback: identity re-verified os.kill (residual PID-reuse race)"
+
+
+def _libproc():
+    """Load libproc at use time so absent symbols do not become cached state."""
+    return ctypes.CDLL("/usr/lib/libproc.dylib", use_errno=True)
+
+
+def signal_mac_verified_process(expected: ProcessIdentity, sig: signal.Signals) -> str | bool:
+    """Return the successful signal path, or False when no signal was sent."""
+    if sys.platform != "darwin" or expected.pid <= 0 or expected.zombie:
+        return False
+    try:
+        lib = _libproc()
+    except OSError as error:
+        raise ContainmentUnverified("macOS libproc unavailable: cannot read process identity") from error
+    proc_pidinfo = getattr(lib, "proc_pidinfo", None)
+    if proc_pidinfo is None:
+        raise ContainmentUnverified("macOS libproc unavailable: cannot read process identity")
+    proc_pidinfo.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_uint64,
+                             ctypes.c_void_p, ctypes.c_int]
+
+    def read_identity() -> _BSDInfoWithUnique | None:
+        info = _BSDInfoWithUnique()
+        count = proc_pidinfo(expected.pid, 18, 0, ctypes.byref(info), ctypes.sizeof(info))
+        if count == 0 and ctypes.get_errno() in (errno.ESRCH, errno.ENOENT):
+            return None
+        if count != ctypes.sizeof(info):
+            raise ContainmentUnverified("cannot read macOS process birth and PID version together")
+        return info
+
+    info = read_identity()
+    if info is None or (info.bsd.pid != expected.pid or info.bsd.uid != os.getuid()
+            or (info.bsd.start_sec, info.bsd.start_usec) != expected.start
+            or info.unique.idversion == 0 or info.bsd.status == 5):
+        return False
+
+    def signal_after_recheck() -> str | bool:
+        again = read_identity()
+        if again is None or (again.bsd.pid != info.bsd.pid or again.bsd.uid != info.bsd.uid
+                or (again.bsd.start_sec, again.bsd.start_usec) != (info.bsd.start_sec, info.bsd.start_usec)
+                or again.bsd.status != info.bsd.status
+                or again.unique.idversion != info.unique.idversion):
+            return False
+        try:
+            os.kill(expected.pid, sig)
+        except ProcessLookupError:
+            return False
+        return MAC_FALLBACK_SIGNAL_PATH
+
+    proc_signal = getattr(lib, "proc_signal_with_audittoken", None)
+    if proc_signal is None:
+        return signal_after_recheck()
+    audit_token = (ctypes.c_uint32 * 8)()
+    audit_token[5] = expected.pid
+    audit_token[7] = info.unique.idversion & 0xffffffff
+    proc_signal.argtypes = [ctypes.c_void_p, ctypes.c_int]
+    result = proc_signal(ctypes.byref(audit_token), int(sig))
+    if result in (errno.ENOTSUP, errno.ENOSYS):
+        return signal_after_recheck()
+    if result in (errno.ESRCH, errno.ENOENT):
+        return False
+    if result != 0:
+        raise OSError(result, "cannot signal verified macOS process", expected.pid)
+    return MAC_KERNEL_SIGNAL_PATH
+
+
 class _TaskInfo(ctypes.Structure):
     _fields_ = [(name, ctypes.c_uint64) for name in (
         "virtual", "resident", "user", "system", "threads_user", "threads_system")]
     _fields_ += [("counters", ctypes.c_int32 * 12)]
+
+
+def process_start_now() -> tuple[int, int]:
+    """The current time in ProcessTable start units, rounded up so a process born by now compares <=.
+
+    macOS reports wall-clock (seconds, microseconds). Linux /proc reports clock ticks since boot;
+    CLOCK_BOOTTIME is never behind the clock older kernels used, so the bound stays inclusive.
+    """
+    if sys.platform == "linux":
+        ticks = os.sysconf("SC_CLK_TCK")
+        return (int(time.clock_gettime(time.CLOCK_BOOTTIME) * ticks) + 1, 0)
+    now = time.time_ns() // 1000
+    return (now // 1_000_000, now % 1_000_000 + 1)
 
 
 class ProcessTable:
@@ -296,10 +388,22 @@ class Descendants:
         self.table = table
         self.members: dict[int, ProcessIdentity] = {}
         self.signal_errors: dict[int, str] = {}
+        self.signal_paths: dict[int, str] = {}
+        # A leader PID cannot be reused until the leader is reaped, so a group or session named
+        # by it is ours until then. Afterwards only processes born by the reap belong to it: a
+        # reused PID's new group starts later. `reaped_bound` is the reap time when the caller
+        # reports it (leader_reaped); otherwise the newest start seen while the leader was live.
+        self.owned_bound: tuple[int, int] | None = None
+        self.reaped_bound: tuple[int, int] | None = None
         row = table.identity(leader)
         if row is not None and (launch_identity is None or
                                 (row.pid == launch_identity.pid and row.start == launch_identity.start)):
             self.members[leader] = row
+
+    def leader_reaped(self) -> None:
+        """Record that the caller has just reaped the leader; call once, right after the reap."""
+        if self.reaped_bound is None:
+            self.reaped_bound = process_start_now()
 
     def update(self, rows: dict[int, ProcessIdentity]) -> list[ProcessIdentity]:
         for pid in self.members.keys() - rows.keys():
@@ -309,14 +413,19 @@ class Descendants:
         active = {pid for pid, old in self.members.items()
                   if pid in rows and rows[pid].start == old.start}
         leader = self.members.get(self.leader)
-        leader_owned = (leader is not None and self.leader in active)
+        leader_live = leader is not None and self.leader in active and self.reaped_bound is None
+        if leader_live and rows:
+            newest = max(row.start for row in rows.values())
+            self.owned_bound = newest if self.owned_bound is None else max(self.owned_bound, newest)
+        bound = self.reaped_bound if self.reaped_bound is not None else self.owned_bound
         changed = True
         while changed:
             changed = False
             for pid, row in rows.items():
                 if pid in active:
                     continue
-                if row.ppid in active or (leader_owned and (row.pgid == self.leader or row.sid == self.leader)):
+                in_group = row.pgid == self.leader or row.sid == self.leader
+                if row.ppid in active or (in_group and (leader_live or (bound is not None and row.start <= bound))):
                     # A reused leader PID must not acquire a new unrelated family.
                     previous = self.members.get(pid)
                     if previous is not None and previous.start != row.start:
@@ -340,6 +449,15 @@ class Descendants:
                     continue
                 if pidfd is not None:
                     signal.pidfd_send_signal(pidfd, sig)
+                elif sys.platform == "darwin":
+                    try:
+                        path = signal_mac_verified_process(row, sig)
+                        if not path:
+                            continue
+                    except ContainmentUnverified as error:
+                        self.signal_errors[row.pid] = str(error)
+                        continue
+                    self.signal_paths[row.pid] = path
                 else:
                     self.signal_errors[row.pid] = "detached descendant signal unavailable without pidfd"
                     continue

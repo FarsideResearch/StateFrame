@@ -81,6 +81,9 @@ class ManagedProcess:
             self.stop(0)
         self.exit_code = self.process.poll()
         if self.exit_code is not None:
+            # poll() has reaped the leader: from here its PID may be reused, so only group
+            # members born by now still belong to this command.
+            self.family.leader_reaped()
             self.stop(0.1)
         if now - self.started >= self.cap.limits.wall_seconds and self.stop_at is None:
             self.timed_out = True
@@ -106,9 +109,15 @@ class ManagedProcess:
 
     def complete(self, ok, survivors, detail=""):
         if survivors and self.family.signal_errors:
-            detail += "; signal permission denied"
+            # Name the real failure: a missing pidfd or unreadable identity is not a permission error.
+            reasons = sorted({self.family.signal_errors[pid] for pid in survivors
+                              if pid in self.family.signal_errors} or set(self.family.signal_errors.values()))
+            detail += "; " + "; ".join(reasons)[:300]
         self.cleanup = {"ok": ok and not self.containment_failed, "killed": len(self.killed | self.term_sent),
                         "survivors": survivors, "detail": detail or self.limit_detail}
+        signal_paths = self.family.signal_paths
+        if signal_paths:
+            self.cleanup["signal_paths"] = signal_paths.copy()
         self.exit_code = self.process.poll()
         self.ended = time.monotonic()
         self.process.stdout.close()
