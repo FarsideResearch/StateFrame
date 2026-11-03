@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.3.14 (2026-11-03)
 
 - The stable tool head now lists the run's full set of offerable tools from the first request, so the tool list no longer grows on request 2 and the server can reuse the cached tools, system prompt and task from request 2 on. The current step's callable menu still controls what can run, and a tool first seen later is still appended. Measured live on Qwen3.6-35B-A3B with llama.cpp, one run of each bundled example: request 2 hit the cache in every run, and the cached share of prompt tokens from request 2 on rose to 37-47%, from 18-22% without the seed. The seed lists five tools earlier than before (`authored_check`, `decide`, `insert_before`, `predict`, `work`), which makes the cached head about 680 tokens larger on every request. In 15 sampled first requests with those five listed, the model called none of them, the same as without them.
 
