@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.3.27 (2026-11-03)
+
+- A model request waiting for a busy server slot now stays alive past its per-request timeout when `/slots` or `/health` returns any HTTP status, including 401, 404, 501, and 503. The extra wait ends at the run deadline or `STATEFRAME_QUEUE_WAIT_MAX_S` (1800 seconds by default). A response that has started still has its per-request deadline. Each extended send records `provider_queue_wait`, and the run prints one queue warning.
+- Request-body uploads now have a progress watchdog (`STATEFRAME_SEND_STALL_S`, 90 seconds by default). A stalled upload closes its connection and enters the ordinary frozen-byte transport retry policy, with one `send_stall` journal event per failed attempt. Healthy probes extend queue waits only after the entire body was sent. The sending process decides whether the body finished before the per-request deadline, at its last socket write, and the caller waits for that verdict within the unchanged hard deadline, so a busy machine no longer fails a request whose upload finished in time.
+- In-flight probes use the request's selected endpoint and API key, never follow redirects, and are bounded by the request's hard deadline. Post-failure health recovery uses that same destination, including for routed requests. Model requests without a configured key send the same headers as before.
+- Measured in one contended live run against a shared server: requests rode out 28 queue waits, the longest 193 seconds, with no transport errors, where the previous release failed all 4 requests in about 80 seconds without a response. A request whose upload stalled was cut off after 15 seconds of no progress, and its retry on a new connection succeeded 18 seconds after the stall began. The previous release stayed blocked on that write for the full 40-second test window.
+- A profile that sets `STATEFRAME_SEND_STALL_S` or `STATEFRAME_QUEUE_WAIT_MAX_S` is refused by earlier versions ("unconsumed STATEFRAME settings").
+- Health probes remain separate from model sends and do not change the request body, wire tape, or replay records.
+
 ## 0.3.26 (2026-11-03)
 
 - Add powerups: an installable package of a skill, command tools, lifecycle hooks and an optional MCP definition, selected once and kept. `stateframe powerups install|enable|disable|list|show|remove|trust|promote` manage them; `--powerup NAME[=MODE]|PATH`, `--powerup-set NAME.KEY=VALUE` and `--no-powerups` adjust one `run` or `chat`. Each powerup is off, offered (only its skill catalog line is shown), on, or auto (on when its file and task rules match), per user, profile, trusted project or command. Selected parts enter the existing skill, tool, hook and MCP loaders with the same limits as hand-written ones, so with `--shell-sandbox off` powerup command tools run on the host like any shell tool; user `--tools` and `--mcp` take the tool schema allowance first.

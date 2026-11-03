@@ -6,6 +6,7 @@ uses provider-origin health probes during the wait instead of a first-byte timeo
 from __future__ import annotations
 
 from collections.abc import Callable
+import errno
 import functools
 import ipaddress
 import http.client
@@ -13,6 +14,7 @@ import json
 import math
 import os
 from pathlib import Path
+import select
 import socket
 import struct
 import subprocess
@@ -33,10 +35,35 @@ RELAY_ERROR_LABELS = frozenset({
 
 
 DEFAULT_PROVIDER_LIVENESS_S = 90.0
+DEFAULT_QUEUE_WAIT_MAX_S = 1800.0
+DEFAULT_SEND_STALL_S = 90.0
 
 
 class ProviderLivenessTimeout(TimeoutError):
-    """No healthy provider-origin probe arrived before the liveness deadline."""
+    """No provider-origin HTTP response arrived before the liveness deadline."""
+
+
+class RequestBodyDeadlineTimeout(TimeoutError):
+    """The child did not finish its upload within the request deadline."""
+
+    def __init__(self) -> None:
+        super().__init__("HTTP request deadline exceeded before body completion")
+
+
+class SendStallTimeout(TimeoutError):
+    """Request-body bytes stopped moving before the body was fully sent."""
+
+    error_type = "SendStallTimeout"
+    http_status = None
+    relay_error = None
+
+    def __init__(self, bytes_sent: int, bytes_total: int, seconds_stalled: float,
+                 origin: str = "unknown") -> None:
+        super().__init__("HTTP request body send stalled")
+        self.bytes_sent = bytes_sent
+        self.bytes_total = bytes_total
+        self.seconds_stalled = seconds_stalled
+        self.origin = origin
 
 
 class BoundedTransportError(ConnectionError):
@@ -127,6 +154,34 @@ def provider_liveness_timeout_seconds() -> float:
     return seconds
 
 
+def queue_wait_max_seconds() -> float:
+    """Maximum total time for a silent, reachable provider request."""
+    raw = os.environ.get("STATEFRAME_QUEUE_WAIT_MAX_S")
+    if raw is None:
+        return DEFAULT_QUEUE_WAIT_MAX_S
+    try:
+        seconds = float(raw)
+    except ValueError as error:
+        raise ValueError("STATEFRAME_QUEUE_WAIT_MAX_S must be finite and positive") from error
+    if not math.isfinite(seconds) or seconds <= 0:
+        raise ValueError("STATEFRAME_QUEUE_WAIT_MAX_S must be finite and positive")
+    return seconds
+
+
+def send_stall_seconds() -> float:
+    """Maximum silence between successful request-body socket writes."""
+    raw = os.environ.get("STATEFRAME_SEND_STALL_S")
+    if raw is None:
+        return DEFAULT_SEND_STALL_S
+    try:
+        seconds = float(raw)
+    except ValueError as error:
+        raise ValueError("STATEFRAME_SEND_STALL_S must be between 10 and 600 seconds") from error
+    if not math.isfinite(seconds) or not 10 <= seconds <= 600:
+        raise ValueError("STATEFRAME_SEND_STALL_S must be between 10 and 600 seconds")
+    return seconds
+
+
 def _provider_probe_origin(endpoint: str) -> tuple[str, str, int | None] | None:
     """Validate a provider URL and return only its origin components."""
     try:
@@ -138,6 +193,16 @@ def _provider_probe_origin(endpoint: str) -> tuple[str, str, int | None] | None:
     return None
 
 
+def _numeric_http_origin(origin: tuple[str, str, int | None] | None) -> bool:
+    if origin is None or origin[0] != "http":
+        return False
+    try:
+        ipaddress.ip_address(origin[1])
+    except ValueError:
+        return False
+    return True
+
+
 def _close_probe_connection(connection: http.client.HTTPConnection | None) -> None:
     if connection is None:
         return
@@ -147,12 +212,9 @@ def _close_probe_connection(connection: http.client.HTTPConnection | None) -> No
         pass
 
 
-def _provider_probe_status(endpoint: str, path: str, key: str,
-                           timeout: float) -> int | None:
-    """Get one bounded provider-origin health response, returning none on failure."""
-    origin = _provider_probe_origin(endpoint)
-    if origin is None:
-        return None
+def _provider_probe_status(origin: tuple[str, str, int | None], path: str,
+                           key: str, timeout: float, read_ok: bool = False) -> tuple[int, bool] | None:
+    """Probe in a disposable child; the parent enforces the whole-operation limit."""
     scheme, host, port = origin
     connection_type = (http.client.HTTPSConnection if scheme == "https"
                        else http.client.HTTPConnection)
@@ -165,22 +227,151 @@ def _provider_probe_status(endpoint: str, path: str, key: str,
         connection.request("GET", path, headers=headers)
         response = connection.getresponse()
         status = response.status
+        healthy = b"ok" in response.read(1024) if read_ok else False
         response.close()
-        return status
+        return status, healthy
     except (OSError, ValueError, http.client.HTTPException):
         return None
     finally:
         _close_probe_connection(connection)
 
 
-def _probe_liveness(endpoint: str, key: str, timeout: float) -> bool:
-    """Probe known provider health routes on the request's authenticated origin."""
-    for path in ("/slots", "/health"):
-        status = _provider_probe_status(endpoint, path, key, timeout)
-        # Missing routes (404/405) do not prove the provider is alive behind a relay.
-        if status is not None and 200 <= status < 300:
-            return True
-    return False
+def _direct_http_probe(origin: tuple[str, str, int | None], path: str,
+                       key: str, stop_at: float, read_ok: bool) -> tuple[int, bool] | None:
+    """Bound a numeric HTTP origin without process startup on short liveness windows."""
+    _, host, port = origin
+    try:
+        address = ipaddress.ip_address(host)
+        if "\r" in key or "\n" in key:
+            return None
+        authority = f"[{host}]" if address.version == 6 else host
+        authority += f":{port}" if port is not None else ""
+        headers = (f"GET {path} HTTP/1.1\r\nHost: {authority}\r\n"
+                   "Accept: application/json\r\nConnection: close\r\n"
+                   + (f"Authorization: Bearer {key}\r\n" if key else "")
+                   + "\r\n").encode("latin-1")
+    except (ValueError, UnicodeEncodeError):
+        return None
+    family = socket.AF_INET6 if address.version == 6 else socket.AF_INET
+    target = (host, 80 if port is None else port)
+    try:
+        with socket.socket(family, socket.SOCK_STREAM) as connection:
+            connection.setblocking(False)
+            code = connection.connect_ex(target)
+            if code not in (0, errno.EINPROGRESS, errno.EWOULDBLOCK):
+                return None
+            if code:
+                remaining = stop_at - time.monotonic()
+                if remaining <= 0 or not select.select([], [connection], [], remaining)[1]:
+                    return None
+                if connection.getsockopt(socket.SOL_SOCKET, socket.SO_ERROR):
+                    return None
+            sent = 0
+            while sent < len(headers):
+                remaining = stop_at - time.monotonic()
+                if remaining <= 0 or not select.select([], [connection], [], remaining)[1]:
+                    return None
+                try:
+                    written = connection.send(headers[sent:])
+                except BlockingIOError:
+                    continue
+                if written == 0:
+                    return None
+                sent += written
+            data = bytearray()
+            header_end = -1
+            status = None
+            while len(data) < 64 * 1024 + 1024:
+                remaining = stop_at - time.monotonic()
+                if remaining <= 0 or not select.select([connection], [], [], remaining)[0]:
+                    return None
+                try:
+                    chunk = connection.recv(4096)
+                except BlockingIOError:
+                    continue
+                if not chunk:
+                    return (status, False) if status is not None else None
+                data.extend(chunk)
+                if status is None and b"\r\n" in data:
+                    first_line = bytes(data).split(b"\r\n", 1)[0].split(b" ", 2)
+                    if len(first_line) < 2 or not first_line[0].startswith(b"HTTP/"):
+                        return None
+                    try:
+                        status = int(first_line[1])
+                    except ValueError:
+                        return None
+                    if not 100 <= status <= 599:
+                        return None
+                    if not read_ok:
+                        return status, False
+                if status is not None and header_end < 0:
+                    header_end = data.find(b"\r\n\r\n")
+                if header_end >= 0 and b"ok" in data[header_end + 4:]:
+                    return status, True
+    except OSError:
+        return None
+    return None
+
+
+def _bounded_probe(endpoint: str, key: str, stop_at: float, *,
+                   paths: tuple[str, ...], read_ok: bool = False) -> tuple[int, bool] | None:
+    """Kill a trickling probe at its absolute deadline, including DNS and body reads."""
+    origin = _provider_probe_origin(endpoint)
+    if origin is None or stop_at <= time.monotonic():
+        return None
+    if _numeric_http_origin(origin):
+        for path in paths:
+            if time.monotonic() >= stop_at:
+                break
+            result = _direct_http_probe(origin, path, key, stop_at, read_ok)
+            if result is not None:
+                return result
+        return None
+    try:
+        process = subprocess.Popen(
+            [sys.executable, "-I", "-B", str(Path(__file__).resolve()), "--probe-child"],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    except OSError:
+        return None
+    packet = json.dumps({"origin": origin, "paths": paths, "key": key,
+                         "stop_at": stop_at, "read_ok": read_ok}).encode()
+    try:
+        remaining = stop_at - time.monotonic()
+        if remaining <= 0:
+            return None
+        output, _ = process.communicate(packet, timeout=remaining)
+        if process.returncode == 0:
+            result = json.loads(output)
+            if (isinstance(result, list) and len(result) == 2
+                    and type(result[0]) is int and type(result[1]) is bool):
+                return result[0], result[1]
+    except (subprocess.TimeoutExpired, ValueError):
+        pass
+    finally:
+        _terminate_child(process)
+    return None
+
+
+def _probe_liveness(endpoint: str, key: str, timeout: float) -> int | None:
+    """Any HTTP status from the request's origin proves the process is reachable."""
+    result = _bounded_probe(endpoint, key, time.monotonic() + timeout,
+                            paths=("/slots", "/health"))
+    return result[0] if result is not None else None
+
+
+def provider_health_ok(endpoint: str, key: str, stop_at: float) -> bool:
+    """Check recovery health without following redirects or escaping the deadline."""
+    result = _bounded_probe(endpoint, key, stop_at, paths=("/health",), read_ok=True)
+    return result is not None and 200 <= result[0] < 300 and result[1]
+
+
+def _safe_origin(endpoint: str) -> str:
+    origin = _provider_probe_origin(endpoint)
+    if origin is None:
+        return "unknown"
+    scheme, host, port = origin
+    host = f"[{host}]" if ":" in host else host
+    return f"{scheme}://{host}" + (f":{port}" if port is not None else "")
 
 
 
@@ -190,39 +381,150 @@ def _terminate_child(process: subprocess.Popen[bytes]) -> None:
         process.communicate()
 
 
+def _child_diagnostic(diagnostic: bytes) -> dict[str, object]:
+    """The child may precede its final diagnostic with a flushed send marker."""
+    try:
+        detail = json.loads(diagnostic.rsplit(b"\n", 1)[-1])
+    except (ValueError, UnicodeError):
+        return {}
+    return detail if isinstance(detail, dict) else {}
+
+
+def _body_completion_state(
+        diagnostic: bytes, attempt: int, completed_at: float | None,
+) -> tuple[int, float | None]:
+    """Use only the newest send attempt's timed completion marker."""
+    for line in diagnostic.splitlines():
+        try:
+            marker = json.loads(line)
+        except (ValueError, UnicodeError):
+            continue
+        if not isinstance(marker, dict) or type(marker.get("body_attempt")) is not int:
+            continue
+        marker_attempt = marker["body_attempt"]
+        if marker_attempt < 1 or marker_attempt < attempt:
+            continue
+        if marker_attempt > attempt:
+            attempt, completed_at = marker_attempt, None
+        if marker.get("body_fully_sent") is False:
+            completed_at = None
+        elif marker.get("body_fully_sent") is True:
+            value = marker.get("completed_at")
+            if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value):
+                completed_at = float(value)
+    return attempt, completed_at
+
+
+def _deliver_packet(process: subprocess.Popen[bytes], packet: bytes) -> threading.Event | None:
+    """Write the child's packet on a thread with blocking writes; set the event once all of it is in the pipe.
+
+    ``communicate(input=...)`` feeds stdin 512 bytes per select and only while the parent is
+    inside ``communicate``, so a multi-MiB wire can take longer than the request deadline on a
+    loaded host. Taking stdin away from the Popen object leaves ``communicate`` draining
+    stdout and stderr only. Returns None for a process object without a stdin pipe.
+    """
+    stdin = getattr(process, "stdin", None)
+    if stdin is None:
+        return None
+    process.stdin = None
+    delivered = threading.Event()
+
+    def write() -> None:
+        try:
+            stdin.write(packet)
+            stdin.flush()
+            delivered.set()
+        except (OSError, ValueError):
+            pass  # the child exited or was terminated; its own exit status reports why
+        finally:
+            try:
+                stdin.close()
+            except (OSError, ValueError):
+                pass
+
+    threading.Thread(target=write, name="bounded-http-packet", daemon=True).start()
+    return delivered
+
+
 def _communicate_with_liveness(
         process: subprocess.Popen[bytes], packet: bytes, endpoint: str, key: str, *,
-        deadline: float, liveness_timeout: float) -> tuple[bytes, bytes]:
-    """Drain the child while checking the provider origin until either deadline."""
+        deadline: float, hard_deadline: float, liveness_timeout: float,
+        probe_state: dict[str, int | float | None]) -> tuple[bytes, bytes]:
+    """Extend a silent send only after the selected provider answers a probe."""
     probe_interval = min(10.0, max(0.01, liveness_timeout / 3))
+    probe_floor = 0.01 if _numeric_http_origin(_provider_probe_origin(endpoint)) else 0.25
     last_liveness = time.monotonic()
-    next_probe = last_liveness + probe_interval
+    first_probe_margin = min(0.05, max(0.0, (deadline - last_liveness) / 3))
+    next_probe = min(last_liveness + probe_interval,
+                     max(last_liveness, deadline - first_probe_margin))
     communication_started = False
+    delivered: threading.Event | None = None
+
+    def record_markers(diagnostic: bytes | None) -> None:
+        if diagnostic:
+            attempt, completed_at = _body_completion_state(
+                diagnostic, int(probe_state["body_attempt"] or 0),
+                probe_state["completed_at"])
+            probe_state["body_attempt"] = attempt
+            probe_state["completed_at"] = completed_at
+
     while True:
         now = time.monotonic()
-        remaining = deadline - now
+        remaining = hard_deadline - now
         if remaining <= 0:
             _terminate_child(process)
             raise TimeoutError("HTTP absolute deadline exceeded")
+        if now >= deadline and probe_state["status"] is None:
+            _terminate_child(process)
+            raise TimeoutError("HTTP request deadline exceeded before body completion or provider liveness")
+        if now >= deadline and delivered is not None and not delivered.is_set():
+            # The child cannot have sent a body it has not yet received: no verdict to wait for.
+            _terminate_child(process)
+            raise TimeoutError("HTTP request deadline exceeded before body completion")
+        if now >= deadline and communication_started:
+            # A synchronous probe can span the cap. Drain what is available, but
+            # let the child decide whether its final socket send beat the cap.
+            try:
+                output, diagnostic = process.communicate(timeout=min(0.01, remaining))
+            except subprocess.TimeoutExpired as error:
+                record_markers(error.stderr)
+            else:
+                record_markers(diagnostic)
+                if (process.returncode == 0 and (probe_state["completed_at"] is None
+                                                or probe_state["completed_at"] > deadline)):
+                    raise TimeoutError("HTTP request deadline exceeded before body completion")
+                return output, diagnostic
+        completed_at = probe_state["completed_at"]
+        body_sent_before_cap = isinstance(completed_at, float) and completed_at <= deadline
         wait_for = min(remaining, max(0.01, next_probe - now))
+        if (probe_state["status"] is None or not body_sent_before_cap) and now < deadline:
+            wait_for = min(wait_for, deadline - now)
         try:
             if communication_started:
-                return process.communicate(timeout=wait_for)
+                output, diagnostic = process.communicate(timeout=wait_for)
+            else:
+                communication_started = True
+                delivered = _deliver_packet(process, packet)
+                output, diagnostic = process.communicate(
+                    None if delivered is not None else packet, timeout=wait_for)
+            record_markers(diagnostic)
+            return output, diagnostic
+        except subprocess.TimeoutExpired as error:
             communication_started = True
-            return process.communicate(packet, timeout=wait_for)
-        except subprocess.TimeoutExpired:
-            communication_started = True
+            record_markers(error.stderr)
             now = time.monotonic()
-            if now >= deadline:
+            if now >= hard_deadline:
                 _terminate_child(process)
                 raise TimeoutError("HTTP absolute deadline exceeded")
             if now < next_probe:
                 continue
             probe_timeout = min(
-                2.0, max(0.01, liveness_timeout / 4), max(0.01, deadline - now))
-            alive = _probe_liveness(endpoint, key, probe_timeout)
+                2.0, max(probe_floor, liveness_timeout / 4),
+                hard_deadline - now)
+            status = _probe_liveness(endpoint, key, probe_timeout)
             probed_at = time.monotonic()
-            if alive:
+            if status is not None:
+                probe_state["status"] = status
                 last_liveness = probed_at
             if probed_at - last_liveness >= liveness_timeout:
                 _terminate_child(process)
@@ -231,11 +533,8 @@ def _communicate_with_liveness(
             next_probe = probed_at + probe_interval
 
 
-def _child_transport_error(diagnostic: bytes, key: str) -> BoundedTransportError:
-    try:
-        failure = json.loads(diagnostic[:4 * SERVER_ERROR_BYTES + 1024])
-    except (ValueError, UnicodeError):
-        failure = {}
+def _child_transport_error(diagnostic: bytes, key: str, endpoint: str) -> Exception:
+    failure = _child_diagnostic(diagnostic)
     kind = failure.get("error_type", "ChildProcessError")
     if not isinstance(kind, str) or not kind.isidentifier() or len(kind) > 80:
         kind = "ChildProcessError"
@@ -246,6 +545,20 @@ def _child_transport_error(diagnostic: bytes, key: str) -> BoundedTransportError
     server_error = failure.get("server_error")
     server_error = (safe_server_error(server_error.encode("utf-8"), key)
                     if isinstance(server_error, str) else None)
+    if kind == "SendStallTimeout":
+        sent = failure.get("bytes_sent")
+        total = failure.get("bytes_total")
+        stalled = failure.get("seconds_stalled")
+        if (type(sent) is int and type(total) is int and 0 <= sent < total <= 256 * 1024 * 1024
+                and isinstance(stalled, (int, float)) and math.isfinite(stalled)
+                and stalled >= 0):
+            return SendStallTimeout(sent, total, float(stalled), _safe_origin(endpoint))
+    if kind == "RequestBodyDeadlineTimeout":
+        return TimeoutError("HTTP request deadline exceeded before body completion")
+    if kind == "TimeoutError":
+        # The child's own absolute deadline can fire just before the parent's: same typed error
+        # either way (kernel_measurement classifies both by error_type "TimeoutError").
+        return TimeoutError("HTTP absolute deadline exceeded")
     return BoundedTransportError(
         error_type=kind,
         http_status=status if type(status) is int and 100 <= status <= 599 else None,
@@ -276,11 +589,13 @@ class _RoutedRedirects(urllib.request.HTTPRedirectHandler):
 
 
 def request_bytes(wire: bytes, endpoint: str, key: str, *,
-                  deadline: float, socket_timeout: float,
-                  liveness_timeout: float | None = None,
+                   deadline: float, socket_timeout: float,
+                   run_deadline: float | None = None,
+                   liveness_timeout: float | None = None,
                   route_meta: dict[str, object] | None = None,
                   route_allow_remote: bool = False,
-                  record_attempts: Callable[[list[dict[str, object]]], None] | None = None) -> bytes:
+                   record_attempts: Callable[[list[dict[str, object]]], None] | None = None,
+                   record_queue_wait: Callable[[float, int, str], None] | None = None) -> bytes:
     """Bound the full HTTP operation and abort it after provider liveness is lost."""
     if not math.isfinite(deadline) or not math.isfinite(socket_timeout) or socket_timeout <= 0:
         raise ValueError("invalid HTTP deadline or socket timeout")
@@ -295,30 +610,57 @@ def request_bytes(wire: bytes, endpoint: str, key: str, *,
         raise TimeoutError("HTTP deadline expired before submission")
     if route_meta is not None:
         _require_routed_local(endpoint, route_allow_remote)
+    hard_deadline = deadline
+    if run_deadline is not None:
+        if not math.isfinite(run_deadline):
+            raise ValueError("invalid run deadline")
+        hard_deadline = min(run_deadline,
+                            time.monotonic() + queue_wait_max_seconds())
+    if hard_deadline <= time.monotonic():
+        raise TimeoutError("HTTP run deadline expired before submission")
     packet = json.dumps({"wire": wire.decode("utf-8"), "endpoint": endpoint, "key": key,
-                         "deadline": deadline,
+                         "deadline": hard_deadline,
+                         "request_deadline": deadline,
                          "socket_timeout": min(socket_timeout, remaining),
+                         "send_stall_seconds": send_stall_seconds(),
+                         "report_body_sent": True,
                          "gzip": request_gzip_enabled(),
                          **({"route_allow_remote": route_allow_remote} if route_meta is not None else {})}).encode()
     process = subprocess.Popen(
         [sys.executable, "-I", "-B", str(Path(__file__).resolve()), "--http-child"],
         stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    probe_state: dict[str, int | float | None] = {
+        "status": None, "body_attempt": 0, "completed_at": None}
+    diagnostic = b""
     try:
         output, diagnostic = _communicate_with_liveness(
             process, packet, endpoint, key, deadline=deadline,
-            liveness_timeout=float(liveness_timeout))
+            hard_deadline=hard_deadline, liveness_timeout=float(liveness_timeout),
+            probe_state=probe_state)
         if record_attempts is not None and diagnostic:
             try:
-                attempts = json.loads(diagnostic).get("transport_attempts")
+                attempts = _child_diagnostic(diagnostic).get("transport_attempts")
             except (ValueError, AttributeError):
                 attempts = None
             if isinstance(attempts, list):
                 record_attempts(attempts)
         if process.returncode != 0:
-            raise _child_transport_error(diagnostic, key)
+            raise _child_transport_error(diagnostic, key, endpoint)
         return output
     finally:
-        _terminate_child(process)
+        try:
+            if (record_queue_wait is not None and probe_state["status"] is not None
+                    and isinstance(probe_state["completed_at"], float)
+                    and probe_state["completed_at"] <= deadline):
+                detail = _child_diagnostic(diagnostic)
+                first_response_at = detail.get("first_response_at") if isinstance(detail, dict) else None
+                finished_at = (first_response_at if isinstance(first_response_at, (int, float))
+                               and math.isfinite(first_response_at) else time.monotonic())
+                waited = max(0.0, min(finished_at, hard_deadline) - deadline)
+                if waited > 0:
+                    record_queue_wait(waited, probe_state["status"], _safe_origin(endpoint))
+        finally:
+            _terminate_child(process)
 
 
 REQUEST_GZIP_ENV = "STATEFRAME_HTTP_GZIP"
@@ -372,6 +714,14 @@ class _AbortiveConnectionTracker:
         self._lock = threading.Lock()
         self._connections: list[_AbortiveConnectionMixin] = []
         self._aborted = False
+        self.request_deadline = 0.0
+        self.hard_deadline = 0.0
+        self.socket_timeout = 0.0
+        self.response_deadline = 0.0
+        self.first_response_at: float | None = None
+        self.send_stall_seconds = DEFAULT_SEND_STALL_S
+        self.report_body_sent = False
+        self.body_attempt = 0
 
     @property
     def aborted(self) -> bool:
@@ -410,13 +760,29 @@ class _AbortiveConnectionMixin:
         self._tracker = tracker
         self._armed = True
         self._active_socket: socket.socket | None = None
+        self._sending_output = False
+        self._header_sent = False
         super().__init__(*args, **kwargs)
         tracker.register(self)
 
     def connect(self) -> None:
         if self._tracker.aborted:
             raise ConnectionError("HTTP request was aborted")
-        super().connect()
+        if self._tracker.report_body_sent:
+            remaining = self._tracker.request_deadline - time.monotonic()
+            if remaining <= 0:
+                raise RequestBodyDeadlineTimeout()
+            self.timeout = min(self.timeout, remaining)
+        try:
+            super().connect()
+        except TimeoutError as error:
+            if (self._tracker.report_body_sent
+                    and time.monotonic() >= self._tracker.request_deadline):
+                raise RequestBodyDeadlineTimeout() from error
+            raise
+        if (self._tracker.report_body_sent
+                and time.monotonic() >= self._tracker.request_deadline):
+            raise RequestBodyDeadlineTimeout()
         active_socket = self.sock
         if active_socket is not None:
             try:
@@ -429,6 +795,133 @@ class _AbortiveConnectionMixin:
         if self._tracker.aborted:
             self.abort()
             raise ConnectionError("HTTP request was aborted")
+
+    def _send_output(self, message_body=None, encode_chunked=False):
+        if self._tracker.report_body_sent:
+            if time.monotonic() >= self._tracker.request_deadline:
+                raise RequestBodyDeadlineTimeout()
+            self._tracker.body_attempt += 1
+            attempt = self._tracker.body_attempt
+            self._body_sent_at = None
+            sys.stderr.write(json.dumps({"body_attempt": attempt,
+                                         "body_fully_sent": False}) + "\n")
+            sys.stderr.flush()
+        self._sending_output = True
+        self._header_sent = False
+        try:
+            result = super()._send_output(message_body, encode_chunked=encode_chunked)
+        finally:
+            self._sending_output = False
+        # Flushed before waiting for a response, so the parent can distinguish
+        # provider queue time from an unfinished upload at the request deadline.
+        if self._tracker.report_body_sent:
+            completed_at = self._body_sent_at
+            if completed_at is None or completed_at >= self._tracker.request_deadline:
+                raise RequestBodyDeadlineTimeout()
+            sys.stderr.write(json.dumps({"body_attempt": attempt,
+                                         "body_fully_sent": True,
+                                         "completed_at": completed_at}) + "\n")
+            sys.stderr.flush()
+        return result
+
+    def send(self, data):
+        if not self._sending_output or not self._header_sent:
+            if (self._tracker.report_body_sent and self._sending_output
+                    and time.monotonic() >= self._tracker.request_deadline):
+                raise RequestBodyDeadlineTimeout()
+            if self._tracker.report_body_sent and self._sending_output and self.sock is not None:
+                self.sock.settimeout(max(0.001, self._tracker.request_deadline - time.monotonic()))
+            try:
+                result = super().send(data)
+            except TimeoutError as error:
+                if (self._tracker.report_body_sent and self._sending_output
+                        and time.monotonic() >= self._tracker.request_deadline):
+                    raise RequestBodyDeadlineTimeout() from error
+                raise
+            if (self._tracker.report_body_sent and self._sending_output
+                    and time.monotonic() >= self._tracker.request_deadline):
+                raise RequestBodyDeadlineTimeout()
+            if self._sending_output:
+                self._header_sent = True
+            return result
+        if not isinstance(data, (bytes, bytearray, memoryview)):
+            return super().send(data)
+        body = memoryview(data)
+        total = len(body)
+        sent = 0
+        last_progress = time.monotonic()
+        active_socket = self.sock
+        if active_socket is None:
+            raise ConnectionError("HTTP socket closed before request body")
+        while sent < total:
+            now = time.monotonic()
+            if self._tracker.report_body_sent and now >= self._tracker.request_deadline:
+                raise RequestBodyDeadlineTimeout()
+            stalled = now - last_progress
+            remaining = min(self._tracker.send_stall_seconds - stalled,
+                            self._tracker.hard_deadline - now)
+            if self._tracker.report_body_sent:
+                remaining = min(remaining, self._tracker.request_deadline - now)
+            if stalled >= self._tracker.send_stall_seconds:
+                raise SendStallTimeout(sent, total, stalled)
+            if remaining <= 0:
+                raise TimeoutError("HTTP absolute deadline exceeded during request body send")
+            active_socket.settimeout(min(0.25, remaining))
+            try:
+                moved = active_socket.send(body[sent:])
+            except (socket.timeout, BlockingIOError):
+                continue
+            if moved <= 0:
+                raise ConnectionError("HTTP socket closed during request body send")
+            sent += moved
+            last_progress = time.monotonic()
+        if self._tracker.report_body_sent:
+            self._body_sent_at = last_progress
+            if last_progress >= self._tracker.request_deadline:
+                raise RequestBodyDeadlineTimeout()
+
+    def getresponse(self):
+        """Wait for the first response byte without a premature socket timeout."""
+        active_socket = self.sock
+        response_deadline = self._tracker.request_deadline
+        if active_socket is not None:
+            remaining = self._tracker.hard_deadline - time.monotonic()
+            if remaining <= 0 or not select.select([active_socket], [], [], remaining)[0]:
+                raise TimeoutError("HTTP absolute deadline exceeded before response")
+            arrived_at = time.monotonic()
+            if self._tracker.first_response_at is None:
+                self._tracker.first_response_at = arrived_at
+            if arrived_at >= response_deadline:
+                response_deadline = arrived_at + self._tracker.socket_timeout
+            response_deadline = min(response_deadline, self._tracker.hard_deadline)
+            self._tracker.response_deadline = response_deadline
+            active_socket.settimeout(max(0.001, min(
+                self._tracker.socket_timeout,
+                response_deadline - arrived_at)))
+        expired = threading.Event()
+        finished = threading.Event()
+
+        def stop_header_read() -> None:
+            if not finished.is_set():
+                expired.set()
+                self.abort()
+
+        timer = threading.Timer(max(0.001, response_deadline - time.monotonic()),
+                                stop_header_read)
+        timer.daemon = True
+        timer.start()
+        try:
+            response = super().getresponse()
+            if expired.is_set() or time.monotonic() >= response_deadline:
+                raise TimeoutError("HTTP response header deadline exceeded")
+            return response
+        except Exception as error:
+            if expired.is_set() or time.monotonic() >= response_deadline:
+                raise TimeoutError("HTTP response header deadline exceeded") from error
+            raise
+        finally:
+            finished.set()
+            timer.cancel()
 
     def close(self) -> None:
         # urllib closes its HTTPConnection as soon as it sees Connection: close, before the
@@ -557,6 +1050,11 @@ def _child() -> None:
     body, encoding = encode_request(wire, gzip_enabled=packet.get("gzip") is True)
     identity, identity_headers = encode_request(wire, gzip_enabled=False)
     tracker = _AbortiveConnectionTracker()
+    tracker.request_deadline = packet.get("request_deadline", packet["deadline"])
+    tracker.hard_deadline = packet["deadline"]
+    tracker.socket_timeout = packet["socket_timeout"]
+    tracker.send_stall_seconds = packet.get("send_stall_seconds", DEFAULT_SEND_STALL_S)
+    tracker.report_body_sent = packet.get("report_body_sent") is True
     if "route_allow_remote" in packet:
         _require_routed_local(packet["endpoint"], packet["route_allow_remote"])
         opener = urllib.request.build_opener(
@@ -572,9 +1070,10 @@ def _child() -> None:
 
     def send(data: bytes, headers: dict[str, str]) -> bytes:
         import hashlib
+        request_headers = {"Content-Type": "application/json", **headers}
+        request_headers["Authorization"] = "Bearer " + packet["key"]
         request = urllib.request.Request(packet["endpoint"], data=data,
-            headers={"Content-Type": "application/json", **headers,
-                     "Authorization": "Bearer " + packet["key"]})
+                                         headers=request_headers)
         attempt = {"content_encoding": headers.get("Content-Encoding"),
                    "body_bytes": len(data), "body_sha256": hashlib.sha256(data).hexdigest(),
                    "http_status": None}
@@ -583,12 +1082,14 @@ def _child() -> None:
             remaining = packet["deadline"] - time.monotonic()
             if remaining <= 0:
                 raise TimeoutError("HTTP absolute deadline exceeded before send")
-            with opener.open(request, timeout=min(packet["socket_timeout"], remaining)) as response:
+            if tracker.report_body_sent and time.monotonic() >= tracker.request_deadline:
+                raise RequestBodyDeadlineTimeout()
+            with opener.open(request, timeout=remaining) as response:
                 attempt["http_status"] = response.status
                 if response.length is not None and response.length > MAX_RESPONSE_BYTES:
                     raise ValueError("HTTP response exceeds bounded transport limit")
                 result = _read_response_body(
-                    response, tracker, deadline=packet["deadline"],
+                    response, tracker, deadline=tracker.response_deadline,
                     socket_timeout=packet["socket_timeout"], max_bytes=MAX_RESPONSE_BYTES)
                 if len(result) > MAX_RESPONSE_BYTES:
                     raise ValueError("HTTP response exceeds bounded transport limit")
@@ -597,16 +1098,23 @@ def _child() -> None:
         except urllib.error.HTTPError as error:
             attempt["http_status"] = error.code
             error_body = _read_response_body(
-                error, tracker, deadline=packet["deadline"],
+                error, tracker, deadline=tracker.response_deadline,
                 socket_timeout=packet["socket_timeout"], max_bytes=MAX_ERROR_BYTES)
             error.relay_error = _relay_error_label(error_body)
             error.server_error = safe_server_error(error_body, packet["key"])
             raise
+        except urllib.error.URLError as error:
+            if isinstance(error.reason, (SendStallTimeout, RequestBodyDeadlineTimeout)):
+                raise error.reason from error
+            raise
 
     def on_refused(_error: urllib.error.HTTPError) -> bool:
-        if time.monotonic() >= packet["deadline"]:
+        if time.monotonic() >= tracker.request_deadline:
             return False
         tracker.finish_all()
+        # The resend has its own first byte. Its queue time must not inherit the 415.
+        tracker.first_response_at = None
+        tracker.response_deadline = tracker.request_deadline
         return True
 
     try:
@@ -616,16 +1124,36 @@ def _child() -> None:
     except Exception as error:
         if len(attempts) > 1:
             error.transport_attempts = attempts
+        error.first_response_at = tracker.first_response_at
         raise
     finally:
         if not response_complete:
             tracker.abort_all()
-    if len(attempts) > 1:
-        sys.stderr.write(json.dumps({"transport_attempts": attempts}))
+    if len(attempts) > 1 or tracker.first_response_at is not None:
+        sys.stderr.write(json.dumps({
+            **({"transport_attempts": attempts} if len(attempts) > 1 else {}),
+            "first_response_at": tracker.first_response_at}))
     sys.stdout.buffer.write(data)
 
 
+def _probe_child() -> None:
+    packet = json.load(sys.stdin)
+    origin = tuple(packet["origin"])
+    for path in packet["paths"]:
+        remaining = packet["stop_at"] - time.monotonic()
+        if remaining <= 0:
+            break
+        result = _provider_probe_status(
+            origin, path, packet["key"], remaining, packet["read_ok"])
+        if result is not None:
+            sys.stdout.write(json.dumps(result))
+            return
+
+
 if __name__ == "__main__":
+    if sys.argv[1:] == ["--probe-child"]:
+        _probe_child()
+        raise SystemExit(0)
     if sys.argv[1:] != ["--http-child"]:
         raise SystemExit("HTTP child invocation required")
     try:
@@ -643,6 +1171,11 @@ if __name__ == "__main__":
                                      and relay_error in RELAY_ERROR_LABELS else None,
                                      "server_error": server_error
                                      if isinstance(server_error, str) else None,
+                                      "first_response_at": getattr(error, "first_response_at", None),
+                                      **({"bytes_sent": error.bytes_sent,
+                                          "bytes_total": error.bytes_total,
+                                          "seconds_stalled": error.seconds_stalled}
+                                         if isinstance(error, SendStallTimeout) else {}),
                                      **({"transport_attempts": error.transport_attempts}
                                         if hasattr(error, "transport_attempts") else {})}))
         raise SystemExit(1) from None

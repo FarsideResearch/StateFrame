@@ -739,6 +739,13 @@ def request_timeout_budget_seconds() -> float:
     return _legacy_request_timeouts()[1]
 
 
+def request_queue_budget_seconds(wall_timeout: float) -> float:
+    """Include the provider queue allowance in a captured send's total deadline."""
+    from kernel_bounded_http import queue_wait_max_seconds
+    return max(request_timeout_budget_seconds(), wall_timeout * 2,
+               queue_wait_max_seconds())
+
+
 def _safe_timeout_endpoint(endpoint: str) -> str:
     """Keep endpoint identity without credentials, query values, or fragments."""
     try:
@@ -2388,6 +2395,8 @@ def _transport_retryable(exc: BaseException, *, elapsed_ns: int,
         return False
     if error_type == "ProviderLivenessTimeout":
         return True
+    if error_type == "SendStallTimeout":
+        return True
     if transport_class == "contract":
         return False
     if relay_error == "relay_ttft_timeout":
@@ -3756,10 +3765,21 @@ class RequestCapture:
             self._assert_wire_string_hygiene(wire)
             guard_physical_send(self, getattr(self, "_wire_truth_runtime", None), body, wire)
             try:
-                from kernel_bounded_http import request_bytes
+                from kernel_bounded_http import request_bytes, queue_wait_max_seconds
+                # Recovery uses the destination actually submitted, including a routed key.
+                # Keep this transient and out of the journal and model request.
+                self._provider_probe_destination = (endpoint, key)
                 raw_response = request_bytes(
                     wire, endpoint, key, deadline=attempt_deadline,
                     socket_timeout=attempt_timeout,
+                    run_deadline=(active_deadline if active_deadline is not None
+                                  else attempt_started + queue_wait_max_seconds()),
+                    record_queue_wait=lambda seconds, status, origin: self.journal.emit(
+                        "provider_queue_wait", producer="kernel_measurement",
+                        fact_owner="HOST", request_id=self.request_id,
+                        step=self.step, transport_attempt=attempt + 1,
+                        seconds_waited=round(seconds, 3), probe_http_status=status,
+                        endpoint_origin=origin, dispatch=False),
                     **({"route_meta": self.frame_route.record(),
                         "route_allow_remote": bool(self.frame_route.settings.get("allow_remote"))}
                        if _frame_routes.ROUTES_ACTIVE and getattr(self, "frame_route", None) is not None else {}))
@@ -3790,6 +3810,7 @@ class RequestCapture:
                 request_timed_out = (
                     per_request_timeout_active
                     and not liveness_lost
+                    and error_type != "SendStallTimeout"
                     and relay_error not in {"downstream_disconnect", "upstream_timeout"}
                     and is_provider_request_timeout_error(exc))
                 if request_timed_out and not model_format_failure:
@@ -3880,6 +3901,16 @@ class RequestCapture:
                         self.journal, request_id=self.request_id, step=self.step,
                         timeout_seconds=attempt_wall_timeout, attempt=attempt + 1,
                         endpoint=endpoint, retry_scheduled=retry_scheduled)
+                if error_type == "SendStallTimeout":
+                    self.journal.emit(
+                        "send_stall", producer="kernel_measurement", fact_owner="HOST",
+                        request_id=self.request_id, step=self.step,
+                        transport_attempt=attempt + 1,
+                        bytes_sent=getattr(exc, "bytes_sent", None),
+                        bytes_total=getattr(exc, "bytes_total", None),
+                        seconds_stalled=round(getattr(exc, "seconds_stalled", 0.0), 3),
+                        endpoint_origin=getattr(exc, "origin", "unknown"),
+                        retry_scheduled=retry_scheduled, dispatch=False)
                 if retry_scheduled:
                     retry_blocked_reason = None
                 elif request_timed_out and timeout_retry_used:
@@ -5049,8 +5080,7 @@ class RequestCapture:
                 wall_timeout = max(0.001, route_deadline - time.monotonic())
                 socket_timeout = min(socket_timeout, wall_timeout)
             if deadline is None and per_request_timeout is not None:
-                total_wall_budget = max(
-                    request_timeout_budget_seconds(), wall_timeout * 2)
+                total_wall_budget = request_queue_budget_seconds(wall_timeout)
                 deadline = time.monotonic() + total_wall_budget
         else:
             # A measured profile is the sole budget authority for this request;

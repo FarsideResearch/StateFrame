@@ -24,6 +24,8 @@
 - `--in-place`: apply a passing result to your repository.
 - `--run-dir`: where to keep the run.
 - `--max-turns N`, `--timeout S`: optional caps; by default there are none.
+- `STATEFRAME_QUEUE_WAIT_MAX_S` (environment or profile): finite positive cap in seconds for a silent request whose selected endpoint keeps answering `/slots` or `/health`. Default 1800 seconds, shortened by the run deadline. The ordinary per-request cap resumes once a response starts. Queue waits are journaled and summarized with one warning line.
+- `STATEFRAME_SEND_STALL_S` (environment or profile): maximum time with no request-body bytes sent, from 10 to 600 seconds; default 90. A stalled upload is aborted and can retry on a new connection under the ordinary transport policy. Queue-wait extension starts only after the full body is sent. Each send stall records sent and total bytes, stalled seconds, and the endpoint origin without credentials.
 - `--test-env KEY=VALUE`: environment for your tests (not for engine settings).
 - `--pytest-plugins installed`: let pytest load installed plugins.
 - `--shell off|read-only|standard|unrestricted` (default `standard`): command policy. `--shell-network none|loopback|full` defaults to `loopback`.

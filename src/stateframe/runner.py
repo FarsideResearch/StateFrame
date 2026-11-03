@@ -483,6 +483,8 @@ OPT_IN_SWITCHES = {
     "STATEFRAME_EDIT_SCOPE_WIDEN": ("on", "off"),  # scoped runs admit an edited product file outside the scope
     "STATEFRAME_REQUIREMENT_RECHECK": ("on", "off"),  # first done answered once with the task's requirement checklist
     "STATEFRAME_FINAL_CACHE_LAYOUT": ("on", "off"),  # cacheable final request layout: volatile authority last
+    "STATEFRAME_QUEUE_WAIT_MAX_S": (),  # finite positive seconds; a profile may set it too
+    "STATEFRAME_SEND_STALL_S": (),  # 10-600 seconds without request-body progress
 }
 # Accepted aliases -> the engine's own value (EVICTFIX "off" is sent as "legacy").
 OPT_IN_ALIASES = {"STATEFRAME_EVICTFIX": {"off": "legacy"}}
@@ -500,6 +502,19 @@ def resolve_opt_in_switches(engine_dir: Path = ENGINE_DIR) -> dict[str, str]:
             default = OPT_IN_RUNNER_DEFAULTS.get(name)
             if default is not None and name in engine_switches(engine_dir):
                 chosen[name] = default
+            continue
+        if name in {"STATEFRAME_QUEUE_WAIT_MAX_S", "STATEFRAME_SEND_STALL_S"}:
+            try:
+                seconds = float(raw)
+            except ValueError as error:
+                raise RunError(f"{name} must be finite and in its supported range") from error
+            if (not math.isfinite(seconds) or
+                    (not 10 <= seconds <= 600 if name == "STATEFRAME_SEND_STALL_S"
+                     else seconds <= 0)):
+                raise RunError(f"{name} must be finite and in its supported range")
+            if name not in engine_switches(engine_dir):
+                raise RunError(f"{name} is set, but this engine does not support it; unset it to run")
+            chosen[name] = raw
             continue
         value = raw.lower()
         value = OPT_IN_ALIASES.get(name, {}).get(value, value)
@@ -1609,7 +1624,8 @@ def drive(run: Path, options: RunOptions, printer=print) -> int:
         else:
             environment.pop(TEST_PYTHON_ENV, None)
             sources.pop(TEST_PYTHON_ENV, None)
-        # Per-request timeouts stay (a hung server must not hang the run), never wider than a run limit.
+        # Keep request limits within the run budget. The engine separately bounds
+        # silent, responsive-provider queue waits by STATEFRAME_QUEUE_WAIT_MAX_S.
         for key, default in (("REACT_REQUEST_TIMEOUT_S", 1800),
                              ("STATEFRAME_PER_REQUEST_TIMEOUT_S", 600)):
             limit = float(environment.get(key, default))
@@ -1707,6 +1723,7 @@ def drive(run: Path, options: RunOptions, printer=print) -> int:
             if code is None:
                 raise RuntimeError("engine survived process-group cleanup")
             _warn_checkpoint_journal(run, checkpoint_warned)
+            _print_queue_wait_warning(run, printer)
             if timed_out.is_set():
                 printer("engine timed out: deadline exhausted; engine stopped")
                 return 124
@@ -1719,6 +1736,32 @@ def drive(run: Path, options: RunOptions, printer=print) -> int:
 
 
 OUTPUT_DRAIN_SECONDS = 10.0
+
+
+def _queue_wait_warning(run: Path) -> str | None:
+    """Summarize the longest durable queue wait, including failed sends."""
+    longest = 0.0
+    for path in (run / "worker" / "measurement-runs").glob("*/events.jsonl"):
+        try:
+            with path.open(encoding="utf-8") as source:
+                for line in source:
+                    record = json.loads(line)
+                    if record.get("kind") == "provider_queue_wait":
+                        seconds = record.get("seconds_waited")
+                        if isinstance(seconds, (int, float)) and math.isfinite(seconds):
+                            longest = max(longest, seconds)
+        except (OSError, UnicodeError, ValueError):
+            continue
+    if longest > 0:
+        return (f"warning: the model server queued requests for up to {longest:.1f} s; "
+                "consider fewer parallel runs")
+    return None
+
+
+def _print_queue_wait_warning(run: Path, printer) -> None:
+    warning = _queue_wait_warning(run)
+    if warning is not None:
+        printer(warning)
 
 
 def _pump_lines(stream, lines: "queue.Queue") -> None:
@@ -2793,6 +2836,9 @@ def _execute(options: RunOptions, started: float, printer, run_dir: Path, work: 
         except (CommitExportError, OSError, ValueError, subprocess.TimeoutExpired) as error:
             commits = {"error": str(error)}
     summary = summarize(run_dir, started)
+    queue_wait_warning = _queue_wait_warning(run_dir)
+    if queue_wait_warning is not None:
+        summary["provider_queue_wait_warning"] = queue_wait_warning
     printer(str(summary["cached_share_display"]))
     if commits is not None:
         summary["commits"] = commits

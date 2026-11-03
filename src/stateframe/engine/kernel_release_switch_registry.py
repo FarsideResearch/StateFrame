@@ -295,6 +295,13 @@ __all__ = [
 if __name__ == "__main__":
     import sys
 
-    if sys.argv[1:] != ["--write"]:
-        raise SystemExit("usage: python -I kernel_release_switch_registry.py --write")
-    print(f"wrote {write_registry(Path(__file__).resolve().parent)}")
+    root = Path(__file__).resolve().parent
+    if sys.argv[1:] == ["--write"]:
+        print(f"wrote {write_registry(root)}")
+    elif sys.argv[1:] == ["--check"]:
+        expected = json.dumps(build_registry_document(root), indent=1) + "\n"
+        if (root / REGISTRY_FILE).read_text(encoding="utf-8") != expected:
+            raise SystemExit("switch-registry.json is stale")
+        print("switch-registry.json is current")
+    else:
+        raise SystemExit("usage: python -I kernel_release_switch_registry.py --write|--check")

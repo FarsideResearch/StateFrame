@@ -40,6 +40,12 @@ def transport_server():
             body = self.rfile.read(int(self.headers["Content-Length"]))
             encoding = self.headers.get("Content-Encoding")
             seen.append((encoding, body, self.headers.get("X-Request-Body-SHA256")))
+            if encoding is None and accepts_gzip.get("trickle_identity_headers"):
+                self.wfile.write(b"HTTP/1.1 200 ")
+                self.wfile.flush()
+                time.sleep(1.5)
+                self.close_connection = True
+                return
             if encoding is None and accepts_gzip.get("close_on_identity"):
                 self.close_connection = True
                 return
@@ -87,6 +93,77 @@ def test_gzip_415_resends_same_identity_once(monkeypatch, transport_server):
     assert [entry[0] for entry in seen] == ["gzip", None]
     assert gzip.decompress(seen[0][1]) == seen[1][1] == WIRE
     assert [entry[2] for entry in seen] == [hashlib.sha256(WIRE).hexdigest()] * 2
+
+
+@pytest.mark.host_sandbox
+def test_gzip_415_identity_queue_wait_uses_resend_first_byte(monkeypatch):
+    monkeypatch.setenv("STATEFRAME_HTTP_GZIP", "on")
+    monkeypatch.setenv("STATEFRAME_PROVIDER_LIVENESS_S", "0.6")
+    monkeypatch.setenv("STATEFRAME_QUEUE_WAIT_MAX_S", "3")
+    seen: list[str | None] = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, *_args):
+            pass
+
+        def do_GET(self):  # noqa: N802
+            self.send_response(401)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+        def do_POST(self):  # noqa: N802
+            self.rfile.read(int(self.headers["Content-Length"]))
+            encoding = self.headers.get("Content-Encoding")
+            seen.append(encoding)
+            if encoding == "gzip":
+                status, body = 415, b"unsupported"
+            else:
+                time.sleep(1.2)
+                status, body = 200, b'{"ok":true}'
+            try:
+                self.send_response(status)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        started = time.monotonic()
+        waits = []
+        reply = kernel_bounded_http.request_bytes(
+            WIRE, f"http://127.0.0.1:{server.server_port}/v1/chat/completions",
+            "", deadline=started + 0.5, run_deadline=started + 3,
+            socket_timeout=0.5, record_queue_wait=lambda *values: waits.append(values))
+        assert reply == b'{"ok":true}'
+        assert seen == ["gzip", None]
+        assert len(waits) == 1
+        assert waits[0][0] >= 0.6
+        assert waits[0][1] == 401
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+@pytest.mark.host_sandbox
+def test_gzip_415_identity_partial_headers_keep_original_deadline(
+        monkeypatch, transport_server):
+    monkeypatch.setenv("STATEFRAME_HTTP_GZIP", "on")
+    monkeypatch.setenv("STATEFRAME_PROVIDER_LIVENESS_S", "0.6")
+    monkeypatch.setenv("STATEFRAME_QUEUE_WAIT_MAX_S", "3")
+    endpoint, seen, settings = transport_server
+    settings["trickle_identity_headers"] = True
+    started = time.monotonic()
+    with pytest.raises((TimeoutError, kernel_bounded_http.BoundedTransportError)):
+        kernel_bounded_http.request_bytes(
+            WIRE, endpoint, "", deadline=started + 0.65,
+            run_deadline=started + 3, socket_timeout=0.65)
+    assert time.monotonic() - started < 1.2
+    assert [entry[0] for entry in seen] == ["gzip", None]
 
 
 @pytest.mark.host_sandbox

@@ -19,6 +19,18 @@ def pytest_configure(config):
         "markers", "host_sandbox: starts an OS sandbox (sandbox-exec/bwrap) or a local socket service")
 
 
+@pytest.fixture(autouse=True)
+def _restore_transport_sender():
+    """_child.install_wire_recorder replaces kernel_bounded_http.request_bytes for the whole
+    process. Put the real sender back after each test so a recorder installed by one test
+    (for example a routed one) never intercepts a later test's sends."""
+    import kernel_bounded_http
+
+    original = kernel_bounded_http.request_bytes
+    yield
+    kernel_bounded_http.request_bytes = original
+
+
 @pytest.fixture
 def clean_test_environment(tmp_path):
     """Real pytest and pip, with no ambient editable installs or startup hooks."""
