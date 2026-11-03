@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.3.13 (2026-11-03)
 
 - The stable tool head is now on by default: each request lists the tools offered so far in the run, in first-seen order, so the server can reuse the cached tools, system prompt and task. The current step's callable menu still controls what can run. Set `STATEFRAME_STABLE_TOOL_HEAD=off` in the shell or a custom profile to restore per-step tool lists and the previous request bytes.
 - Measured on Qwen3.6-35B-A3B with llama.cpp over 30 runs (three bundled examples and two harder multi-file tasks, three runs each way): uncached prompt tokens per run fell 25% and wall time per run 15%, every run with the stable tool head submitted, and hidden-test scores were no worse. See [Running](docs/guide/running.md#prompt-cache-stable-tool-head) for the per-task table.
