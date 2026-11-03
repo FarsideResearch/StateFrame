@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.3.17 (2026-11-03)
 
 - Release-comparison tests run each compared tree under its own interpreter and check which `stateframe` package it imports before comparing bytes. The engine's child process drops `PYTHONPATH`, so a shared interpreter could import an installed copy instead of the tree under test.
 - `test_hook_wiring_parity` and the edit-scope parity test pin the stable tool head off on both sides; since 0.3.13 the base release defaults it on, and only the candidate side had been pinned.
