@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.3.25 (2026-11-03)
 
 - Shell-enabled runs now resume from a checkpoint instead of replaying from the start. Two things kept this from working. Every save after a shell step failed with `cannot pickle 'socket' object`, and three failures in a row turned saving off. Resume also never offered a checkpoint to a run with the shell on. The open execution session is now saved without its supervisor process, control socket and log, and a restored run starts a fresh session the next time it runs a command. A checkpoint already copies the run environment and shell scratch state, and none is taken while a background job is running. On a scripted run killed at request 3, resume took 13-14 s from the checkpoint against 18 s by full replay; the gap grows with the run's length. Run vitals now report `checkpoint_failures` and `checkpoint_saving_disabled`.
 
