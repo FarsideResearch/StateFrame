@@ -240,6 +240,11 @@ HOST_GLOBALS = frozenset(
 # name nothing (or, by reuse, the wrong object), so they are dropped and rebuilt.
 DROP_ATTRS = {
     ("kernel_stateframe_runtime", "StateFrameRuntime"): frozenset({"_model_router_projection_cache"}),
+    # Tokenizer auth is rebound from the new child process on every meter lookup;
+    # neither generation credentials nor endpoint details belong in checkpoints.
+    ("kernel_request_diet", "RequestTokenMeter"): frozenset({
+        "_tokenizer_auth_key", "_generation_endpoint",
+    }),
 }
 _OWN_MODULE = __name__
 _SECRETS: list[bytes] = []

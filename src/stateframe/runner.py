@@ -941,10 +941,15 @@ def prepare(options: RunOptions, printer=print) -> tuple[Path, workcopy.WorkCopy
         try:
             from .engine.kernel_request_diet import RequestTokenMeter
             from .engine.kernel_skills import SkillRuntime, measure_admission
-            meter = RequestTokenMeter(endpoint=options.endpoint.chat_url, template_overhead_tokens=0)
+            meter = RequestTokenMeter(
+                endpoint=options.endpoint.chat_url, template_overhead_tokens=0,
+                auth_key=options.endpoint.api_key(), generation_endpoint=options.endpoint.chat_url,
+            )
             measurements = measure_admission(selected_skills, records, meter)
             digest = measured_skills_digest(records, measurements)
-            SkillRuntime(records, digest, options.endpoint.chat_url, measurements)
+            SkillRuntime(records, digest, options.endpoint.chat_url, measurements,
+                         auth_key=options.endpoint.api_key(),
+                         generation_endpoint=options.endpoint.chat_url)
         except SkillError as error:
             raise RunError(str(error)) from error
         finally:
@@ -1042,7 +1047,9 @@ def prepare(options: RunOptions, printer=print) -> tuple[Path, workcopy.WorkCopy
         mcp = discover_mcp(mcp_servers, work.copy, run,
                            shell_network=settings.shell_network,
                            host_authorization=settings.host_authorization is not None,
-                           custom_schemas=custom.schemas(), endpoint=options.endpoint.chat_url) if mcp_servers else None
+                           custom_schemas=custom.schemas(), endpoint=options.endpoint.chat_url,
+                           auth_key=options.endpoint.api_key(),
+                           generation_endpoint=options.endpoint.chat_url) if mcp_servers else None
     except (CustomToolError, OSError, ValueError) as error:
         raise RunError(f"MCP discovery failed: {error}") from error
     environment.update({
@@ -2272,7 +2279,10 @@ def resume_run(run_dir: Path, *, endpoint: Endpoint | None = None, max_turns: in
                 mcp = discover_mcp(mcp_servers, run_dir / "workspace", run_dir,
                                    shell_network=settings.shell_network,
                                    host_authorization=settings.host_authorization is not None,
-                                   custom_schemas=custom.schemas(), endpoint=spec.get("chat_url"))
+                                   custom_schemas=custom.schemas(), endpoint=spec.get("chat_url"),
+                                   auth_key=(os.environ.get(spec.get("api_key_env"), "")
+                                             if isinstance(spec.get("api_key_env"), str) else None),
+                                   generation_endpoint=spec.get("chat_url"))
             except (CustomToolError, OSError, ValueError) as error:
                 raise resume_module.ResumeRefused(f"MCP discovery changed or failed: {error}") from error
             if mcp.digest != spec.get("mcp_tools_digest") or [t.name for t in mcp.tools] != spec.get("mcp_tools") or list(mcp.omitted) != spec.get("mcp_omitted"):

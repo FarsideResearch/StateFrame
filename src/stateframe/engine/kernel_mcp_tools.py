@@ -385,14 +385,18 @@ def _driver(server: McpServer, session, base_cap, workspace: Path, request: byte
 
 
 def discover_mcp(config: McpSet, session, base_cap, workspace: Path, *, custom_schemas=(),
-                 endpoint: str | None = None) -> McpSet:
+                 endpoint: str | None = None, auth_key: str | None = None,
+                 generation_endpoint: str | None = None) -> McpSet:
     # Host and child must admit the same tools, so both use the engine meter.
     # Its own flat imports resolve through the engine path added at import time.
     if __package__:
         from .kernel_request_diet import RequestTokenMeter
     else:
         from kernel_request_diet import RequestTokenMeter
-    meter = RequestTokenMeter(endpoint=endpoint, template_overhead_tokens=0)
+    meter = RequestTokenMeter(
+        endpoint=endpoint, template_overhead_tokens=0,
+        auth_key=auth_key, generation_endpoint=generation_endpoint,
+    )
     budget_custom = json.loads(json.dumps(custom_schemas))
     for schema in budget_custom:
         schema["function"]["parameters"]["properties"].setdefault("why", {"type": "string"})
@@ -452,7 +456,8 @@ def discover_mcp(config: McpSet, session, base_cap, workspace: Path, *, custom_s
 
 def discover(servers: Sequence[McpServer], workspace: Path, run_dir: Path, *,
              shell_network: str, host_authorization: bool, custom_schemas=(),
-             endpoint: str | None = None) -> McpSet:
+             endpoint: str | None = None, auth_key: str | None = None,
+             generation_endpoint: str | None = None) -> McpSet:
     """Use the same sandbox boundary on the host and in the engine child."""
     workspace = Path(workspace).resolve(strict=True)
     run_dir = Path(run_dir).resolve(strict=True)
@@ -465,7 +470,8 @@ def discover(servers: Sequence[McpServer], workspace: Path, run_dir: Path, *,
     cap = replace(cap, sandboxed=True)
     try:
         return discover_mcp(McpSet(tuple(servers)), None, cap, workspace,
-                            custom_schemas=custom_schemas, endpoint=endpoint)
+                            custom_schemas=custom_schemas, endpoint=endpoint,
+                            auth_key=auth_key, generation_endpoint=generation_endpoint)
     except ExecSessionError as error:
         raise McpError(f"MCP discovery boundary failed: {error}") from error
 

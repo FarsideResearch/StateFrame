@@ -17,6 +17,7 @@ import os
 import re
 import sys
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 import hashlib
@@ -67,6 +68,9 @@ _TOKENIZER_ENDPOINT_ATTRS = (
     "api_url", "base_url", "api_base",
 )
 _MAX_TOKENIZE_RESPONSE_BYTES = 2 * 1024 * 1024
+_TOKENIZER_UNAVAILABLE_REASONS = frozenset({
+    "unauthorized", "http_error", "connection", "timeout", "bad_response", "no_url", "disabled",
+})
 # The cache stores only a digest and integer per exact prompt projection. A
 # pressure walk can exceed 64 distinct bodies, then revisit them on another
 # budget pass. Keep the complete walk without retaining prompt text.
@@ -171,6 +175,53 @@ def _tokenization_content(body: Mapping[str, object]) -> str:
     return prompt_projection(body)
 
 
+def _url_origin(url: object) -> tuple[str, str, int | None] | None:
+    if not isinstance(url, str) or not url:
+        return None
+    try:
+        parsed = urllib.parse.urlsplit(url)
+        scheme = parsed.scheme.lower()
+        hostname = parsed.hostname
+        port = parsed.port
+    except ValueError:
+        return None
+    if scheme not in {"http", "https"} or not hostname:
+        return None
+    if port is None:
+        port = 443 if scheme == "https" else 80
+    return scheme, hostname.lower(), port
+
+
+def request_tokenizer_credentials(capture: object | None = None) -> tuple[str | None, str | None]:
+    """Return this request's in-memory generation key and endpoint for meter binding."""
+    route = getattr(capture, "frame_route", None) if _frame_routes.ROUTES_ACTIVE else None
+    if route is not None:
+        key_name = route.settings.get("api_key_env")
+        key = os.environ.get(key_name, "") if isinstance(key_name, str) else ""
+        endpoint = route.endpoint
+    else:
+        # _child sets these on the request owner before any request budget phase can measure.
+        owner = sys.modules.get("probes.react_repair") or sys.modules.get("react_repair")
+        key = getattr(owner, "KEY", None) if owner is not None else None
+        endpoint = getattr(owner, "API", None) if owner is not None else None
+    return (
+        key if isinstance(key, str) and key else None,
+        endpoint if isinstance(endpoint, str) and endpoint else None,
+    )
+
+
+def _tokenizer_failure_reason(error: Exception) -> str:
+    if isinstance(error, urllib.error.HTTPError):
+        return "unauthorized" if error.code in {401, 403} else "http_error"
+    if isinstance(error, TimeoutError):
+        return "timeout"
+    if isinstance(error, urllib.error.URLError):
+        return "timeout" if isinstance(error.reason, TimeoutError) else "connection"
+    if isinstance(error, (ConnectionError, OSError)):
+        return "connection"
+    return "bad_response"
+
+
 def tokenizer_contract(runtime: object | None, capture: object | None) -> str:
     """Known served/configured tokenizer identity, without endpoint secrets."""
     route = getattr(capture, "frame_route", None) if _frame_routes.ROUTES_ACTIVE else None
@@ -189,13 +240,18 @@ def tokenizer_contract(runtime: object | None, capture: object | None) -> str:
 
 
 def _http_tokenize(content: str, url: str, *, deadline: float | None = None,
-                   route_allow_remote: bool | None = None) -> Sequence[int]:
+                   route_allow_remote: bool | None = None,
+                   auth_key: str | None = None,
+                   generation_endpoint: str | None = None) -> Sequence[int]:
     payload = json.dumps({
         "content": content, "add_special": False, "parse_special": True,
     }, ensure_ascii=False).encode("utf-8")
-    request = urllib.request.Request(
-        url, data=payload, headers={"Content-Type": "application/json"}, method="POST",
-    )
+    generation_origin = _url_origin(generation_endpoint)
+    headers = {"Content-Type": "application/json"}
+    if (auth_key and generation_origin is not None
+            and _url_origin(url) == generation_origin):
+        headers["Authorization"] = "Bearer " + auth_key
+    request = urllib.request.Request(url, data=payload, headers=headers, method="POST")
     # Budget the actual UTF-8 JSON payload, including escaping. Three times
     # SPEED's upper measured relay cost covers the b1598 134 KB load case.
     timeout = min(TOKENIZE_REQUEST_TIMEOUT_CAP_SECONDS, max(
@@ -208,18 +264,21 @@ def _http_tokenize(content: str, url: str, *, deadline: float | None = None,
         if remaining <= 0:
             raise TimeoutError("tokenizer request deadline expired")
         timeout = min(timeout, remaining)
-    if route_allow_remote is None:
-        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-    else:
+    if route_allow_remote is not None:
         from kernel_frame_routes import require_local
         require_local(url, allow_remote=route_allow_remote)
 
-        class RoutedRedirects(urllib.request.HTTPRedirectHandler):
-            def redirect_request(self, req, fp, code, msg, headers, newurl):
+    class TokenizeRedirects(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, req, fp, code, msg, headers, newurl):
+            if route_allow_remote is not None:
                 require_local(newurl, allow_remote=route_allow_remote)
-                return super().redirect_request(req, fp, code, msg, headers, newurl)
+            redirected = super().redirect_request(req, fp, code, msg, headers, newurl)
+            if (redirected is not None and generation_origin is not None
+                    and _url_origin(newurl) != generation_origin):
+                redirected.remove_header("Authorization")
+            return redirected
 
-        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), RoutedRedirects())
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), TokenizeRedirects())
     with opener.open(request, timeout=timeout) as response:
         raw = response.read(_MAX_TOKENIZE_RESPONSE_BYTES + 1)
     if len(raw) > _MAX_TOKENIZE_RESPONSE_BYTES:
@@ -239,19 +298,30 @@ class RequestTokenMeter:
             *, endpoint: str | None = None,
             template_overhead_tokens: int = TEMPLATE_OVERHEAD_TOKENS,
             route_allow_remote: bool | None = None,
+            disabled: bool = False,
+            auth_key: str | None = None,
+            generation_endpoint: str | None = None,
     ) -> None:
         if type(template_overhead_tokens) is not int or template_overhead_tokens < 0:
             raise ValueError("template overhead must be a non-negative integer")
+        if type(disabled) is not bool:
+            raise ValueError("tokenizer disabled flag must be a boolean")
         self._tokenizer = tokenizer
+        self._tokenizer_auth_key: str | None = None
+        self._generation_endpoint: str | None = None
+        self.bind_tokenizer_auth(auth_key, generation_endpoint)
+        self._disabled = disabled
         endpoint = (endpoint if route_allow_remote is not None
                     else resolve_tokenize_url(endpoint=endpoint) if endpoint else None)
         self.endpoint = endpoint
         self.route_allow_remote = route_allow_remote
         self.template_overhead_tokens = template_overhead_tokens
         self._availability = (
-            "unknown" if tokenizer is not None or endpoint else "unavailable"
+            "unavailable" if disabled or (tokenizer is None and endpoint is None) else "unknown"
         )
-        self._failure_reason = "endpoint_unavailable" if endpoint is None and tokenizer is None else None
+        self._failure_reason = (
+            "disabled" if disabled else "no_url" if endpoint is None and tokenizer is None else None
+        )
         self._last_latency_ms: float | None = None
         self._last_attempts = 0
         self._consecutive_failures = 0
@@ -283,6 +353,21 @@ class RequestTokenMeter:
     def measure_method(self) -> str:
         return "tokenize" if self._availability == "available" else "calibrated_bytes"
 
+    def unavailable_reason(self) -> str:
+        """Return a stable public reason without exposing endpoint details."""
+        if self._disabled:
+            return "disabled"
+        if (isinstance(self._failure_reason, str)
+                and self._failure_reason in _TOKENIZER_UNAVAILABLE_REASONS):
+            return self._failure_reason
+        if self._failure_reason == "endpoint_unavailable":
+            return "no_url"
+        if self._failure_reason == "tokenize_unavailable":
+            return "bad_response"
+        if self.endpoint is None and self._tokenizer is None:
+            return "no_url"
+        return "bad_response"
+
     def bind_request(self, request_id: str, logical_request_id: str,
                      *, deadline: float | None = None) -> None:
         self._request_aliases[request_id] = logical_request_id
@@ -292,6 +377,13 @@ class RequestTokenMeter:
             self._deadline = deadline
         elif deadline is not None:
             self._deadline = deadline if self._deadline is None else min(self._deadline, deadline)
+
+    def bind_tokenizer_auth(self, key: str | None, generation_endpoint: str | None) -> None:
+        """Bind credentials to this meter, independent of the measuring thread or phase."""
+        self._tokenizer_auth_key = key if isinstance(key, str) and key else None
+        self._generation_endpoint = (
+            generation_endpoint if isinstance(generation_endpoint, str) and generation_endpoint else None
+        )
 
     def begin_request(self, request_id: object) -> None:
         """Retry transient unavailability only at a new request boundary."""
@@ -316,9 +408,11 @@ class RequestTokenMeter:
              self._last_fallback_rejection_bound) = failure
             self._fallback_pending = True
             return
-        configured = self._tokenizer is not None or self.endpoint is not None
+        configured = not self._disabled and (self._tokenizer is not None or self.endpoint is not None)
         self._availability = "unknown" if configured else "unavailable"
-        self._failure_reason = None if configured else "endpoint_unavailable"
+        self._failure_reason = (
+            "disabled" if self._disabled else None if configured else "no_url"
+        )
         self._last_latency_ms = None
         self._last_attempts = 0
         self._consecutive_failures = 0
@@ -380,7 +474,9 @@ class RequestTokenMeter:
             result = self._tokenizer(content)
         elif self.endpoint is not None:
             result = _http_tokenize(content, self.endpoint, deadline=self._deadline,
-                                    route_allow_remote=self.route_allow_remote)
+                                    route_allow_remote=self.route_allow_remote,
+                                    auth_key=self._tokenizer_auth_key,
+                                    generation_endpoint=self._generation_endpoint)
         else:
             raise OSError("tokenizer endpoint unavailable")
         if type(result) is int:
@@ -413,7 +509,7 @@ class RequestTokenMeter:
                 count = self._count_tokens(content)
             except Exception as error:
                 self._consecutive_failures += 1
-                self._failure_reason = "tokenize_unavailable"
+                self._failure_reason = _tokenizer_failure_reason(error)
                 self._last_tokenizer_error = type(error).__name__
                 continue
             self._last_latency_ms = (time.monotonic() - start) * 1000.0
@@ -468,7 +564,7 @@ class RequestTokenMeter:
                     token_count = self._count_tokens(_tokenization_content(body))
                 except Exception as error:
                     self._consecutive_failures += 1
-                    self._failure_reason = "tokenize_unavailable"
+                    self._failure_reason = _tokenizer_failure_reason(error)
                     self._last_tokenizer_error = type(error).__name__
                     continue
                 self._last_latency_ms = (time.monotonic() - start) * 1000.0
@@ -2956,6 +3052,8 @@ def apply_diet(
         tokenizer=tokenizer,
         endpoint=resolve_tokenize_url(endpoint=tokenizer_endpoint),
     )
+    if token_meter is None:
+        meter.bind_tokenizer_auth(*request_tokenizer_credentials())
     meter.begin_request(request_id)
     read_spans_available = _read_spans_retained(
         [message for message in messages if isinstance(message, Mapping)]

@@ -48,13 +48,17 @@ def note_budget_omission(messages: list[dict[str, object]], removed: object) -> 
 
 class SkillRuntime:
     def __init__(self, records: list[dict[str, object]], digest: str, endpoint: str | None,
-                 measurements: dict[str, object] | None = None):
+                 measurements: dict[str, object] | None = None, *, auth_key: str | None = None,
+                 generation_endpoint: str | None = None):
         self.skills = verify_records(records, digest, measurements)
         self.records = tuple(records)
         self.by_name = {skill.name: skill for skill in self.skills}
         self.resident: list[str] = []
         self.evicted: list[str] = []
-        self.meter = RequestTokenMeter(endpoint=endpoint, template_overhead_tokens=0)
+        self.meter = RequestTokenMeter(
+            endpoint=endpoint, template_overhead_tokens=0,
+            auth_key=auth_key, generation_endpoint=generation_endpoint,
+        )
         self.catalog_lines = catalog_lines(self.skills, self.records)
         if measurements is None:
             measurements = measure_admission(self.skills, self.records, self.meter)
@@ -128,7 +132,8 @@ def measure_admission(skills, records, meter) -> dict[str, object]:
             "bodies": {skill.name: measure(skill.body) for skill in skills}}
 
 
-def configure(records: list[dict[str, object]], digest: str, endpoint: str | None) -> None:
+def configure(records: list[dict[str, object]], digest: str, endpoint: str | None, *,
+              auth_key: str | None = None) -> None:
     global _active
     settings_path = os.environ.get("STATEFRAME_SKILL_SETTINGS_FILE")
     measurements = None
@@ -142,7 +147,10 @@ def configure(records: list[dict[str, object]], digest: str, endpoint: str | Non
             validate_measurements(measurements, [str(record["name"]) for record in records])
     elif records:
         raise SkillError("STATEFRAME_SKILL_SETTINGS_FILE missing for selected skills")
-    candidate = SkillRuntime(records, digest, endpoint, measurements) if records else None
+    candidate = SkillRuntime(
+        records, digest, endpoint, measurements,
+        auth_key=auth_key, generation_endpoint=endpoint,
+    ) if records else None
     _active = candidate
 
 

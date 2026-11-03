@@ -21,6 +21,13 @@ from kernel_web_fetch import WebPolicy, fetch
 import kernel_git_commit
 
 
+def _tokenizer_auth(spec):
+    key_name = spec.get("api_key_env")
+    key = os.environ.get(key_name, "") if isinstance(key_name, str) else ""
+    endpoint = spec.get("chat_url")
+    return key or None, endpoint if isinstance(endpoint, str) else None
+
+
 class AgentTools:
     def __init__(self, shell, custom, mcp_servers=(), *, resume_active=False):
         from kernel_completion_owner import TOOL_SPECS
@@ -65,7 +72,11 @@ class AgentTools:
         self.commit_names = frozenset(kernel_git_commit.TOOL_NAMES) if kernel_git_commit.enabled() else frozenset()
         self.names = OBSERVATION_NAMES | self.commit_names | self.custom.keys()
         from kernel_agent_schemas import measure_schemas
-        self.schema_budget = measure_schemas(self.custom_schemas, endpoint=shell.spec.get("chat_url"))
+        auth_key, generation_endpoint = _tokenizer_auth(shell.spec)
+        self.schema_budget = measure_schemas(
+            self.custom_schemas, endpoint=shell.spec.get("chat_url"),
+            auth_key=auth_key, generation_endpoint=generation_endpoint,
+        )
         with tempfile.NamedTemporaryFile(mode="w", prefix="tool-schema-budget-", suffix=".json",
                                          dir=shell.run_dir, delete=False) as report:
             json.dump(self.schema_budget, report, sort_keys=True)
@@ -80,10 +91,12 @@ class AgentTools:
                 if external:
                     raise ToolReplayRefused(
                         "MCP discovery requires --replay-external for servers: " + ", ".join(external))
+            auth_key, generation_endpoint = _tokenizer_auth(self.shell.spec)
             found = discover(self.mcp_servers, self.shell.root, self.shell.run_dir,
                              shell_network=self.shell.settings.shell_network,
                              host_authorization=self.shell.settings.host_authorization is not None,
-                             custom_schemas=self.custom_schemas, endpoint=self.shell.spec.get("chat_url"))
+                             custom_schemas=self.custom_schemas, endpoint=self.shell.spec.get("chat_url"),
+                             auth_key=auth_key, generation_endpoint=generation_endpoint)
             if (found.digest != self.shell.spec.get("mcp_tools_digest")
                     or [t.name for t in found.tools] != self.shell.spec.get("mcp_tools")
                     or list(found.omitted) != self.shell.spec.get("mcp_omitted")):
@@ -92,7 +105,11 @@ class AgentTools:
             self.custom_schemas.extend(copy.deepcopy(found.schemas()))
             self.names = OBSERVATION_NAMES | self.commit_names | self.custom.keys()
             from kernel_agent_schemas import measure_schemas
-            self.schema_budget = measure_schemas(self.custom_schemas, endpoint=self.shell.spec.get("chat_url"))
+            auth_key, generation_endpoint = _tokenizer_auth(self.shell.spec)
+            self.schema_budget = measure_schemas(
+                self.custom_schemas, endpoint=self.shell.spec.get("chat_url"),
+                auth_key=auth_key, generation_endpoint=generation_endpoint,
+            )
             self.schema_budget_path.write_text(json.dumps(self.schema_budget, sort_keys=True))
         if self.git is not None:
             self.git.workspace = self.shell.root

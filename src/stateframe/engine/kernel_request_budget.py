@@ -1097,7 +1097,9 @@ def _request_token_meter(
         tokenizer_endpoint: str | None = None,
         request_id: str | None = None,
 ) -> RequestTokenMeter:
-    from kernel_request_diet import RequestTokenMeter, resolve_tokenize_url, tokenizer_contract
+    from kernel_request_diet import (
+        RequestTokenMeter, request_tokenizer_credentials, resolve_tokenize_url, tokenizer_contract,
+    )
 
     resolved_endpoint = resolve_tokenize_url(
         runtime, capture, endpoint=(tokenizer_endpoint or getattr(capture, "_tokenize_endpoint", None)),
@@ -1134,6 +1136,7 @@ def _request_token_meter(
         # Route changes invalidate cache/calibration at the next measurement,
         # but cannot reset failure state within the logical request.
         meter.endpoint = resolved_endpoint
+    meter.bind_tokenizer_auth(*request_tokenizer_credentials(capture))
     meter.provider_identity = tokenizer_contract(runtime, capture)
     generation = getattr(capture, "request_id", None) or request_id
     logical = (getattr(capture, "_tokenize_logical_request_id", None)
