@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.3.18 (2026-11-03)
 
 - The dependency-license guard's planted-import check writes its probe into a temporary package instead of the shipped `src/stateframe` tree, so a parallel worker (`pytest -n`) scanning the shipped package no longer sees the probe and fails. A new test runs the planted and shipped scans concurrently.
 
