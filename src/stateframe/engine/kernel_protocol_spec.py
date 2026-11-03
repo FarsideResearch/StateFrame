@@ -561,6 +561,10 @@ def _event_rows() -> list[dict[str, object]]:
             "stateframe_page_log_failed_open", "HOST_OBSERVED", "cache_layout_fail_open_vital",
             "kernel_cache_layout_candidate.render_cache_candidate",
         ),
+        "final_cache_layout_failed_open": EventRef(
+            "final_cache_layout_failed_open", "HOST_OBSERVED", "cache_layout_fail_open_vital",
+            "kernel_cache_layout_candidate.render_final_cache_candidate",
+        ),
         "stateframe_page_log_prepared": EventRef(
             "stateframe_page_log_prepared", "HOST_OBSERVED", "cache_layout_candidate_projection",
             "kernel_cache_layout_candidate.render_cache_candidate",

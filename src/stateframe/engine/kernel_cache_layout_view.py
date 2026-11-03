@@ -15,6 +15,9 @@ from kernel_stateframe_frame_append import DELTA_HEADER, materialize_payload
 from kernel_stateframe_message_layout import validate_stateframe_message_order
 
 
+FINAL_LAYOUT_NAME = "stateframe_final_cache_1"
+
+
 class CacheLayoutError(ValueError):
     pass
 
@@ -22,11 +25,83 @@ class CacheLayoutError(ValueError):
 def is_cache_layout(messages: object) -> bool:
     return (isinstance(messages, Sequence) and not isinstance(messages, (str, bytes))
             and bool(messages) and isinstance(messages[-1], Mapping)
-            and messages[-1].get("name") == PAGE_LOG_FINAL_MESSAGE_NAME)
+            and messages[-1].get("name") in {PAGE_LOG_FINAL_MESSAGE_NAME, FINAL_LAYOUT_NAME})
+
+
+def _final_layout(messages):
+    """Return the physical frame index, restored payload, and canonical index map."""
+    from kernel_stateframe_page_log import (
+        _partition_authority, _payload_has_authority_keys, _restore_authority,
+    )
+    from kernel_stateframe_message_layout import stateframe_message_index
+
+    if not isinstance(messages, list) or len(messages) < 4:
+        raise CacheLayoutError("final cache layout has no message array")
+    if any(not isinstance(row, Mapping) for row in messages):
+        raise CacheLayoutError("final cache layout contains a malformed message")
+    final = messages[-1]
+    marker = AUTHORITY_OVERLAY_HEADER + "\n"
+    content = final.get("content")
+    if final.get("role") != "user" or not isinstance(content, str) or content.count(marker) != 1:
+        raise CacheLayoutError("final cache layout requires one authority overlay")
+    encoded = content.split(marker, 1)[1]
+    try:
+        overlay, consumed = json.JSONDecoder().raw_decode(encoded)
+        state_index = stateframe_message_index(messages)
+        base = json.loads(messages[state_index]["content"].split("\n", 1)[1])
+    except (ValueError, TypeError, KeyError, IndexError) as error:
+        raise CacheLayoutError("final cache layout has invalid typed data") from error
+    if (not isinstance(overlay, dict) or overlay.get("schema") != "stateframe-authority-overlay/1"
+            or overlay.get("layout") != FINAL_LAYOUT_NAME
+            or not isinstance(overlay.get("fields"), list)
+            or _payload_has_authority_keys(base, final=True)):
+        raise CacheLayoutError("final cache layout authority is malformed")
+    from kernel_greenfact import GREENFACT_TEXT
+    if encoded[consumed:] not in {"", GREENFACT_TEXT}:
+        raise CacheLayoutError("final cache layout has an unrecognized overlay suffix")
+    system_end = next((i for i, row in enumerate(messages) if row.get("role") != "system"), len(messages))
+    if (system_end < 1 or system_end + 1 > state_index
+            or not str(messages[system_end].get("content", "")).startswith("Task:")
+            or any(row.get("role") != "user" for row in messages[system_end:state_index + 1])):
+        raise CacheLayoutError("final cache layout must put stable user rows before the frame")
+    from kernel_stateframe_framefit5 import _validated_exchange_and_volatile_tail
+    _exchange, exchange_start, _tail = _validated_exchange_and_volatile_tail(messages)
+    if state_index != exchange_start - 1:
+        raise CacheLayoutError("final cache frame must precede the native exchange")
+    if (sum(str(row.get("content", "")).count("[CONTINUATION LIMITS |") for row in messages) != 1
+            or "[CONTINUATION LIMITS |" not in content
+            or any(AUTHORITY_OVERLAY_HEADER in str(row.get("content", "")) for row in messages[:-1])):
+        raise CacheLayoutError("final cache authority is not unique or physically final")
+    paths = [row.get("path") for row in overlay["fields"] if isinstance(row, Mapping)]
+    if (len(paths) != len(overlay["fields"])
+            or any(not isinstance(path, list) or not path for path in paths)
+            or len({json.dumps(path) for path in paths}) != len(paths)):
+        raise CacheLayoutError("final cache authority paths are malformed or duplicated")
+    restored = _restore_authority(base, overlay["fields"])
+    repartitioned, fields = _partition_authority(restored, final=True)
+    if (repartitioned != base
+            or {json.dumps(row["path"]): row["value"] for row in fields}
+            != {json.dumps(row["path"]): row["value"] for row in overlay["fields"]}):
+        raise CacheLayoutError("final cache authority overlay is not canonical")
+    canonical_order = list(range(len(messages)))
+    canonical_order.pop(state_index)
+    canonical_order.insert(system_end + 1, state_index)
+    return state_index, restored, canonical_order
+
+
+def semantic_index_map(messages):
+    """Map submitted locations to the canonical validation view."""
+    if not is_cache_layout(messages) or messages[-1].get("name") != FINAL_LAYOUT_NAME:
+        return {index: index for index in range(len(messages))}
+    _state_index, _payload, order = _final_layout(messages)
+    return {physical: canonical for canonical, physical in enumerate(order)}
 
 
 def inspect_layout(messages):
     """Validate log/index/authority and return current payload and page locations."""
+    if messages[-1].get("name") == FINAL_LAYOUT_NAME:
+        state_index, payload, _order = _final_layout(messages)
+        return state_index, payload, frozenset(), state_index
     from kernel_greenfact import GREENFACT_TEXT
     from kernel_stateframe_page_log import (
         _page_index_content, _payload_has_authority_keys, _restore_authority, _authority_path,
@@ -111,6 +186,18 @@ def semantic_messages(messages):
     """Same message positions, current frame, opaque native exchange, no stale pages."""
     if not is_cache_layout(messages):
         return messages
+    if messages[-1].get("name") == FINAL_LAYOUT_NAME:
+        state_index, payload, order = _final_layout(messages)
+        view = [copy.deepcopy(dict(messages[index])) for index in order]
+        canonical_index = order.index(state_index)
+        view[canonical_index]["content"] = "[StateFrame]\n" + json.dumps(
+            payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        from kernel_greenfact import GREENFACT_TEXT
+        content = view[-1]["content"]
+        green = GREENFACT_TEXT if content.endswith(GREENFACT_TEXT) else ""
+        view[-1]["content"] = content.split(AUTHORITY_OVERLAY_HEADER + "\n", 1)[0].rstrip() + green
+        view[-1].pop("name", None)
+        return view
     state_index, payload, current_pages, end = inspect_layout(messages)
     view = copy.deepcopy(list(messages))
     view[state_index]["content"] = "[StateFrame]\n" + json.dumps(
@@ -130,6 +217,9 @@ def volatile_blocks(messages):
     """Return literal volatile blocks only after validating the complete layout."""
     if not is_cache_layout(messages):
         return ()
+    if messages[-1].get("name") == FINAL_LAYOUT_NAME:
+        _final_layout(messages)
+        return tuple(messages[-1]["content"].split(AUTHORITY_OVERLAY_HEADER + "\n", 1)[0].rstrip().split("\n\n"))
     inspect_layout(messages)
     prefix = messages[-1]["content"].split(AUTHORITY_OVERLAY_HEADER + "\n", 1)[0]
     return tuple(prefix.rstrip().split("\n\n"))
@@ -142,6 +232,9 @@ def source_messages(messages, *, unwrap_pages=False):
     physical message, including its page header, to the submitted wire.
     """
     if not is_cache_layout(messages):
+        return messages
+    if messages[-1].get("name") == FINAL_LAYOUT_NAME:
+        _final_layout(messages)
         return messages
     state_index, _payload, current_pages, end = inspect_layout(messages)
     result = []

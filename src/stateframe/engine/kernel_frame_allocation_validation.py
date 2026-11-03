@@ -90,7 +90,11 @@ def validate_allocation_authority(
 
     if check_layout:
         try:
-            _validate_frame_request_allocation_placement(messages, allocation)
+            from kernel_cache_layout_view import FINAL_LAYOUT_NAME, semantic_messages
+            placement_messages = (semantic_messages(messages)
+                                  if messages and messages[-1].get("name") == FINAL_LAYOUT_NAME
+                                  else messages)
+            _validate_frame_request_allocation_placement(placement_messages, allocation)
         except FrameFit5Error as error:
             raise FrameAllocationReplanNeeded(
                 f"allocation source layout changed: {error}"
