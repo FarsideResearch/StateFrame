@@ -35,7 +35,7 @@ from kernel_tree_digest import compatible_revision, read_row
 
 
 SCHEMA = "stateframe-request-evidence-closure/1"
-# Domain of the typed encoding used only when a dependency is missing or unreadable.
+# Typed encoding for multi-row, NUL-containing and nonregular dependency revisions.
 DEPENDENCY_DIGEST_FORMAT = "stateframe.dependency_revision/2"
 TICKET_SCHEMA = "stateframe-authorized-ticket/1"
 TICKET_HEADER = "[AUTHORIZED TICKET"
@@ -756,7 +756,7 @@ def _is_test_path(path: str) -> bool:
 
 def dependency_revision(root: Path, paths: Sequence[str]) -> str:
     # Rendered as dependency_revision=... in fact blocks: request-compatible encoding
-    # (regular files hash exactly as before; missing/unreadable are typed, never "<unavailable>").
+    # (all NUL-free regular files hash as before; cache keys also bind paths).
     rows = [read_row(root / path, path) for path in sorted(dict.fromkeys(str(item) for item in paths))]
     return "sha256:" + compatible_revision(DEPENDENCY_DIGEST_FORMAT, rows)
 
@@ -791,11 +791,12 @@ def initialization_fact(root: Path, path: str, names: Sequence[str], *, ticket: 
                 "reason": state, "parser": adapter.parser,
                 "parser_capability": "UNAVAILABLE", "completeness": "UNKNOWN"}
     dependencies = _dependency_candidates(root, path, source, adapter)
+    dependency_paths = tuple(sorted(set((path, *dependencies))))
     source_rev = source_revision(source)
-    deps_rev = dependency_revision(root, (path, *dependencies))
+    deps_rev = dependency_revision(root, dependency_paths)
     wanted = tuple(dict.fromkeys(str(name) for name in names if str(name)))
     capability = parser_capability(path, source)
-    key = (path, source_rev, deps_rev, wanted, adapter.language,
+    key = (path, source_rev, deps_rev, dependency_paths, wanted, adapter.language,
            capability["parser"], capability["capability"])
 
     def compute() -> Mapping[str, object] | None:
@@ -1044,6 +1045,7 @@ class SourceClosure:
     final_delivery: dict[str, dict[str, object]] = field(default_factory=dict)
     skipped_files: list[dict[str, object]] = field(default_factory=list)
     dependency_revisions: dict[str, str] = field(default_factory=dict)
+    dependency_paths: dict[str, tuple[str, ...]] = field(default_factory=dict)
     identities: dict[str, dict[str, object]] = field(default_factory=dict)
     target_path: str = ""
     source_contents: dict[str, str] = field(default_factory=dict)
@@ -1060,7 +1062,10 @@ class SourceClosure:
             "omissions": [dict(item) for item in self.omissions],
             "skipped_files": [dict(item) for item in self.skipped_files],
             "revisions": dict(self.revisions),
+            "dependency_digest_format": DEPENDENCY_DIGEST_FORMAT,
             "dependency_revisions": dict(self.dependency_revisions),
+            # Host-only freshness metadata. render_closure_receipt lists fields explicitly.
+            "dependency_paths": {path: list(paths) for path, paths in self.dependency_paths.items()},
             "identities": {key: dict(value) for key, value in self.identities.items()},
             "adapters": {key: dict(value) for key, value in self.adapters.items()},
             "coverage": {key: dict(value) for key, value in self.coverage.items()},
@@ -1217,6 +1222,7 @@ def build_source_closure(root: Path, paths: Sequence[str], ticket: TicketIdentit
     units: list[SpanNeed] = []
     revisions: dict[str, str] = {}
     dependency_revisions: dict[str, str] = {}
+    dependency_paths: dict[str, tuple[str, ...]] = {}
     identities: dict[str, dict[str, object]] = {}
     adapters: dict[str, dict[str, object]] = {}
     source_contents: dict[str, str] = {}
@@ -1265,7 +1271,8 @@ def build_source_closure(root: Path, paths: Sequence[str], ticket: TicketIdentit
         for dependency in dependencies:
             if dependency not in selected and dependency not in pending and len(selected) + len(pending) < max_files:
                 pending.append(dependency)
-        dependency_revisions[path] = revision_for_paths((path, *dependencies))
+        dependency_paths[path] = tuple(sorted(set((path, *dependencies))))
+        dependency_revisions[path] = revision_for_paths(dependency_paths[path])
     for path in ordered:
         if path not in selected and not any(item.get("path") == path for item in omissions):
             # A lexical hit is a selection hint, not an unbounded delivery debt.
@@ -1337,7 +1344,8 @@ def build_source_closure(root: Path, paths: Sequence[str], ticket: TicketIdentit
     }
     return SourceClosure(identity, tuple(selected), tuple(lexical), tuple(deduped), omissions,
                          revisions, adapters, coverage, skipped_files=skipped_files,
-                         dependency_revisions=dependency_revisions, identities=identities,
+                         dependency_revisions=dependency_revisions, dependency_paths=dependency_paths,
+                         identities=identities,
                          target_path=target_path, source_contents=source_contents,
                          workspace_authorization=workspace_authorization)
 

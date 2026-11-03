@@ -1,7 +1,6 @@
 """Render live, executable ticket-literal sites at the request boundary."""
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 import re
@@ -338,16 +337,15 @@ def current_workspace_revision(runtime: object) -> str | None:
         )
         if not paths:
             return None
-        digest = hashlib.sha256()
+        from kernel_tree_digest import compatible_text_revision
+        sources: dict[str, str] = {}
         for relative in sorted(set(paths)):
             source = _read_source(root, relative)
             if source is None:
                 return None
-            digest.update(relative.encode("utf-8"))
-            digest.update(b"\0")
-            digest.update(source.encode("utf-8"))
-            digest.update(b"\0")
-        return digest.hexdigest()[:8]
+            sources[relative] = source
+        return compatible_text_revision("stateframe.remaining_sites/2", sources,
+                                        terminator=True)[:8]
     except Exception:
         return None
 

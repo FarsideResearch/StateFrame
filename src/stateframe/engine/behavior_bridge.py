@@ -74,7 +74,6 @@ reference records resolved against those spans.
 from __future__ import annotations
 
 import ast
-import hashlib
 import math
 import pathlib
 from dataclasses import dataclass
@@ -217,13 +216,11 @@ def clear_caches() -> None:
 
 
 def _files_hash(files: dict) -> str:
-    h = hashlib.sha256()
-    for p in sorted(files):
-        h.update(p.encode())
-        h.update(b"\0")
-        h.update(files[p].encode("utf-8", "replace"))
-        h.update(b"\0")
-    return h.hexdigest()[:16]
+    from kernel_tree_digest import file_entry, tree_digest
+    return tree_digest("stateframe.behavior_files/2", (
+        file_entry(path, source.encode("utf-8", "surrogatepass"))
+        for path, source in files.items()
+    ))[:16]
 
 
 def _resolve_files(repo_root, files: Optional[dict]) -> dict:

@@ -1163,6 +1163,7 @@ class CoordinatedChangeLedger:
         return tuple(item for item in self.items if item.status != STATUS_VERIFIED)
 
     def refresh_scan(self, *, revision: str = "") -> None:
+        # The in-repository caller passes its just-assigned result.revision here.
         current = revision or tree_revision(self.root)
         if current != self.revision:
             for item in self.items:
@@ -1431,6 +1432,7 @@ def tree_revision(root: str | Path) -> str:
     root_path = Path(root).resolve()
     files = _iter_files(root_path)
     cache_key = _repository_cache_key(root_path, files, None)
+    # The repository signature in this key includes every ordered relative path.
     with _REPOSITORY_CACHE_LOCK:
         cached = _TREE_REVISION_CACHE.get(cache_key)
         if cached is not None:
@@ -1450,13 +1452,17 @@ def tree_revision(root: str | Path) -> str:
 
 def _compute_tree_revision(root_path: Path, files: Sequence[str]) -> str:
     # The revision reaches tool observations (BatchResult.to_dict), so it uses the
-    # request-compatible encoding: present files hash exactly as before; a file that
-    # vanished or can't be read is typed instead of hashing like an empty file.
+    # request-compatible encoding for all NUL-free regular files; nonregular
+    # paths and NUL content need typed boundaries.
     from kernel_scope_widen_guard import read as guarded_read
     rows = []
     for relative in files:
         try:
-            rows.append((relative, guarded_read(root_path / relative), "file"))
+            path = root_path / relative
+            if path.is_symlink():
+                rows.append((relative, os.fsencode(os.readlink(path)), "symlink"))
+            else:
+                rows.append((relative, guarded_read(path), "file"))
         except FileNotFoundError:
             rows.append((relative, None, "missing"))
         except OSError:

@@ -75,6 +75,7 @@ CLAIM_SCOPE = {
 # discovered from the family directory and frozen (with digests) into the
 # protocol; the family must contain exactly STAGED_TASK_COUNT tasks.
 STAGED_FAMILY = "long_horizon2"
+STAGED_DIGEST_FORMAT = "stateframe.staged_task/2"
 STAGED_TASK_COUNT = 3
 STAGED_SWITCH = "LONG_HORIZON_STAGED_PHASES"
 STAGED_SLUG_PREFIX = "lhw_"
@@ -465,10 +466,20 @@ def family_task_ids(task_root: str | Path, family: str) -> tuple[str, ...]:
 def _staged_digest(manifest_path: Path, brief_path: Path,
                    phases: Sequence[Mapping[str, Any]]) -> str:
     """Task digest also covers every later-phase ticket."""
-    payload = manifest_path.read_bytes() + b"\x00long-horizon-brief\x00" + brief_path.read_bytes()
-    for phase in phases:
-        payload += b"\x00phase\x00" + str(phase["phase"]).encode() + b"\x00" + phase["ticket"].encode()
-    return _sha256_bytes(payload)
+    from kernel_tree_digest import file_entry, tree_digest
+    manifest = manifest_path.read_bytes()
+    brief = brief_path.read_bytes()
+    tickets = [(str(phase["phase"]).encode(), phase["ticket"].encode()) for phase in phases]
+    if b"\0" not in manifest and b"\0" not in brief and all(
+            b"\0" not in number and b"\0" not in ticket for number, ticket in tickets):
+        payload = manifest + b"\x00long-horizon-brief\x00" + brief
+        for number, ticket in tickets:
+            payload += b"\x00phase\x00" + number + b"\x00" + ticket
+        return _sha256_bytes(payload)
+    entries = [file_entry("manifest", manifest), file_entry("brief", brief)]
+    for index, phase in enumerate(phases):
+        entries.append(file_entry(f"phase/{index}/{phase['phase']}", phase["ticket"].encode("utf-8")))
+    return tree_digest(STAGED_DIGEST_FORMAT, entries)
 
 
 def _common_runtime_profile() -> dict[str, str]:
@@ -525,6 +536,7 @@ def load_validated_tasks(
             "task_id": task_id,
             "family": family,
             "task_digest": task_digest,
+            **({"task_digest_format": STAGED_DIGEST_FORMAT} if staged else {}),
             "manifest_sha256": _sha256_bytes(manifest_path.read_bytes()),
             "brief_sha256": _sha256_bytes(brief_path.read_bytes()),
             "brief_path": brief_name,
@@ -839,7 +851,6 @@ def build_protocol(
             pair_index = task_index * len(normalized_seeds) + seed_index
             wave = pair_index // slots
             for arm_index, arm_id in enumerate(ARM_ORDER):
-                definition = definitions[arm_id]
                 label = run_label(task['task_id'], seed, arm_id)
                 runs.append(
                     {
@@ -861,11 +872,13 @@ def build_protocol(
                 "task_id",
                 "family",
                 "task_digest",
+                "task_digest_format",
                 "manifest_sha256",
                 "brief_sha256",
                 "brief_path",
                 "entry",
             )
+            if key in task
         }
         for task in tasks
     ]
@@ -1150,6 +1163,9 @@ def check_protocol(
         for item in task_records:
             if not isinstance(item, Mapping) or not isinstance(item.get("task_digest"), str):
                 errors.append("every task must carry a task_digest")
+                break
+            if family == STAGED_FAMILY and item.get("task_digest_format") != STAGED_DIGEST_FORMAT:
+                errors.append("staged task digest format is missing or obsolete")
                 break
 
     definitions = protocol.get("arm_definitions")

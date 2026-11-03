@@ -234,7 +234,9 @@ def _fresh_closure(runtime: object, root: Path, root_fd: int, target_path: str,
         return None
     if not isinstance(plan, Mapping):
         return None
+    from kernel_request_evidence_closure import DEPENDENCY_DIGEST_FORMAT
     if (plan.get("schema") != "stateframe-request-evidence-closure/1"
+            or plan.get("dependency_digest_format") != DEPENDENCY_DIGEST_FORMAT
             or plan.get("target_path") != target_path
             or plan.get("ticket_sha256") != getattr(ticket, "sha256", None)):
         return None
@@ -267,11 +269,12 @@ def _fresh_closure(runtime: object, root: Path, root_fd: int, target_path: str,
             return None
     revisions_in = plan.get("revisions")
     deps_in = plan.get("dependency_revisions")
+    dependency_paths_in = plan.get("dependency_paths")
     adapters = plan.get("adapters")
     source_contents = plan.get("source_contents")
-    if not all(isinstance(item, Mapping) for item in (revisions_in, deps_in, adapters, source_contents)):
+    if not all(isinstance(item, Mapping) for item in (revisions_in, deps_in, dependency_paths_in, adapters, source_contents)):
         return None
-    if any(set(item.keys()) != set(paths) for item in (revisions_in, deps_in, adapters, source_contents)):
+    if any(set(item.keys()) != set(paths) for item in (revisions_in, deps_in, dependency_paths_in, adapters, source_contents)):
         return None
     if any(not isinstance(adapters.get(path), Mapping)
            or adapters[path].get("completeness") != "KNOWN"
@@ -329,15 +332,18 @@ def _fresh_closure(runtime: object, root: Path, root_fd: int, target_path: str,
                 or len(dependencies) > _MAX_DEPENDENCIES_PER_FILE
                 or any(_safe_existing_file(root_fd, dependency) != dependency for dependency in dependencies)):
             return None
-        digest = hashlib.sha256()
+        from kernel_tree_digest import compatible_revision
         closure_paths = tuple(sorted(set((path, *dependencies))))
+        stored_paths = dependency_paths_in.get(path)
+        if not isinstance(stored_paths, (list, tuple)) or tuple(stored_paths) != closure_paths:
+            return None
+        rows: list[tuple[str, bytes | None, str]] = []
         for dependency in closure_paths:
             raw_dependency = read_file(dependency)
             if raw_dependency is None:
                 return None
-            digest.update(dependency.encode("utf-8") + b"\0")
-            digest.update(raw_dependency)
-        current_dependency_revision = "sha256:" + digest.hexdigest()
+            rows.append((dependency, raw_dependency, "file"))
+        current_dependency_revision = "sha256:" + compatible_revision(DEPENDENCY_DIGEST_FORMAT, rows)
         if deps_in.get(path) != current_dependency_revision:
             return None
         fresh_dependencies[path] = current_dependency_revision
@@ -396,6 +402,13 @@ def _clear_timeline_wire_expectation(runtime: object) -> None:
         setattr(runtime, "_timing_timeline_wire_expectation", None)
     except (AttributeError, TypeError):
         pass
+
+
+def _timeline_dependency_path_key(plan: Mapping[str, object]) -> tuple[tuple[str, tuple[str, ...]], ...]:
+    """Host-only key component for the paths behind each dependency revision."""
+    paths = plan["dependency_paths"]
+    assert isinstance(paths, Mapping)
+    return tuple((str(path), tuple(paths[path])) for path in sorted(paths))
 
 
 def _timeline_wire_proof_fields(record: Mapping[str, object],
@@ -574,6 +587,7 @@ def _timeline(runtime: object) -> str | None:
             cache_key = (
                 relative, symbol, start, end, ticket.sha256, current_revision,
                 tuple(sorted(revisions.items())), tuple(sorted(dependency_revisions.items())),
+                _timeline_dependency_path_key(plan),
                 plan.get("workspace_authorization", {}).get("scope"),
                 plan.get("workspace_authorization", {}).get("generation"),
                 run_id, resumed,

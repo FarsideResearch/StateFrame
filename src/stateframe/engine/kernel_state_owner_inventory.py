@@ -251,13 +251,13 @@ def _parser_capability(path: str, source: str) -> str:
 def _source_revision_vector(
         sources: Mapping[str, str], parent_sources: Mapping[str, str],
 ) -> tuple[str, dict[str, dict[str, object]]]:
-    digest = hashlib.sha256()
+    from kernel_tree_digest import compatible_text_revision
     identities: dict[str, dict[str, object]] = {}
     for path in sorted(sources):
         source = sources[path]
-        current = "sha256:" + hashlib.sha256(source.encode("utf-8")).hexdigest()
+        current = "sha256:" + hashlib.sha256(source.encode("utf-8", "surrogatepass")).hexdigest()
         parent = parent_sources.get(path)
-        parent_revision = ("sha256:" + hashlib.sha256(parent.encode("utf-8")).hexdigest()
+        parent_revision = ("sha256:" + hashlib.sha256(parent.encode("utf-8", "surrogatepass")).hexdigest()
                            if isinstance(parent, str) else None)
         identities[path] = {
             "current_revision": current,
@@ -265,8 +265,8 @@ def _source_revision_vector(
             "status": ("UNKNOWN" if parent is None else
                        "UNCHANGED" if source == parent else "CHANGED"),
         }
-        digest.update(path.encode() + b"\0" + source.encode("utf-8", "replace"))
-    return digest.hexdigest(), identities
+    return compatible_text_revision("stateframe.owner_sources/2", dict(sources),
+                                    terminator=False), identities
 
 
 def _runtime_cache_key(
@@ -286,7 +286,7 @@ def _runtime_cache_key(
         capabilities[path] = _parser_capability(path, source)
     dependency_revision, _identities = _source_revision_vector(sources, parent_sources)
     parent_revision = tuple(
-        (path, "sha256:" + hashlib.sha256(source.encode("utf-8")).hexdigest())
+        (path, "sha256:" + hashlib.sha256(source.encode("utf-8", "surrogatepass")).hexdigest())
         for path, source in sorted(parent_sources.items())
     )
     return (
