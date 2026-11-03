@@ -5,10 +5,45 @@ import resource
 import subprocess
 import sys
 
+import pytest
+
 from kernel_exec_capability import ExecLimits
 import sf_launch
 
 LAUNCH = Path(__file__).resolve().parents[1] / "src/stateframe/engine/sf_launch.py"
+_TASK_DRIFT_SLACK = 64  # Linux uid task counts can change between launcher and child sampling.
+
+
+def _nproc_bounds(t0, t1, soft, budget, slack):
+    lo, hi = sorted((t0, t1))
+    if soft == resource.RLIM_INFINITY:
+        return lo + budget - slack, hi + budget + slack
+    return min(soft, lo + budget - slack), min(soft, hi + budget + slack)
+
+
+@pytest.mark.parametrize(
+    ("t0", "t1", "soft", "expected", "launched_nproc", "legacy_cap"),
+    [
+        pytest.param(1070, 1070, 1064, (1064, 1064), 1064, None,
+                     id="soft-cap-below-live-task-count"),
+        pytest.param(100, 180, 4096, (420, 628), 484, None,
+                     id="task-count-drift-up"),
+        pytest.param(180, 100, 4096, (420, 628), 564, None,
+                     id="task-count-drift-down"),
+        pytest.param(100, 120, resource.RLIM_INFINITY, (420, 568), 484, None,
+                     id="infinite-soft-limit"),
+        pytest.param(1000, 1000, 4096, (1320, 1448), 1384, 256,
+                     id="absolute-256-cap-is-below-lower-bound"),
+    ],
+)
+def test_nproc_bounds(t0, t1, soft, expected, launched_nproc, legacy_cap):
+    budget = ExecLimits().nproc + sf_launch._NPROC_HEADROOM
+    lower, upper = _nproc_bounds(t0, t1, soft, budget, _TASK_DRIFT_SLACK)
+
+    assert (lower, upper) == expected
+    assert lower <= launched_nproc <= upper
+    if legacy_cap is not None:
+        assert legacy_cap < lower
 
 
 def launch(tmp_path, argv, env=None, stdin=None):
@@ -40,6 +75,7 @@ print(json.dumps({"session": os.getsid(0) == os.getpid(), "umask": os.umask(0),
 "nofile": resource.getrlimit(resource.RLIMIT_NOFILE)[0],
 "tasks": _user_task_count() if sys.platform.startswith("linux") else None}))
 ''' % str(LAUNCH.parent))
+    t0 = sf_launch._user_task_count() if sys.platform.startswith("linux") else None
     result = launch(tmp_path, [sys.executable, "-I", str(script)])
     assert result.returncode == 0, result.stderr
     data = json.loads(result.stdout)
@@ -47,7 +83,10 @@ print(json.dumps({"session": os.getsid(0) == os.getpid(), "umask": os.umask(0),
     assert data["cpu"] == 300 and data["nofile"] <= 1024
     inherited_soft = resource.getrlimit(resource.RLIMIT_NPROC)[0]
     if sys.platform.startswith("linux"):
-        assert data["tasks"] <= data["nproc"] <= data["tasks"] + ExecLimits().nproc + sf_launch._NPROC_HEADROOM
+        budget = ExecLimits().nproc + sf_launch._NPROC_HEADROOM
+        lower, upper = _nproc_bounds(t0, data["tasks"], inherited_soft, budget,
+                                     _TASK_DRIFT_SLACK)
+        assert lower <= data["nproc"] <= upper
         if inherited_soft != resource.RLIM_INFINITY:
             assert data["nproc"] <= inherited_soft
     else:

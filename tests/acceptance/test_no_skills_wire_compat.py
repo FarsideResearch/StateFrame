@@ -12,7 +12,7 @@ from pathlib import Path
 import pytest
 
 from stateframe.replay_tape import first_difference, normalized_digest
-from ._support import Endpoint, PYTHON, ROOT, copy_repo, environment
+from ._support import Endpoint, PYTHON, budget, ROOT, copy_repo, environment
 
 
 pytestmark = pytest.mark.host_sandbox
@@ -73,7 +73,7 @@ def _run_tree(root: Path, case: Path, repo: Path, script: Path, *,
              "--shell", "off", "--quiet",
              *(("--runner-kind", "pytest", "--protect-tests", "all") if legacy_mode else ())],
             capture_output=True, text=True,
-            env=env, timeout=240, check=False)
+            env=env, timeout=budget("no_skills_run"), check=False)
     requests = tuple(path.read_bytes() for path in sorted((run_dir / "wire").glob("*.request.json")))
     assert result.returncode == 0 and requests, result.stdout + result.stderr
     return requests

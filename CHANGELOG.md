@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.3.16 (2026-11-03)
+
+- Two slow acceptance tests (`test_e19_volatile_shell_observation_is_byte_identical_on_resume` and `test_no_skills_wire_matches_023`) no longer time out on loaded test hosts. Their subprocess timeouts are now 1.5 times the slowest wall time measured on the slowest gate host under heavy load, recorded next to the measurement in `tests/acceptance/_support.py`, instead of a fixed 240 seconds. A guard test fails if either test goes back to a bare timeout or a measurement goes unused.
+- `test_existing_discount_requests_match_untouched_0_2_8` compares the 0.2.8 request bytes with the stable tool head switched off again; since 0.3.13 turned it on by default, the test had compared against the new default and failed. The shared byte-capture helper now requires every caller to state the stable tool head setting, so a default change cannot slip into a byte comparison unnoticed.
+- The launcher test for the process-count limit (`test_launcher_session_umask_limits_and_fds`) no longer fails when other processes start or stop during the test, or when the inherited soft limit is lower than the ceiling the launcher asks for.
+- This release changes tests only; the installed engine is identical to 0.3.15.
+
 ## 0.3.15 (2026-11-03)
 
 - Process-group cleanup now uses the leader identity captured when the process starts. A reused PID cannot authorize a later group signal, including when cleanup runs without a descendant monitor. Request bytes are unchanged.

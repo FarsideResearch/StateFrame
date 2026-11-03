@@ -40,7 +40,8 @@ def write_launcher(path: Path) -> None:
 
 def capture(tree: Path, python: str, launcher: Path, script: Path,
             repo: Path, run_dir: Path, *, legacy_mode: bool = False,
-            stable_tool_head: str | None = None) -> bytes:
+            stable_tool_head: str | None) -> bytes:
+    # stable_tool_head has no default: 0.3.13 changed the engine default, so every caller states its arm.
     environment = source_env(tree, stable_tool_head)
     endpoint = subprocess.Popen([python, "-m", "stateframe.scripted_endpoint",
         "--script", str(script), "--port", "0"], cwd=tree, env=environment,
@@ -95,7 +96,7 @@ def main() -> int:
         launcher = root / "fixed_seed_run.py"
         write_launcher(launcher)
         run_dir = root / "run"
-        previous = capture(baseline, args.python, launcher, script, repo, run_dir)
+        previous = capture(baseline, args.python, launcher, script, repo, run_dir, stable_tool_head=None)
         run_dir.rename(root / "baseline-run")
         current = capture(candidate, args.python, launcher, script, repo, run_dir,
                           stable_tool_head="off")

@@ -40,7 +40,7 @@ def test_no_mcp_requests_match_release_0_2_3(tmp_path):
     write_launcher(launcher)
     run_dir = tmp_path / "run"
     script = ROOT / "examples/discount_bug.script.json"
-    previous = capture(baseline, sys.executable, launcher, script, repo, run_dir)
+    previous = capture(baseline, sys.executable, launcher, script, repo, run_dir, stable_tool_head=None)
     run_dir.rename(tmp_path / "baseline-run")
     # The default now treats unittest as a generic check and permits test edits.
     # Leave the stable tool head unset here to exercise the new default; pin it off only for byte comparison.

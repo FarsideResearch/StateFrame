@@ -8,7 +8,7 @@ import time
 
 import pytest
 
-from ._support import Endpoint, FIXTURES, PYTHON, copy_repo, environment, read_requests, run_case
+from ._support import Endpoint, FIXTURES, budget, PYTHON, copy_repo, environment, read_requests, run_case
 from fixtures.process_signals import record_identity, signal_verified
 
 
@@ -252,7 +252,7 @@ def test_e19_volatile_shell_observation_is_byte_identical_on_resume(tmp_path):
         resumed = subprocess.run(
             [PYTHON, "-m", "stateframe", "resume", str(run_dir), "--endpoint", endpoint.url,
              "--model", "scripted", "--quiet"], capture_output=True, text=True,
-            env=environment(), timeout=240, check=False)
+            env=environment(), timeout=budget("e19_resume"), check=False)
     assert resumed.returncode == 0, resumed.stdout + resumed.stderr
     actual = read_requests(run_dir)[1]
     assert actual["messages"] == expected["messages"]

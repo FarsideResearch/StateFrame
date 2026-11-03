@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import select
 import shutil
@@ -14,6 +15,21 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
 PYTHON = sys.executable
+
+# Slowest stateframe subprocess wall time per case, in seconds, from 3 reps on the slowest gate host
+# (2x Xeon E5-2680 v1 container, 1 worker; 850db00 at load5 61-70 and f8e8925 at load5 70-90, 2026-11-03).
+# Gates rarely run solo, so the loaded maximum is the reference. Re-measure when a case changes; tests/acceptance/test_acceptance_budgets.py
+# checks that every case is used and that the budgeted tests carry no bare timeout literal.
+MEASURED_SECONDS = {
+    "e19_resume": 307,
+    "no_skills_run": 193,
+}
+HEADROOM = 1.5
+
+
+def budget(case: str) -> int:
+    """Subprocess timeout for a measured case: HEADROOM x its slowest measured wall time."""
+    return math.ceil(HEADROOM * MEASURED_SECONDS[case])
 
 
 @dataclass(frozen=True)

@@ -204,7 +204,8 @@ def test_existing_discount_requests_match_untouched_0_2_8(tmp_path):
     write_launcher(launcher)
     run_dir = tmp_path / "run"
     script = ROOT / "examples/discount_bug.script.json"
-    before = capture(baseline, sys.executable, launcher, script, repo, run_dir)
+    before = capture(baseline, sys.executable, launcher, script, repo, run_dir, stable_tool_head=None)
     run_dir.rename(tmp_path / "baseline-run")
-    after = capture(ROOT, sys.executable, launcher, script, repo, run_dir)
+    # 0.3.13 turned the stable tool head on by default; switched off, request bytes stay those of 0.2.8.
+    after = capture(ROOT, sys.executable, launcher, script, repo, run_dir, stable_tool_head="off")
     assert before == after
