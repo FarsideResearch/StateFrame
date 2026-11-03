@@ -226,7 +226,8 @@ def scan_repeated_blockers(path: str | os.PathLike[str], *, minimum: int = 5) ->
         streak = []
 
     blob_cache: dict[str, object] = {}
-    with journal_path.open("r", encoding="utf-8") as handle:
+    from kernel_measurement import open_journal
+    with open_journal(journal_path) as handle:
         for line_number, line in enumerate(handle, 1):
             if not line.strip():
                 continue
@@ -296,7 +297,8 @@ def _load_scanner_records(path: str | os.PathLike[str]) -> list[dict]:
     journal_path = Path(path)
     records: list[dict] = []
     blob_cache: dict[str, object] = {}
-    with journal_path.open("r", encoding="utf-8") as handle:
+    from kernel_measurement import open_journal
+    with open_journal(journal_path) as handle:
         for line_number, line in enumerate(handle, 1):
             if not line.strip():
                 continue

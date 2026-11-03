@@ -765,8 +765,10 @@ class DeliveryManifestTracker:
         if path is None:
             return []
         try:
-            return [json.loads(line) for line in Path(path).read_text(encoding="utf-8").splitlines()
-                    if line.strip()]
+            from kernel_measurement import open_journal
+
+            with open_journal(path) as stream:
+                return [json.loads(line) for line in stream if line.strip()]
         except (OSError, TypeError, ValueError):
             return []
 

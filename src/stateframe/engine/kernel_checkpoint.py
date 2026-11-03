@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import ctypes
 import contextvars
+import fcntl
 import hashlib
 import io
 import json
@@ -732,7 +733,8 @@ def _journal_entries(journal: Path, offset: int, records: list):
     bytes, {blob hash: sha256 of its stored bytes}); None when the journal cannot cover them."""
     entries, shapes, blobs, lines = [], {}, {}, hashlib.sha256()
     try:
-        with open(journal, "rb") as stream:
+        from kernel_measurement import open_journal
+        with open_journal(journal, binary=True) as stream:
             stream.seek(offset)
             for record in records:
                 line = stream.readline()
@@ -754,7 +756,8 @@ def _journal_entries(journal: Path, offset: int, records: list):
 def _journal_offset(journal: Path, lines: int):
     """Byte offset after the first ``lines`` lines (for a lineage started before journal backing)."""
     try:
-        with open(journal, "rb") as stream:
+        from kernel_measurement import open_journal
+        with open_journal(journal, binary=True) as stream:
             for _ in range(lines):
                 if not stream.readline().endswith(b"\n"):
                     return None
@@ -767,7 +770,8 @@ def _load_journal_chunk(part: dict) -> list:
     """Rebuild a journal-backed chunk: its line bytes and every blob must hash as at the save."""
     journal = Path(part["journal"])
     try:
-        with open(journal, "rb") as stream:
+        from kernel_measurement import open_journal
+        with open_journal(journal, binary=True) as stream:
             stream.seek(part["offset"])
             data = stream.read(part["end"] - part["offset"])
     except OSError as error:
@@ -1603,14 +1607,20 @@ _BIG_FILE = 4 << 20
 # blobs into checkpoints/blob-pool and records the name list; a restore links them back.
 POOL_DIR = "blob-pool"
 MANIFEST_FILE = "blobs.json"
-# Pool store -> {name: size when first pooled}. Pooled files are write-once, so a save stats only the
-# names it has not seen (one stat per file for the 8.6k-blob stores cost up to 0.6 s per save under
-# load); a later size change is still caught by authenticate()'s size check against the pool.
-_POOL_KNOWN: dict[str, dict[str, int]] = {}
+# Pool store -> {name: (size, digest)}. Pooled files are write-once; their identity is
+# computed once per process and signed in each checkpoint manifest.
+_POOL_KNOWN: dict[str, dict[str, tuple[int, str]]] = {}
 
 
-def _size(path) -> int:
-    return os.lstat(path).st_size
+def _pool_identity(path: Path) -> tuple[int, str]:
+    info = path.lstat()
+    if not stat.S_ISREG(info.st_mode):
+        raise CheckpointError(f"pooled file {path.name} is not regular")
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for block in iter(lambda: stream.read(1 << 20), b""):
+            digest.update(block)
+    return info.st_size, digest.hexdigest()
 
 
 # Other write-once directories, one or more new files per model send: the product's wire/, requests/
@@ -1638,18 +1648,19 @@ def _snapshot_tree(source: Path, target: Path, relative: str, pool: Path, manife
         known = _POOL_KNOWN.get(str(store))
         if known is None:  # first save of this process: adopt what an earlier process pooled
             store.mkdir(mode=0o700, parents=True, exist_ok=True)
-            known = _POOL_KNOWN.setdefault(str(store), {name: _size(store / name) for name in os.listdir(store)})
+            known = _POOL_KNOWN.setdefault(str(store), {
+                name: _pool_identity(store / name) for name in os.listdir(store)})
         for name in names:
-            if name not in known:
-                size = _size(source / name)
+            if name not in known or not (store / name).is_file():
+                identity = _pool_identity(source / name)
                 try:
                     os.link(source / name, store / name)
                 except FileExistsError:
-                    pass
+                    identity = _pool_identity(store / name)
                 else:
                     new_pool_files.append(store / name)
-                known[name] = size
-        manifests[relative] = [[name, known[name]] for name in names]
+                known[name] = identity
+        manifests[relative] = [[name, known[name][0]] for name in names]
         return
     if relative in ("worker", "worker/measurement-runs") or (
             relative.startswith("worker/measurement-runs/") and relative.count("/") == 2):
@@ -1663,7 +1674,7 @@ def _snapshot_tree(source: Path, target: Path, relative: str, pool: Path, manife
 
 
 def _copy_tree(source: Path, target: Path, previous: Path | None,
-               durable_inodes: set[tuple[int, int]]) -> dict[str, int]:
+               durable_inodes: set[tuple[int, int]], *, seed: Path | None = None) -> dict[str, int]:
     """Copy ``source`` to ``target``; a file unchanged since the previous checkpoint is hard-linked.
 
     Checkpoint copies are never modified after they are written, so linking to one is safe; a file
@@ -1687,6 +1698,18 @@ def _copy_tree(source: Path, target: Path, previous: Path | None,
             if os.path.islink(path):
                 os.symlink(os.readlink(path), destination)
                 continue
+            if seed is not None and not info.st_mode & 0o222:
+                candidate = seed / os.path.relpath(path, source)
+                try:
+                    seed_info = candidate.stat()
+                except OSError:
+                    seed_info = None
+                if (seed_info is not None and info.st_dev == seed_info.st_dev
+                        and info.st_ino == seed_info.st_ino and stat.S_ISREG(seed_info.st_mode)):
+                    os.link(path, destination)
+                    durable_inodes.add((info.st_dev, info.st_ino))
+                    counts["linked"] += 1
+                    continue
             old = None if previous is None else (previous if rel == "." else previous / rel) / name
             if old is not None:
                 try:
@@ -1778,7 +1801,7 @@ def _unpublished_pool_files(previous: Path | None, root: Path,
     for relative, rows in manifests.items():
         old_names = {row[0] for row in old.get(relative, ())}
         store = root / POOL_DIR / relative.replace("/", "__")
-        files.extend(store / name for name, _size in rows if name not in old_names)
+        files.extend(store / row[0] for row in rows if row[0] not in old_names)
     return files
 
 
@@ -1822,19 +1845,56 @@ def save(frame, step: int, run_dir: Path, *, background: bool = False) -> Path:
         raise CheckpointError("no checkpoint signing key registered by the host: not saving")
     root = run_dir / "checkpoints"
     _private_dir(root)
-    # Immutable names: a checkpoint is never replaced, only pruned once newer ones are durable.
-    final = root / f"{step:04d}-{os.getpid()}"
-    tmp = root / f".{step:04d}-{os.getpid()}.tmp"
-    if tmp.exists():
-        shutil.rmtree(tmp)
-    _private_dir(tmp)
+    with (root / ".checkpoint.lock").open("a+b") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        # The writer inherits this lock across fork; its publication and GC finish before
+        # another process can inspect or change the pool or LATEST.
+        final = root / f"{step:04d}-{os.getpid()}"
+        tmp = root / f".{step:04d}-{os.getpid()}.tmp"
+        if tmp.exists():
+            raise CheckpointError(f"checkpoint temporary {tmp.name} already exists")
+        _private_dir(tmp)
+        try:
+            return _save_into(payload, ctx, step, run_dir, root, final, tmp, clocks, started,
+                              collected, background)
+        except BaseException:
+            if _STATE.get("child_tmp") != tmp:
+                shutil.rmtree(tmp, ignore_errors=True)
+            raise
+
+
+def _seed_for_run(run_dir: Path) -> Path | None:
     try:
-        return _save_into(payload, ctx, step, run_dir, root, final, tmp, clocks, started, collected,
-                          background)
-    except BaseException:
-        if _STATE.get("child_tmp") != tmp:  # not yet handed to a writer: nobody else will remove it
-            shutil.rmtree(tmp, ignore_errors=True)
-        raise
+        seed = Path(json.loads((run_dir / "env-seed.json").read_text())["path"])
+        document = json.loads((seed / "seed.json").read_text())
+        if (seed.parent.name == "env-seeds" and re.fullmatch(r"[0-9a-f]{64}", seed.name)
+                and document.get("key") == seed.name and seed.is_dir()):
+            return seed
+    except (OSError, ValueError, KeyError, TypeError):
+        pass
+    return None
+
+
+def _publish_checkpoint(root: Path, tmp: Path, final: Path, run_dir: Path) -> None:
+    """Publish only complete snapshots; keep the pointer's target throughout pruning."""
+    if final.exists():
+        raise CheckpointError(f"checkpoint {final.name} already exists")
+    os.rename(tmp, final)
+    _fsync_dir(root)
+    checkpoints = _checkpoints(root)
+    newest = checkpoints[-1]
+    latest_tmp = root / f".LATEST.{os.getpid()}"
+    latest_tmp.write_text(newest.name + "\n")
+    _fsync_file(latest_tmp)
+    os.replace(latest_tmp, root / "LATEST")
+    _fsync_dir(root)
+    keep = set(checkpoints[-_keep():])
+    keep.add(newest)
+    for old in checkpoints:
+        if old not in keep:
+            shutil.rmtree(old, ignore_errors=True)
+    _prune_chunks(root)
+    _prune_pool(root, run_dir)
 
 
 def _save_into(payload, ctx, step, run_dir, root, final, tmp, clocks, started, collected, background):
@@ -1850,8 +1910,7 @@ def _save_into(payload, ctx, step, run_dir, root, final, tmp, clocks, started, c
     durable_inodes: set[tuple[int, int]] = set()
     for name in entries:
         source, destination = run_dir / name, tmp / "run" / name
-        if (name == "worker" or name in POOLED_DIRS) and source.is_dir() and not source.is_symlink() \
-                and sys.platform == "darwin":
+        if (name == "worker" or name in POOLED_DIRS) and source.is_dir() and not source.is_symlink():
             _snapshot_tree(source, destination, name, root / POOL_DIR, manifests, new_pool_files)
             copied["cloned"] += 1
             continue
@@ -1860,11 +1919,17 @@ def _save_into(payload, ctx, step, run_dir, root, final, tmp, clocks, started, c
             continue
         prior = previous / "run" / name if previous is not None else None
         if source.is_dir() and not source.is_symlink():
-            for key, value in _copy_tree(source, destination, prior, durable_inodes).items():
+            seed = _seed_for_run(run_dir) if name == "env" else None
+            for key, value in _copy_tree(source, destination, prior, durable_inodes,
+                                         seed=seed).items():
                 copied[key] += value
         else:
             _clone(source, destination)
     manifest_bytes = json.dumps(manifests, sort_keys=True, separators=(",", ":")).encode()
+    pool_sha256 = {
+        f"{relative}/{name}": _POOL_KNOWN[str(root / POOL_DIR / relative.replace('/', '__'))][name][1]
+        for relative, rows in manifests.items() for name, _size in rows
+    }
     new_pool_files.extend(_unpublished_pool_files(previous, root, manifests))
     with os.fdopen(os.open(tmp / MANIFEST_FILE, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "wb") as stream:
         stream.write(manifest_bytes)
@@ -1875,6 +1940,7 @@ def _save_into(payload, ctx, step, run_dir, root, final, tmp, clocks, started, c
         "engine_files_sha256": engine_fingerprint(), "pid": os.getpid(),
         "created": time.time(), "seq": seq, "clocks": clocks, "files": copied,
         "blob_manifest_sha256": hashlib.sha256(manifest_bytes).hexdigest(),
+        "pool_sha256": pool_sha256,
         "blob_count": sum(len(names) for names in manifests.values()),
         "seconds": {"collect": round(collected - started, 3), "files": round(files_done - collected, 3),
                     "capture": round(time.perf_counter() - started, 3)},
@@ -1924,18 +1990,7 @@ def _save_into(payload, ctx, step, run_dir, root, final, tmp, clocks, started, c
         _fsync_snapshot(tmp, new_pool_files, durable_inodes)
         if (root / CACHE_DIR).is_dir():
             _fsync_dir(root / CACHE_DIR)
-        if final.exists():
-            raise CheckpointError(f"checkpoint {final.name} already exists")
-        os.rename(tmp, final)
-        latest_tmp = root / f".LATEST.{os.getpid()}"
-        latest_tmp.write_text(final.name + "\n")
-        _fsync_file(latest_tmp)
-        os.replace(latest_tmp, root / "LATEST")
-        _fsync_dir(root)
-        for old in _checkpoints(root)[:-_keep()]:
-            shutil.rmtree(old, ignore_errors=True)
-        _prune_chunks(root)
-        _prune_pool(root, run_dir)
+        _publish_checkpoint(root, tmp, final, run_dir)
         return meta
 
     try:
@@ -2313,11 +2368,16 @@ def authenticate(checkpoint: Path) -> dict:
             store = checkpoint.parent / POOL_DIR / relative.replace("/", "__")
             for name, size in files:
                 try:
-                    actual = os.lstat(store / name).st_size
+                    info = os.lstat(store / name)
                 except OSError:
-                    raise CheckpointError(f"pool lacks {relative}/{name}") from None
-                if actual != size:  # a pooled file must be write-once; this one changed after the save
+                    raise CheckpointError(f"missing pooled blob {relative}/{name}") from None
+                if not stat.S_ISREG(info.st_mode):
+                    raise CheckpointError(f"pooled file {relative}/{name} is not regular")
+                if info.st_size != size:
                     raise CheckpointError(f"pooled file {relative}/{name} changed size since the checkpoint")
+                expected = meta.get("pool_sha256", {}).get(f"{relative}/{name}")
+                if expected is not None and _pool_identity(store / name)[1] != expected:
+                    raise CheckpointError(f"pooled file {relative}/{name} checksum mismatch")
     return meta
 
 
@@ -2325,22 +2385,37 @@ def _prune_pool(root: Path, run_dir: Path) -> None:
     """Drop pooled files that no kept checkpoint lists and that the live run no longer has.
 
     A pooled file still present in the live directory is listed again by the next save, so it is
-    kept (it is a hard link: it costs no extra space). One the run deleted is freed once no kept
-    checkpoint names it, so the pool is bounded by the kept checkpoints plus the live run.
+    kept (it is a hard link: it costs no extra space). A file removed from the live run is freed
+    once no kept checkpoint names it, so the pool is bounded by the kept checkpoints plus the live run.
     """
     pool = root / POOL_DIR
     if not pool.is_dir():
         return
     referenced: dict[str, set[str]] = {}
-    for checkpoint in _checkpoints(root):
+    for checkpoint in root.iterdir():
+        if (not checkpoint.is_dir() or checkpoint.is_symlink()
+                or checkpoint.name in {POOL_DIR, CACHE_DIR}):
+            continue
         try:
             manifest = json.loads((checkpoint / MANIFEST_FILE).read_text())
         except FileNotFoundError:
+            try:
+                meta = json.loads((checkpoint / META_FILE).read_text())
+            except (OSError, ValueError):
+                return
+            if meta.get("blob_manifest_sha256") is not None:
+                return
             continue
         except (OSError, ValueError):
             return  # cannot prove a pooled file unused: keep everything
+        if not isinstance(manifest, dict):
+            return
         for relative, files in manifest.items():
-            referenced.setdefault(relative.replace("/", "__"), set()).update(name for name, _ in files)
+            if (not isinstance(relative, str) or not isinstance(files, list)
+                    or any(not isinstance(row, list) or not row or not isinstance(row[0], str)
+                           for row in files)):
+                return
+            referenced.setdefault(relative.replace("/", "__"), set()).update(row[0] for row in files)
     for store in pool.iterdir():
         if not store.is_dir():
             continue
@@ -2388,7 +2463,8 @@ def _restore_files(checkpoint: Path, run_dir: Path, meta: dict) -> None:
             store = checkpoint.parent / POOL_DIR / relative.replace("/", "__")
             live = run_dir / relative
             live.mkdir(mode=0o700, parents=True, exist_ok=True)
-            for name, _size in files:  # write-once files: a hard link IS the content
+            for row in files:  # write-once files: a hard link IS the content
+                name = row[0]
                 os.link(store / name, live / name)
 
 

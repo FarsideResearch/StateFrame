@@ -56,12 +56,12 @@ class _ExistingJournal:
     """Append through the same on-disk event contract after the worker exits."""
 
     def __init__(self, path: Path):
-        from kernel_measurement import resolve_journal_blob_refs
+        from kernel_measurement import open_journal, resolve_journal_blob_refs
 
         self.path = path
         records = []
         blob_cache: dict[str, object] = {}
-        with path.open("r", encoding="utf-8") as source:
+        with open_journal(path) as source:
             for line in source:
                 if line.strip():
                     records.append(resolve_journal_blob_refs(json.loads(line), path, blob_cache))
@@ -109,7 +109,9 @@ class _ExistingJournal:
 
 def _journal_path(folder: Path) -> Path:
     root = folder / "measurement-runs"
-    candidates = sorted(root.glob("*/events.jsonl"))
+    from kernel_measurement import journal_paths
+
+    candidates = journal_paths(root)
     if len(candidates) != 1:
         raise ValueError(
             "instrument validation requires exactly one completed measurement journal"
@@ -117,6 +119,8 @@ def _journal_path(folder: Path) -> Path:
     path = candidates[0]
     if path.is_symlink() or path.resolve().parent.parent != root.resolve():
         raise ValueError("measurement journal must remain inside the attempt folder")
+    if path.suffix == ".xz":
+        raise ValueError("instrument validation cannot append to a sealed measurement journal")
     return path
 
 

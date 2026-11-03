@@ -54,6 +54,21 @@ def emit(kind: str, **fields: object) -> None:
                                          default=str, separators=(",", ":")), flush=True)
 
 
+def emit_run_env_events(run: Path) -> None:
+    """Forward host provisioning events to the durable engine log stream."""
+    try:
+        document = json.loads((run / "env-seed.json").read_text())
+    except (OSError, ValueError):
+        return
+    if not isinstance(document, dict) or not isinstance(document.get("events", ()), list):
+        return
+    for event in document.get("events", ()):
+        if isinstance(event, dict) and event.get("event") == "env_seed_quarantined":
+            fields = {name: event[name] for name in ("key", "quarantine")
+                      if isinstance(event.get(name), str)}
+            emit("env_seed_quarantined", **fields)
+
+
 def emit_resume_pending_check(spec: dict, resume: dict | None) -> None:
     """Record a routed resume that dropped an unproven in-flight check, on the child's event stream.
 
@@ -838,6 +853,7 @@ def main(argv: list[str]) -> int:
     watch_parent()
     lock = hold_engine_lock(run)  # noqa: F841 - held until exit
     spec = json.loads((run / "spec.json").read_text())
+    emit_run_env_events(run)
     resume = spec.get("resume") if isinstance(spec.get("resume"), dict) else None
     checkpoint = _selected_resume_checkpoint(resume)
     recorded_mode = str(spec.get("environment", {}).get("STATEFRAME_CHECKPOINT", "")).strip().lower()

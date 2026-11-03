@@ -22,9 +22,14 @@ def test_shell_mkdir_then_file_create_completes(tmp_path):
     assert "has no typed repair action" not in requests
     assert "Unresolved effect" not in requests
     assert (run / "workspace/pkg/batch/__init__.py").read_text() == "BATCH = 1\n"
-    event_paths = list(run.rglob("events.jsonl"))
+    # A finished run seals its measurement journal as events.jsonl.xz; open_journal reads both forms.
+    from stateframe.engine.kernel_journal_store import open_journal
+    event_paths = [*run.rglob("events.jsonl"), *run.rglob("events.jsonl.xz")]
     assert event_paths
-    events = [json.loads(line) for path in event_paths for line in path.read_text().splitlines() if line]
+    events = []
+    for path in event_paths:
+        with open_journal(path.parent) as stream:
+            events.extend(json.loads(line) for line in stream.read().splitlines() if line)
     shell_close = next(event for event in events
                        if event.get("kind") == "action_outcome_closed"
                        and event.get("record", {}).get("tool") == "shell")

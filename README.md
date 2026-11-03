@@ -57,6 +57,8 @@ export STATEFRAME_MODEL=my-local-model
 stateframe run --repo examples/discount_bug --task "Discounts are charged wrong at checkout: a 25% discount on an 80.00 order should cost 60.00, and a 100% discount should be free. Fix the pricing code so the tests pass."
 ```
 
+Finished runs trim checkpoints and run environments by default; preview older storage with `stateframe gc` and see [run storage](docs/guide/storage.md) for recovery and cleanup options.
+
 An excerpt from a real run on a local model (lines with local paths and the start-up banner left out):
 
 ```text

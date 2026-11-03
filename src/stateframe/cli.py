@@ -52,6 +52,23 @@ def _positive(value: str) -> int:
     return number
 
 
+def _nonnegative(value: str) -> int:
+    number = int(value)
+    if number < 0:
+        raise argparse.ArgumentTypeError("must be zero or a positive integer")
+    return number
+
+
+def _days(value: str) -> float:
+    try:
+        number = float(value)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError("must be a nonnegative number of days") from error
+    if not 0 <= number < float("inf"):
+        raise argparse.ArgumentTypeError("must be a nonnegative number of days")
+    return number
+
+
 def _add_task_arguments(command: argparse.ArgumentParser, *, for_run: bool = False) -> None:
     """Keep the run contract and chat task options defined in one place."""
     command.add_argument("--repo", required=True, type=Path, help="repository to work on")
@@ -122,6 +139,9 @@ def _add_task_arguments(command: argparse.ArgumentParser, *, for_run: bool = Fal
                               "--test-python; default: StateFrame's own for the engine)")
     command.add_argument("--keep-checkpoints", action="store_true",
                          help="keep the run's checkpoints after it finishes (default: removed once finished)")
+    if for_run:
+        command.add_argument("--keep-run-env", action="store_true",
+                             help="keep the run's Python environment after it finishes (default: removed)")
     command.add_argument("--slot", type=int, help="llama.cpp server slot to pin (optional)")
     command.add_argument("--route", action="append", default=[], metavar="ROLE.FIELD=VALUE",
                          help="override one model route field (repeatable)")
@@ -186,6 +206,8 @@ def build_parser() -> argparse.ArgumentParser:
                             help="explicitly repeat external tool operations and verify their results")
     resume_cmd.add_argument("--keep-checkpoints", action="store_true",
                             help="keep the run's checkpoints after it finishes (default: removed once finished)")
+    resume_cmd.add_argument("--keep-run-env", action="store_true",
+                            help="keep the run's Python environment after it finishes (default: removed)")
     resume_cmd.add_argument("--quiet", action="store_true", help="no live turn log")
     resume_cmd.add_argument("--json", action="store_true", help="print the summary as JSON")
     resume_cmd.add_argument("--route", action="append", default=[], metavar="ROLE.FIELD=VALUE",
@@ -204,6 +226,27 @@ def build_parser() -> argparse.ArgumentParser:
     view.add_argument("--frame", action="store_true", help="the typed StateFrame, pretty JSON")
     view.add_argument("--bytes", action="store_true", help="the exact request bytes sent")
     view.add_argument("--messages", action="store_true", help="every message of the request")
+
+    gc_cmd = commands.add_parser("gc", help="inspect or reclaim run-directory storage")
+    gc_cmd.add_argument("roots", nargs="*", type=Path,
+                        help="runs home or individual run trees (default: ~/.stateframe/runs)")
+    gc_cmd.add_argument("--apply", action="store_true", help="apply the listed lossless retention actions")
+    gc_cmd.add_argument("--older-than", type=_days, default=14,
+                        help="only include runs older than this many days (default: 14)")
+    gc_cmd.add_argument("--keep-last", type=_nonnegative, default=0,
+                        help="keep this many newest runs per root (default: 0)")
+    gc_cmd.add_argument("--include-unfinished", action="store_true",
+                        help="also reclaim unfinished runs and print that resume will be lost")
+    gc_cmd.add_argument("--prune-seeds", action="store_true", default=None,
+                        help="with explicit roots, also prune environment seeds unused for --older-than days")
+    gc_cmd.add_argument("--json", action="store_true", help="print the inventory as JSON")
+
+    rehydrate_cmd = commands.add_parser("rehydrate", help="rebuild a run's Python environment")
+    rehydrate_cmd.add_argument("run_dir", type=Path)
+    rehydrate_cmd.add_argument("--offline", action="store_true",
+                               help="install only from local wheel caches and wheelhouse directories")
+    rehydrate_cmd.add_argument("--dry-run", action="store_true",
+                               help="show the restore plan without writing env/")
 
     chat_cmd = commands.add_parser("chat", help="interactive session (preview): tasks and follow-ups")
     _add_task_arguments(chat_cmd)
@@ -265,6 +308,7 @@ def _run_options(args: argparse.Namespace, endpoint: Endpoint) -> RunOptions:
                       profile=args.profile, python=args.python or sys.executable,
                       python_explicit=args.python is not None, test_python=args.test_python,
                       slot=args.slot, keep_checkpoints=args.keep_checkpoints,
+                      keep_run_env=getattr(args, "keep_run_env", False),
                       timeout_s=args.timeout,
                       quiet=getattr(args, "quiet", False) or getattr(args, "json", False),
                       tool_settings=settings, skills=tuple(args.skill),
@@ -394,6 +438,25 @@ def main(argv: list[str] | None = None) -> int:
             else:
                 print(out)
             return 0
+        if args.command == "gc":
+            from .storage_gc import run_gc
+            messages = []
+            result = run_gc(args.roots or None, apply=args.apply, older_than_days=args.older_than,
+                            keep_last=args.keep_last, include_unfinished=args.include_unfinished,
+                            prune_seeds=args.prune_seeds,
+                            printer=messages.append if args.json else print)
+            if args.json:
+                result["messages"] = messages
+                print(json.dumps(result, indent=1, sort_keys=True))
+            return 0
+        if args.command == "rehydrate":
+            from .rehydrate import RehydrateError, rehydrate_run
+            try:
+                result = rehydrate_run(args.run_dir, offline=args.offline, dry_run=args.dry_run)
+            except RehydrateError as error:
+                print(f"stateframe: rehydrate failed: {error}", file=sys.stderr)
+                return 2
+            return result.exit_code
         if args.command == "config":
             path = args.path.expanduser()
             if path.parent == Path.home() / ".stateframe":
@@ -422,7 +485,8 @@ def main(argv: list[str] | None = None) -> int:
             summary = resume_run(args.run_dir, endpoint=endpoint, max_turns=args.max_turns, model=args.model,
                                  timeout_s=args.timeout, quiet=args.quiet or args.json,
                                  route_cli=args.route, routes_file=args.routes,
-                                 keep_checkpoints=args.keep_checkpoints, replay_external=args.replay_external,
+                                 keep_checkpoints=args.keep_checkpoints, keep_run_env=args.keep_run_env,
+                                 replay_external=args.replay_external,
                                  printer=(lambda *_: None) if args.json else print)
             if args.json:
                 print(json.dumps(summary, indent=1))

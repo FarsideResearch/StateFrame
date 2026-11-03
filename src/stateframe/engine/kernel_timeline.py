@@ -522,12 +522,18 @@ class TimelineIndex:
     def refresh(self) -> int:
         """Project journal suffix; returns newly indexed source records."""
         path = self._journal_path()
-        if path is not None and path.is_file():
-            size = path.stat().st_size
+        if path is not None:
+            from kernel_measurement import _journal_file, open_journal
+
+            if not _journal_file(path).is_file():
+                path = None
+        if path is not None:
+            with open_journal(path, binary=True) as source:
+                size = source.seek(0, 2)
             if size < self._journal_offset:
                 raise TimelineError("journal was truncated while rebuilding timeline")
             added = 0
-            with path.open("r", encoding="utf-8") as handle:
+            with open_journal(path, binary=True) as handle:
                 handle.seek(self._journal_offset)
                 while True:
                     line = handle.readline()

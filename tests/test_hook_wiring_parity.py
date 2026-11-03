@@ -19,6 +19,7 @@ from pathlib import Path
 import pytest
 from acceptance._support import assert_tree_imports, tree_python
 
+import kernel_measurement as measurement
 from stateframe.scripted_endpoint import Script, ScriptStepUnavailable, serve
 
 
@@ -119,11 +120,10 @@ def _run_checkout(
             path.read_bytes() for path in sorted((run / "wire").glob("*.request.json"))
         ]
         assert requests
-        events = [
-            json.loads(line)
-            for path in sorted((run / "worker/measurement-runs").glob("*/events.jsonl"))
-            for line in path.read_text().splitlines()
-        ]
+        events = []
+        for path in measurement.journal_paths(run / "worker" / "measurement-runs"):
+            with measurement.open_journal(path) as stream:
+                events.extend(json.loads(line) for line in stream if line.strip())
         kinds = [event["kind"] for event in events]
         # Hash-chain fields and tokenizer measurement/endpoint identity vary
         # between runs because each scripted server uses a fresh port.

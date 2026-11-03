@@ -6,7 +6,7 @@ A diagram of how these fit together is in [ARCHITECTURE.md](../../ARCHITECTURE.m
 
 | Module | Owns |
 |---|---|
-| `cli.py` | The `run`, `resume`, `inspect` and `chat` commands and their flags. |
+| `cli.py` | The `run`, `resume`, `inspect`, `gc`, `rehydrate` and `chat` commands and their flags. |
 | `skills.py` | Skill directory parsing, installation, path resolution and pinned digest checks. |
 | `instructions.py` | Project instructions: AGENTS.md / CLAUDE.md discovery, size bound and resume digest pin. |
 | `runner.py` | One run: preflight, run directory, spec, driving the engine child, before/after checks, the outcome. |
@@ -19,6 +19,8 @@ A diagram of how these fit together is in [ARCHITECTURE.md](../../ARCHITECTURE.m
 | `endpoint.py` | Endpoint configuration, API key from an environment variable, server probe. |
 | `resume.py`, `replay_tape.py` | Deciding whether a stopped run can continue; replaying its recorded responses. |
 | `inspect_run.py` | Reading a run directory's recorded requests and frames. |
+| `request_records.py` | Reading preflight request records from loose files or `requests.pack.xz`, and sealing them. |
+| `storage_gc.py`, `rehydrate.py` | Finish-time retention, `stateframe gc`, and rebuilding a removed run environment. See [Run storage](storage.md). |
 | `chat.py` | The interactive session (`/diff`, `/undo`, `/apply`). |
 | `outcomes.py` | Turning engine evidence into the printed outcome. |
 | `checks.py` | Strict checks for acceptance tests over non-code output (reports, JSON, CSV). |

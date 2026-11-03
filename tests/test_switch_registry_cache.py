@@ -63,6 +63,11 @@ def test_the_real_engine_starts_without_parsing_its_sources(monkeypatch):
     assert len(switches) > 100 and digest.startswith("sha256:")
 
 
+def test_host_only_env_seed_setting_is_not_in_engine_switch_registry():
+    switches, _ = registry.release_stateframe_switches(ENGINE)
+    assert "STATEFRAME_ENV_SEED" not in switches
+
+
 @pytest.mark.parametrize("damage", ["source_changed", "switches_edited", "digest_edited", "schema", "garbage",
                                     "missing"])
 def test_a_stale_or_damaged_registry_falls_back_to_the_scan(tmp_path, damage):

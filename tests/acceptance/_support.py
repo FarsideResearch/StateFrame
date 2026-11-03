@@ -14,6 +14,7 @@ import sysconfig
 from dataclasses import dataclass
 from pathlib import Path
 
+from stateframe.request_records import list_request_records, read_request_record
 
 ROOT = Path(__file__).resolve().parents[2]
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
@@ -219,8 +220,18 @@ class Endpoint:
 
 
 def read_requests(run_dir: Path) -> tuple[dict, ...]:
-    return tuple(json.loads(path.read_text())
-                 for path in sorted((run_dir / "requests").glob("*.json")))
+    return tuple(json.loads(read_request_record(run_dir, name))
+                 for name in list_request_records(run_dir))
+
+
+def read_measurement_events(run_dir: Path) -> tuple[dict, ...]:
+    import kernel_measurement as measurement
+
+    rows = []
+    for path in measurement.journal_paths(run_dir / "worker" / "measurement-runs"):
+        with measurement.open_journal(path) as stream:
+            rows.extend(json.loads(line) for line in stream if line.strip())
+    return tuple(rows)
 
 
 def run_case(tmp_path: Path, script: str, *, repo_name: str = "simple_repo",

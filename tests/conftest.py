@@ -14,6 +14,21 @@ for path in (ROOT / "src", ROOT / "src" / "stateframe" / "engine"):
     sys.path.insert(0, str(path))
 
 
+@pytest.fixture(autouse=True, scope="session")
+def _isolated_stateframe_home(tmp_path_factory):
+    """Runs under test build env seeds and user state; keep them out of the real ~/.stateframe."""
+    import os
+
+    if os.environ.get("STATEFRAME_HOME"):
+        yield
+        return
+    os.environ["STATEFRAME_HOME"] = str(tmp_path_factory.mktemp("stateframe-home"))
+    try:
+        yield
+    finally:
+        os.environ.pop("STATEFRAME_HOME", None)
+
+
 def pytest_configure(config):
     config.addinivalue_line(
         "markers", "host_sandbox: starts an OS sandbox (sandbox-exec/bwrap) or a local socket service")

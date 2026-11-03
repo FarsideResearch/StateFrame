@@ -19,6 +19,7 @@ import hashlib
 import json
 import os
 import shutil
+import stat
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -82,12 +83,15 @@ def _journal_lineage_ok(run: Path) -> str | None:
     A torn final record (the process was killed while appending) is expected after a hard kill.
     Returns a problem description, or None.
     """
-    journals = sorted((run / "worker" / "measurement-runs").glob("*/events.jsonl"))
+    from .engine.kernel_journal_store import journal_paths, open_journal
+
+    journals = journal_paths(run / "worker" / "measurement-runs")
     if len(journals) > 1:
         return "more than one engine journal in worker/measurement-runs"
     if not journals:
         return None  # stopped before the engine opened its journal
-    lines = journals[0].read_bytes().split(b"\n")
+    with open_journal(journals[0], binary=True) as source:
+        lines = source.read().split(b"\n")
     previous, expected = None, 1
     for number, line in enumerate(lines, start=1):
         if not line:
@@ -237,12 +241,42 @@ def model_swap_for(spec: dict, model: str | None) -> dict[str, object] | None:
     return {"served": served, "recorded": recorded} if recorded else None
 
 
+def _terminal_resume_refusal(status: object, summary: dict, *, hooks_only: bool = False) -> str | None:
+    """The terminal-result refusals shared by resume assessment and storage retention."""
+    if (summary.get("runtime_outcome") == "hook_refused"
+            or summary.get("engine_result") in {"HOOK_DENIED", "HOOK_FAILED"}):
+        return "hook refused prompt submission; start a new run"
+    if (status == "HOOK_CONTAINMENT" or summary.get("runtime_outcome") == "hook_containment"):
+        return "HOOK_CONTAINMENT run cannot be resumed; start a new run"
+    if status == "HOOK_BLOCKED":
+        return "HOOK_BLOCKED run cannot be resumed; start a new run"
+    if hooks_only:
+        return None
+    if status == "SUBMITTED":
+        return "this run already finished: the engine submitted its result " \
+            "(see summary.json and final.diff); start a new run for more work"
+    if status in outcomes.SEAL_FAILURES:
+        return f"the last attempt stopped with {status} while preparing a request; " \
+            "replaying it on the same engine would stop at the same point"
+    return None
+
+
+def run_finished_for_good(run_dir: Path) -> bool:
+    """True only for a terminal engine result that resume refuses for its terminal outcome."""
+    terminal = outcomes.terminal_receipt(run_dir)
+    status = terminal.get("result")
+    if not isinstance(status, str) or not status:
+        return False
+    try:
+        summary = json.loads((run_dir / "summary.json").read_text())
+    except (OSError, ValueError):
+        summary = {}
+    return _terminal_resume_refusal(status, summary if isinstance(summary, dict) else {}) is not None
+
+
 def finished_for_good(run: Path) -> bool:
-    """True when resume would refuse this run whatever the user passes: it submitted its result, or it
-    stopped on a seal failure that would only repeat. A run stopped at its step limit is NOT finished (a
-    larger --max-turns continues it), nor is a cancelled, killed or crashed one."""
-    status = outcomes.terminal_receipt(run).get("result")
-    return status == "SUBMITTED" or status in outcomes.SEAL_FAILURES
+    """Compatibility alias for the single run-finish eligibility rule."""
+    return run_finished_for_good(run)
 
 
 def _tool_safety(run: Path, spec: dict, *, replay_external: bool) -> list[dict[str, str]]:
@@ -310,14 +344,10 @@ def assess(run: Path, *, max_turns: int | None = None, model: str | None = None,
         summary = json.loads(summary_path.read_text()) if summary_path.is_file() else {}
     except (OSError, ValueError):
         summary = {}
-    if (isinstance(summary, dict) and (summary.get("runtime_outcome") == "hook_refused"
-                                       or summary.get("engine_result") in {"HOOK_DENIED", "HOOK_FAILED"})):
-        raise ResumeRefused("hook refused prompt submission; start a new run")
-    if (status == "HOOK_CONTAINMENT"
-            or isinstance(summary, dict) and summary.get("runtime_outcome") == "hook_containment"):
-        raise ResumeRefused("HOOK_CONTAINMENT run cannot be resumed; start a new run")
-    if status == "HOOK_BLOCKED":
-        raise ResumeRefused("HOOK_BLOCKED run cannot be resumed; start a new run")
+    terminal_refusal = _terminal_resume_refusal(status, summary if isinstance(summary, dict) else {},
+                                                hooks_only=True)
+    if terminal_refusal:
+        raise ResumeRefused(terminal_refusal)
     external = _tool_safety(run, spec, replay_external=True)
     if "hooks" in spec:
         from .hook_host import verify_resume_hooks
@@ -346,12 +376,9 @@ def assess(run: Path, *, max_turns: int | None = None, model: str | None = None,
         raise ResumeRefused(f"this run directory was moved: it was created at {original}, and its records "
                             f"use that path. Move it back to {original} (or copy it there) and resume from there")
 
-    if status == "SUBMITTED":
-        raise ResumeRefused("this run already finished: the engine submitted its result "
-                            "(see summary.json and final.diff); start a new run for more work")
-    if status in outcomes.SEAL_FAILURES:
-        raise ResumeRefused(f"the last attempt stopped with {status} while preparing a request; "
-                            "replaying it on the same engine would stop at the same point")
+    terminal_refusal = _terminal_resume_refusal(status, summary if isinstance(summary, dict) else {})
+    if terminal_refusal:
+        raise ResumeRefused(terminal_refusal)
     previous_turns = int(spec["max_turns"])
     turns = previous_turns if max_turns is None else max_turns
     if status in outcomes.BUDGET_STOPS | outcomes.INCOMPLETE and not (
@@ -455,7 +482,9 @@ def select_checkpoint(run: Path, tape: list[dict[str, object]], wire_dir: Path) 
             if digest.hexdigest() != meta.get("state_sha256"):
                 _record_checkpoint_refusal(root, folder, "checkpoint state checksum mismatch")
                 continue
-            if not _blobs_intact(folder, meta):
+            blob_problem = _blob_integrity_problem(folder, meta)
+            if blob_problem:
+                _record_checkpoint_refusal(root, folder, blob_problem)
                 continue  # the engine would refuse it (blob manifest / pool); try the next-older one
         except (OSError, ValueError):
             continue
@@ -469,28 +498,46 @@ def select_checkpoint(run: Path, tape: list[dict[str, object]], wire_dir: Path) 
     return None
 
 
-def _blobs_intact(folder: Path, meta: dict) -> bool:
-    """The engine's blob-manifest rule (kernel_checkpoint.authenticate), checked before a checkpoint is offered:
-    blobs.json must match the signed blob_manifest_sha256, and every pooled file it lists must exist with its
-    recorded size. Read-only: an unusable checkpoint is skipped and kept for diagnosis, never deleted."""
+def _blob_integrity_problem(folder: Path, meta: dict) -> str | None:
+    """Return the engine's pooled-blob refusal detail before offering a checkpoint."""
     try:
         manifest = (folder / "blobs.json").read_bytes()
     except OSError:
         manifest = None
     if manifest is None and meta.get("blob_manifest_sha256") is None:
-        return True  # a checkpoint without pooled blobs
-    if manifest is None or hashlib.sha256(manifest).hexdigest() != meta.get("blob_manifest_sha256"):
-        return False
+        return None  # a checkpoint without pooled blobs
+    if manifest is None:
+        return "checkpoint blob manifest is missing"
+    if hashlib.sha256(manifest).hexdigest() != meta.get("blob_manifest_sha256"):
+        return "checkpoint blob manifest checksum mismatch"
     try:
         listing = json.loads(manifest)
+        if not isinstance(listing, dict):
+            return "checkpoint blob manifest is invalid"
         for relative, files in listing.items():
+            if not isinstance(relative, str) or not isinstance(files, list):
+                return "checkpoint blob manifest is invalid"
             store = folder.parent / "blob-pool" / str(relative).replace("/", "__")
-            for name, size in files:
-                if os.lstat(store / name).st_size != size:
-                    return False
+            for row in files:
+                if (not isinstance(row, list) or len(row) != 2 or not isinstance(row[0], str)
+                        or Path(row[0]).name != row[0] or type(row[1]) is not int or row[1] < 0):
+                    return "checkpoint blob manifest is invalid"
+                name, size = row
+                pooled = store / name
+                try:
+                    info = os.lstat(pooled)
+                except FileNotFoundError:
+                    return f"missing pooled blob {relative}/{name}"
+                if not stat.S_ISREG(info.st_mode) or info.st_size != size:
+                    return f"pooled blob size or type mismatch {relative}/{name}"
     except (OSError, ValueError, TypeError, AttributeError):
-        return False
-    return True
+        return "checkpoint blob manifest is invalid"
+    return None
+
+
+def _blobs_intact(folder: Path, meta: dict) -> bool:
+    """Compatibility check for the engine's checkpoint blob-manifest rule."""
+    return _blob_integrity_problem(folder, meta) is None
 
 
 def archive_attempt(state: dict[str, object], engine_dir: Path, *, use_checkpoint: bool = True,

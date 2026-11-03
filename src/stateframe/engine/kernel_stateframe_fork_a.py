@@ -208,7 +208,10 @@ class ForkAAdmission:
 
 def _journal_sequence(path: Path) -> int:
     try:
-        return sum(1 for line in path.read_text(encoding="utf-8").splitlines() if line.strip())
+        from kernel_measurement import open_journal
+
+        with open_journal(path) as stream:
+            return sum(1 for line in stream if line.strip())
     except FileNotFoundError:
         return 0
 

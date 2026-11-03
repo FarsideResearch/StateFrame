@@ -397,10 +397,17 @@ def _script(tmp_path: Path) -> Path:
 
 def _events(run_dir: Path, kind: str) -> list[dict]:
     found = []
-    for path in run_dir.rglob("*.jsonl"):
+    # Finished runs keep the measurement journal sealed as events.jsonl.xz; open_journal reads both forms.
+    from stateframe.engine.kernel_journal_store import open_journal
+    for path in [*run_dir.rglob("*.jsonl"), *run_dir.rglob("events.jsonl.xz")]:
         if "workspace" in path.parts or "env" in path.parts:
             continue
-        for line in path.read_text(errors="ignore").splitlines():
+        if path.suffix == ".xz":
+            with open_journal(path.parent) as stream:
+                text = stream.read()
+        else:
+            text = path.read_text(errors="ignore")
+        for line in text.splitlines():
             if f'"{kind}"' not in line:
                 continue
             try:

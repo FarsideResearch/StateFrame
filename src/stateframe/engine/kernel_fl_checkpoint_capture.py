@@ -339,7 +339,8 @@ def _journal_capture(
 
     submitted: Mapping[str, object] | None = None
     try:
-        with journal_path.open("rb") as stream:
+        from kernel_measurement import open_journal
+        with open_journal(journal_path, binary=True) as stream:
             for raw_line in stream:
                 if len(raw_line) > max_line_bytes:
                     raise CaptureBoundaryError("public journal prefix exceeds capture bound")
@@ -368,7 +369,8 @@ def _journal_capture(
     digest = hashlib.sha256()
     found_cutoff = False
     try:
-        with journal_path.open("rb") as stream:
+        from kernel_measurement import open_journal
+        with open_journal(journal_path, binary=True) as stream:
             for raw_line in stream:
                 if len(raw_line) > max_line_bytes:
                     raise CaptureBoundaryError("public journal prefix exceeds capture bound")

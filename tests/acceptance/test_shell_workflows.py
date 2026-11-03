@@ -1,6 +1,7 @@
 """Typical developer shell workflows cross the real request and effect pipeline."""
 from __future__ import annotations
 
+import json
 import shutil
 import platform
 
@@ -78,7 +79,10 @@ def test_u6_local_install_is_used_by_shell_and_engine_checks(tmp_path, clean_tes
     assert case.summary is not None and case.summary["succeeded"] is True, case.summary
     assert case.summary["tests_after"]["passed"] is True
     assert str(case.run_dir / "env/bin/python") in case.summary["tests_after"]["command"]
-    assert (case.run_dir / "env").is_dir()
+    # Finished-run retention replaces env/ with its manifest; the local install must be recorded there.
+    assert not (case.run_dir / "env").exists()
+    manifest = json.loads((case.run_dir / "env-manifest.json").read_text())
+    assert any(row["name"] == "localpkg" for row in manifest["distributions"]), manifest["distributions"]
     assert not (case.repo / "localpkg.egg-info").exists()
 
 

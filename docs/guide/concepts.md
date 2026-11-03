@@ -36,7 +36,7 @@ The model can say it is done; the engine decides. A candidate is accepted only a
 
 ## Run history on disk
 
-The run's history lives in the run directory on disk, not in process memory, and the engine reads back what it needs. This is always on. Disk use grows with the run; see Requirements in the README.
+The run's history lives in the run directory on disk, not in process memory, and the engine reads back what it needs. This is always on. Disk use grows with the run; see Requirements in the README. Once a run finishes for good, its journals and preflight records are compressed and its checkpoints and run environment are removed; see [Run storage](storage.md).
 
 ## Checkpoints and resume
 

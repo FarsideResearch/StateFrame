@@ -141,8 +141,12 @@ def test_scripted_final_sealed_wire_and_planted_violation(tmp_path):
         assert not _payload_has_authority_keys(frame, final=True)
         assert semantic_messages(rows)[2]["content"].startswith("[StateFrame]\n")
 
-    events = [json.loads(line) for file in run.rglob("events.jsonl")
-              for line in file.read_text().splitlines()]
+    # A finished run seals its measurement journal as events.jsonl.xz; open_journal reads both forms.
+    from stateframe.engine.kernel_journal_store import open_journal
+    events = []
+    for file in [*run.rglob("events.jsonl"), *run.rglob("events.jsonl.xz")]:
+        with open_journal(file.parent) as stream:
+            events.extend(json.loads(line) for line in stream.read().splitlines())
     final_events = [row for row in events if row.get("event") == "cache_layout_final_wire"
                     or row.get("kind") == "cache_layout_final_wire"]
     assert final_events

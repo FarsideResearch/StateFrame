@@ -42,11 +42,11 @@ def _journal_events(source: object) -> list[Mapping[str, object]]:
         if isinstance(candidate, (str, os.PathLike)):
             path = Path(candidate)
     if path is not None:
-        from kernel_measurement import resolve_journal_blob_refs
+        from kernel_measurement import open_journal, resolve_journal_blob_refs
 
         events: list[Mapping[str, object]] = []
         blob_cache: dict[str, object] = {}
-        with path.open("r", encoding="utf-8") as handle:
+        with open_journal(path) as handle:
             for line_number, line in enumerate(handle, 1):
                 if not line.strip():
                     continue

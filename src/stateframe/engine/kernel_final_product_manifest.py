@@ -69,7 +69,9 @@ def clean_terminal_event(journal_path: Path, *,
     """Return the latest durable PASS terminal for this solver attempt."""
     terminal: Mapping[str, object] | None = None
     try:
-        with journal_path.open("r", encoding="utf-8", errors="strict") as handle:
+        from kernel_measurement import open_journal
+
+        with open_journal(journal_path) as handle:
             for line in handle:
                 try:
                     row = json.loads(line)
