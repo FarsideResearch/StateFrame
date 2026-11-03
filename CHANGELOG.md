@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.3.27 (2026-11-03)
 
 - A model request waiting for a busy server slot now stays alive past its per-request timeout when `/slots` or `/health` returns any HTTP status, including 401, 404, 501, and 503. The extra wait ends at the run deadline or `STATEFRAME_QUEUE_WAIT_MAX_S` (1800 seconds by default). A response that has started still has its per-request deadline. Each extended send records `provider_queue_wait`, and the run prints one queue warning.
 - Request-body uploads now have a progress watchdog (`STATEFRAME_SEND_STALL_S`, 90 seconds by default). A stalled upload closes its connection and enters the ordinary frozen-byte transport retry policy, with one `send_stall` journal event per failed attempt. Healthy probes extend queue waits only after the entire body was sent. The sending process decides whether the body finished before the per-request deadline, at its last socket write, and the caller waits for that verdict within the unchanged hard deadline, so a busy machine no longer fails a request whose upload finished in time.
