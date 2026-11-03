@@ -16,7 +16,9 @@ pytestmark = pytest.mark.host_sandbox
 
 
 def _engine_child(parent_pid):
-    rows = subprocess.run(("ps", "-eo", "pid=,ppid=,args="), capture_output=True,
+    # ps truncates args to terminal width under captured pytest output; the
+    # _child.py suffix can disappear even while the child is alive.
+    rows = subprocess.run(("ps", "-ww", "-eo", "pid=,ppid=,args="), capture_output=True,
                           text=True, check=True).stdout.splitlines()
     for row in rows:
         fields = row.strip().split(maxsplit=2)

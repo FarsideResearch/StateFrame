@@ -4,6 +4,7 @@
 
 - Under `--protect-tests task/all`, creating files that change test collection (`conftest.py`, test-package `__init__.py`, pytest config, `sitecustomize.py`/`.pth`) is now refused; before, a new `tests/__init__.py` could import product code at collection time and change the test result.
 - Fixed: the queue-wait warning now reads sealed run journals (`events.jsonl.xz`), so finished runs report provider queue waits again; the reader also satisfies the journal shim guard.
+- Tests: the engine-child lookup in the resume acceptance tests asks `ps` for untruncated arguments (`ps -ww`). On macOS, `ps` cut the command line to the terminal width under captured pytest output, so the `_child.py` suffix disappeared and `test_acceptance_widened_run_resumes_by_replay` failed on an untouched checkout. Test-only; no product change.
 
 ## 0.3.29 (2026-11-03)
 
