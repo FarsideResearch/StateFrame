@@ -45,7 +45,7 @@ def test_no_mcp_requests_match_release_0_2_3(tmp_path):
     script = ROOT / "examples/discount_bug.script.json"
     baseline_python = tree_python(baseline / "src", tmp_path / "baseline-python")
     assert_tree_imports(baseline_python, baseline / "src", tmp_path)
-    previous = capture(baseline, baseline_python, launcher, script, repo, run_dir, stable_tool_head=None,
+    previous = capture(baseline, baseline_python, launcher, script, repo, run_dir, stable_tool_head=None, final_cache_layout=None,
                        source_on_pythonpath=False, test_python=sys.executable)
     run_dir.rename(tmp_path / "baseline-run")
     current_python = tree_python(ROOT / "src", tmp_path / "current-python")
@@ -53,12 +53,12 @@ def test_no_mcp_requests_match_release_0_2_3(tmp_path):
     # The default now treats unittest as a generic check and permits test edits.
     # Leave the stable tool head unset here to exercise the new default; pin it off only for byte comparison.
     default = capture(ROOT, current_python, launcher, script, repo, run_dir,
-                      stable_tool_head=None, source_on_pythonpath=False,
+                      stable_tool_head=None, final_cache_layout=None, source_on_pythonpath=False,
                       test_python=sys.executable)
     assert default
     run_dir.rename(tmp_path / "default-run")
     current = capture(ROOT, current_python, launcher, script, repo, run_dir,
-                      legacy_mode=True, stable_tool_head="off", source_on_pythonpath=False,
+                      legacy_mode=True, stable_tool_head="off", final_cache_layout="off", source_on_pythonpath=False,
                       test_python=sys.executable)
     # A masked result_sha256 must not hide a content change. Each hash that differs
     # between the releases has to hash a tool message sent in the same run, and those

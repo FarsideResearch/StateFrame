@@ -20,18 +20,49 @@ FINAL_MODE_ENV = "STATEFRAME_FINAL_CACHE_LAYOUT"
 
 def final_layout_mode(environ=None):
     source = os.environ if environ is None else environ
-    selected = str(source.get(FINAL_MODE_ENV, "off")).strip().lower()
+    selected = str(source.get(FINAL_MODE_ENV, "on")).strip().lower()
     if selected not in {"off", "on"}:
         raise ValueError("invalid final cache layout mode")
     return selected
 
 
+def final_layout_requested(environ=None) -> bool:
+    """Whether the layout was asked for explicitly, rather than being on by default."""
+    source = os.environ if environ is None else environ
+    return bool(str(source.get(FINAL_MODE_ENV, "")).strip())
+
+
+def _failed_open(capture, body, reason, **fields):
+    from kernel_stateframe_page_log import _emit
+    journal = getattr(capture, "journal", None)
+    if journal is not None:
+        _emit(journal, "final_cache_layout_failed_open", request_id=capture.request_id,
+              reason=reason, vital=True, **fields)
+    return body
+
+
 def render_final_cache_candidate(capture, runtime, body, *, meter, inputs):
-    """Place current authority at the end of a final, fully fitted request."""
+    """Place current authority at the end of a final, fully fitted request.
+
+    On by default. When it was asked for explicitly, a request it cannot project is an error; when it
+    is only on by default, that request is sent in the normal (already fitted) layout instead, with a
+    final_cache_layout_failed_open event, so the default never ends a run that did not opt in."""
     if final_layout_mode() == "off":
         return body
+    requested = final_layout_requested()
     if mode() != "off":
-        raise ValueError("final cache layout and page log cannot share one request")
+        if requested:
+            raise ValueError("final cache layout and page log cannot share one request")
+        return _failed_open(capture, body, "page_log_on")
+    try:
+        return _render_final_cache_layout(capture, runtime, body, meter=meter, inputs=inputs)
+    except ValueError as error:
+        if requested:
+            raise
+        return _failed_open(capture, body, "cannot_project", error=str(error)[:200])
+
+
+def _render_final_cache_layout(capture, runtime, body, *, meter, inputs):
     from kernel_cache_layout_view import FINAL_LAYOUT_NAME, semantic_messages
     from kernel_greenfact import GREENFACT_TEXT
     from kernel_request_source_window import verify_final_source_delivery, source_delivery_satisfied
@@ -99,13 +130,8 @@ def render_final_cache_candidate(capture, runtime, body, *, meter, inputs):
     if (method != "tokenize" or getattr(meter, "measure_method", method) != "tokenize"
             or tokens > inputs["token_ceiling"] or size > inputs["byte_ceiling"]):
         # The input body is already fitted to this envelope; send it unprojected rather than end the run.
-        from kernel_stateframe_page_log import _emit
-        journal = getattr(capture, "journal", None)
-        if journal is not None:
-            _emit(journal, "final_cache_layout_failed_open", request_id=capture.request_id,
-                  reason="exceeds_measured_envelope", vital=True, meter=method, prompt_tokens=tokens,
-                  token_ceiling=inputs["token_ceiling"], bytes=size, byte_ceiling=inputs["byte_ceiling"])
-        return body
+        return _failed_open(capture, body, "exceeds_measured_envelope", meter=method, prompt_tokens=tokens,
+                            token_ceiling=inputs["token_ceiling"], bytes=size, byte_ceiling=inputs["byte_ceiling"])
     receipt = verify_final_source_delivery(
         inputs["source_plan"], projected["messages"], payload=projected,
         sources=inputs["sources"])

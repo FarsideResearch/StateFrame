@@ -11,6 +11,9 @@
 ## 0.3.38 (2026-11-04)
 
 - Tests: the hook-wiring parity checks compare the provider_dialect journal event and the provider_capabilities spec key against whatever baseline release they pick, so they pass on a released tip as well as on a branch. Test-only; no runtime change.
+## Unreleased
+
+- The final cache layout is now on by default, so the default request order changes: the typed state frame moves after the stable carrier rows and current authority moves into the final message. The model sees the same content in a different place. On the 22-file live task (Qwen3.6-35B-A3B on llama.cpp, first rep of the A/B), uncached prompt tokens per request fell from 23,112 to 19,003 (-18%) and the cached share rose from 22.2% to 32.8%. `STATEFRAME_FINAL_CACHE_LAYOUT=off` restores the previous request order and bytes. While the layout is only on by default, a request it cannot reorder is sent in the normal order with a `final_cache_layout_failed_open` event instead of stopping the run, and a custom profile that turns on the page log keeps the page log. See [Running](docs/guide/running.md#prompt-cache-current-authority-last).
 
 ## 0.3.37 (2026-11-04)
 

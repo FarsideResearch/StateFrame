@@ -119,7 +119,7 @@
   "kernel_bridge_evidence.py": "14820c3a05d1dddc64dbaf98dc78a83ae4172e552aafeb5d239396f724c7b9b5",
   "kernel_build_mode.py": "73624d35f01307147f3a0ac2b9f0b3049579000653db3bf91b93ad6ffc394f64",
   "kernel_cache_layout.py": "fe836ae8d07ab29c243312622efc87726ce49eb2df1232cb33256f4f1058e85e",
-  "kernel_cache_layout_candidate.py": "0b51e23a7389dabb1eea00004a72f52193273ee573e5b28da8ee51abcf4a93de",
+  "kernel_cache_layout_candidate.py": "e370a4551f6b042155ce17fcf40db80f2a2e8b047df19198b57f9e992b6d5feb",
   "kernel_cache_layout_view.py": "5e24b069cd774b2054a8508fc1957b1ef8b7f0da927bb966e8e75ffb6ab6a685",
   "kernel_callsite_census.py": "00e589219c2d3edbb5f51a46dbe8516c0cb2b5f9b12a0317a443a4a3d68ade8c",
   "kernel_candidate_checkpoint_store.py": "91416eaadf30aa5bbdcc4da5201a1a828d1bd945fc57823c452846ed830982fc",

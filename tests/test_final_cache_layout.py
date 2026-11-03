@@ -112,7 +112,8 @@ def test_partition_restores_current_authority_exactly():
 
 
 def test_off_preserves_input_bytes(monkeypatch):
-    monkeypatch.delenv("STATEFRAME_FINAL_CACHE_LAYOUT", raising=False)
+    # The layout is on by default; this checks the explicit off switch.
+    monkeypatch.setenv("STATEFRAME_FINAL_CACHE_LAYOUT", "off")
     body = _body()
     before = json.dumps(body).encode()
     assert render_final_cache_candidate(None, None, body, meter=None, inputs=None) is body
