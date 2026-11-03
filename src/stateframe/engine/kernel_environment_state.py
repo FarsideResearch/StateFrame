@@ -25,6 +25,7 @@ from typing import Generic, TypeVar
 
 from kernel_environment_bindings import ApplicabilityResult, EnvironmentLedger
 from kernel_execution_policy import ExecutionPolicyError, sandboxed_popen
+from kernel_exec_tracker import child_exited_unreaped, recorded_launch_identity, signal_launch_group
 from kernel_environment_recipes import RecipeRegistry, SetupRecipe
 from kernel_environment_types import RequirementBinding, ResourceFact, ResourcePredicate
 
@@ -430,6 +431,7 @@ class _OwnedProcess:
     reader_done: bool = False
     terminal_recorded: bool = False
     cleanup_requested: bool = False
+    containment_verified: bool = False
 
 
 class EnvironmentState:
@@ -588,6 +590,8 @@ class EnvironmentState:
                 return
             process = managed.process
             prior = managed.record
+        if managed.cleanup_requested and not wait_for_exit:
+            return
         returncode = process.poll()
         if returncode is None:
             return
@@ -759,52 +763,61 @@ class EnvironmentState:
         return record
 
     def _signal_group(self, managed: _OwnedProcess, signum: int) -> bool:
-        pid = managed.record.pid
-        if os.name == "posix" and isinstance(pid, int) and pid > 0:
+        if os.name == "posix":
             try:
-                os.killpg(os.getpgid(pid), signum)
-                return True
+                return signal_launch_group(
+                    managed.process, recorded_launch_identity(managed.process), signum)
             except (OSError, ProcessLookupError):
                 return False
         return False
 
     def cleanup(self, *, grace_seconds: float = 1.0) -> tuple[ProcessRecord, ...]:
+        from kernel_exec_tracker import ContainmentUnverified
         if grace_seconds <= 0:
             raise ValueError("grace_seconds must be positive")
         with self._lock:
             managed_rows = tuple(
                 managed for managed in self._processes.values()
-                if managed.record.ownership == "owned"
+                if (managed.record.ownership == "owned"
+                    and not getattr(managed, "containment_verified", False))
             )
         for managed in managed_rows:
-            if managed.process.poll() is None:
-                managed.cleanup_requested = True
-                signalled = self._signal_group(managed, signal.SIGTERM)
-                if not signalled:
-                    terminate = getattr(managed.process, "terminate", None)
-                    if callable(terminate):
-                        terminate()
-                self._emit("environment_process_cleanup_requested",
-                           launch_id=managed.record.launch_id, signal="TERM")
-        deadline = float(self.monotonic_clock()) + grace_seconds
-        for managed in managed_rows:
-            remaining = max(0.0, deadline - float(self.monotonic_clock()))
-            try:
-                managed.process.wait(timeout=remaining)
-            except (AttributeError, subprocess.TimeoutExpired):
-                if managed.process.poll() is None:
-                    signalled = self._signal_group(managed, signal.SIGKILL)
-                    if not signalled:
-                        kill = getattr(managed.process, "kill", None)
-                        if callable(kill):
-                            kill()
-                    self._emit("environment_process_cleanup_escalated",
-                               launch_id=managed.record.launch_id, signal="KILL")
+            managed.cleanup_requested = True
+            signalled = self._signal_group(managed, signal.SIGTERM)
+            if not signalled and not child_exited_unreaped(managed.process):
+                terminate = getattr(managed.process, "terminate", None)
+                if callable(terminate):
                     try:
-                        managed.process.wait(timeout=grace_seconds)
-                    except (AttributeError, subprocess.TimeoutExpired):
+                        terminate()
+                    except OSError:
                         pass
+            self._emit("environment_process_cleanup_requested",
+                       launch_id=managed.record.launch_id, signal="TERM")
+        deadline = time.monotonic() + grace_seconds
+        unverified = []
+        for managed in managed_rows:
+            while (not child_exited_unreaped(managed.process)
+                   and time.monotonic() < deadline):
+                time.sleep(min(.02, max(0.0, deadline - time.monotonic())))
+            signalled = self._signal_group(managed, signal.SIGKILL)
+            if not signalled:
+                unverified.append(managed.record.launch_id)
+            if not signalled and not child_exited_unreaped(managed.process):
+                kill = getattr(managed.process, "kill", None)
+                if callable(kill):
+                    try:
+                        kill()
+                    except OSError:
+                        pass
+            self._emit("environment_process_cleanup_escalated",
+                       launch_id=managed.record.launch_id, signal="KILL")
+            try:
+                managed.process.wait(timeout=grace_seconds)
+            except (AttributeError, subprocess.TimeoutExpired):
+                pass
             self._reconcile_one(managed.record.launch_id, wait_for_exit=True)
+            if signalled and managed.process.returncode is not None:
+                managed.containment_verified = True
         rows = self.refresh()
         self._emit("environment_process_cleanup_finished",
                    process_count=len(managed_rows),
@@ -812,6 +825,10 @@ class EnvironmentState:
                        row.state == "running" and row.ownership == "owned"
                        for row in rows
                    ))
+        if unverified:
+            raise ContainmentUnverified(
+                "environment containment unverified: launch group could not be signalled for "
+                + ", ".join(unverified))
         return rows
 
     def close(self) -> tuple[ProcessRecord, ...]:

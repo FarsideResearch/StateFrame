@@ -1,5 +1,7 @@
 import base64
 import json
+import shutil
+import signal
 import subprocess
 import sys
 from pathlib import Path
@@ -7,10 +9,56 @@ from pathlib import Path
 import pytest
 
 from kernel_hooks import parse_outcome
+import kernel_hook_driver as driver
 
 DRIVER = (
     Path(__file__).resolve().parents[1] / "src/stateframe/engine/kernel_hook_driver.py"
 )
+
+
+def test_driver_runs_when_it_is_the_only_mounted_file(tmp_path):
+    isolated_driver = tmp_path / "kernel_hook_driver.py"
+    shutil.copyfile(DRIVER, isolated_driver)
+    request = {
+        "argv": [sys.executable, "-c", "print('isolated')"],
+        "payload_b64": "e30=",
+        "timeout": 2,
+        "stream_cap": 32768,
+    }
+    result = subprocess.run(
+        [sys._base_executable, "-I", str(isolated_driver)],
+        input=json.dumps(request).encode(),
+        capture_output=True,
+        timeout=7,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr.decode(errors="replace")
+    envelope = json.loads(result.stdout)
+    assert envelope["schema"] == "stateframe-hook-envelope/1"
+    assert envelope["exit_code"] == 0
+    assert base64.b64decode(envelope["stdout_b64"]) == b"isolated\n"
+    assert envelope["cleanup_ok"] is True
+
+
+def test_group_signal_uses_only_own_unreaped_child(monkeypatch):
+    process = subprocess.Popen(
+        [sys.executable, "-c", "import time;time.sleep(30)"],
+        start_new_session=True,
+    )
+    targets = []
+    monkeypatch.setattr(driver.os, "killpg", lambda pid, sig: targets.append((pid, sig)))
+    try:
+        assert driver._stop_group(process) is True
+        assert targets == [(process.pid, signal.SIGKILL)]
+        process.kill()
+        process.wait(timeout=2)
+        assert driver._stop_group(process) is False
+        assert targets == [(process.pid, signal.SIGKILL)]
+    finally:
+        if process.returncode is None:
+            process.kill()
+        process.wait(timeout=2)
+
 
 
 def invoke(argv, *, payload=b"{}", timeout=2):
@@ -73,11 +121,12 @@ def test_stream_flood_retains_prefix_and_counts():
     assert "\x00" not in text and "\x1b" not in text
 
 
+@pytest.mark.host_sandbox
 def test_timeout_kills_descendant_holding_pipe():
     script = "import subprocess,sys;subprocess.Popen([sys.executable,'-c','import time;time.sleep(9)']);sys.exit(0)"
     envelope = invoke([sys.executable, "-c", script], timeout=1)
     assert envelope["timed_out"] is True
-    assert envelope["cleanup_ok"] is True
+    assert envelope["cleanup_ok"] is True, envelope
 
 
 def test_signal_and_maximum_timeout():

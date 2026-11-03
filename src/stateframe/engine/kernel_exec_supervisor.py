@@ -269,6 +269,8 @@ class Supervisor:
                             # one command. Stop the entire session, fail closed.
                             current = self.table.identity(row.pid)
                             if current is not None and current.start == row.start:
+                                # serve() alone reaps this direct child; its PID stays
+                                # reserved until that waitpid, including after exit.
                                 os.kill(row.pid, signal.SIGKILL)
                             for job in self.jobs.values():
                                 if job.cleanup is None:

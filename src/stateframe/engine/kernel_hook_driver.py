@@ -14,6 +14,49 @@ import time
 SCHEMA = "stateframe-hook-envelope/1"
 
 
+def _stop_group(process: subprocess.Popen) -> bool:
+    if not _child_unreaped(process):
+        return False
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        # The group disappeared before the sweep; no members remain to kill.
+        return True
+    except PermissionError:
+        # Darwin reports EPERM for a group containing only its exited leader.
+        # Hooks cannot change UID inside this sandbox; a live member remains
+        # signalable, so EPERM after leader exit means the sweep is complete.
+        if sys.platform == "darwin" and _child_exited(process):
+            return True
+        return False
+    return True
+
+
+def _child_unreaped(process: subprocess.Popen) -> bool:
+    """Only this driver's direct child may reserve the session's group ID."""
+    if process.returncode is not None:
+        return False
+    if not hasattr(os, "waitid") or not hasattr(os, "WNOWAIT"):
+        # poll() reaps on exit, so an exited leader loses signal authority.
+        return process.poll() is None
+    try:
+        os.waitid(os.P_PID, process.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT)
+    except OSError:
+        return False
+    return True
+
+
+def _child_exited(process: subprocess.Popen) -> bool:
+    if process.returncode is not None:
+        return True
+    if not hasattr(os, "waitid") or not hasattr(os, "WNOWAIT"):
+        return process.poll() is not None
+    try:
+        return os.waitid(os.P_PID, process.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT) is not None
+    except ChildProcessError:
+        return True
+
+
 def _envelope(**changes: object) -> dict:
     value = {
         "schema": SCHEMA,
@@ -85,15 +128,13 @@ def run(request: dict) -> dict:
     timed_out = False
     cleanup_ok = True
     try:
-        while selector.get_map() or process.poll() is None:
+        while selector.get_map() or not _child_exited(process):
             now = time.monotonic()
             if now >= deadline and killed_at is None:
                 timed_out = True
                 killed_at = now
-                try:
-                    os.killpg(process.pid, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
+                if not _stop_group(process):
+                    cleanup_ok = False
                 if not process.stdin.closed:
                     try:
                         selector.unregister(process.stdin)
@@ -129,12 +170,10 @@ def run(request: dict) -> dict:
                 totals[kind] += len(chunk)
                 need = cap - len(retained[kind])
                 retained[kind].extend(chunk[: max(0, need)])
-        if process.poll() is None:
+        # The leader may have exited while a descendant held a stream open.
+        # Signal before wait() reaps it and releases the group identity.
+        if not _stop_group(process):
             cleanup_ok = False
-            try:
-                os.killpg(process.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
         try:
             code = process.wait(timeout=2)
         except subprocess.TimeoutExpired:
@@ -143,10 +182,8 @@ def run(request: dict) -> dict:
             code = process.wait(timeout=2)
     except (OSError, subprocess.SubprocessError) as error:
         cleanup_ok = False
-        try:
-            os.killpg(process.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
+        if not _stop_group(process):
+            cleanup_ok = False
         try:
             code = process.wait(timeout=2)
         except subprocess.TimeoutExpired:

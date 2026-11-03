@@ -19,12 +19,12 @@ import uuid
 
 if __package__:
     from .kernel_exec_capability import ExecCapability
-    from .kernel_exec_tracker import kill_launch_unit
+    from .kernel_exec_tracker import capture_launch_identity, kill_launch_unit, recorded_launch_identity
     from .kernel_test_isolation import sandbox_executable
     from .sf_launch import _current_cgroup
 else:
     from kernel_exec_capability import ExecCapability
-    from kernel_exec_tracker import kill_launch_unit
+    from kernel_exec_tracker import capture_launch_identity, kill_launch_unit, recorded_launch_identity
     from kernel_test_isolation import sandbox_executable
     from sf_launch import _current_cgroup
 
@@ -201,6 +201,7 @@ class ExecSession:
             self._process = subprocess.Popen(command, stdin=child, stdout=subprocess.DEVNULL,
                                              stderr=self._log, env={"PATH": "/usr/bin:/bin", "LC_ALL": "C"},
                                              close_fds=True, start_new_session=True)
+            capture_launch_identity(self._process, session_leader=True)
         except OSError as error:
             parent.close()
             self._log.close()
@@ -332,7 +333,9 @@ class ExecSession:
                 except subprocess.TimeoutExpired:
                     # Kill the whole launch unit: the outer bwrap alone can leave a
                     # supervisor that is still setting up its sandbox alive.
-                    survivors = kill_launch_unit(self._process, deadline_seconds=5)
+                    survivors = kill_launch_unit(
+                        self._process, deadline_seconds=5,
+                        launch_identity=recorded_launch_identity(self._process))
                     detail = f"; survivors {', '.join(map(str, survivors))}" if survivors else ""
                     raise ExecSessionError("execution supervisor did not terminate after cleanup" + detail)
             if self._log is not None:

@@ -576,11 +576,14 @@ def terminate_process_group(
                 raise ValueError("refusing to signal the supervisor process group")
         except AttributeError:
             pass
+    from kernel_exec_tracker import (ContainmentUnverified, child_exited_unreaped,
+                                     recorded_launch_identity, signal_launch_group)
+
+    identity = recorded_launch_identity(process)
     group_signalled = False
-    if isinstance(pgid, int) and pgid > 0:
+    if identity is not None and pgid == identity.pid:
         try:
-            os.killpg(pgid, signal.SIGTERM)
-            group_signalled = True
+            group_signalled = signal_launch_group(process, identity, signal.SIGTERM)
         except (AttributeError, OSError, ProcessLookupError):
             pass
     if not group_signalled:
@@ -590,20 +593,27 @@ def terminate_process_group(
                 terminate()
         except (OSError, ProcessLookupError):
             pass
-    _wait(process, float(grace_s))
+    deadline = time.monotonic() + float(grace_s)
+    while not child_exited_unreaped(process) and time.monotonic() < deadline:
+        time.sleep(min(.02, max(0.0, deadline - time.monotonic())))
 
-    if isinstance(pgid, int) and pgid > 0:
+    group_killed = False
+    if identity is not None and pgid == identity.pid:
         try:
-            os.killpg(pgid, signal.SIGKILL)
+            group_killed = signal_launch_group(process, identity, signal.SIGKILL)
         except (AttributeError, OSError, ProcessLookupError):
             pass
-    try:
-        kill = getattr(process, "kill", None)
-        if callable(kill):
-            kill()
-    except (OSError, ProcessLookupError):
-        pass
+    if not child_exited_unreaped(process):
+        try:
+            kill = getattr(process, "kill", None)
+            if callable(kill):
+                kill()
+        except (OSError, ProcessLookupError):
+            pass
     _wait(process, float(grace_s))
+    if not group_killed:
+        raise ContainmentUnverified(
+            "capacity containment unverified: launch group could not be signalled")
 
 
 __all__ = [
