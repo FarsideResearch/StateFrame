@@ -33,9 +33,11 @@ pid = os.fork()
 if pid == 0:
     if detach:
         os.setsid()
+    # Announce only once detached: the test must never act while a "setsid" child is still
+    # in the launcher's process group (a group kill would take it and look like containment).
+    sys.stdout.write(str(os.getpid()) + "\\n"); sys.stdout.flush()
     time.sleep(120)
     os._exit(0)
-sys.stdout.write(str(pid) + "\\n"); sys.stdout.flush()
 time.sleep(120)
 """
 
@@ -87,14 +89,14 @@ def test_cleanup_leaves_no_family_member(name, kind):
         deadline = time.monotonic() + 2
         while _alive(child) and time.monotonic() < deadline:
             time.sleep(.02)
-        if sys.platform == "darwin" and kind == "setsid":
-            assert _alive(child)
-            if name == "kill_launch_unit":
-                assert result == (child,)
-            else:
-                assert result is False
-        else:
-            assert not _alive(child), f"{name} left launch child {child} ({kind}) running"
+        # INVERTED ASSERTION: this test previously asserted that on darwin a setsid child
+        # SURVIVES cleanup (result == (child,) / _kill_group returned False). That encoded the
+        # 0.3.15-0.3.18 macOS cleanup bug (detached descendants were never signalled). With the
+        # fix (generation-checked kernel signal in Descendants.signal), every platform and kind
+        # must leave no family member.
+        assert not _alive(child), f"{name} left launch child {child} ({kind}) running"
+        if name == "kill_launch_unit":
+            assert result == ()
     finally:
         _cleanup(process, child)
 
@@ -121,12 +123,11 @@ def test_monitor_family_survivor_is_killed_after_launcher_is_gone():
         process.wait()
         survivors = tracker.kill_launch_unit(
             process, family, launch_identity=tracker.recorded_launch_identity(process))
-        if sys.platform == "darwin":
-            assert survivors == (child,)
-            assert _alive(child)
-        else:
-            assert survivors == ()
-            assert not _alive(child)
+        # INVERTED ASSERTION: previously on darwin this asserted survivors == (child,) and the
+        # child alive, encoding the 0.3.15-0.3.18 macOS cleanup bug. With the generation-checked
+        # kernel signal fix the monitored setsid child is killed on every platform.
+        assert survivors == ()
+        assert not _alive(child)
     finally:
         _cleanup(process, child)
 
@@ -135,9 +136,12 @@ def test_unkillable_survivor_is_reported(monkeypatch):
     process, child = _launch("setsid")
     try:
         monkeypatch.setattr(tracker.Descendants, "signal", lambda self, rows, sig: set())
-        assert child in tracker.kill_launch_unit(
+        survivors = tracker.kill_launch_unit(
             process, deadline_seconds=.2,
             launch_identity=tracker.recorded_launch_identity(process))
+        # The detached child cannot be signalled here, so it must still be alive AND reported.
+        assert _alive(child), "control: the stubbed signal must leave the setsid child running"
+        assert child in survivors
     finally:
         monkeypatch.undo()
         _cleanup(process, child)
@@ -276,15 +280,19 @@ def test_recycled_leader_cannot_adopt_new_group_members():
     unrelated = tracker.ProcessIdentity(43211, 43210, 43210, 43210, (3, 0), False)
 
     class Table:
+        # The real constructor records the original leader; later lookups see the recycled PID.
+        def __init__(self):
+            self.current = {43210: original}
+
         def identity(self, pid):
-            return {43210: recycled, 43211: unrelated}[pid]
+            return self.current.get(pid)
 
     table = Table()
-    family = tracker.Descendants.__new__(tracker.Descendants)
-    family.leader = 43210
-    family.table = table
-    family.members = {43210: original}
-    family.signal_errors = {}
+    family = tracker.Descendants(43210, table)
+    assert family.members == {43210: original}
+    table.current = {43210: recycled, 43211: unrelated}
+    # No live snapshot of the original leader and no reported reap: nothing anchors group 43210,
+    # so neither the recycled leader nor its child is adopted.
     assert family.update({43210: recycled, 43211: unrelated}) == []
     assert family.members == {43210: original}
 
