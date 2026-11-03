@@ -81,7 +81,11 @@ def install(spec, capture_class):
         timeout = min(10, deadline - time.monotonic()) if deadline is not None else 10
         if timeout <= 0:
             raise TimeoutError("capacity preflight deadline expired")
-        with urllib.request.urlopen(base + "/slots", timeout=timeout) as response:
+        slots_request = urllib.request.Request(base + "/slots", method="GET")
+        if key:
+            # A server started with an API key answers /slots with 401 otherwise.
+            slots_request.add_header("Authorization", "Bearer " + key)
+        with urllib.request.urlopen(slots_request, timeout=timeout) as response:
             raw = response.read(1024 * 1024 + 1)
         if len(raw) > 1024 * 1024:
             raise ValueError("oversized live slot metadata")

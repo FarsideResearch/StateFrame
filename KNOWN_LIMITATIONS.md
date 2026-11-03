@@ -18,6 +18,10 @@ The new command containment path was exercised in a Linux aarch64 container. Its
 
 Request body compression is off by default because stock llama-server does not accept gzip request bodies. Enable `STATEFRAME_HTTP_GZIP=on` or `STATEFRAME_PLAIN_GZIP=on` only in a custom profile for a relay that inflates them. In the default run mode, a compressed request refused with HTTP 415 is resent once without compression within the same deadline. If the run deadline stops a request while that uncompressed resend is in flight, the error is recorded but the two attempts are not listed separately.
 
+A request body that stops making send progress is aborted after `STATEFRAME_SEND_STALL_S` (90 seconds by default; 10 to 600 seconds). It can retry on a new connection within the existing transport attempt and run deadlines. A provider that received part of the body may still have work to discard; StateFrame cannot prove what an intermediary did with those partial bytes. Healthy probes extend queue time only after the full body is sent.
+
+A profile that sets `STATEFRAME_SEND_STALL_S` or `STATEFRAME_QUEUE_WAIT_MAX_S` is refused by earlier StateFrame versions with "unconsumed STATEFRAME settings". Keep a separate profile for older installs.
+
 The engine has a **33,344-token prompt budget** and requires a model server context slot that supports **65,536 tokens**. The slot is server capacity, not a recommendation for cache RAM. Set cache RAM sized to your machine. These are the sizes we built and measured with: a single 48 GB GPU (RTX A6000 class) running Qwen3.6-35B-A3B, a mixture-of-experts model (35B total, about 3B active per token), 4-bit UD-Q4_K_XL, under llama.cpp, with one server sharing a 262,144-token cache across 4 slots (`-np 4 -c 262144 --kv-unified`), so 65,536 tokens per run. A stock 24 GB card was not tested. They are the defaults; both can be changed (see Context size in docs/guide/running.md). Only the default 65,536-token slot is measured on long runs; other sizes (32,768 and 131,072 included) are tested on short scripted runs only.
 
 Large tasks or repositories can require more state and source context than fits. In that case, the engine may stop before completing the task.
@@ -159,11 +163,11 @@ If files in the working copy change while a request is being prepared (for examp
 
 ## Slow or shared hardware
 
-Each model request has a fixed 600-second timeout. If the model server is slow or shares its GPU with other work, a long answer can take more than 600 seconds. The request is then retried, and the server may finish the abandoned attempt anyway, using GPU time while the retry runs. On slow hardware, give the model server the GPU to itself during a run.
+Each model request normally has a 600-second timeout (`STATEFRAME_PER_REQUEST_TIMEOUT_S`). While no response bytes have arrived, StateFrame probes `/slots` and `/health` at the selected endpoint's origin with the request's key. Any HTTP answer, including 401, 404 or 503, permits a longer queue wait. `STATEFRAME_QUEUE_WAIT_MAX_S` caps the total silent wait at 1800 seconds by default, or the remaining run deadline if shorter; it must be finite and positive and can be set in the environment or a profile. A probe answer does not guarantee the model request is progressing. If probes give no answer for 90 seconds by default (`STATEFRAME_PROVIDER_LIVENESS_S`, which only a profile file can change), the request fails; with no successful probe by the per-request deadline, that deadline still applies. Once response bytes arrive, the per-request limit bounds a stalled response. A timed-out send may be retried, and the server may finish an abandoned attempt anyway, using GPU time. On slow hardware, give the model server the GPU to itself during a run.
 
 ## Time and step limits
 
-There is no time limit by default: a run continues until the engine finishes, and you can stop it any time with Ctrl-C. Pass `--timeout <seconds>` to set one. Each model request still has its own timeout, so a hung model server cannot hang the run.
+There is no time limit by default: a run continues until the engine finishes, and you can stop it any time with Ctrl-C. Pass `--timeout <seconds>` to set one. The request, queue-wait, liveness and run deadlines still bound silent or stalled model calls.
 
 There is no step limit by default either. Pass `--max-turns N` to stop after N model turns.
 

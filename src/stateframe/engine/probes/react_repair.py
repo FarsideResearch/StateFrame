@@ -23,6 +23,7 @@ import tempfile
 import textwrap
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -3068,21 +3069,41 @@ def _mark_http_contract(exc: BaseException) -> None:
         exc.failure_origin = "harness"
 
 
-def _await_endpoint(max_wait: int = 300) -> bool:
+def _failed_request_destination(capture) -> tuple[str, str]:
+    """Use the physical send's destination, falling back for uncaptured calls."""
+    return getattr(capture, "_provider_probe_destination", (API, KEY))
+
+
+def _await_endpoint(endpoint: str, key: str, max_wait: int = 300) -> bool:
     """E353 (the E338 sibling): after a connection-class failure, WAIT for the LLM
     endpoint to come back (pod OOM restarts take ~1-3 min) instead of burning the
     lane as ERR. Bounded; True when healthy again."""
-    base = API.rsplit("/v1/", 1)[0]
-    deadline = time.time() + max_wait
-    while time.time() < deadline:
-        try:
-            with urllib.request.urlopen(base + "/health", timeout=4) as r:
-                if b"ok" in r.read():
-                    return True
-        except Exception:                                            # noqa: BLE001
-            pass
-        time.sleep(10)
+    from kernel_bounded_http import provider_health_ok
+    deadline = time.monotonic() + max_wait
+    while time.monotonic() < deadline:
+        if provider_health_ok(endpoint, key, min(deadline, time.monotonic() + 4)):
+            return True
+        remaining = deadline - time.monotonic()
+        if remaining > 0:
+            time.sleep(min(10, remaining))
     return False
+
+
+def _transport_future_timeout(capture, wall_timeout: float,
+                              frozen_timeout_retry_active: bool) -> float:
+    """Keep the outer future alive through an entitled provider queue wait."""
+    from kernel_measurement import request_timeout_budget_seconds
+    from kernel_bounded_http import queue_wait_max_seconds
+
+    baseline = (max(request_timeout_budget_seconds(), wall_timeout * 2)
+                if frozen_timeout_retry_active else wall_timeout)
+    if capture is None:
+        return baseline
+    route_deadline = (getattr(capture, "route_deadline", None)
+                      if _frame_routes.ROUTES_ACTIVE else None)
+    if route_deadline is not None:
+        return max(0.001, route_deadline - time.monotonic())
+    return max(baseline, queue_wait_max_seconds() + wall_timeout)
 
 
 def _live_action_references(measurement, bolt, fileset, target=None) -> dict[str, list[object]]:
@@ -3170,7 +3191,7 @@ def ask_tools(messages, mt=4000, temp=None, tools=None, known_refs=None):
         ACTIVE_REQUEST, ProviderRequestTimeoutError, activate_turn_timing,
         is_provider_request_timeout_error,
         output_token_limits, per_request_timeout_seconds,
-        request_timeout_budget_seconds, request_timeouts,
+        request_timeouts,
         skip_capped_length_retry_enabled, timeout_retry_frozen_enabled,
         turn_timing_step,
     )
@@ -3376,12 +3397,8 @@ def ask_tools(messages, mt=4000, temp=None, tools=None, known_refs=None):
         _ex = _cf.ThreadPoolExecutor(max_workers=1)
         fut = _ex.submit(_one_call, body, socket_timeout)
         try:
-            future_timeout = (
-                max(request_timeout_budget_seconds(), wall_timeout * 2)
-                if frozen_timeout_retry_active else wall_timeout
-            )
-            if _frame_routes.ROUTES_ACTIVE and capture is not None and getattr(capture, "route_deadline", None) is not None:
-                future_timeout = max(0.001, capture.route_deadline - time.monotonic())
+            future_timeout = _transport_future_timeout(
+                capture, wall_timeout, frozen_timeout_retry_active)
             choice = fut.result(timeout=future_timeout)
             if capture is not None:
                 activate_turn_timing(capture.journal)
@@ -3464,7 +3481,7 @@ def ask_tools(messages, mt=4000, temp=None, tools=None, known_refs=None):
             if _is_connection_failure(_te):
                 print(f"    [kernel-wiring] endpoint failure ({type(_te).__name__}) — "
                       f"awaiting recovery")
-                if _await_endpoint():
+                if _await_endpoint(*_failed_request_destination(capture)):
                     continue                     # recovered: retry, attempt not wasted
             if attempt == POLICY.transport_attempts - 1:
                 raise
@@ -3630,7 +3647,7 @@ def ask(messages, mt=4000, temp=None):
     from kernel_measurement import (
         ACTIVE_REQUEST, ProviderRequestTimeoutError, activate_turn_timing,
         is_provider_request_timeout_error, per_request_timeout_seconds,
-        request_timeout_budget_seconds, request_timeouts,
+        request_timeouts,
         skip_capped_length_retry_enabled, timeout_retry_frozen_enabled,
     )
     capture = ACTIVE_REQUEST.get()
@@ -3695,10 +3712,8 @@ def ask(messages, mt=4000, temp=None):
         _ex = _cf.ThreadPoolExecutor(max_workers=1)
         fut = _ex.submit(_one_call, body, socket_timeout)
         try:
-            future_timeout = (
-                max(request_timeout_budget_seconds(), wall_timeout * 2)
-                if frozen_timeout_retry_active else wall_timeout
-            )
+            future_timeout = _transport_future_timeout(
+                capture, wall_timeout, frozen_timeout_retry_active)
             choice = fut.result(timeout=future_timeout)
             if capture is not None:
                 activate_turn_timing(capture.journal)

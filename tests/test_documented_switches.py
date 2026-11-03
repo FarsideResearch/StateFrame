@@ -24,6 +24,7 @@ PROFILE_ONLY = {
     "STATEFRAME_HTTP_GZIP",
     "STATEFRAME_PLAIN_GZIP",
     "STATEFRAME_PAGE_LOG",
+    "STATEFRAME_PROVIDER_LIVENESS_S",
 }
 # Placeholders in the extension guide and prefixes of per-role variables, not settings.
 EXAMPLES = {"STATEFRAME_MY_SWITCH"}
@@ -84,6 +85,8 @@ def test_shell_setting_reaches_the_engine_spec(monkeypatch, name):
         pytest.skip(f"{name} is not read by this engine")
     for other in runner.OPT_IN_SWITCHES:
         monkeypatch.delenv(other, raising=False)
-    value = runner.OPT_IN_SWITCHES[name][0]
+    # Numeric settings have no choice list; any in-range number exercises the path.
+    choices = runner.OPT_IN_SWITCHES[name]
+    value = choices[0] if choices else "120"
     monkeypatch.setenv(name, value)
     assert runner.resolve_opt_in_switches()[name] == value
