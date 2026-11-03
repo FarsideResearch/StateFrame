@@ -1,0 +1,9 @@
+schema = "stateframe-powerup/1"
+name = "sample"
+version = "1.0"
+summary = "Useful sample."
+default = "off"
+[activate]
+skill = true
+commands = true
+hooks = true

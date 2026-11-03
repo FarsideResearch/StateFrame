@@ -1,0 +1,11 @@
+{
+  "global": {
+    "sample": {
+      "digest": "5c14c91dfe65956e2fe9195bd2c388dc8cc187044b84b51361f3590cd8b0eb1f",
+      "mode": "on",
+      "settings": {}
+    }
+  },
+  "profiles": {},
+  "schema": "stateframe-powerup-state/1"
+}

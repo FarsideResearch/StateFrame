@@ -53,6 +53,16 @@ Hooks always use the execution sandbox. There is no host-execution option or uns
 
 If a process is killed while a hook has a durable intent but no completion record, StateFrame cannot know whether an outside effect occurred and refuses to resume that run. Completed hook decisions are served from the run tape. A hook script is pinned, but a hook that deliberately runs project code from the mutable working copy can be influenced by the agent's edits to that code. The `[USER HOOKS]` label describes the text's source; it does not make that text a prompt-injection boundary. See [Lifecycle hooks](docs/guide/hooks.md) for the write, network and size limits.
 
+## Powerups
+
+Offer and auto rules are evaluated once at run start; a file the agent creates later does not switch a powerup on. When a command or MCP powerup is active, user MCP servers are started once more in a temporary repository snapshot to measure the tool schema allowance, because the engine's own discovery depends on the run's workspace. Powerup tools are capped at six per run. A malformed `powerups.json` state file turns every powerup off for that run, with a notice naming the file, rather than falling back to manifest defaults. Promoted powerups that declare a `mutation` executor are skipped until an executor is registered. See [Powerups](docs/guide/powerups.md).
+
+- Under `--shell unrestricted --shell-sandbox off`, powerup command tools run unsandboxed with full host access as the user running StateFrame, like every other shell tool; MCP servers and hooks stay sandboxed.
+- `--powerup NAME=on` runs an installed powerup that was never enabled, because naming it on the command line is treated as the operator's choice; a changed tree is still refused.
+- Promotion provenance is read from the run directory, so a user who can write that directory can forge it. Promoted units still install off and need `enable`.
+- A local process running as the same user can swap a powerup between its final digest check and use, or edit the run spec that resume compares against. Private directories limit this to the user's own processes.
+- A string setting is passed as one whole argument but is not otherwise restricted, so a value can be read as an option by the program, and `test-gate`'s `check_command` chooses the program it runs. Settings come only from the user, the command line or a trusted project.
+
 ## Checks
 
 Ordinary non-verbose `go test` output reports package success without a positive test count, so it receives the weaker `verified by check command` label. Use `go test -v` to include named passing tests for test verification.

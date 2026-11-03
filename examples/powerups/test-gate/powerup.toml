@@ -1,0 +1,14 @@
+schema = "stateframe-powerup/1"
+name = "test-gate"
+version = "1.0.0"
+summary = "Require a configured check command before submission."
+default = "off"
+
+[offer]
+task_matches = ["(?i)\\btest", "(?i)\\bcheck"]
+loops = ["composed"]
+
+[settings.check_command]
+type = "string"
+default = "python3 -B -m pytest -q -p no:cacheprovider"
+max_length = 500

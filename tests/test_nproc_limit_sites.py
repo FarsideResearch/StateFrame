@@ -6,6 +6,8 @@ import sys
 
 import pytest
 
+from _portable import TRUE
+
 import kernel_execution_policy as policy
 import kernel_test_isolation as isolation
 import sf_launch
@@ -98,7 +100,7 @@ def test_outer_policy_passes_budget_to_builder_without_host_count(monkeypatch, t
         received.update(kwargs)
         return command, env
 
-    policy._prepared(["/bin/true"], tmp_path, {}, None, False, 64, isolation_builder=build)
+    policy._prepared([TRUE], tmp_path, {}, None, False, 64, isolation_builder=build)
     assert received["nproc_budget"] == 64
 
 
@@ -111,7 +113,7 @@ def test_generic_check_keeps_linux_nproc_budget(monkeypatch, tmp_path):
         received.update(kwargs)
         return command, env
 
-    policy._prepared(["/bin/true"], tmp_path, {}, None, True, 32,
+    policy._prepared([TRUE], tmp_path, {}, None, True, 32,
                      generic_check=True, isolation_builder=build)
     assert received == {"readonly_workspace": True, "generic_check": True,
                         "nproc_budget": 32}
@@ -195,7 +197,7 @@ def test_outer_launcher_counts_inside_namespace_before_exec(monkeypatch):
         raise RuntimeError("exec reached")
 
     monkeypatch.setattr(sf_launch.os, "execvpe", stop_exec)
-    monkeypatch.setattr(sys, "argv", ["sf_launch.py", "--nproc-budget", "64", "/bin/true"])
+    monkeypatch.setattr(sys, "argv", ["sf_launch.py", "--nproc-budget", "64", TRUE])
     assert sf_launch.main() == 125
     assert calls == [2 + 64 + sf_launch._NPROC_HEADROOM]
 
@@ -227,7 +229,7 @@ def test_outer_check_uses_and_cleans_up_optional_cgroup(monkeypatch, tmp_path):
 
     monkeypatch.setattr(policy, "sandboxed_popen", spawn)
     monkeypatch.setattr(policy, "_collect", lambda *args, **kwargs: ("ok", "", False, False, False))
-    result = policy.run_sandboxed(["/bin/true"], tmp_path)
+    result = policy.run_sandboxed([TRUE], tmp_path)
     assert result.completed.stdout == "ok"
     assert seen == [group]
     assert not group.exists()

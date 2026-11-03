@@ -1,0 +1,15 @@
+schema = "stateframe-powerup/1"
+name = "py-format"
+version = "1.0.0"
+summary = "Format changed Python files with ruff after each edit."
+default = "off"
+
+[offer]
+any_files = ["pyproject.toml", "*.py"]
+loops = ["composed"]
+
+[settings.line_length]
+type = "integer"
+default = 100
+min = 40
+max = 200

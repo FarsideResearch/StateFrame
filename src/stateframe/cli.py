@@ -137,6 +137,11 @@ def _add_task_arguments(command: argparse.ArgumentParser, *, for_run: bool = Fal
         command.add_argument("--" + flag, action="append", default=[])
     command.add_argument("--skill", action="append", default=[], metavar="NAME_OR_PATH",
                          help="load a selected instruction bundle (repeatable)")
+    command.add_argument("--powerup", action="append", default=[], metavar="NAME[=MODE]|PATH",
+                         help="select a powerup for this run (repeatable)")
+    command.add_argument("--powerup-set", action="append", default=[], metavar="NAME.KEY=VALUE",
+                         help="override one powerup setting (repeatable)")
+    command.add_argument("--no-powerups", action="store_true", help="disable all powerups for this run")
     command.add_argument("--trust-skill-tools", action="store_true",
                          help="offer selected skills' command definitions")
     project = command.add_mutually_exclusive_group()
@@ -218,6 +223,8 @@ def build_parser() -> argparse.ArgumentParser:
     trust_cmd = hooks_subcommands.add_parser("trust", help="trust or withdraw a repository hook file")
     trust_cmd.add_argument("--repo", required=True, type=Path, help="repository containing .stateframe/hooks.json")
     trust_cmd.add_argument("--remove", action="store_true", help="withdraw trust for this repository hook file")
+    from .powerups_cli import register as register_powerups
+    register_powerups(commands)
     return parser
 
 
@@ -267,6 +274,8 @@ def _run_options(args: argparse.Namespace, endpoint: Endpoint) -> RunOptions:
                                     str(Path(args.instructions).expanduser().resolve()) if args.instructions
                                     else project_instructions.DEFAULT_MODE),
                       hooks_files=tuple(Path(path).expanduser().resolve() for path in args.hooks),
+                      powerup_requests=tuple(args.powerup), powerup_sets=tuple(args.powerup_set),
+                      no_powerups=args.no_powerups,
                       no_project_hooks=args.no_project_hooks,
                       hooks_repo=args.repo.resolve(),
                       route_cli=args.route, routes_file=args.routes)
@@ -400,6 +409,9 @@ def main(argv: list[str] | None = None) -> int:
             from .hook_host import trust_project_hooks
             trust_project_hooks(args.repo, remove=args.remove)
             return 0
+        if args.command == "powerups":
+            from .powerups_cli import handle as handle_powerups
+            return handle_powerups(args)
         if args.command == "resume":
             endpoint = None
             if args.endpoint or args.api_key_env:

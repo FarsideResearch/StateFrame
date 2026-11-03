@@ -89,6 +89,8 @@ Runs save checkpoints by default, so an interrupted run resumes from where it st
 
 Install a reusable instruction bundle with `stateframe skill install path/to/skill`, then select it with `--skill NAME` on `run` or `chat`. The run shows a small catalog and loads the body only when it calls `skill_load`. Optional commands need `--trust-skill-tools`. The [skills guide](docs/guide/skills.md) covers the format, limits and resume rules.
 
+Powerups package skills, commands, hooks, and optional MCP definitions for persistent selection. Install and enable one with `stateframe powerups install DIR` and `stateframe powerups enable NAME`, or select it for one run with `--powerup PATH`. See the [powerups guide](docs/guide/powerups.md) and [working examples](examples/powerups/).
+
 ## Project instructions
 
 Add `--instructions` to `run` or `chat` to give the agent your repository's own `AGENTS.md` (or `CLAUDE.md` when there is no `AGENTS.md`), or `--instructions=FILE` to use a specific file. The text is added to the end of StateFrame's system prompt in every request, framed as untrusted repository content: it can describe conventions and commands, but it cannot add tools, widen the sandbox or override engine rules. It remains off by default: a comparison on the bundled examples showed no gain, and broader comparisons found no reliable gain from general project guidance (see [known limitations](KNOWN_LIMITATIONS.md)). Details in [Running](docs/guide/running.md#project-instructions).
@@ -101,6 +103,7 @@ Set `STATEFRAME_REQUIREMENT_RECHECK=on` in the shell or a custom profile to get 
 
 - **Find and read:** search the code, list files, read files, and recall what it found earlier in the run.
 - **Use selected skills:** see a bounded catalog of explicitly selected instruction bundles and load one by name. See [Skills](docs/guide/skills.md).
+- **Use powerups:** keep reusable skill, command, hook and MCP bundles installed and turn them on per user, profile, project or run. See [Powerups](docs/guide/powerups.md).
 - **Change code:** make a targeted edit, replace an exact string, insert code at a spot, create, delete, or move a file, or rewrite a whole module.
 - **Run commands:** foreground shell commands and read-only background jobs with bounded, budget-aware replies, per-run dependencies, protected-test restoration and replay verification. See [agent tools](docs/guide/tools.md).
 - **Inspect and organize:** read sanitized Git history, fetch public documentation when enabled, and delete or move files within the task's edit scope. Explicitly trusted command tools can be supplied with `--tools`; local MCP stdio servers can be supplied with `--mcp`.

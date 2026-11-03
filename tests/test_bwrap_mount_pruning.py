@@ -4,6 +4,8 @@ from pathlib import Path
 
 import pytest
 
+from _portable import TRUE
+
 from kernel_exec_capability import shell_capability
 from kernel_test_isolation import _mount_points_from, _uncovered_mounts, capability_command
 
@@ -65,7 +67,7 @@ def test_builder_emits_each_host_tree_once_and_keeps_every_root_visible(tmp_path
     cap = shell_capability(workspace=tmp_path / "workspace", run_env_dir=tmp_path / "env",
                            scratch_home=tmp_path / "home", network="none", writable=False,
                            extra_read_roots=(tree, tree / "bin" / "tool", tree / "lib"))
-    command, _ = capability_command(["/bin/true"], cap, platform_backend="bwrap")
+    command, _ = capability_command([TRUE], cap, platform_backend="bwrap")
     binds = bwrap_binds(command)
     mounted = [Path(path) for _, path in binds]
     assert len(mounted) == len(set(mounted))
@@ -113,11 +115,11 @@ def test_builder_without_mount_table_binds_every_root(tmp_path, monkeypatch):
     cap = shell_capability(workspace=tmp_path / "workspace", run_env_dir=tmp_path / "env",
                            scratch_home=tmp_path / "home", network="none", writable=False,
                            extra_read_roots=(tree, tree / "alias"))
-    command, _ = capability_command(["/bin/true"], cap, platform_backend="bwrap")
+    command, _ = capability_command([TRUE], cap, platform_backend="bwrap")
     mounted = [Path(path) for _, path in bwrap_binds(command)]
     assert tree.resolve() / "lib" / "tool" in mounted and tree.resolve() in mounted
     monkeypatch.setattr("kernel_test_isolation._host_mount_points", lambda: ROOT_ONLY)
-    command, _ = capability_command(["/bin/true"], cap, platform_backend="bwrap")
+    command, _ = capability_command([TRUE], cap, platform_backend="bwrap")
     pruned = [Path(path) for _, path in bwrap_binds(command)]
     assert tree.resolve() in pruned and tree.resolve() / "lib" / "tool" not in pruned
 

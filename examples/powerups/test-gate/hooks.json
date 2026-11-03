@@ -1,0 +1,21 @@
+{
+  "schema": "stateframe-hooks/1",
+  "hooks": [
+    {
+      "name": "test-gate-availability",
+      "event": "session_start",
+      "argv": ["python3", "gate.py", "--check-program", "{setting:check_command}"],
+      "files": ["gate.py"],
+      "network": "none"
+    },
+    {
+      "name": "test-gate-stop",
+      "event": "stop",
+      "argv": ["python3", "gate.py", "--run", "{setting:check_command}"],
+      "files": ["gate.py"],
+      "network": "none",
+      "on_error": "block",
+      "timeout": 125
+    }
+  ]
+}

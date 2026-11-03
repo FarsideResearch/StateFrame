@@ -1,0 +1,10 @@
+{
+ "entries": [
+  {
+   "digest": "6325665fcbb75d8c21c07befe2767dd652551d7c17813f4ec7e92758cf1432bb",
+   "file": "@REPO@/.stateframe/powerups/sample",
+   "repo": "@REPO@"
+  }
+ ],
+ "schema": "stateframe-hook-trust/1"
+}

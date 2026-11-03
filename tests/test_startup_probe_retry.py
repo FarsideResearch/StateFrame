@@ -1,6 +1,7 @@
 """The interpreter startup probe retries once, with a doubled wall, only when it timed out."""
 from __future__ import annotations
 
+import sys
 from types import SimpleNamespace
 
 import pytest
@@ -31,7 +32,7 @@ def probes(monkeypatch):
 def test_a_timeout_is_retried_once_with_double_the_wall(probes):
     calls, script = probes
     script += [_result(timed_out=True), _result()]
-    assert runner._startup_probe("/usr/bin/python3", "import sys", label="engine interpreter x") == b"[3, 12, 0]"
+    assert runner._startup_probe(sys.executable, "import sys", label="engine interpreter x") == b"[3, 12, 0]"
     assert calls == [runner.STARTUP_PROBE_SECONDS, 2 * runner.STARTUP_PROBE_SECONDS]
 
 
@@ -39,7 +40,7 @@ def test_shell_setting_changes_both_probe_walls(probes, monkeypatch, tmp_path):
     monkeypatch.setenv("STATEFRAME_STARTUP_PROBE_SECONDS", "2.5")
     calls, script = probes
     script += [_result(timed_out=True), _result()]
-    runner._startup_probe("/usr/bin/python3", "import sys", label="engine interpreter x")
+    runner._startup_probe(sys.executable, "import sys", label="engine interpreter x")
     assert calls == [2.5, 5.0]
     assert "STATEFRAME_STARTUP_PROBE_SECONDS" not in runner.ignored_shell_settings()
     options = runner.RunOptions(repo=tmp_path, task="test", endpoint=None)
@@ -51,7 +52,7 @@ def test_invalid_shell_setting_is_refused_before_probe(probes, monkeypatch, valu
     monkeypatch.setenv("STATEFRAME_STARTUP_PROBE_SECONDS", value)
     calls, _script = probes
     with pytest.raises(runner.RunError, match="STATEFRAME_STARTUP_PROBE_SECONDS"):
-        runner._startup_probe("/usr/bin/python3", "import sys", label="engine interpreter x")
+        runner._startup_probe(sys.executable, "import sys", label="engine interpreter x")
     assert calls == []
 
 
@@ -66,7 +67,7 @@ def test_two_timeouts_say_timed_out_under_load(probes):
     calls, script = probes
     script += [_result(timed_out=True), _result(timed_out=True)]
     with pytest.raises(runner.RunError) as error:
-        runner._startup_probe("/usr/bin/python3", "import sys", label="engine interpreter x")
+        runner._startup_probe(sys.executable, "import sys", label="engine interpreter x")
     message = str(error.value)
     assert "timed out under load" in message
     assert f"{runner.STARTUP_PROBE_SECONDS} s and then {2 * runner.STARTUP_PROBE_SECONDS} s" in message
@@ -81,7 +82,7 @@ def test_a_real_failure_is_not_retried_and_is_not_called_a_timeout(probes, resul
     calls, script = probes
     script += [result, _result()]
     with pytest.raises(runner.RunError) as error:
-        runner._startup_probe("/usr/bin/python3", "import pytest", label="test interpreter x")
+        runner._startup_probe(sys.executable, "import pytest", label="test interpreter x")
     assert len(calls) == 1
     assert "timed out" not in str(error.value)
 
@@ -90,7 +91,7 @@ def test_a_failure_after_a_timeout_reports_the_failure(probes):
     calls, script = probes
     script += [_result(timed_out=True), _result(exit_code=1, output=b"boom")]
     with pytest.raises(runner.RunError, match="interpreter is broken.*boom"):
-        runner._startup_probe("/usr/bin/python3", "import sys", label="engine interpreter x")
+        runner._startup_probe(sys.executable, "import sys", label="engine interpreter x")
     assert len(calls) == 2
 
 
@@ -98,4 +99,4 @@ def test_a_nonzero_exit_says_the_interpreter_is_broken(probes):
     _calls, script = probes
     script += [_result(exit_code=1, output=b"boom")]
     with pytest.raises(runner.RunError, match="interpreter is broken"):
-        runner._startup_probe("/usr/bin/python3", "import sys", label="engine interpreter x")
+        runner._startup_probe(sys.executable, "import sys", label="engine interpreter x")
