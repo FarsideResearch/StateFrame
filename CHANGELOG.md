@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.3.28 (2026-11-03)
 
 - Runs no longer stop mid-task with `FrameRequestAllocationError` (`closure_units_undelivered`, with or without `final_wire_proof_missing` or `closure_omissions_unreconciled`) when the last fit before sending drops a selected source page. StateFrame now defers that page behind its read route, the same way it already did earlier in allocation, and proves the rebuilt request again. Deferral is bounded to one per selected file; other proof failures still refuse.
 - On a 22-file repository, v0.3.10 refused mid-run in 3 of 3 live runs; with this change, 0 of 3 refused.
