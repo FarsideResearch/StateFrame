@@ -650,8 +650,13 @@ def author_final_tool_surface(
         listed_tools = final_tools
         dispatch_tools = final_tools
         if stable_tool_head_enabled():
-            from kernel_stable_tool_head import callable_subset, listed_tools as stable_listed_tools
-            listed_tools = stable_listed_tools(runtime, final_tools)
+            from kernel_stable_tool_head import (
+                callable_subset,
+                listed_tools as stable_listed_tools,
+                run_offerable_tools,
+            )
+            offerable_tools = run_offerable_tools(runtime)
+            listed_tools = stable_listed_tools(runtime, final_tools, offerable_tools)
             dispatch_tools = callable_subset(listed_tools, names)
             if set(_tool_names(dispatch_tools)) != set(names):
                 raise _SurfaceUnavailable("stable_tool_head_unbound")
