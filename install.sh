@@ -121,7 +121,26 @@ if [[ -e "$VENV" || -L "$VENV" ]]; then
   die "install target already exists: $VENV (choose a new SF_HOME to preserve the existing environment)"
 fi
 
-mkdir -p "$SF_HOME"
+mkdir -p -m 700 "$SF_HOME"
+if ! "$PYTHON_PATH" - "$SF_HOME" <<'PY'
+import os
+import stat
+import sys
+
+directory = sys.argv[1]
+flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+descriptor = os.open(directory, flags)
+try:
+    info = os.fstat(descriptor)
+    if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid():
+        raise PermissionError("install directory is not owned by this user")
+    os.fchmod(descriptor, 0o700)
+finally:
+    os.close(descriptor)
+PY
+then
+  die "install directory must be a real directory owned by this user: $SF_HOME"
+fi
 if ! "$PYTHON_PATH" -m venv "$VENV"; then
   die "could not create isolated virtual environment at $VENV"
 fi

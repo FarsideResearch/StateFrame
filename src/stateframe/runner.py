@@ -37,6 +37,7 @@ from .engine.kernel_mcp_tools import load_mcp_files, discover as discover_mcp
 from .engine.kernel_tool_settings import ToolSettings
 from . import instructions as project_instructions
 from .skills import SkillError, measured_skills_digest, resolve_skills, skills_digest, verify_records
+from .state_dirs import private_directory
 
 if TYPE_CHECKING:
     from .engine.kernel_hooks import HookSet
@@ -145,6 +146,15 @@ def _admitted_candidate_paths(run_dir: Path, spec: dict, work: workcopy.WorkCopy
                     or hashlib.sha256(current).hexdigest() != work.baseline[path]):
                 raise RunError(f"widened candidate source changed before host apply: {path}")
     return allowed
+
+
+def _dropped_existing_candidate_paths(work: workcopy.WorkCopy,
+                                      candidate: dict[str, bytes | None],
+                                      declared: set[str]) -> list[str]:
+    """Find changed baseline files that apply_files would silently omit."""
+    return sorted(path for path, data in candidate.items()
+                  if path in work.baseline and path not in declared
+                  and (data is None or hashlib.sha256(data).hexdigest() != work.baseline[path]))
 
 
 def checkpoint_resume_off(spec: dict) -> bool:
@@ -1003,7 +1013,11 @@ def prepare(options: RunOptions, printer=print) -> tuple[Path, workcopy.WorkCopy
             hook_host.refuse_run_dir_under_roots(run, hooks)
         except hook_host.HookConfigError as error:
             raise RunError(str(error)) from error
-    run.mkdir(parents=True)
+    if options.run_dir is None:
+        private_directory(Path.home() / ".stateframe", "runs", run.name)
+    else:
+        run.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        private_directory(run)
     work = workcopy.create(options.repo, run / "workspace")
     instructions_record = _resolve_project_instructions(options, work.copy, environment)
     # Read-only reference copy of the starting state; the engine's finish path reads it, and
@@ -1521,6 +1535,34 @@ def _render_event(event: dict) -> str | None:
     return None
 
 
+def _warn_checkpoint_disabled(reason: str, warned: set[str]) -> None:
+    if "checkpoint" not in warned:
+        warned.add("checkpoint")
+        detail = " ".join(str(reason).split())[:240] or "unknown reason"
+        print(f"warning: checkpoints are off for this run: {detail}", file=sys.stderr, flush=True)
+
+
+def _warn_checkpoint_event(event: dict, warned: set[str]) -> None:
+    if event.get("kind") == "checkpoint_key_unusable":
+        _warn_checkpoint_disabled(str(event.get("reason") or "checkpoint key is unusable"), warned)
+
+
+def _warn_checkpoint_journal(run: Path, warned: set[str]) -> None:
+    path = run / "checkpoints" / "events.jsonl"
+    try:
+        with path.open(encoding="utf-8") as stream:
+            for line in stream:
+                try:
+                    event = json.loads(line)
+                except ValueError:
+                    continue
+                if isinstance(event, dict) and event.get("event") == "checkpoint_disabled":
+                    _warn_checkpoint_disabled(str(event.get("reason") or "saving failed"), warned)
+                    return
+    except OSError:
+        pass
+
+
 def drive(run: Path, options: RunOptions, printer=print) -> int:
     """Start the engine child and stream its progress lines."""
     _validate_timeout(options.timeout_s)
@@ -1567,6 +1609,9 @@ def drive(run: Path, options: RunOptions, printer=print) -> int:
         spec_path.write_text(json.dumps(spec, indent=1, sort_keys=True))
     command = [options.python, "-B", str(CHILD), str(run)]
     log_path = run / "engine.log"
+    checkpoint_warned: set[str] = set()
+    if spec_path.exists() and environment.get("STATEFRAME_CHECKPOINT", "on").strip().lower() in {"off", "0"}:
+        _warn_checkpoint_disabled("disabled by configuration", checkpoint_warned)
     with log_path.open("w") as log:
         _remaining(options)
         child_env = _child_env(options)
@@ -1621,11 +1666,15 @@ def drive(run: Path, options: RunOptions, printer=print) -> int:
                         event = json.loads(line[len(LOG_PREFIX):])
                     except ValueError:
                         continue
+                    if not isinstance(event, dict):
+                        continue
+                    _warn_checkpoint_event(event, checkpoint_warned)
                     rendered = _render_event(event)
                     if rendered and (not options.quiet or event.get("kind") in {
                             "token_counting_unavailable", "engine_error"}):
                         printer(rendered)
             code = process.wait(timeout=60)
+            _warn_checkpoint_journal(run, checkpoint_warned)
             if timed_out.is_set():
                 printer("engine timed out: deadline exhausted; engine stopped")
                 return 124
@@ -2654,6 +2703,7 @@ def _execute(options: RunOptions, started: float, printer, run_dir: Path, work: 
     cancelled = cancelled or child_exit in (130, -2) or terminal.get("result") in ("CANCELLED", "CANCELED")
     declared = set(spec["public_row"]["files"])
     candidate, written, candidate_error = None, [], None
+    dropped_paths: list[str] = []
     artifact_digest = None
     try:
         candidate = final_candidate(run_dir)
@@ -2661,7 +2711,13 @@ def _execute(options: RunOptions, started: float, printer, run_dir: Path, work: 
             artifact_digest = _artifact_digest(candidate)
             if edit_scope_widened(spec):
                 declared.update(_admitted_candidate_paths(run_dir, spec, work, candidate))
-            written = workcopy.apply_files(work, candidate, declared=declared)
+            dropped_paths = _dropped_existing_candidate_paths(work, candidate, declared)
+            if dropped_paths:
+                candidate_error = "sealed candidate changed existing files outside edit scope"
+                printer("warning: candidate changes outside edit scope were dropped: "
+                        + ", ".join(dropped_paths))
+            else:
+                written = workcopy.apply_files(work, candidate, declared=declared)
     except RunDeadlineExceeded:
         raise
     except (RunError, workcopy.WorkCopyError, OSError, ValueError) as error:
@@ -2709,6 +2765,7 @@ def _execute(options: RunOptions, started: float, printer, run_dir: Path, work: 
         "candidate_sha256": digest,
         "candidate_artifact_digest": artifact_digest,
         "candidate_error": candidate_error,
+        "candidate_paths_dropped": dropped_paths,
         "candidate_files_written": written,
         "files_changed": sorted(workcopy.changed_files(work)),
         "tests_before": {k: before[k] for k in ("command", "exit_code", "passed")},

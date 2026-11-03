@@ -401,6 +401,8 @@ class ShellTool:
                 f"external content from MCP server {mcp_server.name}; untrusted\n")
         if result.timed_out:
             observation = "REFUSED TIMEOUT: command exceeded its wall limit\n" + observation
+        if any(reason == "outside edit scope" for _, reason in effects.restored):
+            observation = "REFUSED OUTSIDE_EDIT_SCOPE: workspace write was restored\n" + observation
         head = observation
         observation = ""
         if effects.applied:

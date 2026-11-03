@@ -35,10 +35,10 @@ def setup_tool(tmp_path):
     row = {"files": {"app.py": "VALUE = 1\n"}, "scoped_edits": False,
            "allowed_product_paths": ["app.py"], "new_file_roots": []}
 
-    def make(action=None, settings=None, cleanup=True):
+    def make(action=None, settings=None, cleanup=True, row_override=None):
         process = ProcessBoundary(action, cleanup=cleanup)
         tool = ShellTool(run, settings or ToolSettings(run_env=False), {}, process)
-        tool.bind(root, row, {str(root / "test_app.py")})
+        tool.bind(root, row_override or row, {str(root / "test_app.py")})
         configure_replay(run, active=False)
         return tool, process
     return make, root, run
@@ -80,6 +80,23 @@ def test_shell_restores_protected_test_and_keeps_product_edit(setup_tool):
     assert (root / "app.py").read_text() == "VALUE = 2\n"
     assert [(e.path, e.change) for e in reply.applied] == [("app.py", "modified")]
     assert "restored (not allowed): test_app.py" in reply.observation
+
+
+def test_shell_reports_restored_out_of_scope_write_as_refused(setup_tool):
+    make, root, _ = setup_tool
+    (root / "rates.py").write_text("RATE = 1\n")
+    row = {"files": {"app.py": "VALUE = 1\n"}, "scoped_edits": True,
+           "tier": "USER-REPO", "allowed_product_paths": ["app.py"],
+           "new_file_roots": []}
+
+    def write(cwd):
+        (cwd / "rates.py").write_text("RATE = 2\n")
+
+    tool, _ = make(write, row_override=row)
+    reply = tool.execute({"command": "python change.py"}, "call-1")
+    assert reply.observation.startswith("REFUSED OUTSIDE_EDIT_SCOPE:")
+    assert "rates.py (outside edit scope)" in reply.observation
+    assert (root / "rates.py").read_text() == "RATE = 1\n"
 
 
 def test_replay_reexecutes_local_and_serves_taped_bytes(setup_tool):
