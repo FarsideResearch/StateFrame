@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- Runs no longer stop mid-task with `FrameRequestAllocationError` (`closure_units_undelivered`, with or without `final_wire_proof_missing` or `closure_omissions_unreconciled`) when the last fit before sending drops a selected source page. StateFrame now defers that page behind its read route, the same way it already did earlier in allocation, and proves the rebuilt request again. Deferral is bounded to one per selected file; other proof failures still refuse.
+- On a 22-file repository, v0.3.10 refused mid-run in 3 of 3 live runs; with this change, 0 of 3 refused.
+- New test guard: every recorded allocation refusal we have (34 runs) is replayed without a model and must finish. A deliberately broken deferral makes it fail.
+- When nothing is dropped, request bytes are unchanged.
+
 ## 0.3.27 (2026-11-03)
 
 - A model request waiting for a busy server slot now stays alive past its per-request timeout when `/slots` or `/health` returns any HTTP status, including 401, 404, 501, and 503. The extra wait ends at the run deadline or `STATEFRAME_QUEUE_WAIT_MAX_S` (1800 seconds by default). A response that has started still has its per-request deadline. Each extended send records `provider_queue_wait`, and the run prints one queue warning.

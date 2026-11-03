@@ -1,0 +1,33 @@
+{
+ "schema": "stateframe-allocation-replay-case/1",
+ "case_id": "econ-flat-sub-1",
+ "origin_run_id": "parallel/probe/ab/rel_10e13c1_flat/flat/r1_sub_20261102T145616/sub-1",
+ "origin_runs": [
+  "parallel/probe/ab/rel_10e13c1_flat/flat/r1_sub_20261102T145616/sub-1"
+ ],
+ "original_refusal_code": "FrameRequestAllocationError",
+ "original_failure_codes": [
+  "final_wire_proof_missing",
+  "closure_units_undelivered"
+ ],
+ "original_receipt_status": "PARTIAL",
+ "original_proof_status": "FAILED",
+ "sends_before_refusal": 5,
+ "origin_send_counts": [
+  {
+   "run_id": "parallel/probe/ab/rel_10e13c1_flat/flat/r1_sub_20261102T145616/sub-1",
+   "sends_before_refusal": 5
+  }
+ ],
+ "profile_settings": {
+  "name": "r2hc3_liveness600",
+  "base_profile": "r2hc3",
+  "switch_overrides": {
+   "STATEFRAME_PER_REQUEST_TIMEOUT_S": "1500",
+   "STATEFRAME_PROVIDER_LIVENESS_S": "600"
+  }
+ },
+ "source_type": "wire_responses",
+ "tape_sha256": "115a15fa1905a3100fafd492ddc43bcc8fa261eb63ed69495958ca3c598cf24d",
+ "repo": "_repos/af8f030aa66d"
+}

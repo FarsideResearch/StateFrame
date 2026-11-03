@@ -1,0 +1,33 @@
+{
+ "schema": "stateframe-allocation-replay-case/1",
+ "case_id": "legacy-guard22",
+ "origin_run_id": "guard22/tape22.script.json",
+ "origin_runs": [
+  "guard22/tape22.script.json"
+ ],
+ "original_refusal_code": "FrameRequestAllocationError",
+ "original_failure_codes": [
+  "final_wire_proof_missing"
+ ],
+ "original_receipt_status": null,
+ "original_proof_status": null,
+ "sends_before_refusal": 13,
+ "origin_send_counts": [
+  {
+   "run_id": "guard22/tape22.script.json",
+   "sends_before_refusal": 13
+  }
+ ],
+ "profile_settings": {
+  "name": "live313",
+  "base_profile": "r2hc3",
+  "switch_overrides": {
+   "STATEFRAME_PER_REQUEST_TIMEOUT_S": "1500",
+   "STATEFRAME_PROVIDER_LIVENESS_S": "600"
+  }
+ },
+ "source_type": "supplied_tape_script",
+ "tape_sha256": "9f8e2b320ae0ee87f313bef1acd4057763616c6bd7399fc0f9d35790f087f541",
+ "source_note": "Guard script identifies a v0.3.5 live final-wire refusal.",
+ "repo": "_repos/0420a86aadd2"
+}

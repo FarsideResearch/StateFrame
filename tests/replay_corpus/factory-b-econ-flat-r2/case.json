@@ -1,0 +1,61 @@
+{
+ "schema": "stateframe-allocation-replay-case/1",
+ "case_id": "factory-b-econ-flat-r2",
+ "origin_run_id": "alloc-repros/factory-0.3.8-factory-b/x/econ_flat_r2-20261102T233142Z",
+ "origin_runs": [
+  "alloc-repros/factory-0.3.8-factory-b/x/econ_flat_r2-20261102T233142Z"
+ ],
+ "original_refusal_code": "FrameRequestAllocationError",
+ "original_failure_codes": [
+  "final_wire_proof_missing",
+  "closure_units_undelivered"
+ ],
+ "original_receipt_status": "PARTIAL",
+ "original_proof_status": "FAILED",
+ "sends_before_refusal": 3,
+ "origin_send_counts": [
+  {
+   "run_id": "alloc-repros/factory-0.3.8-factory-b/x/econ_flat_r2-20261102T233142Z",
+   "sends_before_refusal": 3
+  }
+ ],
+ "profile_settings": {
+  "name": "factory-0.3.8",
+  "base_profile": "r2hc3",
+  "switch_overrides": {
+   "STATEFRAME_BUDGET_UNIT": "response",
+   "STATEFRAME_CEILING": "40000",
+   "STATEFRAME_CHECKPOINT": "on",
+   "STATEFRAME_FRAMEFIT": "on",
+   "STATEFRAME_FRAMEFIT5_ACTION_CONTEXT": "on",
+   "STATEFRAME_FRAMEFIT5_JOURNAL_ORIGIN": "on",
+   "STATEFRAME_FRAME_BUDGET": "on",
+   "STATEFRAME_FRAME_DIET": "on",
+   "STATEFRAME_HOST_CLOSURE": "on",
+   "STATEFRAME_HOST_CLOSURE_RENDER_DEGRADE": "on",
+   "STATEFRAME_READ_RECEIPT": "on",
+   "STATEFRAME_SOURCE_PROOF_DEFERRAL": "on",
+   "STATEFRAME_SOURCE_REQUALIFY": "on",
+   "STATEFRAME_SOURCE_WORKING_SET": "on"
+  },
+  "recorded_profile": "econ_flat_r2.profile.json"
+ },
+ "recorded_settings": {
+  "prompt_cache_slot": {
+   "selection": "explicit",
+   "slot": 1
+  },
+  "react": {
+   "REACT_SEED": "924107",
+   "REACT_SLOT_ID": "1",
+   "REACT_MAX_OUTPUT_TOKENS": "24000",
+   "REACT_REQUEST_TIMEOUT_S": "1800.0",
+   "REACT_TOOLCALL": "1",
+   "REACT_NATIVE_TOOL_BATCHES": "1"
+  },
+  "model": "allocation-replay-model"
+ },
+ "source_type": "wire_responses",
+ "tape_sha256": "742c1be93266cd30588ed77fb4ba0b905ab624eb70d2c2de5e79ed77f5cf3c06",
+ "repo": "_repos/be4f7b3b54c2"
+}

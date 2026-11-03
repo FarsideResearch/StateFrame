@@ -1,0 +1,27 @@
+# Let customers spend reward points at checkout
+
+Customers can earn reward points today but have no way to spend them. Product wants points to be redeemable as a credit against the merchandise on an order.
+
+## Business rules
+1. Points redeem in blocks of 100. Every 100 points is worth $1.00 of credit. A request for 0 points means "no redemption" and checkout must behave exactly as it does today.
+2. A redemption that is negative or not a multiple of 100 is rejected with a ValueError.
+3. A customer can only redeem points they still have: available points = all points ever earned minus all points ever redeemed. Asking for more is rejected with a ValueError whose message contains "insufficient points".
+4. Order of operations: the coupon (if any) is chosen and applied first, exactly as today, using the cart subtotal before any points credit. The points credit is then subtracted from the discounted merchandise amount.
+5. The credit can never exceed the discounted merchandise amount. If it would, reject the order with a ValueError whose message contains "exceeds". A credit exactly equal to it is allowed and leaves a $0.00 merchandise charge.
+6. The credit lowers the tax base. Tax is charged on merchandise after coupon and after credit, still rounded once, half a cent up. Shipping stays untaxed and is never reduced by the credit.
+7. When an invoice has both taxable and tax-exempt lines, the credit comes off the taxable amount first; the taxable base never goes below zero.
+8. Points earned on the order are calculated as today, on the invoice total the customer actually pays (after credit). The active-customer bonus still looks only at points earned in the lookback period; redemptions do not reduce it.
+9. The redemption is recorded on the customer's account dated the order's ship date and tagged with the order id. Lifetime points keep meaning "total ever earned".
+
+## Interface expectations (other teams already code against these names)
+- The checkout request takes `redeem_points` (int, default 0).
+- The checkout receipt exposes `redeemed_points` (int) and `points_credit` (Decimal, 0.00 when nothing redeemed).
+- The price breakdown exposes `points_credit` (default 0.00) and its `total` is subtotal minus discount minus points credit. Order pricing accepts the credit as an optional third argument (default 0.00).
+- The invoice exposes `points_credit` (default 0.00). `merchandise` remains the pre-credit merchandise amount, `total` = merchandise - points_credit + shipping + tax, and `pretax_total` reflects the credit. Invoice creation accepts the credit as an optional fifth argument after shipping (default 0.00).
+- A reward account exposes `redemptions` (tuple, default empty; each entry has `points`, `redeemed_on`, `order_id`), `redeemed_points`, and `available_points`. Recording a new earning must keep existing redemptions.
+
+## Worked example
+$20.00 mug, 10% coupon with $20 minimum, 500 points redeemed, 5% tax, $5.00 shipping, standard tier customer with 600 points:
+discount 2.00 -> credit 5.00 -> merchandise charged 13.00 -> tax 0.65 -> invoice total 18.65 (merchandise shown as 18.00, credit 5.00) -> 18 points earned -> available balance 600 - 500 + 18 = 118.
+
+Existing behavior for orders without a redemption must not change.

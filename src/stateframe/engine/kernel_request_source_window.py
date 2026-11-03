@@ -344,23 +344,61 @@ def _verified_prior_source_message(
 
 
 def partial_source_paths_for_deferred_delivery(
-        plan: Mapping[str, object], receipt: object,
+        plan: Mapping[str, object], receipt: object, *,
+        absent_pages_deferrable: bool = False,
 ) -> tuple[str, ...]:
-    """Return selected, proven-partial paths with a revision-bound read route."""
+    """Return selected, proven-partial paths with a revision-bound read route.
+
+    The absent-pages option permits final allocation to defer paths whose
+    selected pages are absent from the final wire. Other proof failures remain
+    terminal; in that mode, already-deferred and fully delivered paths are
+    excluded.
+    """
     if not isinstance(receipt, Mapping):
         return ()
     authorization = receipt.get("workspace_authorization")
     path_results = receipt.get("paths")
+    raw_failures = receipt.get("proof_failures")
+    failures = (
+        raw_failures
+        if isinstance(raw_failures, Sequence)
+        and not isinstance(raw_failures, (str, bytes, bytearray))
+        else ()
+    )
+    proof_status = str(receipt.get("proof_status", "")).upper()
+    failure_paths: list[str] = []
+    all_absent = bool(failures)
+    for failure in failures:
+        normalized = (
+            _normalized_deferred_paths((failure.get("path", ""),))
+            if isinstance(failure, Mapping)
+            and failure.get("kind") == "final_wire_proof_missing"
+            else ()
+        )
+        if not normalized:
+            all_absent = False
+            break
+        failure_paths.append(normalized[0])
+    absent_only = absent_pages_deferrable and proof_status == "FAILED" and all_absent
+    absent_failure_paths = set(failure_paths) if absent_only else set()
+    accepted_proof = {"VERIFIED", "FAILED"} if absent_only else {"VERIFIED"}
     if (
         str(receipt.get("status", "")).upper() != "PARTIAL"
-        or str(receipt.get("proof_status", "")).upper() != "VERIFIED"
-        or receipt.get("proof_failures")
+        or proof_status not in accepted_proof
+        or (raw_failures and not absent_only)
         or receipt.get("read_tool_available") is not True
         or not isinstance(authorization, Mapping)
         or str(authorization.get("status", "")).upper() != "VERIFIED"
         or not isinstance(path_results, Mapping)
     ):
         return ()
+    raw_deferred = plan.get("deferred_paths", ())
+    deferred_paths = set(
+        raw_deferred
+        if isinstance(raw_deferred, Sequence)
+        and not isinstance(raw_deferred, (str, bytes, bytearray))
+        else ()
+    )
     revisions = plan.get("revisions")
     revisions = revisions if isinstance(revisions, Mapping) else {}
     units_by_path: dict[str, list[str]] = {}
@@ -385,7 +423,16 @@ def partial_source_paths_for_deferred_delivery(
         row = path_results.get(path)
         if (not isinstance(row, Mapping)
                 or str(row.get("status", "")).upper() != "PARTIAL"
-                or str(row.get("proof_status", "")).upper() != "VERIFIED"):
+                or str(row.get("proof_status", "")).upper() not in accepted_proof):
+            continue
+        omitted_units = row.get("omitted_units")
+        if absent_only and (
+            path in deferred_paths
+            or not (
+                (type(omitted_units) is int and omitted_units > 0)
+                or path in absent_failure_paths
+            )
+        ):
             continue
         handles = units_by_path[path]
         revision = str(row.get("revision") or revisions.get(path, "")).strip()

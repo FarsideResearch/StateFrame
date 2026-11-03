@@ -1,0 +1,12 @@
+# Checkout discrepancies reported by support
+
+Several orders from the last release are producing inconsistent results. Please investigate these customer reports:
+
+1. A 10% promotion with a $20 minimum does not apply to a cart totaling exactly $20, although the promotion terms say the minimum is inclusive.
+2. When two usable batches of the same item are available, reservations take the batch with the later expiration date first. Warehouse staff need the earliest safe batch used first.
+3. A lightweight 12 × 12 × 10 inch carton weighing 2 pounds is billed at 11 pounds on a ground shipment. The carrier's current dimensional rule makes it 9 billable pounds.
+4. A customer who earned 100 reward points exactly 30 days ago does not receive the active-customer bonus on today's purchase. Activity from the first day of the 30-day period should count.
+5. An invoice for a taxable 10-cent item at 5% tax shows zero tax. This jurisdiction rounds a half cent up, so the tax should be one cent.
+6. A normal checkout with available stock cannot complete, even though pricing, stock, parcel, tax, and account details are valid. The customer should receive a complete receipt and updated reward balance.
+
+Please resolve the discrepancies while preserving the documented behavior for other orders.
