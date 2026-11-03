@@ -11,7 +11,7 @@ import pytest
 from kernel_custom_tools import CustomToolError
 from kernel_exec_capability import executable_read_roots, shell_capability
 from kernel_mcp_driver import exchange
-from kernel_exec_tracker import ProcessIdentity
+from kernel_exec_tracker import LaunchIdentity, ProcessIdentity
 from kernel_mcp_tools import load_mcp_files, _schema, omission_note, result_text
 from stateframe import __version__
 
@@ -40,7 +40,9 @@ def test_monitor_counts_private_namespace_and_nested_family_union(monkeypatch):
 
     monkeypatch.setattr(driver, "ProcessTable", Table)
     monkeypatch.setattr(driver, "sys", SimpleNamespace(platform="linux"))
-    monitor = driver._ContainmentMonitor(SimpleNamespace(pid=100),
+    process = SimpleNamespace(pid=100, _stateframe_launch_identity=LaunchIdentity(
+        100, rows[100].start, None))
+    monitor = driver._ContainmentMonitor(process,
                                          SimpleNamespace(limits=SimpleNamespace(wall_seconds=4)))
     monitor.namespace = "private"
     assert monitor._sample() == "aggregate resident-memory limit exceeded"

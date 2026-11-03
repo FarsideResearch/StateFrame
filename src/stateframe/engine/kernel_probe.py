@@ -22,7 +22,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Mapping
 
-from kernel_exec_tracker import kill_launch_unit
+from kernel_exec_tracker import child_exited_unreaped, kill_launch_unit, recorded_launch_identity
 from kernel_test_isolation import isolated_command
 from kernel_non_product_paths import NON_PRODUCT_PARTS, is_non_product
 
@@ -457,7 +457,7 @@ sys.exit(_exit)
 def _kill_group(process: subprocess.Popen) -> bool:
     # The whole launch unit, not only the group: a bwrap child still setting up its
     # sandbox, or one that already left the group, must not outlive the timeout.
-    return not kill_launch_unit(process)
+    return not kill_launch_unit(process, launch_identity=recorded_launch_identity(process))
 
 
 def _collect_process(process: subprocess.Popen, wall_seconds: float,
@@ -479,12 +479,12 @@ def _collect_process(process: subprocess.Popen, wall_seconds: float,
     while selector.get_map():
         remaining = deadline - time.monotonic()
         if remaining <= 0:
-            timed_out = process.poll() is None
+            timed_out = not child_exited_unreaped(process)
             if timed_out:
                 group_killed = _kill_group(process) or group_killed
             break
         events = selector.select(min(remaining, 0.05))
-        if not events and process.poll() is not None:
+        if not events and child_exited_unreaped(process):
             # The next select drains EOF from each pipe.
             continue
         for key, _ in events:
@@ -538,14 +538,15 @@ def _collect_process(process: subprocess.Popen, wall_seconds: float,
         except Exception:
             pass
     selector.close()
-    try:
-        process.wait(timeout=1)
-    except subprocess.TimeoutExpired:
-        group_killed = _kill_group(process) or group_killed
-        try:
-            process.wait(timeout=1)
-        except subprocess.TimeoutExpired:
-            pass
+    if not timed_out:
+        until = time.monotonic() + 1
+        while not child_exited_unreaped(process) and time.monotonic() < until:
+            time.sleep(.02)
+        if not child_exited_unreaped(process):
+            timed_out = True
+    cleaned = _kill_group(process)
+    if timed_out:
+        group_killed = cleaned or group_killed
     return bytes(buffers["stdout"]), bytes(buffers["stderr"]), truncated, timed_out, group_killed
 
 

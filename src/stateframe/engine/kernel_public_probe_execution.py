@@ -3,14 +3,13 @@ from __future__ import annotations
 
 import hashlib
 import os
-import signal
 from pathlib import Path
 import subprocess
 import tempfile
 import time
 
 from capability_study_support import locked_test_process
-from kernel_exec_tracker import kill_launch_unit
+from kernel_exec_tracker import child_exited_unreaped, kill_launch_unit, recorded_launch_identity
 from kernel_test_isolation import isolated_command
 from kernel_test_python import selected_test_python
 from kernel_public_probe_sandbox import RUNNER_SOURCE
@@ -76,11 +75,13 @@ def execute_probe(root: Path, product_files: dict, source: str, output: Path, *,
                     file_bytes=1024 * 1024,
                     isolation_builder=isolated_command,
                 )[0] as process:
-                    try:
-                        code = process.wait(timeout=allowance)
-                    except subprocess.TimeoutExpired:
-                        kill_launch_unit(process, deadline_seconds=5)
-                        code, timed_out = -1, True
+                    until = time.monotonic() + allowance
+                    while not child_exited_unreaped(process) and time.monotonic() < until:
+                        time.sleep(.02)
+                    timed_out = not child_exited_unreaped(process)
+                    kill_launch_unit(process, deadline_seconds=5,
+                                     launch_identity=recorded_launch_identity(process))
+                    code = -1 if timed_out else process.returncode
         if any(not path.is_file() or hashlib.sha256(path.read_bytes()).hexdigest() != value
                for path, value in before.items()):
             raise ValueError('public probe modified read-only sources')

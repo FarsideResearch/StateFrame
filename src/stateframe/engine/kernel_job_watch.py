@@ -225,6 +225,7 @@ class _ManagedJob:
     partial_line: str = ""
     reader_done: bool = False
     kill_requested: bool = False
+    cleanup_in_progress: bool = False
     completion_journaled: bool = False
 
 
@@ -369,6 +370,8 @@ class JobWatch:
             if managed is None:
                 return
             process = managed.process
+            if managed.cleanup_in_progress or (managed.kill_requested and not wait_for_exit):
+                return
             if (wait_for_exit and managed.reader_done and process.poll() is None):
                 try:
                     process.wait(timeout=0.2)
@@ -596,12 +599,15 @@ class JobWatch:
         }
 
     def job_kill(self, job_id: object) -> dict[str, object]:
+        from kernel_exec_tracker import child_exited_unreaped
         managed = self._lookup(job_id)
-        self._reconcile(managed.record.job_id)
         with self._lock:
             if managed.record.state != "running":
                 return self._status_locked(managed)
+            if managed.cleanup_in_progress:
+                return self._status_locked(managed)
             managed.kill_requested = True
+            managed.cleanup_in_progress = True
             self._emit("job_kill_requested", job_id=managed.record.job_id,
                        reason="model_selected_job_kill", initiator="model",
                        host_killed_automatically=False,
@@ -611,44 +617,58 @@ class JobWatch:
             pid = getattr(process, "pid", None)
             if os.name == "posix" and isinstance(pid, int) and pid > 0:
                 try:
-                    os.killpg(os.getpgid(pid), signal.SIGTERM)
-                    signalled = True
+                    from kernel_exec_tracker import recorded_launch_identity, signal_launch_group
+                    signalled = signal_launch_group(
+                        process, recorded_launch_identity(process), signal.SIGTERM)
                 except (OSError, ProcessLookupError):
                     pass
-            if not signalled:
-                terminate = getattr(process, "terminate", None)
-                if callable(terminate):
-                    terminate()
-                else:
-                    kill = getattr(process, "kill", None)
-                    if callable(kill):
-                        kill()
+            if not signalled and not child_exited_unreaped(process):
+                try:
+                    terminate = getattr(process, "terminate", None)
+                    if callable(terminate):
+                        terminate()
+                    else:
+                        kill = getattr(process, "kill", None)
+                        if callable(kill):
+                            kill()
+                except OSError:
+                    pass
 
         # This escalation is still part of the explicit model-selected
         # operation; there is no background timeout or automatic kill path.
+        deadline = time.monotonic() + 1.0
+        while not child_exited_unreaped(process) and time.monotonic() < deadline:
+            time.sleep(.02)
+        escalated = False
+        pid = getattr(process, "pid", None)
+        if os.name == "posix" and isinstance(pid, int) and pid > 0:
+            try:
+                from kernel_exec_tracker import recorded_launch_identity, signal_launch_group
+                escalated = signal_launch_group(
+                    process, recorded_launch_identity(process), signal.SIGKILL)
+            except (OSError, ProcessLookupError):
+                pass
+        if not escalated and not child_exited_unreaped(process):
+            kill = getattr(process, "kill", None)
+            if callable(kill):
+                try:
+                    kill()
+                except OSError:
+                    pass
         try:
             process.wait(timeout=1.0)
         except (AttributeError, subprocess.TimeoutExpired):
-            escalated = False
-            pid = getattr(process, "pid", None)
-            if os.name == "posix" and isinstance(pid, int) and pid > 0:
-                try:
-                    os.killpg(os.getpgid(pid), signal.SIGKILL)
-                    escalated = True
-                except (OSError, ProcessLookupError):
-                    pass
-            if not escalated:
-                kill = getattr(process, "kill", None)
-                if callable(kill):
-                    kill()
-            try:
-                process.wait(timeout=1.0)
-            except (AttributeError, subprocess.TimeoutExpired):
-                pass
+            pass
         reader = managed.reader
         if reader is not None and reader.is_alive():
             reader.join(timeout=1.0)
+        with self._lock:
+            managed.cleanup_in_progress = False
         self._reconcile(managed.record.job_id, wait_for_exit=True)
+        if not escalated:
+            raise JobWatchError(
+                "job containment unverified: launch group could not be signalled",
+                code="CONTAINMENT_UNVERIFIED")
         with self._lock:
             return self._status_locked(managed)
 

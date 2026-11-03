@@ -723,6 +723,47 @@ def child(run: Path, *, resume: bool = False, follow_up: str | None = None) -> N
 ATTEMPT_DEADLINE_SECONDS = 14400  # Allow up to four hours for a verified repair.
 
 
+def _terminate_attempt(process, *, capacity_plan, process_group) -> None:
+    if capacity_plan.enabled:
+        from capability_host_capacity import terminate_process_group
+        terminate_process_group(process, pgid=process_group)
+        return
+    from kernel_exec_tracker import (ContainmentUnverified, child_exited_unreaped,
+                                     recorded_launch_identity, signal_launch_group)
+    try:
+        group_terminated = signal_launch_group(
+            process, recorded_launch_identity(process), signal.SIGTERM)
+    except OSError:
+        group_terminated = False
+    if not group_terminated:
+        try:
+            process.terminate()
+        except OSError:
+            pass
+    grace_deadline = time.monotonic() + 10
+    while not child_exited_unreaped(process) and time.monotonic() < grace_deadline:
+        time.sleep(.02)
+    try:
+        group_killed = signal_launch_group(
+            process, recorded_launch_identity(process), signal.SIGKILL)
+    except OSError:
+        group_killed = False
+    if not group_killed:
+        if not child_exited_unreaped(process):
+            try:
+                process.kill()
+            except OSError:
+                pass
+    try:
+        process.wait(timeout=1)
+    except subprocess.TimeoutExpired as error:
+        raise ContainmentUnverified(
+            "release containment unverified: leader survived cleanup") from error
+    if not group_killed:
+        raise ContainmentUnverified(
+            "release containment unverified: launch group could not be signalled")
+
+
 def supervise(run: Path, *, resume: bool = False, follow_up: str | None = None) -> None:
     frozen = source_hashes(run)
     save(run / "source-freeze.json", frozen)
@@ -749,7 +790,7 @@ def supervise(run: Path, *, resume: bool = False, follow_up: str | None = None) 
         capacity_plan = _capacity_plan(spec)
         if capacity_plan.enabled:
             from capability_host_capacity import (
-                CapacityRefusal, captured_process_group, terminate_process_group,
+                CapacityRefusal, captured_process_group,
             )
             capacity_refusal_type = CapacityRefusal
         if capacity_plan.enabled:
@@ -768,6 +809,8 @@ def supervise(run: Path, *, resume: bool = False, follow_up: str | None = None) 
             process = subprocess.Popen(command, cwd=ROOT,
                 stdout=log, stderr=subprocess.STDOUT, start_new_session=True,
                 env=child_environment)
+            from kernel_exec_tracker import capture_launch_identity
+            capture_launch_identity(process, session_leader=True)
             process_group = (captured_process_group(process)
                              if capacity_plan.enabled else None)
             save(run / (attempt + "-process.json"), {"pid": process.pid, "started": time.time()})
@@ -775,15 +818,8 @@ def supervise(run: Path, *, resume: bool = False, follow_up: str | None = None) 
                 process.wait(timeout=max(0, attempt_deadline - time.monotonic()) if deadline_enabled else ATTEMPT_DEADLINE_SECONDS)
             except subprocess.TimeoutExpired:
                 timed_out = True
-                if capacity_plan.enabled:
-                    terminate_process_group(process, pgid=process_group)
-                else:
-                    os.killpg(process.pid, signal.SIGTERM)
-                    try:
-                        process.wait(timeout=10)
-                    except subprocess.TimeoutExpired:
-                        os.killpg(process.pid, signal.SIGKILL)
-                        process.wait()
+                _terminate_attempt(process, capacity_plan=capacity_plan,
+                                   process_group=process_group)
         except capacity_refusal_type as exc:
             capacity_refusal = str(exc)
         finally:

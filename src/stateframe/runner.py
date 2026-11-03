@@ -1625,6 +1625,8 @@ def drive(run: Path, options: RunOptions, printer=print) -> int:
         process = subprocess.Popen(command, cwd=run, env=child_env, stdout=subprocess.PIPE,
                                    stderr=subprocess.STDOUT, text=True, bufsize=1,
                                    start_new_session=True)
+        from .engine.kernel_exec_tracker import capture_launch_identity
+        capture_launch_identity(process, session_leader=True)
         assert process.stdout is not None
         timed_out = threading.Event()
 
@@ -1647,11 +1649,14 @@ def drive(run: Path, options: RunOptions, printer=print) -> int:
             reader = threading.Thread(target=_pump_lines, args=(process.stdout, lines), daemon=True)
             reader.start()
             drain_until = None
+            from .engine.kernel_exec_tracker import child_exited_unreaped
             while True:
                 from .shell_host import answer_pending
                 answer_pending(run, options.shell_confirm)
-                if drain_until is None and process.poll() is not None:
+                if drain_until is None and (child_exited_unreaped(process) or timed_out.is_set()):
                     drain_until = time.monotonic() + OUTPUT_DRAIN_SECONDS
+                if drain_until is not None and timed_out.is_set() and time.monotonic() >= drain_until:
+                    break
                 try:
                     line = lines.get(timeout=0.2)
                 except queue.Empty:
@@ -1674,7 +1679,13 @@ def drive(run: Path, options: RunOptions, printer=print) -> int:
                     if rendered and (not options.quiet or event.get("kind") in {
                             "token_counting_unavailable", "engine_error"}):
                         printer(rendered)
-            code = process.wait(timeout=60)
+            exit_deadline = time.monotonic() + 60
+            while not child_exited_unreaped(process) and time.monotonic() < exit_deadline:
+                time.sleep(.02)
+            _stop_group(process)
+            code = process.returncode
+            if code is None:
+                raise RuntimeError("engine survived process-group cleanup")
             _warn_checkpoint_journal(run, checkpoint_warned)
             if timed_out.is_set():
                 printer("engine timed out: deadline exhausted; engine stopped")
@@ -1724,20 +1735,20 @@ def clean_finished_checkpoints(run_dir: Path, *, keep: bool = False) -> int | No
 
 def _stop_group(process: subprocess.Popen) -> None:
     """Stop the engine and everything it started (pytest, HTTP helpers): its own session."""
-    # Kill even when the leader already exited: descendants can still hold pipes.
+    from .engine.kernel_exec_tracker import recorded_launch_identity, signal_launch_group
+
     try:
-        os.killpg(process.pid, signal.SIGKILL)
-    except ProcessLookupError:
-        pass
+        signalled = signal_launch_group(process, recorded_launch_identity(process), signal.SIGKILL)
     except PermissionError:
         # macOS can return EPERM for the group (zombie members, or a sandboxed member we may not signal).
         # Cleanup runs in `finally` blocks and must never raise: an error here would replace the real
         # reason the run stopped (a --timeout run once reported "could not start engine"). Kill the leader.
-        if process.poll() is None:
-            try:
-                process.kill()
-            except ProcessLookupError:
-                pass
+        signalled = False
+    if not signalled and process.returncode is None:
+        try:
+            process.kill()
+        except ProcessLookupError:
+            pass
     try:
         process.wait(timeout=1)
     except subprocess.TimeoutExpired:

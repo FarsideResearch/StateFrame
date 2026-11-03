@@ -22,7 +22,9 @@ import uuid
 from collections.abc import Mapping, Sequence
 from typing import Callable
 
-from kernel_exec_tracker import kill_launch_unit
+from kernel_exec_tracker import (ContainmentUnverified, ProcessTable,
+                                 capture_launch_identity, child_exited_unreaped, kill_launch_unit,
+                                 recorded_launch_identity, signal_launch_group)
 from kernel_test_isolation import isolated_command, sandbox_executable
 from sf_launch import _command_cgroup
 
@@ -263,7 +265,7 @@ def _resource_preexec(cpu_seconds: float, memory_bytes: int,
 def _kill_group(process: subprocess.Popen[bytes]) -> bool:
     # The whole launch unit, not only the group: a bwrap child still setting up its
     # sandbox, or one that already left the group, must not outlive the timeout.
-    return not kill_launch_unit(process)
+    return not kill_launch_unit(process, launch_identity=recorded_launch_identity(process))
 
 
 def _prepared(command: Sequence[object], root: Path, env: Mapping[object, object] | None,
@@ -325,6 +327,7 @@ def sandboxed_popen(command: Sequence[object], root: str | os.PathLike[str], *,
         preexec_fn=_resource_preexec(cpu_seconds, memory_bytes, file_bytes, nofile, nproc, cgroup)
         if os.name != "nt" else None,
     )
+    capture_launch_identity(process, session_leader=True)
     return process, report
 
 
@@ -371,11 +374,11 @@ def _collect(process: subprocess.Popen[bytes], input_data: bytes | None, deadlin
     _trace_mark(trace, "pipe_drain_start_ns")
     timed_out = False
     while selector.get_map():
-        if trace is not None and process.poll() is not None:
+        if trace is not None and child_exited_unreaped(process):
             _trace_mark(trace, "child_exit_observed_ns")
         remaining = deadline - time.monotonic()
         if remaining <= 0:
-            timed_out = process.poll() is None
+            timed_out = not child_exited_unreaped(process)
             if timed_out:
                 group_killed = _kill_group(process)
             break
@@ -419,7 +422,7 @@ def _collect(process: subprocess.Popen[bytes], input_data: bytes | None, deadlin
             if len(data) > available:
                 truncated = True
             total += len(data)
-        if trace is not None and process.poll() is not None:
+        if trace is not None and child_exited_unreaped(process):
             _trace_mark(trace, "child_exit_observed_ns")
             # The main runner owns the profile writer. Drain all currently available
             # bytes, then stop observing this private channel so a test-spawned child
@@ -458,13 +461,34 @@ def _collect(process: subprocess.Popen[bytes], input_data: bytes | None, deadlin
             pass
     selector.close()
     _trace_mark(trace, "pipe_drain_finished_ns")
-    if timed_out:
-        try:
-            process.wait(timeout=1)
-        except subprocess.TimeoutExpired:
+    # Stop group members before wait() releases the leader's PID.
+    if not timed_out:
+        until = max(time.monotonic() + 1.0, deadline + 1.0)
+        while not child_exited_unreaped(process) and time.monotonic() < until:
+            time.sleep(.02)
+        if not child_exited_unreaped(process):
+            timed_out = True
             group_killed = _kill_group(process) or group_killed
-    else:
-        process.wait(timeout=max(1.0, deadline - time.monotonic() + 1.0))
+        else:
+            # The exited leader remains waitable and pins its group identity.
+            # A launch-unit sweep cannot discover its now-reparented family.
+            identity = recorded_launch_identity(process)
+            if identity is None or identity.pid != process.pid:
+                raise ContainmentUnverified("containment unverified: completed check launch identity missing")
+            try:
+                signalled = signal_launch_group(process, identity, signal.SIGKILL)
+            except PermissionError:
+                signalled = False
+            table = ProcessTable()
+            sweep_deadline = time.monotonic() + 2.0
+            while any(row.pgid == identity.pid and not row.zombie
+                      for row in table.snapshot().values()):
+                if not signalled or time.monotonic() >= sweep_deadline:
+                    raise ContainmentUnverified(
+                        "containment unverified: cannot sweep completed check process group")
+                time.sleep(.02)
+            group_killed = True
+    process.wait(timeout=1)
     if trace is not None:
         _trace_mark(trace, "child_exit_observed_ns")
     return (

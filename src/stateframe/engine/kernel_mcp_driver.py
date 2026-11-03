@@ -15,11 +15,15 @@ import time
 
 if __package__:
     from .kernel_exec_session import CleanupReport, ExecResult, ExecSessionError, _host_load
-    from .kernel_exec_tracker import Descendants, ProcessTable, kill_launch_unit
+    from .kernel_exec_tracker import (Descendants, ProcessTable, capture_launch_identity,
+                                       child_exited_unreaped,
+                                       kill_launch_unit, recorded_launch_identity)
     from .kernel_test_isolation import capability_command
 else:
     from kernel_exec_session import CleanupReport, ExecResult, ExecSessionError, _host_load
-    from kernel_exec_tracker import Descendants, ProcessTable, kill_launch_unit
+    from kernel_exec_tracker import (Descendants, ProcessTable, capture_launch_identity,
+                                     child_exited_unreaped,
+                                     kill_launch_unit, recorded_launch_identity)
     from kernel_test_isolation import capability_command
 
 MAX_MESSAGE = 4 << 20
@@ -47,7 +51,10 @@ class _ContainmentMonitor:
         self.process = process
         self.cap = cap
         self.table = ProcessTable()
-        self.family = Descendants(process.pid, self.table)
+        self.launch_identity = recorded_launch_identity(process)
+        if self.launch_identity is None:
+            raise ExecSessionError("cannot capture MCP launch identity for supervision")
+        self.family = Descendants(process.pid, self.table, self.launch_identity)
         self.started = time.monotonic()
         self.host_namespace = self.table.pid_namespace(os.getpid()) if sys.platform == "linux" else None
         if sys.platform == "linux" and self.host_namespace is None:
@@ -99,8 +106,11 @@ class _ContainmentMonitor:
         if time.monotonic() - self.started >= self.cap.limits.wall_seconds:
             return "wall limit exceeded"
         rows = self.table.snapshot()
-        if not self.family.members and self.process.pid in rows:
-            self.family.members[self.process.pid] = rows[self.process.pid]
+        if not self.family.members and self.launch_identity is not None:
+            leader = rows.get(self.process.pid)
+            if (leader is not None and leader.start == self.launch_identity.start
+                    and leader.pgid == self.launch_identity.pid):
+                self.family.members[self.process.pid] = leader
         family = self.family.update(rows)
         if sys.platform == "linux":
             if self.namespace is None:
@@ -139,7 +149,9 @@ class _ContainmentMonitor:
                 if self.failure is None:
                     self.failure = ("timeout" if breach == "wall limit exceeded" else "resource", breach)
                 try:
-                    survivors = kill_launch_unit(self.process, self.family)
+                    survivors = kill_launch_unit(
+                        self.process, self.family,
+                        launch_identity=recorded_launch_identity(self.process))
                 except OSError as error:
                     self.failure = ("supervision", f"cannot stop MCP server after resource breach: {error}")
                 else:
@@ -147,7 +159,7 @@ class _ContainmentMonitor:
                         self.failure = ("supervision", "MCP server survived the breach kill: "
                                         + ", ".join(str(pid) for pid in survivors))
                 return
-            if self.process.poll() is not None:
+            if child_exited_unreaped(self.process):
                 return
             self.stopped.wait(.02)
 
@@ -198,6 +210,7 @@ def converse(request: dict, cap, cwd: Path) -> object:
     process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                stderr=subprocess.DEVNULL, env=environment, cwd=cwd,
                                close_fds=True, start_new_session=True)
+    capture_launch_identity(process, session_leader=True)
     assert process.stdin is not None and process.stdout is not None
     selector = None
     buffer = bytearray()
@@ -346,7 +359,9 @@ def converse(request: dict, cap, cwd: Path) -> object:
         try:
             if monitor is not None:
                 monitor.stop()
-            survivors = kill_launch_unit(process, monitor.family if monitor is not None else None)
+            survivors = kill_launch_unit(
+                process, monitor.family if monitor is not None else None,
+                launch_identity=recorded_launch_identity(process))
             if survivors:
                 raise ExecSessionError("MCP server survived cleanup: "
                                        + ", ".join(str(pid) for pid in survivors))

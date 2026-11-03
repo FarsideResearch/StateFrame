@@ -13,6 +13,7 @@ import os
 import signal
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -47,6 +48,7 @@ def _alive(pid):
 def _launch(kind):
     process = subprocess.Popen([sys.executable, "-c", LAUNCHER, kind], stdout=subprocess.PIPE,
                                start_new_session=True)
+    assert tracker.capture_launch_identity(process) is not None
     child = int(process.stdout.readline())
     return process, child
 
@@ -69,7 +71,8 @@ def _launcher_only(process):
 
 
 CLEANUPS = {
-    "kill_launch_unit": tracker.kill_launch_unit,
+    "kill_launch_unit": lambda process: tracker.kill_launch_unit(
+        process, launch_identity=tracker.recorded_launch_identity(process)),
     "execution_policy._kill_group": policy._kill_group,
     "probe._kill_group": probe._kill_group,
 }
@@ -80,11 +83,18 @@ CLEANUPS = {
 def test_cleanup_leaves_no_family_member(name, kind):
     process, child = _launch(kind)
     try:
-        CLEANUPS[name](process)
+        result = CLEANUPS[name](process)
         deadline = time.monotonic() + 2
         while _alive(child) and time.monotonic() < deadline:
             time.sleep(.02)
-        assert not _alive(child), f"{name} left launch child {child} ({kind}) running"
+        if sys.platform == "darwin" and kind == "setsid":
+            assert _alive(child)
+            if name == "kill_launch_unit":
+                assert result == (child,)
+            else:
+                assert result is False
+        else:
+            assert not _alive(child), f"{name} left launch child {child} ({kind}) running"
     finally:
         _cleanup(process, child)
 
@@ -109,8 +119,14 @@ def test_monitor_family_survivor_is_killed_after_launcher_is_gone():
         family.update(family.table.snapshot())
         process.kill()
         process.wait()
-        assert tracker.kill_launch_unit(process, family) == ()
-        assert not _alive(child)
+        survivors = tracker.kill_launch_unit(
+            process, family, launch_identity=tracker.recorded_launch_identity(process))
+        if sys.platform == "darwin":
+            assert survivors == (child,)
+            assert _alive(child)
+        else:
+            assert survivors == ()
+            assert not _alive(child)
     finally:
         _cleanup(process, child)
 
@@ -119,7 +135,9 @@ def test_unkillable_survivor_is_reported(monkeypatch):
     process, child = _launch("setsid")
     try:
         monkeypatch.setattr(tracker.Descendants, "signal", lambda self, rows, sig: set())
-        assert child in tracker.kill_launch_unit(process, deadline_seconds=.2)
+        assert child in tracker.kill_launch_unit(
+            process, deadline_seconds=.2,
+            launch_identity=tracker.recorded_launch_identity(process))
     finally:
         monkeypatch.undo()
         _cleanup(process, child)
@@ -158,8 +176,199 @@ def test_kill_launch_unit_never_signals_a_reused_group_leader(monkeypatch):
     monkeypatch.setattr(tracker.os, "getpgid", lambda pid: pid)
     monkeypatch.setattr(tracker.os, "killpg", lambda pid, sig: signaled.append((pid, sig)))
 
-    assert tracker.kill_launch_unit(Process(), family) == ()
+    assert tracker.kill_launch_unit(
+        Process(), family, launch_identity=tracker.LaunchIdentity(
+            43210, original.start, None)) == ()
     assert signaled == []
+
+
+def test_no_family_never_adopts_a_recycled_pid(monkeypatch):
+    original = tracker.ProcessIdentity(43210, 1, 43210, 43210, (1, 0), False)
+    recycled = tracker.ProcessIdentity(43210, 1, 43210, 43210, (2, 0), False)
+
+    class Table:
+        def identity(self, pid):
+            assert pid == 43210
+            return recycled
+
+        def snapshot(self):
+            return {43210: recycled}
+
+    class Process:
+        pid = 43210
+        returncode = 0  # The original launcher has been reaped.
+
+        def kill(self):
+            raise AssertionError("a reaped launcher must not be signalled")
+
+        def wait(self, timeout):
+            return 0
+
+        def poll(self):
+            return 0
+
+    calls = []
+    monkeypatch.setattr(tracker, "ProcessTable", Table)
+    monkeypatch.setattr(tracker.os, "killpg", lambda pid, sig: calls.append((pid, sig)))
+    process = Process()
+    for identity in (None, tracker.LaunchIdentity(43210, original.start, tracker._boot_id())):
+        with pytest.raises(tracker.ContainmentUnverified, match="survivors unknown"):
+            tracker.kill_launch_unit(process, launch_identity=identity)
+    assert calls == []
+
+
+def test_missing_identity_kills_only_the_unreaped_direct_child(monkeypatch):
+    class Process:
+        pid = 43210
+        returncode = None
+
+        def __init__(self):
+            self.killed = 0
+
+        def kill(self):
+            self.killed += 1
+            self.returncode = -signal.SIGKILL
+
+        def wait(self, timeout):
+            return self.returncode
+
+        def poll(self):
+            return self.returncode
+
+    calls = []
+    monkeypatch.setattr(tracker.os, "killpg", lambda pid, sig: calls.append((pid, sig)))
+    process = Process()
+    with pytest.raises(tracker.ContainmentUnverified, match="survivors unknown"):
+        tracker.kill_launch_unit(process, launch_identity=None)
+    assert process.killed == 1
+    assert calls == []
+
+
+def test_runner_without_group_authority_kills_direct_child():
+    from stateframe.runner import _stop_group
+
+    class Process:
+        pid = 43210
+        returncode = None
+
+        def __init__(self):
+            self.killed = 0
+
+        def poll(self):
+            return self.returncode
+
+        def kill(self):
+            self.killed += 1
+            self.returncode = -signal.SIGKILL
+
+        def wait(self, timeout):
+            return self.returncode
+
+    process = Process()
+    _stop_group(process)
+    assert process.killed == 1
+    assert process.returncode == -signal.SIGKILL
+
+
+def test_recycled_leader_cannot_adopt_new_group_members():
+    original = tracker.ProcessIdentity(43210, 1, 43210, 43210, (1, 0), False)
+    recycled = tracker.ProcessIdentity(43210, 1, 43210, 43210, (2, 0), False)
+    unrelated = tracker.ProcessIdentity(43211, 43210, 43210, 43210, (3, 0), False)
+
+    class Table:
+        def identity(self, pid):
+            return {43210: recycled, 43211: unrelated}[pid]
+
+    table = Table()
+    family = tracker.Descendants.__new__(tracker.Descendants)
+    family.leader = 43210
+    family.table = table
+    family.members = {43210: original}
+    family.signal_errors = {}
+    assert family.update({43210: recycled, 43211: unrelated}) == []
+    assert family.members == {43210: original}
+
+
+def test_linux_group_signal_checks_launch_pidfd(monkeypatch):
+    row = tracker.ProcessIdentity(43210, 1, 43210, 43210, (1, 0), False)
+
+    class Table:
+        def identity(self, pid):
+            assert pid == row.pid
+            return row
+
+    class Process:
+        pid = row.pid
+        returncode = None
+        _waitpid_lock = threading.Lock()
+
+    calls = []
+    monkeypatch.setattr(tracker.sys, "platform", "linux")
+    monkeypatch.setattr(tracker, "_boot_id", lambda: "boot-a")
+    monkeypatch.setattr(tracker.os, "pidfd_open", lambda pid: 17, raising=False)
+    monkeypatch.setattr(tracker.signal, "pidfd_send_signal",
+                        lambda fd, sig: calls.append(("pidfd", fd, sig)), raising=False)
+    monkeypatch.setattr(tracker.os, "killpg",
+                        lambda pid, sig: calls.append(("group", pid, sig)))
+
+    identity = tracker.LaunchIdentity(row.pid, row.start, "boot-a", pidfd=17)
+    assert tracker.signal_launch_group(Process(), identity, signal.SIGTERM, table=Table())
+    assert calls == [("pidfd", 17, 0), ("group", row.pid, signal.SIGTERM)]
+
+    calls.clear()
+
+    def exited(_fd, _sig):
+        calls.append(("pidfd", 17, 0))
+        raise ProcessLookupError()
+
+    monkeypatch.setattr(tracker.signal, "pidfd_send_signal", exited)
+    assert not tracker.signal_launch_group(Process(), identity, signal.SIGKILL, table=Table())
+    assert calls == [("pidfd", 17, 0)]
+
+
+def test_unreaped_zombie_leader_still_authorizes_its_group(monkeypatch):
+    leader = tracker.ProcessIdentity(43210, 1, 43210, 43210, (1, 0), True)
+
+    class Table:
+        def identity(self, pid):
+            assert pid == leader.pid
+            return leader
+
+    class Process:
+        pid = leader.pid
+        returncode = None  # Popen has not waited; the PID cannot be recycled.
+        _waitpid_lock = threading.Lock()
+
+    calls = []
+    monkeypatch.setattr(tracker.os, "killpg",
+                        lambda pid, sig: calls.append((pid, sig)))
+    identity = tracker.LaunchIdentity(leader.pid, leader.start, tracker._boot_id())
+    assert tracker.signal_launch_group(Process(), identity, signal.SIGKILL, table=Table())
+    assert calls == [(leader.pid, signal.SIGKILL)]
+
+
+def test_waitable_exited_leader_still_owns_its_group(monkeypatch):
+    class Table:
+        def identity(self, pid):
+            assert pid == 43210
+            return None  # macOS may no longer expose an exited direct child.
+
+    class Process:
+        pid = 43210
+        returncode = None
+        _waitpid_lock = threading.Lock()
+
+    calls = []
+    monkeypatch.setattr(tracker.os, "waitid", lambda *_args: object())
+    monkeypatch.setattr(tracker.os, "killpg", lambda pid, sig: calls.append((pid, sig)))
+    identity = tracker.LaunchIdentity(43210, (1, 0), tracker._boot_id())
+    assert tracker.signal_launch_group(Process(), identity, signal.SIGKILL, table=Table())
+    assert calls == [(43210, signal.SIGKILL)]
+
+    monkeypatch.setattr(tracker.os, "waitid", lambda *_args: None)
+    calls.clear()
+    assert not tracker.signal_launch_group(Process(), identity, signal.SIGKILL, table=Table())
+    assert calls == []
 
 
 # --- structural half: every sandbox launch module routes its kills through the helper ---

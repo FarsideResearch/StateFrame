@@ -11,7 +11,7 @@ import pytest
 
 import kernel_mcp_driver as driver
 from kernel_exec_session import ExecSessionError
-from kernel_exec_tracker import ProcessIdentity
+from kernel_exec_tracker import LaunchIdentity, ProcessIdentity
 
 SERVER, CHILD = 100, 101
 
@@ -34,7 +34,10 @@ def _monitor(monkeypatch, *, sample_seconds, private=True, alive=True):
         def limit_breach(self, live, limits):
             return None
 
-    process = SimpleNamespace(pid=SERVER, poll=lambda: None if alive else 0)
+    process = SimpleNamespace(pid=SERVER, returncode=None if alive else 0,
+                              poll=lambda: None if alive else 0,
+                              _stateframe_launch_identity=LaunchIdentity(
+                                  SERVER, rows[SERVER].start, None))
     monkeypatch.setattr(driver, "ProcessTable", Table)
     monkeypatch.setattr(driver, "sys", SimpleNamespace(platform="linux"))
     monitor = driver._ContainmentMonitor(process, SimpleNamespace(limits=SimpleNamespace(wall_seconds=60)))
