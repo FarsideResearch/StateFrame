@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.3.12 (2026-11-03)
+
+- Add `STATEFRAME_REQUIREMENT_RECHECK` (opt-in, off by default): the first time the model says it is done, StateFrame answers once with the task's own sentences as a numbered checklist and asks the model to check each one before finishing. It never asks with fewer than 2 steps left or when the task has fewer than 2 sentences, and it makes no extra model call. On one harder multi-file task it raised the hidden-test score from 2 of 9 to 8 of 9 in 2 of 3 runs; on a task every arm already passed it roughly doubled the requests. With the switch off, request bytes are unchanged.
+- Correct the project-instructions note in KNOWN_LIMITATIONS: with more runs, the process-guidance `AGENTS.md` showed no reliable gain.
+
 ## 0.3.11 (2026-11-02)
 
 - Scoped runs now refuse edits to existing product files outside their editable set before changing the workspace. The refusal names the file and how to widen the scope; new product files remain allowed under the existing rules.

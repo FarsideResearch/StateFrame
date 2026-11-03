@@ -91,7 +91,11 @@ Install a reusable instruction bundle with `stateframe skill install path/to/ski
 
 ## Project instructions
 
-Add `--instructions` to `run` or `chat` to give the agent your repository's own `AGENTS.md` (or `CLAUDE.md` when there is no `AGENTS.md`), or `--instructions=FILE` to use a specific file. The text is added to the end of StateFrame's system prompt in every request, framed as untrusted repository content: it can describe conventions and commands, but it cannot add tools, widen the sandbox or override engine rules. It is off by default because a live comparison on the bundled examples showed no gain (see [known limitations](KNOWN_LIMITATIONS.md)). Details in [Running](docs/guide/running.md#project-instructions).
+Add `--instructions` to `run` or `chat` to give the agent your repository's own `AGENTS.md` (or `CLAUDE.md` when there is no `AGENTS.md`), or `--instructions=FILE` to use a specific file. The text is added to the end of StateFrame's system prompt in every request, framed as untrusted repository content: it can describe conventions and commands, but it cannot add tools, widen the sandbox or override engine rules. It remains off by default: a comparison on the bundled examples showed no gain, and broader comparisons found no reliable gain from general project guidance (see [known limitations](KNOWN_LIMITATIONS.md)). Details in [Running](docs/guide/running.md#project-instructions).
+
+## Closing requirement check
+
+Set `STATEFRAME_REQUIREMENT_RECHECK=on` in the shell or a custom profile to get one check against the task's own sentences when the model first says it is done. StateFrame returns those sentences as a numbered checklist and asks the model to check them before finishing. The setting is off by default, makes no extra model call, and leaves request bytes unchanged when off. It does not run when the task has fewer than two sentences or fewer than two model steps remain. See [Running](docs/guide/running.md#closing-check-requirement-recheck) for measurements and details.
 
 ## What the agent can do
 

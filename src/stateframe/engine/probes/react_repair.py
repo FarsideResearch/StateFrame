@@ -10634,6 +10634,14 @@ def work(d, *, resume=None):
                             msgs, tool_call_id, observation, no_id_role="user",
                         ))
                         continue
+                    from kernel_requirement_recheck import closing_refusal as _requirement_recheck
+                    _recheck = _requirement_recheck(measurement, d, _remaining_budget_units())
+                    if _recheck is not None:
+                        observation = _recheck + ("\n" + _jobs_stopped if _jobs_stopped else "")
+                        bolt.receipt("done", line, "current candidate", "NEEDS_WORK", detail=observation)
+                        measurement.observe(line, observation)
+                        msgs.append(_tool_reply_for_call(msgs, tool_call_id, observation, no_id_role="user"))
+                        continue
                     if _hook_wiring_for_run is not None:
                         from kernel_done_is_submit_authority import (
                             _ownerless_progress_tool_names, artifact_digest,
