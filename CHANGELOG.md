@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.3.29 (2026-11-03)
 
 - Finished runs take far less disk. A fixed scripted run with a run environment went from 35.8 MB to 0.9 MB, and the bundled examples shrink about 3x before any environment is counted. Measurement journals are sealed as `events.jsonl.xz`, their blobs go into one append-only pack, preflight `requests/` records go into `requests.pack.xz`, and checkpoints and the run environment are removed once the result cannot be resumed. Interrupted, killed and stopped runs keep everything resume needs. `wire/` and `spec.json` are never touched, and request bytes are unchanged.
 - Changed: the layout of a finished run directory. Scripts that read its files directly need updating. Once a run cannot be resumed, `env/` is removed and `env-manifest.json` records what it held; `worker/measurement-runs/<id>/events.jsonl` becomes `events.jsonl.xz`; loose `blobs/*.zlib` become `blobs/pack-0001.sfpk` with an index; `requests/*.json` become `requests.pack.xz`. Pass `--keep-run-env` (or set `STATEFRAME_KEEP_RUN_ENV=on`) to keep `env/`, and `--keep-checkpoints` to keep checkpoints. `stateframe inspect` reads both layouts, and so does `stateframe rehydrate`, which rebuilds `env/`. Interrupted, killed and stopped runs keep the old loose files until they finish.
