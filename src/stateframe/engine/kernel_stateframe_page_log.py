@@ -790,14 +790,25 @@ _AUTHORITY_FIELDS = frozenset({
     "established_facts",
 })
 _AUTHORITY_TOKENS = frozenset({"stop", "verdict", "menu", "authority"})
+_FINAL_AUTHORITY_FIELDS = frozenset({
+    "continuation_limits", "evidence_pin", "next_site", "callable_menu_note",
+    "current_refusal", "recovery_instructions", "wire_truth",
+})
+_FINAL_AUTHORITY_TOKENS = frozenset({
+    "done", "submission", "completion", "stop", "verdict", "menu", "authority",
+    "refusal", "recovery",
+})
 
 
-def _authority_key(key: str) -> bool:
+def _authority_key(key: str, *, final: bool = False) -> bool:
     normalized = key.strip().lower().replace("-", "_")
     if normalized == "owner_protocol":
         # Keep its stable schema identifier in [L]; dynamic owner values live in [V].
         return False
-    return normalized in _AUTHORITY_FIELDS or bool(_AUTHORITY_TOKENS.intersection(normalized.split("_")))
+    return (normalized in _AUTHORITY_FIELDS
+            or bool(_AUTHORITY_TOKENS.intersection(normalized.split("_")))
+            or (final and (normalized in _FINAL_AUTHORITY_FIELDS
+                           or bool(_FINAL_AUTHORITY_TOKENS.intersection(normalized.split("_"))))))
 
 
 def _is_recorded_wire_truth(value: object) -> bool:
@@ -814,7 +825,8 @@ def _contains_recorded_wire_truth(value: object) -> bool:
     return False
 
 
-def _partition_authority(value: object, path: tuple[str | int, ...] = ()) -> tuple[object, list[dict[str, object]]]:
+def _partition_authority(value: object, path: tuple[str | int, ...] = (),
+                         *, final: bool = False) -> tuple[object, list[dict[str, object]]]:
     """Remove authority-shaped keys from cacheable state and retain their exact paths in V."""
     if _is_recorded_wire_truth(value):
         if not path:
@@ -842,10 +854,10 @@ def _partition_authority(value: object, path: tuple[str | int, ...] = ()) -> tup
                 else:
                     overlay.append({"path": [*path, raw_key], "value": copy.deepcopy(child)})
                 continue
-            if _authority_key(raw_key):
+            if _authority_key(raw_key, final=final):
                 overlay.append({"path": [*path, raw_key], "value": copy.deepcopy(child)})
                 continue
-            filtered, nested = _partition_authority(child, (*path, raw_key))
+            filtered, nested = _partition_authority(child, (*path, raw_key), final=final)
             cacheable[raw_key] = filtered
             overlay.extend(nested)
         return cacheable, overlay
@@ -853,7 +865,7 @@ def _partition_authority(value: object, path: tuple[str | int, ...] = ()) -> tup
         cacheable_list: list[object] = []
         overlay: list[dict[str, object]] = []
         for index, child in enumerate(value):
-            filtered, nested = _partition_authority(child, (*path, index))
+            filtered, nested = _partition_authority(child, (*path, index), final=final)
             cacheable_list.append(filtered)
             overlay.extend(nested)
         return cacheable_list, overlay
@@ -892,7 +904,7 @@ def _authority_content(fields: Sequence[Mapping[str, object]]) -> str:
     return content
 
 
-def _payload_has_authority_keys(value: object) -> bool:
+def _payload_has_authority_keys(value: object, *, final: bool = False) -> bool:
     if _is_recorded_wire_truth(value):
         return True
     if isinstance(value, Mapping):
@@ -905,11 +917,11 @@ def _payload_has_authority_keys(value: object) -> bool:
                         or child.get("schema") != "stateframe-framefit5-owner/1"):
                     return True
                 continue
-            if _authority_key(key) or _payload_has_authority_keys(child):
+            if _authority_key(key, final=final) or _payload_has_authority_keys(child, final=final):
                 return True
         return False
     if isinstance(value, list):
-        return any(_payload_has_authority_keys(child) for child in value)
+        return any(_payload_has_authority_keys(child, final=final) for child in value)
     return False
 
 
@@ -1829,6 +1841,7 @@ def _emit(journal: object | None, kind: str, **fields: object) -> None:
             if kind in {
                 "stateframe_page_log_prepared",
                 "stateframe_page_log_failed_open",
+                "final_cache_layout_failed_open",
             }:
                 _observe_run_vitals_event(journal, kind, fields)
         except Exception:

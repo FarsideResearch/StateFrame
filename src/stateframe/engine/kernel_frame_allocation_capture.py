@@ -141,6 +141,7 @@ def _obligations_and_locations(
     receipt: Mapping[str, object],
     sources: Mapping[str, str],
     carrier_roles: Mapping[int, str],
+    location_map: Mapping[int, int] | None = None,
 ) -> tuple[list[dict[str, object]], dict[int, list[dict[str, str]]]]:
     """Consume the existing verifier's exact-byte proofs, without a new parser."""
     obligations = []
@@ -176,7 +177,8 @@ def _obligations_and_locations(
                 "ranges": [{"start_line": start, "end_line": end}],
             }
         )
-        indexes = set() if path in deferred else _unit_carriers(receipt, path, byte_start, byte_end)
+        physical_indexes = set() if path in deferred else _unit_carriers(receipt, path, byte_start, byte_end)
+        indexes = {location_map[index] for index in physical_indexes} if location_map is not None else physical_indexes
         # ALLOC_DIAG / two-views-1 (CHECKPOINT 10-25, benchmark died9 req 9): a closure unit of a path the PLAN deferred
         # that no single delivered carrier contains stays deferred (read windows of the path are carried as their own
         # unit:visibility:* units); one that a carrier does contain is retained there, so obligations always agree
@@ -238,13 +240,16 @@ def capture_candidate(
         raise FrameRequestAllocationError(
             "cannot allocate an unqualified source candidate"
         )
-    messages = body["messages"]
+    physical_messages = body["messages"]
+    from kernel_cache_layout_view import FINAL_LAYOUT_NAME, semantic_index_map, semantic_messages
+    final_layout = bool(physical_messages and physical_messages[-1].get("name") == FINAL_LAYOUT_NAME)
+    location_map = semantic_index_map(physical_messages) if final_layout else None
+    messages = semantic_messages(physical_messages) if final_layout else physical_messages
     state_index = next(
         i
         for i, msg in enumerate(messages)
         if str(msg.get("content") or "").startswith(STATE_HEADER + "\n")
     )
-    from kernel_cache_layout_view import semantic_messages
     _payload, state = _state_payload(semantic_messages(messages)[state_index])
     frame = state["framefit5"]
     exchange = latest_complete_tool_exchange(messages)
@@ -292,7 +297,7 @@ def capture_candidate(
         exchange_end=exchange_end,
     )
     obligations, locations = _obligations_and_locations(
-        source_plan, receipt, sources, carrier_roles,
+        source_plan, receipt, sources, carrier_roles, location_map,
     )
     carriers, facts = [], []
     for index in range(state_index + 1, len(messages)):

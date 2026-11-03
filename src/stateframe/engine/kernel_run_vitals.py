@@ -249,7 +249,7 @@ class RunVitalsAccumulator:
                     self._cache_uncached_tokens += uncached
                     self._cache_hit_tokens += cache_n
 
-        elif kind == "stateframe_page_log_failed_open":
+        elif kind in {"stateframe_page_log_failed_open", "final_cache_layout_failed_open"}:
             self.cache_layout_fail_open += 1
 
         elif kind == "f4_budget_fit":

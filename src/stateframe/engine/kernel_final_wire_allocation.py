@@ -13,6 +13,24 @@ import kernel_frame_routes as _frame_routes
 from kernel_request_seal import QualifiedRequest, OwnerPresentation, RequestSealError, freeze
 
 
+def _final_cache_message_label(message):
+    from kernel_cache_layout_view import FINAL_LAYOUT_NAME
+
+    content = str(message.get("content") or "")
+    if message.get("name") == FINAL_LAYOUT_NAME:
+        return "final_authority"
+    if content.startswith("[StateFrame]\n"):
+        return "state"
+    if content.startswith("Task:"):
+        return "task"
+    if content.startswith(("[Current source:", "[Working source:", "[Retained source:",
+                           "[Observed source:", "[read page]", "[read reuse]", "CURRENT_SOURCE ")):
+        return "source"
+    if message.get("role") == "user":
+        return "host"
+    return str(message.get("role"))
+
+
 def publishes_runtime_token_meter(candidate) -> bool:
     """Whether sealing copies the context meter back onto the runtime.
 
@@ -151,10 +169,15 @@ def build_qualified_request(capture, runtime, body, *, endpoint, key, deadline=N
                            turn=candidate.step, request_id=candidate.request_id)
     before_fit_bytes = len(json.dumps(body).encode())
     body = finalize_frame_candidate(context, candidate, body, frame_counter=token_estimate)
-    from kernel_cache_layout_candidate import render_cache_candidate, pending_publication
+    from kernel_cache_layout_candidate import (
+        render_cache_candidate, render_final_cache_candidate, pending_publication,
+    )
     from kernel_cache_layout_view import semantic_messages
     from kernel_request_budget import _request_token_meter
     body = render_cache_candidate(
+        candidate, context, body, meter=_request_token_meter(context, candidate),
+        inputs=candidate._frame_candidate_inputs)
+    body = render_final_cache_candidate(
         candidate, context, body, meter=_request_token_meter(context, candidate),
         inputs=candidate._frame_candidate_inputs)
     candidate.journal.emit("final_wire_rebudgeted", producer="kernel_final_wire_allocation",
@@ -331,6 +354,13 @@ def build_qualified_request(capture, runtime, body, *, endpoint, key, deadline=N
         skills = skills_service()
         if skills is not None:
             skills.commit_delivery(body["messages"])
+        from kernel_cache_layout_view import FINAL_LAYOUT_NAME
+        if body["messages"][-1].get("name") == FINAL_LAYOUT_NAME:
+            capture.journal.emit(
+                "cache_layout_final_wire", producer="kernel_final_wire_allocation",
+                request_id=capture.request_id, body_sha256="sha256:" + record.body_digest,
+                message_order=[_final_cache_message_label(row) for row in body["messages"]],
+                authority_message_index=len(body["messages"]) - 1, dispatch=False)
     publish_code_bookmark_transition(runtime, capture._code_bookmark_transition)
     return record
 

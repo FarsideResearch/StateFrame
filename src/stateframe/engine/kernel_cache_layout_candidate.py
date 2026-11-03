@@ -8,11 +8,110 @@ import copy
 from collections.abc import Mapping
 from dataclasses import replace
 import json
+import os
 import threading
 
 from kernel_stateframe_page_log import PageLogPending, mode
 
 _COMMIT_LOCK = threading.RLock()
+
+FINAL_MODE_ENV = "STATEFRAME_FINAL_CACHE_LAYOUT"
+
+
+def final_layout_mode(environ=None):
+    source = os.environ if environ is None else environ
+    selected = str(source.get(FINAL_MODE_ENV, "off")).strip().lower()
+    if selected not in {"off", "on"}:
+        raise ValueError("invalid final cache layout mode")
+    return selected
+
+
+def render_final_cache_candidate(capture, runtime, body, *, meter, inputs):
+    """Place current authority at the end of a final, fully fitted request."""
+    if final_layout_mode() == "off":
+        return body
+    if mode() != "off":
+        raise ValueError("final cache layout and page log cannot share one request")
+    from kernel_cache_layout_view import FINAL_LAYOUT_NAME, semantic_messages
+    from kernel_greenfact import GREENFACT_TEXT
+    from kernel_request_source_window import verify_final_source_delivery, source_delivery_satisfied
+    from kernel_stateframe_framefit5 import VOLATILE_TAIL_MARKER, _validated_exchange_and_volatile_tail
+    from kernel_stateframe_page_log import _partition_authority, _payload_has_authority_keys
+    from kernel_stateframe_final_message import AUTHORITY_OVERLAY_HEADER
+
+    projected = copy.deepcopy(body)
+    messages = projected.get("messages")
+    if not isinstance(messages, list) or not messages:
+        raise ValueError("final cache layout requires a message array")
+    _exchange, exchange_start, _tail_index = _validated_exchange_and_volatile_tail(messages)
+    system_end = next((i for i, row in enumerate(messages) if row.get("role") != "system"), len(messages))
+    state_index = system_end + 1
+    if (state_index >= exchange_start or not str(messages[state_index].get("content", "")).startswith("[StateFrame]\n")):
+        raise ValueError("final cache layout requires the canonical frame input")
+    payload = json.loads(messages[state_index]["content"].split("\n", 1)[1])
+    cacheable, fields = _partition_authority(payload, final=True)
+    if _payload_has_authority_keys(cacheable, final=True):
+        raise ValueError("final cache layout retained frame authority")
+    if json.dumps(fields, ensure_ascii=False).count("[CONTINUATION LIMITS |") != 1:
+        raise ValueError("final cache layout requires one current continuation limit")
+    authority_prefixes = (
+        "[CONTINUATION LIMITS |", "[Unified stop authority]", "[COMPLETION OWNER]",
+        "[WIRE_TRUTH_FACT ", "[EVIDENCEPIN]", "[DONE AUTHORITY]", "[MENU AUTHORITY]",
+        "[Read lockout]", "[WIRE_READ_CONTRACT]", "[OPEN UNKNOWNS]",
+        "[NATIVE BATCH RECEIPTS]", "[LITERAL SITE INVENTORY |",
+    )
+    stable = []
+    moved = []
+    for row in messages[state_index + 1:exchange_start]:
+        content = row.get("content")
+        if row.get("role") != "user" or not isinstance(content, str):
+            raise ValueError("final cache layout has a non-user stable row")
+        if content.startswith(authority_prefixes):
+            if not content.startswith("[CONTINUATION LIMITS |"):
+                moved.append(content)
+        else:
+            stable.append(row)
+    # Preserve whole source carriers, with their path and revision attached.
+    frame = messages[state_index]
+    original_frame_content = frame["content"]
+    frame["content"] = "[StateFrame]\n" + json.dumps(
+        cacheable, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False)
+    final = messages[-1]
+    original = final.get("content")
+    if not isinstance(original, str) or not original.startswith(VOLATILE_TAIL_MARKER):
+        raise ValueError("final cache layout lost the volatile tail")
+    green = GREENFACT_TEXT if original.endswith(GREENFACT_TEXT) else ""
+    prefix = original[:-len(green)] if green else original
+    if AUTHORITY_OVERLAY_HEADER in prefix or "[CONTINUATION LIMITS |" in prefix:
+        raise ValueError("final cache layout has duplicate authority text")
+    overlay = json.dumps(
+        {"schema": "stateframe-authority-overlay/1", "layout": FINAL_LAYOUT_NAME, "fields": fields},
+        ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False)
+    final["content"] = "\n\n".join((prefix.rstrip(), *moved, AUTHORITY_OVERLAY_HEADER + "\n" + overlay)) + green
+    final["name"] = FINAL_LAYOUT_NAME
+    projected["messages"] = [*messages[:state_index], *stable, frame,
+                             *messages[exchange_start:-1], final]
+    if semantic_messages(projected["messages"])[state_index]["content"] != original_frame_content:
+        raise ValueError("final cache layout frame reconstruction differs")
+    tokens, method = meter.measure(projected)
+    size = len(json.dumps(projected).encode())
+    if method != "tokenize" or tokens > inputs["token_ceiling"] or size > inputs["byte_ceiling"]:
+        # The input body is already fitted to this envelope; send it unprojected rather than end the run.
+        from kernel_stateframe_page_log import _emit
+        journal = getattr(capture, "journal", None)
+        if journal is not None:
+            _emit(journal, "final_cache_layout_failed_open", request_id=capture.request_id,
+                  reason="exceeds_measured_envelope", vital=True, meter=method, prompt_tokens=tokens,
+                  token_ceiling=inputs["token_ceiling"], bytes=size, byte_ceiling=inputs["byte_ceiling"])
+        return body
+    receipt = verify_final_source_delivery(
+        inputs["source_plan"], projected["messages"], payload=projected,
+        sources=inputs["sources"])
+    if not source_delivery_satisfied(receipt):
+        raise ValueError("final cache layout source proof failed")
+    inputs["receipt"] = receipt
+    capture.request_source_final_delivery = receipt
+    return projected
 
 
 def registered_done_for_wire(capture, registered, tools):

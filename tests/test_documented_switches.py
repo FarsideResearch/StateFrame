@@ -23,6 +23,7 @@ PROFILE_ONLY = {
     "STATEFRAME_READ_LOCKOUT",
     "STATEFRAME_HTTP_GZIP",
     "STATEFRAME_PLAIN_GZIP",
+    "STATEFRAME_PAGE_LOG",
 }
 # Placeholders in the extension guide and prefixes of per-role variables, not settings.
 EXAMPLES = {"STATEFRAME_MY_SWITCH"}

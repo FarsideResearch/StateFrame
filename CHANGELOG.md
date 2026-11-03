@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Add `STATEFRAME_FINAL_CACHE_LAYOUT` (opt-in, off by default): each request places the typed state frame after the stable carrier rows and moves current authority into the final message, so a local server can reuse more of the previous prompt. Measured live on Qwen3.6-35B-A3B with llama.cpp over 20 runs, the server reused 34% more cached prompt tokens per request from request 2 on (6,164 against 4,595), and the cached share rose from 20.9% to 25.7%. A request that would not fit the prompt envelope in this layout is sent in the normal layout instead of stopping the run. It cannot be combined with the page log (`STATEFRAME_PAGE_LOG` in a custom profile). See [Running](docs/guide/running.md#prompt-cache-current-authority-last).
+
 ## 0.3.19 (2026-11-03)
 
 - Three tree digests that could give two different trees the same value in normal use are fixed, and three more no longer confuse a missing or unreadable file with real content. One shared helper, `kernel_tree_digest.py`, records each path with an explicit type (regular file, missing, unreadable, symlink with its target, directory) instead of concatenating paths and bytes or hashing a sentinel string such as `<missing>`. Each site hashes under its own versioned domain. Fully fixed: the get-sure workspace fingerprint (`a.py`="x" matched `a.pyx`=""), the ship-tree smoke digest (same pair, and a missing file matched a file containing `<missing>`), and the realtask snapshot digest (a symlink `x -> y` matched a file `x` containing `L:y`). Missing-file case fixed: `_revision12` (missing matched `<missing>`), `dependency_revision` and the source-closure revision (missing matched `<unavailable>`), and the coordinated-change tree revision (missing matched an empty file).
