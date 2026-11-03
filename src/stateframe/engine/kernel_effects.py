@@ -303,10 +303,14 @@ class WorkspaceEffectPolicy:
     new_file_allowed: Callable[[str], bool]
     baseline_manifest: Manifest | None = None
     directory_allowed: Callable[[str], bool] | None = None
+    collection_guard: Callable[[str, bool, str | None, str | None], str | None] | None = None
 
     def authorize(self, effect: Effect) -> tuple[bool, str]:
         if self.protected(effect.path):
             return False, "protected test or inode alias"
+        if self.collection_guard is not None and effect.before is None:
+            if reason := self.collection_guard(effect.path, True, None, None):
+                return False, reason
         if effect.after and effect.after.kind in {"symlink", "other"}:
             return False, "symlinks, hardlinks, and special files are not allowed"
         if (
@@ -347,6 +351,22 @@ class WorkspaceEffectPolicy:
         return True, "authorized workspace effect"
 
 
+def _workspace_relative(root: Path, path: object) -> str:
+    """A baseline test path as workspace-relative POSIX text.
+
+    Engine callers pass absolute paths under the workspace; projected worker rows carry paths that are
+    already workspace-relative (``tests/test_app.py``). ``relative_to`` raises on the latter, so a relative
+    path is kept as it is and an absolute one is made relative, resolving symlinks if the plain form fails.
+    """
+    candidate = Path(str(path))
+    if not candidate.is_absolute():
+        return candidate.as_posix()
+    try:
+        return candidate.relative_to(root).as_posix()
+    except ValueError:
+        return candidate.resolve().relative_to(root.resolve()).as_posix()
+
+
 def effect_policy_for_run(
     workspace: Path,
     row: Mapping[str, object],
@@ -357,6 +377,7 @@ def effect_policy_for_run(
 ) -> WorkspaceEffectPolicy:
     """Adapt the engine's own path decisions; keep their policy in one place."""
     from probes.react_repair import _is_product_path, protected_test_path
+    from stateframe.test_runners import collection_change_reason, pytest_plugin_modules
 
     root = Path(workspace)
     files = row.get("files")
@@ -366,6 +387,29 @@ def effect_policy_for_run(
     original_paths = frozenset(
         (baseline_manifest or scan(root, exclude=lambda _: False)).keys()
     )
+    guarded = (row.get("runner_kind", "pytest") == "pytest"
+               and row.get("protect_tests", "all") in {"task", "all"})
+    test_paths = tuple(str(path) for path in {
+        *(row.get("test_file_paths", ()) or ()),
+        *(row.get("public_check_paths", ()) or ())})
+    protected_paths = tuple(_workspace_relative(root, path) for path in baseline_tests)
+    plugins = (pytest_plugin_modules(root, tuple(
+        path for path in original_paths if path.endswith(".py")
+        and (path in test_paths or Path(path).name in {"conftest.py", "__init__.py"})))
+        if guarded else ())
+
+    def collection_guard(path: str, created: bool, before: str | None,
+                         after: str | None) -> str | None:
+        current_plugins = plugins
+        if created and path.endswith(".py"):
+            sources = tuple(candidate.relative_to(root).as_posix()
+                            for pattern in ("test_*.py", "conftest.py", "__init__.py")
+                            for candidate in root.rglob(pattern))
+            current_plugins += pytest_plugin_modules(root, sources)
+        return collection_change_reason(
+            path, kind="pytest", protected_tests=protected_paths,
+            test_files=test_paths, pytest_plugins=current_plugins, created=created,
+            before=before, after=after)
     protected_inodes = set()
     for name in baseline_tests:
         try:
@@ -391,6 +435,9 @@ def effect_policy_for_run(
         if path in hook_paths:
             return True
         candidate = root / path
+        if (guarded and path in original_paths
+                and collection_guard(path, False, None, None)):
+            return True
         if protected_test_path(candidate, baseline_tests):
             return True
         try:
@@ -424,6 +471,7 @@ def effect_policy_for_run(
             )
         ),
         new_file_allowed=lambda path: _is_product_path(path, row),
+        collection_guard=collection_guard if guarded else None,
         baseline_manifest=baseline_manifest,
         directory_allowed=lambda path: (
             (
@@ -557,7 +605,21 @@ def reconcile(
     _validate_manifest_limits(before)
     _validate_manifest_limits(after)
     effects = diff(before, after)
-    decisions = [(effect, *policy.authorize(effect)) for effect in effects]
+    decisions = []
+    for effect in effects:
+        decision = policy.authorize(effect)
+        if (decision[0] and isinstance(policy, WorkspaceEffectPolicy)
+                and policy.collection_guard is not None
+                and effect.before is not None and effect.before.kind == "file"
+                and (effect.after is None or effect.after.kind == "file")
+                and PurePosixPath(effect.path).name in {
+                    "pytest.ini", "tox.ini", "setup.cfg", "pyproject.toml"}):
+            original = store.get(effect.before.digest).decode("utf-8", errors="replace")
+            current = ((Path(workspace) / effect.path).read_text(
+                encoding="utf-8", errors="replace") if effect.after is not None else "")
+            if reason := policy.collection_guard(effect.path, False, original, current):
+                decision = False, reason
+        decisions.append((effect, *decision))
     # A new directory is structural authority, not a product-file extension.
     # Keep it when an admitted descendant needs it, but never override protection.
     if isinstance(policy, WorkspaceEffectPolicy):

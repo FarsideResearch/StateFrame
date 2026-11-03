@@ -85,6 +85,7 @@ from sampler_config import apply_to_request as _apply_sampler_fields  # noqa: E4
 from kernel_done_acceptance import done_accepted  # noqa: E402
 import kernel_workspace_truth as _workspace_truth  # noqa: E402
 import kernel_frame_routes as _frame_routes  # noqa: E402
+from stateframe.test_runners import collection_change_reason, pytest_plugin_modules  # noqa: E402
 
 CORPUS = POC / "results.SNAPSHOT-20260920" / (os.environ.get("BENCH_CORPUS") or "real_tasks_v3.jsonl")
 API = os.environ.get("DS_URL", "")
@@ -6420,7 +6421,43 @@ def work(d, *, resume=None):
                           if d.get("runner_kind") == "generic" or
                           d.get("protect_tests") in {"task", "off"} else
                           {str(p) for p in root.rglob("test_*.py")} |
-                          {str(p) for p in root.rglob("conftest.py")})
+                          {str(p) for p in root.rglob("conftest.py")} |
+                          {str(root / p) for p in d.get("public_check_paths", ())})
+        _collection_guarded = (d.get("runner_kind", "pytest") == "pytest"
+                               and d.get("protect_tests", "all") in {"task", "all"})
+        _collection_plugins = (pytest_plugin_modules(root, tuple(
+            path.relative_to(root).as_posix()
+            for path in (*root.rglob("test_*.py"), *root.rglob("conftest.py"),
+                         *root.rglob("__init__.py")))) if _collection_guarded else ())
+
+        def _collection_reason(path, *, created=None, after=None):
+            if not _collection_guarded:
+                return None
+            try:
+                relative = path.relative_to(root).as_posix()
+            except ValueError:
+                return None
+            if created is None:
+                created = not path.exists()
+            before = (path.read_text(encoding="utf-8", errors="replace")
+                      if not created and after is not None and path.is_file() else None)
+            return collection_change_reason(
+                relative, kind="pytest", protected_tests=tuple(
+                    pathlib.Path(name).relative_to(root).as_posix()
+                    for name in baseline_tests),
+                test_files=tuple({*(d.get("test_file_paths", ()) or ()),
+                                  *(d.get("public_check_paths", ()) or ())}),
+                pytest_plugins=(_collection_plugins + pytest_plugin_modules(
+                    root, tuple(pathlib.Path(item).relative_to(root).as_posix()
+                                for item in created_this_run
+                                if str(item).endswith(".py")))), created=created,
+                before=before, after=after)
+
+        def _collection_refusal(path, *, after=None):
+            reason = _collection_reason(path, after=after)
+            if reason is not None:
+                return f"REFUSED PROTECTED_TEST: {path.relative_to(root).as_posix()}: {reason}"
+            return None
         from kernel_shell_tool import service as shell_service
         _shell = shell_service()
         _hook_wiring_for_run = globals().get("_hook_wiring")
@@ -8713,6 +8750,56 @@ def work(d, *, resume=None):
                                                    " next: read one file by path, edit, run_tests or done.")
                             msgs.append(_tool_reply_for_call(msgs, tool_call_id, _reject_text))
                             continue
+                        if _collection_guarded and _name in {
+                                "file_create", "file_delete", "file_move", "edit", "str_replace",
+                                "insert_before", "replace_module"}:
+                            _guard_paths = (
+                                (_args.get("source"), _args.get("destination"))
+                                if _name == "file_move" else
+                                tuple(item.get("path") for item in _args.get("edits", ())
+                                      if isinstance(item, Mapping))
+                                if _name == "str_replace" and isinstance(_args.get("edits"), list)
+                                else (_args.get("path"),))
+                            _collection_feedback = None
+                            for _raw_guard_path in _guard_paths:
+                                if not isinstance(_raw_guard_path, str):
+                                    continue
+                                _guard_path = root / _raw_guard_path
+                                _after_guard = None
+                                if (_name == "file_delete" or
+                                        (_name == "file_move" and
+                                         _raw_guard_path == _args.get("source"))):
+                                    _after_guard = ""
+                                _guard_edit = _args
+                                if _name == "str_replace" and isinstance(_args.get("edits"), list):
+                                    _guard_edit = next((item for item in _args["edits"]
+                                                        if isinstance(item, Mapping)
+                                                        and item.get("path") == _raw_guard_path), {})
+                                _guard_old = _guard_edit.get("old", _guard_edit.get("old_str"))
+                                _guard_new = _guard_edit.get("new", _guard_edit.get("new_str"))
+                                if (_name == "edit" and _guard_path.is_file()
+                                        and isinstance(_args.get("function_source"), str)):
+                                    _after_guard = _args["function_source"]
+                                if (_name == "str_replace" and _guard_path.is_file()
+                                        and isinstance(_guard_old, str)
+                                        and isinstance(_guard_new, str)):
+                                    _guard_source = _guard_path.read_text(
+                                        encoding="utf-8", errors="replace")
+                                    if _guard_old and _guard_source.count(_guard_old) == 1:
+                                        _after_guard = _guard_source.replace(
+                                            _guard_old, _guard_new, 1)
+                                _collection_feedback = _collection_refusal(
+                                    _guard_path, after=_after_guard)
+                                if _collection_feedback:
+                                    break
+                            if _collection_feedback:
+                                bolt.receipt("edit", _name, str(_raw_guard_path),
+                                             "REFUSED", _collection_feedback,
+                                             target_path=str(_raw_guard_path))
+                                measurement.observe(_name, _collection_feedback)
+                                msgs.append(_tool_reply_for_call(
+                                    msgs, tool_call_id, _collection_feedback))
+                                continue
                         if _args.get("path") and not information.check_path(root, str(_args["path"])):
                             msgs.append(_tool_reply_for_call(msgs, tool_call_id, "[information-policy] Path outside workspace denied."))
                             continue

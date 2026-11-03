@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Under `--protect-tests task/all`, creating files that change test collection (`conftest.py`, test-package `__init__.py`, pytest config, `sitecustomize.py`/`.pth`) is now refused; before, a new `tests/__init__.py` could import product code at collection time and change the test result.
+
 ## 0.3.29 (2026-11-03)
 
 - Finished runs take far less disk. A fixed scripted run with a run environment went from 35.8 MB to 0.9 MB, and the bundled examples shrink about 3x before any environment is counted. Measurement journals are sealed as `events.jsonl.xz`, their blobs go into one append-only pack, preflight `requests/` records go into `requests.pack.xz`, and checkpoints and the run environment are removed once the result cannot be resumed. Interrupted, killed and stopped runs keep everything resume needs. `wire/` and `spec.json` are never touched, and request bytes are unchanged.

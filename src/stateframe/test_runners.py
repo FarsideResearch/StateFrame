@@ -1,6 +1,7 @@
 """Runner classification and protected test resources for repository checks."""
 from __future__ import annotations
 
+import ast
 import fnmatch
 import json
 import os
@@ -369,3 +370,107 @@ def protected_paths(paths: list[str] | tuple[str, ...], *, kind: str,
                 if script in available:
                     protected.add(script)
     return tuple(sorted(protected))
+
+
+def pytest_plugin_modules(repo: Path, paths: tuple[str, ...] | list[str]) -> tuple[str, ...]:
+    """Read literal pytest_plugins declarations from existing collection sources."""
+    plugins: set[str] = set()
+    for relative in paths:
+        if not relative.endswith(".py"):
+            continue
+        try:
+            module = ast.parse((repo / relative).read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, SyntaxError):
+            continue
+        for statement in module.body:
+            value = None
+            if isinstance(statement, ast.Assign) and any(
+                    isinstance(target, ast.Name) and target.id == "pytest_plugins"
+                    for target in statement.targets):
+                value = statement.value
+            elif (isinstance(statement, ast.AnnAssign)
+                  and isinstance(statement.target, ast.Name)
+                  and statement.target.id == "pytest_plugins"):
+                value = statement.value
+            if value is None:
+                continue
+            try:
+                declared = ast.literal_eval(value)
+            except (ValueError, TypeError, SyntaxError, MemoryError, RecursionError):
+                # A declaration such as BASE + ["pkg.plugin"] is still a
+                # collection-time load. Keep its literal names and fail closed
+                # for names that cannot be resolved without executing code.
+                plugins.add("*")
+                declared = tuple(node.value for node in ast.walk(value)
+                                 if isinstance(node, ast.Constant)
+                                 and isinstance(node.value, str))
+            if isinstance(declared, str):
+                declared = (declared,)
+            if isinstance(declared, (tuple, list)):
+                plugins.update(item for item in declared if isinstance(item, str))
+    return tuple(sorted(plugins))
+
+
+def _pytest_sections(source: str) -> tuple[str, ...]:
+    """Keep section text, so edits outside pytest configuration remain writable."""
+    sections: list[str] = []
+    active = False
+    for line in source.splitlines(keepends=True):
+        heading = re.match(r"^\s*\[([^]]+)\]\s*(?:[#;].*)?$", line)
+        if heading:
+            name = heading.group(1).strip().lower()
+            active = (name == "pytest" or name == "tool:pytest"
+                      or name.startswith("tool.pytest"))
+            if active:
+                sections.append("")
+        if active:
+            sections[-1] += line
+    return tuple(sections)
+
+
+def collection_change_reason(
+    path: str, *, kind: str, protect_tests: str = "all",
+    protected_tests: tuple[str, ...] | list[str] = (),
+    test_files: tuple[str, ...] | list[str] = (),
+    test_roots: tuple[str, ...] | list[str] = (),
+    pytest_plugins: tuple[str, ...] | list[str] = (),
+    created: bool, before: str | None = None, after: str | None = None,
+) -> str | None:
+    """Explain a write that can alter guarded pytest collection or startup."""
+    if kind != "pytest" or protect_tests not in {"task", "all"}:
+        return None
+    pure = PurePosixPath(path)
+    if pure.is_absolute() or ".." in pure.parts:
+        return None  # The workspace path validator owns containment.
+    name = pure.name
+    roots = {PurePosixPath(root) for root in ("tests", "test", *test_roots)}
+    roots.update(PurePosixPath(test).parent for test in (*protected_tests, *test_files))
+    roots = {root for root in roots if str(root) not in {"", "."}}
+    within_root = any(pure.parent == root or root in pure.parents for root in roots)
+    test_initializer = name == "__init__.py" and any(
+        pure.parent == root or pure.parent in root.parents or root in pure.parents
+        for root in roots)
+    startup_hook = name in {"sitecustomize.py", "usercustomize.py"} or name.endswith(".pth")
+    module = path.removesuffix(".py").replace("/", ".")
+    package = module.removesuffix(".__init__")
+    plugin_module = ((name.startswith("pytest_") and name.endswith(".py"))
+                     or (name.endswith(".py") and "*" in pytest_plugins)
+                     or module in pytest_plugins
+                     or (name == "__init__.py" and package in pytest_plugins))
+    if created:
+        if name == "conftest.py" or test_initializer or startup_hook or plugin_module:
+            return f"protected test tree: new {name} would run at test collection"
+        if name in {"pytest.ini", "tox.ini", "setup.cfg", "pyproject.toml"} and (
+                pure.parent == PurePosixPath(".") or within_root):
+            return f"protected test tree: new {name} would run at test collection"
+        return None
+    if name == "conftest.py" or test_initializer or startup_hook or plugin_module:
+        return f"protected test tree: {name} can change test collection"
+    if (name in {"pytest.ini", "tox.ini", "setup.cfg", "pyproject.toml"}
+            and (pure.parent == PurePosixPath(".") or within_root)
+            and before is not None and after is not None):
+        if name == "pytest.ini" and before != after:
+            return f"protected test tree: {name} changes test collection"
+        if _pytest_sections(before) != _pytest_sections(after):
+            return f"protected test tree: {name} changes test collection"
+    return None
