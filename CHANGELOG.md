@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.3.20 (2026-11-03)
 
 - Add `STATEFRAME_FINAL_CACHE_LAYOUT` (opt-in, off by default): each request places the typed state frame after the stable carrier rows and moves current authority into the final message, so a local server can reuse more of the previous prompt. Measured live on Qwen3.6-35B-A3B with llama.cpp over 20 runs, the server reused 34% more cached prompt tokens per request from request 2 on (6,164 against 4,595), and the cached share rose from 20.9% to 25.7%. A request that would not fit the prompt envelope in this layout is sent in the normal layout instead of stopping the run. It cannot be combined with the page log (`STATEFRAME_PAGE_LOG` in a custom profile). See [Running](docs/guide/running.md#prompt-cache-current-authority-last).
 
