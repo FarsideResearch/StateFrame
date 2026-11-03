@@ -466,15 +466,15 @@ DEFAULT_CONTEXT_TOKENS = 65_536
 DEFAULT_PROMPT_BUDGET = 33_344
 
 
-# Opt-in engine switches a user may set in the shell: exactly these names and values,
-# ambient over the profile; unset keeps the profile's value. Never a blanket STATEFRAME_* passthrough.
+# Engine switches a user may set in the shell: exactly these names and values,
+# ambient over the profile. Never a blanket STATEFRAME_* passthrough.
 OPT_IN_SWITCHES = {
     "STATEFRAME_CACHE_LAYOUT": ("on", "off"),
     "STATEFRAME_SLOT_AFFINITY": ("on", "off"),
     "STATEFRAME_TOOL_ORDER": ("stable", "legacy"),
     "STATEFRAME_EVICTFIX": ("on", "legacy"),
     "STATEFRAME_MICROGRAPH": ("on", "off"),  # experimental; the engine defaults to off
-    "STATEFRAME_STABLE_TOOL_HEAD": ("on", "off"),  # one cacheable tool list per run; gated tools are refused
+    "STATEFRAME_STABLE_TOOL_HEAD": ("on", "off"),  # append-only tool list per run; on by default
     "STATEFRAME_SHELL_STATE": ("on", "off"),  # shell cwd and exported variables persist between calls
     "STATEFRAME_GIT_COMMIT": ("on", "off"),  # git_commit/git_branch tools; patch series per branch after the run
     "STATEFRAME_EDIT_SCOPE_WIDEN": ("on", "off"),  # scoped runs admit an edited product file outside the scope
@@ -488,7 +488,7 @@ OPT_IN_RUNNER_DEFAULTS = {"STATEFRAME_EVICTFIX": "legacy"}
 
 
 def resolve_opt_in_switches(engine_dir: Path = ENGINE_DIR) -> dict[str, str]:
-    """The opt-in switches set in the user's environment, validated, for the engine's spec."""
+    """The shell switches set by the user, validated and forwarded in the engine spec."""
     chosen = {}
     for name in OPT_IN_SWITCHES:
         raw = os.environ.get(name, "").strip()

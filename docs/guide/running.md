@@ -177,9 +177,21 @@ A completed batch made entirely of proved unchanged reads costs one no-progress 
 
 ### Prompt cache: stable tool head
 
-`STATEFRAME_STABLE_TOOL_HEAD=on` (off by default; set it in the shell you start StateFrame from, or in a custom profile) lists one tool list for the whole run instead of the current step's menu. Chat templates such as Qwen's render the tools before the system prompt, so a menu that changes between steps makes the server re-read the whole prompt. With the switch on, the list only grows: a tool keeps the position and schema it had when first offered, and new tools are added at the end. Only the current step's tools can run; calling a listed tool that is not available this step gets the usual "not offered for the current state" reply, and a short note at the end of the request names the callable tools. Request bytes are unchanged when the switch is off.
+`STATEFRAME_STABLE_TOOL_HEAD` is on when unset. Set it to `off` in the shell that starts StateFrame or in a custom profile to restore per-step tool lists. Invalid values are refused.
 
-Measured on a llama.cpp server with Qwen3.6-35B-A3B: after the step where a new tool first appears, each request reuses the cached tools, system prompt and task (about 5-6k tokens; about 17-20% of a multi-file request and up to about 40% of a small one), against 0-3% without the switch. Task outcomes matched in the runs so far (3 matched pairs on two tasks); the effect on total run time is not established.
+The default lists the tools offered during a run in first-seen order. A tool keeps its first position and schema unless its parameters change, in which case its schema is replaced in place. New tools are appended. Only tools in the current step's callable menu can run; calling a listed but unavailable tool gets the usual "not offered for the current state" reply, and a short note names the tools callable on that step. With the switch off, requests keep the pre-feature per-step menu and request bytes.
+
+Measured on Qwen3.6-35B-A3B served by llama.cpp, across the three bundled examples and two harder multi-file tasks scored with hidden tests, three runs per task with the switch off and three with it on (30 runs, none void). Uncached prompt tokens per request is the server's `prompt_n` summed over a run and divided by its requests; wall time is per successful task.
+
+| Task | Submitted (off / on) | Uncached prompt tokens per request (off / on) | Wall time per successful task (off / on) |
+|---|---|---|---|
+| discount_bug | 3 of 3 / 3 of 3 | 10,013 / 7,699 (-23%) | 208 s / 184 s |
+| brief_to_report | 3 of 3 / 3 of 3 | 11,358 / 9,380 (-17%) | 330 s / 289 s |
+| tiny_site | 3 of 3 / 3 of 3 | 11,627 / 10,682 (-8%) | 356 s / 288 s |
+| multi-file task 1 | 3 of 3 / 3 of 3 | 21,498 / 18,775 (-13%) | 1,436 s / 1,459 s |
+| multi-file task 2 | 2 of 3 / 3 of 3 | 23,206 / 21,027 (-9%) | 3,846 s / 1,941 s |
+
+Over all 30 runs, uncached prompt tokens per run fell 25% (84,714 to 63,166) and wall time per run 15% (979 s to 832 s). After the first request, 14-22% of each prompt was served from the cache with the switch on; with it off, 10 of 15 runs had none. Hidden-test scores were no worse (26 against 22 of 42 passed). With three runs per task, read the outcome and wall-time columns as "not worse" rather than as a measured gain; the token reduction appeared in every task.
 
 ### Closing check: requirement recheck
 

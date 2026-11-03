@@ -21,6 +21,8 @@ stateframe inspect <run-dir> --send 2 --frame
 stateframe chat --repo path/to/your-repo
 ```
 
+The server-visible action list grows as actions first appear, but each step still controls which actions can run. To restore per-step lists, set `STATEFRAME_STABLE_TOOL_HEAD=off` in the shell before starting StateFrame.
+
 Each run prints its run directory; pass it to `stateframe inspect`. There is no time limit: stop any run with Ctrl-C.
 
 For an optional closing check based on the task's own sentences, set `STATEFRAME_REQUIREMENT_RECHECK=on` in the shell before starting StateFrame. It is off by default. See [the running guide](docs/guide/running.md#closing-check-requirement-recheck) for when the check applies and its measured results.
