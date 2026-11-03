@@ -49,6 +49,7 @@ The engine is a flat package of modules, each owning one mechanism; `release-man
 | `kernel_agent_schemas.py`, `kernel_agent_tools.py`, `kernel_agent_jobs.py`, `kernel_job_output.py` | Schemas, per-run tool registration and Git/web adapters, background jobs, frozen job snapshots, bounded output and schema budget admission. |
 | `kernel_skills.py` | Bounded skill catalog and user-role body loading. |
 | `kernel_project_instructions.py` | The framed project-instructions block appended to the end of the engine system message. |
+| `kernel_requirement_recheck.py` | The optional one-time refusal on the first eligible `done`, built from the task's own sentences without a model call. |
 | `kernel_custom_tools.py`, `kernel_mcp_tools.py`, `kernel_mcp_driver.py`, `kernel_tool_tape.py` | Trusted command and MCP stdio definitions, bounded server exchanges and durable tool replay records. |
 | `kernel_execution_policy.py`, `kernel_test_isolation.py` | Sandboxed command and test execution. |
 | `kernel_git_view.py` | Pinned, sanitized Git history observations, commit-rooted `show`, run-baseline diffs and offline Git queries for repository indexing. |

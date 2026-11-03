@@ -23,6 +23,8 @@ stateframe chat --repo path/to/your-repo
 
 Each run prints its run directory; pass it to `stateframe inspect`. There is no time limit: stop any run with Ctrl-C.
 
+For an optional closing check based on the task's own sentences, set `STATEFRAME_REQUIREMENT_RECHECK=on` in the shell before starting StateFrame. It is off by default. See [the running guide](docs/guide/running.md#closing-check-requirement-recheck) for when the check applies and its measured results.
+
 ## Model server on another machine: co-locate the tokenizer
 
 The engine counts tokens many times per turn, by default on the model server. If that server is remote,

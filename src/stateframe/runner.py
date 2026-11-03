@@ -478,6 +478,7 @@ OPT_IN_SWITCHES = {
     "STATEFRAME_SHELL_STATE": ("on", "off"),  # shell cwd and exported variables persist between calls
     "STATEFRAME_GIT_COMMIT": ("on", "off"),  # git_commit/git_branch tools; patch series per branch after the run
     "STATEFRAME_EDIT_SCOPE_WIDEN": ("on", "off"),  # scoped runs admit an edited product file outside the scope
+    "STATEFRAME_REQUIREMENT_RECHECK": ("on", "off"),  # first done answered once with the task's requirement checklist
 }
 # Accepted aliases -> the engine's own value (EVICTFIX "off" is sent as "legacy").
 OPT_IN_ALIASES = {"STATEFRAME_EVICTFIX": {"off": "legacy"}}
