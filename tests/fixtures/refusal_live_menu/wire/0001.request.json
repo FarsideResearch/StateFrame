@@ -1,0 +1,1 @@
+{"messages":[{"role":"user","content":"Edit the package and report any refusal."}],"tools":[{"type":"function","function":{"name":"edit","parameters":{"type":"object"}}},{"type":"function","function":{"name":"shell","parameters":{"type":"object"}}}]}
