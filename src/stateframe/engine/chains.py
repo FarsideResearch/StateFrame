@@ -76,13 +76,8 @@ def _sha(text: str) -> str:
 
 def tree_hash(files: dict) -> str:
     """Content-addressed hash of a {path: source} repo snapshot."""
-    h = hashlib.sha256()
-    for p in sorted(files):
-        h.update(p.encode())
-        h.update(b"\0")
-        h.update(files[p].encode("utf-8", "replace"))
-        h.update(b"\0")
-    return h.hexdigest()[:16]
+    from kernel_tree_digest import compatible_text_revision
+    return compatible_text_revision("stateframe.chain_tree/2", files, terminator=True)[:16]
 
 
 # =====================================================================

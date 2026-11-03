@@ -5,16 +5,7 @@ from tools.digest_class_guard import scan_source, scan_tree
 
 
 ROOT = Path(__file__).resolve().parents[1]
-ALLOWLIST = {
-    "stateframe/engine/chains.py:tree_hash": "legacy in-memory source snapshot; stage 2",
-    "stateframe/engine/behavior_bridge.py:_files_hash": "legacy behavior source snapshot; stage 2",
-    "stateframe/engine/build_tasks/swebench_env.py:_dependency_manifest_digest": "SWEbench dependency manifests; stage 2",
-    "stateframe/engine/kernel_state_owner_inventory.py:_source_revision_vector": "state owner revision vector; stage 2",
-    "stateframe/engine/kernel_workspace_truth.py:_symbol_index": "workspace symbol index; stage 2",
-    "stateframe/engine/kernel_workspace_truth.py:_current_literal_fact": "workspace literal evidence; stage 2",
-    "stateframe/engine/kernel_expert_gap_sidecars.py:_fresh_closure": "dependency-closure freshness, path+NUL+bytes; stage 2",
-    "stateframe/engine/kernel_remaining_sites.py:current_workspace_revision": "site-inventory revision, path+NUL+source+NUL; stage 2",
-}
+ALLOWLIST = {}
 
 # The ten digest-family sites proven to collide on 0.3.18; the guard must flag every one
 # of them on an unfixed tree (run against e19c325 in the release evidence).
@@ -29,6 +20,11 @@ HISTORICAL = {
     "stateframe/engine/behavior_bridge.py:_files_hash",
     "stateframe/engine/build_tasks/swebench_env.py:_dependency_manifest_digest",
     "stateframe/engine/kernel_state_owner_inventory.py:_source_revision_vector",
+    "stateframe/engine/kernel_expert_gap_sidecars.py:_fresh_closure",
+    "stateframe/engine/kernel_remaining_sites.py:current_workspace_revision",
+    "stateframe/engine/kernel_workspace_truth.py:_symbol_index",
+    "stateframe/engine/kernel_workspace_truth.py:_current_literal_fact",
+    "stateframe/engine/long_horizon_protocol.py:_staged_digest",
 }
 
 
@@ -37,7 +33,6 @@ def test_digest_class_guard_current_tree():
     print(f"scanned={scanned} eligible={eligible} violated={len(violated)}")
     assert scanned > 500 and eligible > 0
     assert violated == set(ALLOWLIST), ("new or resolved violation; update the exact allowlist", violated)
-    assert all(reason and "stage 2" in reason for reason in ALLOWLIST.values())
 
 
 def test_guard_flags_planted_path_content_concatenation():
@@ -69,6 +64,28 @@ def nul_framed(files):
     return digest.hexdigest()
 """
     assert scan_source(planted)[1] == {"nul_framed"}
+
+
+def test_guard_flags_nul_tagged_ticket_payload():
+    planted = '''def bad(manifest_path, brief_path, phases):
+    payload = manifest_path.read_bytes() + b"\\0brief\\0" + brief_path.read_bytes()
+    for phase in phases:
+        payload += b"\\0phase\\0" + phase["ticket"].encode()
+    return _sha256_bytes(payload)
+'''
+    assert scan_source(planted)[1] == {"bad"}
+
+
+def test_typed_call_cannot_hide_unframed_hash():
+    planted = '''import hashlib
+def bad(path, content):
+    digest = hashlib.sha256()
+    digest.update(path.encode())
+    digest.update(content)
+    tree_digest("unused/2", [])
+    return digest.hexdigest()
+'''
+    assert scan_source(planted)[1] == {"bad"}
 
 
 def test_historical_sites_are_flagged_or_fixed():

@@ -483,7 +483,7 @@ class DecisionEpisodeLedger:
 
 def classify_negative_lookup(
         *, status: object, complete: bool, query: object, scope: object,
-        product_revision: object,
+        product_revision: object, paths: tuple[str, ...] = (),
 ) -> dict[str, object]:
     """Turn a revision/scope-bound negative fact into invalidation or UNKNOWN."""
     if type(complete) is not bool:
@@ -519,6 +519,7 @@ def classify_negative_lookup(
             "query": normalized_query,
             "scope": normalized_scope,
             "product_revision": revision,
+            "paths": paths,
         }),
     }
 

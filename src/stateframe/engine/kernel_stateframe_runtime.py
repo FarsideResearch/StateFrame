@@ -20897,6 +20897,7 @@ class StateFrameRuntime:
                 from kernel_request_source_window import entry_verification, site_fact_blocks
                 entry = entry_verification(self)
                 entry_key = None if entry is None else (
+                    # Ordered paths distinguish equal legacy revisions from different inventories.
                     entry.get("revision"), entry.get("status"),
                     tuple(entry.get("paths", ()) or ()),
                 )

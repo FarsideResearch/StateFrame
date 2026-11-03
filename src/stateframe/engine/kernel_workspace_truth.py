@@ -209,7 +209,10 @@ def _symbol_index(root: Path) -> tuple[
     dict[str, tuple[Mapping[str, object], ...]], dict[str, object], str
 ]:
     definitions: dict[str, list[Mapping[str, object]]] = {}
+    from kernel_tree_digest import tree_digest
     digest = hashlib.sha256()
+    entries: list[list[str]] = []
+    legacy_unique = True
     scanned = 0
     failed = 0
 
@@ -225,9 +228,16 @@ def _symbol_index(root: Path) -> tuple[
         except (OSError, UnicodeError, SyntaxError, ValueError):
             failed += 1
             continue
+        raw_digest = hashlib.sha256(raw).digest()
+        # Keep the historical backslash-zero for request bytes. A path cannot
+        # contain that marker here; the following digest is exactly 32 bytes,
+        # so marker bytes inside the digest cannot be parsed as a new row.
+        legacy_unique &= ("\\0" not in relative
+                          and not any(0xD800 <= ord(character) <= 0xDFFF for character in relative))
+        entries.append(["file", relative, raw_digest.hex()])
         digest.update(relative.encode("utf-8", "replace"))
         digest.update(b"\\0")
-        digest.update(hashlib.sha256(raw).digest())
+        digest.update(raw_digest)
         scanned += 1
         for name, definition in rows:
             definitions.setdefault(name, []).append(definition)
@@ -236,8 +246,10 @@ def _symbol_index(root: Path) -> tuple[
         "indexed": scanned,
         "failed": failed,
     }
+    revision = (digest.hexdigest() if legacy_unique else
+                tree_digest("stateframe.workspace_symbol_index/2", entries))
     return ({name: tuple(rows) for name, rows in definitions.items()},
-            coverage, "sha256:" + digest.hexdigest())
+            coverage, "sha256:" + revision)
 
 
 def _current_path_fact(
@@ -326,7 +338,10 @@ def _current_literal_fact(
     files = 0
     scanned_bytes = 0
     incomplete = False
+    from kernel_tree_digest import tree_digest
     digest = hashlib.sha256()
+    entries: list[list[str]] = []
+    legacy_unique = True
 
     def mark_incomplete(_error: OSError) -> None:
         nonlocal incomplete
@@ -351,9 +366,14 @@ def _current_literal_fact(
         if scanned_bytes > _MAX_LITERAL_BYTES:
             incomplete = True
             break
+        raw_digest = hashlib.sha256(raw).digest()
+        # Same fixed-width legacy framing as _symbol_index above.
+        legacy_unique &= ("\\0" not in relative
+                          and not any(0xD800 <= ord(character) <= 0xDFFF for character in relative))
+        entries.append(["file", relative, raw_digest.hex()])
         digest.update(relative.encode("utf-8", "replace"))
         digest.update(b"\\0")
-        digest.update(hashlib.sha256(raw).digest())
+        digest.update(raw_digest)
         try:
             text = raw.decode("utf-8")
         except UnicodeError:
@@ -364,7 +384,8 @@ def _current_literal_fact(
         "complete": not incomplete, "files": min(files, _MAX_LITERAL_FILES),
         "bytes": min(scanned_bytes, _MAX_LITERAL_BYTES),
     }
-    current_revision = revision or "sha256:" + digest.hexdigest()
+    current_revision = revision or "sha256:" + (digest.hexdigest() if legacy_unique else
+        tree_digest("stateframe.workspace_literal/2", entries))
     if incomplete:
         return _unknown(
             "literal", subject, current_revision, "literal_scan_incomplete",

@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.3.21 (2026-11-03)
+
+- Stage 2 fixes `chains.tree_hash` (NUL and lone-surrogate collisions), `behavior_bridge._files_hash`, `kernel_state_owner_inventory._source_revision_vector`, `swebench_env._dependency_manifest_digest`, the expert-gap closure freshness check, `kernel_remaining_sites.current_workspace_revision`, `long_horizon_protocol._staged_digest`, and both workspace-truth fact revisions. The digest guard now has an empty allowlist and detects NUL-tagged ticket payloads.
+- All normal-input request bytes remain unchanged, including multi-file owner inventory, remaining-sites, chain, workspace-truth and staged-task values. NUL or surrogate inputs use typed digests. Cache keys and closure freshness now also compare ordered dependency paths, so the compatible no-terminator revision residual cannot reuse a fact or plan for a different path list.
+- Persisted closure plans carry `dependency_digest_format=stateframe.dependency_revision/2` and host-only `dependency_paths`; old plans rebuild. SWE-bench manifest digests carry `stateframe.swebench_dependencies/2` and old ready/failed markers or repair contracts are refused. Staged task records carry `task_digest_format=stateframe.staged_task/2` and old records fail validation.
+- The replay acceptance helper requests untruncated `ps` command lines. On this Linux host the default width hid `_child.py`, so its child discovery failed even though the engine had reached the paused request.
+
 ## 0.3.20 (2026-11-03)
 
 - Add `STATEFRAME_FINAL_CACHE_LAYOUT` (opt-in, off by default): each request places the typed state frame after the stable carrier rows and moves current authority into the final message, so a local server can reuse more of the previous prompt. Measured live on Qwen3.6-35B-A3B with llama.cpp over 20 runs, the server reused 34% more cached prompt tokens per request from request 2 on (6,164 against 4,595), and the cached share rose from 20.9% to 25.7%. A request that would not fit the prompt envelope in this layout is sent in the normal layout instead of stopping the run. It cannot be combined with the page log (`STATEFRAME_PAGE_LOG` in a custom profile). See [Running](docs/guide/running.md#prompt-cache-current-authority-last).

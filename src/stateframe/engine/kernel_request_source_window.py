@@ -2459,18 +2459,32 @@ def bound_source_message(
 
 
 def _cached_closure_is_fresh(root: Path, closure: Mapping[str, object]) -> bool:
-    """Invalidate a cached closure when any discovered source byte changes."""
+    """Bind cached dependency revisions to their ordered path lists as well."""
+    from kernel_request_evidence_closure import (
+        _dependency_candidates, dependency_revision, language_adapter_for,
+    )
     revisions = closure.get("revisions")
-    if not isinstance(revisions, Mapping):
+    dependency_revisions = closure.get("dependency_revisions")
+    dependency_paths = closure.get("dependency_paths")
+    if (not isinstance(revisions, Mapping) or not isinstance(dependency_revisions, Mapping)
+            or not isinstance(dependency_paths, Mapping)
+            or set(dependency_revisions) != set(revisions)
+            or set(dependency_paths) != set(revisions)):
         return False
     for raw_path, expected in revisions.items():
         path = str(raw_path)
         current = _read_product_file(root, path)
         if current is None or source_revision(current) != str(expected):
             return False
-    dependency_revisions = closure.get("dependency_revisions")
-    if isinstance(dependency_revisions, Mapping) and dependency_revisions and not revisions:
-        return False
+        try:
+            connected = _dependency_candidates(root, path, current, language_adapter_for(path))
+            paths = tuple(sorted(set((path, *connected))))
+            stored = dependency_paths.get(path)
+            if (not isinstance(stored, (list, tuple)) or tuple(stored) != paths
+                    or dependency_revision(root, paths) != dependency_revisions.get(path)):
+                return False
+        except (OSError, RecursionError, RuntimeError, SyntaxError, TypeError, ValueError):
+            return False
     return True
 
 
@@ -4853,6 +4867,7 @@ def entry_verification(runtime: object) -> dict[str, object] | None:
         query=symbol,
         scope="|".join(paths) or "declared_product_scope",
         product_revision=revision,
+        paths=tuple(sorted(paths)),
     )
     ledger = getattr(runtime, "_fivefix_negative_lookup_ledger", None)
     if not isinstance(ledger, NegativeLookupLedger):
@@ -4926,8 +4941,9 @@ def _construction_names(ticket: str) -> tuple[str, ...]:
 
 @functools.lru_cache(maxsize=32)
 def _import_fact_cached(root: str, path: str, digest: str,
-                        names: tuple[str, ...], dependency_revision: str = "") -> Mapping[str, object] | None:
-    del digest, dependency_revision  # cache keys bind target and dependency revisions
+                        names: tuple[str, ...], dependency_revision: str = "",
+                        connected: tuple[str, ...] = ()) -> Mapping[str, object] | None:
+    del digest, dependency_revision, connected  # arguments bind the LRU entry
     from kernel_repo_intel import import_construction_fact
     return import_construction_fact(Path(root), path, names)
 
@@ -4962,6 +4978,7 @@ def module_head_blocks(runtime: object,
             dependency_revision = _revision12(Path(root), connected)
             fact = _import_fact_cached(
                 str(Path(root).resolve()), path, _digest(source), names, dependency_revision,
+                tuple(sorted(connected)),
             )
             generic_fact = initialization_fact(Path(root), path, names, ticket=ticket)
     else:

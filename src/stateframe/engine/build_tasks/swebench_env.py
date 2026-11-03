@@ -31,6 +31,7 @@ if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from build_tasks.swebench_adapter import make_runner_test, verify_instance
+from kernel_tree_digest import file_entry, tree_digest
 
 
 DEFAULT_TIMEOUT_SECONDS = 600
@@ -38,6 +39,7 @@ SUPPORTED_PYTHON_VERSIONS = ("3.11", "3.10")
 ENVIRONMENT_RECEIPT_SCHEMA = "poc.environment.receipt/1"
 REPAIR_CONTRACT_ID = "env.install_dependencies/1"
 UV_VERSION_PIN = "0.12.9"
+DEPENDENCY_MANIFEST_FORMAT = "stateframe.swebench_dependencies/2"
 UV_BOOTSTRAP_PIP_ARGS = (
     "python3",
     "-m",
@@ -553,16 +555,16 @@ def _manifest_paths(repository: Path) -> tuple[Path, ...]:
 
 def _dependency_manifest_digest(repository: Path) -> tuple[str, tuple[str, ...]]:
     manifest_paths = _manifest_paths(repository)
-    digest = hashlib.sha256()
-    if not manifest_paths:
-        digest.update(b"<no dependency manifest>\n")
+    entries: list[list[str]] = []
     for path in manifest_paths:
         relative = path.relative_to(repository).as_posix()
-        digest.update(relative.encode("utf-8"))
-        digest.update(b"\0")
-        digest.update(path.read_bytes())
-        digest.update(b"\0")
-    return f"sha256:{digest.hexdigest()}", tuple(
+        content = path.read_bytes()
+        if path.is_symlink():
+            entries.append(["symlink_file", relative, os.readlink(path),
+                            hashlib.sha256(content).hexdigest()])
+        else:
+            entries.append(file_entry(relative, content))
+    return f"{DEPENDENCY_MANIFEST_FORMAT}:sha256:{tree_digest(DEPENDENCY_MANIFEST_FORMAT, entries)}", tuple(
         path.relative_to(repository).as_posix() for path in manifest_paths
     )
 
@@ -1225,7 +1227,6 @@ class EnvironmentManager:
         marker_digest = marker.get("manifest_digest")
         if (
             manifest_digest is not None
-            and isinstance(marker_digest, str)
             and marker_digest != manifest_digest
         ):
             return EnvironmentResult(
@@ -1269,7 +1270,6 @@ class EnvironmentManager:
         marker_digest = marker.get("manifest_digest")
         if (
             manifest_digest is not None
-            and isinstance(marker_digest, str)
             and marker_digest != manifest_digest
         ):
             blocker = "ENV_MANIFEST_CHANGED: failed environment belongs to another manifest"
