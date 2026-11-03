@@ -1,0 +1,129 @@
+{
+ "schema": "stateframe-allocation-replay-case/1",
+ "case_id": "presend-full",
+ "origin_run_id": "allocation-bug/runs/full/run",
+ "origin_runs": [
+  "allocation-bug/runs/full/run",
+  "allocation-bug/runs/full_short/run",
+  "allocation-bug/runs/main_full/run",
+  "parallel/probe/ab/real/r1_off_20261101T213009",
+  "parallel/probe/ab/real/r1_p1_20261101T213116",
+  "parallel/probe/ab/real/r1_p2_20261101T213223",
+  "parallel/probe/ab/real/r2_off_20261101T213515",
+  "parallel/probe/ab/real/r2_p1_20261101T213332",
+  "parallel/probe/ab/real/r2_p2_20261101T213425",
+  "parallel/probe/ab/real/r3_off_20261101T213700",
+  "parallel/probe/ab/real/r3_p1_20261101T213744",
+  "parallel/probe/ab/real/r3_p2_20261101T213610",
+  "parallel/probe/ab/real/r4_off_20261101T213830",
+  "parallel/probe/ab/real/r4_p1_20261101T213921",
+  "parallel/probe/ab/real/r4_p2_20261101T214008",
+  "parallel/probe/ab/real/r5_off_20261101T214223",
+  "parallel/probe/ab/real/r5_p1_20261101T214054",
+  "parallel/probe/ab/real/r5_p2_20261101T214137",
+  "parallel/probe/alloc/live3/run",
+  "parallel/probe/alloc/rel3/run",
+  "stable-head/runs/base/multifile"
+ ],
+ "original_refusal_code": "FrameRequestAllocationError",
+ "original_failure_codes": [
+  "closure_omissions_unreconciled"
+ ],
+ "original_receipt_status": "PARTIAL",
+ "original_proof_status": "VERIFIED",
+ "sends_before_refusal": 0,
+ "origin_send_counts": [
+  {
+   "run_id": "allocation-bug/runs/full/run",
+   "sends_before_refusal": 0
+  },
+  {
+   "run_id": "allocation-bug/runs/full_short/run",
+   "sends_before_refusal": 0
+  },
+  {
+   "run_id": "allocation-bug/runs/main_full/run",
+   "sends_before_refusal": 0
+  },
+  {
+   "run_id": "parallel/probe/ab/real/r1_off_20261101T213009",
+   "sends_before_refusal": 0
+  },
+  {
+   "run_id": "parallel/probe/ab/real/r1_p1_20261101T213116",
+   "sends_before_refusal": 0
+  },
+  {
+   "run_id": "parallel/probe/ab/real/r1_p2_20261101T213223",
+   "sends_before_refusal": 0
+  },
+  {
+   "run_id": "parallel/probe/ab/real/r2_off_20261101T213515",
+   "sends_before_refusal": 0
+  },
+  {
+   "run_id": "parallel/probe/ab/real/r2_p1_20261101T213332",
+   "sends_before_refusal": 0
+  },
+  {
+   "run_id": "parallel/probe/ab/real/r2_p2_20261101T213425",
+   "sends_before_refusal": 0
+  },
+  {
+   "run_id": "parallel/probe/ab/real/r3_off_20261101T213700",
+   "sends_before_refusal": 0
+  },
+  {
+   "run_id": "parallel/probe/ab/real/r3_p1_20261101T213744",
+   "sends_before_refusal": 0
+  },
+  {
+   "run_id": "parallel/probe/ab/real/r3_p2_20261101T213610",
+   "sends_before_refusal": 0
+  },
+  {
+   "run_id": "parallel/probe/ab/real/r4_off_20261101T213830",
+   "sends_before_refusal": 0
+  },
+  {
+   "run_id": "parallel/probe/ab/real/r4_p1_20261101T213921",
+   "sends_before_refusal": 0
+  },
+  {
+   "run_id": "parallel/probe/ab/real/r4_p2_20261101T214008",
+   "sends_before_refusal": 0
+  },
+  {
+   "run_id": "parallel/probe/ab/real/r5_off_20261101T214223",
+   "sends_before_refusal": 0
+  },
+  {
+   "run_id": "parallel/probe/ab/real/r5_p1_20261101T214054",
+   "sends_before_refusal": 0
+  },
+  {
+   "run_id": "parallel/probe/ab/real/r5_p2_20261101T214137",
+   "sends_before_refusal": 0
+  },
+  {
+   "run_id": "parallel/probe/alloc/live3/run",
+   "sends_before_refusal": 0
+  },
+  {
+   "run_id": "parallel/probe/alloc/rel3/run",
+   "sends_before_refusal": 0
+  },
+  {
+   "run_id": "stable-head/runs/base/multifile",
+   "sends_before_refusal": 0
+  }
+ ],
+ "profile_settings": {
+  "name": "r2hc3",
+  "base_profile": "r2hc3",
+  "switch_overrides": {}
+ },
+ "source_type": "pre_send_single_done",
+ "tape_sha256": "ec09d0a1439374800982c31ed4adcc0a315057b7c4d794fc6e9a1f88dadc6ee4",
+ "repo": "_repos/0420a86aadd2"
+}

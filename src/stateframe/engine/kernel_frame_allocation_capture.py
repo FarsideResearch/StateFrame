@@ -841,6 +841,40 @@ def finalize_frame_candidate(
             )
         )
 
+    def defer_partial_paths(
+            receipt: object, *, absent_pages_deferrable: bool = False,
+    ) -> tuple[str, ...]:
+        raw_deferred = plan.get("deferred_paths", ())
+        deferred_values = (
+            raw_deferred
+            if isinstance(raw_deferred, Sequence)
+            and not isinstance(raw_deferred, (str, bytes, bytearray))
+            else ()
+        )
+        deferred = tuple(dict.fromkeys(
+            path for path in deferred_values
+            if isinstance(path, str)
+            and path
+        ))
+        deferred_set = set(deferred)
+        partial_paths = tuple(
+            path for path in partial_source_paths_for_deferred_delivery(
+                plan, receipt, absent_pages_deferrable=absent_pages_deferrable,
+            )
+            if path not in deferred_set
+        ) if read_available else ()
+        if not partial_paths:
+            return ()
+        plan["deferred_paths"] = list(dict.fromkeys((*deferred, *partial_paths)))
+        _remove_deferred_source_excerpts(
+            candidate["messages"],
+            [path for path in partial_paths if path not in visibility_paths],
+            preserve_stateframe=True,
+            protected_messages=protected,
+        )
+        assemble_selection()
+        return partial_paths
+
     recent_paths = {row["path"] for row in [*recent_windows, *product_windows]}
 
     def retained_reads_fit() -> bool:
@@ -881,19 +915,9 @@ def finalize_frame_candidate(
             # The bounded source selector can omit units before an allocation
             # proposal exists. Reuse its existing verified-partial authority;
             # byte/revision failures are still terminal, never repair triggers.
-            partial_paths = tuple(
-                path for path in partial_source_paths_for_deferred_delivery(plan, receipt)
-                if path not in plan.get("deferred_paths", ())
-            ) if read_available else ()
+            partial_paths = defer_partial_paths(receipt)
             if not partial_paths:
                 raise source_refusal(plan, receipt, sources)
-            plan["deferred_paths"] = list(dict.fromkeys((
-                *plan.get("deferred_paths", ()), *partial_paths)))
-            _remove_deferred_source_excerpts(
-                candidate["messages"], [path for path in partial_paths if path not in visibility_paths],
-                preserve_stateframe=True, protected_messages=protected,
-            )
-            assemble_selection()
             byte_limit = trim_optional_candidate()
             # Reprove the rebuilt notice and exact bytes before any capacity
             # acceptance. CURRENT read pages remain eligible until real pressure.
@@ -1057,20 +1081,49 @@ def finalize_frame_candidate(
         for message in candidate["messages"]
     )
     if recent_windows or product_windows or public_windows or bookmarks_enabled() and has_source_windows:
-        candidate = fit_recent_read_windows(
-            candidate, recent_windows, public_checks=public_windows,
-            product_windows=product_windows,
-            protected_messages=protected,
-            newest_user_suffix=getattr(capture, "_framefit5_newest_user_suffix", ()),
-            deferred_source_paths=tuple(plan.get("deferred_paths", ())),
-            editable_paths=editable_product_paths,
-            fits=source_windows_fit,
-        )
-        receipt = verify_final_source_delivery(
-            plan, candidate["messages"], payload=json.dumps(candidate).encode(),
-            sources=sources,
-        )
-        if not source_delivery_satisfied(receipt):
+        selected_paths = {
+            unit["path"]
+            for unit in plan.get("units", ())
+            if isinstance(unit, Mapping)
+            and isinstance(unit.get("path"), str)
+            and unit["path"].strip()
+        }
+        late_deferrals = 0
+        # The initial fit plus at most one repair per selected path is finite.
+        for _attempt in range(len(selected_paths) + 1):
+            candidate = fit_recent_read_windows(
+                candidate, recent_windows, public_checks=public_windows,
+                product_windows=product_windows,
+                protected_messages=protected,
+                newest_user_suffix=getattr(capture, "_framefit5_newest_user_suffix", ()),
+                deferred_source_paths=tuple(plan.get("deferred_paths", ())),
+                editable_paths=editable_product_paths,
+                fits=source_windows_fit,
+            )
+            receipt = verify_final_source_delivery(
+                plan, candidate["messages"], payload=json.dumps(candidate).encode(),
+                sources=sources,
+            )
+            if source_delivery_satisfied(receipt):
+                break
+            proof_status = (
+                str(receipt.get("proof_status", "")).upper()
+                if isinstance(receipt, Mapping) else ""
+            )
+            if (not isinstance(receipt, Mapping)
+                    or str(receipt.get("status", "")).upper() != "PARTIAL"
+                    or proof_status not in {"VERIFIED", "FAILED"}
+                    or late_deferrals >= len(selected_paths)):
+                raise source_refusal(plan, receipt, sources)
+            partial_paths = defer_partial_paths(
+                receipt, absent_pages_deferrable=True,
+            )
+            if (not partial_paths
+                    or late_deferrals + len(partial_paths) > len(selected_paths)):
+                raise source_refusal(plan, receipt, sources)
+            late_deferrals += len(partial_paths)
+            byte_limit = trim_optional_candidate()
+        else:
             raise source_refusal(plan, receipt, sources)
         tokens, method = meter.measure(candidate)
         byte_limit = request_byte_limit(method)

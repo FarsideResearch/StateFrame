@@ -1,0 +1,30 @@
+{
+ "schema": "stateframe-allocation-replay-case/1",
+ "case_id": "econ-flat-r1-p2",
+ "origin_run_id": "parallel/probe/ab/flat/r1_p2_20261101T221340",
+ "origin_runs": [
+  "parallel/probe/ab/flat/r1_p2_20261101T221340"
+ ],
+ "original_refusal_code": "FrameRequestAllocationError",
+ "original_failure_codes": [
+  "final_wire_proof_missing",
+  "closure_units_undelivered"
+ ],
+ "original_receipt_status": "PARTIAL",
+ "original_proof_status": "FAILED",
+ "sends_before_refusal": 9,
+ "origin_send_counts": [
+  {
+   "run_id": "parallel/probe/ab/flat/r1_p2_20261101T221340",
+   "sends_before_refusal": 9
+  }
+ ],
+ "profile_settings": {
+  "name": "r2hc3",
+  "base_profile": "r2hc3",
+  "switch_overrides": {}
+ },
+ "source_type": "wire_responses",
+ "tape_sha256": "381a01f40202a41cbc2baf88c0e8e9e9bbc0d4b262efeb85fa7281410c1b5b0f",
+ "repo": "_repos/af8f030aa66d"
+}

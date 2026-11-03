@@ -1,0 +1,29 @@
+{
+ "schema": "stateframe-allocation-replay-case/1",
+ "case_id": "econ-rel10-full-r1-off",
+ "origin_run_id": "parallel/probe/ab/rel_10e13c1/full/r1_off_20261102T104310",
+ "origin_runs": [
+  "parallel/probe/ab/rel_10e13c1/full/r1_off_20261102T104310"
+ ],
+ "original_refusal_code": "FrameRequestAllocationError",
+ "original_failure_codes": [
+  "source_delivery_partial"
+ ],
+ "original_receipt_status": "PARTIAL",
+ "original_proof_status": "VERIFIED",
+ "sends_before_refusal": 6,
+ "origin_send_counts": [
+  {
+   "run_id": "parallel/probe/ab/rel_10e13c1/full/r1_off_20261102T104310",
+   "sends_before_refusal": 6
+  }
+ ],
+ "profile_settings": {
+  "name": "r2hc3",
+  "base_profile": "r2hc3",
+  "switch_overrides": {}
+ },
+ "source_type": "wire_responses",
+ "tape_sha256": "e8a380177e96f485315da248e937e6892b4e24514b70ed48f98e900442f327ee",
+ "repo": "_repos/0420a86aadd2"
+}

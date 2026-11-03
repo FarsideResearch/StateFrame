@@ -1,0 +1,29 @@
+{
+ "schema": "stateframe-allocation-replay-case/1",
+ "case_id": "presend-p4-svc",
+ "origin_run_id": "allocation-bug/runs/p4_svc_short/run",
+ "origin_runs": [
+  "allocation-bug/runs/p4_svc_short/run"
+ ],
+ "original_refusal_code": "FrameRequestAllocationError",
+ "original_failure_codes": [
+  "closure_omissions_unreconciled"
+ ],
+ "original_receipt_status": "PARTIAL",
+ "original_proof_status": "VERIFIED",
+ "sends_before_refusal": 0,
+ "origin_send_counts": [
+  {
+   "run_id": "allocation-bug/runs/p4_svc_short/run",
+   "sends_before_refusal": 0
+  }
+ ],
+ "profile_settings": {
+  "name": "r2hc3",
+  "base_profile": "r2hc3",
+  "switch_overrides": {}
+ },
+ "source_type": "pre_send_single_done",
+ "tape_sha256": "ec09d0a1439374800982c31ed4adcc0a315057b7c4d794fc6e9a1f88dadc6ee4",
+ "repo": "_repos/e76fbcf22470"
+}

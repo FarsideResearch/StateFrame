@@ -1,0 +1,31 @@
+{
+ "schema": "stateframe-allocation-replay-case/1",
+ "case_id": "legacy-b8-off",
+ "origin_run_id": "tape_b8_off.script.json",
+ "origin_runs": [
+  "tape_b8_off.script.json"
+ ],
+ "original_refusal_code": "FrameRequestAllocationError",
+ "original_failure_codes": [],
+ "original_receipt_status": null,
+ "original_proof_status": null,
+ "sends_before_refusal": 4,
+ "origin_send_counts": [
+  {
+   "run_id": "tape_b8_off.script.json",
+   "sends_before_refusal": 4
+  }
+ ],
+ "profile_settings": {
+  "name": "r2hc3_liveness600",
+  "base_profile": "r2hc3",
+  "switch_overrides": {
+   "STATEFRAME_PER_REQUEST_TIMEOUT_S": "1500",
+   "STATEFRAME_PROVIDER_LIVENESS_S": "600"
+  }
+ },
+ "source_type": "supplied_tape_script",
+ "tape_sha256": "8a4001a512fb07d3bd8d0f4f471b78f21c5a8cd4ee6692f446903b7191e259f3",
+ "source_note": "Supplied tape has no paired engine.log.",
+ "repo": "_repos/0420a86aadd2"
+}
