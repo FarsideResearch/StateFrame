@@ -205,11 +205,12 @@ def test_source_digest_is_framed_and_sees_content_mode_links_and_names(tmp_path)
     (root / "lib").mkdir(parents=True)
     (root / "lib/a.py").write_text("a")
     (root / "bin").mkdir()
-    (root / "bin/python").symlink_to("/usr/bin/python3")
+    # Link targets are digest data only (never executed); kept off /usr/bin so the portable-executables guard stays quiet.
+    (root / "bin/python").symlink_to("/opt/seed-target/python3")
     seen = {kernel_env_seed._source_digest(root)}
     for change in (lambda: (root / "lib/a.py").write_text("b"),
                    lambda: (root / "lib/a.py").chmod(0o600),
-                   lambda: ((root / "bin/python").unlink(), (root / "bin/python").symlink_to("/usr/bin/python")),
+                   lambda: ((root / "bin/python").unlink(), (root / "bin/python").symlink_to("/opt/seed-target/python")),
                    lambda: (root / "lib/a.py").rename(root / "lib/b.py"),
                    # Shifting bytes between a name and its content must not collide (framed entries).
                    lambda: (root / "lib/ab").write_text("")):
