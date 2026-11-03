@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.3.25 (2026-11-03)
+
+- Shell-enabled runs now resume from a checkpoint instead of replaying from the start. Two things kept this from working. Every save after a shell step failed with `cannot pickle 'socket' object`, and three failures in a row turned saving off. Resume also never offered a checkpoint to a run with the shell on. The open execution session is now saved without its supervisor process, control socket and log, and a restored run starts a fresh session the next time it runs a command. A checkpoint already copies the run environment and shell scratch state, and none is taken while a background job is running. On a scripted run killed at request 3, resume took 13-14 s from the checkpoint against 18 s by full replay; the gap grows with the run's length. Run vitals now report `checkpoint_failures` and `checkpoint_saving_disabled`.
+
 ## 0.3.24 (2026-11-03)
 
 - Token counting now works against a llama.cpp server started with `--api-key`. StateFrame called `/tokenize` without the key, the server refused it, and every request was sized by an 82 KB byte estimate instead of real token counts. That estimate is tighter than the token budget, so source the model had just read could be left out of the next request. The key is now sent to `/tokenize` when it is on the same origin as the model endpoint, and never to a different host or across a redirect.

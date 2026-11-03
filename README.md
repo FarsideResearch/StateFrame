@@ -83,7 +83,7 @@ engine finished: SUBMITTED in 100.7s
 stateframe chat --repo path/to/your-repo
 ```
 
-Runs save checkpoints by default, so an interrupted `--shell off` run resumes from where it stopped. Runs with the shell enabled, hooks, or per-step models resume by replaying the recorded exchanges instead. Runs with per-step models never restore a checkpoint. To skip checkpoints and their disk use, set `STATEFRAME_CHECKPOINT=off`; see [Checkpoint settings](#checkpoint-settings).
+Runs save checkpoints by default, so an interrupted run resumes from where it stopped, with or without the shell. Runs with hooks or per-step models resume by replaying the recorded exchanges instead. Runs with per-step models never restore a checkpoint. To skip checkpoints and their disk use, set `STATEFRAME_CHECKPOINT=off`; see [Checkpoint settings](#checkpoint-settings).
 
 ## Skills
 
@@ -149,7 +149,7 @@ The [agent tools guide](docs/guide/tools.md) lists the tool arguments, command p
 | `STATEFRAME_CHECKPOINT_KEEP` | `2` | How many checkpoints to keep; older ones are deleted after each save. |
 | `STATEFRAME_CHECKPOINT_MIN_FREE_BYTES` | automatic | Minimum free bytes required before a save. The automatic floor is the greater of 1 GiB and three times the latest saved state size; before the first save it uses three times a conservative process-memory estimate. Set an integer byte count to override it, or `0` to disable the check. |
 
-Checkpoint restore applies only to `--shell off` runs; shell-enabled runs and runs with hooks resume by replay.
+Checkpoint restore applies to runs with and without the shell; runs with hooks or per-step models resume by replay.
 On a scripted 120-request run, the 121 saves paused the engine 0.10 s each (median; 0.14 s at the 95th
 percentile), 13.4 s in total. Each checkpoint's state was 22.6 MB, the checkpoint folder peaked at 236 MB
 with two kept, and the run folder peaked at 323 MB versus 80 MB with checkpoints off. A save that fails,

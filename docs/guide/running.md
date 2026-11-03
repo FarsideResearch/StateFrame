@@ -217,7 +217,7 @@ Measured on Qwen3.6-35B-A3B on two harder multi-file tasks scored with hidden te
 
 ## Checkpoints and resume
 
-Checkpoints are on by default, with a save attempted at every engine step boundary and the two newest kept; a save is skipped while the previous writer is running. They are signed with a per-install key in `~/.stateframe/checkpoint.key`. Checkpoint restore applies only to `--shell off` runs; runs with hooks or per-step models resume by replay and never restore a checkpoint. Resume compares the raw bytes of every request after the restored checkpoint and the first in-flight request with their recorded bytes before going live. An explicit model name swap may change only the leading top-level `model` field. If no checkpoint qualifies or a request differs, resume falls back to full replay. Full replay also verifies the in-flight request and stops before a live send if it differs. Set `STATEFRAME_CHECKPOINT=off` to skip selection, restore and later saves on resume. See "Checkpoint settings" in the README for other switches and measured disk use. When a run finishes for good (its result was submitted, or it stopped on an error that would only repeat, so resume would refuse it), StateFrame removes its checkpoints and prints how much it freed; `--keep-checkpoints` (or `STATEFRAME_KEEP_CHECKPOINTS=1`) keeps them. Stopped, cancelled, killed and crashed runs keep their newest snapshots; archived attempts retain diagnostics without snapshot payloads.
+Checkpoints are on by default, with a save attempted at every engine step boundary and the two newest kept; a save is skipped while the previous writer is running. They are signed with a per-install key in `~/.stateframe/checkpoint.key`. Checkpoint restore applies to runs with and without the shell; runs with hooks or per-step models resume by replay and never restore a checkpoint. Resume compares the raw bytes of every request after the restored checkpoint and the first in-flight request with their recorded bytes before going live. An explicit model name swap may change only the leading top-level `model` field. If no checkpoint qualifies or a request differs, resume falls back to full replay. Full replay also verifies the in-flight request and stops before a live send if it differs. Set `STATEFRAME_CHECKPOINT=off` to skip selection, restore and later saves on resume. See "Checkpoint settings" in the README for other switches and measured disk use. When a run finishes for good (its result was submitted, or it stopped on an error that would only repeat, so resume would refuse it), StateFrame removes its checkpoints and prints how much it freed; `--keep-checkpoints` (or `STATEFRAME_KEEP_CHECKPOINTS=1`) keeps them. Stopped, cancelled, killed and crashed runs keep their newest snapshots; archived attempts retain diagnostics without snapshot payloads.
 
 ## Determinism scope
 
@@ -261,8 +261,11 @@ reads and `run_tests` for those. Authorized product changes invalidate earlier
 reads and checks; protected tests are restored from the immutable start snapshot.
 Plain-loop mode retains its declared-product-only edit/export contract.
 
-Shell-enabled resumes rebuild the environment and scratch state and replay from
-the beginning, even when a checkpoint exists. Local calls must reproduce their
+A shell-enabled resume restores the environment and scratch state from a
+checkpoint when one qualifies (it copies the run directory and saves the
+execution session unstarted; no checkpoint is taken while a background job
+runs), and otherwise replays from the beginning. Local calls caught up after the
+restore point, or during a full replay, must reproduce their
 exit code, workspace and environment identity before their recorded output is
 served. Full-network and host calls require `--replay-external`; incomplete calls
 refuse resume. Raw retained output and truncation counters remain in the run

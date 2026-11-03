@@ -27,11 +27,13 @@ def _engine_child(parent_pid):
 
 def _interrupted_run(tmp_path, *, network="none", script_name="resume.script.json", repo=None,
                      task="Format app.py and verify it", wait_for_checkpoint=False,
-                     checkpoint_task=None, pause_at=None, tokenize_off_marker=None):
+                     checkpoint_task=None, pause_at=None, tokenize_off_marker=None, shell=None):
     repo = repo or copy_repo(tmp_path)
     run_dir = tmp_path / "run"
     marker = tmp_path / "paused"
-    script = FIXTURES / "scripts" / ("checkpoint_resume.script.json" if wait_for_checkpoint else script_name)
+    shell = shell or ("off" if wait_for_checkpoint else "standard")
+    script = FIXTURES / "scripts" / ("checkpoint_resume.script.json"
+                                     if wait_for_checkpoint and shell == "off" else script_name)
     pause_at = pause_at or (3 if wait_for_checkpoint else 2)
     endpoint_args = [PYTHON, str(FIXTURES / "pause_endpoint.py"), "--script", str(script),
                      "--marker", str(marker), "--pause-at", str(pause_at),
@@ -45,7 +47,7 @@ def _interrupted_run(tmp_path, *, network="none", script_name="resume.script.jso
     runner = None
     retain_endpoint = False
     run_task = task
-    if wait_for_checkpoint:
+    if wait_for_checkpoint and shell == "off":
         run_task = checkpoint_task or "Set app.py VALUE to after and verify it"
     try:
         assert endpoint.stdout is not None
@@ -58,7 +60,7 @@ def _interrupted_run(tmp_path, *, network="none", script_name="resume.script.jso
              "--run-dir", str(run_dir), "--test-python", PYTHON,
              "--test-cmd", "python -m unittest discover -s tests -q",
              "--max-turns", "32", "--quiet",
-             "--shell-network", network, "--shell", "off" if wait_for_checkpoint else "standard"],
+             "--shell-network", network, "--shell", shell],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             text=True, env=environment(), start_new_session=True)
         deadline = time.monotonic() + 600  # generous: a loaded machine slows the run, not the behavior checked
@@ -136,6 +138,41 @@ def test_checkpoint_restores_and_verifies_paused_request(tmp_path, monkeypatch):
     assert actual["messages"] == expected["messages"]
     assert actual["tools"] == expected["tools"]
     assert '"kind":"checkpoint_verified"' in (run_dir / "engine.log").read_text()
+
+
+def test_shell_run_restores_checkpoint_after_shell_step(tmp_path, monkeypatch):
+    """A shell-enabled run killed at request 3 resumes from a checkpoint taken after its shell
+    step (not by full replay) and rebuilds the paused request byte for byte."""
+    monkeypatch.setenv("STATEFRAME_CHECKPOINT_EVERY", "1")
+    _, run_dir, expected, endpoint, url = _interrupted_run(
+        tmp_path, wait_for_checkpoint=True, shell="standard", pause_at=3)
+    try:
+        started = time.monotonic()
+        resumed = subprocess.run(
+            [PYTHON, "-m", "stateframe", "resume", str(run_dir), "--endpoint", url,
+             "--model", "scripted", "--quiet", "--keep-checkpoints"], capture_output=True, text=True,
+            env=environment(), timeout=240, check=False)
+        seconds = time.monotonic() - started
+    finally:
+        endpoint.terminate()
+        try:
+            endpoint.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            endpoint.kill()
+            endpoint.wait(timeout=5)
+    log = (run_dir / "engine.log").read_text()
+    print(f"shell resume: rc={resumed.returncode} in {seconds:.1f} s")
+    assert resumed.returncode == 0, resumed.stdout + resumed.stderr + log
+    actual = read_requests(run_dir)[2]
+    assert actual["messages"] == expected["messages"]
+    assert actual["tools"] == expected["tools"]
+    events = [json.loads(line) for path in sorted(run_dir.rglob("checkpoints/events.jsonl"))
+              for line in path.read_text().splitlines()]
+    restored = [row for row in events if row.get("event") == "checkpoint_restored"]
+    assert restored and restored[-1]["sends"] >= 2, events
+    assert '"kind":"checkpoint_verified"' in log
+    assert '"replay_sends":0' in log  # nothing before the checkpoint was replayed
+    assert not [row for row in events if row.get("event") in {"checkpoint_failed", "checkpoint_disabled"}]
 
 
 def test_full_replay_verifies_check_receipt_request_in_flight(tmp_path, monkeypatch):
@@ -257,6 +294,11 @@ def test_e19_volatile_shell_observation_is_byte_identical_on_resume(tmp_path):
     actual = read_requests(run_dir)[1]
     assert actual["messages"] == expected["messages"]
     assert actual["tools"] == expected["tools"]
+    # A shell step leaves a live execution session in the frame; saving must still succeed.
+    saves = [json.loads(line) for path in run_dir.rglob("checkpoints/events.jsonl")
+             for line in path.read_text().splitlines()]
+    assert not [row for row in saves if row.get("event") in {"checkpoint_failed", "checkpoint_disabled"}], saves
+    assert any(row.get("event") == "checkpoint_saved" for row in saves)
 
 
 @pytest.mark.parametrize("operation", ["file_move", "file_delete"])
