@@ -28,7 +28,6 @@ Inert until ``STATEFRAME_SHIP_TREE_SMOKE=on``.  Scope of this lane: Python.
 from __future__ import annotations
 
 import ast
-import hashlib
 import json
 import os
 import tempfile
@@ -42,10 +41,12 @@ from typing import Final
 from kernel_non_product_paths import is_non_product
 from kernel_test_python import selected_test_python
 from kernel_safe_probe import ProbeCleanupError
+from kernel_tree_digest import path_entry, tree_digest as canonical_tree_digest
 
 
 MODE_ENV: Final = "STATEFRAME_SHIP_TREE_SMOKE"
 SCHEMA: Final = "rulebook-ship-tree-smoke/2"
+TREE_DIGEST_FORMAT: Final = "stateframe.ship_tree_smoke/2"
 BLOCK_HEADER: Final = "[SHIP-TREE SMOKE]"
 DETAIL_ENV: Final = "STATEFRAME_TOKENLAB_SHIP_TREE_DETAIL"
 DETAIL_SCHEMA: Final = "stateframe-v19-ship-tree-detail/1"
@@ -77,6 +78,7 @@ class ShipTreeSmokeResult:
     environment_identity: str = ""
     declared_scope: tuple[str, ...] = ()
     resolver_identity: str = ""
+    digest_format: str = ""
 
     @property
     def blocking(self) -> bool:
@@ -91,6 +93,7 @@ class ShipTreeSmokeResult:
                 "baseline_matched": len(self.environment),
                 "roots": list(self.roots),
                 "tree_digest": self.tree_digest,
+                "digest_format": self.digest_format,
                 "dependency_identity": self.dependency_identity,
                 "environment_identity": self.environment_identity,
                 "declared_scope": list(self.declared_scope),
@@ -383,7 +386,7 @@ def apply_baseline(result: "ShipTreeSmokeResult",
     local-import shadow findings stay FAIL (N14), and a NEW failure (different
     path or message, e.g. an import an edit broke) stays FAIL.
     """
-    if baseline is None or result.status == "UNKNOWN":
+    if baseline is None or result.status == "UNKNOWN" or baseline.digest_format != TREE_DIGEST_FORMAT:
         return result
     if (baseline.dependency_identity != result.dependency_identity
             or baseline.environment_identity != result.environment_identity
@@ -406,25 +409,20 @@ def apply_baseline(result: "ShipTreeSmokeResult",
     return ShipTreeSmokeResult(status, result.checked, tuple(failures), result.tree_digest,
                                tuple(environment), result.roots,
                                result.dependency_identity, result.environment_identity,
-                               result.declared_scope, result.resolver_identity)
+                               result.declared_scope, result.resolver_identity, TREE_DIGEST_FORMAT)
 
 
 def tree_digest(root: Path, paths: Sequence[str], *, dependency_identity: object = "",
                 environment_identity: object = "", resolver_identity: object = "") -> str:
-    digest = hashlib.sha256()
+    entries: list[list[object]] = []
     for label, value in (("dependencies", dependency_identity),
                          ("environment", environment_identity),
                          ("resolver", resolver_identity)):
-        digest.update(label.encode("utf-8"))
-        digest.update(json.dumps(value, sort_keys=True, default=str,
-                                 separators=(",", ":")).encode("utf-8"))
+        entries.append(["identity", label, json.dumps(value, sort_keys=True, default=str,
+                                                      separators=(",", ":"), ensure_ascii=True)])
     for path in sorted(str(item) for item in paths if not is_non_product(str(item))):
-        digest.update(path.encode("utf-8"))
-        try:
-            digest.update((Path(root) / path).read_bytes())
-        except OSError:
-            digest.update(b"<missing>")
-    return "sha256:" + digest.hexdigest()
+        entries.append(path_entry(Path(root) / path, path))
+    return "sha256:" + canonical_tree_digest(TREE_DIGEST_FORMAT, entries)
 
 
 def local_import_shadows(source: str) -> tuple[str, ...]:
@@ -499,7 +497,8 @@ def run_smoke(root: Path, paths: Sequence[str], *, timeout_s: float = 20.0,
     checked = python_paths(root, paths)
     scope = python_paths(root, declared_scope if declared_scope is not None else paths)
     if not checked:
-        return ShipTreeSmokeResult("UNKNOWN", (), (), "", declared_scope=scope)
+        return ShipTreeSmokeResult("UNKNOWN", (), (), "", declared_scope=scope,
+                                   digest_format=TREE_DIGEST_FORMAT)
     if roots is not None:
         import_roots = tuple(str(Path(item).resolve()) for item in roots)
     else:
@@ -565,7 +564,8 @@ def run_smoke(root: Path, paths: Sequence[str], *, timeout_s: float = 20.0,
     status = "FAIL" if failures else ("ENVIRONMENT" if host_failures else "PASS")
     raw = ShipTreeSmokeResult(status, checked, tuple(failures), digest,
                               tuple(host_failures), import_roots,
-                              dependency_key, environment_key, scope, resolver_key)
+                              dependency_key, environment_key, scope, resolver_key,
+                              TREE_DIGEST_FORMAT)
     return apply_baseline(raw, baseline)
 
 

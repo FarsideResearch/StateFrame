@@ -34,12 +34,14 @@ import kernel_parse_cache as _parse_cache
 import kernel_workspace_truth as _workspace_truth
 from kernel_measurement import profiled_function_span
 import kernel_turn0_persistence as _turn0
+from kernel_tree_digest import compatible_revision
 
 
 LEDGER_ENV = "STATEFRAME_TOKENLAB_COORDINATED_LEDGER"
 ATOMIC_APPLY_ENV = "STATEFRAME_TOKENLAB_ATOMIC_MULTI_FILE_APPLY"
 GUIDANCE_ENV = "STATEFRAME_TOKENLAB_COORDINATION_GUIDANCE"
 SCHEMA = "requirements-ledger-coordination/1"
+TREE_DIGEST_FORMAT = "stateframe.coordinated_tree_revision/2"
 APPLY_SCHEMA = "stateframe-v22-change-set/2"
 IMPORT_SCHEMA = "stateframe-v22-import-failure/1"
 COMPAT_SCHEMA = "stateframe-v22-compatibility-check/1"
@@ -1447,17 +1449,19 @@ def tree_revision(root: str | Path) -> str:
 
 
 def _compute_tree_revision(root_path: Path, files: Sequence[str]) -> str:
-    digest = hashlib.sha256()
+    # The revision reaches tool observations (BatchResult.to_dict), so it uses the
+    # request-compatible encoding: present files hash exactly as before; a file that
+    # vanished or can't be read is typed instead of hashing like an empty file.
+    from kernel_scope_widen_guard import read as guarded_read
+    rows = []
     for relative in files:
-        path = root_path / relative
         try:
-            digest.update(relative.encode("utf-8"))
-            digest.update(b"\0")
-            from kernel_scope_widen_guard import read as guarded_read
-            digest.update(guarded_read(path))
+            rows.append((relative, guarded_read(root_path / relative), "file"))
+        except FileNotFoundError:
+            rows.append((relative, None, "missing"))
         except OSError:
-            continue
-    return "sha256:" + digest.hexdigest()
+            rows.append((relative, None, "unreadable"))
+    return "sha256:" + compatible_revision(TREE_DIGEST_FORMAT, rows)
 
 
 def _emit(journal: object | None, event: str, **fields: object) -> None:
