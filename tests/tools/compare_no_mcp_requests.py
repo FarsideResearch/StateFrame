@@ -1,7 +1,10 @@
-"""Compare raw no-server request files against a 0.2.1 source tree with stable tool head off.
+"""Compare raw no-server request files against the 0.2.3 source tree that test_no_mcp_release_comparison pins.
 
-Run with --baseline /path/to/97cd52d --candidate /path/to/this/tree.
+Run with --baseline /path/to/33c6c51 (0.2.3) --candidate /path/to/this/tree.
 Both runs use the same temporary repository and run-directory path in sequence.
+The candidate pins the settings whose defaults changed after 0.2.3 (pytest runner, all tests
+protected, stable tool head off), so the request files are expected to be byte-identical;
+pass --current-defaults to see how today's defaults differ instead.
 """
 from __future__ import annotations
 
@@ -17,10 +20,14 @@ import sys
 import tempfile
 
 
-def source_env(tree: Path, stable_tool_head: str | None) -> dict[str, str]:
+def source_env(tree: Path, stable_tool_head: str | None, *,
+               source_on_pythonpath: bool = True) -> dict[str, str]:
     environment = dict(os.environ)
-    environment["PYTHONPATH"] = os.pathsep.join((str(tree / "src"),
-        str(tree / "src/stateframe/engine")))
+    if source_on_pythonpath:
+        environment["PYTHONPATH"] = os.pathsep.join((str(tree / "src"),
+            str(tree / "src/stateframe/engine")))
+    else:
+        environment.pop("PYTHONPATH", None)
     environment.pop("STATEFRAME_STABLE_TOOL_HEAD", None)
     if stable_tool_head is not None:
         environment["STATEFRAME_STABLE_TOOL_HEAD"] = stable_tool_head
@@ -40,9 +47,12 @@ def write_launcher(path: Path) -> None:
 
 def capture(tree: Path, python: str, launcher: Path, script: Path,
             repo: Path, run_dir: Path, *, legacy_mode: bool = False,
-            stable_tool_head: str | None) -> bytes:
-    # stable_tool_head has no default: 0.3.13 changed the engine default, so every caller states its arm.
-    environment = source_env(tree, stable_tool_head)
+            stable_tool_head: str | None,
+            source_on_pythonpath: bool = True,
+            test_python: str | None = None) -> bytes:
+    # stable_tool_head has no default (see tools/changed_defaults.py): every caller states its arm.
+    environment = source_env(tree, stable_tool_head=stable_tool_head,
+                             source_on_pythonpath=source_on_pythonpath)
     endpoint = subprocess.Popen([python, "-m", "stateframe.scripted_endpoint",
         "--script", str(script), "--port", "0"], cwd=tree, env=environment,
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
@@ -56,7 +66,8 @@ def capture(tree: Path, python: str, launcher: Path, script: Path,
             raise RuntimeError(f"unexpected scripted endpoint URL: {url!r}")
         command = [python, str(launcher), "run", "--repo", str(repo),
             "--task", "Fix the pricing code so the tests pass.", "--endpoint", url,
-            "--model", "scripted", "--run-dir", str(run_dir), "--test-python", python,
+            "--model", "scripted", "--run-dir", str(run_dir),
+            "--test-python", test_python or python,
             "--test-cmd", "python -m unittest discover -s tests -q", "--max-turns", "32",
             "--no-run-env", "--quiet",
             *(("--runner-kind", "pytest", "--protect-tests", "all") if legacy_mode else ())]
@@ -81,14 +92,21 @@ def capture(tree: Path, python: str, launcher: Path, script: Path,
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--baseline", type=Path, required=True,
-                        help="source tree at origin/main 97cd52d")
+                        help="untouched source tree of 0.2.3 (33c6c51)")
     parser.add_argument("--candidate", type=Path,
                         default=Path(__file__).resolve().parents[2])
-    parser.add_argument("--python", default=sys.executable)
+    parser.add_argument("--python", default=sys.executable,
+                        help="interpreter that runs the example's tests (each tree runs under its own)")
+    parser.add_argument("--current-defaults", action="store_true",
+                        help="run the candidate with today's defaults instead of the pinned 0.2.3 settings")
     args = parser.parse_args()
     baseline = args.baseline.resolve(strict=True)
     candidate = args.candidate.resolve(strict=True)
     script = candidate / "examples/discount_bug.script.json"
+    # The engine child drops PYTHONPATH, so a shared interpreter would import whichever stateframe it has
+    # installed. Give each tree its own interpreter and prove what it imports before comparing bytes.
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    from acceptance._support import assert_tree_imports, tree_python
     with tempfile.TemporaryDirectory(prefix="sf-no-mcp-diff-") as temporary:
         root = Path(temporary)
         repo = root / "repo"
@@ -96,18 +114,25 @@ def main() -> int:
         launcher = root / "fixed_seed_run.py"
         write_launcher(launcher)
         run_dir = root / "run"
-        previous = capture(baseline, args.python, launcher, script, repo, run_dir, stable_tool_head=None)
+        pythons = {}
+        for label, tree in (("baseline", baseline), ("candidate", candidate)):
+            pythons[label] = tree_python(tree / "src", root / f"{label}-python")
+            assert_tree_imports(pythons[label], tree / "src", root)
+        previous = capture(baseline, pythons["baseline"], launcher, script, repo, run_dir,
+                           stable_tool_head=None, source_on_pythonpath=False, test_python=args.python)
         run_dir.rename(root / "baseline-run")
-        current = capture(candidate, args.python, launcher, script, repo, run_dir,
-                          stable_tool_head="off")
-        for label, body in (("0.2.1", previous), ("candidate", current)):
+        current = capture(candidate, pythons["candidate"], launcher, script, repo, run_dir,
+                          legacy_mode=not args.current_defaults,
+                          stable_tool_head=None if args.current_defaults else "off",
+                          source_on_pythonpath=False, test_python=args.python)
+        for label, body in (("baseline", previous), ("candidate", current)):
             print(f"{label}: {len(body)} bytes sha256={hashlib.sha256(body).hexdigest()}")
         if previous == current:
             print("Model request files are byte-identical.")
             return 0
         before = previous.decode(errors="replace").splitlines(keepends=True)
         after = current.decode(errors="replace").splitlines(keepends=True)
-        sys.stdout.writelines(difflib.unified_diff(before, after, fromfile="0.2.1",
+        sys.stdout.writelines(difflib.unified_diff(before, after, fromfile="baseline",
                                                    tofile="candidate", n=3))
         return 1
 

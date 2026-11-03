@@ -2,8 +2,8 @@
 
 Set SF_TEST_PARITY_BASELINE to the release this branch is based on. The name stays outside the
 STATEFRAME_ namespace: the CLI reports every unknown STATEFRAME_ variable, which would add a line to
-the output of every CLI test in the same session. Candidate parity runs explicitly disable the stable
-tool head to preserve the released per-step request bytes.
+the output of every CLI test in the same session. Both sides explicitly disable the stable tool head:
+the base release may default it on (0.3.13 and later), and the parity is about hooks, not tool lists.
 """
 
 from __future__ import annotations
@@ -17,6 +17,7 @@ import threading
 from pathlib import Path
 
 import pytest
+from acceptance._support import assert_tree_imports, tree_python
 
 from stateframe.scripted_endpoint import Script, ScriptStepUnavailable, serve
 
@@ -72,22 +73,23 @@ def _write_launchers(launcher: Path, wrapper: Path) -> None:
 
 def _run_checkout(
     checkout: Path, repo: Path, run: Path, launcher: Path, wrapper: Path, trace: Path,
-    *, stable_tool_head: str | None = None,
+    *, stable_tool_head: str | None,
 ):
+    python = tree_python(checkout / "src",
+                         run.parent / f"{run.name}-{checkout.name}-python")
+    assert_tree_imports(python, checkout / "src", run.parent)
     script = Script(
         json.loads((CURRENT / "examples/discount_bug.script.json").read_text())
     )
     server = serve(script)
-    environment = {
-        **os.environ,
-        "PYTHONPATH": str(checkout / "src"),
-    }
+    environment = dict(os.environ)
+    environment.pop("PYTHONPATH", None)
     environment.pop("STATEFRAME_STABLE_TOOL_HEAD", None)
     if stable_tool_head is not None:
         environment["STATEFRAME_STABLE_TOOL_HEAD"] = stable_tool_head
     try:
         command = [
-            sys.executable,
+            python,
             str(launcher),
             str(wrapper),
             str(trace),
@@ -163,7 +165,7 @@ def test_no_hooks_raw_requests_and_journal_match_release(tmp_path):
     _write_launchers(launcher, wrapper)
     run = tmp_path / "run"
     baseline = _run_checkout(
-        BASELINE, repo, run, launcher, wrapper, tmp_path / "baseline_modules.json"
+        BASELINE, repo, run, launcher, wrapper, tmp_path / "baseline_modules.json", stable_tool_head="off",
     )
     run.rename(tmp_path / "baseline_run")
     current = _run_checkout(
@@ -196,7 +198,8 @@ def test_no_hooks_regular_stateframe_file_matches_release(tmp_path):
     wrapper = tmp_path / "child_wrapper.py"
     _write_launchers(launcher, wrapper)
     run = tmp_path / "run"
-    baseline = _run_checkout(BASELINE, repo, run, launcher, wrapper, tmp_path / "baseline.json")
+    baseline = _run_checkout(BASELINE, repo, run, launcher, wrapper, tmp_path / "baseline.json",
+                             stable_tool_head="off")
     run.rename(tmp_path / "baseline_run")
     current = _run_checkout(CURRENT, repo, run, launcher, wrapper, tmp_path / "current.json",
                             stable_tool_head="off")
@@ -207,7 +210,10 @@ def test_no_hooks_regular_stateframe_file_matches_release(tmp_path):
 
 def _resume_checkout(checkout: Path, repo: Path, run: Path, launcher: Path,
                      wrapper: Path, trace: Path, *,
-                     stable_tool_head: str | None = None) -> tuple[list[bytes], list[bytes]]:
+                     stable_tool_head: str | None) -> tuple[list[bytes], list[bytes]]:
+    python = tree_python(checkout / "src",
+                         run.parent / f"{run.name}-{checkout.name}-python")
+    assert_tree_imports(python, checkout / "src", run.parent)
     class InterruptAfterTwoActions(Script):
         def __init__(self):
             super().__init__({"model": "scripted", "steps": [
@@ -235,12 +241,12 @@ def _resume_checkout(checkout: Path, repo: Path, run: Path, launcher: Path,
     script = InterruptAfterTwoActions()
     server = serve(script)
     endpoint = f"http://127.0.0.1:{server.server_port}/v1"
-    environment = {**os.environ, "PYTHONPATH": os.pathsep.join(
-        (str(checkout / "src"), str(checkout / "src/stateframe/engine")))}
+    environment = dict(os.environ)
+    environment.pop("PYTHONPATH", None)
     environment.pop("STATEFRAME_STABLE_TOOL_HEAD", None)
     if stable_tool_head is not None:
         environment["STATEFRAME_STABLE_TOOL_HEAD"] = stable_tool_head
-    command = [sys.executable, str(launcher), str(wrapper), str(trace), "run",
+    command = [python, str(launcher), str(wrapper), str(trace), "run",
                "--repo", str(repo), "--task", "Fix the pricing code so the tests pass.",
                "--endpoint", endpoint, "--model", "scripted", "--run-dir", str(run),
                "--test-python", sys.executable, "--max-turns", "16", "--quiet"]
@@ -257,7 +263,7 @@ def _resume_checkout(checkout: Path, repo: Path, run: Path, launcher: Path,
         os.kill(int(children[0]), signal.SIGKILL)
         script.release.set()
         process.communicate(timeout=90)
-        resumed = subprocess.run([sys.executable, "-m", "stateframe", "resume", str(run),
+        resumed = subprocess.run([python, "-m", "stateframe", "resume", str(run),
                                   "--endpoint", endpoint], env=environment, capture_output=True,
                                  text=True, timeout=240)
         assert resumed.returncode == 0, resumed.stdout + resumed.stderr
@@ -283,7 +289,8 @@ def test_no_hooks_resume_rebuilt_requests_match_release(tmp_path):
     wrapper = tmp_path / "child_wrapper.py"
     _write_launchers(launcher, wrapper)
     run = tmp_path / "run"
-    baseline = _resume_checkout(BASELINE, repo, run, launcher, wrapper, tmp_path / "baseline.json")
+    baseline = _resume_checkout(BASELINE, repo, run, launcher, wrapper, tmp_path / "baseline.json",
+                                stable_tool_head="off")
     run.rename(tmp_path / "baseline_run")
     current = _resume_checkout(CURRENT, repo, run, launcher, wrapper, tmp_path / "current.json",
                                stable_tool_head="off")

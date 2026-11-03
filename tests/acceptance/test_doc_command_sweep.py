@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from ._support import assert_tree_imports, tree_python
 from .doc_command_sweep import commands, outcome, sweep
 
 
@@ -42,6 +43,9 @@ def test_documented_and_bundled_examples_submit_from_clean_install(tmp_path):
         path.name.removesuffix(".script.json")
         for path in (ROOT / "examples").glob("*.script.json")
     }
+    # sweep tests installed wheels in fresh venvs; also prove direct source imports stay tree-local.
+    python = tree_python(ROOT / "src", tmp_path / "current-python")
+    assert_tree_imports(python, ROOT / "src", tmp_path)
     results = sweep(ROOT, tmp_path)
     assert len(results) == len(cases)
     assert all(outcome(requests, result) for _, requests, result in results), results
@@ -56,6 +60,8 @@ def test_doc_sweep_rejects_broken_release_before_first_request(tmp_path):
     source = tmp_path / "source"
     source.mkdir()
     subprocess.run(["tar", "-xf", "-", "-C", str(source)], input=archive, check=True)
+    python = tree_python(source / "src", tmp_path / "baseline-python")
+    assert_tree_imports(python, source / "src", tmp_path)
     case = next(case for case in commands(source) if case.example == "tiny_site")
     results = sweep(source, tmp_path / "run", cases=(case,))
     assert len(results) == 1
