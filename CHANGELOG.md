@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.3.24 (2026-11-03)
 
 - Token counting now works against a llama.cpp server started with `--api-key`. StateFrame called `/tokenize` without the key, the server refused it, and every request was sized by an 82 KB byte estimate instead of real token counts. That estimate is tighter than the token budget, so source the model had just read could be left out of the next request. The key is now sent to `/tokenize` when it is on the same origin as the model endpoint, and never to a different host or across a redirect.
 - When token counting does fall back, the `token_counting_unavailable` event now says why: `unauthorized`, `http_error`, `connection`, `timeout`, `bad_response`, `no_url` or `disabled`.
