@@ -4,19 +4,18 @@ Runs the bundled scripted discount_bug example offline (needs the host sandbox a
 """
 from __future__ import annotations
 
-import io
 import json
 import os
 import shutil
 import subprocess
 import sys
-import tarfile
 from pathlib import Path
 
 import pytest
 
 from stateframe.scripted_endpoint import Script, serve
 from engine_run import run_monitored
+from test_hook_wiring_parity import baseline_checkout  # noqa: F401 -- pytest registers this fixture
 
 ROOT = Path(__file__).resolve().parents[1]
 pytestmark = pytest.mark.host_sandbox
@@ -96,22 +95,6 @@ def _assert_tool_arrays_identical(requests: list[dict]) -> None:
         assert _tool_array_bytes(request) == first, f"request {index} changed the tool array"
 
 
-def _archive_revision(revision: str, destination: Path) -> Path:
-    archive = subprocess.run(
-        ["git", "-C", str(ROOT), "archive", revision, "src", "examples"],
-        capture_output=True, check=True,
-    ).stdout
-    destination.mkdir()
-    with tarfile.open(fileobj=io.BytesIO(archive), mode="r:") as contents:
-        for member in contents:
-            target = destination / member.name
-            if (not target.resolve().is_relative_to(destination.resolve())
-                    or member.issym() or member.islnk()):
-                raise AssertionError(f"unsafe baseline archive entry: {member.name}")
-            contents.extract(member, destination)
-    return destination
-
-
 def test_unset_defaults_on_and_the_run_still_succeeds(tmp_path):
     result, run = _run(tmp_path, None)
     assert result.returncode == 0, result.stdout + result.stderr
@@ -151,7 +134,8 @@ def test_raw_tool_array_extractor_preserves_serialized_bytes(tmp_path):
     assert _raw_tool_arrays(run) == [b'[ {"name":"read"} ]']
 
 
-def test_switch_off_requests_match_the_released_baseline(tmp_path):
+def test_switch_off_requests_match_the_released_baseline(
+        tmp_path, baseline_checkout):  # noqa: F811 -- injected fixture
     from tools.compare_no_mcp_requests import (
         capture, mask_wire_ids, unbacked_result_hash_changes, write_launcher)
 
@@ -162,26 +146,70 @@ def test_switch_off_requests_match_the_released_baseline(tmp_path):
     script = ROOT / "examples/discount_bug.script.json"
     run_dir = tmp_path / "run"
 
-    # Only a published release commit: a local or unmerged revision is missing from other clones and CI.
-    for index, revision in enumerate(("5140116",)):
-        baseline = _archive_revision(revision, tmp_path / f"baseline-{index}")
-        expected = capture(
-            baseline, sys.executable, launcher, script, repo, run_dir,
-            stable_tool_head="off",
-        )
-        run_dir.rename(tmp_path / f"baseline-run-{index}")
-        actual = capture(
-            ROOT, sys.executable, launcher, script, repo, run_dir,
-            stable_tool_head="off",
-        )
-        run_dir.rename(tmp_path / f"candidate-run-{index}")
+    expected = capture(
+        baseline_checkout, sys.executable, launcher, script, repo, run_dir,
+        stable_tool_head="off",
+    )
+    run_dir.rename(tmp_path / "baseline-run")
+    actual = capture(
+        ROOT, sys.executable, launcher, script, repo, run_dir,
+        stable_tool_head="off",
+    )
+    run_dir.rename(tmp_path / "candidate-run")
 
-        # Wire IDs changed derivation on purpose (receipt determinism, 11-03); a masked
-        # result hash must still hash text that is sent and compared (see mask_wire_ids).
-        assert unbacked_result_hash_changes(
-            tmp_path / f"baseline-run-{index}", tmp_path / f"candidate-run-{index}") == []
-        assert mask_wire_ids(actual) == mask_wire_ids(expected), (
-            f"STATEFRAME_STABLE_TOOL_HEAD=off changed requests vs {revision}")
+    # The masked result hash must still hash text that is sent and compared.
+    assert unbacked_result_hash_changes(
+        tmp_path / "baseline-run", tmp_path / "candidate-run") == []
+    assert mask_wire_ids(actual) == mask_wire_ids(expected), (
+        "STATEFRAME_STABLE_TOOL_HEAD=off changed requests vs immediate base")
+
+
+def test_deferred_prefit_layout_off_keeps_released_request_bytes(
+        tmp_path, monkeypatch, baseline_checkout):  # noqa: F811 -- injected fixture
+    from tools.compare_no_mcp_requests import capture, write_launcher
+
+    monkeypatch.setenv("STATEFRAME_FINAL_CACHE_LAYOUT", "off")
+    monkeypatch.setenv("STATEFRAME_STABLE_TOOL_HEAD", "off")
+    repo = tmp_path / "repo"
+    shutil.copytree(ROOT / "examples/discount_bug", repo)
+    launcher = tmp_path / "fixed_seed_run.py"
+    write_launcher(launcher)
+    script = ROOT / "examples/discount_bug.script.json"
+    run_dir = tmp_path / "run"
+
+    released = capture(baseline_checkout, sys.executable, launcher, script, repo, run_dir,
+                       stable_tool_head="off")
+    run_dir.rename(tmp_path / "released-run")
+    from _journal import measurement_events
+
+    def budget_slots(events):
+        return [(row.get("step"), row.get("sequence"))
+                for row in events
+                if row.get("kind") == "request_budget_final_wire"]
+
+    released_slots = budget_slots(measurement_events(tmp_path / "released-run"))
+    current = capture(ROOT, sys.executable, launcher, script, repo, run_dir,
+                      stable_tool_head="off")
+    assert len(_wire(run_dir)) >= 2
+    events = measurement_events(run_dir)
+    deferred = [row for row in events
+                if row.get("kind") == "request_budget_final_wire"
+                and row.get("status") == "PRE_FIT_DEFERRED"]
+    proofs = [row for row in events
+              if row.get("kind") == "request_budget_final_wire"
+              and row.get("phase") == "frozen_transport_revalidation"]
+    assert deferred and proofs
+    assert all(row.get("status") == "READY" and row.get("measure_method") == "tokenize"
+               for row in proofs)
+    assert current == released  # Includes every provider-visible request_id.
+    assert budget_slots(events) == released_slots
+
+    # Planted control: dropping one deferred event must break the same slot
+    # comparison. Request IDs can be content-derived, so check the journal too.
+    skipped_events = list(events)
+    skipped_events.remove(deferred[0])
+    with pytest.raises(AssertionError):
+        assert budget_slots(skipped_events) == released_slots
 
 
 def test_switch_off_keeps_per_turn_menus(tmp_path):

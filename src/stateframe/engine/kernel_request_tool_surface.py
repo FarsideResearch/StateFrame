@@ -426,6 +426,7 @@ def author_final_tool_surface(
         bind_current_surface: bool = False,
         stabilize_cache_tools: bool = False,
         framefit5_preassembly: bool = False,
+        final_fit_pending: bool = False,
 ) -> Mapping[str, object] | None:
     """Project once, then bind the exact schemas, names and digest to each gate."""
     request_key = str(request_id or "")
@@ -729,11 +730,23 @@ def author_final_tool_surface(
         capture.final_tool_surface = surface
 
         if isinstance(getattr(capture, "request_action_contract", None), Mapping):
-            from kernel_final_wire_budget import reconcile_frozen_budget
-            budget = reconcile_frozen_budget(capture, runtime, body)
-            if (budget.get("tool_schema_digest") != digest
-                    or tuple(budget.get("tool_names", ())) != tuple(names)):
-                raise _SurfaceUnavailable("request_budget_surface_unbound")
+            if final_fit_pending:
+                # This menu is bound before the completed envelope is fitted.
+                # Preserve the old journal sequence slot (and later request IDs)
+                # without publishing a final proof for the pre-fit body.
+                emit = getattr(getattr(capture, "journal", None), "emit", None)
+                if callable(emit):
+                    emit("request_budget_final_wire", producer="kernel_request_budget",
+                         request_id=getattr(capture, "request_id", None),
+                         step=getattr(capture, "step", None), dispatch=False,
+                         phase="pre_fit_tool_surface", status="PRE_FIT_DEFERRED",
+                         tool_names=list(surface["names"]), tool_schema_digest=digest)
+            else:
+                from kernel_final_wire_budget import reconcile_frozen_budget
+                budget = reconcile_frozen_budget(capture, runtime, body)
+                if (budget.get("tool_schema_digest") != digest
+                        or tuple(budget.get("tool_names", ())) != tuple(names)):
+                    raise _SurfaceUnavailable("request_budget_surface_unbound")
         if floor_enabled and removed_by:
             _emit_capability_floor_restored(capture, runtime, request_key, removed_by)
         if memo_mode != "off":

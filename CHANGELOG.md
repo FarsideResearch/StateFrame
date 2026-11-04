@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.3.36 (2026-11-04)
+
+- Tests: the deferred pre-fit parity test compares against the immediate base tree (as the hook parity test does) instead of a fixed commit, derives its planted control in-process, and the tokenizer-flip live control starts the engine through the shared monitored helper. Test-only; no product change.
+- Tests: a guard plants one extra internal journal event in the engine before request 2 and requires every request file to stay byte-identical, so wire-visible IDs cannot drift with the journal sequence again; a control that ties request IDs to the sequence must change the bytes. Test-only; no product change.
+- FrameFit5 defers both provisional tool bindings until the request is fitted, preserving their journal sequence slots without recording a rejected final proof; the fitted request still receives token and byte validation.
+- Final tool binding now waits for the completed request fit before emitting a final budget proof. Expanded provisional bodies can be trimmed without leaving rejected final proof records; the fitted send still receives the full proof.
+
 ## 0.3.35 (2026-11-04)
 
 - Tests: the checkpoint-bytes bound counts a file as new when its inode was not live in the previous step, so Linux filesystems that reuse freed inode numbers no longer hide new bytes from the regression control. Test-only.

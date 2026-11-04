@@ -1,10 +1,12 @@
 """The allocation and final proof must use one request measurement authority."""
 from __future__ import annotations
 
+import ast
 import copy
 import json
 import math
 import time
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -13,6 +15,30 @@ from kernel_frame_allocation_capture import FrozenRequestCounter, final_request_
 from kernel_frame_request_allocation import FrameRequestAllocationError
 from kernel_final_wire_budget import reconcile_frozen_budget
 from kernel_request_diet import RequestTokenMeter
+
+
+def test_both_framefit5_runtime_bindings_defer_prefit_proof():
+    source = Path(__file__).resolve().parents[1] / "src/stateframe/engine/kernel_stateframe_runtime.py"
+    tree = ast.parse(source.read_text(encoding="utf-8"))
+    calls = [node for node in ast.walk(tree)
+             if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+             and node.func.id == "author_final_tool_surface"]
+
+    def assert_deferred(bindings):
+        assert len(bindings) == 2
+        assert all(any(keyword.arg == "final_fit_pending"
+                       and isinstance(keyword.value, ast.Constant)
+                       and keyword.value.value is True
+                       for keyword in call.keywords) for call in bindings)
+
+    assert_deferred(calls)
+    # Planted control: either former binding without the flag publishes a
+    # HOST_BLOCKED final proof for an expanded body before it is fitted.
+    skipped = copy.deepcopy(calls)
+    skipped[0].keywords = [keyword for keyword in skipped[0].keywords
+                           if keyword.arg != "final_fit_pending"]
+    with pytest.raises(AssertionError):
+        assert_deferred(skipped)
 
 
 def _body(size=1000):
@@ -37,6 +63,100 @@ def _proof(monkeypatch, body, meter, capture):
     monkeypatch.setattr("kernel_request_budget._request_token_meter",
                         lambda *_args, **_kwargs: meter)
     return reconcile_frozen_budget(capture, SimpleNamespace(), body)
+
+
+def test_prefit_menu_binding_defers_final_proof_until_after_fit(monkeypatch):
+    import kernel_completion_owner
+    import kernel_done_is_submit_authority
+    import kernel_final_wire_budget
+    import kernel_read_lockout
+    import kernel_request_tool_surface
+
+    monkeypatch.setenv("STATEFRAME_TOOL_MENU_MEMO", "off")
+    monkeypatch.setenv("STATEFRAME_STABLE_TOOL_HEAD", "off")
+    monkeypatch.setenv("STATEFRAME_REQUEST_TOOL_FLOOR", "off")
+    monkeypatch.delenv("SF_LAB_DETFIX3", raising=False)
+    monkeypatch.setattr(kernel_done_is_submit_authority, "enabled", lambda _runtime: False)
+    monkeypatch.setattr(kernel_done_is_submit_authority, "candidate_exists", lambda _runtime: False)
+    monkeypatch.setattr(kernel_read_lockout, "filter_tools", lambda _runtime, tools: list(tools))
+    monkeypatch.setattr(kernel_completion_owner, "bind_final_tool_surface",
+                        lambda *_args, **_kwargs: True)
+
+    proofs = []
+
+    class Journal:
+        def __init__(self):
+            self._sequence = 0
+            self.events = []
+
+        def emit(self, kind, **fields):
+            self._sequence += 1
+            self.events.append({"kind": kind, **fields})
+
+    def counted_proof(capture, _runtime, body):
+        status = "HOST_BLOCKED" if len(body["messages"][0]["content"]) > 5000 else "READY"
+        receipt = {
+            "status": status,
+            "final_validation_failures": (
+                ["request_tokens_exceed_max_prompt_tokens"] if status == "HOST_BLOCKED" else []),
+            "tool_schema_digest": capture.final_tool_surface["tool_schema_digest"],
+            "tool_names": capture.final_tool_surface["names"],
+        }
+        capture.request_budget_final_wire = receipt
+        proofs.append(status)
+        capture.journal.emit("request_budget_final_wire", status=status,
+                             phase="frozen_transport_revalidation")
+        return receipt
+
+    monkeypatch.setattr(kernel_final_wire_budget, "reconcile_frozen_budget", counted_proof)
+    tool = {"type": "function", "function": {"name": "read", "description": "Read a file",
+            "parameters": {"type": "object", "properties": {}}}}
+
+    def bind(*, final_fit_pending):
+        capture = SimpleNamespace(request_id="seal-r1", request_action_contract={},
+                                  request_budget_final_wire={"status": "READY"},
+                                  journal=Journal())
+        runtime = SimpleNamespace()
+        body = {"messages": [{"role": "user", "content": "x" * 10000}],
+                "tools": [copy.deepcopy(tool)]}
+        surface = kernel_request_tool_surface.author_final_tool_surface(
+            capture, runtime, body, request_id=capture.request_id,
+            bind_current_surface=True, final_fit_pending=final_fit_pending)
+        assert surface is not None
+        return capture, runtime, body
+
+    # Planted control: the old pre-fit call emits a rejected final proof.
+    control, _runtime, _body_before_fit = bind(final_fit_pending=False)
+    assert control.request_budget_final_wire["status"] == "HOST_BLOCKED"
+    assert proofs == ["HOST_BLOCKED"]
+
+    capture, runtime, body = bind(final_fit_pending=True)
+    assert proofs == ["HOST_BLOCKED"]
+    assert capture.request_budget_final_wire["status"] == "READY"
+    assert capture.journal.events == [{
+        "kind": "request_budget_final_wire", "producer": "kernel_request_budget",
+        "request_id": "seal-r1", "step": None, "dispatch": False,
+        "phase": "pre_fit_tool_surface", "status": "PRE_FIT_DEFERRED",
+        "tool_names": ["read"],
+        "tool_schema_digest": capture.final_tool_surface["tool_schema_digest"],
+    }]
+    # The two runtime bindings each retain their old journal sequence slot.
+    kernel_request_tool_surface.author_final_tool_surface(
+        capture, runtime, body, request_id=capture.request_id,
+        bind_current_surface=True, final_fit_pending=True)
+    assert capture.journal._sequence == 2
+    assert [event["status"] for event in capture.journal.events] == [
+        "PRE_FIT_DEFERRED", "PRE_FIT_DEFERRED"]
+    assert proofs == ["HOST_BLOCKED"]
+    # Planted skipped-event control: both former proof slots must be retained.
+    # rc331 request IDs derive from content, so sequence is checked directly.
+    skipped = Journal()
+    skipped.emit("request_budget_final_wire", status="PRE_FIT_DEFERRED")
+    with pytest.raises(AssertionError):
+        assert skipped._sequence == capture.journal._sequence
+    body["messages"][0]["content"] = "x" * 1000
+    assert counted_proof(capture, runtime, body)["status"] == "READY"
+    assert proofs == ["HOST_BLOCKED", "READY"]
 
 
 @pytest.mark.parametrize("layout", ["off", "on"])

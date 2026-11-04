@@ -172,7 +172,8 @@ def build_qualified_request(capture, runtime, body, *, endpoint, key, deadline=N
     from kernel_stateframe_tool_stable import tool_mode
     author_final_tool_surface(candidate, context, body, request_id=candidate.request_id,
                               stabilize_cache_tools=True,
-                              bind_current_surface=tool_mode() in {"on", "shadow"})
+                              bind_current_surface=tool_mode() in {"on", "shadow"},
+                              final_fit_pending=True)
     if not isinstance(candidate.request_action_contract, Mapping):
         raise RequestSealError("qualified request lacks owner authority")
     # Freeze from admitted owner input before any semantic filtering. A final
