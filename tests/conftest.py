@@ -14,8 +14,8 @@ _RETIRED_PARITY_BASELINES = {
     "test_final_cache_layout_host.py": "e19c325",
     "test_edit_scope_widen.py": "0b057d3",
 }
-# Fixture repositories under tests/e2e carry their own tests; they run inside engine runs only.
-collect_ignore_glob = ["e2e/*", "fixtures/*"]  # recorded repo copies in fixtures/ are data, never tests
+# Keep fixture-repository files below tests/e2e out of collection without hiding its top-level tests.
+collect_ignore_glob = ["e2e/*/*", "fixtures/*"]  # top-level e2e test modules remain collectible
 for path in (ROOT / "tests", ROOT / "src", ROOT / "src" / "stateframe" / "engine"):
     sys.path.insert(0, str(path))
 
