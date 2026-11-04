@@ -480,8 +480,6 @@ OPT_IN_SWITCHES = {
     "STATEFRAME_ENV_SEED_MAX_GB": (),  # non-negative decimal GB; 0 disables seed eviction
     "STATEFRAME_KEEP_RUN_ENV": ("on", "off"),  # host-side finished-run retention policy
     "STATEFRAME_CACHE_LAYOUT": ("on", "off"),
-    "STATEFRAME_SLOT_AFFINITY": ("on", "off"),
-    "STATEFRAME_TOOL_ORDER": ("stable", "legacy"),
     "STATEFRAME_EVICTFIX": ("on", "legacy"),
     "STATEFRAME_MICROGRAPH": ("on", "off"),  # experimental; the engine defaults to off
     "STATEFRAME_STABLE_TOOL_HEAD": ("on", "off"),  # append-only tool list per run; on by default

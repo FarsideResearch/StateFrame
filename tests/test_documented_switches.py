@@ -90,3 +90,20 @@ def test_shell_setting_reaches_the_engine_spec(monkeypatch, name):
     value = choices[0] if choices else "120"
     monkeypatch.setenv(name, value)
     assert runner.resolve_opt_in_switches()[name] == value
+
+
+def unread_shell_switches(allowlist, engine: frozenset[str], host_only: frozenset[str]) -> list[str]:
+    """Shell-settable names that neither the engine nor the host reads: exporting one does nothing."""
+    return sorted(name for name in allowlist if name not in engine and name not in host_only)
+
+
+def test_every_shell_switch_has_a_reader():
+    # Without this, test_shell_setting_reaches_the_engine_spec skips an unread name instead of failing.
+    assert unread_shell_switches(runner.OPT_IN_SWITCHES, runner.engine_switches(),
+                                 runner.HOST_ONLY_SWITCHES) == []
+
+
+def test_planted_unread_shell_switch_is_caught():
+    allowlist = {**runner.OPT_IN_SWITCHES, "STATEFRAME_NO_READER": ("on", "off")}
+    assert unread_shell_switches(allowlist, runner.engine_switches(),
+                                 runner.HOST_ONLY_SWITCHES) == ["STATEFRAME_NO_READER"]

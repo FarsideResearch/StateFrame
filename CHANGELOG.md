@@ -22,6 +22,7 @@
 - Tests: every test that starts a real `stateframe` process now runs it through one shared helper. Its deadline follows the measured budget and the host's load: it waits as long as the run keeps making progress, up to a fixed ceiling, and a stalled run fails with the stage it stopped in and the last progress seen, instead of a bare timeout on a busy machine.
 - Test-only: recorded allocation corpus cases run serially outside xdist workers, require the terminal tape turn, and derive backstop deadlines from tape length; corpus runs use the shared progress-aware helper, with tape requests counted as progress.
 - Test-only: xdist deferrals report their corpus count and append per-session execution records; the opt-in gate serial step checks that at least one corpus case ran.
+- Fixed: the slot-affinity and tool-order shell switches were accepted from the shell but no engine reads them, so setting either did nothing. They are no longer accepted. A test now fails when a shell-settable switch has no engine or host reader.
 
 ## 0.3.30 (2026-11-04)
 
