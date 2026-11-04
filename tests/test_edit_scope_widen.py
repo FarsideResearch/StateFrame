@@ -572,12 +572,12 @@ def test_engine_child_lookup_requests_untruncated_ps_arguments(monkeypatch):
 
 
 @pytest.mark.host_sandbox
-@pytest.mark.skipif(not os.environ.get("SF_TEST_PARITY_BASELINE"),
-                    reason="set SF_TEST_PARITY_BASELINE to an untouched 0b057d3 checkout")
-def test_switch_off_request_bytes_match_base_release(tmp_path):
+def test_switch_off_request_bytes_match_base_release(tmp_path, tmp_path_factory):
     from test_hook_wiring_parity import _run_checkout, _write_launchers
+    from tools.pinned_tree import pinned_tree
+
     current = Path(__file__).resolve().parents[1]
-    baseline = Path(os.environ["SF_TEST_PARITY_BASELINE"]).expanduser().resolve()
+    baseline = pinned_tree("0b057d3", tmp_path_factory)
     assert (baseline / "src/stateframe/runner.py").is_file()
     repo = tmp_path / "repo"
     shutil.copytree(current / "examples/discount_bug", repo)

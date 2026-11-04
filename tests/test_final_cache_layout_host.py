@@ -15,9 +15,9 @@ import pytest
 from kernel_cache_layout_view import CacheLayoutError, semantic_messages
 from kernel_stateframe_page_log import _payload_has_authority_keys
 from stateframe.scripted_endpoint import Script, serve
+from tools.pinned_tree import pinned_tree
 
 ROOT = Path(__file__).resolve().parents[1]
-BASELINE = os.environ.get("SF_TEST_PARITY_BASELINE")
 pytestmark = pytest.mark.host_sandbox
 # Per scripted run. tiny_site measured ~420 s solo for the whole parity test on the foundry host;
 # a 240 s per-call limit flaked under full-suite load, so allow ~1.5x the solo time per call.
@@ -61,9 +61,8 @@ def _parity_launchers(tmp_path):
     ("tiny_site", "Build the small static shop site described in the README."),
     ("brief_to_report", "Write the report the brief asks for."),
 ])
-@pytest.mark.skipif(not BASELINE, reason="set SF_TEST_PARITY_BASELINE to an untouched checkout of the base release e19c325")
-def test_switch_off_bytes_match_base_release(tmp_path, example, task):
-    baseline = Path(BASELINE)
+def test_switch_off_bytes_match_base_release(tmp_path, tmp_path_factory, example, task):
+    baseline = pinned_tree("e19c325", tmp_path_factory)
     engine_record = baseline / "src/stateframe/engine/ENGINE_SOURCE.json"
     assert engine_record.is_file()
     released = subprocess.run(

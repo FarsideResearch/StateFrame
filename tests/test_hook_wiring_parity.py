@@ -1,15 +1,16 @@
-"""Raw no-hooks parity against an untouched checkout of the base release.
+"""Raw no-hooks parity against this candidate's immediate base release.
 
-Set SF_TEST_PARITY_BASELINE to the release this branch is based on. The name stays outside the
-STATEFRAME_ namespace: the CLI reports every unknown STATEFRAME_ variable, which would add a line to
-the output of every CLI test in the same session. Both sides explicitly disable the stable tool head:
-the base release may default it on (0.3.13 and later), and the parity is about hooks, not tool lists.
+SF_TEST_BASELINE_IMMEDIATE may name an explicit checkout. Otherwise use the in-tree merge base with
+origin/main when it is a strict ancestor; without that ref, use the newest ancestor release commit
+(excluding HEAD) whose subject identifies a StateFrame version or release. Both sides explicitly
+disable the stable tool head: this parity is about hooks, not tool lists.
 """
 
 from __future__ import annotations
 
 import json
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -21,20 +22,63 @@ from acceptance._support import assert_tree_imports, tree_python
 
 import kernel_measurement as measurement
 from stateframe.scripted_endpoint import Script, ScriptStepUnavailable, serve
+from tools.pinned_tree import pinned_tree
 
 
 CURRENT = Path(__file__).resolve().parents[1]
-_baseline_path = os.environ.get("SF_TEST_PARITY_BASELINE")
-BASELINE = Path(_baseline_path).expanduser().resolve() if _baseline_path else None
+_RELEASE_SUBJECT = re.compile(
+    r"^(?:StateFrame .+: version and changelog|Release v?\d+(?:\.\d+)+|"
+    r"Merge pull request #\d+ from .*/release/v?\d+(?:\.\d+)+)$"
+)
 RUNNER_SPEC_FIELDS = {"check_cmd", "check_source", "protect_tests",
                       "protected_test_globs", "runner_kind"}
-pytestmark = [
-    pytest.mark.host_sandbox,
-    pytest.mark.skipif(
-        BASELINE is None,
-        reason="set SF_TEST_PARITY_BASELINE to an untouched base-release checkout",
-    ),
-]
+pytestmark = pytest.mark.host_sandbox
+
+
+def _git_text(*arguments: str) -> str | None:
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(CURRENT), *arguments],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except OSError:
+        return None
+    return result.stdout.strip() if result.returncode == 0 else None
+
+
+def _immediate_base_release() -> str:
+    head = _git_text("rev-parse", "--verify", "HEAD^{commit}")
+    if head is None:
+        pytest.skip("cannot derive the immediate base release because HEAD is unavailable")
+
+    if _git_text("rev-parse", "--verify", "origin/main^{commit}") is not None:
+        merge_base = _git_text("merge-base", "HEAD", "origin/main")
+        if merge_base is not None and merge_base != head:
+            return merge_base
+
+    history = _git_text("log", "--format=%H%x09%s", "HEAD")
+    if history is not None:
+        for line in history.splitlines():
+            commit, separator, subject = line.partition("\t")
+            if separator and commit != head and _RELEASE_SUBJECT.fullmatch(subject):
+                return commit
+    pytest.skip("cannot find an ancestor release commit to use as the hook parity baseline")
+
+
+@pytest.fixture(scope="module")
+def baseline_checkout(tmp_path_factory):
+    explicit = os.environ.get("SF_TEST_BASELINE_IMMEDIATE")
+    if explicit is not None:
+        if not explicit.strip():
+            pytest.fail("SF_TEST_BASELINE_IMMEDIATE is set but empty", pytrace=False)
+        baseline = Path(explicit).expanduser().resolve()
+    else:
+        baseline = pinned_tree(_immediate_base_release(), tmp_path_factory)
+    if not (baseline / "src/stateframe/runner.py").is_file():
+        pytest.fail(f"immediate base checkout has no src/stateframe/runner.py: {baseline}", pytrace=False)
+    return baseline
 
 
 def _write_launchers(launcher: Path, wrapper: Path) -> None:
@@ -153,8 +197,8 @@ def _run_checkout(
         server.server_close()
 
 
-def test_no_hooks_raw_requests_and_journal_match_release(tmp_path):
-    assert (BASELINE / "src/stateframe/runner.py").is_file()
+def test_no_hooks_raw_requests_and_journal_match_release(tmp_path, baseline_checkout):
+    assert (baseline_checkout / "src/stateframe/runner.py").is_file()
     repo = tmp_path / "repo"
     source = CURRENT / "examples/discount_bug"
     import shutil
@@ -165,7 +209,7 @@ def test_no_hooks_raw_requests_and_journal_match_release(tmp_path):
     _write_launchers(launcher, wrapper)
     run = tmp_path / "run"
     baseline = _run_checkout(
-        BASELINE, repo, run, launcher, wrapper, tmp_path / "baseline_modules.json", stable_tool_head="off",
+        baseline_checkout, repo, run, launcher, wrapper, tmp_path / "baseline_modules.json", stable_tool_head="off",
     )
     run.rename(tmp_path / "baseline_run")
     current = _run_checkout(
@@ -188,7 +232,7 @@ def test_no_hooks_raw_requests_and_journal_match_release(tmp_path):
     )
 
 
-def test_no_hooks_regular_stateframe_file_matches_release(tmp_path):
+def test_no_hooks_regular_stateframe_file_matches_release(tmp_path, baseline_checkout):
     repo = tmp_path / "repo"
     import shutil
 
@@ -198,7 +242,7 @@ def test_no_hooks_regular_stateframe_file_matches_release(tmp_path):
     wrapper = tmp_path / "child_wrapper.py"
     _write_launchers(launcher, wrapper)
     run = tmp_path / "run"
-    baseline = _run_checkout(BASELINE, repo, run, launcher, wrapper, tmp_path / "baseline.json",
+    baseline = _run_checkout(baseline_checkout, repo, run, launcher, wrapper, tmp_path / "baseline.json",
                              stable_tool_head="off")
     run.rename(tmp_path / "baseline_run")
     current = _run_checkout(CURRENT, repo, run, launcher, wrapper, tmp_path / "current.json",
@@ -280,7 +324,7 @@ def _resume_checkout(checkout: Path, repo: Path, run: Path, launcher: Path,
         server.server_close()
 
 
-def test_no_hooks_resume_rebuilt_requests_match_release(tmp_path):
+def test_no_hooks_resume_rebuilt_requests_match_release(tmp_path, baseline_checkout):
     import shutil
 
     repo = tmp_path / "repo"
@@ -289,7 +333,7 @@ def test_no_hooks_resume_rebuilt_requests_match_release(tmp_path):
     wrapper = tmp_path / "child_wrapper.py"
     _write_launchers(launcher, wrapper)
     run = tmp_path / "run"
-    baseline = _resume_checkout(BASELINE, repo, run, launcher, wrapper, tmp_path / "baseline.json",
+    baseline = _resume_checkout(baseline_checkout, repo, run, launcher, wrapper, tmp_path / "baseline.json",
                                 stable_tool_head="off")
     run.rename(tmp_path / "baseline_run")
     current = _resume_checkout(CURRENT, repo, run, launcher, wrapper, tmp_path / "current.json",

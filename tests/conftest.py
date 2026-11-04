@@ -1,6 +1,7 @@
 """Repository tests import the checkout's product package and engine modules."""
 import sys
 import importlib.metadata
+import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -8,6 +9,11 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
+_RETIRED_PARITY_BASELINES = {
+    "test_hook_wiring_parity.py": "immediate base release",
+    "test_final_cache_layout_host.py": "e19c325",
+    "test_edit_scope_widen.py": "0b057d3",
+}
 # Fixture repositories under tests/e2e carry their own tests; they run inside engine runs only.
 collect_ignore_glob = ["e2e/*", "fixtures/*"]  # recorded repo copies in fixtures/ are data, never tests
 for path in (ROOT / "src", ROOT / "src" / "stateframe" / "engine"):
@@ -27,6 +33,18 @@ def _isolated_stateframe_home(tmp_path_factory):
         yield
     finally:
         os.environ.pop("STATEFRAME_HOME", None)
+
+
+@pytest.fixture(autouse=True)
+def reject_retired_shared_parity_baseline(request):
+    """Keep old foundry mounts from silently routing tests to the wrong source tree."""
+    reference = _RETIRED_PARITY_BASELINES.get(request.node.path.name)
+    if reference is not None and "SF_TEST_PARITY_BASELINE" in os.environ:
+        pytest.fail(
+            f"SF_TEST_PARITY_BASELINE is retired: {request.node.nodeid} "
+            f"pins its own reference ({reference}); unset it",
+            pytrace=False,
+        )
 
 
 # _child installers patch these process globals directly. A test must register the

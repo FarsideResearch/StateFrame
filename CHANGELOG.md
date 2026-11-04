@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Tests: each parity test now pins its own baseline commit (a `git archive` tree built in-tree) instead of sharing `SF_TEST_PARITY_BASELINE`, which could only name one commit while three tests needed three. Setting the old variable now fails with a clear error, and a guard test with a planted control keeps it that way. Every byte assertion is kept. Test-only; no product change.
+
 ## 0.3.30 (2026-11-04)
 
 - Docs: `KNOWN_LIMITATIONS.md` now lists two known issues. Every command needs `HOME` or `STATEFRAME_HOME` set. The bundled hook examples use `#!/usr/bin/python3`, which some Linux hosts lack.
