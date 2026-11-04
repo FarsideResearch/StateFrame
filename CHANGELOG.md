@@ -5,6 +5,7 @@
 - Tests: the deferred pre-fit parity test compares against the immediate base tree (as the hook parity test does) instead of a fixed commit, derives its planted control in-process, and the tokenizer-flip live control starts the engine through the shared monitored helper. Test-only; no product change.
 - Tests: a guard plants one extra internal journal event in the engine before request 2 and requires every request file to stay byte-identical, so wire-visible IDs cannot drift with the journal sequence again; a control that ties request IDs to the sequence must change the bytes. Test-only; no product change.
 - FrameFit5 defers both provisional tool bindings until the request is fitted, preserving their journal sequence slots without recording a rejected final proof; the fitted request still receives token and byte validation.
+- Final tool binding now waits for the completed request fit before emitting a final budget proof. Expanded provisional bodies can be trimmed without leaving rejected final proof records; the fitted send still receives the full proof.
 
 ## 0.3.35 (2026-11-04)
 
@@ -61,8 +62,6 @@
 - Shipped Python lifecycle hook examples now select the StateFrame CLI interpreter through the load-time `"{python}"` argv token, so they run on hosts without `/usr/bin/python3` or `python3` on PATH, while project trust and resume stay pinned to that absolute interpreter. The hook shebang known issue is gone from `KNOWN_LIMITATIONS.md`.
 - Upgrade note: the bundled `examples/hooks/*.py` scripts are no longer executable files with a shebang line; StateFrame launches them through the `"{python}"` argv token. If your own `hooks.json` points directly at one of those example scripts as an executable, change that entry to `["{python}", "<path to script>"]`. Hooks you wrote yourself are not affected.
 - Tests: full runs now collect the top-level end-to-end tests in `tests/e2e/`; an ignore pattern meant for the fixture repositories there had hidden them from every full run. Fixture repositories stay uncollected, and a guard with a planted control checks both. The guard also rejects and names fixture-repository `conftest.py` files before collection can import them. Test-only; no product change.
-- Fixed final request proof under tokenizer outages. Allocation now carries its token count, measurement method, and calibrated ratio through cache layout admission and final proof. Post fit growth falls back to the fitted request or is trimmed again before proof. A recovered exact count still rejects an undercount.
-- Final tool binding now waits for the completed request fit before emitting a final budget proof. Expanded provisional bodies can be trimmed without leaving rejected final proof records; the fitted send still receives the full proof.
 
 ## 0.3.30 (2026-11-04)
 
