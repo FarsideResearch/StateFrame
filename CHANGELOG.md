@@ -9,6 +9,7 @@
 - Tests: a guard requires every Linux bwrap launch-argv builder to give the command its own PID namespace (`--unshare-pid` or `--unshare-all`), so an orphaned descendant always dies with its namespace instead of escaping tracking. Builders are found mechanically; a reviewed exemption covers the release runner's write guard. Test-only; no product change.
 - Tests: helpers that start subprocesses without inherited `STATEFRAME_*` switches now give them a temporary `STATEFRAME_HOME`, so test runs no longer pile env seeds into the real `~/.stateframe`; a guard keeps every such helper honest.
 - Tests: the tokenizer end-to-end test reads sealed measurement journals (`events.jsonl.xz`), so it checks real tokenizer measurements again instead of finding none.
+- Tests: a test that leaks installer state on purpose declares it with the `expected_installer_leak` marker; the leak guard then requires the leak and still restores it, and an unmarked leak still fails.
 
 ## 0.3.29 (2026-11-03)
 

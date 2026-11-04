@@ -142,13 +142,19 @@ def guard_child_installer_globals(request, pristine_installer_attributes):
         if newly_imported_child is not None and newly_imported_child.HOST_STATE:
             leaked.append("stateframe._child.HOST_STATE")
             newly_imported_child.HOST_STATE.clear()
-    if leaked:
+    # A test that leaks on purpose (to prove this guard restores state) declares it; it must still leak.
+    if request.node.get_closest_marker("expected_installer_leak") is not None:
+        if not leaked:
+            pytest.fail(f"{request.node.nodeid} is marked expected_installer_leak but leaked nothing", pytrace=False)
+    elif leaked:
         pytest.fail(f"{request.node.nodeid} leaked child installer state: {', '.join(leaked)}", pytrace=False)
 
 
 def pytest_configure(config):
     config.addinivalue_line(
         "markers", "host_sandbox: starts an OS sandbox (sandbox-exec/bwrap) or a local socket service")
+    config.addinivalue_line(
+        "markers", "expected_installer_leak: the test leaks _child installer state on purpose; the guard restores it")
 
 
 @pytest.fixture(autouse=True)
