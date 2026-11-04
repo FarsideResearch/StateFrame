@@ -210,6 +210,24 @@ def test_changed_exact_body_uses_frozen_delta_when_tokenizer_fails(monkeypatch):
     assert meter.measure(changed)[0] > count
 
 
+def test_stable_wire_fit_and_reserve_use_frozen_count_after_tokenizer_failure(monkeypatch):
+    from kernel_stable_wire import _request_fits, _request_retry_reserve
+
+    body = _body(80000)
+    meter = RequestTokenMeter(tokenizer=lambda _text: 20000)
+    meter.bind_request("seal-r1", "seal-r1")
+    tokens, method = meter.measure(body)
+    assert method == "tokenize"
+    capture = _capture(body, meter, method=method, tokens=tokens)
+    inputs = {"token_ceiling": 33344, "byte_ceiling": 82000,
+              "measurement_identity": "tokenize"}
+    monkeypatch.setattr(meter, "_availability", "unavailable")
+    assert meter.measure(body)[0] > inputs["token_ceiling"]  # Planted live-meter control.
+    assert not _request_fits(body, meter, inputs)
+    assert _request_fits(body, meter, inputs, capture)
+    assert _request_retry_reserve(body, meter, inputs, capture) == (16, 256)
+
+
 def test_oversize_rejection_sentinel_freezes_only_after_trimming():
     oversized = _body(600000)
     meter = RequestTokenMeter(tokenizer=lambda _text: 100)
@@ -253,7 +271,7 @@ def test_opt_in_layout_uses_frozen_counter_across_flip(monkeypatch, allocation_m
     inputs = {"token_ceiling": 33344, "byte_ceiling": 82000,
               "source_plan": {}, "sources": {}, "receipt": None}
     result = render_final_cache_candidate(capture, None, body, meter=meter, inputs=inputs)
-    assert result is body  # A new projection needs a live exact count.
+    assert result is not body  # The frozen allocation admits a measured fallback projection.
     assert _proof(monkeypatch, result, meter, capture)["status"] == "READY"
     assert capture.request_budget_final_wire["measure_method"] == allocation_method
 
@@ -318,6 +336,65 @@ def test_permanent_outage_growth_is_rejected_by_layout_before_proof(monkeypatch)
               "source_plan": {}, "sources": {}, "receipt": None}
     projected = render_final_cache_candidate(capture, None, body, meter=meter, inputs=inputs)
     assert projected is body
+    assert _proof(monkeypatch, projected, meter, capture)["status"] == "READY"
+
+
+def test_final_layout_trim_rebinds_frozen_fallback_before_proof(monkeypatch):
+    from test_final_cache_layout import _body as layout_body
+    from kernel_cache_layout_candidate import _project_final_cache_layout, render_final_cache_candidate
+    from kernel_frame_allocation_capture import (
+        calibrated_estimate, rebind_final_layout_trim,
+    )
+    from kernel_frame_optional_allocation import identity
+
+    monkeypatch.setenv("STATEFRAME_FINAL_CACHE_LAYOUT", "on")
+    monkeypatch.setattr("kernel_request_source_window.verify_final_source_delivery",
+                        lambda *_args, **_kwargs: {"status": "COMPLETE"})
+    monkeypatch.setattr("kernel_request_source_window.source_delivery_satisfied",
+                        lambda _receipt: True)
+    body = layout_body()
+    body["messages"][3]["content"] += "x" * (
+        78871 - len(json.dumps(body, sort_keys=True, ensure_ascii=False)))
+    meter = RequestTokenMeter(disabled=True)
+    meter.bind_request("seal-r1", "seal-r1")
+    tokens = calibrated_estimate(body, meter)
+    assert tokens == 33210 and meter._calibration_samples == 0
+    capture = _capture(body, meter, method="calibrated_bytes", tokens=tokens)
+    capture.journal = SimpleNamespace(emit=lambda *_args, **_kwargs: None)
+    capture.request_source_final_delivery = {"status": "COMPLETE"}
+    capture._frame_candidate_fallback_fit = False
+    capture._frame_candidate_rejection_bound = -1
+    inputs = {"token_ceiling": 33344, "byte_ceiling": 82000,
+              "source_plan": {}, "sources": {}, "receipt": {"status": "COMPLETE"},
+              "measurement_identity": "calibrated_bytes"}
+    capture._frame_candidate_inputs = inputs
+
+    # Planted control: projection without the one trim fails the final proof.
+    overgrown = _project_final_cache_layout(body)
+    assert "request_tokens_exceed_max_prompt_tokens" in _proof(
+        monkeypatch, overgrown, meter, capture)["final_validation_failures"]
+    original_digest = capture._frame_candidate_counter.body_digest
+    trimmed_digest = None
+
+    def trim(token_reserve, byte_reserve):
+        nonlocal trimmed_digest
+        assert token_reserve > 0 and byte_reserve >= 0
+        body["messages"][3]["content"] = body["messages"][3]["content"][:-1000]
+        trimmed_digest = identity(body)
+        rebind_final_layout_trim(body, meter, capture, byte_limit=82000, token_limit=33344)
+        assert capture._frame_candidate_counter.body_digest == trimmed_digest
+        assert capture._frame_candidate_fallback_fit is True
+        assert capture._frame_candidate_rejection_bound == meter.measure(body)[0]
+        assert capture._frame_candidate_measurement.method == "calibrated_bytes"
+        assert capture._frame_candidate_measurement.prompt_tokens == capture._frame_candidate_counter.tokens
+        assert capture._frame_candidate_inputs["measurement_identity"] == "calibrated_bytes"
+        return True
+
+    inputs["_final_layout_trim"] = trim
+    projected = render_final_cache_candidate(capture, None, body, meter=meter, inputs=inputs)
+    assert trimmed_digest != original_digest
+    assert projected is not body
+    assert capture._frame_candidate_counter.body_digest == identity(projected)
     assert _proof(monkeypatch, projected, meter, capture)["status"] == "READY"
 
 

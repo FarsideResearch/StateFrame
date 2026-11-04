@@ -378,12 +378,13 @@ def _source_tokens(meter: object, rows: Sequence[Mapping[str, object]]) -> tuple
     return value
 
 
-def _measured_request(body: Mapping[str, object], meter: object):
-    measure = getattr(meter, "measure", None)
-    if not callable(measure):
-        return None
+def _measured_request(body: Mapping[str, object], meter: object, capture: object = None):
     try:
-        value = measure(body)
+        if capture is None:
+            value = meter.measure(body)
+        else:
+            from kernel_frame_allocation_capture import final_request_tokens
+            value = final_request_tokens(body, meter, capture)
     except Exception:
         return None
     if (not isinstance(value, tuple) or len(value) != 2 or type(value[0]) is not int
@@ -396,8 +397,9 @@ def _measured_request(body: Mapping[str, object], meter: object):
     return value[0], value[1], size
 
 
-def _request_fits(body: Mapping[str, object], meter: object, inputs: Mapping[str, object]) -> bool:
-    measured = _measured_request(body, meter)
+def _request_fits(body: Mapping[str, object], meter: object,
+                  inputs: Mapping[str, object], capture: object = None) -> bool:
+    measured = _measured_request(body, meter, capture)
     if measured is None:
         return False
     tokens, method, size = measured
@@ -424,8 +426,8 @@ def _failed_open(capture: object, body: object, reason: str):
 
 
 def _request_retry_reserve(body: Mapping[str, object], meter: object,
-                           inputs: Mapping[str, object]) -> tuple[int, int] | None:
-    measured = _measured_request(body, meter)
+                           inputs: Mapping[str, object], capture: object = None) -> tuple[int, int] | None:
+    measured = _measured_request(body, meter, capture)
     if measured is None:
         return None
     tokens, _method, size = measured
@@ -772,7 +774,7 @@ def project_stable_wire(capture, runtime, body, *, meter, inputs,
 
     projected, status_content, _frame = _project_body(body, candidate_delivered, current, epoch)
 
-    if replay_decision != "applied" and not _request_fits(projected, meter, inputs):
+    if replay_decision != "applied" and not _request_fits(projected, meter, inputs, capture):
         if not must_relayout:
             epoch += 1
             candidate_delivered = sorted(
@@ -781,8 +783,8 @@ def project_stable_wire(capture, runtime, body, *, meter, inputs,
             reason = "envelope"
             projected, status_content, _frame = _project_body(
                 body, candidate_delivered, current, epoch)
-        if not _request_fits(projected, meter, inputs):
-            reserve = _request_retry_reserve(projected, meter, inputs)
+        if not _request_fits(projected, meter, inputs, capture):
+            reserve = _request_retry_reserve(projected, meter, inputs, capture)
             if reserve is not None and callable(trim_callback):
                 trimmed = trim_callback(*reserve)
                 if trimmed is not False and isinstance(inputs, dict):

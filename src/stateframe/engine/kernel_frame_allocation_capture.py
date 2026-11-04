@@ -173,6 +173,22 @@ def carry_final_request_tokens(body: Mapping[str, object], capture: object,
             body_digest=identity(body))
 
 
+def rebind_final_layout_trim(body: Mapping[str, object], meter: object,
+                             capture: object, *, byte_limit: int,
+                             token_limit: int) -> tuple[int, str]:
+    """Make a trimmed canonical body the frozen base for layout and proof."""
+    tokens, method = final_request_tokens(body, meter, capture)
+    carry_final_request_tokens(body, capture, tokens)
+    capture._frame_candidate_measurement = meter.bind_measurement(
+        body, tokens=tokens, method=method, request_id=str(capture.request_id),
+        max_request_bytes=byte_limit, max_prompt_tokens=token_limit)
+    capture._frame_candidate_inputs["measurement_identity"] = method
+    capture._frame_candidate_fallback_fit = method == "calibrated_bytes"
+    capture._frame_candidate_rejection_bound = (
+        meter.measure(body)[0] if method == "calibrated_bytes" else None)
+    return tokens, method
+
+
 def _capture_carrier_roles(
     messages: Sequence[object],
     *,
@@ -1304,15 +1320,17 @@ def finalize_frame_candidate(
             finally:
                 token_limit = base_token_limit
                 layout_byte_ceiling = None
-            fitted_tokens, fitted_method = meter.measure(candidate)
-            fitted_byte_limit = request_byte_limit(fitted_method)
-            capture._frame_candidate_measurement = meter.bind_measurement(
-                candidate, tokens=fitted_tokens, method=fitted_method,
-                request_id=str(capture.request_id), max_request_bytes=fitted_byte_limit,
-                max_prompt_tokens=base_token_limit,
-            )
-            capture._frame_candidate_inputs["measurement_identity"] = fitted_method
+            from kernel_request_source_window import verify_final_source_delivery, source_delivery_satisfied
+            trimmed_receipt = verify_final_source_delivery(
+                plan, candidate["messages"], payload=json.dumps(candidate).encode(), sources=sources)
+            if not source_delivery_satisfied(trimmed_receipt):
+                return False
+            rebind_final_layout_trim(
+                candidate, meter, capture, byte_limit=request_byte_limit(frozen_method()),
+                token_limit=base_token_limit)
             capture._frame_candidate_inputs["source_plan"] = copy.deepcopy(plan)
+            capture._frame_candidate_inputs["receipt"] = copy.deepcopy(trimmed_receipt)
+            capture.request_source_final_delivery = trimmed_receipt
             return True
 
         capture._frame_candidate_inputs["_final_layout_trim"] = trim_for_final_layout
