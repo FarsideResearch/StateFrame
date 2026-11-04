@@ -57,6 +57,10 @@ def capture(tree: Path, python: str, launcher: Path, script: Path,
     # stable_tool_head has no default (see tools/changed_defaults.py): every caller states its arm.
     environment = source_env(tree, stable_tool_head=stable_tool_head,
                              source_on_pythonpath=source_on_pythonpath)
+    # Each capture gets its own empty home. The current tree reads enabled powerups and user skills from
+    # STATEFRAME_HOME and old releases do not, so a home inherited from the test session (where an earlier test
+    # may have left a powerup enabled) changed only one side's request bytes (11-04, 0.2.8 parity in full runs).
+    environment["STATEFRAME_HOME"] = tempfile.mkdtemp(prefix=f"{run_dir.name}-home-", dir=run_dir.parent)
     endpoint = subprocess.Popen([python, "-m", "stateframe.scripted_endpoint",
         "--script", str(script), "--port", "0"], cwd=tree, env=environment,
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)

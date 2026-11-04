@@ -192,6 +192,23 @@ def test_tests_only_repo_can_submit_declared_output(tmp_path, protection):
 
 @pytest.mark.host_sandbox
 def test_existing_discount_requests_match_untouched_0_2_8(tmp_path):
+    _assert_discount_requests_match_0_2_8(tmp_path)
+
+
+@pytest.mark.host_sandbox
+def test_0_2_8_parity_ignores_a_powerup_enabled_in_the_inherited_home(tmp_path, monkeypatch):
+    # Planted: the home this process hands to subprocesses has a powerup enabled, as when an earlier test left one in
+    # the session home. The current tree would apply it and 0.2.8 cannot, so each capture must get its own home.
+    # The planted home is private: the real session home is shared by every xdist worker of a gated run.
+    from stateframe import powerups
+
+    monkeypatch.setenv("STATEFRAME_HOME", str(tmp_path / "polluted-home"))
+    installed = powerups.install(ROOT / "examples/powerups/py-format")
+    powerups.enable(installed.name, mode="on")
+    _assert_discount_requests_match_0_2_8(tmp_path)
+
+
+def _assert_discount_requests_match_0_2_8(tmp_path):
     from tools.compare_no_mcp_requests import capture, write_launcher
 
     archive = subprocess.run(

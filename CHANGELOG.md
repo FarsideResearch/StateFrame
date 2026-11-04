@@ -3,6 +3,7 @@
 ## Unreleased
 
 - Tests: each parity test now pins its own baseline commit (a `git archive` tree built in-tree) instead of sharing `SF_TEST_PARITY_BASELINE`, which could only name one commit while three tests needed three. Setting the old variable now fails with a clear error, and a guard test with a planted control keeps it that way. Every byte assertion is kept. Test-only; no product change.
+- Tests: the 0.2.8 no-MCP parity comparison gives each capture its own `STATEFRAME_HOME`, so a powerup or skill another test enabled in the shared session home no longer changes its requests. A conftest guard now fails and names any test that leaves `powerups/`, `powerups.json` or `skills/` changed in the session home.
 
 ## 0.3.30 (2026-11-04)
 

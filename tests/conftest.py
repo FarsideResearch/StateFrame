@@ -47,6 +47,47 @@ def reject_retired_shared_parity_baseline(request):
         )
 
 
+# The session home is shared by every test in a worker. Powerups and skills in it change what the current tree
+# sends, so a test that leaves one behind changes later tests' request bytes (11-04: the 0.2.8 parity test failed
+# only in full runs). A test that needs such state sets its own STATEFRAME_HOME with monkeypatch.
+_SESSION_HOME_STATE = ("powerups", "powerups.json", "skills")
+
+
+def _session_home_state_snapshot(home):
+    import hashlib
+    from pathlib import Path
+
+    state = {}
+    for name in _SESSION_HOME_STATE:
+        root = Path(home) / name
+        paths = [root] if root.is_file() or root.is_symlink() else sorted(root.rglob("*")) if root.is_dir() else []
+        for path in paths:
+            relative = str(path.relative_to(home))
+            if path.is_symlink():
+                state[relative] = "link:" + str(path.readlink())
+            elif path.is_file():
+                state[relative] = hashlib.sha256(path.read_bytes()).hexdigest()
+            else:
+                state[relative] = "dir"
+    return state
+
+
+@pytest.fixture(autouse=True)
+def guard_session_home_state(request):
+    import os
+
+    home = os.environ.get("STATEFRAME_HOME")
+    before = _session_home_state_snapshot(home) if home else None
+    yield
+    # Compare against the same home: a test that monkeypatched its own home has restored the session one by now.
+    if before is not None and os.environ.get("STATEFRAME_HOME") == home:
+        after = _session_home_state_snapshot(home)
+        if after != before:
+            changed = sorted(set(before) ^ set(after) | {k for k in before.keys() & after.keys() if before[k] != after[k]})
+            pytest.fail(f"{request.node.nodeid} left session STATEFRAME_HOME state changed: {', '.join(changed[:8])}; "
+                        "set its own STATEFRAME_HOME with monkeypatch", pytrace=False)
+
+
 # _child installers patch these process globals directly. A test must register the
 # pristine value with monkeypatch before invoking an installer (or restore it in finally).
 _MISSING = object()
