@@ -28,6 +28,10 @@
 - Fix macOS checks for projects whose `.venv` was made by `uv`: the venv's `python` links into uv's interpreter store (a symlinked directory under `~/.local/share/uv/python`), and the check sandbox refused to start it, so every check came back as a failure and the run stalled. The check sandbox now admits each link on the way to the interpreter and that interpreter's install, read-only. Linux runs mount the same install.
 - A check whose interpreter is missing inside the sandbox now reports a distinct not-found environment error; real permission refusals retain the blocked message. Neither is treated as a failed test. Startup advice covers both causes, and project or temporary-directory venv interpreters are admitted by the check probe.
 - The engine's release manifest now lists the new `kernel_safe_paths.py` module, and a test fails if any engine Python file is missing from the manifest, listed but absent, or listed at an old hash.
+- When token counting falls back to byte estimates after `/tokenize` fails or times out, StateFrame now tries `/tokenize` again later instead of staying on estimates for the rest of the run: once every 5 requests or 30 seconds, never more than once per request. A `/tokenize` call may take up to 25 seconds to allow for queueing on a slow tunnel, capped at the request's remaining time. With a tokenizer that stays down, a request can wait up to that long once per window. The fallback event keeps its existing reasons (`timeout`, `connection`, and so on).
+- When counting never fails, request bytes are unchanged.
+- Tests: measurement-journal checks share `tests/_journal.py` for live and sealed runs, a guard catches direct reads from the old `events.jsonl` location, and the masked request oracle pins baseline bytes while normalizing the countdown field.
+- Tests: the clean-meter replay pins masked request hashes for requests 1-2 against 0.3.30's base, plus countdown-copy counts for requests 1-6; a callsite census that fires depending on run timing changes later requests (finding filed). The tokenizer outage test derives schema-meter calls from the tape server's request log.
 
 ## 0.3.30 (2026-11-04)
 

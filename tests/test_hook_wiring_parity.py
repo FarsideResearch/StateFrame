@@ -21,7 +21,7 @@ from pathlib import Path
 import pytest
 from acceptance._support import assert_tree_imports, tree_python
 
-import kernel_measurement as measurement
+from _journal import measurement_events
 from stateframe.scripted_endpoint import Script, ScriptStepUnavailable, serve
 from fixtures.process_signals import record_identity, signal_run_owned, signal_run_verified
 from tools.compare_no_mcp_requests import (
@@ -260,10 +260,7 @@ def _run_checkout(
             path.read_bytes() for path in sorted((run / "wire").glob("*.request.json"))
         ]
         assert requests
-        events = []
-        for path in measurement.journal_paths(run / "worker" / "measurement-runs"):
-            with measurement.open_journal(path) as stream:
-                events.extend(json.loads(line) for line in stream if line.strip())
+        events = measurement_events(run)
         kinds = [event["kind"] for event in events]
         # Hash-chain fields and tokenizer measurement/endpoint identity vary
         # between runs because each scripted server uses a fresh port.

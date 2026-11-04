@@ -499,7 +499,7 @@
   "kernel_reprospec.py": "08f76f5d5fd6f0fc83abf8554c51f8c9f77daf70586f1766a5f0aa816b049374",
   "kernel_request_budget.py": "4d87e5a8f50776acae06bbf977c2cfd18bd36cf13c13b2a611c72229fd5b5230",
   "kernel_request_candidate.py": "cd5be4404b232687dec32e0e09d0d3d2ebb1807135c5d8a32343af25c5f3919f",
-  "kernel_request_diet.py": "8e2264043a38ca0a58a461283724272cb7ea1b36cea7fef34bfd76e72b60c6e5",
+  "kernel_request_diet.py": "9c4f9410329d2584489e7449abccfe15bd279f5ca671664efa67482fe13c8c23",
   "kernel_request_evidence_closure.py": "2b298cffe2b318485aae4fd6fd4279a373f08017edc3bd6e6f5e87bdf5404ed8",
   "kernel_request_kind.py": "7690584ab794144995879459f9e5ac73e2a9585ad7105619711bb4c97e9e5101",
   "kernel_request_measurement.py": "c8cad96aa5b595a662bbec2ac4ef1a8bcad23e64ec5896b2a42912ff7279339f",

@@ -25,6 +25,7 @@ from probes.react_repair import (EDIT_SCOPE_WIDEN_CAP, EDIT_SCOPE_WIDENED_KEY, F
 from kernel_effects import effect_policy_for_run
 from kernel_scope_widen_guard import admitted, write as guarded_write
 
+from _journal import measurement_events
 from acceptance._support import FIXTURES, Endpoint, PYTHON, environment, read_requests, run_case
 
 PRICING = "from app.rates import rate\n\ndef total(a, p):\n    return a * rate(p)\n"
@@ -396,28 +397,9 @@ def _script(tmp_path: Path) -> Path:
     return path
 
 
-def _events(run_dir: Path, kind: str) -> list[dict]:
-    found = []
-    # Finished runs keep the measurement journal sealed as events.jsonl.xz; open_journal reads both forms.
-    from stateframe.engine.kernel_journal_store import open_journal
-    for path in [*run_dir.rglob("*.jsonl"), *run_dir.rglob("events.jsonl.xz")]:
-        if "workspace" in path.parts or "env" in path.parts:
-            continue
-        if path.suffix == ".xz":
-            with open_journal(path.parent) as stream:
-                text = stream.read()
-        else:
-            text = path.read_text(errors="ignore")
-        for line in text.splitlines():
-            if f'"{kind}"' not in line:
-                continue
-            try:
-                item = json.loads(line)
-            except ValueError:
-                continue
-            if isinstance(item, dict) and kind in (item.get("kind"), item.get("event"), item.get("type")):
-                found.append(item)
-    return found
+def _events(run_dir: Path, kind: str) -> list[dict[str, object]]:
+    return [event for event in measurement_events(run_dir)
+            if kind in (event.get("kind"), event.get("event"), event.get("type"))]
 
 
 def _run(tmp_path: Path, widen: bool):

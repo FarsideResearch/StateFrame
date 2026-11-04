@@ -14,6 +14,7 @@ import sysconfig
 from dataclasses import dataclass
 from pathlib import Path
 
+from _journal import measurement_events
 from _stateframe_home import isolated_stateframe_home
 from stateframe.request_records import list_request_records, read_request_record
 from engine_run import run_monitored
@@ -231,14 +232,8 @@ def read_requests(run_dir: Path) -> tuple[dict, ...]:
                  for name in list_request_records(run_dir))
 
 
-def read_measurement_events(run_dir: Path) -> tuple[dict, ...]:
-    import kernel_measurement as measurement
-
-    rows = []
-    for path in measurement.journal_paths(run_dir / "worker" / "measurement-runs"):
-        with measurement.open_journal(path) as stream:
-            rows.extend(json.loads(line) for line in stream if line.strip())
-    return tuple(rows)
+def read_measurement_events(run_dir: Path) -> tuple[dict[str, object], ...]:
+    return tuple(measurement_events(run_dir))
 
 
 def run_case(tmp_path: Path, script: str, *, repo_name: str = "simple_repo",

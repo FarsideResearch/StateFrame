@@ -1,0 +1,29 @@
+{
+ "schema": "stateframe-allocation-replay-case/1",
+ "case_id": "clean-meter-22file-r1",
+ "origin_run_id": "clean-meter-22file-r1",
+ "original_refusal_code": "FrameRequestAllocationError",
+ "original_failure_codes": [
+  "final_wire_proof_missing",
+  "closure_units_undelivered"
+ ],
+ "original_receipt_status": "PARTIAL",
+ "original_proof_status": "FAILED",
+ "sends_before_refusal": 12,
+ "profile_settings": {
+  "name": "r2hc3",
+  "base_profile": "r2hc3",
+  "switch_overrides": {}
+ },
+ "recorded_settings": {
+  "prompt_cache_slot": {
+   "selection": "explicit",
+   "slot": 0
+  },
+   "model": "allocation-replay-model"
+ },
+ "source_type": "supplied_tape_script",
+ "source_note": "Clean-meter allocation replay for a shared 22-file fixture.",
+ "tape_sha256": "cdb665db38da215595d2fb03272b832b809fafcc250a8203e111b690424faccc",
+ "repo": "_repos/0420a86aadd2"
+}

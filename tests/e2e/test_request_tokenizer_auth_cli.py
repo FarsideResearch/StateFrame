@@ -10,8 +10,8 @@ from pathlib import Path
 
 import pytest
 
+from _journal import measurement_events
 from _stateframe_home import isolated_stateframe_home
-from stateframe.engine.kernel_journal_store import journal_paths, open_journal
 from stateframe.scripted_endpoint import Script, serve
 from engine_run import run_monitored
 
@@ -83,12 +83,8 @@ def _run(tmp_path: Path, *, key: str) -> tuple[subprocess.CompletedProcess[str],
 
 
 def _request_diet_events(run_dir: Path) -> list[dict[str, object]]:
-    # A finished run seals each journal as events.jsonl.xz; read through the store so either layout counts.
-    events = []
-    for path in journal_paths(run_dir / "worker" / "measurement-runs"):
-        with open_journal(path) as source:
-            events.extend(json.loads(line) for line in source if line.strip())
-    return [event for event in events if event.get("kind") == "request_diet_applied"]
+    return [event for event in measurement_events(run_dir)
+            if event.get("kind") == "request_diet_applied"]
 
 
 def _unavailable_events(run_dir: Path) -> list[dict[str, object]]:

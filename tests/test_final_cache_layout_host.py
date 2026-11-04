@@ -14,6 +14,7 @@ import pytest
 
 from kernel_cache_layout_view import CacheLayoutError, semantic_messages
 from kernel_stateframe_page_log import _payload_has_authority_keys
+from _journal import measurement_events
 from stateframe.scripted_endpoint import Script, serve
 from tools.pinned_tree import pinned_tree
 
@@ -149,12 +150,7 @@ def test_scripted_final_sealed_wire_and_planted_violation(tmp_path):
         assert not _payload_has_authority_keys(frame, final=True)
         assert semantic_messages(rows)[2]["content"].startswith("[StateFrame]\n")
 
-    # A finished run seals its measurement journal as events.jsonl.xz; open_journal reads both forms.
-    from stateframe.engine.kernel_journal_store import open_journal
-    events = []
-    for file in [*run.rglob("events.jsonl"), *run.rglob("events.jsonl.xz")]:
-        with open_journal(file.parent) as stream:
-            events.extend(json.loads(line) for line in stream.read().splitlines())
+    events = measurement_events(run)
     final_events = [row for row in events if row.get("event") == "cache_layout_final_wire"
                     or row.get("kind") == "cache_layout_final_wire"]
     assert final_events

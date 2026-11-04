@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from acceptance._support import run_case
+from _journal import measurement_journal_paths
 from stateframe import inspect_run
 from stateframe.request_records import list_request_records
 from test_checkpoint_merge_regression import _script
@@ -39,7 +40,7 @@ def test_finished_run_with_env_stays_under_byte_budget_and_inspectable(
     assert not (run / "env").exists()
     assert json.loads((run / "env-manifest.json").read_text())["distributions"] is not None
     assert not any((run / "checkpoints").glob("*/state.pkl"))
-    journals = list((run / "worker/measurement-runs").glob("*/events.jsonl*"))
+    journals = measurement_journal_paths(run)
     assert journals and all(path.name == "events.jsonl.xz" for path in journals)
     assert not any((run / "requests").glob("*.json"))
     assert (run / "requests.pack.xz").is_file()

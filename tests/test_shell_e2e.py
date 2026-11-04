@@ -14,8 +14,8 @@ from fixtures.process_signals import signal_run_owned
 
 from stateframe.scripted_endpoint import Script, serve
 from stateframe.request_records import list_request_records, read_request_record
-import kernel_measurement as measurement
 from engine_run import run_monitored, start_monitored
+from _journal import measurement_events
 
 ROOT = Path(__file__).resolve().parents[1]
 pytestmark = pytest.mark.host_sandbox
@@ -104,11 +104,8 @@ def test_shell_product_edit_refreshes_read_and_final_diff(tmp_path):
         step("read", path="pkg/value.py"), *finish()], failing=True)
     assert "+VALUE = 2" in (run / "final.diff").read_text()
     assert "files changed by this command: modified: pkg/value.py" in requests
-    events = []
-    for path in measurement.journal_paths(run / "worker" / "measurement-runs"):
-        with measurement.open_journal(path) as stream:
-            events.extend(stream)
-    assert '"shell_effect"' in "".join(events)
+    events = measurement_events(run)
+    assert '"shell_effect"' in json.dumps(events)
     # The read after the shell edit must see a NEW revision with the new bytes, not the stale page.
     revisions = re.findall(r"\[read page\] path=pkg/value\.py revision=(sha256:[0-9a-f]+)", requests)
     assert len(set(revisions)) >= 2, revisions

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import gzip
+import hashlib
 import json
 import math
 import re
@@ -50,6 +51,17 @@ class TapeServer:
         self._divisor = float(script.get("tokenize_divisor", 1.245))
         if self._divisor <= 0:
             raise ValueError("tokenize_divisor must be positive")
+        delay = script.get("tokenize_delay_s", 0.0)
+        if (isinstance(delay, bool) or not isinstance(delay, (int, float))
+                or not math.isfinite(delay) or delay < 0):
+            raise ValueError("tokenize_delay_s must be a finite non-negative number")
+        slow_calls = script.get("tokenize_slow_calls", ())
+        if (not isinstance(slow_calls, Sequence)
+                or isinstance(slow_calls, (str, bytes, bytearray))
+                or any(type(call) is not int or call < 1 for call in slow_calls)):
+            raise ValueError("tokenize_slow_calls must contain positive call numbers")
+        self._tokenize_delay_s = float(delay)
+        self._tokenize_slow_calls = frozenset(slow_calls)
         slots = script.get("slots", [65536] * 8)
         self._slots = tuple(slots) if isinstance(slots, Sequence) and not isinstance(slots, (str, bytes)) else (65536,)
         self._lock = threading.Lock()
@@ -57,6 +69,9 @@ class TapeServer:
         self._turn_index = 0
         self._request_count = 0
         self._served_turn_indexes: set[int] = set()
+        self._tokenize_request_count = 0
+        self._delayed_tokenize_calls: list[int] = []
+        self._tokenize_request_log: list[dict[str, object]] = []
         self._server = ThreadingHTTPServer(("127.0.0.1", 0), self._handler())
         self._server.daemon_threads = True
         self._thread: threading.Thread | None = None
@@ -84,6 +99,21 @@ class TapeServer:
         with self._served_lock:
             return self.total_steps - 1 in self._served_turn_indexes
 
+    @property
+    def tokenize_request_count(self) -> int:
+        with self._lock:
+            return self._tokenize_request_count
+
+    @property
+    def delayed_tokenize_calls(self) -> tuple[int, ...]:
+        with self._lock:
+            return tuple(self._delayed_tokenize_calls)
+
+    @property
+    def tokenize_request_log(self) -> tuple[dict[str, object], ...]:
+        with self._lock:
+            return tuple(dict(entry) for entry in self._tokenize_request_log)
+
     def _token_count(self, text: str) -> int:
         return max(1, round(len(_PIECE.findall(text)) / self._divisor))
 
@@ -102,7 +132,10 @@ class TapeServer:
                 self.send_header("Content-Type", "application/json")
                 self.send_header("Content-Length", str(len(data)))
                 self.end_headers()
-                self.wfile.write(data)
+                try:
+                    self.wfile.write(data)
+                except (BrokenPipeError, ConnectionResetError):
+                    return
 
             def do_GET(self) -> None:
                 path = self.path.rstrip("/")
@@ -137,6 +170,22 @@ class TapeServer:
                 path = self.path.rstrip("/")
                 if path.endswith("/tokenize"):
                     content = body.get("content") if isinstance(body, Mapping) else ""
+                    content_bytes = str(content or "").encode("utf-8")
+                    with tape._lock:
+                        tape._tokenize_request_count += 1
+                        call_number = tape._tokenize_request_count
+                        should_delay = call_number in tape._tokenize_slow_calls
+                        if should_delay:
+                            tape._delayed_tokenize_calls.append(call_number)
+                        tape._tokenize_request_log.append({
+                            "call": call_number,
+                            "timestamp_ns": time.time_ns(),
+                            "content_bytes": len(content_bytes),
+                            "content_sha256": hashlib.sha256(content_bytes).hexdigest(),
+                            "delayed": should_delay,
+                        })
+                    if should_delay and tape._tokenize_delay_s:
+                        time.sleep(tape._tokenize_delay_s)
                     self._send_json(
                         200, {"tokens": list(range(tape._token_count(str(content or ""))))},
                     )
