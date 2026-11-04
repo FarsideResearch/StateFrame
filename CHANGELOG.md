@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.3.34 (2026-11-04)
 
 - Test-only: the allocation replay corpus gives the engine at least its old 1800 s timeout again, so slow recorded cases are not cut short.
 
