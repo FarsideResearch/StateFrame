@@ -35,7 +35,9 @@ def _capture(repo: Path, run: Path, launcher: Path, script_path: Path,
              "--model", "scripted", "--run-dir", str(run), "--test-python", str(python),
              "--test-cmd", "python -m unittest discover -s tests -q",
              "--run-env", "--max-turns", "32", "--quiet"],
-            env=environment, capture_output=True, text=True, timeout=300)
+            # One capture took 186 s solo and timed out at 300 s under concurrent Linux gate load
+            # (11-04); 900 s keeps headroom without letting a hung capture run unbounded.
+            env=environment, capture_output=True, text=True, timeout=900)
         # Parity concerns request bytes, not the example's check outcome under this interpreter.
         assert result.returncode in (0, 1), result.stdout + result.stderr
         script.assert_consumed()
