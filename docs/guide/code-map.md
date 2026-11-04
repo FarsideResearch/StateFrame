@@ -59,4 +59,4 @@ The engine is a flat package of modules, each owning one mechanism; `release-man
 | `kernel_safe_probe.py`, `kernel_ship_tree_smoke.py` | Sandboxed, read-only repository-code diagnostics and provisioning, including imports before the first request and after edits; cleanup failures stop the run. |
 | `kernel_web_fetch.py` | Direct-IP, SSRF-checked web observations with bounded text extraction. |
 | `kernel_release_switch_registry.py` | Which `STATEFRAME_*` switches this engine reads; a setting with no reader is refused. |
-| `mc_repo_intel_vendor/` | The repo map: syntax-aware outlines of functions and classes. |
+| `mc_repo_intel_vendor/` | The repo map lists Python, JS/TS, Vue, Go, Rust, Java, Ruby, PHP, C, C++ and C# files, and reports its parser mode in the header and `repo_map_modes` journal event. |

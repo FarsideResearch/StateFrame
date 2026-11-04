@@ -17,7 +17,7 @@ from pathlib import Path
 from mc_repo_intel_vendor import MC_COMMIT, SOURCE_PATH, VENDOR_SCHEMA
 from mc_repo_intel_vendor.call_graph import build_graph
 from mc_repo_intel_vendor import repo_map as _repo_map_module
-from mc_repo_intel_vendor.repo_map import build_repo_map, get_current_commit_sha
+from mc_repo_intel_vendor.repo_map import build_repo_map_with_stats, get_current_commit_sha
 from mc_repo_intel_vendor.ts_dispatch import outline_file as outline
 from kernel_repo_catalog import StructuralIndexError, build_structural_index
 
@@ -611,14 +611,33 @@ def intake_orientation(root: Path, *, target_path: str = "", symbol: str = "",
                        selectors: Sequence[object] = ()) -> str:
     """Produce map text for the single existing NAVBASICS orientation owner."""
     commit = get_current_commit_sha(str(root))
-    repo_map = build_repo_map(str(root), commit_sha=commit)
+    repo_map, map_stats = build_repo_map_with_stats(str(root), commit_sha=commit)
     repo_map = _ensure_focus_entry(root, repo_map, target_path)
     bounded = bound_repo_map(repo_map, target_path=target_path, symbol=symbol)
+    _journal_repo_map_receipt(map_stats, map_chars=len(bounded))
     from kernel_nav_basics import render_intake_orientation
     orientation = render_intake_orientation(root, selectors, repo_map=bounded)
     _emit_for_root(root, "repo_intel_orientation", commit=commit,
                    map_chars=len(bounded), target_path=str(target_path), symbol=str(symbol))
     return orientation
+
+
+def _journal_repo_map_receipt(stats: Mapping[str, object], *, map_chars: int) -> None:
+    """Record which parser modes the repo map actually used (per-file counts, failure reasons) in the run
+    journal, so a degraded map is visible in the receipt rather than only in a log line. No-op outside a run."""
+    try:
+        from kernel_pilot import ACTIVE_RUNTIME
+        runtime = ACTIVE_RUNTIME.get()
+    except (ImportError, LookupError):
+        return
+    emit = getattr(getattr(runtime, "journal", None), "emit", None)
+    if not callable(emit):
+        return
+    try:
+        emit("repo_map_modes", producer="kernel_repo_intel", dispatch=False, map_chars=map_chars,
+             **{key: copy.deepcopy(value) for key, value in stats.items()})
+    except Exception:  # noqa: BLE001 - the receipt is diagnostic; orientation must not fail on it
+        logger.debug("repo_map_modes receipt not recorded", exc_info=True)
 
 
 def _emit_for_root(root: Path, event: str, **fields: object) -> None:
