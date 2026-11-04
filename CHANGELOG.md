@@ -9,6 +9,7 @@
 - Checkpoints store new audit-journal bytes as verified chunks in the existing journal cache, instead of rewriting the growing `events.jsonl` at every step. Unchanged seeded environment files use copy-on-write clones on APFS when a whole-tree clone is unavailable; run files remain writable.
 - The checkpoint on/off wire test now checks that every request shows `sandbox_seconds_remaining=unbounded`, the reason raw bytes can match across runs, and includes planted controls showing it still catches one changed byte outside the receipt IDs and a change in how many distinct receipts a request declares.
 - Acceptance coverage now kills the second checkpoint save during an audit-journal suffix chunk write and, on Darwin, during seeded run-environment cloning; resume must restore the previous complete journal bytes and preserve request parity.
+- Fixed: the live continuation countdown now occupies one fixed-width slot, and request sizing counts a canonical version of that slot so clock speed cannot change source selection or call-site census admission.
 
 ## 0.3.30 (2026-11-04)
 

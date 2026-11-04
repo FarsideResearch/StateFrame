@@ -2433,7 +2433,9 @@ def prepare_request(
             content[:header.end()] + packet.payload + "\n" + _END + "\n" + content[header.end():]
         )
         try:
-            request_tokens = int(request_token_counter({"messages": candidate, "tools": list(tools)}))
+            from kernel_countdown_slot import canonical_countdown
+            request_tokens = int(request_token_counter(canonical_countdown(
+                {"messages": candidate, "tools": list(tools)})))
             ceiling = max(0, int(frame_ceiling))
         except Exception as error:  # noqa: BLE001 - always report the budget failure type
             return finish("budget_unavailable", packet=packet, error_type=type(error).__name__)
@@ -2462,7 +2464,9 @@ def prepare_request(
         + content[insertion_offset:]
     )
     try:
-        request_tokens = int(request_token_counter({"messages": candidate, "tools": list(tools)}))
+        from kernel_countdown_slot import canonical_countdown
+        request_tokens = int(request_token_counter(canonical_countdown(
+            {"messages": candidate, "tools": list(tools)})))
         ceiling = max(0, int(frame_ceiling))
     except Exception as error:  # noqa: BLE001 - always report the budget failure type
         return finish("budget_unavailable", packet=packet, error_type=type(error).__name__)

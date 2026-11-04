@@ -8,6 +8,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
 from kernel_tool_reply import copy_tool_reply_message
+from kernel_read_fixes import SOURCE_BLOCK_PREFIXES
 
 
 WIRE_STABLE_ENV = "STATEFRAME_WIRE_STABLE"
@@ -510,6 +511,11 @@ def _project_message(
         copied["content"], disk_lines_removed = _clean_content(copied["content"])
 
     if copied.get("role") != "user":
+        return copied, False, disk_lines_removed
+    content = copied.get("content")
+    if isinstance(content, str) and content.startswith((
+            *SOURCE_BLOCK_PREFIXES, "[Model source window]", "CURRENT_SOURCE ")):
+        # Source bytes can contain host-looking time keys at column zero.
         return copied, False, disk_lines_removed
     if _is_marker_message(copied):
         previous_tail = _strip_volatile_marker(copied.get("content"))

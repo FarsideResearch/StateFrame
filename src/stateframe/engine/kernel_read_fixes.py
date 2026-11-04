@@ -7,6 +7,7 @@ bytes.
 from __future__ import annotations
 
 from kernel_step_limits import UNBOUNDED_GUIDANCE, limit_text, reached, remaining
+from kernel_countdown_slot import render_time_slot
 
 import os
 import time
@@ -437,30 +438,8 @@ class ResponseBudget:
 
 
 def _time_left_text(limits: object, seconds: object) -> str:
-    """Seconds left plus plain minutes and turns at the measured pace.
-
-    The pace clock starts at the first render; pace = elapsed / decisions used so far.
-    """
-    if seconds is None:
-        return "unbounded"
-    left = max(0.0, float(seconds))
-    now = time.monotonic()
-    start = getattr(limits, "_time_left_clock_start", None)
-    if not isinstance(start, float):
-        start = now
-        try:
-            setattr(limits, "_time_left_clock_start", start)
-            setattr(limits, "_time_left_decisions_at_start", int(getattr(limits, "model_decisions_used", 0) or 0))
-        except (AttributeError, TypeError):
-            pass
-    used = int(getattr(limits, "model_decisions_used", 0) or 0) - int(
-        getattr(limits, "_time_left_decisions_at_start", 0) or 0)
-    text = f"{left:.1f} (about {int(round(left / 60))} minutes left"
-    if used > 0 and now > start:
-        pace = (now - start) / used
-        if pace > 0:
-            text += f", ~{int(left // pace)} turns at your pace"
-    return text + ")"
+    """Compatibility entry point for the bounded visible countdown."""
+    return render_time_slot(limits, seconds)
 
 
 @dataclass

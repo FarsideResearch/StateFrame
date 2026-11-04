@@ -172,7 +172,9 @@ def tokenize_route_label(endpoint: object) -> str | None:
 
 def _tokenization_content(body: Mapping[str, object]) -> str:
     from kernel_request_measurement import prompt_projection
-    return prompt_projection(body)
+    from kernel_countdown_slot import canonical_countdown
+    # Measure the reserved slot; the separate body digest still binds live wire bytes.
+    return prompt_projection(canonical_countdown(body))
 
 
 def _url_origin(url: object) -> tuple[str, str, int | None] | None:
@@ -499,6 +501,8 @@ class RequestTokenMeter:
         """
         if not isinstance(content, str) or self._availability != "available":
             return None
+        from kernel_countdown_slot import canonical_time_text
+        content = canonical_time_text(content)
         start = time.monotonic()
         self._last_attempts = 0
         for _attempt in range(TOKENIZE_MAX_CONSECUTIVE_FAILURES):
