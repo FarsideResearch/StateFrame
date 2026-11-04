@@ -30,7 +30,10 @@ ALLOCATION_ERRORS = ("FrameRequestAllocationError", "FrameFit5ImpossibleMinimum"
 BACKSTOP_SECONDS_PER_TURN = 10
 BACKSTOP_HEADROOM_MULTIPLIER = 6
 BACKSTOP_FLOOR_SECONDS = 600
-PARENT_TIMEOUT_MARGIN_SECONDS = 30
+# Preserve the pre-F1/F2 engine wall-clock budget for slow recorded cases.
+ENGINE_TIMEOUT_FLOOR_SECONDS = 1800
+# Give the parent one minute to collect the engine's final result.
+PARENT_TIMEOUT_GRACE_SECONDS = 60
 EXPECTED_CASE_IDS = frozenset({
     "clean-meter-22file-r1",
     "econ-flat-r1-off",
@@ -223,6 +226,20 @@ def _backstop_timeout_seconds(total_steps: int) -> int:
     )
 
 
+def _engine_and_parent_timeouts(total_steps: int) -> tuple[int, int]:
+    backstop_seconds = _backstop_timeout_seconds(total_steps)
+    engine_seconds = max(ENGINE_TIMEOUT_FLOOR_SECONDS, backstop_seconds)
+    # Keep the parent alive after the engine's own deadline so it can report its result.
+    parent_seconds = max(
+        backstop_seconds, engine_seconds + PARENT_TIMEOUT_GRACE_SECONDS,
+    )
+    return engine_seconds, parent_seconds
+
+
+def _engine_timeout_argv(engine_seconds: int) -> tuple[str, str]:
+    return "--timeout", str(engine_seconds)
+
+
 def _short_tokenize_timeout_engine_python(
         tmp_path: Path, timeout_s: float, *,
         reprobe_after_requests: int | None = None,
@@ -302,14 +319,14 @@ def _run_case(
     environment["PYTHONHASHSEED"] = "0"
     started = time.monotonic()
     with TapeServer(tape_script) as endpoint:
-        case_timeout = _backstop_timeout_seconds(endpoint.total_steps)
+        engine_timeout, parent_timeout = _engine_and_parent_timeouts(endpoint.total_steps)
         command = [
             sys.executable, "-m", "stateframe", "run", "--repo", str(repo), "--task", task,
             "--endpoint", endpoint.url,
             "--model", str(recorded_settings.get("model") or "allocation-replay-model"),
             "--run-dir", str(run_dir), "--test-python", sys.executable,
             "--shell-read", str(source_root),
-            "--slot", str(slot), "--max-turns", str(max_turns), "--timeout", str(case_timeout), "--quiet",
+            "--slot", str(slot), "--max-turns", str(max_turns), *_engine_timeout_argv(engine_timeout), "--quiet",
         ]
         if profile_path is not None:
             command.extend(("--profile", str(profile_path)))
@@ -326,7 +343,7 @@ def _run_case(
         try:
             process = run_monitored(
                 command,
-                expected_seconds=case_timeout + PARENT_TIMEOUT_MARGIN_SECONDS,
+                expected_seconds=parent_timeout,
                 run_dir=run_dir,
                 step=f"corpus {case_id}",
                 env=environment,
@@ -581,6 +598,28 @@ def test_backstop_timeout_scales_with_tape_length():
     assert _backstop_timeout_seconds(23) == 1380
     with pytest.raises(ValueError, match="at least one step"):
         _backstop_timeout_seconds(0)
+
+
+def test_engine_timeout_argv_keeps_legacy_floor_for_thirteen_turn_tape():
+    engine_seconds, parent_seconds = _engine_and_parent_timeouts(13)
+    argv = _engine_timeout_argv(engine_seconds)
+
+    timeout_index = argv.index("--timeout")
+    assert int(argv[timeout_index + 1]) >= 1800
+    assert parent_seconds >= engine_seconds + PARENT_TIMEOUT_GRACE_SECONDS
+
+    old_timeout_formula = max(600, 10 * 13 * 6)
+    assert old_timeout_formula == 780
+
+
+def test_engine_timeout_tracks_backstop_for_long_tape():
+    engine_seconds, parent_seconds = _engine_and_parent_timeouts(60)
+    backstop_seconds = _backstop_timeout_seconds(60)
+    argv = _engine_timeout_argv(engine_seconds)
+
+    assert backstop_seconds > ENGINE_TIMEOUT_FLOOR_SECONDS
+    assert int(argv[argv.index("--timeout") + 1]) == backstop_seconds
+    assert parent_seconds >= engine_seconds + PARENT_TIMEOUT_GRACE_SECONDS
 
 
 @pytest.mark.host_sandbox
