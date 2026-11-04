@@ -20,6 +20,7 @@ SOURCE_COVERAGE_PREFIX = "[Source coverage]"
 FINAL_LAYOUT_TOKEN_MARGIN = 16
 FINAL_LAYOUT_BYTE_MARGIN = 256
 _REPLAY_LAYOUT_DECISION_PROVIDER: Callable[[], str | None] | None = None
+_REPLAY_STABLE_WIRE_DECISION_PROVIDER: Callable[[], str | None] | None = None
 
 
 class FinalCacheLayoutProjectionError(ValueError):
@@ -58,12 +59,48 @@ def replay_final_layout_decision() -> str | None:
     return decision
 
 
+def install_replay_stable_wire_decision_provider(provider: Callable[[], str | None] | None) -> None:
+    """Install the next recorded stable-wire decision inside the replay-only child path."""
+    global _REPLAY_STABLE_WIRE_DECISION_PROVIDER
+    if provider is not None and not callable(provider):
+        raise TypeError("stable wire replay decision provider must be callable")
+    _REPLAY_STABLE_WIRE_DECISION_PROVIDER = provider
+
+
+def replay_stable_wire_decision() -> str | None:
+    provider = _REPLAY_STABLE_WIRE_DECISION_PROVIDER
+    if provider is None:
+        return None
+    decision = provider()
+    if decision not in {None, "applied", "plain"}:
+        raise ValueError("invalid recorded stable wire decision")
+    return decision
+
+
 def _record_final_layout(capture, disposition: str, reason: str | None = None) -> None:
     if capture is None:
         return
-    record = {"final_layout": disposition}
+    current = getattr(capture, "_final_cache_layout_record", None)
+    record = dict(current) if isinstance(current, Mapping) else {}
+    record["final_layout"] = disposition
+    record.pop("final_layout_reason", None)
     if reason:
         record["final_layout_reason"] = reason
+    try:
+        capture._final_cache_layout_record = record
+    except (AttributeError, TypeError):
+        return
+
+
+def _record_stable_wire(capture, disposition: str, reason: str | None = None) -> None:
+    if capture is None:
+        return
+    current = getattr(capture, "_final_cache_layout_record", None)
+    record = dict(current) if isinstance(current, Mapping) else {}
+    record["stable_wire"] = disposition
+    record.pop("stable_wire_reason", None)
+    if reason:
+        record["stable_wire_reason"] = reason
     try:
         capture._final_cache_layout_record = record
     except (AttributeError, TypeError):
@@ -86,27 +123,53 @@ def render_final_cache_candidate(capture, runtime, body, *, meter, inputs):
     On by default. When it was asked for explicitly, a request it cannot project is an error; when it
     is only on by default, that request is sent in the normal (already fitted) layout instead, with a
     final_cache_layout_failed_open event, so the default never ends a run that did not opt in."""
+    from kernel_stable_wire import mode as stable_wire_mode
+
+    try:
+        capture._final_cache_layout_record = {}
+    except (AttributeError, TypeError):
+        pass
     decision = replay_final_layout_decision()
+    stable_decision = replay_stable_wire_decision()
+    stable_switch_enabled = stable_wire_mode() == "on"
+    selected_layout = final_layout_mode()
+    if stable_switch_enabled and selected_layout != "on":
+        raise ValueError(
+            "STATEFRAME_STABLE_WIRE=on requires STATEFRAME_FINAL_CACHE_LAYOUT=on"
+        )
+    stable_wire_enabled = stable_switch_enabled or stable_decision in {"applied", "plain"}
     trim_callback = inputs.pop("_final_layout_trim", None) if isinstance(inputs, dict) else None
     if decision == "plain":
         _record_final_layout(capture, "plain")
+        if stable_wire_enabled or stable_decision == "plain":
+            _record_stable_wire(capture, "plain", "recorded_plain_layout")
         return body
-    if decision is None and final_layout_mode() == "off":
+    if decision is None and selected_layout == "off":
         _record_final_layout(capture, "plain")
+        if stable_wire_enabled:
+            _record_stable_wire(capture, "off")
         return body
     requested = final_layout_requested()
     if mode() != "off":
         if requested or decision == "layout":
             raise ValueError("final cache layout and page log cannot share one request")
-        return _failed_open(capture, body, "page_log_on")
+        fallback = _failed_open(capture, body, "page_log_on")
+        if stable_wire_enabled:
+            _record_stable_wire(capture, "plain", "final_layout_failed_open")
+        return fallback
     try:
         projected = _render_final_cache_layout(
             capture, runtime, body, meter=meter, inputs=inputs,
-            replay_decision=decision, trim_callback=trim_callback)
+            replay_decision=decision, trim_callback=trim_callback,
+            stable_wire_enabled=stable_wire_enabled,
+            stable_replay_decision=stable_decision)
     except FinalCacheLayoutProjectionError as error:
         if requested or decision == "layout":
             raise
-        return _failed_open(capture, body, "cannot_project", error_type=type(error).__name__)
+        fallback = _failed_open(capture, body, "cannot_project", error_type=type(error).__name__)
+        if stable_wire_enabled:
+            _record_stable_wire(capture, "plain", "final_layout_failed_open")
+        return fallback
     if projected is not body:
         _record_final_layout(capture, "applied")
     return projected
@@ -324,14 +387,15 @@ def _checked_final_cache_projection(body):
 
 
 def _render_final_cache_layout(capture, runtime, body, *, meter, inputs,
-                               replay_decision=None, trim_callback=None):
+                               replay_decision=None, trim_callback=None,
+                               stable_wire_enabled=False, stable_replay_decision=None):
     from kernel_request_source_window import verify_final_source_delivery, source_delivery_satisfied
     from kernel_frame_allocation_capture import final_request_tokens, carry_final_request_tokens
 
     projected = _checked_final_cache_projection(body)
     tokens, method = final_request_tokens(projected, meter, capture)
     size = _wire_size(projected)
-    if replay_decision != "layout" and (
+    if not stable_wire_enabled and replay_decision != "layout" and (
             tokens > inputs["token_ceiling"] or size > inputs["byte_ceiling"]):
         token_reserve, byte_reserve = _final_layout_reserve(
             tokens, inputs["token_ceiling"], size, inputs["byte_ceiling"])
@@ -363,10 +427,79 @@ def _render_final_cache_layout(capture, runtime, body, *, meter, inputs,
         sources=inputs["sources"])
     if not source_delivery_satisfied(receipt):
         raise ValueError("final cache layout source proof failed")
+    plain_receipt = copy.deepcopy(inputs.get("receipt"))
     inputs["receipt"] = receipt
     if capture is not None:
         capture.request_source_final_delivery = receipt
-        carry_final_request_tokens(projected, capture, tokens)
+    if stable_wire_enabled and stable_replay_decision != "plain":
+        from kernel_stable_wire import STATE_ATTR, project_stable_wire
+        stable_state_present = hasattr(runtime, STATE_ATTR)
+        stable_state_before = copy.deepcopy(getattr(runtime, STATE_ATTR, None))
+
+        def restore_plain():
+            inputs["receipt"] = plain_receipt
+            if capture is not None:
+                capture.request_source_final_delivery = plain_receipt
+            if stable_state_present:
+                setattr(runtime, STATE_ATTR, stable_state_before)
+            elif hasattr(runtime, STATE_ATTR):
+                delattr(runtime, STATE_ATTR)
+            _record_stable_wire(capture, "plain", "final_layout_failed_open")
+
+        def stable_trim(token_reserve, byte_reserve):
+            if not callable(trim_callback):
+                return False
+            fitted_body = copy.deepcopy(body)
+            trimmed = trim_callback(token_reserve, byte_reserve)
+            if trimmed is False and isinstance(body, dict):
+                body.clear()
+                body.update(fitted_body)
+            return trimmed
+
+        result = project_stable_wire(
+            capture, runtime, projected, meter=meter, inputs=inputs,
+            trim_callback=stable_trim if callable(trim_callback) else None,
+            replay_decision=stable_replay_decision)
+        if inputs.pop("_stable_wire_retry_after_trim", False):
+            projected = _checked_final_cache_projection(body)
+            receipt = verify_final_source_delivery(
+                inputs["source_plan"], projected["messages"], payload=projected,
+                sources=inputs["sources"])
+            if not source_delivery_satisfied(receipt):
+                raise ValueError("final cache layout source proof failed")
+            plain_receipt = copy.deepcopy(inputs.get("receipt"))
+            inputs["receipt"] = receipt
+            if capture is not None:
+                capture.request_source_final_delivery = receipt
+            result = project_stable_wire(
+                capture, runtime, projected, meter=meter, inputs=inputs,
+                replay_decision=stable_replay_decision)
+        if result is projected:
+            # Stable wire failed open to the final-layout body. The layout
+            # fallback still owns any overflow in that body.
+            tokens, method = final_request_tokens(projected, meter, capture)
+            size = _wire_size(projected)
+            if tokens > inputs["token_ceiling"] or size > inputs["byte_ceiling"]:
+                restore_plain()
+                return _failed_open(
+                    capture, body, "exceeds_measured_envelope", meter=method,
+                    prompt_tokens=tokens, token_ceiling=inputs["token_ceiling"],
+                    bytes=size, byte_ceiling=inputs["byte_ceiling"],
+                )
+        result_tokens, result_method = final_request_tokens(result, meter, capture)
+        if (result_tokens > inputs["token_ceiling"]
+                or _wire_size(result) > inputs["byte_ceiling"]):
+            restore_plain()
+            return _failed_open(
+                capture, body, "exceeds_measured_envelope", meter=result_method,
+                prompt_tokens=result_tokens, token_ceiling=inputs["token_ceiling"],
+                bytes=_wire_size(result), byte_ceiling=inputs["byte_ceiling"],
+            )
+        carry_final_request_tokens(result, capture, result_tokens)
+        return result
+    if stable_wire_enabled:
+        _record_stable_wire(capture, "plain", "recorded_plain_wire")
+    carry_final_request_tokens(projected, capture, tokens)
     return projected
 
 

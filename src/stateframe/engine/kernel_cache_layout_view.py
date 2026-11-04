@@ -220,6 +220,13 @@ def _final_layout(messages):
 
 def semantic_index_map(messages):
     """Map submitted locations to the canonical validation view."""
+    from kernel_stable_wire import canonicalize_stable_wire, is_stable_wire_projection
+    if is_stable_wire_projection(messages):
+        canonical, physical_to_canonical = canonicalize_stable_wire(messages)
+        canonical_map = semantic_index_map(canonical)
+        return {physical: canonical_map[canonical_index]
+                for physical, canonical_index in physical_to_canonical.items()
+                if canonical_index in canonical_map}
     if not is_cache_layout(messages) or messages[-1].get("name") != FINAL_LAYOUT_NAME:
         return {index: index for index in range(len(messages))}
     _state_index, _payload, _canonical, physical_to_canonical = _final_layout(messages)
@@ -228,6 +235,13 @@ def semantic_index_map(messages):
 
 def inspect_layout(messages):
     """Validate log/index/authority and return current payload and page locations."""
+    from kernel_stable_wire import canonicalize_stable_wire, is_stable_wire_projection
+    if is_stable_wire_projection(messages):
+        canonical, _physical_to_canonical = canonicalize_stable_wire(messages)
+        _canonical_state_index, payload, _order = _final_layout(canonical)
+        from kernel_stable_wire import _frame_index
+        state_index = _frame_index(messages)
+        return state_index, payload, frozenset(), state_index
     if messages[-1].get("name") == FINAL_LAYOUT_NAME:
         state_index, payload, _canonical, _index_map = _final_layout(messages)
         return state_index, payload, frozenset(), state_index
@@ -313,6 +327,10 @@ def inspect_layout(messages):
 
 def semantic_messages(messages):
     """Same message positions, current frame, opaque native exchange, no stale pages."""
+    from kernel_stable_wire import canonicalize_stable_wire, is_stable_wire_projection
+    if is_stable_wire_projection(messages):
+        canonical, _physical_to_canonical = canonicalize_stable_wire(messages)
+        return semantic_messages(canonical)
     if not is_cache_layout(messages):
         return messages
     if messages[-1].get("name") == FINAL_LAYOUT_NAME:
@@ -339,6 +357,10 @@ def semantic_messages(messages):
 
 def volatile_blocks(messages):
     """Return literal volatile blocks only after validating the complete layout."""
+    from kernel_stable_wire import canonicalize_stable_wire, is_stable_wire_projection
+    if is_stable_wire_projection(messages):
+        canonical, _physical_to_canonical = canonicalize_stable_wire(messages)
+        return volatile_blocks(canonical)
     if not is_cache_layout(messages):
         return ()
     if messages[-1].get("name") == FINAL_LAYOUT_NAME:
@@ -355,6 +377,11 @@ def source_messages(messages, *, unwrap_pages=False):
     Positions never change. Callers proving delivery must bind the original
     physical message, including its page header, to the submitted wire.
     """
+    from kernel_stable_wire import canonicalize_stable_wire, is_stable_wire_projection
+    if is_stable_wire_projection(messages):
+        canonical, _physical_to_canonical = canonicalize_stable_wire(messages)
+        _final_layout(canonical)
+        return messages
     if not is_cache_layout(messages):
         return messages
     if messages[-1].get("name") == FINAL_LAYOUT_NAME:

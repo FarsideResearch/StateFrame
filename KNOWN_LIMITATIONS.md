@@ -164,6 +164,8 @@ The engine normalizes volatile test and tool output (test-runner durations, memo
 
 Prompt cache reuse is still bounded by the state frame. The tool list is stable by default, which lets the provider reuse the tool schemas, system prompt and task after the first request. The state frame remains one message that changes every turn, so the cache must start again at that message. In the measured comparison, cached share after the first request was 14-22% on the bundled examples. See [Running](docs/guide/running.md#prompt-cache-stable-tool-head).
 
+`STATEFRAME_STABLE_WIRE=on` is an experimental opt-in layered on the final cache layout. It keeps windows that are no longer current in the prompt until an epoch rebase; the status row labels them, but the model can still misread stale lines as current. The source-delivery proof checks current obligations and does not independently prove that model actions ignored retained content. `STATEFRAME_STABLE_WIRE_HEADROOM` defaults to 16000 tokens; values under 6000 are refused because measured compactions every 2-3 requests erase the gain. The crew-01 OWNER r2 comparison measured a better hybrid score at 16000 than 12000, but broader live cache and completion A/B evidence is still pending. Keep it off for ordinary runs.
+
 ## Token counting
 
 - Without `LLAMA_CPP_TOKENIZE_URL`, tokens are counted on the model server. If that server is remote, each count is a network round trip and adds noticeable time per turn. Co-locate a tokenizer (QUICKSTART.md).

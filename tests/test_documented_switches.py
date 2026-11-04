@@ -79,6 +79,18 @@ def test_planted_violation_is_caught():
     assert any(p.startswith("STATEFRAME_CODE_BOOKMARKS:") for p in problems)
 
 
+def test_stable_wire_headroom_is_documented_and_forwarded(monkeypatch):
+    name = "STATEFRAME_STABLE_WIRE_HEADROOM"
+    assert name in runner.OPT_IN_SWITCHES
+    sentences = _documented()[name]
+    assert any("16000" in sentence and "retained" in sentence.lower() for sentence in sentences)
+    for switch in runner.OPT_IN_SWITCHES:
+        monkeypatch.delenv(switch, raising=False)
+    monkeypatch.setenv(name, "16000")
+    monkeypatch.setattr(runner, "engine_switches", lambda _directory=runner.ENGINE_DIR: frozenset({name}))
+    assert runner.resolve_opt_in_switches()[name] == "16000"
+
+
 @pytest.mark.parametrize("name", sorted(runner.OPT_IN_SWITCHES))
 def test_shell_setting_reaches_the_engine_spec(monkeypatch, name):
     if name not in runner.engine_switches():

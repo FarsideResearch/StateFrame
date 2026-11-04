@@ -193,9 +193,13 @@ def install_wire_recorder(run: Path, chat_url: str, replayer: Replayer | None = 
     if replayer is not None:
         # Replay is the only path that needs these engine imports. The recorded
         # request bytes decide the old order; current meter and switch do not.
-        from kernel_cache_layout_candidate import install_replay_layout_decision_provider
+        from kernel_cache_layout_candidate import (
+            install_replay_layout_decision_provider,
+            install_replay_stable_wire_decision_provider,
+        )
         from kernel_cache_layout_view import FINAL_LAYOUT_NAME
         from kernel_stateframe_final_message import AUTHORITY_OVERLAY_HEADER
+        from kernel_stable_wire import is_stable_wire_projection
 
         def replay_layout_decision() -> str | None:
             recorded = replayer.request_for_layout_decision()
@@ -220,6 +224,21 @@ def install_wire_recorder(run: Path, chat_url: str, replayer: Replayer | None = 
 
         install_replay_layout_decision_provider(replay_layout_decision)
 
+        def replay_stable_wire_decision() -> str | None:
+            recorded = replayer.request_for_layout_decision()
+            if recorded is None:
+                return None
+            try:
+                request = json.loads(recorded)
+            except (ValueError, RecursionError):
+                return None
+            messages = request.get("messages") if isinstance(request, dict) else None
+            if not isinstance(messages, list):
+                return None
+            return "applied" if is_stable_wire_projection(messages) else "plain"
+
+        install_replay_stable_wire_decision_provider(replay_stable_wire_decision)
+
     wire_dir = run / "wire"
     wire_dir.mkdir(exist_ok=True)
     original = kernel_bounded_http.request_bytes
@@ -235,34 +254,29 @@ def install_wire_recorder(run: Path, chat_url: str, replayer: Replayer | None = 
         finally:
             temp.unlink(missing_ok=True)
 
-    def final_layout_record(wire: bytes) -> dict[str, str]:
+    def final_layout_record(_wire: bytes) -> dict[str, str]:
         from kernel_measurement import ACTIVE_REQUEST
 
-        try:
-            request = json.loads(wire)
-        except (ValueError, RecursionError):
-            request = None
-        messages = request.get("messages") if isinstance(request, dict) else None
-        final = messages[-1] if isinstance(messages, list) and messages else None
-        if isinstance(final, dict):
-            content = final.get("content")
-            # These wire markers let the host diagnose the actual bytes without
-            # importing engine layout modules on a non-replay send.
-            if (final.get("name") == "stateframe_final_cache_1" and isinstance(content, str)
-                    and "[StateFrame authority]" in content):
-                return {"final_layout": "applied"}
         capture = ACTIVE_REQUEST.get()
         record = getattr(capture, "_final_cache_layout_record", None)
-        if not isinstance(record, dict) or record.get("final_layout") not in {
-                "applied", "plain", "failed_open"}:
-            return {}
-        if record["final_layout"] == "plain":
-            # Plain sends keep the original 0.2.2 sends.jsonl shape.
-            return {}
-        result = {"final_layout": record["final_layout"]}
-        reason = record.get("final_layout_reason")
-        if isinstance(reason, str) and reason:
-            result["final_layout_reason"] = reason
+        record = record if isinstance(record, dict) else {}
+        result: dict[str, str] = {}
+        # The engine capture is authoritative; inferring from message markers
+        # would add metadata to legacy plain sends.
+        layout = record.get("final_layout")
+        # Omit the plain layout value to preserve the original 0.2.2 shape.
+        if isinstance(layout, str) and layout in {"applied", "failed_open"}:
+            result["final_layout"] = layout
+            reason = record.get("final_layout_reason")
+            if isinstance(reason, str) and reason:
+                result["final_layout_reason"] = reason
+
+        stable_wire = record.get("stable_wire")
+        if isinstance(stable_wire, str) and stable_wire in {"applied", "plain", "failed_open"}:
+            result["stable_wire"] = stable_wire
+            reason = record.get("stable_wire_reason")
+            if isinstance(reason, str) and reason:
+                result["stable_wire_reason"] = reason
         return result
 
     def recorded(wire: bytes, endpoint: str, key: str, **kwargs):

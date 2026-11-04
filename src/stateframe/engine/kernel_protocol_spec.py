@@ -565,6 +565,14 @@ def _event_rows() -> list[dict[str, object]]:
             "final_cache_layout_failed_open", "HOST_OBSERVED", "cache_layout_fail_open_vital",
             "kernel_cache_layout_candidate.render_final_cache_candidate",
         ),
+        "stable_wire_epoch": EventRef(
+            "stable_wire_epoch", "HOST_OBSERVED", "stable_wire_source_epoch_started",
+            "kernel_stable_wire.project_stable_wire",
+        ),
+        "stable_wire_failed_open": EventRef(
+            "stable_wire_failed_open", "HOST_OBSERVED", "stable_wire_envelope_fail_open",
+            "kernel_stable_wire.project_stable_wire",
+        ),
         "stateframe_page_log_prepared": EventRef(
             "stateframe_page_log_prepared", "HOST_OBSERVED", "cache_layout_candidate_projection",
             "kernel_cache_layout_candidate.render_cache_candidate",

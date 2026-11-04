@@ -7,10 +7,13 @@ import copy
 
 def runtime_authority_fields(runtime=None):
     from kernel_request_tool_surface import _RUNTIME_FIELDS
+    from kernel_stable_wire import STATE_ATTR, enabled_for_replay
 
     dynamic = tuple(name for name in vars(runtime) if name.startswith(
         ("_completion_owner_", "_greenlock_"))) if runtime is not None else ()
-    return tuple(dict.fromkeys((*_RUNTIME_FIELDS, *dynamic, "_completion_owner_request_contract_assertions",
+    stable_wire = (STATE_ATTR,) if enabled_for_replay() else ()
+    return tuple(dict.fromkeys((*_RUNTIME_FIELDS, *dynamic, *stable_wire,
+            "_completion_owner_request_contract_assertions",
             "_greenfact_rendered_request_revisions", "_greenfact_rendered_revisions",
             "_greenfact_skipped_revisions")))
 

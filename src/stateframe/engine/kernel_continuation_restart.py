@@ -134,6 +134,9 @@ _EVICTFIX_NOTICE_FIELDS = (
 def runtime_fields(runtime=None) -> tuple[str, ...]:
     """Return checkpoint fields without changing the legacy OFF shape."""
     fields = list(RUNTIME_FIELDS)
+    from kernel_stable_wire import enabled_for_replay
+    if enabled_for_replay():
+        fields.append("_stable_wire_state")
     if getattr(runtime, "stateframe_challenge_budget", None) is not None:
         fields.append("_challenge_budget_state")
     if getattr(runtime, "stateframe_preedit_coverage_arm", None) in {"treatment", "placebo"}:
@@ -151,6 +154,12 @@ def checkpoint_runtime_fields_match(runtime, saved_runtime) -> bool:
     if not isinstance(saved_runtime, dict):
         return False
     actual, expected = set(saved_runtime), set(runtime_fields(runtime))
+    if "_stable_wire_state" in expected:
+        try:
+            from kernel_stable_wire import validate_checkpoint_state
+            validate_checkpoint_state(saved_runtime.get("_stable_wire_state"))
+        except (TypeError, ValueError):
+            return False
     notice_fields = set(_EVICTFIX_NOTICE_FIELDS)
     present_notice_fields = actual & notice_fields
     if present_notice_fields:
@@ -188,6 +197,9 @@ def restore_runtime_field_values(runtime, saved_runtime: Mapping[str, object]) -
                     value, str(getattr(runtime.owner, "task_id", "task")))
             except (KeyError, TypeError, ValueError) as error:
                 raise WorkerResumeError("invalid MicroGraph checkpoint") from error
+        elif key == "_stable_wire_state":
+            from kernel_stable_wire import validate_checkpoint_state
+            runtime._stable_wire_state = validate_checkpoint_state(value)
         else:
             setattr(runtime, key, copy.deepcopy(value))
 
@@ -863,7 +875,9 @@ def checkpoint(runtime, messages, worker_state):
         "owner": {key: _plain(getattr(runtime.owner, key))
                   for key in OWNER_FIELDS if hasattr(runtime.owner, key)},
         "runtime": {key: (runtime.micrograph_wire.checkpoint() if key == "micrograph_wire"
-                          else _plain(getattr(runtime, key))) for key in runtime_fields(runtime)},
+                          else _plain(getattr(runtime, key, None)
+                                      if key == "_stable_wire_state" else getattr(runtime, key)))
+                    for key in runtime_fields(runtime)},
         "ledger": _checkpoint_ledger(runtime.step_ledger),
         "actions": _plain(list(runtime.actions.actions)),
         "projection": None if projection is None else {

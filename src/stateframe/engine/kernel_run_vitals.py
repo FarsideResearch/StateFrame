@@ -165,6 +165,7 @@ class RunVitalsAccumulator:
         self._cache_prompt_tokens = 0
         self._cache_uncached_tokens = 0
         self.cache_layout_fail_open = 0
+        self.stable_wire_epochs = 0
         self._cache_hit_tokens = 0
 
     def _observe_greenfact_decision(self, record: Mapping[str, object]) -> None:
@@ -249,8 +250,12 @@ class RunVitalsAccumulator:
                     self._cache_uncached_tokens += uncached
                     self._cache_hit_tokens += cache_n
 
-        elif kind in {"stateframe_page_log_failed_open", "final_cache_layout_failed_open"}:
+        elif kind in {"stateframe_page_log_failed_open", "final_cache_layout_failed_open",
+                      "stable_wire_failed_open"}:
             self.cache_layout_fail_open += 1
+
+        elif kind == "stable_wire_epoch":
+            self.stable_wire_epochs += 1
 
         elif kind == "f4_budget_fit":
             self.f4_fit_checks += 1
@@ -394,6 +399,7 @@ class RunVitalsAccumulator:
             "cache_prompt_tokens": self._cache_prompt_tokens,
             "cache_uncached_tokens": self._cache_uncached_tokens,
             "cache_layout_fail_open": self.cache_layout_fail_open,
+            "stable_wire_epochs": self.stable_wire_epochs,
             "cache_hit_tokens": self._cache_hit_tokens,
             "rejected_events": self.rejected_events,
         }

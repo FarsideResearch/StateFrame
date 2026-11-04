@@ -302,7 +302,7 @@ def test_wire_recorder_normal_record_keeps_022_shape(monkeypatch, tmp_path, tran
     original = child_http.request_bytes
     monkeypatch.setattr(_child, "HOST_STATE", dict(_child.HOST_STATE))
     token = ACTIVE_REQUEST.set(SimpleNamespace(
-        _final_cache_layout_record={"final_layout": "plain"}))
+        _final_cache_layout_record={"final_layout": "plain", "stable_wire": "off"}))
     try:
         _child.install_wire_recorder(tmp_path, endpoint)
         assert child_http.request_bytes(
@@ -316,6 +316,8 @@ def test_wire_recorder_normal_record_keeps_022_shape(monkeypatch, tmp_path, tran
     _assert_normal_send_keeps_022_shape(line)
     assert "final_layout" not in record
     assert "final_layout_reason" not in record
+    assert "stable_wire" not in record
+    assert "stable_wire_reason" not in record
 
     import kernel_cache_layout_candidate as candidate
 
@@ -353,6 +355,9 @@ def test_022_send_shape_pin_rejects_planted_plain_layout_key():
     planted = {**record, "final_layout": "plain"}
     with pytest.raises(AssertionError):
         _assert_normal_send_keeps_022_shape(json.dumps(planted) + "\n")
+    planted_stable_wire = {**record, "stable_wire": "off"}
+    with pytest.raises(AssertionError):
+        _assert_normal_send_keeps_022_shape(json.dumps(planted_stable_wire) + "\n")
 
 
 @pytest.mark.host_sandbox
