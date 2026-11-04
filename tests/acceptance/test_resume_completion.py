@@ -29,7 +29,8 @@ def _engine_child(parent_pid):
 
 def _interrupted_run(tmp_path, *, network="none", script_name="resume.script.json", repo=None,
                      task="Format app.py and verify it", wait_for_checkpoint=False,
-                     checkpoint_task=None, pause_at=None, tokenize_off_marker=None, shell=None):
+                     checkpoint_task=None, pause_at=None, tokenize_off_marker=None, shell=None,
+                     wait_for_saved=False):
     repo = repo or copy_repo(tmp_path)
     run_dir = tmp_path / "run"
     marker = tmp_path / "paused"
@@ -39,7 +40,7 @@ def _interrupted_run(tmp_path, *, network="none", script_name="resume.script.jso
     pause_at = pause_at or (3 if wait_for_checkpoint else 2)
     endpoint_args = [PYTHON, str(FIXTURES / "pause_endpoint.py"), "--script", str(script),
                      "--marker", str(marker), "--pause-at", str(pause_at),
-                     "--pause-seconds", "600" if wait_for_checkpoint else "30"]
+                     "--pause-seconds", "600" if wait_for_checkpoint or wait_for_saved else "30"]
     if tokenize_off_marker is not None:
         endpoint_args.extend(("--tokenize-off-marker", str(tokenize_off_marker)))
     endpoint = subprocess.Popen(
@@ -80,6 +81,15 @@ def _interrupted_run(tmp_path, *, network="none", script_name="resume.script.jso
             while time.monotonic() < deadline and not pointer.is_file():
                 time.sleep(0.1)
             assert pointer.is_file(), "checkpoint was not saved before the paused request"
+        if wait_for_saved:
+            # The step-1 checkpoint is written by a forked writer in the engine's process group, which the
+            # group SIGKILL below would kill mid-save under load: wait until it has recorded the save.
+            events = run_dir / "checkpoints" / "events.jsonl"
+            while time.monotonic() < deadline and not (
+                    events.is_file() and '"checkpoint_saved"' in events.read_text(errors="replace")):
+                time.sleep(0.1)
+            assert events.is_file() and '"checkpoint_saved"' in events.read_text(errors="replace"), \
+                "checkpoint was not saved before the paused request"
         child = _engine_child(runner.pid)
         assert child is not None
         identity = record_identity(child, launched_after=launched_after, command_fragment="_child.py")
@@ -286,7 +296,7 @@ def test_e23_full_network_shell_requires_replay_external(tmp_path):
 
 
 def test_e19_volatile_shell_observation_is_byte_identical_on_resume(tmp_path):
-    _, run_dir, expected = _interrupted_run(tmp_path, script_name="volatile.script.json")
+    _, run_dir, expected = _interrupted_run(tmp_path, script_name="volatile.script.json", wait_for_saved=True)
     with Endpoint(FIXTURES / "scripts" / "volatile_remaining.script.json") as endpoint:
         resumed = subprocess.run(
             [PYTHON, "-m", "stateframe", "resume", str(run_dir), "--endpoint", endpoint.url,
