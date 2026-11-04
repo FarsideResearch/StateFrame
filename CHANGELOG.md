@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.3.31 (2026-11-04)
 
 - Known issue: on Linux, checks that run Go or Node programs fail under the check memory limit; listed in `KNOWN_LIMITATIONS.md` until the next release fixes it.
 - Fixed: resume of a `--timeout` run reads the fixed-width countdown, including before a pace is known and when minutes or turns exceed the display cap.
