@@ -250,6 +250,8 @@ def _terminal_resume_refusal(status: object, summary: dict, *, hooks_only: bool 
         return "HOOK_CONTAINMENT run cannot be resumed; start a new run"
     if status == "HOOK_BLOCKED":
         return "HOOK_BLOCKED run cannot be resumed; start a new run"
+    if status == "CONTINUATION_BLOCKED":
+        return "CONTINUATION_BLOCKED run cannot be resumed; start a new run"
     if hooks_only:
         return None
     if status == "SUBMITTED":

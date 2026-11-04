@@ -5737,6 +5737,14 @@ def _red_confrontation_target(symbol: object, path: object) -> tuple[str, str] |
     return path.strip(), symbol.strip()
 
 
+def _terminal_block_skips_final_grading(measurement: object) -> bool:
+    """A continuation block is not a submitted candidate for behavioural grading.
+
+    Hook terminals keep their released finalization; only the continuation block is guarded here.
+    """
+    return getattr(measurement, "system_outcome", None) == "continuation_blocked"
+
+
 def work(d, *, resume=None):
     # Workers and scripted tapes may assign MAX_STEPS after import.
     step_cap = parse_step_limit(MAX_STEPS)
@@ -8986,7 +8994,7 @@ def work(d, *, resume=None):
                             (getattr(measurement, "project_registries", None) is not None
                              and _name == "registry_lookup")
                             or (getattr(measurement, "continuation", None) is not None
-                                and _name == "continuation_detour")
+                                and _name in {"continuation_detour", "continuation_reobserve"})
                             or (getattr(measurement, "working_sets", None) is not None
                                 and _name == "working_set")
                             or (getattr(measurement, "generated", None) is not None
@@ -13611,6 +13619,7 @@ def work(d, *, resume=None):
         # An AST match stays a diagnostic in `result`; `behaviour` is the only verdict.
         from kernel_done_is_submit_authority import done_sealed
         if (final and not target_gone_paths and not _v2_not_submitted
+                and not _terminal_block_skips_final_grading(measurement)
                 and done_sealed(measurement) is None
                 and not getattr(measurement, "_done_capture_error_class", None)):
             try:

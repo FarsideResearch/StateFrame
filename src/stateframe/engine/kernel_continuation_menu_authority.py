@@ -18,7 +18,8 @@ MODE_ENV = "STATEFRAME_GREENLOCK_MENU_AUTHORITY_CONTINUATION"
 # offer it even though kernel_greenlock_menu_authority.VERIFY_ACTIONS already treats "predict"
 # as a verification action alongside run_tests/test/pytest.  Gated: off-parity is byte-identical.
 PREDICT_MODE_ENV = "STATEFRAME_CONTINUATION_PREDICT"
-CONTROL_TOOLS = frozenset({"done", "continuation_detour", "work_update", "note_update", "work"})
+CONTROL_TOOLS = frozenset({"done", "continuation_detour", "continuation_reobserve",
+                           "work_update", "note_update", "work"})
 EDIT_TOOLS = frozenset({"edit", "str_replace", "file_create", "file_delete", "file_move", "shell", "insert_before"})
 AUTHORED_CHECK_TOOLS = frozenset({"authored_check"})
 EFFECT_TOOLS = frozenset({
@@ -96,13 +97,17 @@ def state_allow_set(state: object) -> frozenset[str]:
         if any(getattr(effects[effect_id], "tool", None) == "run_tests"
                for effect_id in unresolved_ids):
             allowed.add("run_tests")
+        if any(getattr(effects[effect_id], "read_only", True) is False
+               for effect_id in unresolved_ids):
+            allowed.add("continuation_reobserve")
         if predict_enabled() and any(getattr(effects[effect_id], "tool", None) == "predict"
                                      for effect_id in unresolved_ids):
             allowed.add("predict")
         return _dispatchable_subset(allowed)
+    ordinary_controls = CONTROL_TOOLS - {"continuation_reobserve"}
     if predict_enabled():
-        return _dispatchable_subset(CONTROL_TOOLS | EFFECT_TOOLS | observations | {"predict"})
-    return _dispatchable_subset(CONTROL_TOOLS | EFFECT_TOOLS | observations)
+        return _dispatchable_subset(ordinary_controls | EFFECT_TOOLS | observations | {"predict"})
+    return _dispatchable_subset(ordinary_controls | EFFECT_TOOLS | observations)
 
 
 def per_step_allow_set(runtime: object | None) -> frozenset[str] | None:

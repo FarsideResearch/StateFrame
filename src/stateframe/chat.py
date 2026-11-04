@@ -158,8 +158,10 @@ class Session:
             if record.runtime_outcome == "hook_containment":
                 self._stopped = True
             if (record.files and succeeded(summary)
-                    and record.runtime_outcome not in {"hook_blocked", "hook_containment"}
-                    and record.result not in {"HOOK_BLOCKED", "HOOK_CONTAINMENT"}):
+                    and record.runtime_outcome not in {"hook_blocked", "hook_containment",
+                                                       "continuation_blocked"}
+                    and record.result not in {"HOOK_BLOCKED", "HOOK_CONTAINMENT",
+                                              "CONTINUATION_BLOCKED"}):
                 self._promote(record)
         except HookContainmentRunError as error:
             record.runtime_outcome = "hook_containment"

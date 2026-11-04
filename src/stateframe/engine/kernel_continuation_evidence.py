@@ -198,6 +198,7 @@ READ_RECEIPT_KINDS = {tool: ("read" if tool in {
 EXECUTION_RECEIPT_CONTRACTS = {
     "done": "completion_control",
     "continuation_detour": "continuation_control",
+    "continuation_reobserve": "continuation_control",
     "work_update": "work_record_control",
     "note_update": "work_record_control",
     "work": "work_record_control",
@@ -212,6 +213,10 @@ EXECUTION_RECEIPT_CONTRACTS = {
     "run_tests": "test_action_receipt",
     "authored_check": "authored_check_receipt",
 }
+
+# A finished shell receipt closes the execution even when it changed only the
+# run environment. The exit code proves completion, not command success.
+APPLIED_RECEIPT_CLOSURES = {"shell": "shell_effect"}
 
 
 def has_execution_receipt_contract(tool: object) -> bool:
@@ -688,27 +693,33 @@ class HostEvidence:
                       and any(r.get("kind") == "test" and r.get("result_class") == result for r in matching)):
                     status = "not_applied"
                 elif result == "APPLIED":
-                    shell_effects = effect.tool == "shell" and any(
-                        receipt.get("kind") == "shell_effect"
+                    shell_receipt_closure = effect.tool in APPLIED_RECEIPT_CLOSURES and any(
+                        receipt.get("kind") == APPLIED_RECEIPT_CLOSURES[effect.tool]
                         and receipt.get("result_class") == "APPLIED"
-                        and isinstance(receipt.get("effects"), (list, tuple))
-                        and bool(receipt["effects"])
+                        and type(receipt.get("exit_code")) is int
+                        and isinstance(receipt.get("effects", ()), (list, tuple))
                         and all(
                             isinstance(entry, Mapping)
                             and _is_workspace_relative_path(entry.get("path"))
-                            for entry in receipt["effects"]
-                        )
-                        and any(
-                            isinstance(entry, Mapping)
                             and entry.get("change") in {
                                 "created", "modified", "deleted", "mode", "type",
                             }
-                            for entry in receipt["effects"]
+                            for entry in receipt.get("effects", ())
                         )
                         for receipt in matching
                     )
-                    if record.get("changes") or shell_effects:
+                    if shell_receipt_closure or (effect.tool not in APPLIED_RECEIPT_CLOSURES
+                                                 and record.get("changes")):
                         status = "applied"
+                    elif (effect.tool in {"edit", "str_replace", "write", "replace_module",
+                                            "replace", "insert_before"}
+                          and record.get("before_binding") == current
+                          and any(r.get("kind") == "edit"
+                                  and r.get("result_class") == "APPLIED" for r in matching)):
+                        # A post-tool hook can rewrite an admitted edit back to
+                        # its original bytes. The authenticated action ran, but
+                        # no tracked workspace effect remains to reconcile.
+                        status = "not_applied"
                 elif (effect.read_only and record.get("before_binding") == current
                       and not record.get("changes")
                       and result in READ_OUTCOMES.get(effect.tool, frozenset())

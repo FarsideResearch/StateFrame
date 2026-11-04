@@ -1286,9 +1286,10 @@ class KernelBolt:
                 target_path: str | None = None,
                 changed_paths: tuple[str, ...] = (),
                 read_contract: Mapping[str, object] | None = None,
-                result_set_digest: str | None = None,
-                test_output: str | None = None,
-                effects: tuple[dict, ...] = ()) -> None:
+                 result_set_digest: str | None = None,
+                 test_output: str | None = None,
+                 effects: tuple[dict, ...] = (),
+                 exit_code: int | None = None) -> None:
         import hashlib
         import json as _json
         import time
@@ -1330,6 +1331,8 @@ class KernelBolt:
             rec["changed_files"] = [{"path": path} for path in changed_paths]
         if effects:
             rec["effects"] = list(effects)
+        if type(exit_code) is int:
+            rec["exit_code"] = exit_code
         if anchor:
             rec["anchor"] = anchor
         # Baseline organs consume the exact legacy record. The experimental retry

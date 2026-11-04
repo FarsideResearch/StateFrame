@@ -99,6 +99,7 @@ class ShellReply:
     environment_changed: bool = False
     environment_identity: str = "disabled"
     fatal: bool = False
+    exit_code: int | None = None
 
 
 def request_confirmation(run_dir: Path, call_id: str, command: str, *, timeout: float = 120) -> bool:
@@ -441,7 +442,8 @@ class ShellTool:
             observation = record.observation
         else:
             tape.complete(call_id=call_id, observation=observation, **completion)
-        return ShellReply(observation, tuple(effects.applied), after_identity != identity, after_identity)
+        return ShellReply(observation, tuple(effects.applied), after_identity != identity,
+                          after_identity, exit_code=result.exit_code)
 
 
 _active: ShellTool | None = None
@@ -486,5 +488,7 @@ def publish_effects(reply: ShellReply, runtime, bolt, created: set[str], *, name
     bolt.receipt("shell_effect" if paths or reply.environment_changed else name,
                  name, reply.observation, result, reply.observation,
                  changed_paths=paths,
-                 effects=tuple({"path": e.path, "change": e.change} for e in reply.applied))
+                 effects=tuple({"path": e.path, "change": e.change} for e in reply.applied),
+                 exit_code=(reply.exit_code if name == "shell" and
+                            getattr(runtime, "continuation", None) is not None else None))
     return target

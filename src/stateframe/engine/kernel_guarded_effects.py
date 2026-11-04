@@ -124,6 +124,10 @@ class GuardedEffectSequence:
 
     def _state(self, effect_id: object) -> dict | None:
         effect = _effect_id(effect_id)
+        view = getattr(self, "_journal_view", None)
+        if view is not None and view.journal is self.journal:
+            view.sync()
+            return view.guarded_states.get(effect)
         state: dict | None = None
         for event in self._records():
             if event.get("kind") not in {
@@ -437,12 +441,14 @@ class GuardedEffectSequence:
     def context_dict(self) -> dict:
         if not self.enabled:
             return {}
-        effects: dict[str, dict] = {}
-        for event in self._records():
-            if event.get("kind") == INTENT_EVENT and isinstance(event.get("effect_id"), str):
-                effects[event["effect_id"]] = self._snapshot(event["effect_id"])
+        view = getattr(self, "_journal_view", None)
+        if view is None or view.journal is not self.journal:
+            from kernel_continuation_runtime import _ContinuationJournalView
+            view = _ContinuationJournalView(self.journal)
+            self._journal_view = view
+        view.sync()
         return {
             "schema": SCHEMA,
             "event_schema": SCHEMA,
-            "effects": list(effects.values()),
+            "effects": [self._snapshot(effect_id) for effect_id in view.guarded_intents],
         }

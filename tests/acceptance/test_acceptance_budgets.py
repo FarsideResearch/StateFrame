@@ -10,6 +10,7 @@ ACCEPTANCE = Path(__file__).resolve().parent
 BUDGETED = {
     "test_resume_completion.py": "test_e19_volatile_shell_observation_is_byte_identical_on_resume",
     "test_no_skills_wire_compat.py": "_run_tree",
+    "../test_refusal_names_live_action.py": "recorded_blocked_run",
 }
 
 

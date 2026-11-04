@@ -1799,6 +1799,25 @@ class ContinuationJournal(AuditJournal):
                 return tuple(self._record_cache[sequence:])
             return tuple(self._record_range(sequence, self._sequence))
 
+    def record_by_event_id(self, reference: object) -> dict | None:
+        """Resolve one durable event without replaying its predecessors."""
+        with self._lock:
+            self.assert_owner()
+            if not isinstance(reference, str):
+                return None
+            prefix = f"{self.run_id}:"
+            if not reference.startswith(prefix):
+                return None
+            suffix = reference[len(prefix):]
+            if (not suffix.isascii() or not suffix.isdecimal()
+                    or suffix.startswith("0") or len(suffix) > 20):
+                return None
+            sequence = int(suffix)
+            if sequence < 1 or sequence > self._sequence:
+                return None
+            row = next(self._record_range(sequence - 1, sequence))
+            return row if row.get("event_id") == reference else None
+
     @profiled_journal_span("journal_emit")
     def emit(self, kind: str, **fields: object) -> dict[str, object]:
         identity_fire = False

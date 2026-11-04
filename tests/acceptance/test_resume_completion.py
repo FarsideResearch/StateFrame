@@ -123,6 +123,31 @@ def test_e16_local_shell_resume_replays_identical_next_request(tmp_path):
     assert 'VALUE = "before"' in (repo / "app.py").read_text()
 
 
+def test_continuation_resume_sends_uncrashed_prepared_request_bytes(tmp_path, monkeypatch):
+    """Compare the provider body rebuilt on resume with the real pre-crash request."""
+    monkeypatch.setenv("KERNEL_CONTINUATION_EXECUTIVE", "1")
+    _, run_dir, expected = _interrupted_run(tmp_path)
+    prepared = (run_dir / "wire" / "0002.request.json").read_bytes()
+    prepared_body = json.loads(prepared)
+    assert prepared_body["messages"] == expected["messages"]
+    assert prepared_body["tools"] == expected["tools"]
+    request_log = tmp_path / "resumed-provider-requests.jsonl"
+    script = json.loads((FIXTURES / "scripts" / "resume_remaining.script.json").read_text())
+    script["request_log"] = str(request_log)
+    script_path = tmp_path / "resume-with-request-log.script.json"
+    script_path.write_text(json.dumps(script))
+    with Endpoint(script_path) as endpoint:
+        resumed = subprocess.run(
+            [PYTHON, "-m", "stateframe", "resume", str(run_dir), "--endpoint", endpoint.url,
+             "--model", "scripted", "--quiet"], capture_output=True, text=True,
+            env=environment(), timeout=240, check=False)
+    assert resumed.returncode == 0, resumed.stdout + resumed.stderr
+    sent = tuple(json.loads(line) for line in request_log.read_text().splitlines())
+    assert sent, "resume did not send a provider request"
+    assert json.dumps(sent[0]).encode() == prepared
+    assert not (run_dir / "resume-divergence.json").exists()
+
+
 def test_checkpoint_restores_and_verifies_paused_request(tmp_path, monkeypatch):
     monkeypatch.setenv("STATEFRAME_CHECKPOINT", "save")
     monkeypatch.setenv("STATEFRAME_CHECKPOINT_EVERY", "1")

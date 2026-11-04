@@ -2701,7 +2701,8 @@ def _session_end_is_final(summary: dict[str, object]) -> bool:
     # may be resumed, and replay must not collide with a second session_end event id.
     terminal = summary.get("engine_terminal") or {}
     result = terminal.get("result") if isinstance(terminal, dict) else None
-    return isinstance(result, str) and (result in {"SUBMITTED", "HOOK_BLOCKED"} | outcomes.SEAL_FAILURES)
+    return isinstance(result, str) and (result in {"SUBMITTED", "HOOK_BLOCKED", "CONTINUATION_BLOCKED"}
+                                        | outcomes.SEAL_FAILURES)
 
 
 def _run(options: RunOptions, started: float, printer=print) -> dict[str, object]:

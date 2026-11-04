@@ -12,6 +12,9 @@
 - Fixed: the live continuation countdown now occupies one fixed-width slot, and request sizing counts a canonical version of that slot so clock speed cannot change source selection or call-site census admission.
 - Fixed: macOS developer tools under the sandbox no longer fail with "couldn't create cache file" or leave xcrun_db-* temp files.
 - Security (macOS): protected-tree deny rules on paths containing non-ASCII characters were not enforced, so a sandboxed process could write inside such a protected tree. The sandbox profile quoted paths as JSON, which turned characters like `é` into `\u00e9` escapes that macOS does not decode, so the rule named a different path. This affected every release since 0.1.0. Paths are now quoted for the macOS sandbox directly, and allow rules on paths containing punctuation (`.`, `-`, `+`) now match too.
+- No run is left with only `done` when a host refusal or an unresolved effect blocks completion. Ordinary refusals stay recoverable when a live action exists; an effect that cannot be settled or re-observed ends the run instead of fencing it. `KNOWN_DEAD_END_FENCES` is now empty.
+- `CONTINUATION_BLOCKED` is a named terminal with its reason in the summary, a distinct CLI exit and a resume refusal. A failed source read in a sub-task with no turns left names its path and result kind.
+- Crash recovery replays the normal closure path, so a run that crashed after an action closed resumes to the same state as one that did not. A shell command whose receipt shows it finished, such as a local `pip install` into the run environment, settles from that receipt; only an interrupted command with no receipt ends the run blocked. Continuation evidence uses a sequence cursor after its first validated scan, so later steps resolve only newly appended journal records.
 
 ## 0.3.30 (2026-11-04)
 

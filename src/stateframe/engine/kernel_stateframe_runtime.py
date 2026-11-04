@@ -12283,7 +12283,7 @@ class StateFrameRuntime:
             if self.continuation is not None:
                 from kernel_continuation_runtime import tool_surface
                 self.close_step(messages)
-                return tool_surface(current)
+                return tool_surface(current, runtime=self)
             return current
 
         def generated(current: list[dict]) -> list[dict]:
@@ -12425,7 +12425,7 @@ class StateFrameRuntime:
         if self.continuation is not None:
             from kernel_continuation_runtime import tool_surface
             self.close_step(messages)
-            tools = tool_surface(tools)
+            tools = tool_surface(tools, runtime=self)
         if getattr(self, "generated", None) is not None:
             from kernel_generated_context import tool_surface as generated_tools
             tools = generated_tools(tools)
@@ -21059,41 +21059,6 @@ class StateFrameRuntime:
         return prepare_replacement(self, original_capture, immutable_input,
                                    transport_body, deadline=deadline, endpoint=endpoint, key=key)
 
-    def _prepare_continuation_boundary(
-            self, messages: Sequence[dict]) -> PreparedRequest | None:
-        continuation = getattr(self, "continuation", None)
-        if continuation is None:
-            return None
-        continuation.prepare(messages)
-        if continuation.completed:
-            self.continuation_terminal = True
-            capture = RequestCapture(
-                self.journal, getattr(self.owner, "current_step", 0), self.snapshot_id,
-                endpoint_profile=self.endpoint_profile,
-            )
-            return PreparedRequest((), capture, {"kind": "CONTINUATION_COMPLETE"})
-        if getattr(continuation, "terminal_blocked", False):
-            from kernel_terminal_policy import (
-                deliver_pending_advisories,
-                enabled as hard_budget_only_enabled,
-                queue_advisory,
-            )
-            if hard_budget_only_enabled(self):
-                queue_advisory(self, "continuation_blocked")
-                deliver_pending_advisories(self, messages)
-                return None
-            self.system_outcome = "blocked"
-            capture = RequestCapture(
-                self.journal, getattr(self.owner, "current_step", 0), self.snapshot_id,
-                endpoint_profile=self.endpoint_profile,
-            )
-            return PreparedRequest(
-                (), capture,
-                {"kind": "CONTINUATION_BLOCKED",
-                 "finding": continuation.completion_finding()},
-            )
-        return None
-
     def _prepare_lean_plain_loop(
             self, messages: Sequence[dict], uncapped: Sequence[dict],
             tools: object, *, provider_request: bool) -> PreparedRequest:
@@ -21105,9 +21070,6 @@ class StateFrameRuntime:
             stack_enabled, stack_tail_blocks, validate_deferred_reads,
         )
 
-        continuation_outcome = self._prepare_continuation_boundary(uncapped)
-        if continuation_outcome is not None:
-            return continuation_outcome
         started = time.perf_counter()
         provided_tools = (
             list(tools)
@@ -21421,6 +21383,12 @@ class StateFrameRuntime:
             if isinstance(tools, list):
                 tools[:] = copy.deepcopy(selected_tools)
 
+        if provider_request:
+            continuation_stop = self._finalize_continuation_menu(
+                capture, tuple(selected_tools))
+            if continuation_stop is not None:
+                return continuation_stop
+
         prefix_ratio = shared_prefix_ratio(
             getattr(self, "_lean_previous_messages", None), prepared)
         before_bytes = request_size_bytes(
@@ -21509,32 +21477,78 @@ class StateFrameRuntime:
         """Advance continuation state before rendering or sending its next frame."""
         if self.continuation is None:
             return None
+        # Source replans may re-enter preparation without sending a request.
+        # A stuck scheduler must not silently spin at the same model step.
+        guard_key = getattr(getattr(self, "owner", None), "current_step", None)
+        if (not hasattr(self, "_continuation_prepare_guard_count")
+                or getattr(self, "_continuation_prepare_guard_key", None) != guard_key):
+            self._continuation_prepare_guard_key = guard_key
+            self._continuation_prepare_guard_count = 0
+        self._continuation_prepare_guard_count += 1
+        if self._continuation_prepare_guard_count > 8:
+            raise RuntimeError("continuation preparation exceeded eight attempts without a request")
+        # Candidate menus can be narrower than the eventual capability floor.
+        # Use the registered surface for repair projection until the wire menu
+        # is final; no blocked decision is made at this boundary.
+        self.continuation._request_tools = (
+            getattr(self, "_completion_owner_full_tools", ())
+            or getattr(self, "_continuation_request_tools", ()))
+        self.continuation._final_request_surface_bound = False
         self.continuation.prepare(uncapped)
+        identity = self.continuation.engine.state.active_id
+        details = self.continuation._unresolved_effect_details(identity)
+        # Stop before optional request work only when no typed write
+        # reobservation can be offered on the eventual menu.
+        intrinsic_block = any(
+            detail.get("status") in {"pending", "unknown"}
+            and isinstance(detail.get("tool"), str)
+            and detail.get("tool") not in {"read", "run_tests"}
+            and not self.continuation._dispatchable_repair(detail)
+            for detail in details)
+        if intrinsic_block:
+            self.continuation.terminal_blocked = True
+            self.system_outcome = "continuation_blocked"
+            capture = RequestCapture(
+                self.journal, getattr(self.owner, "current_step", 0), self.snapshot_id,
+                endpoint_profile=self.endpoint_profile)
+            return PreparedRequest((), capture, {
+                "kind": "CONTINUATION_BLOCKED",
+                "finding": self.continuation.completion_finding(),
+            })
         if self.continuation.completed:
             self.continuation_terminal = True
             capture = RequestCapture(
                 self.journal, getattr(self.owner, "current_step", 0), self.snapshot_id,
                 endpoint_profile=self.endpoint_profile)
             return PreparedRequest((), capture, {"kind": "CONTINUATION_COMPLETE"})
-        if getattr(self.continuation, "terminal_blocked", False):
-            from kernel_terminal_policy import (
-                deliver_pending_advisories,
-                enabled as hard_budget_only_enabled,
-                queue_advisory,
-            )
-            if hard_budget_only_enabled(self):
-                queue_advisory(self, "continuation_blocked")
-                deliver_pending_advisories(self, uncapped)
-                return None
-            self.system_outcome = "blocked"
-            capture = RequestCapture(
-                self.journal, getattr(self.owner, "current_step", 0), self.snapshot_id,
-                endpoint_profile=self.endpoint_profile)
-            finding = self.continuation.completion_finding()
-            return PreparedRequest(
-                (), capture,
-                {"kind": "CONTINUATION_BLOCKED", "finding": finding})
         return None
+
+    def _finalize_continuation_menu(
+            self, capture: RequestCapture,
+            prepared_tools: Sequence[Mapping[str, object]]) -> PreparedRequest | None:
+        """Decide effect repairability once, against the final provider surface."""
+        continuation = self.continuation
+        if continuation is None:
+            return None
+        continuation._request_tools = tuple(prepared_tools)
+        continuation._final_request_surface_bound = True
+        identity = continuation.engine.state.active_id
+        details = continuation._unresolved_effect_details(identity)
+        failed_source_read = getattr(continuation, "_exhausted_source_read_failure", None)
+        source_read_failure = failed_source_read() if callable(failed_source_read) else None
+        continuation.terminal_blocked = source_read_failure is not None or any(
+            detail.get("status") in {"pending", "unknown"} and not continuation._live_repair(detail)
+            for detail in details)
+        if not continuation.terminal_blocked:
+            return None
+        # There is no admissible action that can settle this unresolved effect.
+        # Sending another request (even with an advisory) would strand the model
+        # behind the same fence until its hard budget expires.
+        self.system_outcome = "continuation_blocked"
+        return PreparedRequest((), capture, {
+            "kind": "CONTINUATION_BLOCKED",
+            "finding": continuation.completion_finding(),
+        })
 
     @_reprepare_on_source_change
     @_host_phase("prepare")
@@ -21709,6 +21723,10 @@ class StateFrameRuntime:
         # deliver that result in this same provider request.
         if not _frame_routes.ROUTES_ACTIVE or frozen_route_capture is None:
             self._deliver_auto_verify(messages, uncapped)
+        if self.continuation is not None:
+            # Resume reaches the continuation gate before menu composition has
+            # registered the owner cache. Supply the candidate request surface.
+            self._continuation_request_tools = tuple(tools) if isinstance(tools, (list, tuple)) else ()
         if lean_on:
             # Plain LEAN requests skip the projected-frame arm below, so they
             # must advance the same host continuation boundary here.
@@ -24660,6 +24678,10 @@ class StateFrameRuntime:
             for tool in tools
             if isinstance(tool, Mapping)
         )
+        if provider_request:
+            continuation_stop = self._finalize_continuation_menu(capture, prepared_tools)
+            if continuation_stop is not None:
+                return continuation_stop
         if framefit_on and not framefit_minimum_terminal:
             from kernel_stateframe_framefit5 import validate_final_product_boundary
             try:
@@ -24847,6 +24869,7 @@ class StateFrameRuntime:
         from kernel_request_kind import RequestKindError, is_auxiliary
         if is_auxiliary(prepared.capture):
             raise RequestKindError("auxiliary_cannot_activate_workspace_dispatch")
+        self._continuation_prepare_guard_count = 0
         self._active_capture = prepared.capture
         return ACTIVE_REQUEST.set(prepared.capture)
 
@@ -24854,9 +24877,9 @@ class StateFrameRuntime:
     def finish(self, result: Mapping[str, object], *, messages: Sequence[dict] | None = None) -> None:
         if self._finished:
             return
-        hook_terminated = str(result.get("result", "")).upper() in {
-            "HOOK_BLOCKED", "HOOK_CONTAINMENT"}
-        if (not hook_terminated
+        boundary_terminated = str(result.get("result", "")).upper() in {
+            "HOOK_BLOCKED", "HOOK_CONTAINMENT", "CONTINUATION_BLOCKED"}
+        if (not boundary_terminated
                 and getattr(self, "stateframe_completion_owner_mode", "off") == "on"):
             from kernel_completion_owner import reconcile_submitted_request, request_pending
             reconcile_submitted_request(self)
@@ -24891,6 +24914,12 @@ class StateFrameRuntime:
                 host_done_facts_on or repair_blocks_done_stopped or delivery_contract_on
             ) else result
         )
+        if str(terminal_result.get("result", "")).upper() == "CONTINUATION_BLOCKED":
+            finding = (self.continuation.completion_finding()
+                       if self.continuation is not None else None)
+            if isinstance(finding, Mapping) and isinstance(finding.get("detail"), str):
+                terminal_result = dict(terminal_result)
+                terminal_result["error_message"] = finding["detail"]
         if (sealed_terminal is None
                 and getattr(self, "stateframe_completion_owner_mode", "off") == "on"):
             from kernel_completion_owner import terminal_result as owner_terminal_result
@@ -24907,7 +24936,7 @@ class StateFrameRuntime:
             if terminal_status in {"HARNESS_ERROR", "HARNESS_SUSPECT",
                                    "ATTEMPT_BUDGET_EXHAUSTED", "RENDER_OVERFLOW",
                                    "STOPPED_INCOMPLETE",
-                                   "HOOK_BLOCKED", "HOOK_CONTAINMENT",
+                                    "HOOK_BLOCKED", "HOOK_CONTAINMENT", "CONTINUATION_BLOCKED",
                                    "BLOCKED", "NEEDS_WORK", "UNCERTIFIED_SUBMIT"}:
                 terminal_gates.append("terminal:" + terminal_status)
             facts = self._compute_host_done_facts(
