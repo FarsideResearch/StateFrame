@@ -1,5 +1,9 @@
 # Known limitations
 
+## Linux checks that run Go or Node
+
+Linux: checks that run Go or Node programs fail under StateFrame's check memory limit. The limit caps virtual address space (`RLIMIT_AS`), and those runtimes reserve far more address space than they use, so they exit at startup. macOS ignores that limit and is not affected. This has been true since at least 0.3.30 and is fixed in the next release.
+
 ## Environment seed storage
 
 The `STATEFRAME_ENV_SEED_MAX_GB` cap is soft: the newest seed and seeds in use can keep the store above it. On Linux, a seed whose files are still hard-linked into a run environment cannot be evicted until that run is removed with `stateframe gc`.
