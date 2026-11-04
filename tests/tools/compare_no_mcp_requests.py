@@ -139,8 +139,12 @@ WIRE_ID_PATHS = (
      "expectation-receipt:", (24,)),
 )
 
-# Used only to verify sent result hashes; masking itself uses WIRE_ID_PATHS exclusively.
+# Used only to verify result hashes; masking itself uses WIRE_ID_PATHS exclusively.
 _RESULT_SHA = re.compile(rb'(result_sha256\\*":\s*\\*")([0-9a-f]{64})')
+_STALE_TEST_LINE = re.compile(
+    r"\[STALE TEST RESULT revision=sha256:[0-9a-f]{64}; "
+    r"superseded by GREEN revision=sha256:[0-9a-f]{64}\]"
+)
 
 
 def _replace_path(value, path: tuple[str, ...], *, text_marker: str | None = None,
@@ -391,20 +395,59 @@ def mask_wire_ids(body: bytes) -> bytes:
     return b"\n".join(masked)
 
 
+def _stale_test_result_hashes(messages: list[object], earlier_tools: list[str]) -> set[str]:
+    """Rebuild stale oracle text from its sent prefix and an earlier sent tool reply."""
+    backed: set[str] = set()
+    for message in messages:
+        if not isinstance(message, dict):
+            continue
+        content = message.get("content")
+        if not isinstance(content, str) or not content.startswith("[StateFrame]\n"):
+            continue
+        payload = json.loads(content.split("\n", 1)[1])
+        state = payload.get("state", {}) if isinstance(payload, dict) else {}
+        frame = state.get("framefit5", {}) if isinstance(state, dict) else {}
+        ledger = frame.get("action_ledger", {}) if isinstance(frame, dict) else {}
+        rows = ledger.get("unclassified_actions", ()) if isinstance(ledger, dict) else ()
+        for row in rows if isinstance(rows, list) else ():
+            if not isinstance(row, dict) or row.get("tool") != "run_tests":
+                continue
+            first_line = str(row.get("result_receipt", "")).split("\n", 1)[0]
+            if _STALE_TEST_LINE.fullmatch(first_line) is None:
+                continue
+            for prior in earlier_tools:
+                if not prior.startswith("pytest exit 1"):
+                    continue
+                result = first_line + "\n" + prior
+                if len(result) != row.get("result_chars"):
+                    continue
+                digest = hashlib.sha256(result.encode("utf-8")).hexdigest()
+                if digest == row.get("result_sha256"):
+                    backed.add(digest)
+                    break
+    return backed
+
+
 def result_hashes(run_dir: Path) -> tuple[list[str], set[str]]:
-    """The result_sha256 values a run sent, in order, and the hashes of its sent message texts."""
-    sent, texts = [], set()
+    """Sent result hashes and hashes backed by sent text or a reconstructed stale oracle."""
+    sent, texts, earlier_tools = [], set(), []
     for path in sorted(run_dir.rglob("*.request.json")):
         raw = path.read_bytes()
         sent += [match.group(2).decode() for match in _RESULT_SHA.finditer(raw)]
-        for message in json.loads(raw).get("messages", []):
-            if isinstance(message.get("content"), str):
-                texts.add(hashlib.sha256(message["content"].encode("utf-8")).hexdigest())
+        messages = json.loads(raw).get("messages", [])
+        texts.update(_stale_test_result_hashes(messages, earlier_tools))
+        for message in messages:
+            if not isinstance(message, dict) or not isinstance(message.get("content"), str):
+                continue
+            content = message["content"]
+            if message.get("role") == "tool":
+                texts.add(hashlib.sha256(content.encode("utf-8")).hexdigest())
+                earlier_tools.append(content)
     return sent, texts
 
 
 def unbacked_result_hash_changes(before_run: Path, after_run: Path) -> list[str]:
-    """Changed result_sha256 values whose hashed text was not sent, so masking them could hide a difference."""
+    """Changed result hashes without sent or exactly reconstructed text backing them."""
     before_hashes, before_texts = result_hashes(before_run)
     after_hashes, after_texts = result_hashes(after_run)
     if len(before_hashes) != len(after_hashes):
@@ -428,7 +471,7 @@ def wire_id_drift(before: list[bytes], after: list[bytes]) -> tuple[list[str], d
     """Problems outside declared generated fields, plus which fields changed.
 
     Bodies must be byte-identical after mask_wire_ids. Callers that mask result_sha256
-    also verify changed digests hash sent tool-result messages in each run.
+    also verify changed digests hash sent or exactly reconstructed tool-result text.
     """
     problems: list[str] = []
     kinds: dict[str, int] = {}

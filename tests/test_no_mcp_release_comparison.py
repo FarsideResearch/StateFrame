@@ -218,6 +218,44 @@ def test_unbacked_result_hash_change_is_reported(tmp_path):
     assert len(unbacked_result_hash_changes(before, hidden)) == 1
 
 
+def test_stale_result_hash_is_backed_by_earlier_oracle_reply(tmp_path):
+    """The action ledger hashes a stale label plus an earlier, separately sent reply."""
+    import json
+
+    from tools.compare_no_mcp_requests import unbacked_result_hash_changes
+
+    def run(name, receipt_id, *, result_text=None, result_chars=None, prior_role="tool"):
+        directory = tmp_path / name
+        (directory / "wire").mkdir(parents=True)
+        prior = ("pytest exit 1 — multi-selector oracle (1 selectors)\n"
+                 f"CHECK_FAILURE_SUMMARY full_output_handle=check-receipt:{receipt_id}")
+        prefix = ("[STALE TEST RESULT revision=sha256:" + "a" * 64
+                  + "; superseded by GREEN revision=sha256:" + "b" * 64 + "]")
+        stale = prefix + "\n" + (prior if result_text is None else result_text)
+        digest = hashlib.sha256(stale.encode()).hexdigest()
+        row = {"tool": "run_tests", "result_receipt": prefix,
+               "result_chars": len(stale) if result_chars is None else result_chars,
+               "result_sha256": digest}
+        frame = "[StateFrame]\n" + json.dumps({"state": {"framefit5": {
+            "action_ledger": {"unclassified_actions": [row]}}}})
+        (directory / "wire" / "0001.request.json").write_text(json.dumps({
+            "messages": [{"role": prior_role, "content": prior}]}))
+        (directory / "wire" / "0002.request.json").write_text(json.dumps({
+            "messages": [{"role": "user", "content": frame}]}))
+        return directory
+
+    before = run("before", "c" * 24)
+    after = run("after", "d" * 24)
+    assert unbacked_result_hash_changes(before, after) == []
+    # Neither an unsent tail, a false length, nor non-tool text can back the hash.
+    hidden = run("hidden", "d" * 24, result_text="pytest exit 1 — unsent result")
+    wrong_length = run("wrong-length", "d" * 24, result_chars=0)
+    not_tool = run("not-tool", "d" * 24, prior_role="user")
+    assert len(unbacked_result_hash_changes(before, hidden)) == 1
+    assert len(unbacked_result_hash_changes(before, wrong_length)) == 1
+    assert len(unbacked_result_hash_changes(before, not_tool)) == 1
+
+
 def test_mask_wire_ids_uses_declared_paths_and_preserves_unrelated_hex():
     import json
 
