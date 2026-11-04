@@ -17,6 +17,7 @@ import kernel_request_diet as request_diet
 from kernel_shell_tool import SHELL_SCHEMA
 from tests import test_allocation_replay_corpus as corpus
 from tests.tape_server import TapeServer
+from tools.compare_no_mcp_requests import mask_wire_ids
 
 
 TOKENIZE_TIMEOUT_SECONDS = 0.05
@@ -27,12 +28,14 @@ _CLEAN_METER_COUNTDOWN = re.compile(
     rb"(?:, ~(?:\d+|999\+|----) turns at your pace)?\)"
 )
 _CLEAN_METER_COUNTDOWN_MASK = b"sandbox_seconds_remaining=<masked>"
-# Derived on a rel330b 012e0b5 checkout run through pytest_gate.sh (two runs agree); an external
-# STATEFRAME_REPLAY_SOURCE records a different environment_revision, so it cannot derive these.
+# An external STATEFRAME_REPLAY_SOURCE records a different environment_revision, so it cannot derive these.
 # Countdown masked because it is wall-clock; only requests 1-2 have stable masked bytes.
+# Derived with tests/tools/derive_clean_meter_pins.py on an untouched 012e0b5 worktree (2 runs) and on the v0.3.31 RC
+# (2 runs); all four agree. Wire-visible IDs (moved by deterministic IDs) and the countdown are masked, so these hashes
+# prove every other request-1/2 byte is unchanged since 012e0b5.
 CLEAN_METER_MASKED_HASHES_012E0B5 = (
-    "d9a863bd9a484ec0c1f916b405edfc96d750c9ba1a05180a60ac413ff1a6b6b5",
-    "58e1ae8042ff92a5663e7b9338543e447e88e6f6d2dffba1d370471165339a91",
+    "64e811d7331b461bb7af6c571ef7eb757707670616db8e87171117cae0a2cb4e",
+    "adbfc0415994d9ec3aa377abbc723541f622bd01992a4a535921859ba5f9ffb3",
 )
 CLEAN_METER_COUNTDOWN_COPIES_012E0B5 = (2, 2, 2, 1, 1, 2)
 
@@ -47,7 +50,9 @@ _COUNTDOWN_MASK_CONTROL_BODY = (
 
 
 def _masked_wire_sha256(wire_body: bytes) -> str:
-    masked = _CLEAN_METER_COUNTDOWN.sub(_CLEAN_METER_COUNTDOWN_MASK, wire_body)
+    masked = _CLEAN_METER_COUNTDOWN.sub(
+        _CLEAN_METER_COUNTDOWN_MASK, mask_wire_ids(wire_body),
+    )
     return hashlib.sha256(masked).hexdigest()
 
 
@@ -84,6 +89,19 @@ def test_countdown_mask_preserves_non_countdown_byte_changes():
     flip_at = _model_value_start(_COUNTDOWN_MASK_CONTROL_BODY)
     changed[flip_at] ^= 1
     assert _masked_wire_sha256(bytes(changed)) != original_hash
+
+
+def test_wire_id_mask_preserves_non_id_non_countdown_byte_changes():
+    original = _COUNTDOWN_MASK_CONTROL_BODY.replace(
+        b'"tools":[]', b'"request_id":"' + b"a" * 20 + b'","tools":[]',
+    )
+    changed_id = original.replace(b"a" * 20, b"b" * 20)
+    assert original != changed_id
+    assert _masked_wire_sha256(original) == _masked_wire_sha256(changed_id)
+
+    changed_model = bytearray(changed_id)
+    changed_model[_model_value_start(changed_id)] ^= 1
+    assert _masked_wire_sha256(bytes(changed_model)) != _masked_wire_sha256(original)
 
 
 def test_countdown_mask_matches_one_active_frame_occurrence():
@@ -387,6 +405,34 @@ def test_permanent_tokenizer_outage_replay_submits_with_bounded_probes(tmp_path)
     assert outcome.delayed_tokenize_calls == tuple(range(1, outcome.tokenize_request_count + 1))
 
 
+def _capture_clean_meter_request_bodies(tmp_path):
+    outcome = corpus._run_case(tmp_path, "clean-meter-22file-r1")
+    assert outcome.engine_result == "SUBMITTED", outcome.evidence[-6000:]
+    assert '"kind":"token_counting_unavailable"' not in outcome.engine_log
+    assert outcome.endpoint_requests >= 6
+    assert len(outcome.request_hashes) >= 6
+    request_bodies = tuple(
+        (tmp_path / "run" / "wire" / f"{index:04d}.request.json").read_bytes()
+        for index in range(1, 7)
+    )
+    return request_bodies
+
+
+def _clean_meter_fingerprints(request_bodies):
+    countdown_copy_counts = tuple(
+        len(_CLEAN_METER_COUNTDOWN.findall(wire_body)) for wire_body in request_bodies
+    )
+    masked_hashes = []
+    for index, wire_body in enumerate(request_bodies, start=1):
+        countdowns = _active_frame_countdowns(wire_body)
+        assert len(countdowns) == 1, (
+            f"request {index} active-frame countdown matches={countdowns!r}; "
+            f"whole-request countdown-copy counts={countdown_copy_counts!r}"
+        )
+        masked_hashes.append(_masked_wire_sha256(wire_body))
+    return tuple(masked_hashes), countdown_copy_counts
+
+
 @pytest.mark.host_sandbox
 def test_healthy_measurement_preserves_baseline_request_bytes(tmp_path):
     body = _body("wire identity")
@@ -412,33 +458,13 @@ def test_healthy_measurement_preserves_baseline_request_bytes(tmp_path):
     assert json.dumps(body, ensure_ascii=False, separators=(",", ":")).encode("utf-8") == expected
     assert "tokenize_reprobe_status" not in meter.journal_fields("tokenize")
 
-    outcome = corpus._run_case(tmp_path, "clean-meter-22file-r1")
-    assert outcome.engine_result == "SUBMITTED", outcome.evidence[-6000:]
-    assert '"kind":"token_counting_unavailable"' not in outcome.engine_log
-    assert outcome.endpoint_requests >= 6
-    assert len(outcome.request_hashes) >= 6
-    request_bodies = tuple(
-        (tmp_path / "run" / "wire" / f"{index:04d}.request.json").read_bytes()
-        for index in range(1, 7)
-    )
-    countdown_copy_counts = tuple(
-        len(_CLEAN_METER_COUNTDOWN.findall(wire_body)) for wire_body in request_bodies
-    )
+    request_bodies = _capture_clean_meter_request_bodies(tmp_path)
+    computed_masked_hashes, countdown_copy_counts = _clean_meter_fingerprints(request_bodies)
     assert countdown_copy_counts == CLEAN_METER_COUNTDOWN_COPIES_012E0B5, (
         f"whole-request countdown-copy counts for requests 1-6: {countdown_copy_counts!r}"
     )
 
-    computed_masked_hashes = []
-    for index, wire_body in enumerate(request_bodies, start=1):
-        countdowns = _active_frame_countdowns(wire_body)
-        assert len(countdowns) == 1, (
-            f"request {index} active-frame countdown matches={countdowns!r}; "
-            f"whole-request countdown-copy counts={countdown_copy_counts!r}"
-        )
-        computed_masked_hashes.append(_masked_wire_sha256(wire_body))
-    computed_masked_hashes = tuple(computed_masked_hashes)
-
-    # Prove the whole-body normalizer still notices a one-byte edit outside the countdown.
+    # Prove the whole-body normalizer still notices a byte outside IDs and countdowns.
     changed_body = bytearray(request_bodies[0])
     flip_at = _model_value_start(request_bodies[0])
     changed_body[flip_at] ^= 1
