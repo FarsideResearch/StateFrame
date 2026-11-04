@@ -1,5 +1,6 @@
 """Compare no-MCP request bytes with the pinned 0.2.3 source tree."""
 import hashlib
+import json
 import shutil
 import subprocess
 import sys
@@ -83,17 +84,41 @@ def test_wire_id_drift_names_moved_fields_and_rejects_other_changes(tmp_path):
         planted_body_change_is_caught, request_id_handle_mismatches, wire_id_drift)
 
     def body(request_id, receipt):
-        return json.dumps({"messages": [
-            {"role": "user", "content": f"fact handle=wire-truth:{request_id}:green_state"},
-            {"role": "tool", "content": json.dumps({"edit_receipt": receipt, "status": "ok"})},
-        ]}).encode()
+        frame = {"state": {"framefit5": {"action_ledger": {"applied_edits": [
+            {"edit_receipt": receipt, "request_id": request_id},
+        ]}}}}
+        content = ("[StateFrame]\n" + json.dumps(frame, separators=(",", ":"))
+                   + f"\nFact handle=wire-truth:{request_id}:green_state")
+        return json.dumps({"messages": [{"role": "user", "content": content}]}).encode()
 
     old, new = body("a" * 20, "b" * 20), body("c" * 20, "d" * 20)
     problems, kinds = wire_id_drift([old], [new])
     assert problems == []
-    assert kinds == {"wire_truth_handle(request_id)": 1, "edit_receipt": 1}
+    assert kinds == {"wire_truth_handle(request_id)": 1, "request_id": 1, "edit_receipt": 1}
+    legacy_suffix = old.replace(b"wire-truth:" + b"a" * 20 + b":green_state",
+                                b"wire-truth:" + b"a" * 20 + b":1067:green_state")
+    assert wire_id_drift([legacy_suffix], [old]) == (
+        [], {"wire_truth_handle(request_id)": 1})
+    refs_before = json.dumps({"messages": [{"role": "user", "content":
+        "check_execution_ref: " + "a" * 20 + ":1," + "b" * 20 + ":2"}]}).encode()
+    refs_after = json.dumps({"messages": [{"role": "user", "content":
+        "check_execution_ref: " + "c" * 20 + ":1," + "d" * 20 + ":2"}]}).encode()
+    assert wire_id_drift([refs_before], [refs_after]) == (
+        [], {"check_execution_ref": 2})
+    changed_ordinal = refs_after.replace(b"c" * 20 + b":1", b"c" * 20 + b":9")
+    assert wire_id_drift([refs_before], [changed_ordinal])[0]
     # A change outside the IDs is reported, and the planted control finds such changes.
-    assert wire_id_drift([old], [new.replace(b"ok", b"no")])[0]
+    assert wire_id_drift([old], [new.replace(b"green_state", b"red_state")])[0]
+    non_id_hex_before = json.dumps({"messages": [{"role": "user", "content": "c" * 24}]}).encode()
+    non_id_hex_after = json.dumps({"messages": [{"role": "user", "content": "d" * 24}]}).encode()
+    assert wire_id_drift([non_id_hex_before], [non_id_hex_after])[0]
+    def deferred_read(receipt, suffix):
+        return json.dumps({"messages": [{"role": "user", "content":
+            f"journal receipts {receipt}; status {suffix}"}]}).encode()
+    assert wire_id_drift([deferred_read("a" * 20, "same")],
+                         [deferred_read("b" * 20, "same")]) == ([], {"receipt_id": 1})
+    assert wire_id_drift([deferred_read("a" * 20, "same")],
+                         [deferred_read("b" * 20, "changed")])[0]
     assert planted_body_change_is_caught(new)
     assert wire_id_drift([old], [new, new])[0]
 
@@ -107,35 +132,30 @@ def test_wire_id_drift_names_moved_fields_and_rejects_other_changes(tmp_path):
     assert request_id_handle_mismatches(run)
 
 
-def test_applied_edit_history_digest_mask_keeps_count_and_states_its_blind_spot():
-    """historical_applied_edits.sha256 is masked, its count is not.
-
-    KNOWN LIMITATION: the digest's preimage is the older applied-edit rows pruned from the
-    frame. They are not in the same request, so a release comparison cannot recompute it from
-    what was sent; it relies on each pruned row having been sent, and compared after masking,
-    in an earlier request while it was among the last three edits. A change that exists ONLY
-    inside a pruned row's digest is invisible to the mask. The planted case below shows that
-    blind spot on purpose; the count and every other byte stay compared.
-    """
+def test_applied_edit_history_digest_is_compared_as_a_non_id_hash():
+    """A digest is not a wire ID, even when its preimage contains wire IDs."""
     import json
 
     from tools.compare_no_mcp_requests import wire_id_drift
 
     def body(rows, count):
         digest = hashlib.sha256(json.dumps(rows, sort_keys=True).encode()).hexdigest()
-        ledger = {"historical_applied_edits": {"count": count, "sha256": digest}}
-        return json.dumps({"messages": [{"role": "user", "content": json.dumps(ledger)}]}).encode()
+        frame = {"state": {"framefit5": {"action_ledger": {
+            "historical_applied_edits": {"count": count, "sha256": digest},
+        }}}}
+        content = "[StateFrame]\n" + json.dumps(frame, separators=(",", ":"))
+        return json.dumps({"messages": [{"role": "user", "content": content}]}).encode()
 
     rows = [{"edit_receipt": "a" * 20, "file": "shop/pricing.py"}]
     moved_ids = [{"edit_receipt": "b" * 20, "file": "shop/pricing.py"}]
+    # Changing only an older edit receipt changes this digest, which remains visible.
     problems, kinds = wire_id_drift([body(rows, 1)], [body(moved_ids, 1)])
-    assert problems == [] and kinds == {"historical_applied_edits_sha256": 1}
-    # The count is still compared: a different number of pruned edits fails.
+    assert problems and kinds == {}
+    # The count is compared too: a different number of pruned edits fails.
     assert wire_id_drift([body(rows, 1)], [body(rows, 2)])[0]
-    # Blind spot, planted: a non-ID change inside a pruned row alters only the digest,
-    # so the masked comparison cannot see it.
+    # A non-ID change inside a pruned row also changes the visible digest.
     planted = [{"edit_receipt": "a" * 20, "file": "shop/discount.py"}]
-    assert wire_id_drift([body(rows, 1)], [body(planted, 1)])[0] == []
+    assert wire_id_drift([body(rows, 1)], [body(planted, 1)])[0]
 
 
 def test_diet_size_counts_move_only_with_the_id_length_change():
@@ -177,14 +197,85 @@ def test_unbacked_result_hash_change_is_reported(tmp_path):
     assert len(unbacked_result_hash_changes(before, hidden)) == 1
 
 
-def test_mask_wire_ids_hides_only_ids_and_result_hashes():
+def test_mask_wire_ids_uses_declared_paths_and_preserves_unrelated_hex():
+    import json
+
+    from tools.compare_no_mcp_requests import mask_wire_ids
+
+    def body(tool_call_id, content):
+        return json.dumps({"messages": [
+            {"role": "assistant", "tool_calls": [{"id": tool_call_id,
+                "type": "function", "function": {"name": "read", "arguments": "{}"}}]},
+            {"role": "user", "content": content},
+        ]}).encode()
+
+    unchanged = "this message contains an unrelated value " + "c" * 24
+    first = body("native_" + "a" * 20 + "_0", unchanged)
+    changed_id = body("native_" + "b" * 20 + "_0", unchanged)
+    assert mask_wire_ids(first) == mask_wire_ids(changed_id)
+
+    changed_content = body("native_" + "b" * 20 + "_0",
+                           "this message contains an unrelated value " + "d" * 24)
+    assert mask_wire_ids(changed_id) != mask_wire_ids(changed_content)
+    assert mask_wire_ids(first) != mask_wire_ids(body("native_" + "b" * 20 + "_1", unchanged))
+    assert mask_wire_ids(body("call-good", unchanged)) != mask_wire_ids(body("call-bad", unchanged))
+
     digest = "ab" * 32
-    body = (b'{"result_sha256":"' + digest.encode() + b'","escaped":"{\\"result_sha256\\":\\"'
-            + digest.encode() + b'\\"}","candidate_revision":"sha256:' + digest.encode()
-            + b'","ref":"' + b"c" * 20 + b'","check":"' + b"d" * 24 + b':1067","long":"'
-            + b"e" * 40 + b'"}')
-    masked = mask_wire_ids(body)
-    assert masked.count(b"<result-sha256>") == 2
-    assert masked.count(b"<wire-id>") == 2
-    # Every other hex value is still compared byte for byte.
-    assert b"sha256:" + digest.encode() in masked and b"e" * 40 in masked
+    frame = {"state": {"framefit5": {"action_ledger": {"unclassified_actions": [
+        {"result_sha256": digest, "candidate_revision": "sha256:" + digest},
+    ]}}}}
+    content = "[StateFrame]\n" + json.dumps(frame, separators=(",", ":"))
+    masked = mask_wire_ids(json.dumps({"messages": [{"role": "user", "content": content}]}).encode())
+    assert b"result_sha256" in masked and masked.count(digest.encode()) == 2
+    assert (b"sha256:" + digest.encode()) in masked
+
+
+def test_wire_id_paths_match_real_captured_request_fixtures():
+    from tools.compare_no_mcp_requests import WIRE_ID_PATHS, _mask_wire_ids_with_values
+
+    fixture_root = Path(__file__).resolve().parent / "fixtures"
+    fixtures = sorted(fixture_root.rglob("*.request.json"))
+    assert fixtures, "no captured request fixtures available for wire-ID path coverage"
+    coverage = [0] * len(WIRE_ID_PATHS)
+    for fixture in fixtures:
+        _, path_values = _mask_wire_ids_with_values(fixture.read_bytes())
+        for index, (_kind, values) in enumerate(path_values):
+            coverage[index] += len(values)
+    # Provider wire fixtures have no CLI preflight wrapper. Both release and current
+    # _child.py write this top-level request_id in requests/NNNN.json records.
+    native_call = "native_" + "a" * 20 + "_0"
+    preflight = {"request": 1, "turn": 1, "request_id": "a" * 20,
+                 "messages": [{"role": "assistant", "tool_calls": [{"id": native_call}]},
+                              {"role": "tool", "tool_call_id": native_call}],
+                 "tools": [], "presentation": {}}
+    _, path_values = _mask_wire_ids_with_values(json.dumps(preflight).encode())
+    for index, (_kind, values) in enumerate(path_values):
+        coverage[index] += len(values)
+    missing = [f"{kind}: {'.'.join(path)}" for index, (path, kind, _marker, _lengths)
+               in enumerate(WIRE_ID_PATHS) if not coverage[index]]
+    assert not missing, f"wire-ID JSON paths matched no captured request field: {missing}"
+
+
+def test_mask_wire_ids_rejects_non_json_bodies():
+    from tools.compare_no_mcp_requests import mask_wire_ids
+
+    with pytest.raises(json.JSONDecodeError):
+        mask_wire_ids(b"request body that is not JSON")
+
+
+def test_mask_wire_ids_parses_multiline_preflight_capture_and_hook_payloads():
+    from tools.compare_no_mcp_requests import mask_wire_ids, wire_id_drift
+
+    def preflight(request_id, content):
+        return json.dumps({"request": 1, "request_id": request_id,
+                           "messages": [{"role": "user", "content": content}],
+                           "tools": [], "presentation": {}}, indent=1).encode()
+
+    old = preflight("a" * 20, "fixed " + "c" * 24)
+    new = preflight("b" * 20, "fixed " + "c" * 24)
+    assert mask_wire_ids(old + b"\n" + old) == mask_wire_ids(new + b"\n" + new)
+    assert mask_wire_ids(old + b"\n" + old) != mask_wire_ids(new + b"\n" +
+                                                         preflight("b" * 20, "fixed " + "d" * 24))
+    assert wire_id_drift([json.dumps([{"request_id": "a" * 20}]).encode()],
+                         [json.dumps([{"request_id": "b" * 20}]).encode()]) == (
+        [], {"request_id": 1})

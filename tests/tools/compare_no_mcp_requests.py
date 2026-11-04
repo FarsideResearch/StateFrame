@@ -2,6 +2,7 @@
 
 Run with --baseline /path/to/33c6c51 (0.2.3) --candidate /path/to/this/tree.
 Both runs use the same temporary repository and run-directory path in sequence.
+Wire IDs are masked by JSON path so unrelated hex in prompt content stays part of parity checks.
 The candidate pins the settings whose defaults changed after 0.2.3 (pytest runner, all tests
 protected, stable tool head off), so the request files are expected to be byte-identical;
 pass --current-defaults to see how today's defaults differ instead.
@@ -23,7 +24,7 @@ import tempfile
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "src"))
-from stateframe.request_records import list_request_records, read_request_record
+from stateframe.request_records import list_request_records, read_request_record  # noqa: E402
 
 
 def source_env(tree: Path, stable_tool_head: str | None, *,
@@ -40,29 +41,318 @@ def source_env(tree: Path, stable_tool_head: str | None, *,
     return environment
 
 
-# Wire IDs are exactly WIRE_ID_HEX_LENGTH (20) hex chars; check receipts use 24.
-# The receipt-determinism change (11-03) derives them from task + step + content
-# instead of the journal position, so they deliberately differ from releases cut
-# before it. Older releases also suffixed some IDs with the global journal sequence
-# ("check:<id>:1067"); the change removes that suffix, so it is masked with the ID.
-# A tool result's result_sha256 hashes that result's text, wire IDs included. The
-# text itself is in the same request and compared after masking, so its hash is
-# masked too. Release comparisons mask ONLY these tokens; every other byte must match.
-_WIRE_ID_TOKEN = re.compile(
-    rb"(?<![0-9a-f])(?:[0-9a-f]{20}|[0-9a-f]{24})(?![0-9a-f])(?::[0-9]+)?")
+# Wire IDs are masked by JSON path so a 20/24-hex value in ordinary request content remains
+# part of the comparison. StateFrame and read-contract payloads are JSON embedded in message
+# content; their markers are path steps, not a fallback for malformed request bodies.
+WIRE_ID_PATHS = (
+    # The CLI preflight capture records the active request ID outside messages.
+    (("request_id",), "request_id", None, (20,)),
+    # Provider tool-call IDs are referenced by later tool messages through tool_call_id.
+    (("messages", "*", "tool_calls", "*", "id"), "tool_call_id", "native_", (20,)),
+    # Tool replies carry the matching provider tool-call ID.
+    (("messages", "*", "tool_call_id"), "tool_call_id", "native_", (20,)),
+    # The action ledger carries the receipt and request ID for each applied edit.
+    (("messages", "*", "content", "[StateFrame]", "state", "framefit5",
+      "action_ledger", "applied_edits", "*", "edit_receipt"), "edit_receipt", None, (20,)),
+    # The top-level StateFrame projection repeats applied-edit receipt IDs.
+    (("messages", "*", "content", "[StateFrame]", "state", "framefit5",
+      "applied_edits", "*", "edit_receipt"), "edit_receipt", None, (20,)),
+    # The action ledger carries the request ID that minted each applied-edit receipt.
+    (("messages", "*", "content", "[StateFrame]", "state", "framefit5",
+      "action_ledger", "applied_edits", "*", "request_id"), "request_id", None, (20,)),
+    # The top-level StateFrame projection repeats those applied-edit request IDs.
+    (("messages", "*", "content", "[StateFrame]", "state", "framefit5",
+      "applied_edits", "*", "request_id"), "request_id", None, (20,)),
+    # Native call IDs in edit action rows derive from the request ID and action index.
+    (("messages", "*", "content", "[StateFrame]", "state", "framefit5",
+      "action_ledger", "edits", "*", "call_ids", "*"), "native_call_id(request_id)", "native_", (20,)),
+    # The history digest preserves native IDs for calls that have left the recent action rows.
+    (("messages", "*", "content", "[StateFrame]", "state", "framefit5",
+      "action_ledger", "history_digest", "call_ids", "*"), "native_call_id(request_id)", "native_", (20,)),
+    # Coverage summaries carry the public run ID derived from the task identity.
+    (("messages", "*", "content", "[StateFrame]", "state", "framefit5",
+      "action_ledger", "history_digest", "coverage_run_id"), "coverage_run_id", None, (20,)),
+    # Read action rows retain the provider call IDs that produced each read receipt.
+    (("messages", "*", "content", "[StateFrame]", "state", "framefit5",
+      "action_ledger", "reads", "*", "call_ids", "*"), "native_call_id(request_id)", "native_", (20,)),
+    # Unclassified actions record their host-derived native call ID in call_id.
+    (("messages", "*", "content", "[StateFrame]", "state", "framefit5",
+      "action_ledger", "unclassified_actions", "*", "call_id"),
+     "native_call_id(request_id)", "native_", (20,)),
+    # Read receipts are carried in the StateFrame's read-fact receipt rows.
+    (("messages", "*", "content", "[StateFrame]", "state", "framefit5",
+      "read_facts", "*", "receipts", "*", "receipt_id"), "receipt_id", None, (20,)),
+    # Read-contract receipts are serialized as a separate tagged JSON payload in message content.
+    (("messages", "*", "content", "[WIRE_READ_CONTRACT]", "receipt_id"),
+     "receipt_id", None, (20,)),
+    # The action ledger's journal verdict references the host-minted check receipt.
+    (("messages", "*", "content", "[StateFrame]", "state", "framefit5",
+      "action_ledger", "journal_verdict", "check_receipt_id"), "check_receipt", "check-receipt:", (24,)),
+    # The latest verdict projection repeats the host-minted check receipt ID.
+    (("messages", "*", "content", "[StateFrame]", "state", "framefit5",
+      "last_verdict", "check_receipt_id"), "check_receipt", "check-receipt:", (24,)),
+    # Check execution IDs appear in the evidence pin as labeled text.
+    (("messages", "*", "content", "[StateFrame]", "state", "framefit5",
+      "owner_protocol", "evidence_pin"),
+     "check_execution", "execution_id=check-execution:", (20,)),
+    # The evidence pin's bounded excerpt may truncate this duplicate handle after its label.
+    (("messages", "*", "content", "[StateFrame]", "state", "framefit5",
+      "owner_protocol", "evidence_pin"),
+     "check_receipt", "full_output_handle=check-receipt:", (24,)),
+    # The visible check-output receipt repeats that same host receipt handle.
+    (("messages", "*", "content", "[StateFrame]", "state", "framefit5",
+      "owner_protocol", "evidence_pin"),
+     "check_receipt", "check_output_receipt=check-receipt:", (24,)),
+    (("messages", "*", "content", "[StateFrame]", "state", "framefit5",
+      "owner_protocol", "evidence_pin"),
+     "check_receipt", "receipt=check-receipt:", (24,)),
+    # Check-finding IDs use the check:<run-id>:<ordinal> form in the history projection.
+    (("messages", "*", "content", "[StateFrame]", "state", "history_findings", "latest", "id"),
+     "check_finding_id", "check:", (20,)),
+    # Omitted-fact handles embed the request ID that fixed the fact's cutoff.
+    (("messages", "*", "content"), "wire_truth_handle(request_id)", "wire-truth:", (20,)),
+    # The check-execution reference lists host execution IDs in the volatile-truth tail.
+    (("messages", "*", "content"), "check_execution_ref", "check_execution_ref: ", (20,)),
+    # The generated deferred-read notice lists the same read-fact receipt IDs.
+    (("messages", "*", "content"), "receipt_id", "journal receipts ", (20,)),
+    # Traceback paths can include the generated continuation-workspace ID; fixtures use <workspace>.
+    (("messages", "*", "content"), "continuation_workspace_dir",
+     "continuation-workspaces/", (20, 32)),
+)
+
+# Used only to report sent result hashes; masking itself uses WIRE_ID_PATHS exclusively.
 _RESULT_SHA = re.compile(rb'(result_sha256\\*":\s*\\*")([0-9a-f]{64})')
-# historical_applied_edits.sha256 digests the older applied-edit rows pruned from the frame.
-# Each row carries an edit_receipt ID, and each row was sent (and compared after masking) in an
-# earlier request while it was among the last three edits. Only this one digest is masked; its
-# count stays compared.
-_HISTORY_SHA = re.compile(
-    rb'(historical_applied_edits\\*":\s*\{\\*"count\\*":\s*[0-9]+,\s*\\*"sha256\\*":\s*\\*")([0-9a-f]{64})')
+
+
+def _replace_path(value, path: tuple[str, ...], *, text_marker: str | None = None,
+                  text_lengths: tuple[int, ...] = ()) -> tuple[object, list[str]]:
+    """Replace the values selected by one explicit JSON path."""
+    if not path:
+        if not isinstance(value, str) or not value:
+            return value, []
+        if text_marker is not None:
+            return _replace_marked_hex(value, text_marker, text_lengths)
+        if text_lengths and (len(value) not in text_lengths
+                             or any(char not in "0123456789abcdef" for char in value)):
+            return value, []
+        return "<wire-id>", [value]
+
+    segment, rest = path[0], path[1:]
+    if segment in {"[StateFrame]", "[WIRE_READ_CONTRACT]"}:
+        if not isinstance(value, str):
+            return value, []
+        marker = segment + ("\n" if segment == "[StateFrame]" else " ")
+        return _replace_embedded_json(value, marker, rest,
+                                      text_marker=text_marker, text_lengths=text_lengths)
+    if segment == "*":
+        if isinstance(value, dict):
+            rebuilt, matches = {}, []
+            for key, child in value.items():
+                rebuilt_child, child_matches = _replace_path(
+                    child, rest, text_marker=text_marker, text_lengths=text_lengths)
+                rebuilt[key] = rebuilt_child
+                matches.extend(child_matches)
+            return rebuilt, matches
+        if isinstance(value, list):
+            rebuilt, matches = [], []
+            for child in value:
+                rebuilt_child, child_matches = _replace_path(
+                    child, rest, text_marker=text_marker, text_lengths=text_lengths)
+                rebuilt.append(rebuilt_child)
+                matches.extend(child_matches)
+            return rebuilt, matches
+        return value, []
+    if not isinstance(value, dict) or segment not in value:
+        return value, []
+    rebuilt = dict(value)
+    rebuilt[segment], matches = _replace_path(value[segment], rest, text_marker=text_marker,
+                                               text_lengths=text_lengths)
+    return rebuilt, matches
+
+
+def _replace_embedded_json(content: str, marker: str, path: tuple[str, ...], *,
+                           text_marker: str | None,
+                           text_lengths: tuple[int, ...]) -> tuple[str, list[str]]:
+    """Apply a JSON path to each JSON payload following a known message-content marker."""
+    decoder = json.JSONDecoder()
+    cursor = 0
+    matches: list[str] = []
+    pieces: list[str] = []
+    while True:
+        marker_start = content.find(marker, cursor)
+        if marker_start < 0:
+            pieces.append(content[cursor:])
+            break
+        payload_start = marker_start + len(marker)
+        json_start = payload_start
+        while json_start < len(content) and content[json_start].isspace():
+            json_start += 1
+        try:
+            payload, payload_end = decoder.raw_decode(content, json_start)
+        except json.JSONDecodeError as error:
+            raise ValueError(f"invalid JSON after embedded {marker.strip()} marker") from error
+        updated, payload_matches = _replace_path(
+            payload, path, text_marker=text_marker, text_lengths=text_lengths)
+        if payload_matches:
+            encoded = json.dumps(updated, separators=(",", ":"), ensure_ascii=True)
+            pieces.extend((content[cursor:json_start], encoded))
+            cursor = payload_end
+            matches.extend(payload_matches)
+        else:
+            pieces.append(content[cursor:payload_end])
+            cursor = payload_end
+    return "".join(pieces), matches
+
+
+def _replace_marked_hex(value: str, marker: str,
+                        lengths: tuple[int, ...]) -> tuple[str, list[str]]:
+    """Replace hex IDs immediately following one known text label, never arbitrary hex text."""
+    if marker in {"check_execution_ref: ", "check:"}:
+        return _replace_check_execution_refs(value, marker, lengths)
+    if marker == "journal receipts ":
+        return _replace_journal_receipts(value)
+    if marker == "native_" and re.fullmatch(r"native_[0-9a-f]{20}_[0-9]+", value) is None:
+        return value, []
+    output = value
+    cursor = 0
+    matches: list[str] = []
+    while True:
+        marker_start = output.find(marker, cursor)
+        if marker_start < 0:
+            break
+        start = marker_start + len(marker)
+        matched_length = next((length for length in lengths
+                               if start + length <= len(output)
+                               and all(char in "0123456789abcdef"
+                                       for char in output[start:start + length])
+                               and (start + length == len(output)
+                                    or output[start + length] not in "0123456789abcdef")), None)
+        if matched_length is None:
+            if marker == "full_output_handle=check-receipt:":
+                matches.append("")  # The fixture truncates this labeled value after the prefix.
+            elif (marker == "continuation-workspaces/"
+                  and output.startswith("<workspace>/", start)):
+                matches.append("")  # The fixture replaces the generated ID with this stable placeholder.
+                cursor = start + len("<workspace>/")
+                continue
+            cursor = start
+            continue
+        end = _legacy_sequence_end(output, start + matched_length)
+        matches.append(output[start:end])
+        output = output[:start] + "<wire-id>" + output[end:]
+        cursor = start + len("<wire-id>")
+    return output, matches
+
+
+def _legacy_sequence_end(value: str, token_end: int) -> int:
+    """Include the old journal-sequence suffix when it is part of a wire-ID rendering."""
+    if token_end >= len(value) or value[token_end] != ":":
+        return token_end
+    end = token_end + 1
+    while end < len(value) and value[end].isdigit():
+        end += 1
+    return end if end > token_end + 1 else token_end
+
+
+def _replace_check_execution_refs(value: str, marker: str,
+                                  lengths: tuple[int, ...]) -> tuple[str, list[str]]:
+    """Mask run IDs in the comma-separated check_execution_ref list; keep ordinals visible."""
+    spans: list[tuple[int, int]] = []
+    matches: list[str] = []
+    cursor = 0
+    while True:
+        marker_start = value.find(marker, cursor)
+        if marker_start < 0:
+            break
+        token_start = marker_start + len(marker)
+        list_cursor = token_start
+        while True:
+            length = next((candidate for candidate in lengths
+                           if list_cursor + candidate <= len(value)
+                           and all(char in "0123456789abcdef"
+                                   for char in value[list_cursor:list_cursor + candidate])
+                           and list_cursor + candidate < len(value)
+                           and value[list_cursor + candidate] == ":"), None)
+            if length is None:
+                break
+            token_end = list_cursor + length
+            ordinal_start = token_end + 1
+            ordinal_end = ordinal_start
+            while ordinal_end < len(value) and value[ordinal_end].isdigit():
+                ordinal_end += 1
+            if ordinal_end == ordinal_start:
+                break
+            spans.append((list_cursor, token_end))
+            matches.append(value[list_cursor:token_end])
+            if ordinal_end >= len(value) or value[ordinal_end] != ",":
+                break
+            list_cursor = ordinal_end + 1
+        cursor = max(token_start, list_cursor)
+    output = value
+    for start, end in reversed(spans):
+        output = output[:start] + "<wire-id>" + output[end:]
+    return output, matches
+
+
+def _replace_journal_receipts(value: str) -> tuple[str, list[str]]:
+    """Mask only the generated comma-separated receipt list after its label."""
+    matches: list[str] = []
+    pattern = re.compile(r"journal receipts ([0-9a-f]{20}(?:, [0-9a-f]{20})*)(?![0-9a-f])")
+
+    def replace(match: re.Match[str]) -> str:
+        ids = match.group(1).split(", ")
+        matches.extend(ids)
+        return "journal receipts " + ", ".join("<wire-id>" for _ in ids)
+
+    return pattern.sub(replace, value), matches
+
+
+def _mask_one_json_body(body: bytes) -> tuple[bytes, list[tuple[str, list[str]]]]:
+    request = json.loads(body)
+    if not isinstance(request, (dict, list)) or (isinstance(request, list)
+                                                  and not all(isinstance(row, dict) for row in request)):
+        raise ValueError("request body must be a JSON object or a list of records")
+    records = request if isinstance(request, list) else [request]
+    values_by_path = []
+    for path, kind, text_marker, text_lengths in WIRE_ID_PATHS:
+        matches = []
+        for index, record in enumerate(records):
+            records[index], found = _replace_path(record, path, text_marker=text_marker,
+                                                   text_lengths=text_lengths)
+            matches.extend(found)
+        values_by_path.append((kind, matches))
+    if not isinstance(request, list):
+        request = records[0]
+    encoded = json.dumps(request, separators=(",", ":"), ensure_ascii=True).encode("utf-8")
+    return encoded, values_by_path
+
+
+def _mask_wire_ids_with_values(body: bytes) -> tuple[bytes, list[tuple[str, list[str]]]]:
+    """Return one request's path-masked bytes and the original values selected at each path."""
+    return _mask_one_json_body(body)
 
 
 def mask_wire_ids(body: bytes) -> bytes:
-    """Replace wire-ID tokens so a release comparison checks everything else exactly."""
-    body = _HISTORY_SHA.sub(rb"\1<applied-edit-history-sha256>", body)
-    return _WIRE_ID_TOKEN.sub(b"<wire-id>", _RESULT_SHA.sub(rb"\1<result-sha256>", body))
+    """Mask one wire body or consecutive pretty-printed CLI preflight records.
+
+    capture() joins requests/NNNN.json records with a newline. Each record is
+    itself multiline JSON, so splitting the stream into lines loses its framing.
+    """
+    source = body.decode("utf-8")
+    decoder = json.JSONDecoder()
+    offset = 0
+    masked = []
+    while offset < len(source):
+        while offset < len(source) and source[offset].isspace():
+            offset += 1
+        if offset == len(source):
+            break
+        _, end = decoder.raw_decode(source, offset)
+        masked.append(_mask_one_json_body(source[offset:end].encode("utf-8"))[0])
+        offset = end
+    if not masked:
+        raise ValueError("request capture contains no JSON objects")
+    return b"\n".join(masked)
 
 
 def result_hashes(run_dir: Path) -> tuple[list[str], set[str]]:
@@ -87,38 +377,13 @@ def unbacked_result_hash_changes(before_run: Path, after_run: Path) -> list[str]
             if before != after and (before not in before_texts or after not in after_texts)]
 
 
-# The field a differing wire ID sits in, named from the text just before it.
-_ID_FIELD_KINDS = (
-    (re.compile(rb"wire-truth:$"), "wire_truth_handle(request_id)"),
-    (re.compile(rb"edit_receipt\\*\":\s*\\*\"$"), "edit_receipt"),
-    (re.compile(rb"check-receipt:$"), "check_receipt"),
-    (re.compile(rb"check-execution:$"), "check_execution"),
-    (re.compile(rb"receipt_id\\*\":\s*\\*\"$"), "receipt_id"),
-    # native_<request_id>_<n>: tool-call IDs embed the request that made the call.
-    (re.compile(rb"native_$"), "native_call_id(request_id)"),
-    (re.compile(rb"request_id\\*\":\s*\\*\"$"), "request_id"),
-    (re.compile(rb"\"check:$"), "check_finding_id"),
-    (re.compile(rb"check_execution_ref: $"), "check_execution_ref"),
-    (re.compile(rb"expectation-receipt:$"), "expectation_receipt"),
-    (re.compile(rb"\"receipt:$"), "evidence_receipt"),
-    # A continuation workspace directory name, seen by the model inside test tracebacks.
-    (re.compile(rb"continuation-workspaces/$"), "continuation_workspace_dir"),
-)
-
-
 # Every field the receipt-determinism change (11-03) is allowed to move. Release parity tests
 # fail on a changed ID in any other field, and on any change outside an ID.
 MOVED_ID_FIELDS = frozenset({
-    "wire_truth_handle(request_id)", "request_id", "native_call_id(request_id)",
+    "tool_call_id", "wire_truth_handle(request_id)", "request_id", "native_call_id(request_id)",
     "edit_receipt", "check_receipt", "check_execution", "check_execution_ref",
-    "check_finding_id", "receipt_id", "result_sha256", "historical_applied_edits_sha256",
-    "expectation_receipt", "continuation_workspace_dir", "evidence_receipt",
+    "check_finding_id", "receipt_id", "continuation_workspace_dir",
 })
-
-
-def _id_field_kind(body: bytes, start: int) -> str:
-    before = body[max(0, start - 40):start]
-    return next((name for pattern, name in _ID_FIELD_KINDS if pattern.search(before)), "other_wire_id")
 
 
 def wire_id_drift(before: list[bytes], after: list[bytes]) -> tuple[list[str], dict[str, int]]:
@@ -132,33 +397,34 @@ def wire_id_drift(before: list[bytes], after: list[bytes]) -> tuple[list[str], d
     if len(before) != len(after):
         return [f"{len(before)} requests before, {len(after)} after"], kinds
     for index, (old, new) in enumerate(zip(before, after)):
-        if mask_wire_ids(old) != mask_wire_ids(new):
-            masked_old, masked_new = mask_wire_ids(old), mask_wire_ids(new)
+        masked_old, old_values = _mask_one_json_body(old)
+        masked_new, new_values = _mask_one_json_body(new)
+        if masked_old != masked_new:
             offset = next((i for i, (x, y) in enumerate(zip(masked_old, masked_new)) if x != y),
                           min(len(masked_old), len(masked_new)))
             problems.append(f"request {index}: non-ID bytes differ at masked offset {offset}: "
                             f"{masked_old[max(0, offset - 60):offset + 40]!r} -> "
                             f"{masked_new[max(0, offset - 60):offset + 40]!r}")
             continue
-        for old_token, new_token in zip(_WIRE_ID_TOKEN.finditer(old), _WIRE_ID_TOKEN.finditer(new)):
-            if old_token.group() != new_token.group():
-                kind = _id_field_kind(new, new_token.start())
-                kinds[kind] = kinds.get(kind, 0) + 1
-        for old_hash, new_hash in zip(_RESULT_SHA.finditer(old), _RESULT_SHA.finditer(new)):
-            if old_hash.group(2) != new_hash.group(2):
-                kinds["result_sha256"] = kinds.get("result_sha256", 0) + 1
-        for old_hash, new_hash in zip(_HISTORY_SHA.finditer(old), _HISTORY_SHA.finditer(new)):
-            if old_hash.group(2) != new_hash.group(2):
-                kinds["historical_applied_edits_sha256"] = kinds.get("historical_applied_edits_sha256", 0) + 1
+        for (kind, old_ids), (_new_kind, new_ids) in zip(old_values, new_values):
+            for old_id, new_id in zip(old_ids, new_ids):
+                if old_id != new_id:
+                    kinds[kind] = kinds.get(kind, 0) + 1
     return problems, kinds
 
 
 def changed_id_chars(before: list[bytes], after: list[bytes]) -> list[int]:
     """Per request, how many characters sit in wire-ID tokens whose value changed. A token count
     can follow the ID's characters, not only its length, so this bounds token movement."""
-    return [sum(len(n.group()) for o, n in zip(_WIRE_ID_TOKEN.finditer(old), _WIRE_ID_TOKEN.finditer(new))
-                if o.group() != n.group())
-            for old, new in zip(before, after)]
+    changed = []
+    for old, new in zip(before, after):
+        _, old_values = _mask_one_json_body(old)
+        _, new_values = _mask_one_json_body(new)
+        chars = sum(len(new_id) for (_kind, old_ids), (_new_kind, new_ids)
+                    in zip(old_values, new_values)
+                    for old_id, new_id in zip(old_ids, new_ids) if old_id != new_id)
+        changed.append(chars)
+    return changed
 
 
 def id_length_deltas(before: list[bytes], after: list[bytes]) -> tuple[list[int], list[str]]:
@@ -166,8 +432,11 @@ def id_length_deltas(before: list[bytes], after: list[bytes]) -> tuple[list[int]
     change is NOT fully explained by them (older releases suffixed some IDs with ':<sequence>')."""
     deltas, problems = [], []
     for index, (old, new) in enumerate(zip(before, after)):
-        pairs = zip(_WIRE_ID_TOKEN.finditer(old), _WIRE_ID_TOKEN.finditer(new))
-        delta = sum(len(n.group()) - len(o.group()) for o, n in pairs)
+        _, old_values = _mask_one_json_body(old)
+        _, new_values = _mask_one_json_body(new)
+        delta = sum(len(new_id) - len(old_id)
+                    for (_kind, old_ids), (_new_kind, new_ids) in zip(old_values, new_values)
+                    for old_id, new_id in zip(old_ids, new_ids))
         deltas.append(delta)
         if len(new) - len(old) != delta:
             problems.append(f"request {index}: size changed by {len(new) - len(old)}, ID tokens by {delta}")
@@ -196,27 +465,21 @@ def request_id_handle_mismatches(run_dir: Path) -> list[str]:
 
 
 def planted_body_change_is_caught(body: bytes) -> bool:
-    """Flip one letter outside every wire ID in a real body; wire_id_drift must report each one.
-
-    Planted at the first eligible byte, the middle of the body, and the first byte after a
-    masked ID, so a mask that swallowed a neighbouring field would show up.
-    """
-    masked_spans = [match.span() for match in _WIRE_ID_TOKEN.finditer(body)]
-    masked_spans += [match.span(2) for match in _RESULT_SHA.finditer(body)]
-    masked_spans += [match.span(2) for match in _HISTORY_SHA.finditer(body)]
-    eligible = [position for position, value in enumerate(body)
-                if chr(value).isalpha()
-                and not any(start <= position < end for start, end in masked_spans)]
-    if not eligible or not masked_spans:
-        return False
-    first_id_end = min(end for _start, end in masked_spans)
-    targets = {eligible[0], eligible[len(eligible) // 2],
-               next((p for p in eligible if p >= first_id_end), eligible[-1])}
-    for position in targets:
-        planted = body[:position] + bytes([body[position] ^ 0x20]) + body[position + 1:]
-        if not wire_id_drift([body], [planted])[0]:
-            return False
-    return True
+    """Check role and 24-hex message-content changes on a real request."""
+    request = json.loads(body)
+    for message in request.get("messages", []):
+        if (isinstance(message, dict) and isinstance(message.get("role"), str)
+                and isinstance(message.get("content"), str)):
+            message["role"] += "-planted"
+            planted = json.dumps(request, separators=(",", ":"), ensure_ascii=True).encode()
+            if not wire_id_drift([body], [planted])[0]:
+                return False
+            message["content"] += "\nparity-control=" + "c" * 24
+            first = json.dumps(request, separators=(",", ":"), ensure_ascii=True).encode()
+            message["content"] = message["content"][:-24] + "d" * 24
+            second = json.dumps(request, separators=(",", ":"), ensure_ascii=True).encode()
+            return bool(wire_id_drift([first], [second])[0])
+    return False
 
 
 def write_launcher(path: Path) -> None:
