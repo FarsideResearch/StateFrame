@@ -113,7 +113,49 @@ time.sleep(60)
     assert "stalled child stdout" in str(error)
     assert error.group_gone
     with pytest.raises(ProcessLookupError):
-        os.getpgid(error.process_group_id)
+        os.killpg(error.process_group_id, 0)
+
+
+def test_timeout_kills_group_after_leader_exits_with_live_grandchild(monkeypatch, tmp_path):
+    monkeypatch.setattr(engine_run, "host_load_factor", lambda: 1.0)
+    marker = tmp_path / "grandchild.pid"
+    child = _child(tmp_path, """
+from pathlib import Path
+import subprocess
+import sys
+
+grandchild = subprocess.Popen(
+    [sys.executable, "-c", "import time; time.sleep(60)"],
+    stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+)
+Path(sys.argv[1]).write_text(str(grandchild.pid), encoding="utf-8")
+""")
+    original_killpg = os.killpg
+
+    with start_monitored([sys.executable, str(child), str(marker)], expected_seconds=1,
+                         step="exited leader with live grandchild") as process:
+        process_group_id = process.process_group_id
+        group_gone = False
+        try:
+            assert process.wait(timeout=5) == 0
+            assert marker.is_file()
+            original_killpg(process_group_id, 0)
+            process.started_at -= process.hard_ceiling
+
+            with pytest.raises(EngineRunTimeout) as caught:
+                process.poll()
+
+            assert caught.value.group_gone
+            with pytest.raises(ProcessLookupError):
+                original_killpg(process_group_id, 0)
+            group_gone = True
+        finally:
+            # The test owns this group and must not strand its grandchild on failure.
+            if not group_gone:
+                try:
+                    original_killpg(process_group_id, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
 
 
 def test_signal_owned_uses_monitored_process_group(monkeypatch, tmp_path):

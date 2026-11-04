@@ -223,13 +223,17 @@ def _tail(path: Path) -> str:
 
 
 def _group_exists(process_group_id: int) -> bool:
-    from fixtures.process_signals import monitored_group_exists
-
-    return monitored_group_exists(process_group_id)
+    try:
+        os.killpg(process_group_id, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
 
 
 class EngineProcess:
-    """A process-group watcher with polling, waiting, and captured text output."""
+    """A process-group watcher retaining Popen-style controls and captured text output."""
 
     def __init__(self, process: subprocess.Popen[bytes], args: Sequence[str | os.PathLike[str]],
                  expected_seconds: float, run_dir: Path | None, step: str,
@@ -281,14 +285,8 @@ class EngineProcess:
         return "starting"
 
     def _stop_group(self) -> bool:
-        from fixtures.process_signals import signal_run_owned
-
-        run_dir = self.run_dir or Path(".")
         try:
-            # A stalled or failed monitor must stop the child even without a checkpoint.
-            signal_run_owned(run_dir, self, signal.SIGTERM,
-                             deadline=time.monotonic(), what="monitor cleanup",
-                             require_checkpoint_saved=False, group=True)
+            os.killpg(self.process_group_id, signal.SIGTERM)
         except (ProcessLookupError, PermissionError):
             pass
         terminate_until = time.monotonic() + TERMINATE_GRACE_SECONDS
@@ -296,18 +294,14 @@ class EngineProcess:
             time.sleep(POLL_INTERVAL_SECONDS)
         if _group_exists(self.process_group_id):
             try:
-                signal_run_owned(run_dir, self, signal.SIGKILL,
-                                 deadline=time.monotonic(), what="monitor cleanup escalation",
-                                 require_checkpoint_saved=False, group=True)
+                os.killpg(self.process_group_id, signal.SIGKILL)
             except (ProcessLookupError, PermissionError):
                 pass
         try:
             self._process.wait(timeout=GROUP_VERIFY_SECONDS)
         except subprocess.TimeoutExpired:
             try:
-                signal_run_owned(run_dir, self, signal.SIGKILL,
-                                 deadline=time.monotonic(), what="monitor reap escalation",
-                                 require_checkpoint_saved=False, group=True)
+                os.killpg(self.process_group_id, signal.SIGKILL)
             except (ProcessLookupError, PermissionError):
                 pass
         verify_until = time.monotonic() + GROUP_VERIFY_SECONDS
@@ -409,6 +403,18 @@ class EngineProcess:
     @property
     def stderr_text(self) -> str:
         return self._output_paths[1].read_text(errors="replace")
+
+    def send_signal(self, sig: int) -> None:
+        try:
+            self._process.send_signal(sig)
+        except ProcessLookupError:
+            return
+
+    def terminate(self) -> None:
+        self._process.terminate()
+
+    def kill(self) -> None:
+        self._process.kill()
 
     def close(self) -> None:
         if self._closed:

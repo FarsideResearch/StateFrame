@@ -66,8 +66,12 @@ def _raw_run_signals(source: str, relative: Path) -> list[tuple[int, str]]:
             continue
         func = node.func
         raw = isinstance(func, ast.Name) and func.id in raw_names
+        group_probe = (isinstance(func, ast.Attribute) and func.attr == "killpg"
+                       and len(node.args) >= 2 and isinstance(node.args[1], ast.Constant)
+                       and node.args[1].value == 0)
         raw |= (isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name)
-                and func.value.id in os_names and func.attr in {"kill", "killpg"})
+                and func.value.id in os_names and func.attr in {"kill", "killpg"}
+                and not group_probe)
         raw |= (isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name)
                 and func.value.id in signal_modules
                 and func.attr in {"signal_verified", "signal_owned"})
@@ -86,17 +90,39 @@ def _raw_run_signals(source: str, relative: Path) -> list[tuple[int, str]]:
     return violations
 
 
-def test_run_kills_use_checkpoint_barrier() -> None:
+def _unbarriered_signals(root: Path) -> dict[str, list[tuple[int, str]]]:
     violations = {}
-    for path in TESTS.rglob("*.py"):
-        relative = path.relative_to(TESTS)
-        if relative.as_posix() == "fixtures/process_signals.py" or (
+    for path in root.rglob("*.py"):
+        relative = path.relative_to(root)
+        # The monitor owns and reaps its engine process group after the leader exits; run-kill decisions stay in tests.
+        if relative.as_posix() in {"fixtures/process_signals.py", "engine_run.py"} or (
                 relative.parts[0] != "acceptance" and path.name in PRIMITIVE_TESTS):
             continue
         found = _raw_run_signals(path.read_text(encoding="utf-8"), relative)
         if found:
             violations[relative.as_posix()] = found
+    return violations
+
+
+def test_run_kills_use_checkpoint_barrier() -> None:
+    violations = _unbarriered_signals(TESTS)
     assert not violations, violations
+
+
+def test_engine_run_primitive_exemption_is_path_exact(tmp_path: Path) -> None:
+    source = "import os\nos.killpg(123, 9)\n"
+    (tmp_path / "engine_run.py").write_text(source, encoding="utf-8")
+    acceptance = tmp_path / "acceptance"
+    acceptance.mkdir()
+    (acceptance / "engine_run.py").write_text(source, encoding="utf-8")
+
+    assert _unbarriered_signals(tmp_path) == {
+        "acceptance/engine_run.py": [(2, "os.killpg(123, 9)")],
+    }
+
+
+def test_group_existence_probe_is_not_a_run_kill() -> None:
+    assert not _raw_run_signals("import os\nos.killpg(pgid, 0)\n", Path("test_engine_run.py"))
 
 
 @pytest.mark.parametrize("source", (
