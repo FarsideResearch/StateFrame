@@ -270,6 +270,12 @@ def build_qualified_request(capture, runtime, body, *, endpoint, key, deadline=N
         fitted_inputs, fitted_delivery,
         meter=_request_token_meter(context, candidate), endpoint=endpoint, key=key,
     )
+    layout_record = getattr(candidate, "_final_cache_layout_record", None)
+    if isinstance(layout_record, Mapping):
+        try:
+            capture._final_cache_layout_record = dict(layout_record)
+        except (AttributeError, TypeError):
+            pass
     candidate.journal.emit("final_wire_rebudgeted", producer="kernel_final_wire_allocation",
                            request_id=candidate.request_id, step=candidate.step,
                            before=before_fit_bytes, after=len(json.dumps(body).encode()),
