@@ -189,7 +189,7 @@ def test_deferred_prefit_layout_off_keeps_released_request_bytes(tmp_path, monke
 
     monkeypatch.setenv("STATEFRAME_FINAL_CACHE_LAYOUT", "off")
     monkeypatch.setenv("STATEFRAME_STABLE_TOOL_HEAD", "off")
-    baseline = _archive_revision("7ea0b8c", tmp_path / "released")
+    baseline = _archive_revision("1871e01", tmp_path / "released")
     repo = tmp_path / "repo"
     shutil.copytree(ROOT / "examples/discount_bug", repo)
     launcher = tmp_path / "fixed_seed_run.py"
@@ -200,14 +200,18 @@ def test_deferred_prefit_layout_off_keeps_released_request_bytes(tmp_path, monke
     released = capture(baseline, sys.executable, launcher, script, repo, run_dir,
                        stable_tool_head="off")
     run_dir.rename(tmp_path / "released-run")
+    from _journal import measurement_events
+
+    def budget_slots(path):
+        return [(row.get("step"), row.get("sequence"))
+                for row in measurement_events(path)
+                if row.get("kind") == "request_budget_final_wire"]
+
+    released_slots = budget_slots(tmp_path / "released-run")
     current = capture(ROOT, sys.executable, launcher, script, repo, run_dir,
                       stable_tool_head="off")
     assert len(_wire(run_dir)) >= 2
-    from stateframe.engine.kernel_journal_store import journal_paths, open_journal
-    events = []
-    for path in journal_paths(run_dir / "worker" / "measurement-runs"):
-        with open_journal(path) as source:
-            events.extend(json.loads(line) for line in source if line.strip())
+    events = measurement_events(run_dir)
     deferred = [row for row in events
                 if row.get("kind") == "request_budget_final_wire"
                 and row.get("status") == "PRE_FIT_DEFERRED"]
@@ -218,16 +222,15 @@ def test_deferred_prefit_layout_off_keeps_released_request_bytes(tmp_path, monke
     assert all(row.get("status") == "READY" and row.get("measure_method") == "tokenize"
                for row in proofs)
     assert current == released  # Includes every provider-visible request_id.
+    assert budget_slots(run_dir) == released_slots
     run_dir.rename(tmp_path / "current-run")
 
-    # Planted control: ddc59ca skipped this pre-fit event and shifted request 2.
-    skipped_tree = _archive_revision("ddc59ca", tmp_path / "skipped-event")
-    skipped = capture(skipped_tree, sys.executable, launcher, script, repo, run_dir,
-                      stable_tool_head="off")
-    from stateframe.request_records import read_request_record
-    released_id = json.loads(read_request_record(tmp_path / "released-run", "0002.json"))["request_id"]
-    skipped_id = json.loads(read_request_record(run_dir, "0002.json"))["request_id"]
-    assert skipped != released and skipped_id != released_id
+    # Planted control: this revision omitted the pre-fit journal slot. Request
+    # IDs on rc331 are content-derived, so compare journal sequences directly.
+    skipped_tree = _archive_revision("d616a87", tmp_path / "skipped-event")
+    capture(skipped_tree, sys.executable, launcher, script, repo, run_dir,
+            stable_tool_head="off")
+    assert budget_slots(run_dir) != released_slots
 
 
 def test_switch_off_keeps_per_turn_menus(tmp_path):

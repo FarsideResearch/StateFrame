@@ -1,10 +1,12 @@
 """The allocation and final proof must use one request measurement authority."""
 from __future__ import annotations
 
+import ast
 import copy
 import json
 import math
 import time
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -13,6 +15,30 @@ from kernel_frame_allocation_capture import FrozenRequestCounter, final_request_
 from kernel_frame_request_allocation import FrameRequestAllocationError
 from kernel_final_wire_budget import reconcile_frozen_budget
 from kernel_request_diet import RequestTokenMeter
+
+
+def test_both_framefit5_runtime_bindings_defer_prefit_proof():
+    source = Path(__file__).resolve().parents[1] / "src/stateframe/engine/kernel_stateframe_runtime.py"
+    tree = ast.parse(source.read_text(encoding="utf-8"))
+    calls = [node for node in ast.walk(tree)
+             if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+             and node.func.id == "author_final_tool_surface"]
+
+    def assert_deferred(bindings):
+        assert len(bindings) == 2
+        assert all(any(keyword.arg == "final_fit_pending"
+                       and isinstance(keyword.value, ast.Constant)
+                       and keyword.value.value is True
+                       for keyword in call.keywords) for call in bindings)
+
+    assert_deferred(calls)
+    # Planted control: either former binding without the flag publishes a
+    # HOST_BLOCKED final proof for an expanded body before it is fitted.
+    skipped = copy.deepcopy(calls)
+    skipped[0].keywords = [keyword for keyword in skipped[0].keywords
+                           if keyword.arg != "final_fit_pending"]
+    with pytest.raises(AssertionError):
+        assert_deferred(skipped)
 
 
 def _body(size=1000):
@@ -45,7 +71,6 @@ def test_prefit_menu_binding_defers_final_proof_until_after_fit(monkeypatch):
     import kernel_final_wire_budget
     import kernel_read_lockout
     import kernel_request_tool_surface
-    from kernel_wire_identity import next_wire_id
 
     monkeypatch.setenv("STATEFRAME_TOOL_MENU_MEMO", "off")
     monkeypatch.setenv("STATEFRAME_STABLE_TOOL_HEAD", "off")
@@ -115,11 +140,20 @@ def test_prefit_menu_binding_defers_final_proof_until_after_fit(monkeypatch):
         "tool_names": ["read"],
         "tool_schema_digest": capture.final_tool_surface["tool_schema_digest"],
     }]
-    # Planted skipped-event control: the next provider-visible ID changes.
-    expected_next_id = next_wire_id(capture.journal, "request", 2)
+    # The two runtime bindings each retain their old journal sequence slot.
+    kernel_request_tool_surface.author_final_tool_surface(
+        capture, runtime, body, request_id=capture.request_id,
+        bind_current_surface=True, final_fit_pending=True)
+    assert capture.journal._sequence == 2
+    assert [event["status"] for event in capture.journal.events] == [
+        "PRE_FIT_DEFERRED", "PRE_FIT_DEFERRED"]
+    assert proofs == ["HOST_BLOCKED"]
+    # Planted skipped-event control: both former proof slots must be retained.
+    # rc331 request IDs derive from content, so sequence is checked directly.
     skipped = Journal()
+    skipped.emit("request_budget_final_wire", status="PRE_FIT_DEFERRED")
     with pytest.raises(AssertionError):
-        assert next_wire_id(skipped, "request", 2) == expected_next_id
+        assert skipped._sequence == capture.journal._sequence
     body["messages"][0]["content"] = "x" * 1000
     assert counted_proof(capture, runtime, body)["status"] == "READY"
     assert proofs == ["HOST_BLOCKED", "READY"]

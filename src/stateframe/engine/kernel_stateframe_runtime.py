@@ -24383,6 +24383,7 @@ class StateFrameRuntime:
                         capture, self, menu_body, request_id=capture.request_id,
                         bind_current_surface=True,
                         framefit5_preassembly=generic_framefit_preassembly,
+                        final_fit_pending=True,
                     )
                     if not isinstance(surface, Mapping):
                         raise FrameFit5Error("final allocation tool surface unavailable")
@@ -24750,6 +24751,7 @@ class StateFrameRuntime:
                 final_surface = author_final_tool_surface(
                     capture, self, final_body, request_id=capture.request_id,
                     bind_current_surface=True,
+                    final_fit_pending=True,
                 )
                 final_tools = final_body.get("tools")
                 if (not isinstance(final_surface, Mapping)

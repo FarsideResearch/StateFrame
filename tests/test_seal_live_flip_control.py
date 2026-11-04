@@ -12,6 +12,7 @@ import time
 import pytest
 
 from _stateframe_home import isolated_stateframe_home
+from _journal import measurement_events
 from tests import test_allocation_replay_corpus as corpus
 from tests.tape_server import TapeServer
 
@@ -21,10 +22,11 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class FlipTapeServer(TapeServer):
-    """Answer allocation tokenizations, then refuse calls until the next send."""
+    """Answer allocation tokenizations, then refuse calls for one or all later sends."""
 
-    def __init__(self, script):
+    def __init__(self, script, *, sticky=False):
         super().__init__(script)
+        self.sticky = sticky
         self.armed = False
         self.successful_tokenizations = 0
         self.failed_tokenizations = 0
@@ -59,7 +61,7 @@ class FlipTapeServer(TapeServer):
                         self._send_json(503, {"error": {"message": "tokenizer unavailable"}})
                         return
                 super().do_POST()
-                if path.endswith("/chat/completions"):
+                if path.endswith("/chat/completions") and not tape.sticky:
                     with tape._lock:
                         tape.armed = False
 
@@ -120,18 +122,9 @@ def _engine_python(tmp_path: Path, endpoint_url: str) -> Path:
     return wrapper
 
 
-def _events(run_dir: Path):
-    from stateframe.engine.kernel_journal_store import journal_paths, open_journal
-
-    events = []
-    for path in journal_paths(run_dir / "worker" / "measurement-runs"):
-        with open_journal(path) as source:
-            events.extend(json.loads(line) for line in source if line.strip())
-    return events
-
-
 @pytest.mark.host_sandbox
-def test_layout_tokenizer_flip_seals_live_request(tmp_path):
+@pytest.mark.parametrize("sticky", [False, True], ids=["one-request", "sticky-outage"])
+def test_layout_tokenizer_flip_seals_live_request(tmp_path, sticky):
     """A projected exact fit survives a later tokenizer outage at final proof."""
     source_root = ROOT / "src"
     assert (source_root / "stateframe" / "_child.py").is_file()
@@ -156,7 +149,7 @@ def test_layout_tokenizer_flip_seals_live_request(tmp_path):
         "PYTHONHASHSEED": "0",
     })
     script = case_dir / "script.json.gz"
-    with FlipTapeServer(script) as endpoint:
+    with FlipTapeServer(script, sticky=sticky) as endpoint:
         command = [
             sys.executable, "-m", "stateframe", "run", "--repo", str(repo),
             "--task", task, "--endpoint", endpoint.url,
@@ -180,7 +173,7 @@ def test_layout_tokenizer_flip_seals_live_request(tmp_path):
     engine_result = summary.get("engine_result")
     marker_path = run_dir / "seal-live-flip.json"
     marker = json.loads(marker_path.read_text()) if marker_path.is_file() else None
-    events = _events(run_dir)
+    events = measurement_events(run_dir)
     budget_rows = [row for row in events if row.get("kind") == "request_budget_final_wire"]
     blocked_proofs = [row for row in budget_rows
                       if row.get("phase") == "frozen_transport_revalidation"
@@ -213,3 +206,22 @@ def test_layout_tokenizer_flip_seals_live_request(tmp_path):
                       if row.get("status") == "READY"}
     assert sent_digests and sent_digests <= sealed_digests, detail
     assert not blocked_proofs, detail
+    if sticky:
+        ready_by_digest = {row.get("body_sha256"): row.get("request_id")
+                           for row in budget_rows if row.get("status") == "READY"}
+        sent_ids = [ready_by_digest.get("sha256:" + row["request_sha256"])
+                    for row in sends if "error" not in row]
+        assert flip_request_id in sent_ids and sent_ids.index(flip_request_id) < len(sent_ids) - 1, detail
+        deferred = [row for row in budget_rows
+                    if row.get("request_id") in sent_ids
+                    and row.get("phase") == "pre_fit_tool_surface"
+                    and row.get("status") == "PRE_FIT_DEFERRED"]
+        later_ids = sent_ids[sent_ids.index(flip_request_id) + 1:]
+        assert any(row.get("request_id") in later_ids
+                   and row.get("measure_method") == "calibrated_bytes"
+                   and row.get("phase") == "frozen_transport_revalidation"
+                   for row in budget_rows), detail
+        assert all(sum(row.get("request_id") == request_id for row in deferred) >= 2
+                   for request_id in later_ids), detail
+        assert all(row.get("status") == "READY" for row in budget_rows
+                   if row.get("phase") == "frozen_transport_revalidation"), detail

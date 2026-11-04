@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- FrameFit5 defers both provisional tool bindings until the request is fitted, preserving their journal sequence slots without recording a rejected final proof; the fitted request still receives token and byte validation.
 
 ## 0.3.35 (2026-11-04)
 
