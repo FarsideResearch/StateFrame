@@ -52,6 +52,33 @@ class SourceMeter:
         return self.base_tokens + source_tokens, "tokenize"
 
 
+class EstimatedMeter:
+    """Use the 040b estimator method for request and source-only counts."""
+
+    def __init__(self, source_method="estimate"):
+        self.source_method = source_method
+        self.source_measurements = []
+        self.stable_measurements = []
+
+    def measure(self, body):
+        from kernel_context import token_estimate
+        from kernel_stable_wire import is_stable_wire_projection
+
+        messages = body.get("messages", []) if isinstance(body, dict) else []
+        tokens = token_estimate(body)
+        source_rows = [row for row in messages
+                       if str(row.get("content", "")).startswith("[Current source:")]
+        if messages and len(source_rows) == len(messages):
+            method = self.source_method
+            measured = 0 if method == "unavailable" else tokens
+            self.source_measurements.append((
+                tuple(row["content"] for row in source_rows), measured, method))
+            return measured, method
+        if is_stable_wire_projection(messages):
+            self.stable_measurements.append((tokens, len(json.dumps(body).encode("utf-8"))))
+        return tokens, "estimate"
+
+
 class Journal:
     run_id = "stable-wire-test"
 
@@ -176,6 +203,45 @@ def _messages_with_prefix(rows, prefix):
 
 def _status_rows(rows):
     return _messages_with_prefix(rows, "[Source windows status]")
+
+
+def _serialized_stable_messages(messages):
+    volatile_index = next(
+        index for index, row in enumerate(messages)
+        if isinstance(row, dict) and row.get("name") == "stateframe_stable_wire_volatile"
+    )
+    return b"\n".join(
+        json.dumps(row, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        for row in messages[:volatile_index]
+    )
+
+
+def _assert_stable_message_byte_prefix(first, second):
+    first_bytes = _serialized_stable_messages(first["messages"])
+    second_bytes = _serialized_stable_messages(second["messages"])
+    assert second_bytes.startswith(first_bytes)
+
+
+def _estimated_window_sequence(monkeypatch, *, source_method):
+    windows = [
+        _window(path=f"pkg/{name}.py", revision=_revision(str(index)),
+                text="x" * 30_000 + "\n")
+        for index, name in enumerate(("a", "b", "c", "d"), start=1)
+    ]
+    runtime = SimpleNamespace(_stable_wire_state=None)
+    meter = EstimatedMeter(source_method=source_method)
+    inputs = {"token_ceiling": 33_344, "byte_ceiling": 1_000_000,
+              "source_plan": {}, "sources": {}, "receipt": None}
+    current_sets = ([windows[0], windows[1]], [windows[1]], [windows[2]], [windows[3]])
+    results = []
+    events = []
+    for current in current_sets:
+        result, _, journal = _invoke(
+            monkeypatch, _body(current), runtime, headroom=16_000,
+            meter=meter, inputs=copy.deepcopy(inputs))
+        results.append(result)
+        events.append(journal.events)
+    return windows, results, events, meter
 
 
 def test_windows_remain_byte_immutable_and_new_versions_append(monkeypatch):
@@ -387,6 +453,126 @@ def test_headroom_relays_to_current_windows_then_appends_again(monkeypatch):
                                  headroom=6_000, meter=meter)
     assert _messages_with_prefix(fourth["messages"], "[Current source:") == [v3, other]
     assert not any(row["kind"] == "stable_wire_epoch" for row in events4.events)
+
+
+def test_estimated_meter_keeps_same_epoch_stable_prefix_and_counts_retained_headroom(monkeypatch):
+    windows, results, events, meter = _estimated_window_sequence(
+        monkeypatch, source_method="estimate")
+
+    # The first window is retained, not-current, on the next send. Its estimate
+    # keeps the source block in epoch 1, so the serialized stable messages match.
+    _assert_stable_message_byte_prefix(results[0], results[1])
+    assert not any(event["kind"] == "stable_wire_epoch" for event in events[1])
+    assert _status_rows(results[0]["messages"])[0]["content"].splitlines()[1] == "Epoch 1"
+    assert "\nEpoch 1\n" in _status_rows(results[1]["messages"])[0]["content"]
+
+    expected_sets = (
+        ((windows[0]["content"],), 16_000),
+        ((windows[0]["content"], windows[1]["content"]), 16_000),
+        ((windows[0]["content"], windows[1]["content"],
+          windows[2]["content"]), 16_000),
+    )
+    measured = {contents: (tokens, method)
+                for contents, tokens, method in meter.source_measurements}
+    assert measured[expected_sets[0][0]][0] < expected_sets[0][1]
+    assert measured[expected_sets[1][0]][0] < expected_sets[1][1]
+    retained_tokens, retained_method = measured[expected_sets[2][0]]
+    assert retained_tokens > expected_sets[2][1]
+    assert retained_method == "estimate"
+
+    epochs = [event for event in events[3] if event["kind"] == "stable_wire_epoch"]
+    assert len(epochs) == 1
+    assert epochs[0]["reason"] == "headroom"
+    assert epochs[0]["retained_tokens"] == retained_tokens
+    assert epochs[0]["epoch"] == 2
+
+
+def test_unavailable_source_meter_rebases_each_send_and_breaks_prefix_control(monkeypatch):
+    _windows, results, events, meter = _estimated_window_sequence(
+        monkeypatch, source_method="unavailable")
+
+    epochs = [[event for event in rows if event["kind"] == "stable_wire_epoch"]
+              for rows in events]
+    assert [rows[0]["epoch"] for rows in epochs] == [1, 2, 3, 4]
+    assert all(rows[0]["reason"] in {"start", "headroom"} for rows in epochs)
+    assert all(method == "unavailable" and tokens == 0
+               for _contents, tokens, method in meter.source_measurements)
+
+    # Planted control: applying the prefix assertion to the same sequence with
+    # an unavailable source meter fails because each send rebases to its window.
+    with pytest.raises(AssertionError):
+        _assert_stable_message_byte_prefix(results[0], results[1])
+
+
+def test_estimated_stable_request_uses_040b_reserve_and_fits_its_token_ceiling(monkeypatch):
+    import kernel_cache_layout_candidate as candidate
+    from kernel_context import token_estimate
+    from kernel_stable_wire import is_stable_wire_projection
+
+    monkeypatch.setenv("STATEFRAME_STABLE_WIRE", "on")
+    monkeypatch.delenv("STATEFRAME_FINAL_CACHE_LAYOUT", raising=False)
+    monkeypatch.setenv("STATEFRAME_STABLE_WIRE_HEADROOM", "16000")
+    monkeypatch.setattr("kernel_request_source_window.verify_final_source_delivery",
+                        lambda _plan, _messages, **_kwargs: {"status": "COMPLETE"})
+    monkeypatch.setattr("kernel_request_source_window.source_delivery_satisfied",
+                        lambda receipt: receipt["status"] == "COMPLETE")
+
+    def body_with_optional_context():
+        body = _final_layout_body()
+        frame_index = next(index for index, row in enumerate(body["messages"])
+                           if row.get("content", "").startswith("[StateFrame]\n"))
+        body["messages"].insert(frame_index, {
+            "role": "user", "content": "[Optional context]\n" + "x" * 20_000,
+        })
+        return body
+
+    def render(body, *, meter, inputs, trim=None):
+        if trim is not None:
+            inputs["_final_layout_trim"] = trim
+        return candidate.render_final_cache_candidate(
+            SimpleNamespace(journal=Journal(), request_id="estimated-fit", step=1,
+                            request_source_final_delivery=None),
+            SimpleNamespace(_stable_wire_state=None), body, meter=meter, inputs=inputs)
+
+    probe_meter = EstimatedMeter()
+    probe = render(
+        body_with_optional_context(), meter=probe_meter,
+        inputs={"token_ceiling": 100_000, "byte_ceiling": 1_000_000,
+                "source_plan": {}, "sources": {}, "receipt": None})
+    assert is_stable_wire_projection(probe["messages"])
+    projected_tokens = token_estimate(probe)
+    token_ceiling = projected_tokens - 128
+    byte_ceiling = 1_000_000
+    expected_reserve = candidate._final_layout_reserve(
+        projected_tokens, token_ceiling,
+        len(json.dumps(probe).encode("utf-8")), byte_ceiling)
+    reserves = []
+
+    def trim(token_reserve, byte_reserve):
+        reserves.append((token_reserve, byte_reserve))
+        assert token_reserve > 0
+        original["messages"] = [
+            row for row in original["messages"]
+            if not str(row.get("content", "")).startswith("[Optional context]")
+        ]
+        return True
+
+    original = body_with_optional_context()
+    meter = EstimatedMeter()
+    result = render(
+        original, meter=meter,
+        inputs={"token_ceiling": token_ceiling, "byte_ceiling": byte_ceiling,
+                "source_plan": {}, "sources": {}, "receipt": None},
+        trim=trim)
+
+    assert reserves == [expected_reserve]
+    assert all(not str(row.get("content", "")).startswith("[Optional context]")
+               for row in original["messages"])
+    measured_tokens, method = meter.measure(result)
+    assert method == "estimate"
+    assert measured_tokens <= token_ceiling
+    assert token_estimate(result) == measured_tokens
+    assert is_stable_wire_projection(result["messages"])
 
 
 def test_fresh_epoch_that_still_does_not_fit_fails_open(monkeypatch):

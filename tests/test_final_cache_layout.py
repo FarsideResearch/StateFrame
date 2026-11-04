@@ -572,3 +572,42 @@ def test_pending_replay_without_request_body_has_no_layout_decision(tmp_path, mo
     run.mkdir()
     install_wire_recorder(run, "http://127.0.0.1:8000/v1/chat/completions", replay)
     assert candidate.replay_final_layout_decision() is None
+
+
+def test_physical_send_records_layout_disposition_from_capture(monkeypatch, tmp_path):
+    import kernel_bounded_http
+    import kernel_measurement
+    from stateframe import _child
+
+    endpoint = "http://127.0.0.1:1/v1/chat/completions"
+    response_bytes = b'{"choices":[{"message":{"role":"assistant","content":"ok"}}]}'
+    submitted_wires = []
+
+    def request_bytes(submitted, *_args, **_kwargs):
+        submitted_wires.append(submitted)
+        return response_bytes
+
+    monkeypatch.setattr(kernel_bounded_http, "request_bytes", request_bytes)
+    _child.install_wire_recorder(tmp_path, endpoint)
+
+    body = {
+        "model": "scripted",
+        "messages": [{"role": "user", "content": "request"}],
+        "tools": [],
+    }
+    wire = json.dumps(body).encode()
+    journal = kernel_measurement.AuditJournal(tmp_path, "layout-record", {})
+    capture = kernel_measurement.RequestCapture(journal, 1, "snapshot")
+    capture._final_cache_layout_record = {"final_layout": "applied"}
+    assert kernel_measurement.ACTIVE_REQUEST.get() is None
+
+    response, _submission, _started = capture._send_transport_with_retries(
+        body, wire, endpoint, "", admission=None, socket_timeout=5,
+        deadline=kernel_measurement.time.monotonic() + 10, wall_timeout=5,
+        backend_identity={}, request_extensions={})
+
+    assert response["choices"]
+    assert submitted_wires == [wire]
+    record = json.loads((tmp_path / "sends.jsonl").read_text())
+    assert record["final_layout"] == "applied"
+    assert kernel_measurement.ACTIVE_REQUEST.get() is None
