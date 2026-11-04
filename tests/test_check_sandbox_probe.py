@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import platform
 import shutil
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -14,6 +15,7 @@ import pytest
 import kernel_test_isolation as isolation
 from stateframe import runner
 from stateframe.engine import kernel_test_isolation as runner_isolation
+from kernel_check_receipts import sandbox_open_denial
 
 
 def _require_working_sandbox(tmp_path: Path) -> None:
@@ -51,6 +53,49 @@ def _make_venv_python(venv: Path) -> Path:
     python = venv / "bin" / "python"
     python.symlink_to(sys.executable)
     return python
+
+
+def _shell_python_wrapper(path: Path) -> Path:
+    path.write_text(f"#!/bin/sh\nexec {shlex.quote(sys.executable)} \"$@\"\n",
+                    encoding="utf-8")
+    path.chmod(0o700)
+    return path
+
+
+def test_darwin_check_profile_admits_system_shebang_but_not_private_interpreter(
+        monkeypatch, tmp_path, tmp_path_factory):
+    wrapper = _shell_python_wrapper(tmp_path / "crash-python")
+    # Outside the check root (tmp_path), which the profile grants as the workspace.
+    hidden = tmp_path_factory.mktemp("private-interpreter") / "interpreter"
+    hidden.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    hidden.chmod(0o700)
+    monkeypatch.setattr(isolation.platform, "system", lambda: "Darwin")
+    monkeypatch.setattr(isolation, "backend", lambda: "/usr/bin/sandbox-exec")
+    grants = []
+    isolation.isolated_command([str(wrapper), "-I", "-B", "-c", "pass"], tmp_path,
+                               dict(os.environ), selected_python=str(wrapper),
+                               read_grants_out=grants)
+
+    assert len(grants) == 1
+    assert grants[0].allows(Path("/bin/sh"))
+    if Path("/private/var/select").is_dir():
+        assert grants[0].allows(Path("/private/var/select/sh"))
+    assert grants[0].allows(wrapper)
+    assert not grants[0].allows(hidden)
+    assert sandbox_open_denial(
+        f"Error opening {hidden}: Operation not permitted", grants[0]) is not None
+
+
+@pytest.mark.host_sandbox
+def test_check_sandbox_probe_executes_shell_python_wrapper(tmp_path):
+    wrapper = _shell_python_wrapper(tmp_path / "crash-python")
+    assert isolation.check_sandbox_exec_denial(str(wrapper)) is None
+    command, env = isolation.isolated_command(
+        [str(wrapper), "-I", "-B", "-c", "pass"], tmp_path, dict(os.environ),
+        selected_python=str(wrapper))
+    result = subprocess.run(command, cwd=tmp_path, env=env, capture_output=True,
+                            text=True, timeout=30, check=False)
+    assert result.returncode == 0, result.stderr
 
 
 def _assert_probe_and_runner_startup(repo: Path, python: Path, monkeypatch) -> None:
@@ -103,16 +148,16 @@ def test_probe_and_startup_accept_system_temp_venv(monkeypatch, tmp_path):
 
 
 @pytest.mark.host_sandbox
-def test_probe_still_reports_a_real_sandbox_exec_refusal(monkeypatch, tmp_path):
+def test_probe_still_reports_a_real_sandbox_exec_refusal(monkeypatch, tmp_path, tmp_path_factory):
     _require_working_sandbox(tmp_path)
     monkeypatch.delenv("STATEFRAME_TEST_PYTHON", raising=False)
     python = tmp_path / "bin" / "python"
     python.parent.mkdir()
     if platform.system() == "Darwin":
-        hidden = tmp_path / "hidden" / "interpreter"
-        hidden.parent.mkdir()
-        hidden.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
-        hidden.chmod(0o755)
+        # A private link to a system shell, outside every granted root: the sandbox refuses
+        # it. (Before 11-04 this test passed only because /private/var/select/sh was ungranted.)
+        hidden = tmp_path_factory.mktemp("private-interpreter") / "interpreter"
+        hidden.symlink_to("/bin/sh")
         python.write_text(f"#!{hidden}\n", encoding="utf-8")
         python.chmod(0o755)
     else:

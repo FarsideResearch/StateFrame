@@ -47,12 +47,12 @@ class SandboxReadGrants:
 
 
 if __package__:
-    from .kernel_exec_capability import system_runtime_read_roots
+    from .kernel_exec_capability import executable_read_roots, system_runtime_read_roots
     from .kernel_safe_paths import safe_home
     from .kernel_sbpl import sbpl_path_regex, sbpl_string
     from .kernel_test_python import selected_test_python
 else:
-    from kernel_exec_capability import system_runtime_read_roots
+    from kernel_exec_capability import executable_read_roots, system_runtime_read_roots
     from kernel_safe_paths import safe_home
     from kernel_sbpl import sbpl_path_regex, sbpl_string
     from kernel_test_python import selected_test_python
@@ -172,9 +172,24 @@ def _link_chain(path: Path, limit: int = 40) -> list[Path]:
 
 
 def _program_read_roots(program: Path, env: dict[str, str] | None = None) -> set[str]:
-    """Read roots a host-selected executable needs: its link hops and, for Python, its install."""
+    """Read roots for a selected executable, its system shebang, and Python install."""
     roots = {str(hop) for hop in _link_chain(program)}
     roots |= _interpreter_roots(program, env)
+    if program.is_file() and os.access(program, os.X_OK):
+        system_roots = system_runtime_read_roots()
+        # A selected shell wrapper needs its shebang interpreter. Admit only the
+        # exact chain inside installed system roots; a private shebang stays denied.
+        chain = executable_read_roots(program)
+        roots.update(str(hop) for hop in chain
+                     if any(hop.is_relative_to(root) for root in system_roots))
+        if Path("/bin/sh") in chain:
+            # macOS resolves sh through this selector after opening /bin/sh.
+            selector = Path("/private/var/select")
+            if selector in system_roots:
+                roots.add(str(selector))
+                selected_shell = selector / "sh"
+                if selected_shell.is_file():
+                    roots.update(str(hop) for hop in executable_read_roots(selected_shell))
     return roots
 
 
