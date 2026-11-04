@@ -352,12 +352,14 @@ class PublicReview:
             self.runtime.journal.emit('public_review_admission', stage='rerun', **_journal_safe_fields(admission))
             if not admission['admitted']:
                 self.runtime.journal.emit('public_probe_rerun_unavailable',
+                                          reason='deadline policy did not admit the probe rerun',
                                           error_type='TimeoutError', detail='wall_budget_unavailable')
                 return 'PROBE_UNAVAILABLE: wall_budget_unavailable'
         try:
             receipt = self._execute()
         except Exception as error:
             self.runtime.journal.emit('public_probe_rerun_unavailable', error_type=type(error).__name__,
+                                      reason=f"probe rerun failed: {type(error).__name__}",
                                       detail=str(error)[:300])
             return 'PROBE_UNAVAILABLE: ' + str(error)[:300]
         return self._card(receipt)

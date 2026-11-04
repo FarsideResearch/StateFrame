@@ -129,7 +129,8 @@ def slots_busy(value: object) -> int | None:
     return None
 
 
-def observe_slots(capture: object, endpoint: str, *, deadline: float | None = None) -> int | None:
+def observe_slots(capture: object, endpoint: str, *, key: str = "",
+                  deadline: float | None = None) -> int | None:
     """Best-effort local slot occupancy observation.
 
     Only loopback endpoints are queried.  A missing endpoint, malformed
@@ -146,7 +147,9 @@ def observe_slots(capture: object, endpoint: str, *, deadline: float | None = No
         timeout = min(2.0, deadline - time.monotonic()) if deadline is not None else 2.0
         if timeout <= 0:
             return None
-        request = urllib.request.Request(base + "/slots", method="GET")
+        request = urllib.request.Request(
+            base + "/slots", method="GET",
+            headers={"Authorization": f"Bearer {key}"} if key else {})
         with urllib.request.urlopen(request, timeout=timeout) as response:
             raw = response.read(1024 * 1024 + 1)
         if len(raw) > 1024 * 1024:

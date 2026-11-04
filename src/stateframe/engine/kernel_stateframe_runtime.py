@@ -25113,6 +25113,7 @@ class StateFrameRuntime:
             except Exception as error:
                 # Preserve the original terminal failure and make missing state explicit.
                 self.journal.emit('public_state_final_unavailable',
+                                  reason=f"final public state flush failed: {type(error).__name__}",
                                   error_type=type(error).__name__)
         native_batch = getattr(self, 'native_batch', None)
         if native_batch is not None:

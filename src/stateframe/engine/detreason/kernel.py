@@ -11,7 +11,10 @@ a5 escalation, a_sense2 sensors, a_crossboot margin probe, a_hats aggregation).
 Everything here is pure code except Sensor.answer implementations.
 """
 from __future__ import annotations
-import json, re, urllib.request
+import json
+import os
+import re
+import urllib.request
 from dataclasses import dataclass, field
 
 TRUE, FALSE, UNKNOWN, CONFLICT = "TRUE", "FALSE", "UNKNOWN", "CONFLICT"
@@ -89,9 +92,11 @@ class LlamaSensor(Sensor):
     fragility detector the A10G-vs-M3 flip measured the need for)."""
     name = "llama-1b"
 
-    def __init__(self, url, seed=31, margin_probe=True, timeout=240):
+    def __init__(self, url, seed=31, margin_probe=True, timeout=240, api_key=None):
         self.url, self.seed = url, seed
         self.margin_probe, self.timeout = margin_probe, timeout
+        self.api_key = api_key if api_key is not None else (
+            os.environ.get("LLM_API_KEY") or os.environ.get("DEEPINFRA_API_KEY") or "")
 
     def _call(self, prompt, seed):
         body = {"messages": [{"role": "user", "content": prompt}],
@@ -99,7 +104,9 @@ class LlamaSensor(Sensor):
         if self.margin_probe:
             body["n_probs"] = 8
         req = urllib.request.Request(self.url, data=json.dumps(body).encode(),
-                                     headers={"Content-Type": "application/json"})
+                                     headers={"Content-Type": "application/json",
+                                              **({"Authorization": f"Bearer {self.api_key}"}
+                                                 if self.api_key else {})})
         return json.loads(urllib.request.urlopen(req, timeout=self.timeout).read())
 
     @staticmethod

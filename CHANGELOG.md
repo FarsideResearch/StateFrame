@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.3.32 (2026-11-04)
+
+- Added AST and live-server guards for bearer authentication across model-server routes and for reasons on unavailable journal events. A configured API key is now also sent to loopback endpoints and to /slots observation.
+
 ## 0.3.31 (2026-11-04)
 
 - Known issue: on Linux, checks that run Go or Node programs fail under the check memory limit; listed in `KNOWN_LIMITATIONS.md` until the next release fixes it.

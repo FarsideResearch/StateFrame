@@ -3159,7 +3159,7 @@ def _post(body, url, timeout=600):
     headers = {"Content-Type": "application/json"}
     _remote = not url.startswith("http://127.0.0.1")
     _key = os.environ.get("LLM_API_KEY") or os.environ.get("DEEPINFRA_API_KEY")
-    if _key and _remote:
+    if _key:
         headers["Authorization"] = "Bearer " + _key
     # `model` is REQUIRED by OpenAI-compatible providers and INFERRED by our llama.cpp server,
     # so the kernel never sent it. Bisected against DeepInfra: with the field absent the API
