@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.3.35 (2026-11-04)
+
+- Tests: the checkpoint-bytes bound counts a file as new when its inode was not live in the previous step, so Linux filesystems that reuse freed inode numbers no longer hide new bytes from the regression control. Test-only.
+
 ## 0.3.34 (2026-11-04)
 
 - Test-only: the allocation replay corpus gives the engine at least its old 1800 s timeout again, so slow recorded cases are not cut short.

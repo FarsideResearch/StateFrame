@@ -170,6 +170,34 @@ def _save_series_step(run, step):
     return checkpoint.save(sys._getframe(), step, run)
 
 
+def _new_bytes(
+        previous_live: set[tuple[tuple[int, int], int]],
+        current_entries: list[tuple[tuple[int, int], int]]) -> int:
+    """Count distinct files not present in the previous live snapshot."""
+    current_live = set(current_entries)
+    return sum(size for entry, size in current_live if (entry, size) not in previous_live)
+
+
+def test_new_bytes_counts_reused_inode_and_ignores_unchanged_files():
+    identity = (17, 42)
+    size = 128
+    current_entries = [(identity, size)]
+
+    # The file was seen before pruning, but was not live in the previous step.
+    previous_live = set()
+    ever_seen = {identity}
+    old_ever_seen_bytes = sum(
+        entry_size for entry, entry_size in current_entries if entry not in ever_seen)
+    assert old_ever_seen_bytes == 0
+    assert _new_bytes(previous_live, current_entries) == size
+
+    unchanged = (identity, size)
+    assert _new_bytes({unchanged}, [unchanged]) == 0
+
+    # A different-sized file cannot be the same live file, even if its inode was reused.
+    assert _new_bytes({(identity, size - 1)}, current_entries) == size
+
+
 def _checkpoint_series(tmp_path, monkeypatch, *, whole_copy=False):
     run = tmp_path / ("control" if whole_copy else "optimized")
     journal = run / "worker/measurement-runs/a/events.jsonl"
@@ -184,21 +212,21 @@ def _checkpoint_series(tmp_path, monkeypatch, *, whole_copy=False):
     checkpoint.register_signing_key(b"checkpoint-storage-test-key-0123456789")
     if whole_copy:
         monkeypatch.setattr(checkpoint, "_snapshot_appended_file", lambda *_args: False)
-    seen = set()
+    previous_live = set()
     written = []
     try:
         for step in range(1, 41):
             write_journal_bytes(journal, bytes(range(256)) * 512, append=True)
             saved = _save_series_step(run, step)
-            new_bytes = 0
+            current_entries = []
             for path in (run / "checkpoints").rglob("*"):
                 if not path.is_file():
                     continue
                 info = path.stat()
                 identity = (info.st_dev, info.st_ino)
-                if identity not in seen:
-                    seen.add(identity)
-                    new_bytes += info.st_size
+                current_entries.append((identity, info.st_size))
+            new_bytes = _new_bytes(previous_live, current_entries)
+            previous_live = set(current_entries)
             written.append(new_bytes)
         return run, saved, journal_bytes(journal), written
     finally:
