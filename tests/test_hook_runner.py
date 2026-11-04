@@ -142,6 +142,8 @@ def test_no_hooks_prepare_has_no_hook_spec_or_files(tmp_path):
         "model", "api_key_env", "max_turns", "parent_snapshot", "public_row", "tool_settings",
         "custom_tools_digest", "custom_executables", "environment", "environment_sources",
         "prompt_cache_slot", "test_cmd", "run_identity_seed", "repo", "in_place",
+        # Since strict-endpoint support every run pins the probed provider capabilities.
+        "provider_capabilities",
         # Since 0.2.4 every run pins its (possibly empty) skill selection.
         "skills", "skills_digest",
         # Since 0.2.7 every run pins its resolved check and test-protection settings for resume.

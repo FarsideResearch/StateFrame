@@ -81,6 +81,16 @@ def test_inspect_and_summary_count_sealed_preflight_records(tmp_path, monkeypatc
     assert result["requests"] == len(originals)
 
 
+def test_summary_of_old_spec_reports_no_provider_dialects(tmp_path, monkeypatch):
+    run, _ = _run_with_requests(tmp_path)
+    (run / "spec.json").write_text(json.dumps({"model": "scripted"}))
+    monkeypatch.setattr(runner, "_read_send_metrics", lambda *_args: [])
+
+    result = runner.summarize(run, 0.0)
+
+    assert result["provider_capabilities"] == {}
+
+
 def test_reading_a_sealed_run_decompresses_the_pack_once(tmp_path, monkeypatch):
     """Readers list then read every record; each read must not rescan the whole xz archive."""
     import tarfile

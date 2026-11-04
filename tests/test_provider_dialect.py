@@ -519,6 +519,17 @@ def test_provider_dialect_journal_marker_is_once_per_origin_per_run():
     assert dialect.mark_dialect_journaled("https://api.example") is True
 
 
+def test_old_spec_without_provider_capabilities_seeds_empty_run_cache():
+    dialect.seed_run_capability_cache({
+        "https://api.example": ProviderCapabilities("llama.cpp").to_record(),
+    })
+    assert dialect.RUN_CAPABILITY_CACHE
+
+    dialect.seed_run_capability_cache(None)
+
+    assert dialect.RUN_CAPABILITY_CACHE == {}
+
+
 def test_slot_zero_is_never_synthesized(monkeypatch):
     from kernel_kv_chunk_reuse import _slot_id
     from kernel_self_plan_prefill import self_plan_id_slot
