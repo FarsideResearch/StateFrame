@@ -7,8 +7,8 @@
 - Tests: the engine-child lookup in the resume acceptance tests asks `ps` for untruncated arguments (`ps -ww`). On macOS, `ps` cut the command line to the terminal width under captured pytest output, so the `_child.py` suffix disappeared and `test_acceptance_widened_run_resumes_by_replay` failed on an untouched checkout. Test-only; no product change.
 - Tests: `test_routes_cli`'s resume test installed the wire recorder without monkeypatching, so later tests in the same process inherited it. It now restores it, `HOST_STATE` is isolated in five more test files, an autouse fixture names any test that leaves an installer attribute behind, and a forced-order subprocess test reproduces the original leak. Test-only; no product change.
 - Tests: a guard requires every Linux bwrap launch-argv builder to give the command its own PID namespace (`--unshare-pid` or `--unshare-all`), so an orphaned descendant always dies with its namespace instead of escaping tracking. Builders are found mechanically; a reviewed exemption covers the release runner's write guard. Test-only; no product change.
-
 - Tests: helpers that start subprocesses without inherited `STATEFRAME_*` switches now give them a temporary `STATEFRAME_HOME`, so test runs no longer pile env seeds into the real `~/.stateframe`; a guard keeps every such helper honest.
+- Tests: the tokenizer end-to-end test reads sealed measurement journals (`events.jsonl.xz`), so it checks real tokenizer measurements again instead of finding none.
 
 ## 0.3.29 (2026-11-03)
 
