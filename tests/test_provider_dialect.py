@@ -276,11 +276,9 @@ def test_bundled_identity_scripts_prove_llama_without_slots_or_cache_pin(example
     assert capabilities.slots is False
     assert options._cache_slot is None
     assert options._cache_slot_selection == "not_pinned"
-    assert options._cache_slot_degraded is True
-    assert options._cache_slot_reason == (
-        "provider did not prove llama.cpp /slots; optional prompt-cache pin dropped"
-    )
-    assert messages == ["cache: prompt-cache pin dropped because provider did not prove llama.cpp /slots"]
+    assert options._cache_slot_degraded is False
+    assert options._cache_slot_reason == "server did not expose usable slot status"
+    assert messages == ["cache: server does not expose slots; not pinned"]
 
 
 def test_strict_endpoint_refuses_native_tokenize_before_post():
@@ -908,6 +906,7 @@ def test_plain_loop_journals_prompt_cache_pin_degradation(tmp_path):
             provider=lambda _body, _timeout: {},
             check_runner=lambda *_args: None,
             environ={
+                "DS_MODEL": "scripted",
                 "STATEFRAME_PROMPT_CACHE": "off",
                 "SF_PROMPT_CACHE_PIN_DEGRADED_REASON": reason,
             },

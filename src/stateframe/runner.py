@@ -1409,11 +1409,17 @@ def _select_prompt_cache_slot(options: RunOptions, printer=print) -> None:
     else:
         if not capabilities.slots:
             options._cache_slot_selection = "not_pinned"
-            options._cache_slot_degraded = True
-            options._cache_slot_reason = (
-                "provider did not prove llama.cpp /slots; optional prompt-cache pin dropped"
-            )
-            printer("cache: prompt-cache pin dropped because provider did not prove llama.cpp /slots")
+            if capabilities.dialect == "llama.cpp":
+                # A proven llama.cpp without slot status was unpinned before dialect
+                # probing; no optional pin or prompt-cache mode has been degraded.
+                options._cache_slot_reason = "server did not expose usable slot status"
+                printer("cache: server does not expose slots; not pinned")
+            else:
+                options._cache_slot_degraded = True
+                options._cache_slot_reason = (
+                    "provider did not prove llama.cpp /slots; optional prompt-cache pin dropped"
+                )
+                printer("cache: prompt-cache pin dropped because provider did not prove llama.cpp /slots")
             return
         endpoint = replace(options.endpoint,
                            timeout_s=min(options.endpoint.timeout_s, _remaining(options)))

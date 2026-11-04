@@ -106,7 +106,23 @@ def test_wire_id_drift_names_moved_fields_and_rejects_other_changes(tmp_path):
     assert wire_id_drift([refs_before], [refs_after]) == (
         [], {"check_execution_ref": 2})
     changed_ordinal = refs_after.replace(b"c" * 20 + b":1", b"c" * 20 + b":9")
-    assert wire_id_drift([refs_before], [changed_ordinal])[0]
+    assert wire_id_drift([refs_before], [changed_ordinal]) == (
+        [], {"check_execution_ref": 2})
+    no_ordinal = refs_after.replace(b"c" * 20 + b":1", b"c" * 20).replace(
+        b"d" * 20 + b":2", b"d" * 20)
+    assert wire_id_drift([refs_before], [no_ordinal]) == (
+        [], {"check_execution_ref": 2})
+    assert wire_id_drift([refs_before], [no_ordinal.replace(b"check_execution_ref", b"changed_ref")])[0]
+    def finding(finding_id):
+        frame = {"state": {"history_findings": {"latest": {"id": finding_id}}}}
+        return json.dumps({"messages": [{"role": "user", "content":
+            "[StateFrame]\n" + json.dumps(frame, separators=(",", ":"))}]}).encode()
+    assert wire_id_drift([finding("check:" + "a" * 20 + ":616")],
+                         [finding("check:" + "b" * 20)]) == (
+        [], {"check_finding_id": 1})
+    assert wire_id_drift([finding("check:" + "a" * 20 + ":616")],
+                         [finding("check:" + "b" * 20 + ":617")]) == (
+        [], {"check_finding_id": 1})
     # A change outside the IDs is reported, and the planted control finds such changes.
     assert wire_id_drift([old], [new.replace(b"green_state", b"red_state")])[0]
     non_id_hex_before = json.dumps({"messages": [{"role": "user", "content": "c" * 24}]}).encode()
@@ -119,6 +135,10 @@ def test_wire_id_drift_names_moved_fields_and_rejects_other_changes(tmp_path):
                          [deferred_read("b" * 20, "same")]) == ([], {"receipt_id": 1})
     assert wire_id_drift([deferred_read("a" * 20, "same")],
                          [deferred_read("b" * 20, "changed")])[0]
+    evidence_before = json.dumps({"required_evidence_ids": ["R1", "receipt:" + "a" * 24]}).encode()
+    evidence_after = json.dumps({"required_evidence_ids": ["R1", "receipt:" + "b" * 24]}).encode()
+    assert wire_id_drift([evidence_before], [evidence_after]) == ([], {"check_receipt": 1})
+    assert wire_id_drift([evidence_before], [evidence_after.replace(b'"R1"', b'"R2"')])[0]
     assert planted_body_change_is_caught(new)
     assert wire_id_drift([old], [new, new])[0]
 
@@ -219,6 +239,14 @@ def test_mask_wire_ids_uses_declared_paths_and_preserves_unrelated_hex():
     assert mask_wire_ids(changed_id) != mask_wire_ids(changed_content)
     assert mask_wire_ids(first) != mask_wire_ids(body("native_" + "b" * 20 + "_1", unchanged))
     assert mask_wire_ids(body("call-good", unchanged)) != mask_wire_ids(body("call-bad", unchanged))
+    assert mask_wire_ids(body("native_" + "a" * 20 + "_0:auto_verify", unchanged)) == mask_wire_ids(
+        body("native_" + "b" * 20 + "_0:auto_verify", unchanged))
+    assert mask_wire_ids(body("native_" + "a" * 20 + "_0:auto_verify", unchanged)) != mask_wire_ids(
+        body("native_" + "b" * 20 + "_1:auto_verify", unchanged))
+    oracle_a = "CHECK_FAILURE_SUMMARY execution_id=check-execution:" + "a" * 20 + " full_output_handle=check-receipt:" + "b" * 24
+    oracle_b = "CHECK_FAILURE_SUMMARY execution_id=check-execution:" + "c" * 20 + " full_output_handle=check-receipt:" + "d" * 24
+    assert mask_wire_ids(body("call-good", oracle_a)) == mask_wire_ids(body("call-good", oracle_b))
+    assert mask_wire_ids(body("call-good", oracle_a)) != mask_wire_ids(body("call-good", oracle_b + " changed"))
 
     digest = "ab" * 32
     frame = {"state": {"framefit5": {"action_ledger": {"unclassified_actions": [
@@ -226,8 +254,18 @@ def test_mask_wire_ids_uses_declared_paths_and_preserves_unrelated_hex():
     ]}}}}
     content = "[StateFrame]\n" + json.dumps(frame, separators=(",", ":"))
     masked = mask_wire_ids(json.dumps({"messages": [{"role": "user", "content": content}]}).encode())
-    assert b"result_sha256" in masked and masked.count(digest.encode()) == 2
+    assert b"result_sha256" in masked and b"<wire-id>" in masked
+    assert masked.count(digest.encode()) == 1
     assert (b"sha256:" + digest.encode()) in masked
+    changed_hash = json.loads(json.dumps(frame))
+    changed_hash["state"]["framefit5"]["action_ledger"]["unclassified_actions"][0][
+        "result_sha256"] = "cd" * 32
+    changed_content = "[StateFrame]\n" + json.dumps(changed_hash, separators=(",", ":"))
+    assert mask_wire_ids(json.dumps({"messages": [{"role": "user", "content": changed_content}]}).encode()) == masked
+    changed_hash["state"]["framefit5"]["action_ledger"]["unclassified_actions"][0][
+        "candidate_revision"] = "sha256:" + "cd" * 32
+    changed_content = "[StateFrame]\n" + json.dumps(changed_hash, separators=(",", ":"))
+    assert mask_wire_ids(json.dumps({"messages": [{"role": "user", "content": changed_content}]}).encode()) != masked
 
 
 def test_wire_id_paths_match_real_captured_request_fixtures():
@@ -246,9 +284,17 @@ def test_wire_id_paths_match_real_captured_request_fixtures():
     native_call = "native_" + "a" * 20 + "_0"
     preflight = {"request": 1, "turn": 1, "request_id": "a" * 20,
                  "messages": [{"role": "assistant", "tool_calls": [{"id": native_call}]},
-                              {"role": "tool", "tool_call_id": native_call}],
+                              {"role": "tool", "tool_call_id": native_call,
+                               "content": ("CHECK_FAILURE_SUMMARY execution_id=check-execution:"
+                                           + "a" * 20 + " full_output_handle=check-receipt:"
+                                           + "b" * 24)}],
                  "tools": [], "presentation": {}}
     _, path_values = _mask_wire_ids_with_values(json.dumps(preflight).encode())
+    for index, (_kind, values) in enumerate(path_values):
+        coverage[index] += len(values)
+    _, path_values = _mask_wire_ids_with_values(json.dumps({
+        "required_evidence_ids": ["R1", "receipt:" + "a" * 24],
+    }).encode())
     for index, (_kind, values) in enumerate(path_values):
         coverage[index] += len(values)
     missing = [f"{kind}: {'.'.join(path)}" for index, (path, kind, _marker, _lengths)

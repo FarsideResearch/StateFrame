@@ -41,12 +41,14 @@ def source_env(tree: Path, stable_tool_head: str | None, *,
     return environment
 
 
-# Wire IDs are masked by JSON path so a 20/24-hex value in ordinary request content remains
-# part of the comparison. StateFrame and read-contract payloads are JSON embedded in message
-# content; their markers are path steps, not a fallback for malformed request bodies.
+# Generated IDs and the tool-result hash derived from them are masked by JSON path,
+# so unrelated hex remains part of the comparison. StateFrame and read-contract
+# payloads are embedded JSON; their markers are path steps, not a malformed-body fallback.
 WIRE_ID_PATHS = (
     # The CLI preflight capture records the active request ID outside messages.
     (("request_id",), "request_id", None, (20,)),
+    # Request-diet journal payloads name check receipts in their evidence list.
+    (("required_evidence_ids", "*"), "check_receipt", "receipt:", (24,)),
     # Provider tool-call IDs are referenced by later tool messages through tool_call_id.
     (("messages", "*", "tool_calls", "*", "id"), "tool_call_id", "native_", (20,)),
     # Tool replies carry the matching provider tool-call ID.
@@ -79,6 +81,11 @@ WIRE_ID_PATHS = (
     (("messages", "*", "content", "[StateFrame]", "state", "framefit5",
       "action_ledger", "unclassified_actions", "*", "call_id"),
      "native_call_id(request_id)", "native_", (20,)),
+    # The oracle result hash covers the sent tool-result text, including generated
+    # CHECK_FAILURE_SUMMARY execution_id and full_output_handle receipt IDs.
+    (("messages", "*", "content", "[StateFrame]", "state", "framefit5",
+      "action_ledger", "unclassified_actions", "*", "result_sha256"),
+     "result_sha256(tool_result)", None, (64,)),
     # Read receipts are carried in the StateFrame's read-fact receipt rows.
     (("messages", "*", "content", "[StateFrame]", "state", "framefit5",
       "read_facts", "*", "receipts", "*", "receipt_id"), "receipt_id", None, (20,)),
@@ -118,9 +125,12 @@ WIRE_ID_PATHS = (
     # Traceback paths can include the generated continuation-workspace ID; fixtures use <workspace>.
     (("messages", "*", "content"), "continuation_workspace_dir",
      "continuation-workspaces/", (20, 32)),
+    # The oracle's sent tool result repeats host-minted check execution and receipt IDs.
+    (("messages", "*", "content"), "check_execution", "CHECK_FAILURE_SUMMARY execution_id=check-execution:", (20,)),
+    (("messages", "*", "content"), "check_receipt", "full_output_handle=check-receipt:", (24,)),
 )
 
-# Used only to report sent result hashes; masking itself uses WIRE_ID_PATHS exclusively.
+# Used only to verify sent result hashes; masking itself uses WIRE_ID_PATHS exclusively.
 _RESULT_SHA = re.compile(rb'(result_sha256\\*":\s*\\*")([0-9a-f]{64})')
 
 
@@ -207,11 +217,12 @@ def _replace_embedded_json(content: str, marker: str, path: tuple[str, ...], *,
 def _replace_marked_hex(value: str, marker: str,
                         lengths: tuple[int, ...]) -> tuple[str, list[str]]:
     """Replace hex IDs immediately following one known text label, never arbitrary hex text."""
-    if marker in {"check_execution_ref: ", "check:"}:
+    if marker == "check_execution_ref: ":
         return _replace_check_execution_refs(value, marker, lengths)
     if marker == "journal receipts ":
         return _replace_journal_receipts(value)
-    if marker == "native_" and re.fullmatch(r"native_[0-9a-f]{20}_[0-9]+", value) is None:
+    if marker == "native_" and re.fullmatch(
+            r"native_[0-9a-f]{20}_[0-9]+(?::auto_verify)?", value) is None:
         return value, []
     output = value
     cursor = 0
@@ -255,8 +266,8 @@ def _legacy_sequence_end(value: str, token_end: int) -> int:
 
 
 def _replace_check_execution_refs(value: str, marker: str,
-                                  lengths: tuple[int, ...]) -> tuple[str, list[str]]:
-    """Mask run IDs in the comma-separated check_execution_ref list; keep ordinals visible."""
+                                   lengths: tuple[int, ...]) -> tuple[str, list[str]]:
+    """Mask check execution IDs and the old journal-sequence suffix, if present."""
     spans: list[tuple[int, int]] = []
     matches: list[str] = []
     cursor = 0
@@ -271,22 +282,24 @@ def _replace_check_execution_refs(value: str, marker: str,
                            if list_cursor + candidate <= len(value)
                            and all(char in "0123456789abcdef"
                                    for char in value[list_cursor:list_cursor + candidate])
-                           and list_cursor + candidate < len(value)
-                           and value[list_cursor + candidate] == ":"), None)
+                           and (list_cursor + candidate == len(value)
+                                or value[list_cursor + candidate] in ":, \t\r\n")), None)
             if length is None:
                 break
             token_end = list_cursor + length
-            ordinal_start = token_end + 1
-            ordinal_end = ordinal_start
-            while ordinal_end < len(value) and value[ordinal_end].isdigit():
-                ordinal_end += 1
-            if ordinal_end == ordinal_start:
+            suffix_end = token_end
+            if suffix_end < len(value) and value[suffix_end] == ":":
+                suffix_end += 1
+                ordinal_start = suffix_end
+                while suffix_end < len(value) and value[suffix_end].isdigit():
+                    suffix_end += 1
+                if suffix_end == ordinal_start:
+                    break
+            spans.append((list_cursor, suffix_end))
+            matches.append(value[list_cursor:suffix_end])
+            if suffix_end >= len(value) or value[suffix_end] != ",":
                 break
-            spans.append((list_cursor, token_end))
-            matches.append(value[list_cursor:token_end])
-            if ordinal_end >= len(value) or value[ordinal_end] != ",":
-                break
-            list_cursor = ordinal_end + 1
+            list_cursor = suffix_end + 1
         cursor = max(token_start, list_cursor)
     output = value
     for start, end in reversed(spans):
@@ -384,13 +397,14 @@ MOVED_ID_FIELDS = frozenset({
     "edit_receipt", "check_receipt", "check_execution", "check_execution_ref",
     "check_finding_id", "receipt_id", "continuation_workspace_dir",
 })
+DERIVED_RESULT_FIELDS = frozenset({"result_sha256(tool_result)"})
 
 
 def wire_id_drift(before: list[bytes], after: list[bytes]) -> tuple[list[str], dict[str, int]]:
-    """Problems if two request-body lists differ in anything but wire IDs, plus which ID fields changed.
+    """Problems outside declared generated fields, plus which fields changed.
 
-    Bodies must be byte-identical after mask_wire_ids. Each changed token is named by the field
-    it sits in, so a report can say exactly what moved.
+    Bodies must be byte-identical after mask_wire_ids. Callers that mask result_sha256
+    also verify changed digests hash sent tool-result messages in each run.
     """
     problems: list[str] = []
     kinds: dict[str, int] = {}
