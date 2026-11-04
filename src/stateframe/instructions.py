@@ -12,6 +12,8 @@ import os
 import stat
 from pathlib import Path
 
+from .engine.kernel_safe_paths import safe_expanduser
+
 SCHEMA = "stateframe-project-instructions/1"
 CANDIDATES = ("AGENTS.md", "CLAUDE.md")
 MAX_SHOWN_BYTES = 6144       # bytes of instruction text placed in every request
@@ -97,7 +99,7 @@ def resolve(repo: Path, explicit: Path | None, *, discover: bool,
     """
     root = repo.resolve()
     if explicit is not None:
-        path = explicit.expanduser()
+        path = safe_expanduser(explicit)
         if path.is_symlink():
             target = path.resolve()
             if _inside(path.absolute(), root) and not _inside(target, root):

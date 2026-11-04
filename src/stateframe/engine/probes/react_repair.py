@@ -5157,7 +5157,7 @@ def _run_tests_impl(root: pathlib.Path, fn: str, explicit: str | None,
         def _run_check(command):
             nonlocal _check_output_truncated
             _check_output_truncated = None
-            from kernel_execution_policy import run_sandboxed
+            from kernel_execution_policy import policy_read_grants, run_sandboxed
             from kernel_pilot import ParentBudgetExhausted
             try:
                 # The CPU budget must match the wall budget: the policy default (30 s RLIMIT_CPU,
@@ -5194,6 +5194,12 @@ def _run_tests_impl(root: pathlib.Path, fn: str, explicit: str | None,
             if result.timed_out:
                 raise subprocess.TimeoutExpired(command, 300, output=result.completed.stdout,
                                                 stderr=result.completed.stderr)
+            from kernel_check_receipts import sandbox_open_denial
+            denial = sandbox_open_denial(
+                result.completed.stderr + "\n" + result.completed.stdout,
+                policy_read_grants(result))
+            if denial is not None:
+                raise _HostExecutionRefused(RuntimeError(denial))
             return result.completed
 
         _check_output_truncated = None

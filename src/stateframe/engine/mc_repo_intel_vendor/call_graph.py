@@ -49,6 +49,11 @@ from pathlib import Path
 from urllib.parse import urlsplit
 from typing import Iterable, Optional
 
+if __package__ and __package__.endswith("engine.mc_repo_intel_vendor"):
+    from ..kernel_safe_paths import safe_expanduser, safe_home
+else:
+    from kernel_safe_paths import safe_expanduser, safe_home
+
 logger = logging.getLogger(__name__)
 
 try:
@@ -170,7 +175,11 @@ def repo_cache_file(repo_path, filename: str = _CACHE_FILENAME) -> Path:
     requested_name = Path(filename)
     if requested_name.is_absolute() or requested_name.name != filename:
         raise ValueError("repo cache filename must be a single relative filename")
-    requested = Path(os.getenv("STATEFRAME_REPO_CACHE_DIR") or Path.home() / ".cache" / "stateframe" / "repo-intel").expanduser().resolve()
+    home = safe_home()
+    default_cache = (home / ".cache" / "stateframe" / "repo-intel" if home is not None else
+                     Path(tempfile.gettempdir()) / "stateframe" / "repo-intel")
+    configured_cache = os.getenv("STATEFRAME_REPO_CACHE_DIR")
+    requested = safe_expanduser(Path(configured_cache) if configured_cache else default_cache).resolve()
     try:
         requested.relative_to(repo)
     except ValueError:
@@ -179,11 +188,13 @@ def repo_cache_file(repo_path, filename: str = _CACHE_FILENAME) -> Path:
         # A caller-provided cache root must not be allowed to mutate the
         # analysed checkout.  Prefer the normal user cache, then the OS temp
         # directory if the checkout itself lives below the user's home cache.
-        candidates = (
-            (Path.home() / ".cache" / "stateframe" / "repo-intel").resolve(),
+        candidates = []
+        if home is not None:
+            candidates.append((home / ".cache" / "stateframe" / "repo-intel").resolve())
+        candidates.extend((
             (Path(tempfile.gettempdir()) / "stateframe" / "repo-intel").resolve(),
             Path("/private/tmp/stateframe/repo-intel"),
-        )
+        ))
         base = next((candidate for candidate in candidates if not candidate.is_relative_to(repo)), candidates[-1])
     key = hashlib.sha256(str(repo).encode("utf-8")).hexdigest()[:16]
     target = base / key

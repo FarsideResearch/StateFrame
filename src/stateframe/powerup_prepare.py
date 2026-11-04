@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sys
 import tempfile
 from pathlib import Path
 
@@ -9,18 +10,29 @@ from . import hook_host, powerups, workcopy
 from .engine.kernel_custom_tools import load_tool_files
 from .engine.kernel_mcp_tools import discover as discover_mcp, load_mcp_files
 from .powerup_budget import admit_powerup_units
-from .powerup_state import home
-from .skills import resolve_skills
+from .powerup_state import user_home_or_none
+from .skills import NAME, resolve_skills
+
+NO_HOME_NOTICE = (
+    "stateframe: no home directory found (HOME and STATEFRAME_HOME unset); "
+    "user powerups and skills are skipped for this run"
+)
 
 
 def prepare_run_inputs(options, environment: dict, printer=print) -> powerups.Selection:
     """Append admitted powerups; keep the unconfigured path free of optional work."""
+    if options.no_powerups and not options.skills:
+        return powerups.Selection()
+    user_home = user_home_or_none()
+    if user_home is None and (not options.no_powerups or any(
+            NAME.fullmatch(value) and not Path(value).is_dir() for value in options.skills)):
+        print(NO_HOME_NOTICE, file=sys.stderr)
     if options.no_powerups:
         return powerups.Selection()
     project_root = Path(options.repo) / ".stateframe"
     if (not options.powerup_requests and not options.powerup_sets
-            and not (home() / "powerups.json").exists()
-            and not (home() / "powerups").exists()
+            and (user_home is None or (not (user_home / "powerups.json").exists()
+                                       and not (user_home / "powerups").exists()))
             and not (project_root / "powerups.json").exists()
             and not (project_root / "powerups").exists()):
         return powerups.Selection()

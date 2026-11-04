@@ -20,11 +20,12 @@ from . import instructions as project_instructions
 from .skills import install as install_skill, list_installed, remove as remove_skill
 from datetime import datetime, timezone
 
+from .engine.kernel_safe_paths import safe_expanduser, safe_home
 
 def _task_text(value: str) -> str:
     """``--task`` is literal text, or ``@path`` to read it from a file."""
     if value.startswith("@"):
-        path = Path(value[1:]).expanduser()
+        path = safe_expanduser(Path(value[1:]))
         if not path.is_file():
             raise argparse.ArgumentTypeError(f"task file not found: {path}")
         return path.read_text(encoding="utf-8")
@@ -217,7 +218,9 @@ def build_parser() -> argparse.ArgumentParser:
     config_cmd = commands.add_parser("config", help="create a commented route configuration")
     config_actions = config_cmd.add_subparsers(dest="config_command", required=True)
     config_init = config_actions.add_parser("init", help="write an inactive routes.toml example")
-    config_init.add_argument("--path", type=Path, default=Path.home() / ".stateframe" / "routes.toml")
+    # Resolved in the handler: build_parser runs for every command, and HOME may be absent (containers).
+    config_init.add_argument("--path", type=Path, default=None,
+                             help="where to write it (default: ~/.stateframe/routes.toml)")
 
     inspect_cmd = commands.add_parser("inspect", help="show the frames and request bytes of a run")
     inspect_cmd.add_argument("run_dir", type=Path)
@@ -287,9 +290,9 @@ def _run_options(args: argparse.Namespace, endpoint: Endpoint) -> RunOptions:
                             git_tool=args.git_tool if args.git_tool is not None else True,
                             web=args.web if args.web is not None else False,
                             web_allow=tuple(args.web_allow),
-                            tools_files=tuple({"path": str(Path(path).expanduser().resolve()), "digest": "pending"}
+                            tools_files=tuple({"path": str(safe_expanduser(Path(path)).resolve()), "digest": "pending"}
                                               for path in args.tools),
-                            mcp_files=tuple({"path": str(Path(path).expanduser().resolve()), "digest": "pending"}
+                            mcp_files=tuple({"path": str(safe_expanduser(Path(path)).resolve()), "digest": "pending"}
                                             for path in args.mcp))
     return RunOptions(repo=args.repo, task=getattr(args, "task", ""), endpoint=endpoint,
                        max_turns=args.max_turns, test_cmd=args.test_cmd, check_cmd=args.check_cmd,
@@ -315,9 +318,9 @@ def _run_options(args: argparse.Namespace, endpoint: Endpoint) -> RunOptions:
                       trust_skill_tools=args.trust_skill_tools,
                       instructions=("off" if args.no_instructions else
                                     "auto" if args.instructions == "auto" else
-                                    str(Path(args.instructions).expanduser().resolve()) if args.instructions
+                                    str(safe_expanduser(Path(args.instructions)).resolve()) if args.instructions
                                     else project_instructions.DEFAULT_MODE),
-                      hooks_files=tuple(Path(path).expanduser().resolve() for path in args.hooks),
+                      hooks_files=tuple(safe_expanduser(Path(path)).resolve() for path in args.hooks),
                       powerup_requests=tuple(args.powerup), powerup_sets=tuple(args.powerup_set),
                       no_powerups=args.no_powerups,
                       no_project_hooks=args.no_project_hooks,
@@ -458,8 +461,13 @@ def main(argv: list[str] | None = None) -> int:
                 return 2
             return result.exit_code
         if args.command == "config":
-            path = args.path.expanduser()
-            if path.parent == Path.home() / ".stateframe":
+            home = safe_home()
+            if args.path is None and home is None:
+                print("stateframe: config init: cannot find the home directory; set HOME or pass --path",
+                      file=sys.stderr)
+                return 2
+            path = safe_expanduser(args.path) if args.path is not None else home / ".stateframe" / "routes.toml"
+            if home is not None and path.parent == home / ".stateframe":
                 from .state_dirs import private_directory
                 private_directory(path.parent)
             else:

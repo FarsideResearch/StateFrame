@@ -40,6 +40,7 @@ from kernel_source_presentation import strip_callsite_census
 from kernel_measurement import profiled_function_span
 import kernel_turn0_persistence as _turn0
 
+from kernel_safe_paths import safe_expanduser
 
 SCHEMA = "stateframe-callsite-census/1"
 ROUTE_ID = "R_shown_crossfile"
@@ -1710,7 +1711,7 @@ def _root(runtime: object) -> Path:
         candidate = getattr(runtime, "repo_root", None)
     if candidate is None:
         raise CensusError("workspace root is unavailable")
-    supplied = Path(candidate).expanduser()
+    supplied = safe_expanduser(Path(candidate))
     if supplied.is_symlink():
         raise CensusError("workspace root is a symlink")
     root = supplied.resolve()

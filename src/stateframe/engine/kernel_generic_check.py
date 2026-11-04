@@ -5,7 +5,7 @@ import hashlib
 from collections.abc import Mapping
 from pathlib import Path
 
-from kernel_execution_policy import run_sandboxed
+from kernel_execution_policy import policy_read_grants, run_sandboxed
 from kernel_pilot import ACTIVE_RUNTIME
 
 
@@ -58,8 +58,13 @@ def check_result(root: Path, row: Mapping[str, object]) -> tuple[str, int]:
         _record(runtime, binding, command, 127, detail, outcome="ENVIRONMENT")
         return detail, 127
     output = (result.completed.stdout + result.completed.stderr)[-OUTPUT_LIMIT:]
+    from kernel_check_receipts import sandbox_open_denial
+    denial = sandbox_open_denial(result.completed.stderr + "\n" + result.completed.stdout,
+                                 policy_read_grants(result))
     if result.timed_out:
         code, outcome, label = 124, "RESOURCE_LIMIT", "check timed out"
+    elif denial is not None:
+        code, outcome, label = 126, "ENVIRONMENT", denial
     else:
         code = result.completed.returncode
         if code == 0:

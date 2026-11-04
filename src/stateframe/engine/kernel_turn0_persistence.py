@@ -11,6 +11,11 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
+if __package__:
+    from .kernel_safe_paths import safe_home
+else:
+    from kernel_safe_paths import safe_home
+
 MODE_ENV = "STATEFRAME_TURN0_PERSIST"
 CACHE_FORMAT = "stateframe-turn0-index/1"
 MAX_CACHE_BYTES = 128 * 1024 * 1024
@@ -47,7 +52,10 @@ def enabled(environ: Mapping[str, str] | None = None) -> bool:
 
 def cache_directory() -> Path:
     """Default shared cache root; callers may replace this function in tests."""
-    return Path.home() / ".cache" / "stateframe" / "repo-intel"
+    home = safe_home()
+    if home is not None:
+        return home / ".cache" / "stateframe" / "repo-intel"
+    return Path(tempfile.gettempdir()) / "stateframe" / "repo-intel"
 
 
 def implementation_version(schema: str, module_path: Path) -> str | None:

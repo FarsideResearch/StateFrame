@@ -22,6 +22,11 @@ else:
     from kernel_exec_session import ExecSessionError
     from kernel_mcp_driver import exchange
 
+if __package__:
+    from .kernel_safe_paths import safe_expanduser
+else:
+    from kernel_safe_paths import safe_expanduser
+
 if __package__ and str(Path(__file__).parent) not in sys.path:
     # Host runner imports this namespace package; engine modules use flat imports.
     sys.path.insert(0, str(Path(__file__).parent))
@@ -285,7 +290,7 @@ def load_mcp_files(paths: Sequence[Path], *, shell_network: str) -> McpSet:
     servers: list[McpServer] = []
     names: set[str] = set()
     for path in paths:
-        path = Path(path).expanduser().resolve()
+        path = safe_expanduser(Path(path)).resolve()
         try:
             if path.stat().st_size > 1 << 20:
                 _fail(str(path), "servers", "file exceeds 1 MiB")

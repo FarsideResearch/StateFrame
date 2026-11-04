@@ -40,6 +40,8 @@ from .skills import SkillError, measured_skills_digest, resolve_skills, skills_d
 from .state_dirs import private_directory
 from .request_records import RequestRecordsError, list_request_records
 
+from .engine.kernel_safe_paths import safe_home
+
 if TYPE_CHECKING:
     from .engine.kernel_hooks import HookSet
 
@@ -330,7 +332,10 @@ def validate_test_env(test_env: dict[str, str]) -> dict[str, str]:
 def default_run_dir(repo: Path) -> Path:
     """Outside the repository, so a run never writes anything into the user's tree."""
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    return Path.home() / ".stateframe" / "runs" / f"{repo.resolve().name}-{stamp}"
+    home = safe_home()
+    state_root = (home if home is not None else
+                  Path(tempfile.gettempdir()) / f"stateframe-{getattr(os, 'getuid', lambda: 'unknown')()}")
+    return state_root / ".stateframe" / "runs" / f"{repo.resolve().name}-{stamp}"
 
 
 def run_test_cmd(command: str, cwd: Path, timeout_s: float = 900,
@@ -721,6 +726,12 @@ def _select_test_python(options: RunOptions, printer=print) -> str:
     # with its own site-packages) is probed.
     if options.runner_kind != "generic" and python != options._pytest_proven:
         _startup_probe(python, "import pytest", label=f"test interpreter {python} ({reason})")
+    from .engine.kernel_test_isolation import check_sandbox_exec_denial
+    denial = check_sandbox_exec_denial(python)
+    if denial:
+        raise RunError(f"test interpreter {python} ({reason}): {denial}. Every check would fail "
+                       "to start; check that the interpreter and its links are available and "
+                       "executable inside the check sandbox, or report this as a StateFrame bug")
     printer(f"test interpreter: {python} ({reason})")
     if not engine_reads_test_python():
         # Honest scope: --test-cmd before/after use it; this engine's own checks do not yet.
@@ -1085,7 +1096,7 @@ def prepare(options: RunOptions, printer=print) -> tuple[Path, workcopy.WorkCopy
         except hook_host.HookConfigError as error:
             raise RunError(str(error)) from error
     if options.run_dir is None:
-        private_directory(Path.home() / ".stateframe", "runs", run.name)
+        private_directory(run.parent.parent, "runs", run.name)
     else:
         run.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         private_directory(run)

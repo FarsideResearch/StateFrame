@@ -16,11 +16,13 @@ import struct
 import subprocess
 import sys
 import tarfile
+import tempfile
 import time
 import uuid
 from pathlib import Path
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
+from .engine.kernel_safe_paths import safe_expanduser, safe_home
 from .request_records import PACK_NAME as REQUEST_PACK_NAME
 from .request_records import request_pack_size, seal_request_records
 
@@ -35,12 +37,21 @@ _BACKUP_NAME = "backups"
 
 
 def default_runs_home() -> Path:
-    """The same runs parent used by runner.default_run_dir()."""
-    return Path.home() / ".stateframe" / "runs"
+    """The same runs parent used by runner.default_run_dir(), including its no-home fallback."""
+    user_home = safe_home()
+    state_root = (user_home if user_home is not None else
+                  Path(tempfile.gettempdir()) / f"stateframe-{getattr(os, 'getuid', lambda: 'unknown')()}")
+    return state_root / ".stateframe" / "runs"
 
 
 def stateframe_home() -> Path:
-    return Path(os.environ.get("STATEFRAME_HOME") or Path.home() / ".stateframe").expanduser()
+    configured = os.environ.get("STATEFRAME_HOME")
+    if configured:
+        return safe_expanduser(Path(configured))
+    user_home = safe_home()
+    if user_home is None:
+        raise ValueError("cannot find the StateFrame home: set HOME or STATEFRAME_HOME")
+    return safe_expanduser(user_home / ".stateframe")
 
 
 def _normal_name(name: str) -> str:
@@ -233,7 +244,7 @@ def build_env_manifest(run_dir: str | os.PathLike[str]) -> dict[str, object]:
     python_version = config.get("version") or config.get("version_info")
     python_implementation = config.get("implementation")
     if not python_version or not python_implementation:
-        interpreter = Path(str(source_python or (env / "bin" / "python"))).expanduser()
+        interpreter = safe_expanduser(Path(str(source_python or (env / "bin" / "python"))))
         probed_version, probed_implementation = _probe_python_identity(interpreter)
         if python_version and python_version != probed_version:
             raise OSError("run interpreter version differs from env/pyvenv.cfg")
@@ -629,7 +640,7 @@ def _seed_reference(path: Path, seed_store: Path) -> Path | None:
         raw = metadata.get("path")
         if not isinstance(raw, str) or not raw:
             return None
-        seed = Path(raw).expanduser()
+        seed = safe_expanduser(Path(raw))
         if not seed.is_absolute():
             seed = seed_store / seed
         return seed.resolve()
@@ -760,8 +771,8 @@ def run_gc(roots: list[str | os.PathLike[str]] | None = None, *, apply: bool = F
         raise ValueError("--older-than must be zero or more days")
     if keep_last < 0:
         raise ValueError("--keep-last must be zero or more")
-    state_home = home.expanduser() if home is not None else stateframe_home()
-    selected_roots = [Path(root).expanduser().resolve() for root in roots] if roots else [default_runs_home()]
+    state_home = safe_expanduser(home) if home is not None else stateframe_home()
+    selected_roots = [safe_expanduser(Path(root)).resolve() for root in roots] if roots else [default_runs_home()]
     run_roots: dict[Path, Path] = {}
     for root in selected_roots:
         for run in _discover_runs(root):

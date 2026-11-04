@@ -11,6 +11,7 @@ fallback.
 """
 from __future__ import annotations
 
+from dataclasses import dataclass
 import json
 from functools import lru_cache
 import os
@@ -22,12 +23,37 @@ import site
 import subprocess
 import sys
 
+
+@dataclass(frozen=True)
+class SandboxReadGrants:
+    """Exact subpath and literal read grants emitted into a macOS check profile."""
+
+    subpaths: frozenset[Path]
+    literals: frozenset[Path]
+
+    def allows(self, path: Path) -> bool:
+        if not path.is_absolute():
+            return False
+        lexical = Path(os.path.abspath(path))
+        try:
+            resolved = lexical.resolve(strict=False)
+        except (OSError, RuntimeError):
+            return False
+        return all(
+            candidate in self.literals
+            or any(candidate.is_relative_to(root) for root in self.subpaths)
+            for candidate in (lexical, resolved)
+        )
+
+
 if __package__:
     from .kernel_exec_capability import system_runtime_read_roots
+    from .kernel_safe_paths import safe_home
     from .kernel_sbpl import sbpl_path_regex, sbpl_string
     from .kernel_test_python import selected_test_python
 else:
     from kernel_exec_capability import system_runtime_read_roots
+    from kernel_safe_paths import safe_home
     from kernel_sbpl import sbpl_path_regex, sbpl_string
     from kernel_test_python import selected_test_python
 
@@ -99,12 +125,13 @@ def _bwrap_userns_guard_supported(executable: str) -> bool:
     return result.returncode == 0
 
 
-def _interpreter_roots(selected: Path) -> set[str]:
+def _interpreter_roots(selected: Path, env: dict[str, str] | None = None) -> set[str]:
     """Admit only installed Python prefixes, including virtualenvs and PATH Pythons."""
     roots: set[str] = set()
+    home = safe_home(env)
     for binary in (selected, selected.resolve()):
         prefix = binary.parent.parent
-        if prefix == Path.home() or prefix in {
+        if (home is not None and prefix == home) or prefix in {
                 Path("/"), Path("/Users"), Path("/home"), Path("/opt"), Path("/tmp"),
                 Path("/private/tmp")}:
             continue
@@ -115,10 +142,79 @@ def _interpreter_roots(selected: Path) -> set[str]:
     return roots
 
 
+def _link_chain(path: Path, limit: int = 40) -> list[Path]:
+    """Every path the kernel visits to open ``path``: each symlink hop and the final file.
+
+    uv venvs link bin/python into ~/.local/share/uv/python/cpython-3.12-<platform>/, a
+    symlinked directory; admitting only the fully resolved file left that hop unreadable
+    and sandbox-exec refused to exec the interpreter (11-02).
+    """
+    chain: list[Path] = []
+    pending = Path(os.path.abspath(path))
+    for _ in range(limit):
+        resolved_prefix = Path(pending.anchor)
+        hop: Path | None = None
+        for index, part in enumerate(pending.parts[1:], start=1):
+            candidate = resolved_prefix / part
+            if candidate.is_symlink():
+                chain.append(candidate)
+                target = Path(os.readlink(candidate))
+                rest = Path(*pending.parts[index + 1:]) if index + 1 < len(pending.parts) else None
+                base = target if target.is_absolute() else resolved_prefix / target
+                hop = Path(os.path.normpath(base / rest if rest else base))
+                break
+            resolved_prefix = candidate
+        if hop is None:
+            chain.append(pending)
+            return chain
+        pending = hop
+    return chain
+
+
+def _program_read_roots(program: Path, env: dict[str, str] | None = None) -> set[str]:
+    """Read roots a host-selected executable needs: its link hops and, for Python, its install."""
+    roots = {str(hop) for hop in _link_chain(program)}
+    roots |= _interpreter_roots(program, env)
+    return roots
+
+
+def check_sandbox_exec_denial(python: str, timeout: float = 60.0) -> str | None:
+    """Start ``python`` once under the exact check sandbox; the loud message if it is refused.
+
+    The startup probe uses a different capability profile, so it can pass while every
+    check sandbox exec is refused and every check comes back as a fake RED (11-02).
+    """
+    import tempfile
+    if __package__:
+        from .kernel_check_receipts import sandbox_exec_denial, sandbox_open_denial
+    else:
+        from kernel_check_receipts import sandbox_exec_denial, sandbox_open_denial
+    with tempfile.TemporaryDirectory(prefix="stateframe-check-sandbox-") as directory:
+        try:
+            read_grants: list[SandboxReadGrants] = []
+            argv, env = isolated_command([python, "-I", "-B", "-c", "pass"], Path(directory),
+                                         dict(os.environ), selected_python=python,
+                                         read_grants_out=read_grants)
+        except RuntimeError:
+            return None  # no sandbox at all: the capability check reports that, not this probe
+        try:
+            result = subprocess.run(argv, cwd=directory, env=env, capture_output=True,
+                                    text=True, timeout=timeout, check=False)
+        except (OSError, subprocess.TimeoutExpired):
+            return None  # not an exec refusal; the startup probe reports real failures
+    output = result.stderr + "\n" + result.stdout
+    if sandbox_open_denial(output, read_grants[0] if read_grants else None):
+        return (f"the sandbox blocked the project interpreter at {python}: this is an environment "
+                "error, not a test result (no test ran)")
+    return sandbox_exec_denial(output)
+
+
 def isolated_command(command: list[str], root: Path, env: dict[str, str], *,
                      readonly_workspace: bool = False,
                      generic_check: bool = False,
-                     nproc_budget: int | None = None) -> tuple[list[str], dict[str, str]]:
+                     nproc_budget: int | None = None,
+                     selected_python: str | None = None,
+                     read_grants_out: list[SandboxReadGrants] | None = None) -> tuple[list[str], dict[str, str]]:
     executable = backend()
     root = root.resolve()
     scratch = root / ".test-tmp"
@@ -145,9 +241,9 @@ def isolated_command(command: list[str], root: Path, env: dict[str, str], *,
     if host_task_pytest_plugins() == "installed":
         clean.pop("PYTEST_DISABLE_PLUGIN_AUTOLOAD", None)
     relay_dir = _declared_relay_dir(clean)
-    selected = Path(selected_test_python())
+    selected = Path(selected_test_python() if selected_python is None else selected_python)
     resolved_selected = selected.resolve()
-    interpreter_roots = (_interpreter_roots(selected)
+    interpreter_roots = (_interpreter_roots(selected, env)
                          if selected != Path(sys.executable) else set())
     if platform.system() == "Darwin":
         readable = {"/System", "/usr", "/Library/Apple",
@@ -178,11 +274,25 @@ def isolated_command(command: list[str], root: Path, env: dict[str, str], *,
                 if (executable_path.is_file() and
                         not any(executable_path.is_relative_to(Path(allowed)) for allowed in readable)):
                     readable.add(str(executable_path))
+        # The chain must start from the unresolved path the child execs (relative argv runs
+        # from root): the symlink hops are exactly what a resolved path skips.
+        if "/" in program and not Path(program).is_absolute():
+            exec_path: Path | None = Path(os.path.abspath(root / program))
+        elif resolved_program and Path(resolved_program).is_absolute():
+            exec_path = Path(resolved_program)
+        else:
+            exec_path = None
+        # Executables only: a link to a data file never widens what the child may read.
+        if exec_path is not None and exec_path.is_file() and os.access(exec_path, os.X_OK):
+            covered = [Path(allowed) for allowed in readable]
+            readable.update(value for value in _program_read_roots(exec_path, env)
+                            if not any(Path(value).is_relative_to(parent) for parent in covered))
         if selected != Path(sys.executable):
             # A selected executable can sit directly under HOME. Permit the file,
             # not its entire parent directory, before adding verified Python roots.
             readable.update((str(selected), str(resolved_selected)))
             readable.update(interpreter_roots)
+            readable.update(_program_read_roots(selected, env))
         # Homebrew's launcher and dynamically linked runtime cross opt/Cellar
         # symlinks; these are installed code directories, not its var/data tree.
         if relay_dir is not None:
@@ -196,6 +306,12 @@ def isolated_command(command: list[str], root: Path, env: dict[str, str], *,
         metadata = " ".join(f"(literal {sbpl_string(value)})" for value in sorted(ancestors))
         devices = '(subpath "/dev")'
         shared_xcrun_cache = _darwin_xcrun_shared_cache_read_filter()
+        if read_grants_out is not None:
+            # Record every read the profile grants, including the read-only xcrun cache literal.
+            read_grants_out.append(SandboxReadGrants(
+                frozenset(map(Path, readable | {"/dev"})),
+                frozenset(map(Path, ancestors))
+                | frozenset(path / "xcrun_db" for path in _darwin_xcrun_cache_paths())))
         # Keep ordinary interpreter Mach/IPC operations while restricting its
         # information-bearing filesystem and network capabilities explicitly.
         writable = scratch if readonly_workspace else root
@@ -234,6 +350,18 @@ def isolated_command(command: list[str], root: Path, env: dict[str, str], *,
     if selected != Path(sys.executable):
         prefixes.update((str(selected), str(resolved_selected)))
         prefixes.update(interpreter_roots)
+    # A project venv (inside root) whose python links into a uv/pyenv install outside the
+    # mounts: mount that install, and give each symlinked directory hop its real tree.
+    program = command[0]
+    exec_path = (Path(os.path.abspath(root / program))
+                 if "/" in program and not Path(program).is_absolute()
+                 else Path(program) if Path(program).is_absolute() else None)
+    link_binds: list[tuple[str, str]] = []
+    if exec_path is not None and exec_path.is_file() and os.access(exec_path, os.X_OK):
+        prefixes.update(_interpreter_roots(exec_path.resolve(), env))
+        for hop in _link_chain(exec_path):
+            if hop.is_symlink() and hop.resolve().is_dir() and not hop.is_relative_to(root):
+                link_binds.append((str(hop.resolve()), str(hop)))
     mounted: list[Path] = []
     for value in sorted(prefixes):
         if value.startswith("/usr") or value in {"/", "/home", "/root"}:
@@ -245,6 +373,9 @@ def isolated_command(command: list[str], root: Path, env: dict[str, str], *,
             continue
         arguments.extend(["--ro-bind", value, value])
         mounted.append(Path(value))
+    for source, destination in link_binds:
+        if not any(Path(destination).is_relative_to(parent) for parent in mounted):
+            arguments.extend(["--ro-bind", source, destination])
     if relay_dir is not None:
         # /tmp is a fresh sandbox tmpfs; expose only this run's relay directory.
         arguments.extend(["--bind", str(relay_dir), str(relay_dir)])

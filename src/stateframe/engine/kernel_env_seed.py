@@ -17,6 +17,11 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Callable
 
+if __package__:
+    from .kernel_safe_paths import safe_home
+else:
+    from kernel_safe_paths import safe_home
+
 
 FICLONE = 0x40049409
 DEFAULT_MAX_GB = 10
@@ -485,7 +490,14 @@ def clone(source: Path, destination: Path, interpreter: Path, source_repo: Path 
     """Build or verify one seed under a per-key lock, then clone it into a new run env."""
     inputs = _key_inputs(source, interpreter, source_repo, authorized_roots)
     key = hashlib.sha256(json.dumps(inputs, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
-    home = Path(os.environ.get("STATEFRAME_HOME") or Path.home() / ".stateframe")
+    configured = os.environ.get("STATEFRAME_HOME")
+    if configured:
+        home = Path(configured)
+    else:
+        user_home = safe_home()
+        if user_home is None:
+            raise OSError("cannot find the StateFrame home: set HOME or STATEFRAME_HOME")
+        home = user_home / ".stateframe"
     store = home / "env-seeds"
     store.mkdir(mode=0o700, parents=True, exist_ok=True)
     seed = store / key

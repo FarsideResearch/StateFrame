@@ -29,6 +29,11 @@ else:
         symlink_hops,
     )
 
+if __package__:
+    from .kernel_safe_paths import safe_expanduser, safe_home
+else:
+    from kernel_safe_paths import safe_expanduser, safe_home
+
 HOOKS_SCHEMA = "stateframe-hooks/1"
 INPUT_SCHEMA = "stateframe-hook-input/1"
 PROJECT_HOOKS_PATH = ".stateframe/hooks.json"
@@ -538,7 +543,7 @@ def load_hook_files(
     counts = dict.fromkeys(EVENTS, 0)
     for source_index, raw_path in enumerate(paths):
         try:
-            path = Path(raw_path).expanduser().resolve(strict=True)
+            path = safe_expanduser(Path(raw_path)).resolve(strict=True)
             valid_file = path.is_file() and path.stat().st_size <= 1 << 20
         except OSError as error:
             raise HookConfigError(
@@ -1255,10 +1260,11 @@ class SanitizedText:
 def sanitize(text: str, *, limit: int) -> SanitizedText:
     value = _ANSI.sub("", text).replace("\r\n", "\n")
     value = re.sub(r"[^\n]*\r", "", value)
-    for path, label in (
-        (_RUN_PATH.get() or os.environ.get("STATEFRAME_RUN_DIR", ""), "<run>"),
-        (str(Path.home()), "<home>"),
-    ):
+    replacements = [(_RUN_PATH.get() or os.environ.get("STATEFRAME_RUN_DIR", ""), "<run>")]
+    home = safe_home()
+    if home is not None:
+        replacements.append((str(home), "<home>"))
+    for path, label in replacements:
         if path:
             value = value.replace(path, label)
     value = "".join(

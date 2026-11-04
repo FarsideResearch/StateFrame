@@ -29,11 +29,13 @@ from pathlib import Path
 
 if __package__:
     from .cache_metrics import normalize
+    from .engine.kernel_safe_paths import safe_home
     from .replay_tape import CheckpointUnfaithful, ReplayUnfaithful, Replayer, mask_volatile
     from .skills import SkillError, skills_digest, verify_records
     from .state_dirs import private_directory
 else:  # Executed by path under the selected project interpreter.
     from cache_metrics import normalize
+    from engine.kernel_safe_paths import safe_home
     from replay_tape import CheckpointUnfaithful, ReplayUnfaithful, Replayer, mask_volatile
     from skills import SkillError, skills_digest, verify_records
     from state_dirs import private_directory
@@ -747,10 +749,9 @@ def checkpoint_key() -> bytes | None:
     import secrets
     import stat as stat_module
 
-    try:
-        home = Path.home()  # RuntimeError when HOME is unset and the uid has no passwd entry (containers)
-    except (RuntimeError, KeyError, OSError) as error:
-        emit("checkpoint_key_unusable", reason="home directory unknown: " + type(error).__name__)
+    home = safe_home()
+    if home is None:
+        emit("checkpoint_key_unusable", reason="home directory unknown")
         return None
     path = home / CHECKPOINT_KEY
 

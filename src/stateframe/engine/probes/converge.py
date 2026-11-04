@@ -16,6 +16,11 @@ import tempfile
 import time
 from collections.abc import Mapping
 
+if __package__ and __package__.endswith("engine.probes"):
+    from ..kernel_safe_paths import safe_expanduser
+else:
+    from kernel_safe_paths import safe_expanduser
+
 POC = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(POC))
 sys.path.insert(0, str(POC / "probes"))
@@ -65,7 +70,7 @@ def _swebench_workspace(d):
     python = d.get("python")
     if isinstance(python, str) and python:
         try:
-            env_cache = pathlib.Path(python).expanduser().parents[3]
+            env_cache = safe_expanduser(pathlib.Path(python)).parents[3]
             roots.extend((env_cache, *sorted(env_cache.parent.glob("swebench*"))))
         except IndexError:
             pass
@@ -74,7 +79,7 @@ def _swebench_workspace(d):
     seen = set()
     last_error = None
     for cache in roots:
-        cache = cache.expanduser().resolve()
+        cache = safe_expanduser(cache).resolve()
         if cache in seen:
             continue
         seen.add(cache)

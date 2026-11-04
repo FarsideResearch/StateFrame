@@ -13,6 +13,8 @@ from typing import Mapping
 
 from .endpoint import EndpointError, _is_loopback, normalize_base_url
 
+from .engine.kernel_safe_paths import safe_expanduser, safe_home
+
 SCHEMA = "stateframe-routes/1"
 ROLES = ("read", "plan", "edit", "finish", "decide2", "unit")
 FIELDS = ("endpoint", "model", "api_key_env", "temperature", "top_p", "top_k", "min_p",
@@ -175,10 +177,13 @@ def load_file(path: Path | None) -> dict[str, dict[str, object]]:
 
 def routes_path(explicit: Path | None, environ: Mapping[str, str]) -> Path | None:
     if explicit is not None:
-        return explicit.expanduser()
+        return safe_expanduser(explicit, environ)
     if environ.get("STATEFRAME_ROUTES"):
-        return Path(environ["STATEFRAME_ROUTES"]).expanduser()
-    default = Path.home() / ".stateframe" / "routes.toml"
+        return safe_expanduser(Path(environ["STATEFRAME_ROUTES"]), environ)
+    home = safe_home(environ)
+    if home is None:
+        return None
+    default = home / ".stateframe" / "routes.toml"
     return default if default.is_file() else None
 
 

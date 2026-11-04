@@ -16,8 +16,6 @@ The digest class review also found 96 identity keys that join several fields wit
 
 This preview is supported on macOS on Apple silicon and on Linux x86_64 (tested on Ubuntu 22.04.5, kernel 6.8, Python 3.11: install, the three demos, the bubblewrap sandbox with no network and no writes outside the run, and `kill -9` then resume all pass). Long runs (200-300 requests) and the speed and memory numbers were measured on macOS only; Linux is tested end to end on short runs. Checkpoints were measured on macOS; on Linux, resume is verified through full replay. Linux arm64 preview runs are untested. Ubuntu 24.04 and later restrict unprivileged user namespaces, which bubblewrap needs; that release is untested, and if the sandbox cannot start there the usual setting is `sudo sysctl kernel.apparmor_restrict_unprivileged_userns=0` (or an AppArmor profile that allows `bwrap`). Docker is not supported. Use Python 3.11 or newer with venv and ensurepip (Python 3.14.1 is not supported: the pinned networkx 3.6.1 excludes that one release; other 3.14.x releases work). The installer downloads pinned, hash-checked dependencies from PyPI; `./install.sh --offline` uses the bundled wheelhouse instead, without schema validation or the syntax-aware repo map.
 
-Every `stateframe` command needs `HOME` or `STATEFRAME_HOME` set. Without either, as in some containers or for accounts with no home directory, the command line exits before it starts. Set `STATEFRAME_HOME` to a writable directory in that case.
-
 The new command containment path was exercised in a Linux aarch64 container. Its x86_64 path has not been verified for this tool release. That is separate from the earlier Linux x86_64 preview checks above.
 
 ## Request and model capacity

@@ -35,6 +35,10 @@ import uuid
 from collections import Counter
 from collections.abc import Mapping, Sequence
 
+if __package__:
+    from .kernel_safe_paths import safe_expanduser
+else:
+    from kernel_safe_paths import safe_expanduser
 
 SCHEMA_VERSION = 1
 DEFAULT_MAX_BYTES = 256 * 1024 * 1024
@@ -46,7 +50,7 @@ _THINK_RE = re.compile(r"<think>(.*?)</think>", re.IGNORECASE | re.DOTALL)
 def _default_root() -> Path:
     configured = os.environ.get("PROMPT_LEDGER_DIR")
     if configured:
-        return Path(configured).expanduser()
+        return safe_expanduser(Path(configured))
     return Path(__file__).resolve().parent / "results" / "prompt_ledger"
 
 
@@ -219,7 +223,7 @@ class PromptLedger:
     """A file-backed prompt ledger with per-instance synchronization."""
 
     def __init__(self, root: str | os.PathLike[str] | None = None, max_bytes: int | None = None):
-        selected_root = Path(root).expanduser() if root is not None else _default_root()
+        selected_root = safe_expanduser(Path(root)) if root is not None else _default_root()
         if not selected_root.is_absolute():
             selected_root = Path(__file__).resolve().parent / selected_root
         self.root = selected_root

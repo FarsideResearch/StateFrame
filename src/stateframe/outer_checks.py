@@ -188,6 +188,7 @@ def _helper() -> int:
     os.environ.update(env)
     sys.path.insert(0, str(Path(__file__).resolve().parent / "engine"))
     import kernel_execution_policy as policy
+    from kernel_check_receipts import sandbox_open_denial
 
     spawned = None
     scratch = None
@@ -247,6 +248,10 @@ def _helper() -> int:
                 break
             time.sleep(pause)
         sandbox_error = result.completed.stderr
+        denial = sandbox_open_denial(
+            sandbox_error + "\n" + result.completed.stdout, policy.policy_read_grants(result))
+        if denial is not None:
+            raise OuterCheckError(denial)
         missing = re.match(r"bwrap: execvp (\S+): No such file or directory", sandbox_error)
         if result.completed.returncode and missing:
             # The sandbox started; the check program itself is absent (for example `make`

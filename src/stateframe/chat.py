@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import shutil
 import tempfile
 from dataclasses import dataclass, field, replace
@@ -22,6 +23,8 @@ from .endpoint import EndpointError
 from .runner import HookContainmentRunError, HookRefusedRunError, RunError, RunOptions, run, succeeded
 from .state_dirs import private_directory
 from .task_row import TaskRowError
+
+from .engine.kernel_safe_paths import safe_home
 
 if TYPE_CHECKING:
     from .engine.kernel_hooks import HookSet
@@ -84,7 +87,10 @@ class Session:
 
     def start(self, printer=print) -> None:
         self._resolve_project_hooks(printer)
-        state_root = Path.home() / ".stateframe"
+        home = safe_home()
+        state_root = (home / ".stateframe" if home is not None else
+                      Path(tempfile.gettempdir()) / f"stateframe-{getattr(os, 'getuid', lambda: 'unknown')()}"
+                      / ".stateframe")
         if self.home.parent == state_root / "sessions":
             private_directory(state_root, "sessions", self.home.name)
         else:
@@ -289,7 +295,10 @@ def _tree_diff(a: Path, b: Path) -> str:
 
 def default_home(repo: Path) -> Path:
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    return Path.home() / ".stateframe" / "sessions" / f"{repo.resolve().name}-{stamp}"
+    home = safe_home()
+    state_root = (home if home is not None else
+                  Path(tempfile.gettempdir()) / f"stateframe-{getattr(os, 'getuid', lambda: 'unknown')()}")
+    return state_root / ".stateframe" / "sessions" / f"{repo.resolve().name}-{stamp}"
 
 
 def repl(session: Session, read=input, printer=print, print_summary=None) -> int:

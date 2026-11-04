@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from . import storage_gc
+from .engine.kernel_safe_paths import safe_expanduser, safe_home
 
 
 class RehydrateError(RuntimeError):
@@ -77,7 +78,10 @@ def _seed_path(manifest: dict[str, object]) -> Path | None:
     key = manifest.get("seed_key")
     if not isinstance(key, str) or not key or Path(key).name != key or key.startswith("."):
         return None
-    store = storage_gc.stateframe_home() / "env-seeds"
+    try:
+        store = storage_gc.stateframe_home() / "env-seeds"
+    except ValueError as error:
+        raise RehydrateError(str(error)) from error
     if store.is_symlink() or not store.is_dir():
         return None
     seed = store / key
@@ -224,8 +228,13 @@ def _probe_python(interpreter: Path) -> tuple[str, str]:
 
 
 def _wheel_directories(run_dir: Path, manifest: dict[str, object]) -> list[Path]:
-    candidates = [run_dir / "wheelhouse", storage_gc.stateframe_home() / "wheelhouse",
-                  Path.home() / ".cache" / "pip"]
+    try:
+        candidates = [run_dir / "wheelhouse", storage_gc.stateframe_home() / "wheelhouse"]
+    except ValueError as error:
+        raise RehydrateError(str(error)) from error
+    user_home = safe_home()
+    if user_home is not None:
+        candidates.append(user_home / ".cache" / "pip")
     try:
         spec = json.loads((run_dir / "spec.json").read_text(encoding="utf-8"))
     except (OSError, ValueError):
@@ -235,7 +244,7 @@ def _wheel_directories(run_dir: Path, manifest: dict[str, object]) -> list[Path]
         candidates.append(Path(repo) / "wheelhouse")
     cache = os.environ.get("PIP_CACHE_DIR")
     if cache:
-        candidates.append(Path(cache).expanduser())
+        candidates.append(safe_expanduser(Path(cache)))
     directories = set()
     for candidate in candidates:
         if not candidate.is_dir() or candidate.is_symlink():
@@ -261,7 +270,7 @@ def _local_project(row: dict[str, object]) -> Path | None:
 
 def _build_environment(destination: Path, manifest: dict[str, object], *, run_dir: Path,
                        offline: bool, printer=print) -> None:
-    interpreter = Path(str(manifest["source_interpreter_path"])).expanduser()
+    interpreter = safe_expanduser(Path(str(manifest["source_interpreter_path"])))
     version, implementation = _probe_python(interpreter)
     if version != manifest["python_version"]:
         raise RehydrateError(f"recorded Python version mismatch: expected {manifest['python_version']}, got {version}")
@@ -370,7 +379,7 @@ def compare_distributions(expected: list[dict[str, object]],
 def rehydrate_run(run_dir: str | os.PathLike[str], *, offline: bool = False,
                   dry_run: bool = False, printer=print) -> RehydrateResult:
     """Restore env/ without overwriting an existing environment; report exactness explicitly."""
-    run = Path(run_dir).expanduser().resolve()
+    run = safe_expanduser(Path(run_dir)).resolve()
     if dry_run:
         return _rehydrate_plan(run, offline=offline, printer=printer)
     from .resume import ENGINE_LOCK, ResumeRefused, _lock_holder, hold_run_lock

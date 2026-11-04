@@ -13,12 +13,16 @@ import hashlib
 import json
 import os
 import stat
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Iterable, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterator
 
+if __package__:
+    from .kernel_safe_paths import safe_expanduser
+else:
+    from kernel_safe_paths import safe_expanduser
 
 SWITCH = "STATEFRAME_VERDICT_IDENTITY"
 SCHEMA = "stateframe-verdict-identity/1"
@@ -119,7 +123,7 @@ class RunIdentityProvider:
     excluded_paths: tuple[str | Path, ...] = ()
 
     def __post_init__(self) -> None:
-        root = Path(self.root).expanduser().resolve()
+        root = safe_expanduser(Path(self.root)).resolve()
         if not root.is_dir():
             raise ValueError("identity root must be an existing directory")
         object.__setattr__(self, "root", root)
@@ -131,7 +135,7 @@ class RunIdentityProvider:
         object.__setattr__(self, "harness_version", str(harness).strip())
         object.__setattr__(
             self, "excluded_paths",
-            tuple(Path(path).expanduser().absolute() for path in self.excluded_paths),
+            tuple(safe_expanduser(Path(path)).absolute() for path in self.excluded_paths),
         )
 
     def current(self) -> RunIdentity:
@@ -186,10 +190,10 @@ def workspace_tree_hash(root: str | Path, *, exclude: Iterable[str | Path] = ())
     included.  Volatile interpreter/cache directories are excluded, matching
     the host workspace snapshot used by the obligation kernel.
     """
-    base = Path(root).expanduser().resolve()
+    base = safe_expanduser(Path(root)).resolve()
     if not base.is_dir():
         raise ValueError("workspace hash root must be an existing directory")
-    excluded = tuple(Path(path).expanduser().absolute() for path in exclude)
+    excluded = tuple(safe_expanduser(Path(path)).absolute() for path in exclude)
     rows: list[dict[str, object]] = []
     paths = sorted(base.rglob("*"), key=lambda path: path.relative_to(base).as_posix())
     for path in paths:
@@ -234,7 +238,7 @@ def release_id_for(root: str | Path, manifest: Mapping[str, object] | None = Non
             value = manifest.get(key)
             if value is not None and str(value).strip():
                 return str(value).strip()
-    path = Path(root).expanduser().resolve()
+    path = safe_expanduser(Path(root)).resolve()
     release_manifest = path / "release-manifest.json"
     if release_manifest.is_file() and path.name:
         return path.name
