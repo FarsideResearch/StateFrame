@@ -31,6 +31,8 @@ from .engine.kernel_hooks import (
     verify_sources,
 )
 
+from .engine.kernel_safe_paths import safe_home
+
 __all__ = ["HookContainmentError", "HookRunRefused", "HookTrustError", "HookRecordsError",
            "ProjectHookSelection", "resolve_project_hooks", "trust_project_hooks", "load_hooks",
            "create_bundle", "refuse_run_dir_under_roots", "hooks_from_spec", "run_start_hooks",
@@ -77,7 +79,10 @@ def _reject_constant(value: str) -> object:
 
 
 def _stateframe_dir(*, create: bool) -> Path | None:
-    directory = Path.home() / ".stateframe"
+    home = safe_home()
+    if home is None:
+        return None
+    directory = home / ".stateframe"
     try:
         if not create and not directory.exists() and not directory.is_symlink():
             return None
@@ -339,7 +344,7 @@ def trust_project_hooks(repo: Path, *, remove: bool = False, printer=print) -> s
     _write_trust_store(kept)
     for line in _definition_lines(hooks, path, digest):
         printer(line)
-    printer(f"trusted project hooks for {root}; trust store: {Path.home() / _TRUST_RELATIVE}")
+    printer(f"trusted project hooks for {root}; trust store: {_trust_path()}")
     return digest
 
 

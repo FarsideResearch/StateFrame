@@ -1,4 +1,3 @@
-#!/usr/bin/python3
 """Require a completed passing check before allowing a submission."""
 
 import json

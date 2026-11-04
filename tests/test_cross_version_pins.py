@@ -14,7 +14,13 @@ from tools.changed_defaults import CHANGED_DEFAULTS
 
 TESTS = Path(__file__).resolve().parent
 # Text that marks a file as running an older release tree next to the current one.
-CROSS_VERSION_MARKERS = ("SF_TEST_PARITY_BASELINE", '"archive"', "compare_no_mcp_requests", "_archive_revision")
+CROSS_VERSION_MARKERS = (
+    "SF_TEST_PARITY_BASELINE",
+    '"archive"',
+    "compare_no_mcp_requests",
+    "_archive_revision",
+    "pinned_tree",
+)
 # Files that run an older tree but compare no request bytes, with the reason.
 EXEMPT = {
     "acceptance/test_doc_command_sweep.py": "positive control: asserts the old release fails; no byte comparison",

@@ -9,6 +9,7 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Callable, Sequence
 
+from .engine.kernel_safe_paths import safe_expanduser
 from .powerup_attachment import read_attachments, shell_attachments
 from .powerup_management import disable, enable, install, promote, remove, trust
 from .powerup_manifest import (
@@ -24,9 +25,9 @@ from .powerup_materialize import _materialize, _read_json, _validate
 from .powerup_offer import _offer_matches
 from .powerup_state import (
     effective_state,
-    home,
     project_state,
     trusted_digest,
+    user_home_or_none,
     user_state,
 )
 from .skills import NAME, SkillError
@@ -133,7 +134,7 @@ def resolve_units(
     explicit: dict[str, Path] = {}
     for request in requests:
         name, mode = _requested(request)
-        path = Path(name).expanduser()
+        path = safe_expanduser(Path(name))
         if path.is_dir() or os.sep in name:
             explicit[path.name] = path.absolute()
             cli_modes[path.name] = mode or "on"
@@ -164,7 +165,8 @@ def resolve_units(
         printer("powerups disabled for this run: fix or remove the invalid state file")
         return selected
     project_root = root / ".stateframe" / "powerups"
-    user_root = home() / "powerups"
+    user_home = user_home_or_none()
+    user_root = user_home / "powerups" if user_home is not None else None
     names = (
         set(cli_modes)
         | set(cli_settings)
@@ -172,7 +174,7 @@ def resolve_units(
         | set(user["profiles"].get(profile, {}))
         | set(project["global"])
     )
-    for directory in (project_root, user_root):
+    for directory in (project_root, *([user_root] if user_root is not None else [])):
         try:
             if directory.is_dir() and not directory.is_symlink():
                 names.update(
@@ -206,14 +208,14 @@ def resolve_units(
                 source, source_kind = project_path, "project"
             else:
                 project_rejected = True
-        user_path = user_root / name
-        if source is None and user_path.is_dir() and not user_path.is_symlink():
+        user_path = user_root / name if user_root is not None else None
+        if source is None and user_path is not None and user_path.is_dir() and not user_path.is_symlink():
             source, source_kind = user_path, "user"
-        if source_kind == "explicit" and (project_path.is_dir() or user_path.is_dir()):
+        if source_kind == "explicit" and (project_path.is_dir() or (user_path is not None and user_path.is_dir())):
             printer(
                 f"powerup {name}: explicit path takes precedence over discovered copies"
             )
-        if source_kind == "project" and user_path.is_dir():
+        if source_kind == "project" and user_path is not None and user_path.is_dir():
             printer(
                 f"powerup {name}: trusted project copy takes precedence over installed copy"
             )

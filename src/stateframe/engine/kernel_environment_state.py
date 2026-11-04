@@ -28,6 +28,7 @@ from kernel_execution_policy import ExecutionPolicyError, sandboxed_popen
 from kernel_exec_tracker import child_exited_unreaped, recorded_launch_identity, signal_launch_group
 from kernel_environment_recipes import RecipeRegistry, SetupRecipe
 from kernel_environment_types import RequirementBinding, ResourceFact, ResourcePredicate
+from kernel_wire_identity import seeded_content_wire_id, wire_identity_content, wire_run_seed
 
 
 MODE_ENV = "STATEFRAME_ENVIRONMENT_STATE"
@@ -459,6 +460,7 @@ class EnvironmentState:
         if not 1 <= tail_bytes <= MAX_TAIL_BYTES:
             raise ValueError(f"tail_bytes must be between 1 and {MAX_TAIL_BYTES}")
         self.journal = journal
+        self.run_seed = wire_run_seed(journal)
         self.wall_clock = wall_clock or time.time
         self.monotonic_clock = monotonic_clock or time.monotonic
         # The optional factory is a deterministic test seam only.  Production
@@ -1007,31 +1009,48 @@ class EnvironmentState:
         by_id: dict[str, ReceiptIndexRow] = {}
         content_by_id: dict[str, dict[str, object]] = {}
         file_digests: dict[str, str] = {}
+        duplicate_ordinals: dict[tuple[int, str], int] = {}
         for raw in receipts:
             if not isinstance(raw, Mapping):
                 continue
-            receipt_id = raw.get("receipt_id") or raw.get("event_id") or raw.get("id")
-            if not receipt_id:
-                continue
-            row = ReceiptIndexRow(
-                receipt_id=safe_label(receipt_id, fallback="receipt"),
-                kind=safe_label(raw.get("kind") or raw.get("tool") or "unknown", fallback="unknown"),
-                result_class=safe_label(raw.get("result_class") or raw.get("result") or raw.get("status") or "unknown",
-                                        fallback="unknown"),
-                revision=safe_label(raw.get("revision") or raw.get("snapshot_digest") or "unknown",
-                                    fallback="unknown"),
-                owner="existing_receipt_owner",
-            )
-            by_id[row.receipt_id] = row
             path = str(raw.get("target_path") or raw.get("path") or "").replace("\\", "/")
             if path and path not in file_digests:
                 file_digests[path] = _receipt_file_digest(self.root, path)
-            content_by_id[row.receipt_id] = {
-                "kind": row.kind, "result_class": row.result_class, "revision": row.revision,
+            kind = safe_label(raw.get("kind") or raw.get("tool") or "unknown", fallback="unknown")
+            result_class = safe_label(
+                raw.get("result_class") or raw.get("result") or raw.get("status") or "unknown",
+                fallback="unknown",
+            )
+            revision = safe_label(
+                raw.get("revision") or raw.get("snapshot_digest") or "unknown",
+                fallback="unknown",
+            )
+            content = {
+                "kind": kind, "result_class": result_class, "revision": revision,
                 "workspace_revision": raw.get("workspace_revision"),
                 "fingerprint": raw.get("fingerprint"), "path": path,
                 "file_digest": file_digests.get(path),
             }
+            stable_content = wire_identity_content(content)
+            step_value = raw.get("step", raw.get("turn", 0))
+            step = step_value if type(step_value) is int and step_value >= 0 else 0
+            content_key = digest(stable_content)
+            ordinal_key = (step, content_key)
+            ordinal = duplicate_ordinals.get(ordinal_key, 0) + 1
+            duplicate_ordinals[ordinal_key] = ordinal
+            receipt_id = "environment-receipt:" + seeded_content_wire_id(
+                self.run_seed, "environment-receipt", step,
+                stable_content, ordinal=ordinal,
+            )
+            row = ReceiptIndexRow(
+                receipt_id=safe_label(receipt_id, fallback="receipt"),
+                kind=kind,
+                result_class=result_class,
+                revision=revision,
+                owner="existing_receipt_owner",
+            )
+            by_id[row.receipt_id] = row
+            content_by_id[row.receipt_id] = content
         # Compare semantic content before the bounded projection; random receipt
         # IDs must not control which rows survive overflow or change detection.
         ordered = sorted(by_id, key=lambda key: _canonical(content_by_id[key]))

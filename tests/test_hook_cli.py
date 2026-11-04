@@ -189,6 +189,30 @@ def test_project_trust_digest_covers_definition_resources_and_executable(tmp_pat
     assert "not trusted" in changed.message
 
 
+def test_project_python_token_requires_retrust_for_different_interpreter(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    config = _hook_file(repo)
+    document = json.loads(config.read_text(encoding="utf-8"))
+    document["hooks"][0]["argv"] = ["{python}", "context.py"]
+    config.write_text(json.dumps(document), encoding="utf-8")
+    first = tmp_path / "first-python"
+    second = tmp_path / "second-python"
+    first.symlink_to(Path(os.sys.executable))
+    second.symlink_to(Path(os.sys.executable))
+
+    monkeypatch.setattr(os.sys, "executable", str(first))
+    hook_host.trust_project_hooks(repo, printer=lambda *_: None)
+    assert hook_host.resolve_project_hooks(repo, shell_network="none").hooks is not None
+
+    monkeypatch.setattr(os.sys, "executable", str(second))
+    changed = hook_host.resolve_project_hooks(repo, shell_network="none")
+
+    assert changed.hooks is None
+    assert "not trusted" in changed.message
+
+
 def test_profile_rejects_hook_switches(tmp_path):
     profile = tmp_path / "bad.json"
     profile.write_text(json.dumps({

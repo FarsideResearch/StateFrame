@@ -25,7 +25,7 @@ from typing import Callable
 from kernel_exec_tracker import (ContainmentUnverified, ProcessTable,
                                  capture_launch_identity, child_exited_unreaped, kill_launch_unit,
                                  recorded_launch_identity, signal_launch_group)
-from kernel_test_isolation import isolated_command, sandbox_executable
+from kernel_test_isolation import SandboxReadGrants, isolated_command, sandbox_executable
 from sf_launch import _command_cgroup
 
 
@@ -86,6 +86,12 @@ class PolicyResult:
     pid: int | None = None
     execution_trace: Mapping[str, int] = field(default_factory=dict)
     profile_payload: bytes | None = None
+    read_grants: SandboxReadGrants | None = None
+
+
+def policy_read_grants(result: object) -> SandboxReadGrants | None:
+    """Return grants when recorded; older policy results have no such field."""
+    return getattr(result, "read_grants", None)
 
 
 def capability_report() -> CapabilityReport:
@@ -273,6 +279,7 @@ def _prepared(command: Sequence[object], root: Path, env: Mapping[object, object
               readonly_workspace: bool, nproc: int,
               generic_check: bool = False,
               isolation_builder: Callable[..., tuple[list[str], dict[str, str]]] = isolated_command,
+              read_grants_out: list[SandboxReadGrants] | None = None,
               ) -> tuple[list[str], dict[str, str], CapabilityReport]:
     report = require_capabilities()
     arguments = _arguments(command)
@@ -281,6 +288,8 @@ def _prepared(command: Sequence[object], root: Path, env: Mapping[object, object
         isolation_options["generic_check"] = True
     if platform.system() == "Linux":
         isolation_options["nproc_budget"] = int(_limit_value("nproc", nproc, maximum=256))
+    if read_grants_out is not None:
+        isolation_options["read_grants_out"] = read_grants_out
     isolated, clean = isolation_builder(arguments, root, _safe_environment(env),
                                         **isolation_options)
     for key, value in (internal_env or {}).items():
@@ -306,13 +315,15 @@ def sandboxed_popen(command: Sequence[object], root: str | os.PathLike[str], *,
                     pass_fds: Sequence[int] = (),
                     cgroup: Path | None = None,
                     isolation_builder: Callable[..., tuple[list[str], dict[str, str]]] = isolated_command,
+                    read_grants_out: list[SandboxReadGrants] | None = None,
                     popen_factory: Callable[..., subprocess.Popen] | None = None) -> tuple[subprocess.Popen[bytes], CapabilityReport]:
     """Start an argv child behind the required sandbox and resource policy."""
     contained = _contained_root(root)
     command_line, clean, report = _prepared(
         command, contained, env, internal_env, readonly_workspace, nproc,
         generic_check=generic_check,
-        isolation_builder=isolation_builder)
+        isolation_builder=isolation_builder,
+        read_grants_out=read_grants_out)
     factory = popen_factory or subprocess.Popen
     process = factory(
         command_line,
@@ -547,6 +558,7 @@ def run_sandboxed(command: Sequence[object], root: str | os.PathLike[str], *,
     if trace is not None:
         trace["sandbox_spawn_start_ns"] = time.monotonic_ns()
     cgroup = _command_cgroup(uuid.uuid4().hex, nproc_budget) if nproc_budget is not None else None
+    read_grants: list[SandboxReadGrants] = []
     try:
         spawn_options = {
             "env": env, "internal_env": child_internal_env,
@@ -560,6 +572,8 @@ def run_sandboxed(command: Sequence[object], root: str | os.PathLike[str], *,
             spawn_options["pass_fds"] = pass_fds
         if cgroup is not None:
             spawn_options["cgroup"] = cgroup
+        if platform.system() == "Darwin":
+            spawn_options["read_grants_out"] = read_grants
         process, report = sandboxed_popen(command, root, **spawn_options)
     except BaseException:
         for fd in (profile_reader, profile_writer):
@@ -616,12 +630,13 @@ def run_sandboxed(command: Sequence[object], root: str | os.PathLike[str], *,
         pid=process.pid if isinstance(process.pid, int) else None,
             execution_trace=trace or {},
         profile_payload=profile_payload,
+        read_grants=read_grants[0] if read_grants else None,
     )
 
 
 __all__ = [
     "CapabilityReport", "DEFAULT_CPU_SECONDS", "DEFAULT_FILE_BYTES",
     "DEFAULT_MEMORY_BYTES", "ExecutionPolicyError", "MAX_OUTPUT_BYTES",
-    "PolicyResult", "available", "capability_report", "require_capabilities",
+    "PolicyResult", "available", "capability_report", "policy_read_grants", "require_capabilities",
     "run_sandboxed", "sandboxed_popen",
 ]

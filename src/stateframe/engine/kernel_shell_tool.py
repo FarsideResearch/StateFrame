@@ -18,6 +18,8 @@ from kernel_tool_settings import ToolSettings
 from kernel_tool_tape import (ToolReplayRefused, ToolTapeError, replay_decision, replay_mode_active,
                               tape_for_run, verify_intent, verify_reexecution)
 
+from kernel_safe_paths import safe_home
+
 SHELL_SCHEMA = {"type": "function", "function": {
     "name": "shell", "description": "Run a bounded foreground shell command. Output is not source-read or check evidence.",
     "parameters": {"type": "object", "properties": {
@@ -99,6 +101,7 @@ class ShellReply:
     environment_changed: bool = False
     environment_identity: str = "disabled"
     fatal: bool = False
+    exit_code: int | None = None
 
 
 def request_confirmation(run_dir: Path, call_id: str, command: str, *, timeout: float = 120) -> bool:
@@ -387,10 +390,14 @@ class ShellTool:
             except (UnicodeError, ValueError, TypeError, KeyError) as error:
                 mcp_refusal = "REFUSED MCP_PROTOCOL_ERROR: "
                 delivery_bytes = str(error)[:500].encode()
+        replacements = {str(self.run_dir / "shell-home"): "<scratch>",
+                        str(self.run_dir): "<run>"}
+        home = safe_home()
+        if home is not None:
+            replacements[str(home)] = "<home>"
         output, omitted_bytes = normalize_output_delivery(delivery_bytes,
             total_bytes=len(delivery_bytes) if mcp_server is not None else result.output_total_bytes,
-            replacements={str(self.run_dir / "shell-home"): "<scratch>",
-                          str(self.run_dir): "<run>", str(Path.home()): "<home>"})
+            replacements=replacements)
         observation = (f"$ {command[:200]}\nexit {'timeout' if result.timed_out else result.exit_code} | "
                        f"{result.wall_seconds:.2f}s | {self.settings.shell} | network {cap.network}\n")
         if custom is not None:
@@ -441,7 +448,8 @@ class ShellTool:
             observation = record.observation
         else:
             tape.complete(call_id=call_id, observation=observation, **completion)
-        return ShellReply(observation, tuple(effects.applied), after_identity != identity, after_identity)
+        return ShellReply(observation, tuple(effects.applied), after_identity != identity,
+                          after_identity, exit_code=result.exit_code)
 
 
 _active: ShellTool | None = None
@@ -486,5 +494,7 @@ def publish_effects(reply: ShellReply, runtime, bolt, created: set[str], *, name
     bolt.receipt("shell_effect" if paths or reply.environment_changed else name,
                  name, reply.observation, result, reply.observation,
                  changed_paths=paths,
-                 effects=tuple({"path": e.path, "change": e.change} for e in reply.applied))
+                 effects=tuple({"path": e.path, "change": e.change} for e in reply.applied),
+                 exit_code=(reply.exit_code if name == "shell" and
+                            getattr(runtime, "continuation", None) is not None else None))
     return target

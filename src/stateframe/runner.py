@@ -40,6 +40,8 @@ from .skills import SkillError, measured_skills_digest, resolve_skills, skills_d
 from .state_dirs import private_directory
 from .request_records import RequestRecordsError, list_request_records
 
+from .engine.kernel_safe_paths import safe_home
+
 if TYPE_CHECKING:
     from .engine.kernel_hooks import HookSet
 
@@ -330,7 +332,10 @@ def validate_test_env(test_env: dict[str, str]) -> dict[str, str]:
 def default_run_dir(repo: Path) -> Path:
     """Outside the repository, so a run never writes anything into the user's tree."""
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    return Path.home() / ".stateframe" / "runs" / f"{repo.resolve().name}-{stamp}"
+    home = safe_home()
+    state_root = (home if home is not None else
+                  Path(tempfile.gettempdir()) / f"stateframe-{getattr(os, 'getuid', lambda: 'unknown')()}")
+    return state_root / ".stateframe" / "runs" / f"{repo.resolve().name}-{stamp}"
 
 
 def run_test_cmd(command: str, cwd: Path, timeout_s: float = 900,
@@ -477,10 +482,9 @@ DEFAULT_PROMPT_BUDGET = 33_344
 # ambient over the profile. Never a blanket STATEFRAME_* passthrough.
 OPT_IN_SWITCHES = {
     "STATEFRAME_ENV_SEED": ("auto", "copy"),  # host-side run environment creation policy
+    "STATEFRAME_ENV_SEED_MAX_GB": (),  # non-negative decimal GB; 0 disables seed eviction
     "STATEFRAME_KEEP_RUN_ENV": ("on", "off"),  # host-side finished-run retention policy
     "STATEFRAME_CACHE_LAYOUT": ("on", "off"),
-    "STATEFRAME_SLOT_AFFINITY": ("on", "off"),
-    "STATEFRAME_TOOL_ORDER": ("stable", "legacy"),
     "STATEFRAME_EVICTFIX": ("on", "legacy"),
     "STATEFRAME_MICROGRAPH": ("on", "off"),  # experimental; the engine defaults to off
     "STATEFRAME_STABLE_TOOL_HEAD": ("on", "off"),  # append-only tool list per run; on by default
@@ -491,6 +495,7 @@ OPT_IN_SWITCHES = {
     "STATEFRAME_FINAL_CACHE_LAYOUT": ("on", "off"),  # cacheable final request layout: volatile authority last
     "STATEFRAME_QUEUE_WAIT_MAX_S": (),  # finite positive seconds; a profile may set it too
     "STATEFRAME_SEND_STALL_S": (),  # 10-600 seconds without request-body progress
+    "STATEFRAME_FL_CHECKPOINT_CAPTURE": ("on", "off"),  # opt-in settled-boundary observer capture
 }
 # Accepted aliases -> the engine's own value (EVICTFIX "off" is sent as "legacy").
 OPT_IN_ALIASES = {"STATEFRAME_EVICTFIX": {"off": "legacy"}}
@@ -510,6 +515,10 @@ def resolve_opt_in_switches(engine_dir: Path = ENGINE_DIR) -> dict[str, str]:
             default = OPT_IN_RUNNER_DEFAULTS.get(name)
             if default is not None and name in engine_switches(engine_dir):
                 chosen[name] = default
+            continue
+        if name == "STATEFRAME_ENV_SEED_MAX_GB":
+            # The host seed builder reports an invalid ambient value and uses the default.
+            chosen[name] = raw if re.fullmatch(r"(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)", raw) else "10"
             continue
         if name in {"STATEFRAME_QUEUE_WAIT_MAX_S", "STATEFRAME_SEND_STALL_S"}:
             try:
@@ -538,6 +547,27 @@ def resolve_opt_in_switches(engine_dir: Path = ENGINE_DIR) -> dict[str, str]:
         if name not in engine_switches(engine_dir):
             raise RunError(f"{name} is set, but this engine does not support it; unset it to run")
         chosen[name] = value
+    capture_enabled = chosen.get("STATEFRAME_FL_CHECKPOINT_CAPTURE") == "on"
+    capture_limits = {
+        "STATEFRAME_FL_CAPTURE_EVERY_K": 1000,
+        "STATEFRAME_FL_CAPTURE_MAX_COUNT": 1000,
+        "STATEFRAME_FL_CAPTURE_MAX_FILES": 10000,
+        "STATEFRAME_FL_CAPTURE_MAX_BYTES": 16 * 1024 * 1024,
+    }
+    for name, maximum in capture_limits.items():
+        raw = os.environ.get(name, "").strip()
+        if not raw:
+            continue
+        if not capture_enabled:
+            raise RunError(f"{name} requires STATEFRAME_FL_CHECKPOINT_CAPTURE=on")
+        try:
+            value = int(raw)
+        except ValueError:
+            raise RunError(f"{name} must be an integer") from None
+        if value <= 0 or value > maximum:
+            raise RunError(f"{name} must be between 1 and {maximum}")
+        # The child environment is allowlisted from this spec, not inherited.
+        chosen[name] = str(value)
     return chosen
 
 
@@ -696,6 +726,12 @@ def _select_test_python(options: RunOptions, printer=print) -> str:
     # with its own site-packages) is probed.
     if options.runner_kind != "generic" and python != options._pytest_proven:
         _startup_probe(python, "import pytest", label=f"test interpreter {python} ({reason})")
+    from .engine.kernel_test_isolation import check_sandbox_exec_denial
+    denial = check_sandbox_exec_denial(python)
+    if denial:
+        raise RunError(f"test interpreter {python} ({reason}): {denial}. Every check would fail "
+                       "to start; check that the interpreter and its links are available and "
+                       "executable inside the check sandbox, or report this as a StateFrame bug")
     printer(f"test interpreter: {python} ({reason})")
     if not engine_reads_test_python():
         # Honest scope: --test-cmd before/after use it; this engine's own checks do not yet.
@@ -1060,7 +1096,7 @@ def prepare(options: RunOptions, printer=print) -> tuple[Path, workcopy.WorkCopy
         except hook_host.HookConfigError as error:
             raise RunError(str(error)) from error
     if options.run_dir is None:
-        private_directory(Path.home() / ".stateframe", "runs", run.name)
+        private_directory(run.parent.parent, "runs", run.name)
     else:
         run.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         private_directory(run)
@@ -2222,6 +2258,29 @@ def _time_limit_line(options: RunOptions) -> str:
             "finalization; stop earlier with Ctrl-C")
 
 
+def _apply_resumed_time_limit(options: RunOptions, resume: dict, started: float,
+                              timeout_s: float | None, printer) -> None:
+    """Keep the run's own --timeout across a resume.
+
+    The engine gets the time that was left at the run's newest recorded request, started once
+    its replay ends (replaying recorded steps spends none of it). The runner's outer limit is
+    the run's whole allowance from now, so a slow replay cannot outlive what the run was given.
+    A --timeout passed to resume replaces all of this.
+    """
+    seconds_left = resume.get("seconds_left")
+    if timeout_s is not None:
+        resume.pop("seconds_left", None)
+        resume.pop("time_allowance_seconds", None)
+        return
+    if not isinstance(seconds_left, (int, float)) or isinstance(seconds_left, bool):
+        return
+    allowance = float(resume.get("time_allowance_seconds") or seconds_left)
+    options.timeout_s = max(allowance, float(seconds_left))
+    options._deadline = started + options.timeout_s
+    printer(f"time limit: this run's --timeout continues with {float(seconds_left):.0f}s left, "
+            "counted from the end of replay; stop earlier with Ctrl-C")
+
+
 def step_limit_restart_warning(old: int, new: int) -> str:
     """Resume with a different step limit: the limit is part of request 1, so nothing recorded can be reused."""
     def name(turns: int) -> str:
@@ -2456,7 +2515,10 @@ def resume_run(run_dir: Path, *, endpoint: Endpoint | None = None, max_turns: in
     options._deadline = started + timeout_s if timeout_s is not None else None
     try:
         with _wall_deadline(options), _sigterm_as_interrupt():
-            printer(_time_limit_line(options))
+            # A run that had a --timeout prints the time it has left once its attempt is archived.
+            if timeout_s is not None or resume_module.replay_tape.recorded_countdown_window(
+                    run_dir / "wire") is None:
+                printer(_time_limit_line(options))
             printer(_step_limit_line(options))
             options.endpoint.check_locality()
             options.python = _check_python(options.python,
@@ -2540,6 +2602,7 @@ def resume_run(run_dir: Path, *, endpoint: Endpoint | None = None, max_turns: in
             if options._routes is not None:
                 spec["routes"] = options._routes.public()
             _compose_resume_route_changes(spec, route_changes)
+            _apply_resumed_time_limit(options, spec["resume"], started, timeout_s, printer)
             (run_dir / "spec.json").write_text(json.dumps(spec, indent=1, sort_keys=True))
             # The cache slot stays the one the run started with: it is part of the request bytes.
             slot = spec.get("prompt_cache_slot") or {}
@@ -2696,7 +2759,8 @@ def _session_end_is_final(summary: dict[str, object]) -> bool:
     # may be resumed, and replay must not collide with a second session_end event id.
     terminal = summary.get("engine_terminal") or {}
     result = terminal.get("result") if isinstance(terminal, dict) else None
-    return isinstance(result, str) and (result in {"SUBMITTED", "HOOK_BLOCKED"} | outcomes.SEAL_FAILURES)
+    return isinstance(result, str) and (result in {"SUBMITTED", "HOOK_BLOCKED", "CONTINUATION_BLOCKED"}
+                                        | outcomes.SEAL_FAILURES)
 
 
 def _run(options: RunOptions, started: float, printer=print) -> dict[str, object]:

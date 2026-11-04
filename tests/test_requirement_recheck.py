@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import os
-import subprocess
 import sys
 from pathlib import Path
 
@@ -14,6 +13,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src/stateframe/engine"))
 
 import kernel_requirement_recheck as recheck  # noqa: E402
+from engine_run import run_monitored  # noqa: E402
 
 TASK = ("Add a deadline to the client. Reject zero, negative values and booleans before sending. "
         "Keep every existing call shape working.")
@@ -113,13 +113,13 @@ def _run(tmp_path: Path, steps: list[dict], switch: str | None, max_turns: int =
     server = serve(script)
     run = tmp_path / "run"
     try:
-        result = subprocess.run(
+        result = run_monitored(
             [sys.executable, "-m", "stateframe", "run", "--repo", str(repo),
              "--task", "Set VALUE to three in pkg/value.py. Keep the module importable. Make the tests pass.",
              "--endpoint", f"http://127.0.0.1:{server.server_port}/v1", "--model", "scripted",
              "--run-dir", str(run), "--test-python", sys.executable, "--max-turns", str(max_turns),
              "--profile", str(_profile(tmp_path, switch)), "--quiet"],
-            env={**os.environ, "PYTHONPATH": str(ROOT / "src")}, capture_output=True, text=True, timeout=240)
+            env={**os.environ, "PYTHONPATH": str(ROOT / "src")}, capture_output=True, text=True, expected_seconds=240)
         try:
             script.assert_consumed()
         except AssertionError as error:

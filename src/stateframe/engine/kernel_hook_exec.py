@@ -23,14 +23,14 @@ if __package__:
     )
     from .kernel_exec_capability import (
         _macos_developer_roots, ExecCapability, ExecLimits,
-        executable_read_roots, symlink_hops,
+        python_runtime_read_roots, symlink_hops,
     )
     from .kernel_exec_session import ExecSession, ExecSessionError
     from .kernel_hooks import (
         GATING_EVENTS, HookArgvError, HookConfigError, HookDefinition,
         HookOutcome, HookSet, PanelEntry, build_payload, check_operands,
         event_id, matches, parse_outcome, resolve_argv, sanitize,
-        _RUN_PATH, _pairs, _constant, _file_sha, _regular_no_symlink,
+        _RUN_PATH, _pairs, _constant, _file_sha, _regular_no_symlink, _shebang,
     )
 else:
     from kernel_effects import (
@@ -39,14 +39,14 @@ else:
     )
     from kernel_exec_capability import (
         _macos_developer_roots, ExecCapability, ExecLimits,
-        executable_read_roots, symlink_hops,
+        python_runtime_read_roots, symlink_hops,
     )
     from kernel_exec_session import ExecSession, ExecSessionError
     from kernel_hooks import (
         GATING_EVENTS, HookArgvError, HookConfigError, HookDefinition,
         HookOutcome, HookSet, PanelEntry, build_payload, check_operands,
         event_id, matches, parse_outcome, resolve_argv, sanitize,
-        _RUN_PATH, _pairs, _constant, _file_sha, _regular_no_symlink,
+        _RUN_PATH, _pairs, _constant, _file_sha, _regular_no_symlink, _shebang,
     )
 
 
@@ -525,26 +525,23 @@ class HookRunner:
             (
                 Path(sys.base_prefix),
                 Path(sys.prefix),
-                Path(sys.executable),
                 self.driver,
                 self.bundle_dir / str(hook.source_index),
             )
         )
+        roots.extend(python_runtime_read_roots(Path(sys.executable)))
         roots.extend(_macos_developer_roots())
         system_gitconfig = Path("/etc/gitconfig")
         if sys.platform == "darwin" and system_gitconfig.is_file():
             roots.extend(symlink_hops(system_gitconfig))
         if hook.executable:
-            roots.extend(executable_read_roots(Path(hook.executable)))
+            roots.extend(python_runtime_read_roots(Path(hook.executable)))
         for item in hook.files:
             if item.executable:
                 path = self.bundle_dir / str(hook.source_index) / item.relative
-                with path.open("rb") as source:
-                    first = source.readline(4096)
-                if first.startswith(b"#!"):
-                    words = first[2:].split()
-                    if words:
-                        roots.extend(executable_read_roots(Path(os.fsdecode(words[0]))))
+                interpreter = _shebang(path)
+                if interpreter:
+                    roots.extend(python_runtime_read_roots(interpreter))
         for prefix in (Path("/opt/homebrew"), Path("/usr/local")):
             if (prefix / "Cellar").is_dir():
                 roots.extend(
@@ -1409,7 +1406,7 @@ class HookRunner:
                                     bundle_dir=self.bundle_dir,
                                     source_index=hook.source_index,
                                 )
-                            except (OSError, HookConfigError):
+                            except (OSError, ValueError):
                                 pinned = None
                             if (
                                 pinned != hook.executable_digest

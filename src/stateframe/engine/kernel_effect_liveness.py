@@ -17,7 +17,6 @@ import inspect
 import json
 import os
 import time
-import uuid
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 
@@ -217,6 +216,22 @@ def _merge_binding(mapping: Mapping[str, object], binding: Mapping[str, object] 
     return result
 
 
+def _receipt_identity_content(value: Mapping[str, object],
+                             binding: Mapping[str, object] | None) -> tuple[object, object]:
+    """Return the stable step and semantic content used for fallback receipt IDs."""
+    from kernel_wire_identity import wire_identity_content
+
+    normalized = _merge_binding(value, binding)
+    content = wire_identity_content({
+        "record": value,
+        "binding": normalized,
+        "effect_observed": _first(
+            value, "effect_observed", "effect_present", "observed", default=None),
+        "result_count": _result_count(value),
+    })
+    return _first(value, "turn", "step", default=0), content
+
+
 @dataclass(frozen=True, slots=True)
 class EffectObligation:
     """A host-admitted obligation whose meaning is an externally visible effect."""
@@ -352,14 +367,27 @@ class EffectReceipt:
 
     @classmethod
     def from_mapping(cls, value: Mapping[str, object], *, binding: Mapping[str, object] | None = None,
-                     default_obligation_id: str | None = None) -> "EffectReceipt":
+                     default_obligation_id: str | None = None,
+                     ordinal: int = 1, journal: object | None = None) -> "EffectReceipt":
         if not isinstance(value, Mapping):
             raise TypeError("effect receipt must be a mapping")
+        if type(ordinal) is not int or ordinal < 1:
+            raise ValueError("effect receipt ordinal must be a positive integer")
         normalized = _merge_binding(value, binding)
+        from kernel_wire_identity import seeded_content_wire_id, wire_run_seed
+
+        step, identity_content = _receipt_identity_content(value, binding)
+        seed = wire_run_seed(journal)
+
+        def derived_identity(kind: str) -> str:
+            return f"{kind}-" + seeded_content_wire_id(
+                seed, "effect-" + kind, step, identity_content, ordinal=ordinal,
+            )
+
         effect_value = _first(value, "effect_observed", "effect_present", "observed", default=None)
         return cls(
-            receipt_id=_first(value, "receipt_id", "id", default="receipt-" + uuid.uuid4().hex),
-            experiment_id=_first(value, "experiment_id", "experiment", default="experiment-" + uuid.uuid4().hex),
+            receipt_id=_first(value, "receipt_id", "id", default=derived_identity("receipt")),
+            experiment_id=_first(value, "experiment_id", "experiment", default=derived_identity("experiment")),
             obligation_id=_first(value, "obligation_id", "obligation", default=default_obligation_id or ""),
             control=_first(value, "control", "arm", default="positive"),
             candidate_digest=normalized["candidate_digest"],
@@ -368,7 +396,7 @@ class EffectReceipt:
             config_digest=normalized["config_digest"],
             dependency_snapshot=normalized["dependency_snapshot"],
             stimulus_correlation_id=_first(value, "stimulus_correlation_id", "correlation_id",
-                                            "correlation", default="correlation-" + uuid.uuid4().hex),
+                                            "correlation", default=derived_identity("correlation")),
             observer_completeness=_optional_bool(_first(
                 value, "observer_completeness", "observer_complete", "observer_sufficient", default=None),
                 "observer_completeness"),
@@ -453,9 +481,11 @@ def _coerce_obligation(value: EffectObligation | Mapping[str, object]) -> Effect
 
 
 def _coerce_receipt(value: EffectReceipt | Mapping[str, object], *, binding: Mapping[str, object] | None = None,
-                    default_obligation_id: str | None = None) -> EffectReceipt:
+                    default_obligation_id: str | None = None, ordinal: int = 1,
+                    journal: object | None = None) -> EffectReceipt:
     return value if isinstance(value, EffectReceipt) else EffectReceipt.from_mapping(
-        value, binding=binding, default_obligation_id=default_obligation_id)
+        value, binding=binding, default_obligation_id=default_obligation_id,
+        ordinal=ordinal, journal=journal)
 
 
 def _correlation_matches(receipt: EffectReceipt,
@@ -562,6 +592,7 @@ def assess_effect_obligation(
     binding: Mapping[str, object] | None = None,
     experiments: Sequence[EffectExperiment] | None = None,
     deadline_reached: bool | None = None,
+    journal: object | None = None,
 ) -> EffectAssessment:
     """Assess one effect obligation without promoting incomplete evidence.
 
@@ -583,9 +614,20 @@ def assess_effect_obligation(
     current_binding = inspect_runtime_binding(binding) if binding is not None else None
     coerced: list[EffectReceipt] = []
     invalid: list[str] = []
+    receipt_ordinals: dict[str, int] = {}
     for value in receipts:
         try:
-            current = _coerce_receipt(value, binding=binding, default_obligation_id=item.obligation_id)
+            if isinstance(value, Mapping):
+                from kernel_wire_identity import wire_identity_content
+
+                encoded = _canonical(wire_identity_content(value))
+                ordinal = receipt_ordinals.get(encoded, 0) + 1
+                receipt_ordinals[encoded] = ordinal
+            else:
+                ordinal = 1
+            current = _coerce_receipt(
+                value, binding=binding, default_obligation_id=item.obligation_id,
+                ordinal=ordinal, journal=journal)
         except (TypeError, ValueError) as error:
             invalid.append(type(error).__name__)
             continue
@@ -691,9 +733,31 @@ def run_behavior_experiment(
         raise ValueError("control must be positive or negative")
     if stimulus is _MISSING:
         stimulus = item.positive_stimulus if control == POSITIVE else item.negative_stimulus
-    correlation = correlation_id or "corr-" + uuid.uuid4().hex
-    experiment = experiment_id or "experiment-" + uuid.uuid4().hex
-    receipt_name = receipt_id or "receipt-" + uuid.uuid4().hex
+    from kernel_wire_identity import (
+        content_wire_id, seeded_content_wire_id, wire_identity_content, wire_run_seed,
+    )
+
+    step = _first(binding or {}, "turn", "step", default=0)
+    identity_content = wire_identity_content({
+        "obligation_id": item.obligation_id,
+        "control": control,
+        "stimulus": stimulus,
+        "binding": binding or {},
+    })
+
+    def stable_experiment_id(kind: str) -> str:
+        if journal is not None:
+            suffix = content_wire_id(journal, "effect-liveness-" + kind, step, identity_content)
+        else:
+            suffix = seeded_content_wire_id(
+                wire_run_seed(), "effect-liveness-" + kind, step, identity_content,
+            )
+        prefix = "corr" if kind == "correlation" else kind
+        return prefix + "-" + suffix
+
+    correlation = correlation_id or stable_experiment_id("correlation")
+    experiment = experiment_id or stable_experiment_id("experiment")
+    receipt_name = receipt_id or stable_experiment_id("receipt")
     host_binding = inspect_runtime_binding(
         binding, process=process, loaded_artifact=loaded_artifact,
         config=config, dependency_snapshot=dependency_snapshot)
@@ -815,6 +879,7 @@ class EffectLivenessProbe:
         self.binding_provider = binding_provider
         self.obligations: list[EffectObligation] = []
         self.receipts: list[EffectReceipt] = []
+        self._receipt_ordinals: dict[tuple[str, str], int] = {}
         self.experiments: list[EffectExperiment] = []
         self.assessments: list[EffectAssessment] = []
         if self.enabled:
@@ -872,7 +937,15 @@ class EffectLivenessProbe:
             if isinstance(nested, Mapping):
                 value = nested
         try:
-            receipt = _coerce_receipt(value, binding=self._binding(binding))
+            current_binding = self._binding(binding)
+            ordinal = 1
+            if isinstance(value, Mapping):
+                step, content = _receipt_identity_content(value, current_binding)
+                key = (str(step), _digest(content))
+                ordinal = self._receipt_ordinals.get(key, 0) + 1
+                self._receipt_ordinals[key] = ordinal
+            receipt = _coerce_receipt(
+                value, binding=current_binding, ordinal=ordinal, journal=self.journal)
         except (TypeError, ValueError) as error:
             self._fire("receipt_invalid", error_type=type(error).__name__)
             _emit(self.journal, "effect_liveness_receipt_invalid",
@@ -899,7 +972,7 @@ class EffectLivenessProbe:
         assessment = assess_effect_obligation(
             item, self.receipts if receipts is None else receipts,
             binding=current_binding, experiments=self.experiments,
-            deadline_reached=deadline_reached)
+            deadline_reached=deadline_reached, journal=self.journal)
         self.assessments.append(assessment)
         _emit(self.journal, "effect_liveness_assessment", producer="kernel_effect_liveness",
               record_type="assessment", payload_schema=ASSESSMENT_SCHEMA,

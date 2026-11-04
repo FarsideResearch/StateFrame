@@ -97,11 +97,19 @@ class TestRunProfile:
         if execution_id:
             self.execution_id = execution_id
         elif journal is not None:
-            from kernel_wire_identity import next_wire_id
+            from kernel_check_receipts import _next_check_execution_ordinal
+            from kernel_wire_identity import content_wire_id
             owner = getattr(runtime, "owner", None)
             step = getattr(owner, "current_step", None)
-            self.execution_id = "check-execution:" + next_wire_id(
-                journal, "check-execution", step, "test-run-profile")
+            if step is None:
+                step = getattr(runtime, "current_step", 0)
+            # Two test runs in one step must not share an ID: the second would
+            # reuse the first's pinned binding and be judged at its revision.
+            self.execution_id = "check-execution:" + content_wire_id(
+                journal, "check-execution", step,
+                {"purpose": "test-run-profile", "mode": profile_mode},
+                ordinal=_next_check_execution_ordinal(journal),
+            )
         else:
             self.execution_id = f"check-execution:{uuid.uuid4().hex}"
         self.runtime = runtime

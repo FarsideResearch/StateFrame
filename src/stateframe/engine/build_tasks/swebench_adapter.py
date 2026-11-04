@@ -31,6 +31,11 @@ from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import cast
 
+if __package__ and __package__.endswith("engine.build_tasks"):
+    from ..kernel_safe_paths import safe_expanduser
+else:
+    from kernel_safe_paths import safe_expanduser
+
 try:
     from build_tasks.multifile_row import (
         MultiFileRowError,
@@ -869,7 +874,7 @@ class WorkspaceMaterializer:
     """
 
     def __init__(self, cache_dir: Path | str, *, git_timeout: int = 900) -> None:
-        self.cache_dir = Path(cache_dir).expanduser().resolve()
+        self.cache_dir = safe_expanduser(Path(cache_dir)).resolve()
         self.git_timeout = git_timeout
 
     def materialize(self, instance: SWEInstance) -> MaterializedWorkspace:

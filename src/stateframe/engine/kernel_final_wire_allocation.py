@@ -63,6 +63,51 @@ def _prepare_qualified_hook_body(context, body, request_id):
     return wire_body
 
 
+def _recover_post_fit_growth(candidate, context, body, fitted_body, fitted_counter,
+                             fitted_inputs, fitted_delivery, *, meter, endpoint, key):
+    """Fit the final transport body before its budget proof can reject growth."""
+    from kernel_context import token_estimate
+    from kernel_context_capacity import enforce_context_capacity
+    from kernel_frame_allocation_capture import (
+        FrameFit5ImpossibleMinimum, final_request_tokens, finalize_frame_candidate,
+    )
+
+    def fits(value):
+        tokens, _method = final_request_tokens(value, meter, candidate)
+        inputs = candidate._frame_candidate_inputs
+        return (tokens <= inputs["token_ceiling"]
+                and len(json.dumps(value).encode()) <= inputs["byte_ceiling"])
+
+    if fits(body):
+        return body, False
+
+    # A projection is optional. Restore the fully fitted canonical candidate
+    # and its measurement authority, then apply the same send-time transforms.
+    candidate._frame_candidate_counter = fitted_counter
+    candidate._frame_candidate_inputs = copy.deepcopy(fitted_inputs)
+    candidate.request_source_final_delivery = copy.deepcopy(fitted_delivery)
+    candidate._stateframe_page_log_pending = None
+    recovered = copy.deepcopy(fitted_body)
+    enforce_context_capacity(candidate, recovered, endpoint=endpoint, key=key)
+    recovered = _prepare_qualified_hook_body(context, recovered, candidate.request_id)
+    if not fits(recovered):
+        # A later body rewrite may itself consume capacity. Refit its changed
+        # bytes instead of handing an over-budget candidate to the final proof.
+        recovered = finalize_frame_candidate(
+            context, candidate, recovered, frame_counter=token_estimate)
+        enforce_context_capacity(candidate, recovered, endpoint=endpoint, key=key)
+        recovered = _prepare_qualified_hook_body(context, recovered, candidate.request_id)
+    if not fits(recovered):
+        tokens, method = final_request_tokens(recovered, meter, candidate)
+        raise FrameFit5ImpossibleMinimum({
+            "request_bytes": len(json.dumps(recovered).encode()),
+            "prompt_tokens": tokens, "measure_method": method,
+            "max_request_bytes": candidate._frame_candidate_inputs["byte_ceiling"],
+            "max_prompt_tokens": candidate._frame_candidate_inputs["token_ceiling"],
+        })
+    return recovered, True
+
+
 def build_qualified_request(capture, runtime, body, *, endpoint, key, deadline=None):
     """Complete, fit and prove detached state, then publish one coherent record."""
     from kernel_request_kind import classify, gate_required, validate_adapter, RequestKindError
@@ -169,6 +214,10 @@ def build_qualified_request(capture, runtime, body, *, endpoint, key, deadline=N
                            turn=candidate.step, request_id=candidate.request_id)
     before_fit_bytes = len(json.dumps(body).encode())
     body = finalize_frame_candidate(context, candidate, body, frame_counter=token_estimate)
+    fitted_body = copy.deepcopy(body)
+    fitted_counter = candidate._frame_candidate_counter
+    fitted_inputs = copy.deepcopy(candidate._frame_candidate_inputs)
+    fitted_delivery = copy.deepcopy(candidate.request_source_final_delivery)
     from kernel_cache_layout_candidate import (
         render_cache_candidate, render_final_cache_candidate, pending_publication,
     )
@@ -180,6 +229,11 @@ def build_qualified_request(capture, runtime, body, *, endpoint, key, deadline=N
     body = render_final_cache_candidate(
         candidate, context, body, meter=_request_token_meter(context, candidate),
         inputs=candidate._frame_candidate_inputs)
+    body, projection_recovered = _recover_post_fit_growth(
+        candidate, context, body, fitted_body, fitted_counter,
+        fitted_inputs, fitted_delivery,
+        meter=_request_token_meter(context, candidate), endpoint=endpoint, key=key,
+    )
     candidate.journal.emit("final_wire_rebudgeted", producer="kernel_final_wire_allocation",
                            request_id=candidate.request_id, step=candidate.step,
                            before=before_fit_bytes, after=len(json.dumps(body).encode()),
@@ -208,6 +262,25 @@ def build_qualified_request(capture, runtime, body, *, endpoint, key, deadline=N
     # serializer. Keep typed panel metadata through classification and fitting,
     # then remove private fields from the body that final measurement seals.
     body = _prepare_qualified_hook_body(context, body, candidate.request_id)
+    body, refitted = _recover_post_fit_growth(
+        candidate, context, body, fitted_body, fitted_counter,
+        fitted_inputs, fitted_delivery,
+        meter=_request_token_meter(context, candidate), endpoint=endpoint, key=key,
+    )
+    if projection_recovered or refitted:
+        # The earlier extension and product receipts described the rejected
+        # projection. Rebind both against the canonical recovered body.
+        extensions = candidate._request_capture_pre_wire_extensions(
+            body, endpoint, key, deadline=deadline, runtime=context, read_only=True)
+        frame = next(_state_payload(message)[1]["framefit5"]
+                     for message in semantic_messages(body["messages"])
+                     if str(message.get("content", "")).startswith("[StateFrame]\n"))
+        optional, inventory = selection_from_frame(
+            *candidate._frame_candidate_inputs["optional_inputs"], frame)
+        selection = FrameSelectionProposal(freeze(optional), freeze(inventory), b"{}")
+        product_validation = validate_final_product_boundary(
+            context, body["messages"], body.get("tools"), refresh_sources=False,
+            refresh_headcarry=False, frame_selection=selection)
     budget = dict(getattr(candidate, "request_budget_final_wire", None) or {})
     budget["max_request_bytes"] = candidate._frame_candidate_inputs["byte_ceiling"]
     candidate.request_budget_final_wire = budget
@@ -329,6 +402,9 @@ def build_qualified_request(capture, runtime, body, *, endpoint, key, deadline=N
         "_qualified_request_gate_passed": False,
         "final_submitted_bytes_hash": "sha256:" + record.body_digest,
         "_request_measurement": record.measurement,
+        "_frame_candidate_counter": candidate._frame_candidate_counter,
+        "_frame_candidate_fallback_fit": candidate._frame_candidate_fallback_fit,
+        "_frame_candidate_inputs": copy.deepcopy(candidate._frame_candidate_inputs),
         "_code_bookmark_transition": copy.deepcopy(
             getattr(candidate, "_code_bookmark_transition", (False, []))),
         "_tokenize_endpoint": candidate._tokenize_endpoint,

@@ -2,13 +2,14 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import uuid
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from pathlib import Path
 
 from kernel_continuation_evidence import (
-    READ_ONLY, binding_versions, has_execution_receipt_contract,
+    READ_ONLY, READ_RESULT_CLASSES, binding_versions, has_execution_receipt_contract,
 )
 from kernel_continuation_executive import ContinuationExecutive
 from kernel_continuation_menu_authority import AUTHORED_CHECK_TOOLS, EDIT_TOOLS, state_allow_set
@@ -19,15 +20,285 @@ from kernel_verdict import (
     repair_action_for,
 )
 
-CONTROL_TOOLS = frozenset({"done", "continuation_detour", "work_update", "note_update", "work"})
+
+class _ContinuationJournalView:
+    """A cursor over durable records, including appends made outside prepare.
+
+    The journal owns validation and blob resolution.  This view retains only
+    records needed by continuation joins; each sequence is examined once.
+    """
+
+    def __init__(self, journal):
+        self.journal = journal
+        self.cursor = 0
+        self._fallback_loaded = False
+        self.scanned_total = 0
+        self.last_sync_count = 0
+        self.last_new_count = 0
+        self.closures_by_effect: dict[str, list[dict]] = {}
+        self.active_closure_effects: set[str] = set()
+        self.closures_by_ref: dict[str, dict] = {}
+        self.settlements: dict[tuple[str, str], dict] = {}
+        self.revalidations: dict[str, list[int]] = {}
+        self.processed: set[str] = set()
+        self.return_ready: set[tuple[str, str]] = set()
+        self.reobserved: set[str] = set()
+        self.guarded_receipts: dict[str, str] = {}
+        self.guarded_states: dict[str, dict] = {}
+        self.guarded_intents: dict[str, None] = {}
+        self.events_by_effect: dict[str, set[str]] = {}
+        self.events_by_external: dict[str, set[str]] = {}
+        self.events_by_ref: dict[str, dict] = {}
+        self.effect_arguments: dict[str, dict[str, tuple[int, str]]] = {}
+        self.ref_arguments: dict[str, dict[str, tuple[int, str]]] = {}
+        self.submissions: dict[tuple[str, str], dict] = {}
+        self.latest_writer_resumed = 0
+
+    def _new_records(self):
+        since = getattr(self.journal, "cached_records_since", None)
+        if callable(since):
+            return since(self.cursor)
+        # Small static journal doubles in unit tests do not implement the cursor
+        # API. They can supply an initial snapshot, never a per-effect replay.
+        if self._fallback_loaded:
+            return ()
+        records = getattr(self.journal, "records", None)
+        rows = tuple(records()) if callable(records) else ()
+        self._fallback_loaded = True
+        return (row for row in rows if row.get("sequence", 0) > self.cursor)
+
+    def sync(self) -> None:
+        scanned = 0
+        new = 0
+        for row in self._new_records():
+            scanned += 1
+            sequence = row.get("sequence")
+            if type(sequence) is not int or sequence <= self.cursor:
+                continue
+            self.cursor = sequence
+            new += 1
+            kind = row.get("kind")
+            ref = row.get("event_id")
+            if kind == "action_outcome_closed":
+                record = row.get("record")
+                effect = record.get("continuation_effect_id") if isinstance(record, Mapping) else None
+                if isinstance(ref, str):
+                    self.closures_by_ref[ref] = row
+                if isinstance(effect, str):
+                    self.closures_by_effect.setdefault(effect, []).append(row)
+                    self.active_closure_effects.add(effect)
+            elif kind == "continuation_transition":
+                data = row.get("data")
+                if isinstance(data, Mapping):
+                    receipt = data.get("receipt_ref")
+                    effect = data.get("effect_id")
+                    if row.get("operation") == "settle_effect" and isinstance(effect, str) and isinstance(receipt, str):
+                        self.settlements.setdefault((effect, receipt), row)
+                    elif row.get("operation") == "revalidate" and isinstance(receipt, str):
+                        self.revalidations.setdefault(receipt, []).append(sequence)
+                    elif row.get("operation") == "complete":
+                        key = data.get("submission_key")
+                        if isinstance(key, list) and len(key) == 2 and all(isinstance(part, str) for part in key):
+                            self.submissions[tuple(key)] = {
+                                "accepted": True, "submission_key": key,
+                            }
+            elif kind == "continuation_closure_processed" and isinstance(row.get("closure_ref"), str):
+                self.processed.add(row["closure_ref"])
+            elif kind == "continuation_return_ready":
+                child, receipt = row.get("child_id"), row.get("receipt")
+                if isinstance(child, str) and isinstance(receipt, str):
+                    self.return_ready.add((child, receipt))
+            elif kind == "continuation_reobserve_attempt" and isinstance(row.get("effect_id"), str):
+                self.reobserved.add(row["effect_id"])
+            elif kind == "continuation_writer_resumed":
+                self.latest_writer_resumed = sequence
+            elif kind == "guarded_effect_receipt":
+                effect = row.get("effect_id")
+                if isinstance(effect, str) and isinstance(ref, str):
+                    self.guarded_receipts[effect] = ref
+            if kind in {"guarded_effect_intent", "guarded_effect_dispatch",
+                        "guarded_effect_receipt", "guarded_effect_acceptance"}:
+                effect = row.get("effect_id")
+                if isinstance(effect, str):
+                    if kind == "guarded_effect_intent":
+                        self.guarded_intents.setdefault(effect, None)
+                    state = self.guarded_states.setdefault(effect, {
+                        "effect_id": effect, "intent": None, "dispatch": None,
+                        "receipt": None, "acceptance": None,
+                    })
+                    state[kind.removeprefix("guarded_effect_")] = row
+            if isinstance(ref, str):
+                payload = row.get("record")
+                if not isinstance(payload, Mapping):
+                    payload = row
+                parameters = payload.get("action_parameters")
+                if not isinstance(parameters, Mapping):
+                    parameters = payload.get("arguments")
+                if isinstance(parameters, Mapping):
+                    arguments = {name: (sequence, value)
+                                 for name, value in parameters.items()
+                                 if name == "path" and isinstance(value, str) and value.strip()}
+                    self.ref_arguments[ref] = arguments
+                    effect = payload.get("continuation_effect_id")
+                    if isinstance(effect, str):
+                        self.effect_arguments.setdefault(effect, {}).update(arguments)
+                for effect in (row.get("effect_id"), row.get("continuation_effect_id")):
+                    if isinstance(effect, str):
+                        self.events_by_effect.setdefault(effect, set()).add(ref)
+                external = row.get("external_effect_id")
+                if isinstance(external, str):
+                    self.events_by_external.setdefault(external, set()).add(ref)
+                if kind in {"guarded_effect_receipt", "external_effect_outcome"}:
+                    self.events_by_ref[ref] = row
+        self.last_sync_count = scanned
+        self.last_new_count = new
+        self.scanned_total += scanned
+
+CONTROL_TOOLS = frozenset({"done", "continuation_detour", "continuation_reobserve",
+                           "work_update", "note_update", "work"})
 EFFECT_TOOLS = READ_ONLY | {
     "job_stop", *EDIT_TOOLS, "run_tests",
 } | AUTHORED_CHECK_TOOLS
-# A witness is a host-owned evidence action, not a continuation effect.  It is
-# nevertheless a valid way to clear a read-only unknown effect: the old read
-# can be reconciled as not-applied before the witness rail executes.
+# A witness is a host-owned evidence action, not a continuation effect.
 WITNESS_TOOLS = frozenset({"probe", *AUTHORED_CHECK_TOOLS})
-SAFE_REPAIR_TOOLS = frozenset({"read", "run_tests", "probe"})
+SAFE_REPAIR_TOOLS = frozenset({"read"})
+
+SETTLE_FROM_DURABLE_CLOSURE = "settle-from-durable-closure"
+TYPED_REOBSERVE = "re-observe"
+CONTINUATION_BLOCKED = "CONTINUATION_BLOCKED"
+
+# Closure evidence takes precedence for every effect. Without it, only a
+# declared typed observation can safely proceed; all other cases fail closed.
+EFFECT_RECONCILIATION = {
+    (effect_class, status, closure): (
+        SETTLE_FROM_DURABLE_CLOSURE if closure else CONTINUATION_BLOCKED)
+    for effect_class in ("write", "read-only-effect")
+    for status in ("pending", "unknown", "applied", "not_applied")
+    for closure in (False, True)
+}
+TYPED_REOBSERVE_TOOLS = frozenset({"read"})
+
+
+def registered_write_effect_tools() -> frozenset[str]:
+    """Read the live effect registry, including registered custom producers."""
+    from kernel_agent_tools import service
+    from kernel_frame_routes import WRITE
+    host = service()
+    custom = frozenset(host.custom) if host is not None else frozenset()
+    return frozenset((EFFECT_TOOLS | WRITE | custom) - READ_ONLY)
+
+
+def effect_class(tool: str) -> str | None:
+    """Resolve an effect against the live registries, including custom tools."""
+    if tool in READ_ONLY:
+        return "read-only-effect"
+    try:
+        if tool in registered_write_effect_tools():
+            return "write"
+    except Exception as error:
+        logging.getLogger(__name__).warning(
+            "continuation effect registry unavailable (%s)", type(error).__name__)
+    return None
+
+
+def reconciliation_action(tool: str, status: str, *, closure: bool = False,
+                          attempted: bool = False) -> str:
+    """Choose a total, fail-closed action for a registered effect."""
+    kind = effect_class(tool)
+    action = EFFECT_RECONCILIATION.get((kind, status, closure), CONTINUATION_BLOCKED)
+    if (action == CONTINUATION_BLOCKED and not attempted
+            and tool in TYPED_REOBSERVE_TOOLS and kind == "read-only-effect"
+            and status in {"pending", "unknown"}):
+        return TYPED_REOBSERVE
+    return action
+
+
+def _wire_effect_id(journal: object, *, request_id: object, step: object,
+                    tool: str, arguments_hash: str, ordinal: object = 1) -> str:
+    """Identify a pending effect by its request, turn and action content."""
+    from kernel_wire_identity import content_wire_id
+
+    return content_wire_id(
+        journal, "continuation-effect", step, {
+            "request_id": request_id if isinstance(request_id, str) else "",
+            "tool": tool,
+            "arguments_hash": arguments_hash,
+        },
+        ordinal=ordinal,
+    )
+
+
+def _wire_effect_ordinal(journal: object, *, request_id: object, step: object,
+                         tool: str, arguments_hash: str) -> int:
+    """Rebuild a duplicate dispatch ordinal from this request's durable journal rows."""
+    if not isinstance(request_id, str) or not request_id:
+        return 1
+    request_records = getattr(journal, "request_records", None)
+    if not callable(request_records):
+        return 1
+    return 1 + sum(
+        1 for row in request_records(request_id)
+        if row.get("kind") == "step_dispatch_binding"
+        and row.get("step") == step
+        and row.get("tool") == tool
+        and row.get("arguments_hash") == arguments_hash
+        and isinstance(row.get("continuation_effect_id"), str)
+        and row.get("continuation_effect_id")
+    )
+
+
+def _wire_intention_id(journal: object, *, step: object, content: object,
+                       ordinal: object = 1) -> str:
+    """Identify a continuation intention by its run, turn, and semantic contents."""
+    from kernel_wire_identity import content_wire_id, wire_identity_content
+
+    return "intention:" + content_wire_id(
+        journal, "continuation-intention", step, wire_identity_content(content),
+        ordinal=ordinal,
+    )
+
+
+_RAW_JOURNAL_REFERENCE_FIELDS = frozenset({
+    "action_ref", "dispatch_ref", "event_id", "event_ref", "journal_event_id",
+    "origin_ref", "outcome_event_ref", "receipt_ref", "return_receipts",
+    "source_event_id",
+})
+_OMIT_CONTEXT_VALUE = object()
+
+
+def _is_raw_journal_reference(value: object, journal: object) -> bool:
+    run_id = getattr(journal, "run_id", None)
+    if not isinstance(value, str) or not isinstance(run_id, str) or not run_id:
+        return False
+    prefix = run_id + ":"
+    suffix = value[len(prefix):] if value.startswith(prefix) else ""
+    return bool(suffix) and suffix.isdecimal()
+
+
+def _public_continuation_context(value: object, journal: object) -> object:
+    """Alias the host run and omit journal-position references from model context."""
+    from kernel_wire_identity import public_wire_value
+
+    if isinstance(value, str):
+        if _is_raw_journal_reference(value, journal):
+            return _OMIT_CONTEXT_VALUE
+        return public_wire_value(value, journal)
+    if isinstance(value, Mapping):
+        result: dict[object, object] = {}
+        for key, item in value.items():
+            if isinstance(key, str) and key in _RAW_JOURNAL_REFERENCE_FIELDS:
+                continue
+            public_item = _public_continuation_context(item, journal)
+            if public_item is _OMIT_CONTEXT_VALUE:
+                continue
+            public_key = public_wire_value(key, journal) if isinstance(key, str) else key
+            result[public_key] = public_item
+        return result
+    if isinstance(value, (list, tuple)):
+        return [public_item for item in value
+                if (public_item := _public_continuation_context(item, journal))
+                is not _OMIT_CONTEXT_VALUE]
+    return value
 
 
 def _guarded_host_outcome(result: object) -> str:
@@ -35,6 +306,10 @@ def _guarded_host_outcome(result: object) -> str:
     if isinstance(result, dict):
         result = result.get("outcome", result.get("status", result.get("result")))
     value = str(result).strip().upper().replace("-", "_").replace(" ", "_")
+    # The pre-tool hook emits a gate receipt whose closed result is
+    # REFUSED_PREDISPATCH. No action ran, so the effect is absent.
+    if value == "REFUSED_PREDISPATCH" or value.startswith("REFUSED_HOOK_DENIED:"):
+        return "ABSENT"
     if value in {"OK", "APPLIED", "PASSED", "GREEN", "SUCCESS", "PRESENT",
                  "REUSED_VERIFICATION"}:
         return "PRESENT"
@@ -51,10 +326,10 @@ def enabled() -> bool:
     return value == "1"
 
 
-def tool_surface(tools: list[dict]) -> list[dict]:
-    if any(t["function"]["name"] == "continuation_detour" for t in tools):
-        return tools
-    return [*tools, {"type": "function", "function": {
+def tool_surface(tools: list[dict], *, runtime: object | None = None) -> list[dict]:
+    selected = list(tools)
+    if not any(t["function"]["name"] == "continuation_detour" for t in selected):
+        selected.append({"type": "function", "function": {
         "name": "continuation_detour",
         "description": "Suspend this decision to acquire a specific source range. The kernel returns "
                        "to your original decision after a current, complete read of that range. "
@@ -64,7 +339,8 @@ def tool_surface(tools: list[dict]) -> list[dict]:
             "end_line": {"type": "integer", "minimum": 1},
             "reason": {"type": "string"}, "pending_decision": {"type": "string"}},
             "required": ["path", "start_line", "end_line", "reason", "pending_decision"],
-            "additionalProperties": False}}}]
+            "additionalProperties": False}}})
+    return selected
 
 
 def required_acceptance_selectors(runtime: object) -> list[str]:
@@ -85,6 +361,7 @@ class LiveContinuation:
         if context_scope_enabled():
             self.context_scope = bind_runtime(runtime)
         self.engine = ContinuationExecutive(self.journal)
+        self._journal_view = _ContinuationJournalView(self.journal)
         self.guarded_effects = None
         from kernel_guarded_effects import (
             GuardedEffectSequence, enabled as guarded_effects_enabled,
@@ -133,6 +410,14 @@ class LiveContinuation:
         self._stranded_blocker: str | None = None
         self._stranded_revision: object | None = None
         self.terminal_blocked = False
+
+    def _view(self) -> _ContinuationJournalView:
+        view = getattr(self, "_journal_view", None)
+        if view is None or view.journal is not self.journal:
+            view = _ContinuationJournalView(self.journal)
+            self._journal_view = view
+        view.sync()
+        return view
 
     @staticmethod
     def _unknown_outcomes_enabled() -> bool:
@@ -185,7 +470,8 @@ class LiveContinuation:
             return set()
         state = self.engine.state
         reconciled: set[str] = set()
-        records = list(self.journal.records())
+        view = self._view()
+        sequence._journal_view = view
         for effect_id, effect in getattr(state, "effects", {}).items():
             if getattr(effect, "status", None) not in {"pending", "unknown"}:
                 continue
@@ -195,10 +481,7 @@ class LiveContinuation:
                 continue
             external_ref = snapshot.get("receipt_ref")
             if not isinstance(external_ref, str):
-                matching = [event for event in records
-                            if event.get("kind") == "guarded_effect_receipt"
-                            and event.get("effect_id") == effect_id]
-                external_ref = matching[-1].get("event_id") if matching else None
+                external_ref = view.guarded_receipts.get(effect_id)
             if not isinstance(external_ref, str):
                 continue
             try:
@@ -207,13 +490,7 @@ class LiveContinuation:
                        current_binding=self.runtime.binding())
             except ContinuationError:
                 continue
-            reconciled.update(
-                event["event_id"] for event in records
-                if event.get("event_id") and (
-                    event.get("effect_id") == effect_id
-                    or event.get("continuation_effect_id") == effect_id
-                )
-            )
+            reconciled.update(view.events_by_effect.get(effect_id, ()))
         return reconciled
 
     def _reconcile_unknown_outcomes(self) -> set[str]:
@@ -225,7 +502,7 @@ class LiveContinuation:
         if not callable(settle):
             return set()
         state = self.engine.state
-        records = list(self.journal.records())
+        view = self._view()
         reconciled: set[str] = set()
         effects = getattr(state, "effects", {})
         for snapshot in snapshots:
@@ -251,13 +528,9 @@ class LiveContinuation:
             except ContinuationError:
                 continue
             external_id = snapshot.get("external_effect_id")
-            reconciled.update(
-                event["event_id"] for event in records
-                if event.get("event_id") and (
-                    event.get("external_effect_id") == external_id
-                    or event.get("event_id") == external_ref
-                )
-            )
+            reconciled.update(view.events_by_external.get(external_id, ()))
+            if external_ref in view.events_by_ref:
+                reconciled.add(external_ref)
         return reconciled
 
     def _record_stranded(self, blocker: str) -> None:
@@ -316,55 +589,179 @@ class LiveContinuation:
             if not isinstance(actual_id, str) or not isinstance(tool, str) or not isinstance(status, str):
                 continue
             repair = None
-            if tool == "run_tests" and selectors:
-                repair = self._registered_test_repair(selectors)
-            elif tool == "read":
+            if tool == "read" and reconciliation_action(
+                    tool, status, attempted=self._reobserve_attempted(actual_id)) == TYPED_REOBSERVE:
                 path = self._effect_path(effect)
                 if path is not None:
-                    repair = repair_action_for(
-                        ("UNRESOLVED_EFFECT", "READ_EVIDENCE"),
-                        menu=self._live_completion_menu(), path=path)
+                    repair = self._registered_read_repair(path)
                 if repair is None:
                     repair = self._completion_owner_repair_action()
             details.append({
                 "effect_id": actual_id,
                 "tool": tool,
                 "status": status,
+                "read_only": bool(getattr(effect, "read_only", True)),
                 "repair_action": repair,
             })
         return details
 
-    def _registered_test_repair(self, selectors: tuple[str, ...]) -> dict | None:
-        """Resolve a test retry before the menu intersects continuation permission.
+    @staticmethod
+    def _dispatchable_repair(detail: Mapping[str, object]) -> bool:
+        """Match the host evidence contract before projecting a repair."""
+        action = detail.get("repair_action")
+        tool = action.get("tool") if isinstance(action, Mapping) else None
+        arguments = action.get("arguments") if isinstance(action, Mapping) else None
+        if (detail.get("status") not in ("pending", "unknown")
+                or not isinstance(detail.get("effect_id"), str)
+                or not isinstance(tool, str) or tool != detail.get("tool")
+                or tool not in SAFE_REPAIR_TOOLS
+                or detail.get("read_only") is not True
+                or not isinstance(arguments, Mapping)):
+            return False
+        return isinstance(arguments.get("path"), str) and bool(arguments["path"].strip())
 
-        A narrowed completion menu cannot prove its own retry unavailable.
-        Use the registered schema and capability gate; authorization still
-        checks the exact effect and target before reconciling any outcome.
-        """
+    def _live_repair(self, detail: Mapping[str, object]) -> bool:
+        action = detail.get("repair_action")
+        tool = action.get("tool") if isinstance(action, Mapping) else None
+        identity = self.engine.state.active_id
+        return (len(self._unresolved_effect_details(identity)) == 1
+                 and self._dispatchable_repair(detail)
+                 and tool in self._live_completion_menu()
+                 and tool in self.per_step_allow_set())
+
+    def _unrepairable_unknown_effect(self, detail: Mapping[str, object]) -> bool:
+        # Both durable unresolved states fence scheduling until host evidence settles.
+        return detail.get("status") in {"pending", "unknown"} and not self._live_repair(detail)
+
+    def _reobserve_attempted(self, effect_id: str) -> bool:
+        return effect_id in self._view().reobserved
+
+    def _repair_surface(self) -> object:
+        """Use registered tools while projecting, and only wire tools once bound."""
+        request = getattr(self, "_request_tools", ())
+        full = getattr(self.runtime, "_completion_owner_full_tools", ())
+        bound = getattr(self, "_final_request_surface_bound", None)
+        if bound is True:
+            return request
+        if bound is False:
+            return full or request
+        return request or full
+
+    @staticmethod
+    def _effect_closures(effect_id: str, records: Iterable[Mapping[str, object]]) -> tuple:
+        return tuple(event for event in records
+                     if isinstance(event, Mapping)
+                     and event.get("kind") == "action_outcome_closed"
+                     and isinstance(event.get("record"), Mapping)
+                     and event["record"].get("continuation_effect_id") == effect_id)
+
+    def _settle_durable_effect(self, effect_id: str, current_binding: dict,
+                               closures: Iterable[Mapping[str, object]], *,
+                               allow_unknown: bool = False) -> str | None:
+        """Finish a durable closure through the ordinary host close path."""
+        for event in closures:
+            if not isinstance(event, Mapping):
+                continue
+            record = event.get("record")
+            if (event.get("kind") != "action_outcome_closed"
+                    or not isinstance(record, Mapping)
+                    or record.get("continuation_effect_id") != effect_id):
+                continue
+            receipt_ref = event.get("event_id")
+            if not isinstance(receipt_ref, str):
+                continue
+            try:
+                self.closed(dict(event), allow_unknown=allow_unknown,
+                            current_binding=current_binding, reconciling=True)
+                settled_effect = self.engine.state.effects.get(effect_id)
+                status = getattr(settled_effect, "status", None)
+                if status in {"applied", "not_applied"}:
+                    return status
+            except Exception as error:
+                # A malformed or unprovable closure must remain unresolved.
+                logging.getLogger(__name__).warning(
+                    "continuation closure could not settle effect %s (%s)",
+                    effect_id, type(error).__name__)
+                continue
+        return None
+
+    def _reconcile_unresolved_effects(self) -> int | None:
+        """Finish journaled closures, including children no longer active."""
+        state = self.engine.state
+        try:
+            view = self._view()
+        except Exception as error:
+            logging.getLogger(__name__).warning(
+                "continuation effect evidence unavailable (%s)", type(error).__name__)
+            return None
+        if not view.active_closure_effects:
+            return None
+        effect_ids = [effect_id for effect_id, effect in state.effects.items()
+                      if effect_id in view.active_closure_effects
+                      and effect.status in {"pending", "unknown", "applied", "not_applied"}]
+        if not effect_ids:
+            return None
+        try:
+            current = self.runtime.binding()
+        except Exception as error:
+            logging.getLogger(__name__).warning(
+                "continuation binding unavailable during closure replay (%s)", type(error).__name__)
+            return None
+        replayed_at = None
+        for effect_id in effect_ids:
+            effect = state.effects.get(effect_id)
+            if effect is None:
+                continue
+            matching = tuple(view.closures_by_effect.get(effect_id, ()))
+            action = reconciliation_action(
+                effect.tool, effect.status, closure=bool(matching))
+            if matching and action == SETTLE_FROM_DURABLE_CLOSURE:
+                before = state.revision
+                self._settle_durable_effect(effect_id, current, matching,
+                                            allow_unknown=True)
+                state = self.engine.state
+                settled = state.effects.get(effect_id)
+                if (settled is not None and settled.status in {"applied", "not_applied"}
+                        and effect.tool not in {"read", "run_tests"}
+                        and all(row.get("event_id") == settled.receipt_ref for row in matching)):
+                    view.active_closure_effects.discard(effect_id)
+                item = state.intentions.get(effect.intention_id)
+                parent = state.intentions.get(item.parent_id) if item is not None else None
+                pending_child_schedule = (
+                    item is not None and parent is not None
+                    and state.active_id == item.intention_id and item.turns_left == 0
+                    and parent.phase == "suspended" and parent.wake is not None
+                    and parent.wake.kind == "child"
+                    and parent.wake.child_id == item.intention_id
+                    and any(view.latest_writer_resumed > event.get("sequence", 0)
+                            for event in matching))
+                if state.revision != before or pending_child_schedule:
+                    used = next((event for event in matching
+                                 if event.get("event_id") == state.effects[effect_id].receipt_ref),
+                                matching[0])
+                    stamp = used.get("timestamp_ns")
+                    if type(stamp) is int and stamp > 0:
+                        replayed_at = max(replayed_at or 0, stamp // 1000)
+        return replayed_at
+
+    def _registered_read_repair(self, path: str) -> dict | None:
+        """Keep read retries tied to the exact advertised argument schema."""
         from kernel_completion_owner import validate_tool_arguments
-        from kernel_tool_surface import dispatch_admissible
 
-        surface = getattr(self.runtime, "_completion_owner_full_tools", ())
-        if not isinstance(surface, (list, tuple)) or not dispatch_admissible(
-                "run_tests", runtime=self.runtime):
+        action = repair_action_for(("UNRESOLVED_EFFECT", "READ_EVIDENCE"),
+                                   menu=self._live_completion_menu(), path=path)
+        surface = self._repair_surface()
+        if action is None or not isinstance(surface, (list, tuple)):
             return None
-        schemas = [schema for schema in surface if isinstance(schema, Mapping)
-                   and isinstance(schema.get("function"), Mapping)
-                   and schema["function"].get("name") == "run_tests"]
-        arguments = {"target": " ".join(selectors)}
-        if len(schemas) != 1:
+        schemas = [tool for tool in surface if isinstance(tool, Mapping)
+                   and isinstance(tool.get("function"), Mapping)
+                   and tool["function"].get("name") == "read"]
+        if len(schemas) != 1 or validate_tool_arguments(schemas, "read", action["arguments"]):
             return None
-        parameters = schemas[0]["function"].get("parameters")
-        properties = parameters.get("properties") if isinstance(parameters, Mapping) else None
-        target = properties.get("target") if isinstance(properties, Mapping) else None
-        if (not isinstance(target, Mapping) or target.get("type") != "string"
-                or validate_tool_arguments(schemas, "run_tests", arguments)):
-            return None
-        return {"tool": "run_tests", "arguments": arguments,
-                "reason": "retry the exact unresolved public test selectors"}
+        return action
 
     def _effect_path(self, effect: object) -> str | None:
-        """Recover the exact read target from the host receipt journal.
+        """Recover the exact read path from indexed host receipts.
 
         ``Effect`` intentionally stores only hashes, so a read that closes with
         an unknown cursor result cannot be retried from continuation state alone.
@@ -373,35 +770,17 @@ class LiveContinuation:
         """
         effect_id = getattr(effect, "effect_id", None)
         receipt_ref = getattr(effect, "receipt_ref", None)
-        records = getattr(self.journal, "records", None)
-        if callable(records):
-            records = records()
-        if not isinstance(records, (list, tuple)):
-            return None
-        for event in reversed(records):
-            if not isinstance(event, Mapping):
-                continue
-            record = event.get("record")
-            if not isinstance(record, Mapping):
-                record = event
-            effect_matches = record.get("continuation_effect_id") == effect_id
-            receipt_matches = event.get("event_id") == receipt_ref
-            if not (effect_matches or receipt_matches):
-                continue
-            parameters = record.get("action_parameters")
-            if not isinstance(parameters, Mapping):
-                parameters = record.get("arguments")
-            path = parameters.get("path") if isinstance(parameters, Mapping) else None
-            if isinstance(path, str) and path.strip():
-                return path
-        return None
+        view = self._view()
+        candidates = (view.effect_arguments.get(effect_id, {}).get("path"),
+                      view.ref_arguments.get(receipt_ref, {}).get("path"))
+        found = [candidate for candidate in candidates if candidate is not None]
+        return max(found)[1] if found else None
 
     def _completion_owner_repair_action(self) -> dict[str, object] | None:
         """Project one currently admitted owner action onto continuation repair.
 
-        This is deliberately a fallback.  Exact read replay is preferred; the
-        owner projection covers a REQWITNESS state where the only admissible
-        progress is the typed probe already present on the live menu.
+        This is deliberately a fallback. Exact read replay is preferred; an
+        owner action may repair this unknown read only through another read.
         """
         tools = getattr(self.runtime, "_completion_owner_full_tools", ())
         if not tools:
@@ -416,12 +795,16 @@ class LiveContinuation:
         except (ImportError, AttributeError, OSError, RuntimeError, TypeError, ValueError):
             return None
         menu = set(self._live_completion_menu())
+        surface = self._repair_surface()
+        from kernel_completion_owner import validate_tool_arguments
         for action in actions:
             if not isinstance(action, Mapping):
                 continue
             tool = str(action.get("tool", "")).strip()
             arguments = action.get("arguments")
-            if tool not in SAFE_REPAIR_TOOLS or tool not in menu or not isinstance(arguments, Mapping):
+            if (tool != "read" or tool not in menu
+                    or not isinstance(arguments, Mapping)
+                    or validate_tool_arguments(surface, tool, arguments)):
                 continue
             return {"tool": tool, "arguments": dict(arguments),
                     "reason": str(action.get("reason", "use the completion owner's live route"))}
@@ -437,10 +820,33 @@ class LiveContinuation:
         return self._stranded_blocker is not None and self._stranded_revision == revision
 
     def _live_completion_menu(self) -> tuple[str, ...]:
+        bound = getattr(self, "_final_request_surface_bound", None)
+        request_tools = self._repair_surface()
+        if isinstance(request_tools, (list, tuple)) and request_tools:
+            names = tuple(tool["function"]["name"] for tool in request_tools
+                          if isinstance(tool, Mapping)
+                          and isinstance(tool.get("function"), Mapping)
+                          and isinstance(tool["function"].get("name"), str))
+            if names:
+                return names
+        if bound is True:
+            return ()
         menu = getattr(self.runtime, "completion_menu", ())
         if isinstance(menu, (list, tuple, set, frozenset)) and menu:
             return tuple(str(name) for name in menu)
-        return ("done", "run_tests")
+        # Resume starts before the next request menu exists. Project the tools
+        # registered for that request, then let per_step_allow_set enforce the
+        # continuation and dispatch gates on the proposed repair.
+        tools = getattr(self.runtime, "_completion_owner_full_tools", ())
+        if isinstance(tools, (list, tuple)) and tools:
+            names = []
+            for tool in tools:
+                function = tool.get("function") if isinstance(tool, Mapping) else None
+                if isinstance(function, Mapping) and isinstance(function.get("name"), str):
+                    names.append(function["name"])
+            if names:
+                return tuple(names)
+        return ()
 
     def _repair_unresolved_effect(self, tool: str, arguments: dict,
                                   identity: str) -> bool:
@@ -450,39 +856,21 @@ class LiveContinuation:
         details = self._unresolved_effect_details(identity)
         if len(details) != 1:
             return False
+        if not self._live_repair(details[0]):
+            return False
         action = details[0].get("repair_action")
         action_tool = action.get("tool") if isinstance(action, Mapping) else None
         if action_tool != tool:
             return False
         action_arguments = action.get("arguments") if isinstance(action, dict) else None
         effect_id = details[0].get("effect_id")
-        effect_tool = details[0].get("tool")
-        if not isinstance(effect_id, str) or not isinstance(effect_tool, str):
-            return False
-        # A read-only unknown can be safely superseded by another typed
-        # read/test/witness route.  Unknown test execution itself may only be
-        # retried by the same test tool and exact target.
-        if effect_tool != "read" and effect_tool != tool:
+        if not isinstance(effect_id, str):
             return False
         if not isinstance(action_arguments, Mapping):
             return False
-        if tool == "run_tests":
-            expected = action_arguments.get("target")
-            if not isinstance(expected, str) or arguments.get("target") != expected:
-                return False
-        elif tool == "read":
-            expected = action_arguments.get("path")
-            if not isinstance(expected, str) or arguments.get("path") != expected:
-                return False
-        elif tool == "probe":
-            expected_mode = action_arguments.get("mode")
-            expected_clause = action_arguments.get("clause_ref", action_arguments.get("clause_id"))
-            if expected_mode is not None and arguments.get("mode") != expected_mode:
-                return False
-            if expected_clause is not None:
-                actual_clause = arguments.get("clause_ref", arguments.get("clause_id"))
-                if actual_clause != expected_clause:
-                    return False
+        expected = action_arguments.get("path")
+        if not isinstance(expected, str) or arguments.get("path") != expected:
+            return False
         self.engine.repair_effect(
             intention_id=identity, effect_id=effect_id, tool=tool,
             current_binding=self.runtime.binding(),
@@ -497,6 +885,7 @@ class LiveContinuation:
         # decision itself, so it must still expose a model request.
         if self.completed:
             return
+        self.terminal_blocked = False
         self.reconcile_external_effects()
         from kernel_candidate_restart_reconcile import enabled as candidate_reconcile_enabled
         if candidate_reconcile_enabled():
@@ -505,25 +894,37 @@ class LiveContinuation:
         current = self.runtime.binding()
         if self.guarded_effects is not None:
             self.reconcile_external_effects()
+        replayed_at = self._reconcile_unresolved_effects()
         if not self.engine.state.intentions:
             owner = self.runtime.owner
             objective = getattr(owner, "task_row", {}).get("msg")
             if not isinstance(objective, str) or not objective.strip():
                 objective = str(messages[1].get("content", "")) if len(messages) > 1 else ""
             required = required_acceptance_selectors(self.runtime)
-            self.engine.apply("create", new_id="root", objective=objective,
-                pending_decision="Complete the original objective and verify its public requirements.",
-                dependencies=binding_versions(current), turns=self.runtime.step_limit,
-                acceptance={
-                    "kind": "public_checks" if required else "no_public_checks",
-                    "selectors": required,
-                    "host_check_state": "REQUIRED_PUBLIC_CHECKS" if required else NO_HOST_CHECKS,
-                })
+            pending_decision = "Complete the original objective and verify its public requirements."
+            dependencies = binding_versions(current)
+            acceptance = {
+                "kind": "public_checks" if required else "no_public_checks",
+                "selectors": required,
+                "host_check_state": "REQUIRED_PUBLIC_CHECKS" if required else NO_HOST_CHECKS,
+            }
+            step = getattr(owner, "current_step", 0)
+            root_id = _wire_intention_id(self.journal, step=step, content={
+                "role": "root", "objective": objective,
+                "pending_decision": pending_decision, "dependencies": dependencies,
+                "turns": self.runtime.step_limit, "acceptance": acceptance,
+            }, ordinal=1)
+            self.engine.apply(
+                "create", new_id=root_id, objective=objective,
+                pending_decision=pending_decision, dependencies=dependencies,
+                turns=self.runtime.step_limit, acceptance=acceptance,
+            )
         # Retention runs at the request boundary, before selection can consume
         # a return-pending child.  This keeps source needed for the current
         # parent frame hot while allowing the following boundary to reclaim it.
         self.engine.retention_checkpoint()
-        selected = self.engine.choose_next(current)
+        selected = (self.engine.choose_next(current) if replayed_at is None else
+                    self.engine.choose_next(current, at_us=replayed_at))
         if selected is None:
             # A settled, currently verified root has reached the hand-off point:
             # the model must decide whether more work is needed or whether to
@@ -538,12 +939,9 @@ class LiveContinuation:
                 return
             self.certified = False
             details = self._unresolved_effect_details(self.engine.state.active_id)
-            self.terminal_blocked = bool(details and
-                                         not any(item.get("repair_action") for item in details)
-                                         and self._genuine_stall(
-                                             self.engine.state.intentions[self.engine.state.active_id],
-                                             getattr(self.engine.state, "revision", None)))
-            if details and any(item.get("repair_action") for item in details):
+            self.terminal_blocked = any(self._unrepairable_unknown_effect(detail)
+                                        for detail in details)
+            if details and any(self._live_repair(detail) for detail in details):
                 # An unresolved effect with a typed live route is waiting for
                 # the next provider action, not stranded work.
                 self._stranded_blocker = None
@@ -623,10 +1021,11 @@ class LiveContinuation:
             # shared completion reducer can issue its typed finding.
             details = self._unresolved_effect_details(identity)
             allowed = {"done"}
-            for item in details:
-                action = item.get("repair_action")
-                if isinstance(action, Mapping) and action.get("tool") in SAFE_REPAIR_TOOLS:
-                    allowed.add(str(action["tool"]))
+            if len(details) == 1:
+                for item in details:
+                    action = item.get("repair_action")
+                    if self._dispatchable_repair(item) and isinstance(action, Mapping):
+                        allowed.add(str(action["tool"]))
             from kernel_tool_surface import dispatch_admissible
             return frozenset(
                 name for name in allowed
@@ -765,7 +1164,14 @@ class LiveContinuation:
         if tool != "done" and identity is None:
             return self.completion_blocker()
         if tool != "done" and identity is not None and unresolved(state, identity):
-            if not self._repair_unresolved_effect(tool, arguments, identity):
+            if tool == "continuation_reobserve":
+                details = self._unresolved_effect_details(identity)
+                admitted = (len(details) == 1 and self._live_repair(details[0])
+                            and arguments.get("effect_id") == details[0]["effect_id"]
+                            and set(arguments) <= {"effect_id", "why", "reason"})
+            else:
+                admitted = self._repair_unresolved_effect(tool, arguments, identity)
+            if not admitted:
                 return self.completion_blocker()
             state = self.engine.state
         from kernel_check_authoring_route import CHECK_AUTHORING_TOOLS, authoring_open
@@ -811,8 +1217,19 @@ class LiveContinuation:
         if (not prefix and self.runtime.continuation_source_refresh and tool in EDIT_TOOLS
                 and (item.stale_dependencies or item.dependencies != binding_versions(current))):
             self.refresh_delivered_source(current)
-        effect = None if (tool in CONTROL_TOOLS | WITNESS_TOOLS or authoring) else uuid.uuid4().hex
         args_hash = digest({k: v for k, v in arguments.items() if k not in {"why", "reason"}})
+        effect = None
+        if tool not in CONTROL_TOOLS | WITNESS_TOOLS and not authoring:
+            effect_ordinal = _wire_effect_ordinal(
+                self.journal, request_id=runtime.current_request_id,
+                step=runtime.owner.current_step, tool=tool,
+                arguments_hash=args_hash,
+            )
+            effect = _wire_effect_id(
+                self.journal, request_id=runtime.current_request_id,
+                step=runtime.owner.current_step, tool=tool,
+                arguments_hash=args_hash, ordinal=effect_ordinal,
+            )
         fence = self.journal.emit("step_dispatch_binding", producer="stateframe_runtime",
             snapshot_id=runtime.snapshot_id, accepted=True, expected=current, current=current,
             continuation_id=identity, continuation_effect_id=effect,
@@ -917,21 +1334,30 @@ class LiveContinuation:
         identity = self.engine.state.active_id
         if identity is None:
             return False
-        try:
-            evidence = self.engine._evidence
-            state = self.engine.state
-        except AttributeError:
+        receipt = self._trusted_reused_receipt(candidate, identity)
+        if receipt is None:
             return False
-        valid_receipts: list[TrustedTestReceipt] = []
+        self._pending_reused_test = (self.effect_id, candidate, receipt)
+        return True
+
+    def _trusted_reused_receipt(self, candidate: Verdict, identity: str,
+                                *, before_sequence: int | None = None) -> TrustedTestReceipt | None:
+        """Validate the staged test lineage using only durable host evidence."""
+        evidence = self.engine._evidence
+        state = self.engine.state
+        if (candidate.state != SATISFIED or candidate.current_binding != self.runtime.binding()
+                or not candidate.trusted_receipts):
+            return None
         for receipt in candidate.trusted_receipts:
             if not isinstance(receipt, TrustedTestReceipt):
-                return False
+                return None
             try:
                 event = evidence.event(receipt.receipt_id, "test_subprocess_completed")
             except ContinuationError:
-                return False
+                return None
             effect = state.effects.get(event.get("continuation_effect_id"))
             if (event.get("producer") != "test_subprocess"
+                    or (before_sequence is not None and event["sequence"] >= before_sequence)
                     or event.get("binding_stable") is not True
                     or event.get("binding") != candidate.current_binding
                     or event.get("after_binding") != candidate.current_binding
@@ -942,17 +1368,14 @@ class LiveContinuation:
                     or effect is None or effect.status != "applied"
                     or effect.intention_id != event.get("continuation_id")
                     or effect.dispatch_ref != event.get("continuation_dispatch_ref")):
-                return False
+                return None
             ancestor = event.get("continuation_id")
             while ancestor in state.intentions and ancestor != identity:
                 ancestor = state.intentions[ancestor].parent_id
             if ancestor != identity:
-                return False
-            valid_receipts.append(receipt)
-        if not valid_receipts:
-            return False
-        self._pending_reused_test = (self.effect_id, candidate, valid_receipts[0])
-        return True
+                return None
+            return receipt
+        return None
 
     def discard_queued(self, reason: str) -> None:
         batch = getattr(self.runtime, "native_batch", None)
@@ -960,6 +1383,35 @@ class LiveContinuation:
             batch.discard_pending(reason)
 
     def operation(self, tool: str, arguments: dict) -> str | None:
+        if tool == "continuation_reobserve":
+            effect_id = arguments.get("effect_id")
+            if (self.dispatch is None or self.dispatch.get("tool") != tool
+                    or self.dispatch.get("accepted") is not True
+                    or not isinstance(effect_id, str)
+                    or arguments != getattr(self, "_authorized_arguments", None)
+                    or self.dispatch.get("continuation_id") != self.engine.state.active_id):
+                raise ContinuationError("reobservation bypassed live dispatch authorization")
+            effect = self.engine.state.effects.get(effect_id)
+            if (effect is None or effect.status not in {"pending", "unknown"}
+                    or effect.read_only
+                    or effect.intention_id != self.engine.state.active_id
+                    or self._reobserve_attempted(effect_id)):
+                raise ContinuationError("no unresolved write effect to reobserve")
+            # Materialize records before settlement appends to the journal.
+            matching = tuple(self._view().closures_by_effect.get(effect_id, ()))
+            action = reconciliation_action(
+                effect.tool, effect.status, closure=bool(matching))
+            current = self.runtime.binding()
+            outcome = (self._settle_durable_effect(effect_id, current, matching)
+                       if action == SETTLE_FROM_DURABLE_CLOSURE else None)
+            if outcome is not None:
+                return json.dumps({"status": "SETTLED", "effect_id": effect_id}, sort_keys=True)
+            self.journal.emit("continuation_reobserve_attempt", producer="stateframe_runtime",
+                              effect_id=effect_id, dispatch_ref=self.dispatch["event_id"],
+                              dispatch=False)
+            return json.dumps({"status": "CONTINUATION_BLOCKED", "effect_id": effect_id,
+                               "detail": "No durable host outcome can establish whether the write ran."},
+                              sort_keys=True)
         if tool != "continuation_detour":
             return None
         if self.dispatch is None:
@@ -982,7 +1434,23 @@ class LiveContinuation:
             relative = path.relative_to(root).as_posix()
             if relative not in current.get("product_files", {}) and relative not in current.get("harness_files", {}):
                 raise ContinuationError("detour source lacks a tracked file revision")
-            child = uuid.uuid4().hex
+            objective = "Acquire source: " + relative
+            pending_decision = arguments.get("pending_decision")
+            dependencies = binding_versions(current)
+            turns = (12 if self.runtime.step_limit is None else
+                     max(1, min(12, self.runtime.step_limit - self.runtime.owner.current_step - 1)))
+            acceptance = {"kind": "source_read", "path": relative,
+                          "start_line": start, "end_line": end}
+            child = _wire_intention_id(
+                self.journal, step=self.runtime.owner.current_step, content={
+                    "role": "source_detour", "parent_id": parent,
+                    "objective": objective, "pending_decision": pending_decision,
+                    "dependencies": dependencies, "turns": turns,
+                    "acceptance": acceptance,
+                    "request_id": self.runtime.current_request_id,
+                },
+                ordinal=len(state.intentions) + 1,
+            )
             parent_item = state.intentions.get(parent) if parent is not None else None
             if parent_item is not None:
                 acceptance = getattr(parent_item, "acceptance", {})
@@ -1003,13 +1471,10 @@ class LiveContinuation:
                 )
             self.engine.apply("detour", intention_id=parent, reason=arguments.get("reason"),
                 wake_token=uuid.uuid4().hex, deadline_us=self.engine.clock_us() + 300_000_000,
-                child={"new_id": child, "objective": "Acquire source: " + relative,
-                    "pending_decision": arguments.get("pending_decision"),
-                    "dependencies": binding_versions(current),
-                    "turns": (12 if self.runtime.step_limit is None else
-                              max(1, min(12, self.runtime.step_limit - self.runtime.owner.current_step - 1))),
-                    "acceptance": {"kind": "source_read", "path": relative,
-                                   "start_line": start, "end_line": end}})
+                child={"new_id": child, "objective": objective,
+                    "pending_decision": pending_decision,
+                    "dependencies": dependencies, "turns": turns,
+                    "acceptance": acceptance})
         except (ContinuationError, OSError) as error:
             feedback = "[continuation] Detour rejected: " + str(error)
             self.runtime.owner.receipt("state", tool, tool, "REJECTED", feedback)
@@ -1019,46 +1484,95 @@ class LiveContinuation:
         self.runtime.owner.receipt("state", tool, tool, "APPLIED", feedback)
         return feedback
 
-    def closed(self, event: dict) -> None:
+    def closed(self, event: dict, *, allow_unknown: bool = True,
+               current_binding: dict | None = None, reconciling: bool = False) -> None:
         record = event["record"]
         effect = record.get("continuation_effect_id")
         if effect is None:
+            return
+        receipt_ref = event["event_id"]
+        state = self.engine.state
+        existing = state.effects.get(effect)
+        if existing is None:
+            raise ContinuationError("closure has no continuation effect")
+        if existing.status in {"applied", "not_applied"} and existing.receipt_ref != receipt_ref:
+            raise ContinuationError("closure conflicts with the settled effect")
+        view = self._view()
+        if receipt_ref in view.processed:
+            return
+        # The settle_effect transition's receipt_ref is the durable processed
+        # marker. A second marker event would shift ordinary request IDs and
+        # leave a crash window between the two writes.
+        settlement = view.settlements.get((effect, receipt_ref))
+        stamp = event.get("timestamp_ns")
+        closure_us = stamp // 1000 if type(stamp) is int and stamp > 0 else None
+        current = current_binding if current_binding is not None else self.runtime.binding()
+        if settlement is not None:
+            if existing.status == "applied":
+                item = state.intentions[existing.intention_id]
+                followup_done = any(sequence > settlement["sequence"]
+                                    for sequence in view.revalidations.get(receipt_ref, ()))
+                return_ready = (getattr(self.engine, "return_ledger", None) is None
+                                or (item.intention_id, receipt_ref) in view.return_ready)
+                if followup_done and (item.acceptance.get("kind") != "source_read"
+                                      or (item.phase == "completed" and return_ready)):
+                    return
+                self._closed_applied_followups(event, state, current, at_us=closure_us)
+            elif record.get("tool") == "run_tests" and record.get("result") == "REUSED_VERIFICATION":
+                self._revalidate_reused_test(effect, record)
             return
         if self.guarded_effects is not None:
             self.guarded_effects.record_receipt(
                 effect,
                  {"tool": record.get("tool"), "result": record.get("result"),
-                  "action_ref": event["event_id"]},
-                 outcome=_guarded_host_outcome(record.get("result")),
-                 receipt_ref=event["event_id"],
+                  "action_ref": receipt_ref},
+                  outcome=_guarded_host_outcome(record.get("result")),
+                  receipt_ref=receipt_ref,
             )
-        self.engine.settle_host_effect(effect_id=effect, receipt_ref=event["event_id"],
-                                      current_binding=self.runtime.binding())
+        if existing.status in {"pending", "unknown"}:
+            committed = self.engine.settle_host_effect(
+                effect_id=effect, receipt_ref=receipt_ref,
+                current_binding=current, allow_unknown=allow_unknown,
+                at_us=closure_us if reconciling else None)
+            if committed is None:
+                return
         state = self.engine.state
         if state.effects[effect].status != "applied":
             if (record.get("tool") == "run_tests"
                     and record.get("result") == "REUSED_VERIFICATION"):
                 self._revalidate_reused_test(effect, record)
-            return
+        else:
+            self._closed_applied_followups(event, state, current, at_us=closure_us)
+
+    def _closed_applied_followups(self, event: dict, state: object, current: dict,
+                                  *, at_us: int | None = None) -> None:
+        record = event["record"]
         identity = record["continuation_id"]
-        current = self.runtime.binding()
+        receipt_ref = event["event_id"]
         if record["tool"] == "run_tests" or (record["tool"] == "read" and record["result"] == "OK"):
-            try:
-                self.engine.apply("revalidate", intention_id=identity, receipt_ref=event["event_id"],
-                    current_binding=current, current_dependencies=binding_versions(current))
-            except ContinuationError:
-                # An empty/truncated/historical read is not a current evidence refresh.
-                return
-            if record["tool"] == "read" and state.intentions[identity].acceptance.get("kind") == "source_read":
+            item = state.intentions[identity]
+            if item.evidence_refs != [receipt_ref]:
                 try:
-                    self.engine.apply("complete", intention_id=identity, receipt_ref=event["event_id"],
-                        current_binding=current, current_dependencies=binding_versions(current))
+                    self.engine.apply("revalidate", intention_id=identity, receipt_ref=receipt_ref,
+                        current_binding=current, current_dependencies=binding_versions(current),
+                        at_us=at_us if item.acceptance.get("kind") == "source_read" else None)
                 except ContinuationError:
-                    return  # Current read is useful, but the declared range remains unfinished.
-                self.engine.mark_continuation_return(
-                    identity, now=self.engine.clock_us(), evidence=(event["event_id"],),
-                    receipt=event["event_id"],
-                )
+                    # An empty/truncated/historical read is not a current evidence refresh.
+                    return
+            if record["tool"] == "read" and item.acceptance.get("kind") == "source_read":
+                if self.engine.state.intentions[identity].phase != "completed":
+                    try:
+                        self.engine.apply("complete", intention_id=identity, receipt_ref=receipt_ref,
+                            current_binding=current, current_dependencies=binding_versions(current),
+                            at_us=at_us)
+                    except ContinuationError:
+                        return  # Current read is useful, but the declared range remains unfinished.
+                if (identity, receipt_ref) not in self._view().return_ready:
+                    self.engine.mark_continuation_return(
+                        identity, now=at_us if at_us is not None else self.engine.clock_us(),
+                        evidence=(receipt_ref,),
+                        receipt=receipt_ref,
+                    )
                 self.discard_queued("source child completed; return to original pending decision")
 
     def revalidate_from_green_receipt(
@@ -1126,15 +1640,30 @@ class LiveContinuation:
         return True
 
     def _revalidate_reused_test(self, effect_id: str, record: dict) -> None:
-        staged = self._pending_reused_test
+        staged = getattr(self, "_pending_reused_test", None)
         self._pending_reused_test = None
         if staged is None or staged[0] != effect_id:
-            return
+            identity = record.get("continuation_id")
+            if not isinstance(identity, str):
+                return
+            current = self.runtime.binding()
+            required = self.engine.state.intentions[identity].acceptance.get("selectors")
+            verdict = evaluate_required_tests(
+                current, required, self.engine._evidence.scan_rows())
+            closure_ref = self.engine.state.effects[effect_id].receipt_ref
+            closure = self.engine._evidence.event(closure_ref, "action_outcome_closed")
+            receipt = self._trusted_reused_receipt(
+                verdict, identity, before_sequence=closure["sequence"])
+            if receipt is None:
+                return
+            staged = (effect_id, verdict, receipt)
         _staged_effect, verdict, receipt = staged
         current = self.runtime.binding()
         identity = record.get("continuation_id")
         if (not isinstance(identity, str) or verdict.current_binding != current
                 or receipt.binding != current or receipt.after_binding != current):
+            return
+        if self.engine.state.intentions[identity].evidence_refs == [receipt.receipt_id]:
             return
         try:
             self.engine.apply("revalidate", intention_id=identity,
@@ -1156,6 +1685,37 @@ class LiveContinuation:
         slot = submission_slot(self.runtime)
         return slot is not None and self.submission_result(slot_key(slot)) is not None
 
+    def _exhausted_source_read_failure(self) -> dict[str, object] | None:
+        """Identify a failed, settled source read that exhausted its child."""
+        state = self.engine.state
+        if state.active_id is not None:
+            return None
+        failures = []
+        closures = self._view().closures_by_ref
+        for child in state.intentions.values():
+            acceptance = child.acceptance
+            if (child.parent_id is None or child.phase != "blocked"
+                    or child.turns_left != 0 or not isinstance(acceptance, dict)
+                    or acceptance.get("kind") != "source_read"):
+                continue
+            path = acceptance.get("path")
+            if not isinstance(path, str):
+                continue
+            for effect in state.effects.values():
+                if (effect.intention_id != child.intention_id or effect.tool != "read"
+                        or effect.status not in {"applied", "not_applied"}):
+                    continue
+                closure = closures.get(effect.receipt_ref)
+                record = closure.get("record") if closure is not None else None
+                result = record.get("result") if isinstance(record, dict) else None
+                if isinstance(result, str) and result in READ_RESULT_CLASSES["read"] - {"OK"}:
+                    failures.append((child.intention_id, path, result))
+        if not failures:
+            return None
+        _, path, result = sorted(failures)[0]
+        return {"code": "CONTINUATION_BLOCKED",
+                "detail": f"[continuation] Source read {path} returned {result}; the source-read child has no turns left."}
+
     def completion_blocker(self) -> str | None:
         catalog_gate = getattr(self.runtime, "catalog_completion_blocker", None)
         if callable(catalog_gate):
@@ -1165,6 +1725,9 @@ class LiveContinuation:
         state = self.engine.state
         identity = state.active_id
         if identity is None:
+            failed_read = self._exhausted_source_read_failure()
+            if failed_read is not None:
+                return str(failed_read["detail"])
             if self._keyed_completion_durable():
                 return None
             return "[continuation] No active root can be completed."
@@ -1174,16 +1737,17 @@ class LiveContinuation:
         if unresolved(state, identity) or children_open(state, identity):
             details = self._unresolved_effect_details(identity)
             if details:
-                first = details[0]
+                first = next((detail for detail in details
+                               if self._unrepairable_unknown_effect(detail)), details[0])
                 action = first.get("repair_action")
-                if action is not None:
+                if self._live_repair(first):
                     return (f"[continuation] Unresolved effect {first['effect_id']} "
                             f"(tool={first['tool']}, status={first['status']}) has no settled host "
                             "outcome. Use the typed repair action on the live menu: "
                             + json.dumps(action, sort_keys=True, ensure_ascii=False))
                 return (f"[continuation] Unresolved effect {first['effect_id']} "
-                        f"(tool={first['tool']}, status={first['status']}) has no typed repair "
-                        "action on the live menu; completion is BLOCKED.")
+                        f"(tool={first['tool']}, status={first['status']}) has no settled host "
+                        "outcome; completion remains unresolved.")
             return "[continuation] Required work or an action outcome remains unresolved."
         if item.stale_dependencies or item.dependencies != binding_versions(self.runtime.binding()):
             return "[continuation] Evidence is stale. Read current source or run current checks before claiming completion."
@@ -1248,6 +1812,9 @@ class LiveContinuation:
         state = self.engine.state
         identity = state.active_id
         if identity is None:
+            failed_read = self._exhausted_source_read_failure()
+            if failed_read is not None:
+                return failed_read
             if self._keyed_completion_durable():
                 return None
             return {"code": "CONTINUATION_NO_ROOT",
@@ -1259,10 +1826,15 @@ class LiveContinuation:
         if unresolved(state, identity):
             details = self._unresolved_effect_details(identity)
             selectors = item.acceptance.get("selectors", []) if isinstance(item.acceptance, dict) else []
-            repairable = bool(details and details[0].get("repair_action"))
-            return {"code": "UNRESOLVED_EFFECT" if repairable else "CONTINUATION_BLOCKED",
-                    "detail": self.completion_blocker() or
-                    "[continuation] Required work or an action outcome remains unresolved.",
+            unrepairable_effect = any(self._unrepairable_unknown_effect(detail)
+                                      for detail in details)
+            repairable = not unrepairable_effect and any(self._live_repair(detail)
+                                                         for detail in details)
+            return {"code": "CONTINUATION_BLOCKED" if unrepairable_effect else "UNRESOLVED_EFFECT",
+                    "detail": ("[continuation] No durable closure proves the unresolved effect, "
+                               "and no typed re-observation is available."
+                               if unrepairable_effect else self.completion_blocker() or
+                               "[continuation] Required work or an action outcome remains unresolved."),
                     "selectors": list(selectors) if repairable else [],
                     "unresolved_effects": details}
         if children_open(state, identity):
@@ -1371,18 +1943,9 @@ class LiveContinuation:
         Journal errors propagate: "unknown" must never read as "not submitted".
         """
         expected = [str(key[0]), str(key[1])]
-        records = getattr(self.journal, "records", None)
-        if not callable(records):
+        if not callable(getattr(self.journal, "cached_records_since", None)):
             raise ContinuationError("keyed completion lookup needs a replayable journal")
-        found = None
-        for record in records():
-            data = record.get("data")
-            if (record.get("kind") == "continuation_transition"
-                    and record.get("operation") == "complete"
-                    and isinstance(data, dict) and data.get("submission_key") == expected):
-                found = {"accepted": True, "submission_key": expected,
-                         "event_id": record.get("event_id")}
-        return found
+        return self._view().submissions.get(tuple(expected))
 
     def accept_done(self, verdict: dict | None = None, *,
                     idempotency_key: tuple[str, str] | None = None) -> dict | None:
@@ -1450,15 +2013,14 @@ class LiveContinuation:
             raise ContinuationError("accepted done lacks current host certification")
         current = self.runtime.binding()
         expected = [str(key[0]), str(key[1])]
-        event = self.engine.apply("complete", intention_id=self.dispatch["continuation_id"],
-                                  receipt_ref=self._pending_completion_ref,
-                                  current_binding=current,
-                                  current_dependencies=binding_versions(current),
-                                  submission_key=expected)
+        self.engine.apply("complete", intention_id=self.dispatch["continuation_id"],
+                          receipt_ref=self._pending_completion_ref,
+                          current_binding=current,
+                          current_dependencies=binding_versions(current),
+                          submission_key=expected)
         self.completed = True
         self._pending_completion_ref = None
-        return {"accepted": True, "submission_key": expected,
-                "event_id": (event or {}).get("event_id")}
+        return {"accepted": True, "submission_key": expected}
 
     def keyed_destination(self, verdict: dict | None):
         """The done callback as a keyed destination (idempotency switch on)."""
@@ -1550,6 +2112,7 @@ class LiveContinuation:
                 "accepted with this no-host-checks limitation disclosed; do not claim host-test coverage."
             )
         if self.guarded_effects is not None:
+            self.guarded_effects._journal_view = self._view()
             value["guarded_effects"] = self.guarded_effects.context_dict()
         if coherent_ready:
             value["instructions"] = REFUSAL_LEAD
@@ -1559,7 +2122,33 @@ class LiveContinuation:
                 " The continuation is temporarily stranded; resolve this blocker before claiming completion: "
                 + self._stranded_blocker)
         if self.context_scope is not None:
-            value["context_scope"] = self.context_scope.public_context()
+            scope = self.context_scope.public_context()
+            identity = scope.get("identity") if isinstance(scope, Mapping) else None
+            if isinstance(identity, dict):
+                from kernel_wire_identity import (
+                    seeded_content_wire_id, wire_identity_content, wire_run_id,
+                    wire_run_seed,
+                )
+
+                seed = wire_run_seed(self.journal)
+                owner = getattr(self.runtime, "owner", None)
+                step = getattr(owner, "current_step", 0)
+                identity["run_id"] = wire_run_id(self.journal)
+                try:
+                    workspace_binding = self.runtime.binding()
+                except (AttributeError, TypeError, ValueError):
+                    workspace_binding = {}
+                try:
+                    workspace_content = wire_identity_content(workspace_binding)
+                except (TypeError, ValueError):
+                    workspace_content = {"binding_unavailable": True}
+                identity["workspace_id"] = "workspace-scope:" + seeded_content_wire_id(
+                    seed, "continuation-context-workspace", step, workspace_content,
+                )
+                identity["grant_id"] = "grant-scope:" + seeded_content_wire_id(
+                    seed, "continuation-context-grant", step, identity.get("grant_id", ""),
+                )
+            value["context_scope"] = scope
         adapter = self._unknown_outcome_adapter()
         if adapter is not None:
             value["external_outcomes"] = adapter.context()
@@ -1589,7 +2178,8 @@ class LiveContinuation:
                 " Complete current Working source in this model request also counts as a source "
                 "observation after the kernel verifies actual delivery. It does not refresh test "
                 "results or prove completion. Queued actions do not receive a fresh model observation.")
-        return "[Continuation]\n" + json.dumps(value, ensure_ascii=False, sort_keys=True)
+        public_value = _public_continuation_context(value, self.journal)
+        return "[Continuation]\n" + json.dumps(public_value, ensure_ascii=False, sort_keys=True)
 
     def finish(self) -> None:
         self.journal.emit("continuation_worker_stopped", state=self.engine.state.document(),

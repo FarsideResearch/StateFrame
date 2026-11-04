@@ -20,7 +20,7 @@ FATAL_OUTCOMES = frozenset({
     "boundary_unrecoverable", "env_broken", "harness_contract", "harness_error",
     "harness_transport", "harden8_contract_error", "harden8_evidence_pin_error",
     "harden8_owner_finalization_error", "harden8_route_error", "invalidate_attempt",
-    "quarantine_harness", "run_incomplete",
+    "quarantine_harness", "run_incomplete", "continuation_blocked",
 })
 # User-configured hook policy ends the run: a stop hook's veto limit, or lost hook containment. These are
 # explicit user decisions or safety stops, never heuristics, so they stay authoritative under hard-budget mode.
@@ -30,7 +30,6 @@ _ADVISORY_MESSAGES = {
     "blocked": "The host marked the current completion attempt blocked. Continue with the available repair, evidence, or verification actions until a hard budget is reached or completion is accepted.",
     "catalog_unknown": "The host could not classify the current catalog state. Continue by inspecting the available evidence and taking an admissible repair or verification action.",
     "completion_owner_exhausted": "The completion owner found no current submission route. Continue with available product, read, and verification actions; the hard run budgets still apply.",
-    "continuation_blocked": "The continuation authority could not certify the current boundary. Continue with the available task actions and resolve the open work.",
     "effect_boundary_shadow": "The effect boundary reported an unresolved shadow result. Continue with an admissible action and use the remaining run budget.",
     "greenlock_empty_menu": "The green-lock projection produced no permitted tool. Continue with the available task context and request an admissible action; hard budgets still bound the run.",
     "owner_reserved_submit_cap": "The owner's reserved submission limit was reached without an accepted submission. Continue with available actions until a hard run budget is reached.",

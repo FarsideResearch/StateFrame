@@ -46,7 +46,7 @@ The tool tape records intent before execution and completion afterward for shell
 
 ## Determinism
 
-Request ids are not random, and volatile test and tool output (durations, memory addresses in tracebacks, run-directory paths) is normalized before the model sees it, with the raw output kept in the run journal. Identical inputs give identical requests on the measured workload apart from three clock fields and an edit-receipt ID; this is not full determinism, because the model's own output is not deterministic. See KNOWN_LIMITATIONS.md.
+Wire-visible IDs are derived from the persisted run seed, step, identifying content and an ordinal for duplicate content at that step. Journal sequence, event IDs, random UUIDs and wall-clock values do not mint provider-visible IDs, so repeated runs with the same run seed send identical request bytes and preserve prompt-cache reuse. Volatile test and tool output (durations, memory addresses in tracebacks, run-directory paths) is normalized before the model sees it, with the raw output kept in the run journal. The model's own output is not deterministic. See KNOWN_LIMITATIONS.md.
 
 ## Why this matters
 

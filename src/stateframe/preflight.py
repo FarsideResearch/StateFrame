@@ -8,6 +8,7 @@ import sys
 from pathlib import Path
 from typing import Sequence
 
+from .engine.kernel_safe_paths import safe_expanduser
 
 class PreflightError(RuntimeError):
     """A required local interpreter or sandbox prerequisite is unavailable."""
@@ -20,13 +21,13 @@ def resolve_interpreter(path_or_name: str | os.PathLike[str], cwd: str | os.Path
         raise PreflightError("Python interpreter path or command name is empty")
 
     try:
-        caller_cwd = Path(cwd).expanduser().resolve(strict=True)
+        caller_cwd = safe_expanduser(Path(cwd)).resolve(strict=True)
     except (OSError, RuntimeError) as error:
         raise PreflightError(f"caller working directory is unavailable: {cwd}") from error
     if not caller_cwd.is_dir():
         raise PreflightError(f"caller working directory is not a directory: {caller_cwd}")
 
-    candidate_path = Path(raw).expanduser()
+    candidate_path = safe_expanduser(Path(raw))
     has_path_component = candidate_path.is_absolute() or os.sep in raw or (os.altsep and os.altsep in raw)
     if has_path_component:
         candidate = candidate_path if candidate_path.is_absolute() else caller_cwd / candidate_path

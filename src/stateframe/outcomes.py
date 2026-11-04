@@ -96,6 +96,8 @@ def project(summary: dict[str, object], *, cancelled: bool = False,
         runtime = "hook_containment"
     elif status == "HOOK_BLOCKED":
         runtime = "hook_blocked"
+    elif status == "CONTINUATION_BLOCKED":
+        runtime = "continuation_blocked"
     elif cancelled or child in (130, -2) or status in ("CANCELLED", "CANCELED"):
         runtime = "cancelled"
     elif recovered:
@@ -194,6 +196,8 @@ def exit_code(summary: dict[str, object]) -> int:
     if runtime == "hook_containment":
         return 2
     if runtime == "hook_blocked":
+        return 1
+    if runtime == "continuation_blocked":
         return 1
     if summary.get("apply_error"):
         return 2

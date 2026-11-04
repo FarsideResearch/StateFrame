@@ -4,6 +4,7 @@ import subprocess
 import sys
 
 from ._support import FIXTURES, script_path
+from engine_run import run_monitored
 
 
 def test_all_offline_scripts_are_valid_and_have_steps():
@@ -26,7 +27,7 @@ def test_e25_older_run_spec_is_refused_cleanly(tmp_path):
     run_dir = tmp_path / "old-run"
     run_dir.mkdir()
     (run_dir / "spec.json").write_text(json.dumps({"schema": "stateframe-run/0"}))
-    result = subprocess.run((sys.executable, "-m", "stateframe", "resume", str(run_dir)),
+    result = run_monitored((sys.executable, "-m", "stateframe", "resume", str(run_dir)),
                             capture_output=True, text=True, check=False)
     assert result.returncode != 0
     assert "not a stateframe-run/1 run spec" in result.stderr + result.stdout

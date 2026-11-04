@@ -1,6 +1,7 @@
 """Repository tests import the checkout's product package and engine modules."""
 import sys
 import importlib.metadata
+import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -8,10 +9,17 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
-# Fixture repositories under tests/e2e carry their own tests; they run inside engine runs only.
-collect_ignore_glob = ["e2e/*", "fixtures/*"]  # recorded repo copies in fixtures/ are data, never tests
-for path in (ROOT / "src", ROOT / "src" / "stateframe" / "engine"):
+_RETIRED_PARITY_BASELINES = {
+    "test_hook_wiring_parity.py": "immediate base release",
+    "test_final_cache_layout_host.py": "e19c325",
+    "test_edit_scope_widen.py": "0b057d3",
+}
+# Keep fixture-repository files below tests/e2e out of collection without hiding its top-level tests.
+collect_ignore_glob = ["e2e/*/*", "fixtures/*"]  # top-level e2e test modules remain collectible
+for path in (ROOT / "tests", ROOT / "src", ROOT / "src" / "stateframe" / "engine"):
     sys.path.insert(0, str(path))
+
+import serial_lane_plugin  # noqa: E402 -- pytest adds tests/ to sys.path when importing the root conftest
 
 
 @pytest.fixture(autouse=True, scope="session")
@@ -27,6 +35,59 @@ def _isolated_stateframe_home(tmp_path_factory):
         yield
     finally:
         os.environ.pop("STATEFRAME_HOME", None)
+
+
+@pytest.fixture(autouse=True)
+def reject_retired_shared_parity_baseline(request):
+    """Keep old foundry mounts from silently routing tests to the wrong source tree."""
+    reference = _RETIRED_PARITY_BASELINES.get(request.node.path.name)
+    if reference is not None and "SF_TEST_PARITY_BASELINE" in os.environ:
+        pytest.fail(
+            f"SF_TEST_PARITY_BASELINE is retired: {request.node.nodeid} "
+            f"pins its own reference ({reference}); unset it",
+            pytrace=False,
+        )
+
+
+# The session home is shared by every test in a worker. Powerups and skills in it change what the current tree
+# sends, so a test that leaves one behind changes later tests' request bytes (11-04: the 0.2.8 parity test failed
+# only in full runs). A test that needs such state sets its own STATEFRAME_HOME with monkeypatch.
+_SESSION_HOME_STATE = ("powerups", "powerups.json", "skills")
+
+
+def _session_home_state_snapshot(home):
+    import hashlib
+    from pathlib import Path
+
+    state = {}
+    for name in _SESSION_HOME_STATE:
+        root = Path(home) / name
+        paths = [root] if root.is_file() or root.is_symlink() else sorted(root.rglob("*")) if root.is_dir() else []
+        for path in paths:
+            relative = str(path.relative_to(home))
+            if path.is_symlink():
+                state[relative] = "link:" + str(path.readlink())
+            elif path.is_file():
+                state[relative] = hashlib.sha256(path.read_bytes()).hexdigest()
+            else:
+                state[relative] = "dir"
+    return state
+
+
+@pytest.fixture(autouse=True)
+def guard_session_home_state(request):
+    import os
+
+    home = os.environ.get("STATEFRAME_HOME")
+    before = _session_home_state_snapshot(home) if home else None
+    yield
+    # Compare against the same home: a test that monkeypatched its own home has restored the session one by now.
+    if before is not None and os.environ.get("STATEFRAME_HOME") == home:
+        after = _session_home_state_snapshot(home)
+        if after != before:
+            changed = sorted(set(before) ^ set(after) | {k for k in before.keys() & after.keys() if before[k] != after[k]})
+            pytest.fail(f"{request.node.nodeid} left session STATEFRAME_HOME state changed: {', '.join(changed[:8])}; "
+                        "set its own STATEFRAME_HOME with monkeypatch", pytrace=False)
 
 
 # _child installers patch these process globals directly. A test must register the
@@ -155,6 +216,29 @@ def pytest_configure(config):
         "markers", "host_sandbox: starts an OS sandbox (sandbox-exec/bwrap) or a local socket service")
     config.addinivalue_line(
         "markers", "expected_installer_leak: the test leaks _child installer state on purpose; the guard restores it")
+    serial_lane_plugin.configure_serial_lane(config)
+
+
+def pytest_collection_modifyitems(items, config):
+    serial_lane_plugin.collect_serial_lane_items(items, config)
+
+
+@pytest.hookimpl(hookwrapper=True)
+def pytest_runtest_makereport(item, call):
+    outcome = yield
+    serial_lane_plugin.record_call(item, outcome.get_result())
+
+
+def pytest_runtest_logreport(report):
+    serial_lane_plugin.record_logreport(report)
+
+
+def pytest_sessionfinish(session, exitstatus):
+    serial_lane_plugin.finish_session(session)
+
+
+def pytest_terminal_summary(terminalreporter, exitstatus, config):
+    serial_lane_plugin.terminal_summary(terminalreporter, exitstatus, config)
 
 
 @pytest.fixture(autouse=True)

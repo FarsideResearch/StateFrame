@@ -1637,9 +1637,68 @@ def _is_pooled(relative: str) -> bool:
     return relative in POOLED_DIRS or _is_blob_store(relative)
 
 
+def _snapshot_appended_file(source: Path, target: Path, relative: str, root: Path,
+                            previous: list, file_chunks: dict, seq: int) -> bool:
+    """Store an audit journal in the existing chunk cache, writing only its new suffix."""
+    if (not relative.startswith("worker/measurement-runs/")
+            or relative.count("/") != 3 or not relative.endswith("/events.jsonl")
+            or not source.is_file() or source.is_symlink()):
+        return False
+    size = source.stat().st_size
+    rows = [list(row) for row in previous]
+    covered = rows[-1][2] if rows else 0
+    if covered > size:
+        rows, covered = [], 0
+    if rows:
+        last = rows[-1]
+        digest = hashlib.sha256()
+        with source.open("rb") as stream:
+            stream.seek(last[1])
+            for block in iter(lambda: stream.read(min(1 << 20, last[2] - stream.tell())), b""):
+                digest.update(block)
+        if digest.hexdigest() != last[3]:
+            rows, covered = [], 0
+    if size > covered:
+        folder = root / CACHE_DIR
+        _private_dir(folder)
+        name = f"file-{_stable_key(relative)}-{seq:08d}-{os.getpid()}{CHUNK_SUFFIX}"
+        temporary = folder / f".{name}.tmp"
+        raw_digest, stored_digest = hashlib.sha256(), hashlib.sha256()
+        compressor = zlib.compressobj(1)
+        with source.open("rb") as source_stream, os.fdopen(
+                os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "wb") as output:
+            source_stream.seek(covered)
+            remaining = size - covered
+            while remaining:
+                block = source_stream.read(min(1 << 20, remaining))
+                if not block:
+                    raise CheckpointError(f"audit journal {relative} shrank during snapshot")
+                remaining -= len(block)
+                raw_digest.update(block)
+                encoded = compressor.compress(block)
+                output.write(encoded)
+                stored_digest.update(encoded)
+            encoded = compressor.flush()
+            output.write(encoded)
+            stored_digest.update(encoded)
+            output.flush()
+            os.fsync(output.fileno())
+        os.replace(temporary, folder / name)
+        rows.append([name, covered, size, raw_digest.hexdigest(), stored_digest.hexdigest()])
+    target.touch()
+    shutil.copystat(source, target)
+    file_chunks[relative] = rows
+    return True
+
+
 def _snapshot_tree(source: Path, target: Path, relative: str, pool: Path, manifests: dict,
-                   new_pool_files: list[Path]) -> None:
+                   new_pool_files: list[Path], file_chunks: dict | None = None,
+                   previous_files: dict | None = None, seq: int = 0) -> None:
     """Clone ``source`` into ``target`` with as few clonefile calls as possible, pooling write-once dirs."""
+    if file_chunks is not None and _snapshot_appended_file(
+            source, target, relative, pool.parent,
+            (previous_files or {}).get(relative, ()), file_chunks, seq):
+        return
     entries = list(os.scandir(source)) if _is_pooled(relative) and source.is_dir() else None
     if entries is not None and all(entry.is_file(follow_symlinks=False) for entry in entries):
         names = sorted(entry.name for entry in entries)
@@ -1667,7 +1726,7 @@ def _snapshot_tree(source: Path, target: Path, relative: str, pool: Path, manife
         target.mkdir()
         for entry in os.scandir(source):
             _snapshot_tree(Path(entry.path), target / entry.name, f"{relative}/{entry.name}", pool,
-                           manifests, new_pool_files)
+                           manifests, new_pool_files, file_chunks, previous_files, seq)
         return
     if not _clonefile(source, target):
         _clone(source, target)
@@ -1679,7 +1738,8 @@ def _copy_tree(source: Path, target: Path, previous: Path | None,
 
     Checkpoint copies are never modified after they are written, so linking to one is safe; a file
     is unchanged when size and mtime_ns equal the previous copy (copies keep the source mtime).
-    Big changed files are APFS-cloned (copy-on-write), small ones copied.
+    Seed-matching env files and big changed files are APFS-cloned (copy-on-write)
+    when possible; small changed files are copied.
     """
     counts = {"linked": 0, "copied": 0, "cloned": 0}
     for directory, dirnames, filenames in os.walk(source):
@@ -1720,6 +1780,18 @@ def _copy_tree(source: Path, target: Path, previous: Path | None,
                     os.link(old, destination)
                     durable_inodes.add((prior.st_dev, prior.st_ino))
                     counts["linked"] += 1
+                    continue
+            if seed is not None and sys.platform == "darwin":
+                candidate = seed / os.path.relpath(path, source)
+                try:
+                    seed_info = candidate.stat()
+                except OSError:
+                    seed_info = None
+                if (seed_info is not None and stat.S_ISREG(seed_info.st_mode)
+                        and seed_info.st_size == info.st_size
+                        and seed_info.st_mtime_ns == info.st_mtime_ns
+                        and _clonefile(Path(path), destination)):
+                    counts["cloned"] += 1
                     continue
             if info.st_size >= _BIG_FILE and sys.platform == "darwin":
                 if _clonefile(Path(path), destination):
@@ -1904,14 +1976,22 @@ def _save_into(payload, ctx, step, run_dir, root, final, tmp, clocks, started, c
     _STATE["next_seq"] = seq + 1
     entries = sorted(p.name for p in run_dir.iterdir() if p.name not in SKIP_RUN_ENTRIES)
     previous = latest(run_dir)
+    prior_meta = {}
+    if previous is not None:
+        try:
+            prior_meta = json.loads((previous / META_FILE).read_text())
+        except (OSError, ValueError):
+            pass
     copied = {"linked": 0, "copied": 0, "cloned": 0}
     manifests: dict[str, list] = {}
+    file_chunks: dict[str, list] = {}
     new_pool_files: list[Path] = []
     durable_inodes: set[tuple[int, int]] = set()
     for name in entries:
         source, destination = run_dir / name, tmp / "run" / name
         if (name == "worker" or name in POOLED_DIRS) and source.is_dir() and not source.is_symlink():
-            _snapshot_tree(source, destination, name, root / POOL_DIR, manifests, new_pool_files)
+            _snapshot_tree(source, destination, name, root / POOL_DIR, manifests, new_pool_files,
+                           file_chunks, prior_meta.get("file_chunks", {}), seq)
             copied["cloned"] += 1
             continue
         if _clonefile(source, destination):
@@ -1941,17 +2021,13 @@ def _save_into(payload, ctx, step, run_dir, root, final, tmp, clocks, started, c
         "created": time.time(), "seq": seq, "clocks": clocks, "files": copied,
         "blob_manifest_sha256": hashlib.sha256(manifest_bytes).hexdigest(),
         "pool_sha256": pool_sha256,
+        "file_chunks": file_chunks,
         "blob_count": sum(len(names) for names in manifests.values()),
         "seconds": {"collect": round(collected - started, 3), "files": round(files_done - collected, 3),
                     "capture": round(time.perf_counter() - started, 3)},
     }
     _STATE["phase_seconds"] = dict(meta["seconds"])
-    prior_index = {}
-    if previous is not None:
-        try:
-            prior_index = json.loads((previous / META_FILE).read_text()).get("chunk_index", {}) or {}
-        except (OSError, ValueError):
-            prior_index = {}
+    prior_index = prior_meta.get("chunk_index", {}) or {}
 
     def write() -> None:
         t0 = time.perf_counter()
@@ -1982,7 +2058,8 @@ def _save_into(payload, ctx, step, run_dir, root, final, tmp, clocks, started, c
             stream.flush()
         meta.update(state_bytes=writer.count, state_sha256=writer.digest.hexdigest(),
                     chunk_index=index,
-                    chunks=sorted(row[0] for rows in index.values() for row in rows))
+                     chunks=sorted({row[0] for rows in index.values() for row in rows}
+                                   | {row[0] for rows in file_chunks.values() for row in rows}))
         meta["seconds"]["write"] = round(time.perf_counter() - t0, 3)
         meta["signature"] = _signature(meta, meta["state_sha256"])
         with os.fdopen(os.open(tmp / META_FILE, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "w") as stream:
@@ -2466,6 +2543,38 @@ def _restore_files(checkpoint: Path, run_dir: Path, meta: dict) -> None:
             for row in files:  # write-once files: a hard link IS the content
                 name = row[0]
                 os.link(store / name, live / name)
+    for relative, rows in meta.get("file_chunks", {}).items():
+        if (not relative.startswith("worker/measurement-runs/")
+                or relative.count("/") != 3 or not relative.endswith("/events.jsonl")):
+            raise CheckpointError(f"invalid audit journal path {relative!r}")
+        destination = run_dir / relative
+        if not destination.is_file() or destination.is_symlink():
+            raise CheckpointError(f"audit journal placeholder missing: {relative}")
+        with destination.open("wb") as output:
+            for name, start, end, raw_sha, stored_sha in rows:
+                if output.tell() != start:
+                    raise CheckpointError(f"audit journal chunks are discontinuous: {relative}")
+                chunk = checkpoint.parent / CACHE_DIR / name
+                stored = hashlib.sha256()
+                raw = hashlib.sha256()
+                decoder = zlib.decompressobj()
+                with chunk.open("rb") as stream:
+                    for block in iter(lambda: stream.read(1 << 20), b""):
+                        stored.update(block)
+                        try:
+                            decoded = decoder.decompress(block)
+                        except zlib.error:
+                            raise CheckpointError(
+                                f"audit journal chunk checksum mismatch: {relative}") from None
+                        output.write(decoded)
+                        raw.update(decoded)
+                decoded = decoder.flush()
+                output.write(decoded)
+                raw.update(decoded)
+                if (not decoder.eof or decoder.unused_data or stored.hexdigest() != stored_sha
+                        or raw.hexdigest() != raw_sha or output.tell() != end):
+                    raise CheckpointError(f"audit journal chunk checksum mismatch: {relative}")
+        shutil.copystat(checkpoint / "run" / relative, destination)
 
 
 _ABSENT = object()

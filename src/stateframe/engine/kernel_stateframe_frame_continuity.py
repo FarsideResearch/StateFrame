@@ -4,6 +4,7 @@ from __future__ import annotations
 import copy
 import json
 import os
+import re
 from collections.abc import Mapping, Sequence
 
 from kernel_read_working_set import _read_ranges, evictfix_enabled
@@ -600,8 +601,9 @@ def journal_check_receipts(action_context: object) -> tuple[dict[str, object], .
             "revision", "tested_rev", "tested_revision", "source_revision"
         ) if isinstance(record.get(key), str) and record.get(key).strip()), None)
         receipt_id = next((record.get(key) for key in (
-            "receipt_id", "check_receipt_id", "event_id"
-        ) if isinstance(record.get(key), str) and record.get(key).strip()), None)
+            "receipt_id", "check_receipt_id"
+        ) if isinstance(record.get(key), str)
+           and re.fullmatch(r"check-receipt:[0-9a-f]{24}", record[key])), None)
         row: dict[str, object] = {
             "kind": "check_receipt",
             "status": status,
@@ -613,13 +615,10 @@ def journal_check_receipts(action_context: object) -> tuple[dict[str, object], .
             row["text"] += " revision=" + revision
         if isinstance(receipt_id, str):
             row["receipt_id"] = receipt_id
-        for key in ("selector", "execution_id", "request_id", "sequence", "ordinal"):
+        for key in ("selector",):
             value = record.get(key)
             if isinstance(value, (str, int)) and not isinstance(value, bool):
                 row[key] = value
-        event_id = record.get("source_event_id", record.get("event_id"))
-        if isinstance(event_id, str) and event_id:
-            row["source_event_id"] = event_id
         result.append(row)
     return tuple(result)
 

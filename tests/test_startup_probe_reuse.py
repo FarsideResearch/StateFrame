@@ -4,6 +4,7 @@ import sys
 import pytest
 
 from stateframe import runner
+from stateframe.engine import kernel_test_isolation
 
 
 @pytest.fixture
@@ -68,3 +69,24 @@ def test_failed_engine_check_leaves_no_proof(tmp_path, monkeypatch):
     with pytest.raises(runner.RunError):
         runner._check_engine_python(options)
     assert options._pytest_proven is None
+
+
+def test_missing_interpreter_inside_check_sandbox_has_relevant_startup_advice(
+        tmp_path, monkeypatch, probes):
+    link = tmp_path / "bin" / "python"
+    link.parent.mkdir()
+    link.symlink_to(sys.executable)
+    message = (f"test interpreter {link} not found inside the check sandbox: this is an "
+               "environment error, not a test result (no test ran)")
+    monkeypatch.setattr(kernel_test_isolation, "check_sandbox_exec_denial",
+                        lambda selected: message if selected == str(link) else None)
+    options = options_for(tmp_path, test_python=str(link))
+
+    with pytest.raises(runner.RunError) as error:
+        runner._select_test_python(options, printer=lambda _line: None)
+
+    assert str(error.value) == (
+        f"test interpreter {link} (--test-python): {message}. Every check would fail to start; "
+        "check that the interpreter and its links are available and executable inside the "
+        "check sandbox, or report this as a StateFrame bug")
+    assert [python for python, _, _ in probes] == [str(link)]

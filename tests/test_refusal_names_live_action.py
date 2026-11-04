@@ -1,17 +1,25 @@
 import json
 import re
+import subprocess
+import sys
 from dataclasses import dataclass
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
-from test_shell_e2e import run_script, step
+from _journal import measurement_events, measurement_journal_paths
+from acceptance._support import budget
+from test_shell_e2e import command, environment, fixture_repo, run_script, step
+from kernel_completion_owner import REFUSAL_REASON_CODES
+from probes.react_repair import _terminal_block_skips_final_grading
+from stateframe.scripted_endpoint import Script, serve
 
 
 ROOT = Path(__file__).resolve().parents[1]
 pytestmark = pytest.mark.host_sandbox
 REFUSAL_MARKER = re.compile(
-    r"\b(?:REJECTED|REFUSED[A-Z0-9_-]*|NOT[\s_]+EXECUTED)\b"
+    r"\b(?:REJECTED|(?:HOST_)?REFUSED[A-Z0-9_-]*|NOT[\s_]+EXECUTED|NO TOOL WAS EXECUTED)\b"
     r"|^\s*\[continuation\]",
     re.IGNORECASE | re.MULTILINE,
 )
@@ -30,6 +38,20 @@ NEXT_ACTION_FIELDS = (
     "alternatives", "repair_action", "resolver", "next_action",
     "next_actions", "suggested_action", "suggested_tools",
 )
+PLAIN_TEXT_REFUSAL_PRODUCERS = {
+    "[continuation] Dispatch refused: stale binding":
+        ("kernel_continuation_runtime.py", "[continuation] Dispatch refused:",
+         "Continuation authorization returns a plain-text dispatch veto."),
+    "HOST_REFUSED: host could not run tests":
+        ("probes/react_repair.py", "HOST_REFUSED: host could not run tests",
+         "The test host reports a refused subprocess as plain text."),
+    "[selector] REFUSED_PREDISPATCH: invalid selector":
+        ("probes/react_repair.py", "[selector] REFUSED_PREDISPATCH",
+         "Selector validation refuses before dispatch in plain text."),
+    "No tool was executed. Return a valid tool call.":
+        ("probes/react_repair.py", "No tool was executed.",
+         "The no-tool-call branch has no structured tool receipt."),
+}
 
 
 @dataclass(frozen=True)
@@ -38,6 +60,7 @@ class RefusalReply:
     offered_request: str | None
     tool_call_id: str | None
     offered_tool: str | None
+    offered_menu: frozenset[str]
     actions: tuple[str, ...]
     menu: frozenset[str]
     text: str
@@ -76,16 +99,29 @@ def _structured_objects(value):
 
 
 def _is_refusal(content):
-    if REFUSAL_MARKER.search(_reply_text(content)):
-        return True
     for item in _structured_objects(content):
-        status = item.get("status")
-        if isinstance(status, str):
-            normalized = status.strip().upper()
-            if (normalized == "REJECTED" or normalized.startswith("REFUSED")
-                    or normalized.replace("_", " ") == "NOT EXECUTED"):
+        for field in ("kind", "status", "outcome", "result", "result_class"):
+            value = item.get(field)
+            if isinstance(value, str) and (
+                    value.strip().upper().startswith(("REFUSED", "REJECTED"))
+                    or value.strip().upper() in {"UNKNOWN_TOOL", "UNSUPPORTED_ACTION"}
+                    or value.strip().upper().replace(" ", "_") == "NOT_EXECUTED"):
                 return True
-    return False
+        codes = [item.get("code"), item.get("reason_code")]
+        reason_codes = item.get("reason_codes")
+        if isinstance(reason_codes, (list, tuple)):
+            codes.extend(reason_codes)
+        terminal_or_action_codes = {
+            "NO_CLOBBER", "UNRESOLVED_EFFECT", "CONTINUATION_BLOCKED", "HOOK_DENIED"}
+        if any(isinstance(code, str) and code.strip().upper() in terminal_or_action_codes
+               for code in codes):
+            return True
+        if (item.get("accepted") is False or item.get("admitted") is False
+                or str(item.get("state", "")).upper() in {"BLOCKED", "REFUSED"}):
+            if any(isinstance(code, str) and code.strip().upper() in REFUSAL_REASON_CODES
+                   for code in codes):
+                return True
+    return bool(REFUSAL_MARKER.search(_reply_text(content)))
 
 
 def _named_actions(content, known_tool_names):
@@ -122,8 +158,9 @@ def _terminal_status(content):
     if "terminal status" in text or "run will end with blocked status" in text:
         return True
     return any(
-        isinstance(item.get("code"), str)
-        and item["code"].strip().upper() == "CONTINUATION_BLOCKED"
+        any(isinstance(item.get(field), str)
+            and item[field].strip().upper() == "CONTINUATION_BLOCKED"
+            for field in ("kind", "code", "reason_code", "status", "result"))
         for item in _structured_objects(content)
     )
 
@@ -182,7 +219,7 @@ def _known_tool_names(request_rows):
 
 
 def recorded_refusal_replies(run_dir):
-    """Pair host refusals with offered calls and the menu for the next model turn."""
+    """Pair each host reply with its call ID, offering request, and next menu."""
     request_paths = sorted(
         (Path(run_dir) / "wire").glob("[0-9][0-9][0-9][0-9].request.json")
     )
@@ -201,8 +238,9 @@ def recorded_refusal_replies(run_dir):
                 continue
             if message.get("role") == "assistant":
                 offered_request = request_rows[index - 1][0].name if index else None
+                offered_menu = _tool_menu(request_rows[index - 1][1]) if index else frozenset()
                 for call_id, name in _tool_calls(message):
-                    offers[call_id] = (offered_request, name)
+                    offers[call_id] = (offered_request, name, offered_menu)
                 continue
             if message.get("role") != "tool":
                 continue
@@ -211,12 +249,14 @@ def recorded_refusal_replies(run_dir):
                 continue
             call_id = message.get("tool_call_id")
             offer = offers.get(call_id) if isinstance(call_id, str) else None
-            offered_request, offered_tool = offer if offer is not None else (None, None)
+            offered_request, offered_tool, offered_menu = (
+                offer if offer is not None else (None, None, frozenset()))
             replies.append(RefusalReply(
                 reply_request=request_path.name,
                 offered_request=offered_request,
                 tool_call_id=call_id if isinstance(call_id, str) else None,
                 offered_tool=offered_tool,
+                offered_menu=offered_menu,
                 actions=_named_actions(content, known_tool_names | menu),
                 menu=menu,
                 text=_reply_text(content),
@@ -228,16 +268,54 @@ def recorded_refusal_replies(run_dir):
 def recorded_refusal_violations(run_dir):
     """Return uncorrelated refusals, missing actions, and actions absent from the next menu."""
     violations = []
+    result_path = Path(run_dir) / "engine-result.json"
+    try:
+        run_result = json.loads(result_path.read_text(encoding="utf-8"))["result"]["result"]
+    except (OSError, ValueError, KeyError, TypeError):
+        run_result = None
     for reply in recorded_refusal_replies(run_dir):
         detail = (reply.reply_request, reply.offered_request, reply.tool_call_id)
         if reply.offered_request is None or reply.tool_call_id is None:
             violations.append((*detail, None, "tool reply has no correlated offered call"))
-        if not reply.actions and not _terminal_status(reply.content):
+        elif reply.offered_tool not in reply.offered_menu:
+            violations.append((*detail, reply.offered_tool,
+                               "called action was not on its offering request menu"))
+        terminal_claim = _terminal_status(reply.content)
+        if terminal_claim and run_result != "CONTINUATION_BLOCKED":
+            violations.append((*detail, None, "terminal claim does not match run result"))
+        if not reply.actions and not terminal_claim:
             violations.append((*detail, None, "missing next action or terminal status"))
         for action in reply.actions:
             if action not in reply.menu:
                 violations.append((*detail, action, "named action is not on the request menu"))
     return violations
+
+
+def test_refusal_terminal_claim_requires_matching_run_result(tmp_path):
+    run = tmp_path / "run"
+    wire = run / "wire"
+    wire.mkdir(parents=True)
+    (wire / "0001.request.json").write_text(json.dumps({
+        "messages": [{"role": "user", "content": "Inspect."}],
+        "tools": [{"type": "function", "function": {"name": "read"}}],
+    }))
+    (wire / "0002.request.json").write_text(json.dumps({
+        "messages": [
+            {"role": "assistant", "tool_calls": [{"id": "call-read", "type": "function",
+                "function": {"name": "read", "arguments": "{}"}}]},
+            {"role": "tool", "tool_call_id": "call-read",
+             "content": {"code": "CONTINUATION_BLOCKED"}},
+        ],
+        "tools": [{"type": "function", "function": {"name": "done"}}],
+    }))
+    (run / "engine-result.json").write_text(json.dumps({"result": {"result": "BLOCKED"}}))
+    assert recorded_refusal_violations(run) == [
+        ("0002.request.json", "0001.request.json", "call-read", None,
+         "terminal claim does not match run result"),
+    ]
+    (run / "engine-result.json").write_text(json.dumps({
+        "result": {"result": "CONTINUATION_BLOCKED"}}))
+    assert recorded_refusal_violations(run) == []
 
 
 def test_recorded_wire_helper_follows_three_request_tool_call_chronology():
@@ -264,7 +342,138 @@ def test_refusal_helper_recognizes_host_structured_markers():
     assert _is_refusal("Tool NOT EXECUTED: edit was denied.")
     assert _is_refusal({"status": "NOT_EXECUTED"})
     assert _is_refusal("[continuation] Unresolved effect remains open.")
-    assert not _is_refusal({"code": "NO_CLOBBER"})
+    assert _is_refusal({"code": "NO_CLOBBER"})
+
+
+def test_refusal_helper_uses_typed_host_tool_outcome():
+    assert _is_refusal({"tool_outcome": {"kind": "REFUSED", "code": "hook_denied"}})
+    assert _is_refusal({"result_class": "REFUSED_PREDISPATCH"})
+    assert _is_refusal({"admitted": False, "reason_code": "CAPABILITY_DENIED"})
+    assert not _is_refusal({"code": "UNKNOWN", "detail": "Evidence still pending"})
+
+
+def _uncovered_refusal_variants(reason_codes, result_classes):
+    missing_codes = {code for code in reason_codes
+                     if not _is_refusal({"accepted": False, "reason_code": code})}
+    missing_classes = {code for code in result_classes
+                       if not _is_refusal({"result_class": code})}
+    return missing_codes, missing_classes
+
+
+def _assert_refusal_coverage(reason_codes, result_classes):
+    assert _uncovered_refusal_variants(reason_codes, result_classes) == (set(), set())
+
+
+def test_refusal_checker_covers_source_producers_and_owner_reason_codes():
+    """Keep receipt classes and refusal codes coupled to their host producers."""
+    source_root = ROOT / "src/stateframe/engine"
+    sources = [path.read_text(encoding="utf-8") for path in source_root.rglob("*.py")]
+    # The reply classifier names receipt classes that represent refusal even
+    # without a REFUSED prefix. Every source REFUSED variant is also sampled.
+    reply_source = (source_root / "kernel_tool_reply.py").read_text(encoding="utf-8")
+    receipt_sets = re.findall(r"if result_class in \{([^}]+)\}", reply_source)
+    refusal_sets = [values for values in receipt_sets if '"REFUSED"' in values]
+    assert len(refusal_sets) == 1
+    refusal_classes = set(re.findall(r'"([A-Z_]+)"', refusal_sets[0]))
+    refusal_classes.update(re.findall(r"\bREFUSED(?:_[A-Z0-9_]+)?\b", "\n".join(sources)))
+    assert {"REFUSED_PREDISPATCH", "REFUSED_SERIES", "REFUSED_UNCHANGED_GREEN",
+            "REJECTED", "UNKNOWN_TOOL", "UNSUPPORTED_ACTION"} <= refusal_classes
+    assert REFUSAL_REASON_CODES
+    _assert_refusal_coverage(REFUSAL_REASON_CODES, refusal_classes)
+
+
+def test_refusal_coverage_guard_rejects_planted_code_and_result_class():
+    with pytest.raises(AssertionError, match="REFUSED_PLANTED_POLICY"):
+        _assert_refusal_coverage({*REFUSAL_REASON_CODES, "REFUSED_PLANTED_POLICY"}, set())
+    with pytest.raises(AssertionError, match="DENIED_PLANTED_RESULT_CLASS"):
+        _assert_refusal_coverage(REFUSAL_REASON_CODES, {"DENIED_PLANTED_RESULT_CLASS"})
+
+
+def test_plain_text_host_refusal_producers_remain_recognized():
+    assert len(PLAIN_TEXT_REFUSAL_PRODUCERS) == 4
+    source_root = ROOT / "src/stateframe/engine"
+    for reply, (path, marker, reason) in PLAIN_TEXT_REFUSAL_PRODUCERS.items():
+        assert reason
+        assert marker in (source_root / path).read_text(encoding="utf-8")
+        assert _is_refusal(reply), reply
+
+
+@pytest.mark.parametrize("outcome,continuation_blocked,skip", [
+    ("continuation_blocked", False, True),
+    ("blocked", True, False),
+    ("blocked", False, False),
+    ("hook_blocked", False, False),
+    ("hook_containment", False, False),
+    (None, False, False),
+])
+def test_terminal_block_final_grading_policy(outcome, continuation_blocked, skip):
+    runtime = SimpleNamespace(system_outcome=outcome,
+                              continuation=SimpleNamespace(terminal_blocked=continuation_blocked))
+    assert _terminal_block_skips_final_grading(runtime) is skip
+
+
+@pytest.fixture(scope="module")
+def recorded_blocked_run(tmp_path_factory):
+    """A scripted caller records a no-clobber refusal, then a net-zero create."""
+    tmp_path = tmp_path_factory.mktemp("recorded-blocked")
+    repo = fixture_repo(tmp_path)
+    (repo / "pkg/value.py").write_text(
+        "VALUE = 1\n\ndef keep_value():\n    return VALUE\n\n"
+        "def remove_value():\n    return VALUE + 1\n")
+    config = tmp_path / "hooks.json"
+    config.write_text(json.dumps({"schema": "stateframe-hooks/1", "hooks": [
+        {"name": "undo-create", "event": "post_tool", "tools": ["file_create"],
+         "changed": True, "writes": "changed", "argv": [sys.executable, "-c",
+                  "import pathlib,sys;pathlib.Path(sys.argv[1]).unlink()", "{paths}"]},
+    ]}))
+    script = Script({"model": "scripted", "steps": [
+        step("edit", path="pkg/value.py",
+             function_source="def keep_value():\n    return VALUE + 2\n"),
+        step("file_create", path="pkg/generated.py", content="VALUE = 1\n"),
+    ], "tokenize": {"mode": "ok"}})
+    server = serve(script)
+    run = tmp_path / "run"
+    try:
+        try:
+            result = subprocess.run(
+                command(repo, run, f"http://127.0.0.1:{server.server_port}/v1",
+                        flags=("--hooks", str(config), "--max-turns", "4")),
+                env=environment(), capture_output=True, text=True,
+                timeout=budget("recorded_blocked_run"))
+        except subprocess.TimeoutExpired as error:
+            requests = len(list((run / "wire").glob("*.request.json")))
+            pytest.fail(f"recorded blocked run exceeded measured timeout: "
+                        f"{requests} provider requests in {budget('recorded_blocked_run')} seconds; "
+                        f"{error}")
+        assert (run / "engine-result.json").is_file(), result.stdout + result.stderr
+        script.assert_consumed()
+        return run
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_default_policy_blocked_run_stops_before_another_request(recorded_blocked_run):
+    run = recorded_blocked_run
+    result = json.loads((run / "engine-result.json").read_text())["result"]
+    assert result["result"] == "CONTINUATION_BLOCKED"
+    assert result["behaviour"] == "not_attempted"
+    assert len(list((run / "wire").glob("*.request.json"))) == 2
+
+
+def test_recorded_blocked_run_uses_host_refusal_codes(recorded_blocked_run):
+    run = recorded_blocked_run
+    assert json.loads((run / "engine-result.json").read_text())["result"]["result"] == (
+        "CONTINUATION_BLOCKED")
+    assert measurement_journal_paths(run)
+    events = measurement_events(run)
+    receipts = [event["receipt"] for event in events if event.get("kind") == "action_receipt"]
+    denied = [receipt for receipt in receipts
+              if receipt.get("result_class") == "REJECTED"
+              and "NO_CLOBBER" in str(receipt.get("detail", ""))]
+    assert denied and all(_is_refusal(receipt) for receipt in denied)
+    assert recorded_refusal_replies(run)
+    assert recorded_refusal_violations(run) == []
 
 
 def test_named_actions_only_accept_known_tool_names():
@@ -340,6 +549,28 @@ def test_recorded_wire_helper_uses_latest_offer_for_reused_call_id(tmp_path):
     ]
 
 
+def test_recorded_wire_helper_checks_call_against_its_offering_request(tmp_path):
+    wire = tmp_path / "run" / "wire"
+    wire.mkdir(parents=True)
+    (wire / "0001.request.json").write_text(json.dumps({
+        "messages": [{"role": "user", "content": "Edit."}],
+        "tools": [{"type": "function", "function": {"name": "edit"}}],
+    }))
+    (wire / "0002.request.json").write_text(json.dumps({
+        "messages": [
+            {"role": "assistant", "tool_calls": [{"id": "call-wrong", "type": "function",
+                "function": {"name": "shell", "arguments": "{}"}}]},
+            {"role": "tool", "tool_call_id": "call-wrong",
+             "content": "{\"status\":\"REJECTED\",\"next_action\":\"read\"}"},
+        ],
+        "tools": [{"type": "function", "function": {"name": "read"}}],
+    }))
+    assert recorded_refusal_violations(tmp_path / "run") == [
+        ("0002.request.json", "0001.request.json", "call-wrong", "shell",
+         "called action was not on its offering request menu"),
+    ]
+
+
 def test_recorded_wire_helper_flags_the_old_shell_blocker(tmp_path):
     wire = tmp_path / "run" / "wire"
     wire.mkdir(parents=True)
@@ -394,17 +625,14 @@ def test_real_no_clobber_refusal_names_action_in_rendered_next_menu(tmp_path):
     ]
     assert no_clobber
     assert any(reply.offered_tool == "edit" for reply in no_clobber)
+    assert all(reply.offered_tool in reply.offered_menu for reply in no_clobber)
     assert recorded_refusal_violations(run) == []
+    assert json.loads((run / "engine-result.json").read_text())["result"]["result"] == "SUBMITTED"
 
 
 # Host fences that can still refuse with no reachable way out. Listed, not hidden: each entry names its owner.
 # When a fence gets a live repair action (or a terminal status), delete its entry; a NEW unlisted fence fails.
-KNOWN_DEAD_END_FENCES = {
-    ("src/stateframe/engine/kernel_continuation_runtime.py", "no typed repair"): (
-        "unresolved effect with no repair action blocks every non-done tool before dispatch; the directory-only "
-        "shell case is fixed (kernel_continuation_evidence.py), other unknown effects remain. Owner: work-queue "
-        "item 'no unrecoverable continuation fence' (spec: Part B review findings 1-5)."),
-}
+KNOWN_DEAD_END_FENCES = {}
 DEAD_END_FENCE_PATTERN = re.compile(r"no typed repair|no \w+ action on the live menu|nothing on the live menu")
 
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import platform
 import subprocess
 import sys
@@ -71,6 +72,8 @@ def _exact_seed_run(tmp_path, monkeypatch):
 
 def test_rehydrate_reuses_exact_matching_seed(tmp_path, monkeypatch):
     run, record = _exact_seed_run(tmp_path, monkeypatch)
+    seed = tmp_path / "home/env-seeds/seed-1"
+    os.utime(seed, ns=(1, 1))
 
     result = rehydrate.rehydrate_run(run)
 
@@ -79,6 +82,23 @@ def test_rehydrate_reuses_exact_matching_seed(tmp_path, monkeypatch):
     assert (run / "env/lib/python3.11/site-packages/demo-pkg-1.0.dist-info/RECORD").read_bytes() == record
     assert f"exec {run / 'env'}/bin/python" in (run / "env/bin/pip").read_text()
     assert not (run / "env/seed.json").exists()
+    assert seed.stat().st_mtime_ns > 1
+
+
+def test_rehydrate_copy_succeeds_when_seed_is_evicted_before_touch(tmp_path, monkeypatch):
+    run, _ = _exact_seed_run(tmp_path, monkeypatch)
+    seed = tmp_path / "home/env-seeds/seed-1"
+    original_utime = os.utime
+
+    def race(path, *args, **kwargs):
+        if Path(path) == seed:
+            raise FileNotFoundError("seed was evicted")
+        return original_utime(path, *args, **kwargs)
+
+    monkeypatch.setattr(rehydrate.os, "utime", race)
+    result = rehydrate.rehydrate_run(run)
+    assert result.exact is True and result.used_seed is True
+    assert (run / "env/lib/python3.11/site-packages/demo_pkg/__init__.py").is_file()
 
 
 def test_inexact_rehydrate_prints_all_mismatches_and_returns_nonzero_result(tmp_path, monkeypatch):

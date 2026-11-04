@@ -13,6 +13,7 @@ import pytest
 from stateframe.task_row import TaskRowError, _public_hint, build_row
 from stateframe.workcopy import create
 from acceptance._support import assert_tree_imports, tree_python
+from engine_run import run_monitored
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -172,13 +173,13 @@ def test_tests_only_repo_can_submit_declared_output(tmp_path, protection):
     environment.pop("PYTHONPATH", None)
     server = serve(script)
     try:
-        result = subprocess.run(
+        result = run_monitored(
             [python, "-m", "stateframe", "run", "--repo", str(repo),
              "--task", "Create output/result.txt. Make tests/test_output.py pass.",
              "--endpoint", f"http://127.0.0.1:{server.server_port}/v1", "--model", "scripted",
              "--test-python", sys.executable, "--run-dir", str(run),
              *(["--protect-tests", "all"] if protection == "all" else [])],
-            capture_output=True, text=True, timeout=240, env=environment,
+            capture_output=True, text=True, expected_seconds=240, env=environment,
         )
         summary = json.loads((run / "summary.json").read_text())
         assert result.returncode == 0, result.stdout + result.stderr
@@ -192,7 +193,24 @@ def test_tests_only_repo_can_submit_declared_output(tmp_path, protection):
 
 @pytest.mark.host_sandbox
 def test_existing_discount_requests_match_untouched_0_2_8(tmp_path):
-    from tools.compare_no_mcp_requests import capture, write_launcher
+    _assert_discount_requests_match_0_2_8(tmp_path)
+
+
+@pytest.mark.host_sandbox
+def test_0_2_8_parity_ignores_a_powerup_enabled_in_the_inherited_home(tmp_path, monkeypatch):
+    # Planted: the home this process hands to subprocesses has a powerup enabled, as when an earlier test left one in
+    # the session home. The current tree would apply it and 0.2.8 cannot, so each capture must get its own home.
+    # The planted home is private: the real session home is shared by every xdist worker of a gated run.
+    from stateframe import powerups
+
+    monkeypatch.setenv("STATEFRAME_HOME", str(tmp_path / "polluted-home"))
+    installed = powerups.install(ROOT / "examples/powerups/py-format")
+    powerups.enable(installed.name, mode="on")
+    _assert_discount_requests_match_0_2_8(tmp_path)
+
+
+def _assert_discount_requests_match_0_2_8(tmp_path):
+    from tools.compare_no_mcp_requests import capture, mask_wire_ids, write_launcher
 
     archive = subprocess.run(
         ["git", "-C", str(ROOT), "archive", "--format=tar", "f848c2e"],
@@ -217,4 +235,5 @@ def test_existing_discount_requests_match_untouched_0_2_8(tmp_path):
     # 0.3.13 turned the stable tool head on by default; switched off, request bytes stay those of 0.2.8.
     after = capture(ROOT, current_python, launcher, script, repo, run_dir, stable_tool_head="off",
                     source_on_pythonpath=False, test_python=sys.executable)
-    assert before == after
+    # Wire IDs changed derivation on purpose (receipt determinism, 11-03); see mask_wire_ids.
+    assert mask_wire_ids(before) == mask_wire_ids(after)

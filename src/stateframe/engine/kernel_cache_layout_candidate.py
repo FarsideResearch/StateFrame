@@ -93,9 +93,11 @@ def render_final_cache_candidate(capture, runtime, body, *, meter, inputs):
                              *messages[exchange_start:-1], final]
     if semantic_messages(projected["messages"])[state_index]["content"] != original_frame_content:
         raise ValueError("final cache layout frame reconstruction differs")
-    tokens, method = meter.measure(projected)
+    from kernel_frame_allocation_capture import final_request_tokens
+    tokens, method = final_request_tokens(projected, meter, capture)
     size = len(json.dumps(projected).encode())
-    if method != "tokenize" or tokens > inputs["token_ceiling"] or size > inputs["byte_ceiling"]:
+    if (method != "tokenize" or getattr(meter, "measure_method", method) != "tokenize"
+            or tokens > inputs["token_ceiling"] or size > inputs["byte_ceiling"]):
         # The input body is already fitted to this envelope; send it unprojected rather than end the run.
         from kernel_stateframe_page_log import _emit
         journal = getattr(capture, "journal", None)
@@ -111,6 +113,8 @@ def render_final_cache_candidate(capture, runtime, body, *, meter, inputs):
         raise ValueError("final cache layout source proof failed")
     inputs["receipt"] = receipt
     capture.request_source_final_delivery = receipt
+    from kernel_frame_allocation_capture import carry_final_request_tokens
+    carry_final_request_tokens(projected, capture, tokens)
     return projected
 
 
@@ -207,8 +211,10 @@ def render_cache_candidate(capture, runtime, body, *, meter, inputs):
                     projection.state, generation=previous.generation + 1,
                     turn_index=previous.turn_index + 1, epoch=previous.epoch + 1))
             projected = finish(projection)
-        tokens, method = meter.measure(projected)
-        if (method != "tokenize" or tokens > inputs["token_ceiling"]
+        from kernel_frame_allocation_capture import final_request_tokens
+        tokens, method = final_request_tokens(projected, meter, capture)
+        if (method != "tokenize" or getattr(meter, "measure_method", method) != "tokenize"
+                or tokens > inputs["token_ceiling"]
                 or len(json.dumps(projected).encode()) > inputs["byte_ceiling"]
                 or token_estimate(projected) > runtime.frame_ceiling):
             raise ValueError("host_envelope_capacity")
@@ -236,6 +242,8 @@ def render_cache_candidate(capture, runtime, body, *, meter, inputs):
             return body
         inputs["receipt"] = receipt
         capture.request_source_final_delivery = receipt
+        from kernel_frame_allocation_capture import carry_final_request_tokens
+        carry_final_request_tokens(projected, capture, tokens)
         return projected
     except Exception as error:
         from kernel_boundary_recovery import safe_error_class

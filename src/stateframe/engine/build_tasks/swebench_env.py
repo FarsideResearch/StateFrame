@@ -25,6 +25,11 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Protocol
 
+if __package__ and __package__.endswith("engine.build_tasks"):
+    from ..kernel_safe_paths import safe_expanduser
+else:
+    from kernel_safe_paths import safe_expanduser
+
 # Keep both ``python -m build_tasks.swebench_env`` and the documented direct script
 # invocation usable when build_tasks remains a namespace package.
 if __package__ in (None, ""):
@@ -739,7 +744,7 @@ def _safe_instance_id(instance_id: str) -> str:
 def environment_dir(cache_dir: Path | str, instance_id: str) -> Path:
     """Return the exact per-instance venv path under ``<cache>/envs``."""
     safe_id = _safe_instance_id(instance_id)
-    return Path(cache_dir).expanduser().resolve() / "envs" / safe_id
+    return safe_expanduser(Path(cache_dir)).resolve() / "envs" / safe_id
 
 
 def _venv_python(env_dir: Path) -> Path | None:
@@ -803,7 +808,7 @@ def _pyenv_python_candidates(pyenv: Path, version: str) -> tuple[Path, ...]:
         return ()
     candidates: list[Path] = []
     for line in result.stdout.splitlines():
-        candidate = Path(line.strip()).expanduser()
+        candidate = safe_expanduser(Path(line.strip()))
         if candidate.is_file():
             candidates.append(candidate.resolve())
     return tuple(dict.fromkeys(candidates))
@@ -1205,7 +1210,7 @@ class EnvironmentManager:
         timeout: int = DEFAULT_TIMEOUT_SECONDS,
     ) -> None:
         _validate_timeout(timeout)
-        self.cache_dir = Path(cache_dir).expanduser().resolve()
+        self.cache_dir = safe_expanduser(Path(cache_dir)).resolve()
         self.timeout = timeout
 
     def _cached_result(
@@ -1297,7 +1302,7 @@ class EnvironmentManager:
     ) -> EnvironmentResult:
         """Prepare an environment, returning a named blocker instead of hiding failure."""
         safe_id = _safe_instance_id(instance_id)
-        repository = Path(repo_dir).expanduser().resolve()
+        repository = safe_expanduser(Path(repo_dir)).resolve()
         env_dir = environment_dir(self.cache_dir, safe_id)
         if not repository.is_dir():
             return EnvironmentResult(
@@ -1766,7 +1771,7 @@ class WorkspaceLookupError(RuntimeError):
 
 def _candidate_workspace(value: object) -> Path | None:
     if isinstance(value, (str, Path)):
-        path = Path(value).expanduser().resolve()
+        path = safe_expanduser(Path(value)).resolve()
         if path.name == "base":
             path = path.parent
         if (path / "base").is_dir() and (path / "gold").is_dir():
@@ -1806,7 +1811,7 @@ def find_workspace(cache_dir: Path | str, row: Mapping[str, object]) -> Path:
         if candidate is not None:
             return candidate
 
-    cache = Path(cache_dir).expanduser().resolve()
+    cache = safe_expanduser(Path(cache_dir)).resolve()
     cache_key = row.get("cache_key")
     if isinstance(cache_key, str) and cache_key:
         candidate = _candidate_workspace(cache / "instances" / cache_key)

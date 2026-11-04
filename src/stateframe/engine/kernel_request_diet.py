@@ -37,13 +37,21 @@ INITIAL_BYTES_PER_TOKEN = 2.46
 # 0.68-0.77 s for 90 KB. b1569's ~211 ms and product benchmark's ~203 ms were
 # the old 0.2 s timeout firing, not successful-tokenization latency.
 TOKENIZE_REQUEST_TIMEOUT_SECONDS = 2.0
-TOKENIZE_REQUEST_TIMEOUT_CAP_SECONDS = 10.0
+TOKENIZE_REQUEST_TIMEOUT_CAP_SECONDS = 30.0
+# Cache A/B over the tunnel returned valid counts 5.8–21.9 seconds after
+# dispatch. Keep a 25-second queue allowance plus a small margin, bounded by
+# both the per-call cap and the logical request deadline.
+TOKENIZE_QUEUEING_TIMEOUT_SECONDS = 25.0
 TOKENIZE_RELAY_REFERENCE_BYTES = 90_000
 TOKENIZE_RELAY_REFERENCE_SECONDS = 0.77
 TOKENIZE_RELAY_RTT_SECONDS = 0.15
 TOKENIZE_RELAY_LOAD_MARGIN = 3.0
 TOKENIZE_SLOW_SECONDS = 1.0  # Telemetry only: never discard a valid count.
 TOKENIZE_MAX_CONSECUTIVE_FAILURES = 3
+# Probes only at a later request boundary: five requests avoid noisy retries,
+# while the 30-second wall bound limits recovery delay on sparse workloads.
+TOKENIZE_REPROBE_AFTER_REQUESTS = 5
+TOKENIZE_REPROBE_AFTER_SECONDS = 30.0
 TEMPLATE_OVERHEAD_TOKENS = 1_148
 TEMPLATE_OVERHEAD_EVIDENCE = (
     "calibration-batch-927 request d402be5a823d4026a7d6b6066403fe84: "
@@ -172,7 +180,9 @@ def tokenize_route_label(endpoint: object) -> str | None:
 
 def _tokenization_content(body: Mapping[str, object]) -> str:
     from kernel_request_measurement import prompt_projection
-    return prompt_projection(body)
+    from kernel_countdown_slot import canonical_countdown
+    # Measure the reserved slot; the separate body digest still binds live wire bytes.
+    return prompt_projection(canonical_countdown(body))
 
 
 def _url_origin(url: object) -> tuple[str, str, int | None] | None:
@@ -255,6 +265,7 @@ def _http_tokenize(content: str, url: str, *, deadline: float | None = None,
     # Budget the actual UTF-8 JSON payload, including escaping. Three times
     # SPEED's upper measured relay cost covers the b1598 134 KB load case.
     timeout = min(TOKENIZE_REQUEST_TIMEOUT_CAP_SECONDS, max(
+        TOKENIZE_QUEUEING_TIMEOUT_SECONDS,
         TOKENIZE_REQUEST_TIMEOUT_SECONDS,
         TOKENIZE_RELAY_RTT_SECONDS + TOKENIZE_RELAY_LOAD_MARGIN
         * TOKENIZE_RELAY_REFERENCE_SECONDS * len(payload) / TOKENIZE_RELAY_REFERENCE_BYTES,
@@ -291,7 +302,7 @@ def _http_tokenize(content: str, url: str, *, deadline: float | None = None,
 
 
 class RequestTokenMeter:
-    """Run-level cache/calibration with monotone fallback within each request."""
+    """Run-level cache/calibration with bounded recovery after tokenizer outages."""
 
     def __init__(
             self, tokenizer: Callable[[str], object] | None = None,
@@ -327,6 +338,14 @@ class RequestTokenMeter:
         self._consecutive_failures = 0
         self._fallback_pending = False
         self._fallback_reported = False
+        self._reprobe_active = False
+        self._reprobe_attempts = 0
+        self._reprobe_requests_since_attempt = 0
+        self._reprobe_last_attempt_at: float | None = None
+        self._reprobe_ready_requests: set[str] = set()
+        self._reprobe_attempted_requests: set[str] = set()
+        self._reprobe_status: str | None = None
+        self._reprobe_status_by_request: dict[str, str] = {}
         self._request_id: str | None = None
         self._request_aliases: dict[str, str] = {}
         self._tokenizer_calls_by_request: dict[str | None, int] = {}
@@ -386,11 +405,12 @@ class RequestTokenMeter:
         )
 
     def begin_request(self, request_id: object) -> None:
-        """Retry transient unavailability only at a new request boundary."""
+        """Keep a tokenizer outage sticky and schedule bounded later probes."""
         if isinstance(request_id, str):
             request_id = self._request_aliases.get(request_id, request_id)
         if not isinstance(request_id, str) or not request_id or request_id == self._request_id:
             return
+        reprobe_outage = self._reprobe_active and self._availability == "unavailable"
         if self._request_id is not None and self._availability == "unavailable":
             self._request_failures[self._request_id] = (
                 self._failure_reason, self._last_latency_ms,
@@ -407,6 +427,25 @@ class RequestTokenMeter:
              self._consecutive_failures, self._fallback_reported,
              self._last_fallback_rejection_bound) = failure
             self._fallback_pending = True
+            self._reprobe_status = self._reprobe_status_by_request.get(request_id)
+            return
+        if reprobe_outage:
+            self._availability = "unavailable"
+            # Keep the last classified failure visible while waiting for a probe.
+            self._fallback_pending = True
+            self._reprobe_requests_since_attempt += 1
+            time_due = (
+                self._reprobe_last_attempt_at is not None
+                and time.monotonic() - self._reprobe_last_attempt_at >= TOKENIZE_REPROBE_AFTER_SECONDS
+            )
+            if (self._reprobe_requests_since_attempt >= TOKENIZE_REPROBE_AFTER_REQUESTS
+                    or time_due):
+                self._reprobe_ready_requests.add(request_id)
+                self._reprobe_status = "due"
+                self._reprobe_status_by_request[request_id] = "due"
+            else:
+                self._reprobe_status = "waiting"
+                self._reprobe_status_by_request[request_id] = "waiting"
             return
         configured = not self._disabled and (self._tokenizer is not None or self.endpoint is not None)
         self._availability = "unknown" if configured else "unavailable"
@@ -419,6 +458,45 @@ class RequestTokenMeter:
         self._last_fallback_rejection_bound = None
         self._fallback_pending = False
         self._fallback_reported = False
+        self._reprobe_status = None
+
+    def _reprobe_due(self) -> bool:
+        if not self._reprobe_active or self._availability != "unavailable":
+            return False
+        if self._request_id is None or self._request_id not in self._reprobe_ready_requests:
+            return False
+        if self._request_id in self._reprobe_attempted_requests:
+            return False
+        return True
+
+    def _claim_reprobe(self) -> None:
+        """Consume one re-probe window and one attempt for the current request."""
+        if self._request_id is None:
+            raise RuntimeError("tokenizer re-probe requires a logical request identity")
+        self._reprobe_ready_requests.clear()
+        self._reprobe_attempted_requests.add(self._request_id)
+        self._reprobe_status_by_request[self._request_id] = "probing"
+        self._reprobe_requests_since_attempt = 0
+        self._reprobe_last_attempt_at = time.monotonic()
+        self._reprobe_attempts += 1
+        self._reprobe_status = "probing"
+
+    def _start_reprobe_schedule(self) -> None:
+        self._reprobe_active = True
+        self._reprobe_requests_since_attempt = 0
+        self._reprobe_last_attempt_at = time.monotonic()
+        self._reprobe_status = "waiting"
+        if self._request_id is not None:
+            self._reprobe_status_by_request[self._request_id] = "waiting"
+
+    def _record_reprobe_failure(self) -> None:
+        self._availability = "unavailable"
+        # The probe loop already recorded the concrete failure reason.
+        self._reprobe_status = "failed"
+        self._reprobe_last_attempt_at = time.monotonic()
+        self._reprobe_requests_since_attempt = 0
+        if self._request_id is not None:
+            self._reprobe_status_by_request[self._request_id] = "failed"
 
     def tokenizer_identity(self, body: Mapping[str, object], *, endpoint: str | None = None) -> str:
         from kernel_request_measurement import PROJECTION_VERSION, digest
@@ -499,6 +577,8 @@ class RequestTokenMeter:
         """
         if not isinstance(content, str) or self._availability != "available":
             return None
+        from kernel_countdown_slot import canonical_time_text
+        content = canonical_time_text(content)
         start = time.monotonic()
         self._last_attempts = 0
         for _attempt in range(TOKENIZE_MAX_CONSECUTIVE_FAILURES):
@@ -523,6 +603,7 @@ class RequestTokenMeter:
         if self._deadline is not None and time.monotonic() >= self._deadline:
             raise TimeoutError("tokenizer request deadline expired")
         self._fallback_pending = True
+        self._start_reprobe_schedule()
         self._emit_fallback()
         return None
 
@@ -542,7 +623,8 @@ class RequestTokenMeter:
         if self._deadline is not None and time.monotonic() >= self._deadline:
             raise TimeoutError("tokenizer request deadline expired")
         self._last_attempts = 0
-        if self._availability != "unavailable":
+        reprobe = self._availability == "unavailable" and self._reprobe_due()
+        if self._availability != "unavailable" or reprobe:
             from kernel_request_budget import (
                 ENDPOINT_VERIFIED_BYTES_PER_TOKEN, FREE_STAGE, _lean_request_limits,
             )
@@ -552,11 +634,13 @@ class RequestTokenMeter:
                 # A rejection bound, never an exact count or endpoint failure.
                 # Smaller candidates can still tokenize within this request.
                 return max(token_limit + 1, math.ceil(size / ENDPOINT_VERIFIED_BYTES_PER_TOKEN)), "verified_byte_bound"
+            if reprobe:
+                self._claim_reprobe()
             start = time.monotonic()
-            # Resolve transient errors before publishing a measurement method.
-            # Diet/finalizer fitting relies on a monotone switch to fallback;
-            # retries on later measurements of this request violate that contract.
-            for _attempt in range(TOKENIZE_MAX_CONSECUTIVE_FAILURES):
+            # Initial failures are retried before selecting bytes. Once on bytes,
+            # a scheduled probe gets exactly one attempt for this logical request.
+            attempt_limit = 1 if reprobe else TOKENIZE_MAX_CONSECUTIVE_FAILURES
+            for _attempt in range(attempt_limit):
                 if self._deadline is not None and time.monotonic() >= self._deadline:
                     raise TimeoutError("tokenizer request deadline expired")
                 self._last_attempts += 1
@@ -566,6 +650,8 @@ class RequestTokenMeter:
                     self._consecutive_failures += 1
                     self._failure_reason = _tokenizer_failure_reason(error)
                     self._last_tokenizer_error = type(error).__name__
+                    if reprobe:
+                        break
                     continue
                 self._last_latency_ms = (time.monotonic() - start) * 1000.0
                 if self._deadline is not None and time.monotonic() >= self._deadline:
@@ -573,9 +659,18 @@ class RequestTokenMeter:
                 self._availability = "available"
                 self._failure_reason = None
                 self._consecutive_failures = 0
+                if reprobe:
+                    self._reprobe_active = False
+                    self._reprobe_status = "recovered"
+                    if self._request_id is not None:
+                        self._reprobe_status_by_request[self._request_id] = "recovered"
                 return token_count + self.template_overhead_tokens, "tokenize"
             self._last_latency_ms = (time.monotonic() - start) * 1000.0
-            self._availability = "unavailable"
+            if reprobe:
+                self._record_reprobe_failure()
+            else:
+                self._availability = "unavailable"
+                self._start_reprobe_schedule()
         if self._deadline is not None and time.monotonic() >= self._deadline:
             raise TimeoutError("tokenizer request deadline expired")
         # All fallback consumers compare this count to the prompt ceiling. A
@@ -721,7 +816,7 @@ class RequestTokenMeter:
     def journal_fields(self, measure_method: str) -> dict[str, object]:
         self._flush_observer_failures()
         ratio, margin = self._fallback_ratio()
-        return {
+        fields: dict[str, object] = {
             "tokenizer_identity": self._namespace,
             # TOKURL: effective tokenize route, scheme://host:port only (never path/query/credentials). A field on the
             # existing measurement events rather than a new event, so journal event ids (which reach the wire) do not shift.
@@ -753,6 +848,10 @@ class RequestTokenMeter:
                if measure_method == "calibrated_bytes" else {}),
             "journal_observer_failures": self._observer_failure_count,
         }
+        if self._reprobe_status is not None:
+            fields["tokenize_reprobe_status"] = self._reprobe_status
+            fields["tokenize_reprobe_attempts"] = self._reprobe_attempts
+        return fields
 SECTION_NAMES = (
     "system_prompt",
     "task",

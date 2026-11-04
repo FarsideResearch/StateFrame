@@ -9,6 +9,7 @@ import os
 import re
 import shutil
 import stat
+import sys
 from contextvars import ContextVar
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path, PurePosixPath
@@ -18,6 +19,7 @@ if __package__:
     from .kernel_exec_capability import (
         _macos_developer_roots,
         executable_read_roots,
+        python_runtime_read_roots,
         executable_symlinks,
         symlink_hops,
     )
@@ -25,13 +27,20 @@ else:
     from kernel_exec_capability import (
         _macos_developer_roots,
         executable_read_roots,
+        python_runtime_read_roots,
         executable_symlinks,
         symlink_hops,
     )
 
+if __package__:
+    from .kernel_safe_paths import safe_expanduser, safe_home
+else:
+    from kernel_safe_paths import safe_expanduser, safe_home
+
 HOOKS_SCHEMA = "stateframe-hooks/1"
 INPUT_SCHEMA = "stateframe-hook-input/1"
 PROJECT_HOOKS_PATH = ".stateframe/hooks.json"
+_PYTHON_ARG = "{python}"
 EVENTS = (
     "session_start",
     "prompt_submit",
@@ -177,6 +186,19 @@ def _chain_digest(path: Path) -> tuple[str, tuple[Path, ...]]:
     return _sha(_canonical(parts)), roots
 
 
+def _absolute_executable(value: object, *, label: str) -> Path:
+    if type(value) is not str or not value:
+        raise HookConfigError(f"{label} must be an absolute executable file")
+    path = Path(value)
+    try:
+        valid = path.is_absolute() and path.is_file() and os.access(path, os.X_OK)
+    except (OSError, ValueError):
+        valid = False
+    if not valid:
+        raise HookConfigError(f"{label} must be an absolute executable file: {value}")
+    return path
+
+
 def _shebang(path: Path) -> Path | None:
     with path.open("rb") as source:
         first = source.readline(4096)
@@ -211,7 +233,8 @@ def _execution_pin(
     """Bind external exec and every declared executable's interpreter chain."""
     parts = []
     if executable:
-        parts.append(("argv0", _chain_digest(Path(executable))[0]))
+        pinned = _absolute_executable(executable, label="hook executable")
+        parts.append(("argv0", _chain_digest(pinned)[0]))
     for item in files:
         if not item.executable:
             continue
@@ -324,11 +347,11 @@ class HookSet:
         }
         roots.update(
             (
-                Path(os.path.realpath(os.sys.executable)),
-                Path(os.sys.base_prefix),
-                Path(os.sys.prefix),
+                Path(sys.base_prefix),
+                Path(sys.prefix),
             )
         )
+        roots.update(python_runtime_read_roots(Path(sys.executable)))
         roots.update(_macos_developer_roots())
         system_gitconfig = Path("/etc/gitconfig")
         if os.sys.platform == "darwin" and system_gitconfig.is_file():
@@ -342,12 +365,12 @@ class HookSet:
                 )
         for hook in self.definitions:
             if hook.executable:
-                roots.update(executable_read_roots(Path(hook.executable)))
+                roots.update(python_runtime_read_roots(Path(hook.executable)))
             for item in hook.files:
                 if item.executable:
                     interpreter = _shebang(Path(item.source))
                     if interpreter:
-                        roots.update(executable_read_roots(interpreter))
+                        roots.update(python_runtime_read_roots(interpreter))
         return tuple(sorted(roots))
 
     def as_spec(self, bundle_manifest: dict) -> dict:
@@ -437,6 +460,8 @@ class HookSet:
                     or len(_canonical(item["argv"])) > 65536
                 ):
                     raise ValueError("invalid hook argv")
+                if any(_PYTHON_ARG in arg for arg in item["argv"]):
+                    raise ValueError("unresolved {python} token in pinned hook argv")
                 if (
                     not item["tools"]
                     or any(
@@ -465,8 +490,10 @@ class HookSet:
                         raise ValueError("invalid bundled file pin")
                     _relative(file["relative"], "hook spec file")
                     bundled.append(BundledFile(**file))
-                if type(item["executable"]) is not str or not _hex_digest(
-                    item["executable_digest"]
+                if (
+                    type(item["executable"]) is not str
+                    or _PYTHON_ARG in item["executable"]
+                    or not _hex_digest(item["executable_digest"])
                 ):
                     raise ValueError("invalid executable pin")
                 if item["executable"] and not Path(item["executable"]).is_absolute():
@@ -538,7 +565,7 @@ def load_hook_files(
     counts = dict.fromkeys(EVENTS, 0)
     for source_index, raw_path in enumerate(paths):
         try:
-            path = Path(raw_path).expanduser().resolve(strict=True)
+            path = safe_expanduser(Path(raw_path)).resolve(strict=True)
             valid_file = path.is_file() and path.stat().st_size <= 1 << 20
         except OSError as error:
             raise HookConfigError(
@@ -610,6 +637,29 @@ def load_hook_files(
                 raise HookConfigError(
                     f"{where}: argv must contain 1..64 bounded nonempty strings, at most 64 KiB"
                 )
+            python_token = argv[0] == _PYTHON_ARG
+            if any(_PYTHON_ARG in value for value in argv[1:]) or (
+                not python_token and _PYTHON_ARG in argv[0]
+            ):
+                raise HookConfigError(
+                    f"{where}: {{python}} is allowed only as the whole argv[0] element"
+                )
+            if python_token:
+                interpreter = _absolute_executable(
+                    sys.executable,
+                    label=f"{where}: resolved {{python}} interpreter",
+                )
+                argv = [str(interpreter), *argv[1:]]
+                try:
+                    resolved_argv_size = len(_canonical(argv))
+                except (UnicodeError, ValueError) as error:
+                    raise HookConfigError(
+                        f"{where}: resolved {{python}} argv is invalid: {error}"
+                    ) from error
+                if len(argv[0]) > 4096 or resolved_argv_size > 65536:
+                    raise HookConfigError(
+                        f"{where}: resolved {{python}} argv exceeds the argument limits"
+                    )
             file_names = item.get("files", [])
             if (
                 type(file_names) is not list
@@ -670,9 +720,13 @@ def load_hook_files(
                     raise HookConfigError(f"{where}: bundled argv[0] is not executable")
             else:
                 candidate = (
-                    shutil.which(argv[0])
-                    if not Path(argv[0]).is_absolute()
-                    else argv[0]
+                    str(_absolute_executable(argv[0], label=f"{where}: {{python}} interpreter"))
+                    if python_token
+                    else (
+                        shutil.which(argv[0])
+                        if not Path(argv[0]).is_absolute()
+                        else argv[0]
+                    )
                 )
                 if (
                     not candidate
@@ -1255,10 +1309,11 @@ class SanitizedText:
 def sanitize(text: str, *, limit: int) -> SanitizedText:
     value = _ANSI.sub("", text).replace("\r\n", "\n")
     value = re.sub(r"[^\n]*\r", "", value)
-    for path, label in (
-        (_RUN_PATH.get() or os.environ.get("STATEFRAME_RUN_DIR", ""), "<run>"),
-        (str(Path.home()), "<home>"),
-    ):
+    replacements = [(_RUN_PATH.get() or os.environ.get("STATEFRAME_RUN_DIR", ""), "<run>")]
+    home = safe_home()
+    if home is not None:
+        replacements.append((str(home), "<home>"))
+    for path, label in replacements:
         if path:
             value = value.replace(path, label)
     value = "".join(

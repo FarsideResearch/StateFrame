@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Protocol, TypeAlias
 
 from kernel_liveness import Evidence, OrganCensusSpec, TriState
+from kernel_wire_identity import wire_run_seed
 
 
 logger = logging.getLogger(__name__)
@@ -411,6 +412,7 @@ class ExpectationLedger:
         receipt_sink: ReceiptSink | None = None,
         world_store: WorldFactWriter | None = None,
         max_visible_cells: int = MAX_VISIBLE_CELLS,
+        run_seed: str | None = None,
     ) -> None:
         if max_visible_cells < 1:
             raise ValueError("max_visible_cells must be positive")
@@ -420,7 +422,8 @@ class ExpectationLedger:
         self._receipt_sink = receipt_sink
         self._world_store = world_store
         self._max_visible_cells = min(max_visible_cells, MAX_VISIBLE_CELLS)
-        self._sequence = 0
+        self._run_seed = run_seed.strip() if isinstance(run_seed, str) and run_seed.strip() else wire_run_seed()
+        self._receipt_ordinals: dict[tuple[int, str], int] = {}
 
     @property
     def records(self) -> tuple[ExpectationRecord, ...]:
@@ -436,16 +439,8 @@ class ExpectationLedger:
     def observe(self, observation: EnumerationObservation) -> ObservationResult:
         """Record one observation and emit typed receipt/fact references."""
 
-        self._sequence += 1
         if not observation.provenance.receipt_id:
-            generated_receipt = "expectation-receipt:" + _digest(
-                {
-                    "sequence": self._sequence,
-                    "expectation_id": observation.key.identity,
-                    "value": observation.value,
-                    "provenance": observation.provenance.to_dict(),
-                }
-            ).removeprefix("sha256:")[:24]
+            generated_receipt = self._receipt_id_for_observation(observation)
             observation = replace(
                 observation,
                 provenance=replace(observation.provenance, receipt_id=generated_receipt),
@@ -697,14 +692,36 @@ class ExpectationLedger:
         return []
 
     def _receipt_id(self, result: ObservationResult) -> str:
-        return "expectation-receipt:" + _digest(
-            {
-                "sequence": self._sequence,
-                "expectation_id": result.record.expectation_id,
-                "value": result.observation.value,
-                "provenance": result.observation.provenance.to_dict(),
-            }
-        ).removeprefix("sha256:")[:24]
+        observation = result.observation
+        if observation.provenance.receipt_id:
+            return observation.provenance.receipt_id
+        return self._receipt_id_for_observation(observation)
+
+    def _receipt_id_for_observation(self, observation: EnumerationObservation) -> str:
+        """Mint a stable evidence ID without counting unrelated ledger or journal events."""
+        step = observation.provenance.turn if observation.provenance.turn is not None else 0
+        provenance = observation.provenance.to_dict()
+        provenance.pop("receipt_id", None)
+        provenance.pop("action_id", None)
+        content = {
+            "expectation_id": observation.key.identity,
+            "kind": observation.kind.value,
+            "value": observation.value,
+            "unknown_reason": observation.unknown_reason,
+            "provenance": provenance,
+        }
+        fingerprint = _digest(content)
+        ordinal_key = (step, fingerprint)
+        ordinal = self._receipt_ordinals.get(ordinal_key, 0) + 1
+        self._receipt_ordinals[ordinal_key] = ordinal
+        receipt_digest = hashlib.sha256(_canonical({
+            "run_seed": self._run_seed,
+            "kind": "expectation-receipt",
+            "step": step,
+            "content": content,
+            "ordinal": ordinal,
+        }).encode("utf-8")).hexdigest()[:24]
+        return "expectation-receipt:" + receipt_digest
 
     @staticmethod
     def _recorded_advisory(observation: EnumerationObservation) -> str:

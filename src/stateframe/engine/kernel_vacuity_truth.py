@@ -73,7 +73,6 @@ def journal_applied_edit_rows(
         row: dict[str, object] = {
             "file": receipt.get("target_path"),
             "edit_receipt": receipt.get("receipt_id"),
-            "journal_event_id": event.get("event_id"),
             "action_kind": receipt.get("kind"),
             "result_class": receipt.get("result_class"),
         }

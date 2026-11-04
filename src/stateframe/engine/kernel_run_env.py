@@ -14,6 +14,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, Mapping
 
+if __package__:
+    from .kernel_safe_paths import safe_home
+else:
+    from kernel_safe_paths import safe_home
 
 class RunEnvError(RuntimeError):
     pass
@@ -86,7 +90,8 @@ def _external_root(value: str, source_repo: Path | None, source_env: Path,
     path = Path(value).resolve()
     if path.is_relative_to(source_env) or (source_repo is not None and path.is_relative_to(source_repo)):
         return None
-    if path == Path.home() or path in Path.home().parents:
+    home = safe_home()
+    if home is not None and (path == home or path in home.parents):
         raise RunEnvError("import metadata cannot grant the home directory or its ancestors")
     # Metadata requests imports; only independent host policy grants reads.
     # Validate even missing paths so a later install cannot activate a grant.

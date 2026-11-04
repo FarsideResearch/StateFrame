@@ -8,9 +8,11 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 import types
 import zlib
 from dataclasses import dataclass
+from pathlib import Path
 
 import pytest
 
@@ -461,6 +463,19 @@ def test_restored_meter_does_not_shift_edit_and_check_ids(monkeypatch, tmp_path)
         live_checkpoint._SECRETS[:] = old_secrets
         live_checkpoint._SCANS.clear()
         live_checkpoint._SCANS.update(old_scans)
+
+
+def test_source_child_recovery_does_not_leak_into_later_checkpoint_restore(
+        monkeypatch, tmp_path):
+    from test_no_dead_fence import _exercise_source_child_recovery
+
+    def verify_in_one_process():
+        with tempfile.TemporaryDirectory(dir=tmp_path) as source:
+            _exercise_source_child_recovery(Path(source), "source_read_child", False)
+        # The prior journal directory is gone before the next run is checkpointed.
+        test_restored_meter_does_not_shift_edit_and_check_ids(monkeypatch, tmp_path)
+
+    contextvars.Context().run(verify_in_one_process)
 
 
 def _restore_relocated_workspace(source_run, destination_run, relocation, replacement):

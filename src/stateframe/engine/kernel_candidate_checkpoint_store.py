@@ -17,6 +17,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Mapping
 
+if __package__:
+    from .kernel_safe_paths import safe_expanduser
+else:
+    from kernel_safe_paths import safe_expanduser
 
 SCHEMA = "stateframe-candidate-checkpoint/1"
 DEFAULT_MAX_CHECKPOINTS = 32
@@ -65,7 +69,7 @@ def _as_bytes(value: object) -> bytes | None:
 
 
 def _root_path(root: object) -> Path:
-    path = Path(root).expanduser()
+    path = safe_expanduser(Path(root))
     try:
         return path.resolve(strict=True)
     except OSError as error:
@@ -276,7 +280,7 @@ class CheckpointStore:
     def __init__(self, root: object | None = None, *, max_checkpoints: int = DEFAULT_MAX_CHECKPOINTS):
         if max_checkpoints < 1:
             raise ValueError("max_checkpoints must be positive")
-        self.root = Path(root).expanduser() if root is not None else None
+        self.root = safe_expanduser(Path(root)) if root is not None else None
         self.max_checkpoints = int(max_checkpoints)
         self._items: dict[str, StoredCheckpoint] = {}
         self._sequence = 0

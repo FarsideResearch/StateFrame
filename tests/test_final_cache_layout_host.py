@@ -14,10 +14,11 @@ import pytest
 
 from kernel_cache_layout_view import CacheLayoutError, semantic_messages
 from kernel_stateframe_page_log import _payload_has_authority_keys
+from _journal import measurement_events
 from stateframe.scripted_endpoint import Script, serve
+from tools.pinned_tree import pinned_tree
 
 ROOT = Path(__file__).resolve().parents[1]
-BASELINE = os.environ.get("SF_TEST_PARITY_BASELINE")
 pytestmark = pytest.mark.host_sandbox
 # Per scripted run. tiny_site measured ~420 s solo for the whole parity test on the foundry host;
 # a 240 s per-call limit flaked under full-suite load, so allow ~1.5x the solo time per call.
@@ -61,9 +62,8 @@ def _parity_launchers(tmp_path):
     ("tiny_site", "Build the small static shop site described in the README."),
     ("brief_to_report", "Write the report the brief asks for."),
 ])
-@pytest.mark.skipif(not BASELINE, reason="set SF_TEST_PARITY_BASELINE to an untouched checkout of the base release e19c325")
-def test_switch_off_bytes_match_base_release(tmp_path, example, task):
-    baseline = Path(BASELINE)
+def test_switch_off_bytes_match_base_release(tmp_path, tmp_path_factory, example, task):
+    baseline = pinned_tree("e19c325", tmp_path_factory)
     engine_record = baseline / "src/stateframe/engine/ENGINE_SOURCE.json"
     assert engine_record.is_file()
     released = subprocess.run(
@@ -96,7 +96,16 @@ def test_switch_off_bytes_match_base_release(tmp_path, example, task):
         finally:
             server.shutdown()
             server.server_close()
-    assert outputs[0] and outputs[1] == outputs[0]
+    assert outputs[0]
+    # The receipt-determinism change (11-03) moved request_id and the receipt IDs derived
+    # like it; every other byte must still match the base release.
+    from tools.compare_no_mcp_requests import (
+        MOVED_ID_FIELDS, planted_body_change_is_caught, request_id_handle_mismatches, wire_id_drift)
+    problems, kinds = wire_id_drift(outputs[0], outputs[1])
+    assert not problems, problems
+    assert set(kinds) <= MOVED_ID_FIELDS, kinds
+    assert planted_body_change_is_caught(outputs[1][0])
+    assert request_id_handle_mismatches(tmp_path / "run") == []
 
 
 def test_scripted_final_sealed_wire_and_planted_violation(tmp_path):
@@ -141,12 +150,7 @@ def test_scripted_final_sealed_wire_and_planted_violation(tmp_path):
         assert not _payload_has_authority_keys(frame, final=True)
         assert semantic_messages(rows)[2]["content"].startswith("[StateFrame]\n")
 
-    # A finished run seals its measurement journal as events.jsonl.xz; open_journal reads both forms.
-    from stateframe.engine.kernel_journal_store import open_journal
-    events = []
-    for file in [*run.rglob("events.jsonl"), *run.rglob("events.jsonl.xz")]:
-        with open_journal(file.parent) as stream:
-            events.extend(json.loads(line) for line in stream.read().splitlines())
+    events = measurement_events(run)
     final_events = [row for row in events if row.get("event") == "cache_layout_final_wire"
                     or row.get("kind") == "cache_layout_final_wire"]
     assert final_events

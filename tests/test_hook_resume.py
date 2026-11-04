@@ -6,6 +6,7 @@ from types import SimpleNamespace
 import pytest
 
 import kernel_hook_exec
+import kernel_hooks
 from kernel_hooks import PanelEntry, event_id
 from stateframe import hook_host, resume, runner, shell_host
 from stateframe.endpoint import Endpoint
@@ -33,7 +34,7 @@ def _repo(root: Path) -> Path:
     return root
 
 
-def _config(root: Path) -> tuple[Path, Path, Path]:
+def _config(root: Path, *, python_token: bool = False) -> tuple[Path, Path, Path]:
     folder = root / "hook-source"
     folder.mkdir()
     script = folder / "hook.py"
@@ -44,7 +45,8 @@ def _config(root: Path) -> tuple[Path, Path, Path]:
     config.write_text(json.dumps({
         "schema": "stateframe-hooks/1",
         "hooks": [{"name": "start", "event": "session_start",
-                   "argv": [sys.executable, "hook.py"], "files": ["hook.py", "resource.txt"]}],
+                   "argv": ["{python}" if python_token else sys.executable, "hook.py"],
+                   "files": ["hook.py", "resource.txt"]}],
     }), encoding="utf-8")
     return config, script, resource
 
@@ -86,9 +88,11 @@ class _RecordingHookRunner:
         pass
 
 
-def _prepared(tmp_path: Path, monkeypatch) -> tuple[Path, Path, dict, Path, Path, Path]:
+def _prepared(
+    tmp_path: Path, monkeypatch, *, python_token: bool = False
+) -> tuple[Path, Path, dict, Path, Path, Path]:
     repo = _repo(tmp_path / "repo")
-    config, script, resource = _config(tmp_path)
+    config, script, resource = _config(tmp_path, python_token=python_token)
     _RecordingHookRunner.instances = 0
     monkeypatch.setattr(hook_host, "HookRunner", _RecordingHookRunner)
     options = runner.RunOptions(
@@ -142,6 +146,39 @@ def test_resume_refuses_changed_external_hook_executable(tmp_path, monkeypatch):
     run_dir, _, _spec = runner.prepare(options, printer=lambda *_: None)
     executable.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
     executable.chmod(0o755)
+    with pytest.raises(resume.ResumeRefused, match="hook definition, executable or file changed"):
+        resume.assess(run_dir)
+
+
+def test_resume_refuses_changed_python_interpreter_with_completed_tape(tmp_path, monkeypatch):
+    interpreter = tmp_path / "selected-python"
+    interpreter.symlink_to(sys.executable)
+    monkeypatch.setattr(kernel_hooks.sys, "executable", str(interpreter))
+    _repo_path, run_dir, _spec, _config, _script, _resource = _prepared(
+        tmp_path, monkeypatch, python_token=True
+    )
+    tape = kernel_hook_exec.HookTape(run_dir)
+    assert not tape.pending()
+
+    interpreter.unlink()
+    interpreter.symlink_to("/bin/sh")
+
+    with pytest.raises(resume.ResumeRefused, match="hook definition, executable or file changed"):
+        resume.assess(run_dir)
+
+
+def test_resume_refuses_missing_python_interpreter_with_completed_tape(tmp_path, monkeypatch):
+    interpreter = tmp_path / "selected-python"
+    interpreter.symlink_to(sys.executable)
+    monkeypatch.setattr(kernel_hooks.sys, "executable", str(interpreter))
+    _repo_path, run_dir, _spec, _config, _script, _resource = _prepared(
+        tmp_path, monkeypatch, python_token=True
+    )
+    tape = kernel_hook_exec.HookTape(run_dir)
+    assert not tape.pending()
+
+    interpreter.unlink()
+
     with pytest.raises(resume.ResumeRefused, match="hook definition, executable or file changed"):
         resume.assess(run_dir)
 

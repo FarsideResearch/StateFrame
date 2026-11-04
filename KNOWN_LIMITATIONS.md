@@ -1,5 +1,13 @@
 # Known limitations
 
+## Linux checks that run Go or Node
+
+Linux: checks that run Go or Node programs fail under StateFrame's check memory limit. The limit caps virtual address space (`RLIMIT_AS`), and those runtimes reserve far more address space than they use, so they exit at startup. macOS ignores that limit and is not affected. This has been true since at least 0.3.30 and is fixed in the next release.
+
+## Environment seed storage
+
+The `STATEFRAME_ENV_SEED_MAX_GB` cap is soft: the newest seed and seeds in use can keep the store above it. On Linux, a seed whose files are still hard-linked into a run environment cannot be evicted until that run is removed with `stateframe gc`.
+
 ## Request-compatible digest residual
 
 `_revision12`, `dependency_revision`, the source-closure revision, the coordinated-change tree revision, and `kernel_state_owner_inventory._source_revision_vector` keep the 0.3.18 encoding for readable NUL-free regular files so that request bytes stay identical. That encoding puts no terminator after a file's content, so two different lists of files can produce the same revision when one file's content ends with the start of the next path in the other list (`a`="bc", `d`="e" equals `a`="b", `cd`="e"). Their comparing cache keys and closure freshness checks now include the ordered path list. A fully typed encoding for these sites is planned for a release that is allowed to change request bytes; no version is set. The digest class guard's allowlist is empty.
@@ -11,8 +19,6 @@ The digest class review also found 96 identity keys that join several fields wit
 ## Supported environment
 
 This preview is supported on macOS on Apple silicon and on Linux x86_64 (tested on Ubuntu 22.04.5, kernel 6.8, Python 3.11: install, the three demos, the bubblewrap sandbox with no network and no writes outside the run, and `kill -9` then resume all pass). Long runs (200-300 requests) and the speed and memory numbers were measured on macOS only; Linux is tested end to end on short runs. Checkpoints were measured on macOS; on Linux, resume is verified through full replay. Linux arm64 preview runs are untested. Ubuntu 24.04 and later restrict unprivileged user namespaces, which bubblewrap needs; that release is untested, and if the sandbox cannot start there the usual setting is `sudo sysctl kernel.apparmor_restrict_unprivileged_userns=0` (or an AppArmor profile that allows `bwrap`). Docker is not supported. Use Python 3.11 or newer with venv and ensurepip (Python 3.14.1 is not supported: the pinned networkx 3.6.1 excludes that one release; other 3.14.x releases work). The installer downloads pinned, hash-checked dependencies from PyPI; `./install.sh --offline` uses the bundled wheelhouse instead, without schema validation or the syntax-aware repo map.
-
-Every `stateframe` command needs `HOME` or `STATEFRAME_HOME` set. Without either, as in some containers or for accounts with no home directory, the command line exits before it starts. Set `STATEFRAME_HOME` to a writable directory in that case.
 
 The new command containment path was exercised in a Linux aarch64 container. Its x86_64 path has not been verified for this tool release. That is separate from the earlier Linux x86_64 preview checks above.
 
@@ -48,6 +54,7 @@ Large tasks or repositories can require more state and source context than fits.
 - Network package installs need `--shell-network full`. The default loopback mode cannot reach package indexes. A run-local install does not update the project's dependency declaration. If a selected virtual environment cannot be safely cloned or remapped, the run environment is disabled with a message.
 - Web fetch is off by default, accepts public HTTP(S) text only and blocks private addresses, including redirects to them. Its untrusted-content label is not a prompt-injection security boundary.
 - Shell output is neither revision-bound source-read evidence nor engine check evidence. Use `read` and `run_tests` respectively. A command that exits zero or runs pytest itself does not complete a task.
+- A source-read sub-task with no turns left whose read fails ends the run `CONTINUATION_BLOCKED` and names the read instead of retrying.
 - Custom command definitions require a finite positive timeout no greater than 600 seconds; larger values fail at load.
 - Executable-bit changes are refused and restored, including creation of executable files. Shell deletion of an executable is refused; `file_delete` supports intentional removal, while `file_move` refuses executable sources. The sealed candidate does not carry executable-mode changes.
 - Workspace reconciliation stops without promoting command effects when any regular file exceeds 16 MiB, aggregate regular-file bytes exceed 256 MiB, or the tree exceeds 20,000 entries. These bounds also apply before execution when the snapshot is captured.
@@ -55,7 +62,7 @@ Large tasks or repositories can require more state and source context than fits.
 
 ## Lifecycle hooks
 
-Hooks always use the execution sandbox. There is no host-execution option or unsandboxed fallback; a sandbox startup failure is a hook error. Windows is unsupported. Linux desktop notifications cannot reach the user's D-Bus session from the sandbox; use an explicitly configured webhook instead. On Linux, network mode `loopback` gives a hook its own private loopback, so a service listening on the host's loopback needs `full`. The macOS notification and webhook samples are examples and are not exercised by the automated end-to-end tests. The bundled hook scripts in `examples/hooks/` start with `#!/usr/bin/python3`, so on a Linux host with no Python at that path (venv-only installs, python.org builds, containers) the shipped hooks profile fails to run them. Point the hook entries at an absolute Python 3.11+ interpreter on your machine, as [Lifecycle hooks](docs/guide/hooks.md) describes.
+Hooks always use the execution sandbox. There is no host-execution option or unsandboxed fallback; a sandbox startup failure is a hook error. Windows is unsupported. Linux desktop notifications cannot reach the user's D-Bus session from the sandbox; use an explicitly configured webhook instead. On Linux, network mode `loopback` gives a hook its own private loopback, so a service listening on the host's loopback needs `full`. The macOS notification and webhook samples are examples and are not exercised by the automated end-to-end tests.
 
 If a process is killed while a hook has a durable intent but no completion record, StateFrame cannot know whether an outside effect occurred and refuses to resume that run. Completed hook decisions are served from the run tape. A hook script is pinned, but a hook that deliberately runs project code from the mutable working copy can be influenced by the agent's edits to that code. The `[USER HOOKS]` label describes the text's source; it does not make that text a prompt-injection boundary. See [Lifecycle hooks](docs/guide/hooks.md) for the write, network and size limits.
 
@@ -143,7 +150,7 @@ Finished runs remove checkpoints and the run environment by default, while retai
 
 ## Identical runs and request bytes
 
-The engine normalizes volatile test and tool output (test-runner durations, memory addresses in tracebacks, run-directory paths) before the model sees it; the raw output stays in the run journal. On the measured 40-request workload, two runs on the same input sent byte-identical requests on 40 of 40 requests, apart from three clock fields. In live runs the ID the engine gives each applied edit (its edit receipt) is not yet deterministic, so requests after an edit can differ in that one field. Tool output the engine does not recognize as volatile can still differ between runs. This is not full determinism. The model's own output is not deterministic, so a live run can take a different path. On purpose, the engine still shows the model some real clock readings: the time in the environment panel, how long a job has run, and when a navigation handle expires. A few rarely used paths still use random ids, the ones that continue an interrupted intention, fork work, or run several attempts side by side, so runs that take those paths can differ in request bytes.
+The engine normalizes volatile test and tool output (test-runner durations, memory addresses in tracebacks, run-directory paths) before the model sees it; the raw output stays in the run journal. On the measured 40-request workload, two runs on the same input sent byte-identical requests on 40 of 40 requests, apart from three clock fields. The IDs the engine shows the model (edit receipts, check receipts, request IDs) come from the task, the step and the content, so two runs of the same task that take the same path give them the same values. Tool output the engine does not recognize as volatile can still differ between runs. This is not full determinism. The model's own output is not deterministic, so a live run can take a different path. On purpose, the engine still shows the model some real clock readings: the time in the environment panel, how long a job has run, and when a navigation handle expires. A few rarely used paths still use random ids, the ones that continue an interrupted intention, fork work, or run several attempts side by side, so runs that take those paths can differ in request bytes.
 
 ## Prompt cache reuse
 

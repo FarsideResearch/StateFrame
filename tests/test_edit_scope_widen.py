@@ -25,6 +25,7 @@ from probes.react_repair import (EDIT_SCOPE_WIDEN_CAP, EDIT_SCOPE_WIDENED_KEY, F
 from kernel_effects import effect_policy_for_run
 from kernel_scope_widen_guard import admitted, write as guarded_write
 
+from _journal import measurement_events
 from acceptance._support import FIXTURES, Endpoint, PYTHON, environment, read_requests, run_case
 
 PRICING = "from app.rates import rate\n\ndef total(a, p):\n    return a * rate(p)\n"
@@ -396,28 +397,9 @@ def _script(tmp_path: Path) -> Path:
     return path
 
 
-def _events(run_dir: Path, kind: str) -> list[dict]:
-    found = []
-    # Finished runs keep the measurement journal sealed as events.jsonl.xz; open_journal reads both forms.
-    from stateframe.engine.kernel_journal_store import open_journal
-    for path in [*run_dir.rglob("*.jsonl"), *run_dir.rglob("events.jsonl.xz")]:
-        if "workspace" in path.parts or "env" in path.parts:
-            continue
-        if path.suffix == ".xz":
-            with open_journal(path.parent) as stream:
-                text = stream.read()
-        else:
-            text = path.read_text(errors="ignore")
-        for line in text.splitlines():
-            if f'"{kind}"' not in line:
-                continue
-            try:
-                item = json.loads(line)
-            except ValueError:
-                continue
-            if isinstance(item, dict) and kind in (item.get("kind"), item.get("event"), item.get("type")):
-                found.append(item)
-    return found
+def _events(run_dir: Path, kind: str) -> list[dict[str, object]]:
+    return [event for event in measurement_events(run_dir)
+            if kind in (event.get("kind"), event.get("event"), event.get("type"))]
 
 
 def _run(tmp_path: Path, widen: bool):
@@ -486,7 +468,7 @@ def _remaining_script(tmp_path: Path) -> Path:
 def test_acceptance_widened_run_resumes_by_replay(tmp_path):
     """Kill the engine after the widened edit; resume replays the tape (never a checkpoint)."""
     from acceptance.test_resume_completion import _engine_child
-    from fixtures.process_signals import record_identity, signal_verified
+    from fixtures.process_signals import record_identity, signal_run_owned, signal_run_verified
 
     repo = _large_repo(tmp_path)
     run_dir, marker = tmp_path / "run", tmp_path / "paused"
@@ -528,14 +510,19 @@ def test_acceptance_widened_run_resumes_by_replay(tmp_path):
         assert child is not None, (
             f"engine child missing at paused request; runner_exit={runner.poll()} "
             f"endpoint_exit={endpoint.poll()} related_processes={related[:5]}")
-        signal_verified(child, record_identity(child, launched_after=launched_after,
-                                               command_fragment="_child.py"), signal.SIGKILL)
+        signal_run_verified(run_dir, child, record_identity(
+            child, launched_after=launched_after, command_fragment="_child.py"),
+            signal.SIGKILL, deadline=deadline, what="widened edit replay")
         runner.communicate(timeout=30)
     finally:
-        for process in (runner, endpoint):
-            if process is not None and process.poll() is None:
-                process.kill()
-                process.wait(timeout=5)
+        if runner is not None and runner.poll() is None:
+            # Failure cleanup may run before a checkpoint exists.
+            signal_run_owned(run_dir, runner, signal.SIGKILL, deadline=time.monotonic(),
+                             what="widened run cleanup", require_checkpoint_saved=False)
+            runner.wait(timeout=5)
+        if endpoint.poll() is None:
+            endpoint.kill()
+            endpoint.wait(timeout=5)
     spec = json.loads((run_dir / "spec.json").read_text())
     assert spec["environment"]["STATEFRAME_EDIT_SCOPE_WIDEN"] == "on"
     with Endpoint(_remaining_script(tmp_path)) as remaining:
@@ -572,12 +559,11 @@ def test_engine_child_lookup_requests_untruncated_ps_arguments(monkeypatch):
 
 
 @pytest.mark.host_sandbox
-@pytest.mark.skipif(not os.environ.get("SF_TEST_PARITY_BASELINE"),
-                    reason="set SF_TEST_PARITY_BASELINE to an untouched 0b057d3 checkout")
-def test_switch_off_request_bytes_match_base_release(tmp_path):
-    from test_hook_wiring_parity import _run_checkout, _write_launchers
+def test_switch_off_request_bytes_match_base_release(tmp_path, tmp_path_factory):
+    from test_hook_wiring_parity import _assert_only_wire_ids_moved, _run_checkout, _write_launchers
+    from tools.pinned_tree import pinned_tree
     current = Path(__file__).resolve().parents[1]
-    baseline = Path(os.environ["SF_TEST_PARITY_BASELINE"]).expanduser().resolve()
+    baseline = pinned_tree("0b057d3", tmp_path_factory)
     assert (baseline / "src/stateframe/runner.py").is_file()
     repo = tmp_path / "repo"
     shutil.copytree(current / "examples/discount_bug", repo)
@@ -590,4 +576,5 @@ def test_switch_off_request_bytes_match_base_release(tmp_path):
     current_requests = _run_checkout(current, repo, run, launcher, wrapper,
                                      tmp_path / "current_modules.json",
                                      stable_tool_head="off")[0]
-    assert current_requests == base_requests
+    # Only request_id and the receipt IDs derived like it moved (receipt determinism, 11-03).
+    _assert_only_wire_ids_moved(base_requests, current_requests, run)

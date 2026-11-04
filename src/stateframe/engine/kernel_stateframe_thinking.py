@@ -304,8 +304,10 @@ def _evidence_rows(brief: str, path: str, source: str, components: list[dict],
             result = str(raw.get("result_class", raw.get("result", raw.get("status", "")))).upper()
             if result in _GREEN:
                 executed = True
-                receipt_id = str(raw.get("receipt_id", raw.get("event_id", "receipt")))
-                evidence.append(receipt_id)
+                receipt_id = raw.get("receipt_id")
+                if isinstance(receipt_id, str) and re.fullmatch(
+                        r"(?:check-receipt:[0-9a-f]{24}|[0-9a-f]{20})", receipt_id):
+                    evidence.append(receipt_id)
                 if _receipt_revision(raw) and revision not in _receipt_revision(raw) \
                         and revision.removeprefix("sha256:") not in _receipt_revision(raw):
                     stale = True

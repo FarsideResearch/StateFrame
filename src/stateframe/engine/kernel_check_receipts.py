@@ -10,6 +10,7 @@ from pathlib import Path
 import re
 
 from kernel_measurement import digest
+from kernel_test_isolation import SandboxReadGrants
 
 
 SCHEMA = "stateframe-check-output-receipt/1"
@@ -32,6 +33,48 @@ _IMPORT_FAILURE = re.compile(
     r"collection error|test collection failed)",
     re.IGNORECASE,
 )
+# The check sandbox could not start the program itself. A missing interpreter and an
+# exec refusal are distinct environment errors; neither is a RED check.
+_SANDBOX_EXEC_DENIED = re.compile(
+    r"sandbox-exec: execvp\(\) of '(?P<darwin>[^']+)' failed: Operation not permitted"
+    r"|bwrap: execvp (?P<linux>\S+): (?:Permission denied|Operation not permitted)")
+_SANDBOX_EXEC_MISSING = re.compile(
+    r"bwrap: execvp (?P<linux>\S+): No such file or directory")
+_SANDBOX_OPEN_DENIED = re.compile(
+    r"\s*Error opening (?P<path>/[^\r\n]+?): Operation not permitted\s*\Z")
+
+
+def sandbox_exec_denial(output: object, *,
+                        read_grants: SandboxReadGrants | None = None) -> str | None:
+    """The environment message when the check sandbox could not exec, or None."""
+    if not isinstance(output, str):
+        return None
+    denied = _SANDBOX_EXEC_DENIED.search(output)
+    if denied is not None:
+        path = denied.group("darwin") or denied.group("linux")
+        return (f"the sandbox blocked the project interpreter at {path}: this is an environment "
+                "error, not a test result (no test ran)")
+    missing = _SANDBOX_EXEC_MISSING.search(output)
+    if missing is not None:
+        return (f"test interpreter {missing.group('linux')} not found inside the check sandbox: "
+                "this is an environment error, not a test result (no test ran)")
+    return sandbox_open_denial(output, read_grants)
+
+
+def sandbox_open_denial(output: object,
+                        read_grants: SandboxReadGrants | None) -> str | None:
+    """Classify only the complete macOS shebang refusal with its exact profile grants."""
+    if not isinstance(output, str):
+        return None
+    opening = _SANDBOX_OPEN_DENIED.fullmatch(output)
+    if opening is not None and read_grants is not None:
+        path = Path(opening.group("path"))
+        if not read_grants.allows(path):
+            return (f"the sandbox blocked the project interpreter at {path}: this is an environment "
+                    "error, not a test result (no test ran)")
+    return None
+
+
 _RESOURCE_FAILURE = re.compile(r"(?:timeout|timed out|out of memory|resource limit)", re.IGNORECASE)
 _TYPED_OBSERVATION_FIELDS = frozenset({
     "outcome", "result", "failure_phase", "phase", "reached_observation",
@@ -263,6 +306,7 @@ def _execution_termination(exit_code: object, reported: object = None) -> str:
 def canonical_execution_id(
         runtime: object | None = None, *, execution_id: object = None,
         selector: object = "", sequence: object = None, fresh: bool = False,
+        selector_scope: object = None, producer: object = None,
 ) -> str:
     """Return the one opaque host identity shared by every view of one check."""
     explicit = _text(execution_id).strip()
@@ -272,21 +316,46 @@ def canonical_execution_id(
     if not fresh and pending not in (None, ""):
         return str(pending).strip()
     journal = getattr(runtime, "journal", None) if runtime is not None else None
-    from kernel_wire_identity import next_wire_id, stable_wire_id
+    from kernel_wire_identity import content_wire_id
     owner = getattr(runtime, "owner", None) if runtime is not None else None
-    task_id = getattr(owner, "task_id", None)
     step = getattr(owner, "current_step", None)
-    if journal is not None:
-        # The journal sequence survives checkpoint/crash replay. A runtime-local
-        # counter does not, and could repeat an already published check ID.
-        digest = next_wire_id(journal, "check-execution", step, selector, sequence)
-    else:
-        ordinal = int(getattr(runtime, "_check_execution_ordinal", 0) or 0) + 1
-        if runtime is not None:
-            setattr(runtime, "_check_execution_ordinal", ordinal)
-        digest = stable_wire_id(task_id, "check-execution", step, selector,
-                                sequence, ordinal)
+    # Only inputs every view of the check passes identically: callers that look
+    # an execution up do not know its scope or producer, so hashing those made
+    # the views disagree. selector_scope/producer stay accepted for call sites.
+    del selector_scope, producer
+    # Each allocation needs its own ID: equal IDs share one pinned pre-launch
+    # binding, so a second check would be judged against the first one's
+    # revision. The ordinal counts check executions: completed receipts in the
+    # journal (rebuilt on replay) or allocations made since, whichever is larger,
+    # so a check started before an earlier one's receipt lands still gets a new
+    # number. Observer events never touch either count.
+    ordinal = _next_check_execution_ordinal(journal)
+    digest = content_wire_id(
+        journal, "check-execution", step, {
+            "selector": str(selector or ""),
+            # This sequence belongs to the check receipt itself, not the global
+            # journal. It is replayed with the receipt.
+            "sequence": sequence,
+        },
+        ordinal=ordinal,
+    )
     return "check-execution:" + digest
+
+
+def _next_check_execution_ordinal(journal: object | None) -> int:
+    """Allocate the next check-execution number from journal-derived counts."""
+    if journal is None:
+        return 1
+    completed = getattr(journal, "check_receipt_count", 0)
+    allocated = getattr(journal, "check_execution_allocations", 0)
+    completed = completed if isinstance(completed, int) else 0
+    allocated = allocated if isinstance(allocated, int) else 0
+    ordinal = max(completed, allocated) + 1
+    try:
+        setattr(journal, "check_execution_allocations", ordinal)
+    except (AttributeError, TypeError):
+        pass
+    return ordinal
 
 
 def _execution_receipt_id(execution_id: str) -> str:
@@ -388,8 +457,10 @@ def _capture_metadata(output_truncated: object) -> dict[str, object]:
 
 def _summary(receipt: Mapping[str, object]) -> str:
     context = str(receipt.get("assertion_context_preview") or "NO ASSERTION CONTEXT")
+    environment_error = receipt.get("environment_error")
     return (
-        "CHECK_FAILURE_SUMMARY "
+        (f"ENVIRONMENT_ERROR {environment_error}\n" if environment_error else "")
+        + "CHECK_FAILURE_SUMMARY "
         f"execution_id={receipt.get('execution_id', 'UNKNOWN')} "
         f"status={receipt.get('status', 'UNKNOWN')} "
         f"outcome={receipt.get('outcome', 'UNKNOWN')} "
@@ -432,6 +503,7 @@ def classify_check_outcome(
         counts: object = None,
         execution_complete: object = None,
         termination_reason: object = None,
+        read_grants: SandboxReadGrants | None = None,
 ) -> tuple[str, str, bool | None]:
     """Reduce typed execution facts without letting wrappers rewrite them.
 
@@ -462,6 +534,10 @@ def classify_check_outcome(
         and any(_text(typed.get(key)).strip() for key in ("failure_phase", "phase"))
     )
     output = "\n".join(value for value in (stdout, stderr) if isinstance(value, str))
+    opening_denial = sandbox_open_denial(output, read_grants)
+    if opening_denial is not None:
+        return "ENVIRONMENT", "HOST", False
+    denial = sandbox_exec_denial(output)
     phase = str(failure_phase or "").upper()
     status_text = str(status or "").upper()
     selected = _normalize_outcome(outcome)
@@ -531,6 +607,9 @@ def classify_check_outcome(
             reached = True
         return "PASS", phase or "NONE", reached
 
+    if (reached is not True and not typed_behavior_failure
+            and denial is not None):
+        return "ENVIRONMENT", "HOST", False
     behavior_status = status_text in {"FAIL", "FAILED", "RED", "BEHAVIOR_FAIL"}
     if typed_behavior_failure or (
             behavior_status and (
@@ -713,6 +792,7 @@ def record_check_output(
         producer: object = None,
         wrapper_error: object = None,
         wrapper_parse_error: object = None,
+        read_grants: SandboxReadGrants | None = None,
 ) -> dict[str, object]:
     """Store captured public streams and publish a compact receipt row."""
     capture_metadata = _capture_metadata(output_truncated)
@@ -736,7 +816,8 @@ def record_check_output(
     if ordinal is None:
         ordinal = getattr(getattr(runtime, "owner", None), "current_step", 0)
     execution_text = canonical_execution_id(
-        runtime, execution_id=execution_id, selector=selector_text, sequence=ordinal)
+        runtime, execution_id=execution_id, selector=selector_text, sequence=ordinal,
+        selector_scope=scope, producer=producer)
     execution_binding_mode = check_execution_binding_mode(runtime)
     execution_context = (
         _check_execution_context(runtime, execution_text)
@@ -816,6 +897,7 @@ def record_check_output(
         counts=structured_counts,
         execution_complete=execution_complete,
         termination_reason=termination_reason,
+        read_grants=read_grants,
     )
     termination = _execution_termination(exit_code, termination_reason)
     if termination == "UNKNOWN" and typed_outcome == "RESOURCE_LIMIT":
@@ -832,6 +914,14 @@ def record_check_output(
                      if effective_revision is not None else _current_revision(runtime))
     handle = _execution_receipt_id(execution_text)
     context_preview, context_omitted = _preview(context_text)
+    environment_error = (sandbox_exec_denial("\n".join((stdout_text, stderr_text)),
+                                             read_grants=read_grants)
+                         if typed_outcome == "ENVIRONMENT" else None)
+    receipt_status = _CANONICAL_STATUS.get(typed_outcome)
+    if environment_error:
+        receipt_status = "HOST_REFUSED"
+    if receipt_status is None:
+        receipt_status = "UNKNOWN" if wrapper_text and not has_native_observation else status_text
     private = {
         "schema": SCHEMA,
         "receipt_id": handle,
@@ -844,9 +934,9 @@ def record_check_output(
         # The status is a projection of the ONE canonical outcome: a settled
         # PASS/BEHAVIOR_FAIL is never re-decided by a wrapper's own status word
         # (b857: PASS/46 -> UNKNOWN, FAIL/26 -> UNKNOWN).  A wrapper's advertised
-        # PASS/FAIL without native facts stays unresolved.
-        "status": _CANONICAL_STATUS.get(typed_outcome) or (
-            "UNKNOWN" if wrapper_text and not has_native_observation else status_text),
+        # PASS/FAIL without native facts stays unresolved. A sandbox launch
+        # refusal uses the host refusal status even if the caller claimed PASS.
+        "status": receipt_status,
         "outcome": typed_outcome,
         "reached_observation": observation_reached,
         "failure_phase": typed_phase,
@@ -875,6 +965,8 @@ def record_check_output(
         "assertion_context_omitted_bytes": context_omitted,
         "runner_tail": _runner_tail(stdout_text, stderr_text),
     })
+    if environment_error:
+        private["environment_error"] = environment_error
     private["summary"] = _summary(private)
     receipts = getattr(runtime, "_check_output_receipts", None)
     if not isinstance(receipts, dict):
@@ -901,8 +993,8 @@ def record_check_output(
             merged["producer"] = _text(producer).strip()
         settled = str(existing.get("outcome") or "").upper() in _CANONICAL_STATUS
         later_is_settled = str(typed_outcome or "").upper() in _CANONICAL_STATUS
-        if not wrapper_only and settled and not later_is_settled:
-        # A later view of the SAME execution that cannot settle it
+        if not wrapper_only and settled and not later_is_settled and not environment_error:
+            # A later view of the SAME execution that cannot settle it
             # (exit-text only, no typed facts) never re-decides a settled
             # PASS/BEHAVIOR_FAIL; it may only add metadata above.
             wrapper_only = True
@@ -998,14 +1090,15 @@ def record_check_output(
 
 
 def _refresh_referencing_rows(runtime: object, public: Mapping[str, object]) -> None:
-    """Push a settled canonical outcome to wrapper rows that reference it.
+    """Push a settled outcome or host refusal to wrapper rows that reference it.
 
     A test receipt can be written while its execution is still pending (the
     native detail arrives later); it references the execution id and must not
     keep a stale UNKNOWN snapshot once the one canonical receipt settles.
     """
     outcome = str(public.get("outcome") or "").upper()
-    if outcome not in _CANONICAL_STATUS:
+    status = str(public.get("status") or "").upper()
+    if outcome not in _CANONICAL_STATUS and (outcome, status) != ("ENVIRONMENT", "HOST_REFUSED"):
         return
     execution = str(public.get("execution_id") or "")
     for collection in ("test_receipts",):
@@ -1019,7 +1112,7 @@ def _refresh_referencing_rows(runtime: object, public: Mapping[str, object]) -> 
             if isinstance(ids, list) and len(ids) > 1:
                 continue  # aggregate rows are re-derived by canonical_identity
             row["outcome"] = outcome
-            row["status"] = _CANONICAL_STATUS[outcome]
+            row["status"] = _CANONICAL_STATUS.get(outcome, status)
 
 
 def retrieve_check_output(

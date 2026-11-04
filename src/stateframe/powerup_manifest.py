@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .engine.kernel_custom_tools import CustomToolError, _pattern
+from .engine.kernel_safe_paths import safe_expanduser
 from .skills import MAX_DIRECTORY_BYTES, NAME
 
 
@@ -181,7 +182,7 @@ def _setting(spec: object, where: str) -> dict:
 
 
 def parse_manifest(path: Path) -> Manifest:
-    root = Path(path).expanduser()
+    root = safe_expanduser(Path(path))
     tree_digest(root)
     source = root / "powerup.toml"
     try:

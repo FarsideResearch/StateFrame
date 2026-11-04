@@ -677,6 +677,8 @@ def final_result(runtime: object, fallback: str) -> str:
     if done_sealed(runtime) is not None:
         return TERMINAL_RESULT
     outcome = getattr(runtime, "system_outcome", None)
+    if outcome == "blocked" and getattr(getattr(runtime, "continuation", None), "terminal_blocked", False):
+        return "CONTINUATION_BLOCKED"
     return str(outcome).upper() if outcome is not None else fallback
 
 

@@ -20,6 +20,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from kernel_history_spool import EventLookup, HistorySpool, history
+from kernel_wire_identity import seeded_content_wire_id, wire_identity_content, wire_run_seed
 
 
 SCHEMA = "stateframe-timeline/1"
@@ -33,6 +34,9 @@ MAX_RECENT_TURN_CHARS = 220
 MAX_ASK_CHARS = 320
 MAX_RELEVANT_CHARS = 360
 _RELEVANCE_HEAD_SIZE = 64
+_RECENT_FRAME_KINDS = frozenset({
+    "user_message", "assistant_message", "action", "receipt", "decision", "stage_change",
+})
 _TOKEN_RE = re.compile(r"[A-Za-z0-9_./:-]{2,}")
 _PATH_KEYS = frozenset({
     "file", "files", "filepath", "file_path", "path", "paths", "target",
@@ -149,6 +153,9 @@ def _turn(value: object, fallback: int) -> int:
 
 def _event_type(kind: str) -> str:
     lowered = kind.lower().replace("-", "_")
+    # Checkpoint capture is host observer traffic, not model-relevant evidence.
+    if lowered.startswith("fl_checkpoint_"):
+        return "event"
     if lowered in {"user_message", "user", "user_ask"}:
         return "user_message"
     if lowered in {"assistant_message", "assistant", "assistant_reply"}:
@@ -277,6 +284,7 @@ class TimelineIndex:
                  decision_graph: object | None = None) -> None:
         self.session_id = _text(session_id).strip() or "session"
         self.journal = journal
+        self.wire_seed = wire_run_seed(journal)
         self.recall = recall
         self.selector = selector
         self.decision_graph = decision_graph
@@ -328,6 +336,18 @@ class TimelineIndex:
         ident = f"{self.session_id}:{prefix}:{self._next_event_number}"
         self._next_event_number += 1
         return ident
+
+    def _frame_reference(self, kind: str, row: Mapping[str, object],
+                         occurrences: dict[tuple[str, int, str], int]) -> str:
+        step_value = row.get("turn")
+        step = step_value if type(step_value) is int and step_value >= 0 else 0
+        content = wire_identity_content(row)
+        encoded = json.dumps(content, ensure_ascii=False, sort_keys=True,
+                             separators=(",", ":"), allow_nan=False)
+        key = (kind, step, encoded)
+        ordinal = occurrences.get(key, 0) + 1
+        occurrences[key] = ordinal
+        return f"{kind}:{seeded_content_wire_id(self.wire_seed, kind, step, content, ordinal=ordinal)}"
 
     def _make_event(self, kind: str, *, actor: str, turn: object, timestamp_ns: object,
                     event_id: str | None, message_id: str | None, ask_id: str | None,
@@ -789,11 +809,12 @@ class TimelineIndex:
         latest_content = _text(latest.get("content")) if latest else None
         latest_id = (_text(latest.get("message_id")) if latest and latest.get("message_id") else None)
         asks = self.open_asks(limit=max_open_asks)
-        turns = sorted(self._by_turn if isinstance(self._events, HistorySpool)
-                       else {event.turn for event in self._events}, reverse=True)[:recent_turns]
+        recent_events = tuple(event for event in self._events
+                              if event.kind in _RECENT_FRAME_KINDS)
+        turns = sorted({event.turn for event in recent_events}, reverse=True)[:recent_turns]
         recent_lines: list[str] = []
         for turn in reversed(turns):
-            rows = (self._by_id[event_id] for event_id in self._by_turn.get(turn, ()))
+            rows = (event for event in recent_events if event.turn == turn)
             bits = []
             for event in rows:
                 detail = event.content or _compact(event.payload, 100)
@@ -805,22 +826,26 @@ class TimelineIndex:
             recent_lines.append(_compact(f"turn {turn}: " + " | ".join(bits), MAX_RECENT_TURN_CHARS))
         relevant = self._select_relevant(focus, max_items=max_relevant,
                                          budget_tokens=max(32, budget_tokens // 2)) if max_relevant else ()
-        lines = [f"[TIMELINE schema={SCHEMA} events={len(self._events)}]", "LATEST USER MESSAGE"]
+        occurrences: dict[tuple[str, int, str], int] = {}
+        lines = [f"[TIMELINE schema={SCHEMA}]", "LATEST USER MESSAGE"]
         if latest_content is not None:
             # Deliberately do not compact this line: this is the one verbatim user slice.
             lines.append(latest_content)
         else:
             lines.append("<none>")
         lines.append("OPEN ASKS")
-        lines.extend(f"{row.get('ask_id') or row.get('message_id')}: {_compact(row.get('content'), MAX_ASK_CHARS)}"
-                     for row in asks)
         if not asks:
             lines.append("<none>")
+        else:
+            for row in asks:
+                reference = self._frame_reference("timeline-ask", row, occurrences)
+                lines.append(f"{reference}: {_compact(row.get('content'), MAX_ASK_CHARS)}")
         lines.append("RECENT TURNS")
         lines.extend(recent_lines or ["<none>"])
         lines.append("SELECTOR RELEVANT")
         for row in relevant:
-            lines.append(f"{row.get('id', row.get('event_id', '?'))}: "
+            reference = self._frame_reference("timeline-event", row, occurrences)
+            lines.append(f"{reference}: "
                          f"{_compact(row.get('gist', row.get('content', row.get('payload', ''))), MAX_RELEVANT_CHARS)}")
         if not relevant:
             lines.append("<none>")

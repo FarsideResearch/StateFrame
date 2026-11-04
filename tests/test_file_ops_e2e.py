@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 
 from stateframe.request_records import list_request_records, read_request_record
+from engine_run import run_monitored
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -37,8 +38,8 @@ def _run(tmp_path, fixture, script, *, edit=()):
             "--test-python", sys.executable, "--max-turns", "16", "--in-place",
             "--quiet", *edit,
         ]
-        result = subprocess.run(command, capture_output=True, text=True, env=environment,
-                                timeout=240, check=False)
+        result = run_monitored(command, capture_output=True, text=True, env=environment,
+                               expected_seconds=240, run_dir=run_dir, check=False)
         summary = json.loads((run_dir / "summary.json").read_text())
         assert result.returncode == 0, result.stdout + result.stderr + str(summary)
         assert summary["succeeded"] is True, summary
@@ -117,12 +118,12 @@ def test_existing_discount_demo(tmp_path):
     try:
         assert endpoint.stdout is not None
         url = endpoint.stdout.readline().strip()
-        result = subprocess.run([
+        result = run_monitored([
             sys.executable, "-m", "stateframe", "run", "--repo", str(repo),
             "--task", "Fix the pricing code so the tests pass.",
             "--endpoint", url, "--model", "scripted", "--run-dir", str(run_dir),
             "--test-python", sys.executable, "--max-turns", "16", "--quiet",
-        ], capture_output=True, text=True, env=environment, timeout=240, check=False)
+        ], capture_output=True, text=True, env=environment, expected_seconds=240, check=False)
         summary = json.loads((run_dir / "summary.json").read_text())
         assert result.returncode == 0, result.stdout + result.stderr + str(summary)
         assert summary["succeeded"] is True

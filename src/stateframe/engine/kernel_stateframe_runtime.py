@@ -5592,12 +5592,14 @@ class StateFrameRuntime:
         self.journal.emit("parent_attached", budget=self.parent.snapshot())
         if use_continuation and self.workspace is not None and resume is None:
             self.workspace.bind(self)
+        from kernel_wire_identity import wire_run_seed
         self.portfolio = None
         if self.stateframe_portfolio_mode == "on":
             self.portfolio = PortfolioManager(
                 Path(owner.root), store_root=self.journal.path.parent / "portfolio",
                 policy=PortfolioPolicy.from_env(), ticket_id=str(getattr(owner, "task_id", "")),
-                parent_ledger=self.parent)
+                parent_ledger=self.parent,
+                run_seed=wire_run_seed(self.journal))
             self.journal.emit("portfolio_attached", producer="stateframe_portfolio",
                               policy=self.portfolio.policy.to_dict(),
                               portfolio_journal_id=self.portfolio.journal.journal_id,
@@ -5611,6 +5613,7 @@ class StateFrameRuntime:
                 budget=int(os.environ.get("STATEFRAME_FORK_A_BUDGET", "2")),
                 ticket_id=str(getattr(owner, "task_id", "")),
                 parent_ledger=self.parent,
+                run_seed=wire_run_seed(self.journal),
                 excluded_roots=(self.journal.path.parent,),
             )
             self.journal.emit(
@@ -5892,6 +5895,7 @@ class StateFrameRuntime:
     def _init_completion_authority(self, *, step_limit: int | None, tools: object, resume=None) -> None:
         """Create completion authority only in its explicit opt-in mode."""
         from kernel_completion_authority import CompletionAuthority, POLICY_VERSION, RootFuelBudget
+        from kernel_wire_identity import completion_root_budget_wire_id
 
         raw_total = os.environ.get("STATEFRAME_COMPLETION_ROOT_FUEL",
                                    "unbounded" if step_limit is None else str(max(2, step_limit + 1)))
@@ -5948,8 +5952,11 @@ class StateFrameRuntime:
                     "required_selectors": selectors,
                     "environment_revision": self.journal.manifest.get("environment_revision"),
                 },
-                budget=RootFuelBudget(total=total, unbounded=total is None,
-                                      terminalization_reserve=reserve),
+                budget=RootFuelBudget(
+                    total=total, unbounded=total is None,
+                    terminalization_reserve=reserve,
+                    root_budget_id=completion_root_budget_wire_id(self.journal),
+                ),
                 required_evidence=selectors,
                 available_actions=available or None,
                 current_revision=revision,
@@ -5994,7 +6001,7 @@ class StateFrameRuntime:
         for row in getattr(self, "test_receipts", ()):
             if not isinstance(row, Mapping):
                 continue
-            receipt_id = str(row.get("receipt_id", row.get("event_id", "")))
+            receipt_id = str(row.get("receipt_id", ""))
             if not receipt_id or receipt_id in self._completion_authority_receipt_ids:
                 continue
             selectors = row.get("selectors", row.get("selector", ()))
@@ -8195,13 +8202,36 @@ class StateFrameRuntime:
         from kernel_check_receipts import canonical_identity
 
         owner = getattr(self, "owner", None)
-        from kernel_wire_identity import public_wire_text
+        step = getattr(owner, "current_step", 0)
+        canonical = canonical_identity(canonical_rows)
+        identity_content = {
+            "canonical_check_identity": canonical,
+            "selector": event.get("selector", event.get("selector_scope")),
+            "status": event.get("status", event.get("outcome")),
+            "revision": event.get("revision", event.get("tested_revision")),
+        }
+        from kernel_wire_identity import content_wire_id, wire_identity_content
+        # Two runs of the same check at one step can match on every field above;
+        # count the earlier equal receipts so each run keeps its own ID.
+        same_content = wire_identity_content(identity_content)
+        ordinal = 1 + sum(
+            1 for prior in getattr(self, "test_receipts", ())
+            if isinstance(prior, Mapping) and prior.get("step") == step
+            and prior.get("_receipt_identity_content") == same_content
+        )
+        receipt_id = content_wire_id(
+            self.journal, "test-completion-receipt", step, identity_content,
+            ordinal=ordinal,
+        )
 
         self.test_receipts.append({
+            # Host consumers join test and check receipts on the event fields;
+            # only receipt_id is the provider-visible identity.
             **event,
-            "receipt_id": public_wire_text(event["event_id"], getattr(self, "journal", None)),
-            "step": getattr(owner, "current_step", 0),
-            **canonical_identity(canonical_rows),
+            "_receipt_identity_content": same_content,
+            "receipt_id": receipt_id,
+            "step": step,
+            **canonical,
             **StateFrameRuntime._micrograph_failed_paths(self, canonical_rows),
             # LedgerIndex consumes action-shaped test receipts to reobserve the
             # selected test paths at the binding checked by this subprocess.
@@ -10352,6 +10382,33 @@ class StateFrameRuntime:
         return self._compute_host_done_facts(
             claims=claims, unresolved_gating_items=unresolved_gating_items)
 
+    def _finalize_host_done_facts(
+            self, terminal_result: dict[str, object], *, sealed_terminal: object = None,
+    ) -> None:
+        """Cache terminal facts while the journal is still open, including sealed submits."""
+        if getattr(self, "stateframe_host_done_facts_mode", "off") != "on":
+            return
+        terminal_gates = list(self._host_done_facts_gating_items)
+        terminal_status = str(terminal_result.get("result", "")).upper()
+        if sealed_terminal is None and terminal_status in {
+                "HARNESS_ERROR", "HARNESS_SUSPECT", "ATTEMPT_BUDGET_EXHAUSTED",
+                "RENDER_OVERFLOW", "STOPPED_INCOMPLETE", "HOOK_BLOCKED",
+                "HOOK_CONTAINMENT", "CONTINUATION_BLOCKED", "BLOCKED", "NEEDS_WORK",
+                "UNCERTIFIED_SUBMIT"}:
+            terminal_gates.append("terminal:" + terminal_status)
+        facts = self._compute_host_done_facts(
+            claims=terminal_result.get("claims", self._host_done_facts_claims),
+            unresolved_gating_items=terminal_result.get(
+                "unresolved_gating_items", terminal_gates),
+        )
+        terminal_result["done_facts"] = facts.to_dict()
+        terminal_result["claims"] = copy.deepcopy(dict(facts.claims))
+        self.journal.emit(
+            "done_facts_finalized", producer="kernel_host_done_facts",
+            facts=facts.to_dict(), claims=copy.deepcopy(dict(facts.claims)),
+            accepted=facts.accepted, rejection_reasons=list(facts.rejection_reasons),
+            evidence_digest=facts.evidence_digest, phase="finalization", dispatch=False)
+
     def done_facts_payload(self) -> dict[str, object] | None:
         if getattr(self, "stateframe_host_done_facts_mode", "off") != "on":
             return None
@@ -12283,7 +12340,7 @@ class StateFrameRuntime:
             if self.continuation is not None:
                 from kernel_continuation_runtime import tool_surface
                 self.close_step(messages)
-                return tool_surface(current)
+                return tool_surface(current, runtime=self)
             return current
 
         def generated(current: list[dict]) -> list[dict]:
@@ -12425,7 +12482,7 @@ class StateFrameRuntime:
         if self.continuation is not None:
             from kernel_continuation_runtime import tool_surface
             self.close_step(messages)
-            tools = tool_surface(tools)
+            tools = tool_surface(tools, runtime=self)
         if getattr(self, "generated", None) is not None:
             from kernel_generated_context import tool_surface as generated_tools
             tools = generated_tools(tools)
@@ -13673,9 +13730,18 @@ class StateFrameRuntime:
     def harness_fault(self, fault: str, scope: str) -> None:
         event = self.journal.emit("harness_fault", producer="harness_transport", validated=True,
                                   fault=fault, scope=scope, system_denominator_included=True)
-        self.fault_receipts.append({**event, "receipt_id": event["event_id"]})
+        from kernel_wire_identity import content_wire_id
+        step = getattr(getattr(self, "owner", None), "current_step", 0)
+        receipt_id = content_wire_id(
+            self.journal, "harness-fault-receipt", step,
+            {"fault": fault, "scope": scope},
+        )
+        self.fault_receipts.append({
+            key: value for key, value in event.items()
+            if key not in {"event_id", "sequence", "event_sequence", "timestamp", "timestamp_ns"}
+        } | {"receipt_id": receipt_id})
         self.actions.append(kind="harness_request", arguments={"scope": scope},
-                            resources=self.binding(), result=fault, observation=event["event_id"],
+                            resources=self.binding(), result=fault, observation=receipt_id,
                             pending="timeout" if fault == "transport_timeout" else "completed")
         self.lifecycle("harness_fault")
 
@@ -14547,7 +14613,8 @@ class StateFrameRuntime:
                 root = Path(self.owner.root).resolve()
                 report = self.where_used_ledger.observe_edit(
                     root, path, before or "", after,
-                    edit_receipt_id=str(receipt.get("receipt_id", "")) or None)
+                    edit_receipt_id=str(receipt.get("receipt_id", "")) or None,
+                    step=getattr(self.owner, "current_step", 0))
                 receipt["where_used_closure"] = report.to_dict()
                 if getattr(self, "completion_authority", None) is not None:
                     from kernel_where_used import sync_completion_authority
@@ -15810,24 +15877,59 @@ class StateFrameRuntime:
         """Record a worker probe with separate host/model provenance."""
         if not getattr(self, "probe_gate_enabled", False) or getattr(self, "probe_gate", None) is None:
             return {"accepted": False, "status": "OFF", "reason": "probe gate is off"}
+        step = getattr(getattr(self, "owner", None), "current_step", 0)
+        request_id = getattr(self, "current_request_id", None)
         result = self.probe_gate.record_probe(
             obligation, host_observed, model_interpretation,
             revision=getattr(self, "_probe_revision", None))
         record = result.get("record") if isinstance(result, Mapping) else None
-        event = self.journal.emit("probe_result", revision=getattr(self, "_probe_revision", None),
-                                  obligation=str(obligation), status=result.get("status"),
-                                  accepted=bool(result.get("accepted")),
-                                  authority="HOST_OBSERVED",
-                                  expected_authority="BRIEF",
-                                  expected=(record.get("expected") if isinstance(record, Mapping) else None),
-                                  expectation_authority="MODEL_INTERPRETATION",
-                                  observation=(record.get("result") if isinstance(record, Mapping) else None),
-                                  expectation=(record.get("expectation") if isinstance(record, Mapping) else None))
+        self.journal.emit("probe_result", revision=getattr(self, "_probe_revision", None),
+                          request_id=request_id, step=step,
+                          obligation=str(obligation), status=result.get("status"),
+                          accepted=bool(result.get("accepted")),
+                          authority="HOST_OBSERVED",
+                          expected_authority="BRIEF",
+                          expected=(record.get("expected") if isinstance(record, Mapping) else None),
+                          expectation_authority="MODEL_INTERPRETATION",
+                          observation=(record.get("result") if isinstance(record, Mapping) else None),
+                          expectation=(record.get("expectation") if isinstance(record, Mapping) else None))
         if result.get("accepted") and isinstance(record, Mapping):
             # Keep only host observation in the receipt projection; the model
             # expectation remains an explicitly separate journal field.
-            from kernel_wire_identity import wire_run_id
-            public_receipt_id = f"{wire_run_id(self.journal)}:{event['sequence']}"
+            from kernel_wire_identity import content_wire_id
+            identity_content = {
+                "obligation": str(obligation),
+                "status": result.get("status"),
+                "accepted": bool(result.get("accepted")),
+                "revision": record.get("revision"),
+                "observation": record.get("result"),
+            }
+            ordinal = 1
+            request_records = getattr(self.journal, "request_records", None)
+            if isinstance(request_id, str) and callable(request_records):
+                ordinal = sum(
+                    1 for row in request_records(request_id)
+                    if row.get("kind") == "probe_result"
+                    and row.get("step") == step
+                    and row.get("obligation") == str(obligation)
+                    and row.get("status") == result.get("status")
+                    and row.get("accepted") is True
+                    and row.get("revision") == record.get("revision")
+                    and row.get("observation") == record.get("result")
+                )
+            else:
+                ordinal += sum(
+                    1 for prior in getattr(self, "probe_receipts", ())
+                    if isinstance(prior, Mapping)
+                    and prior.get("kind") == "probe"
+                    and prior.get("obligation") == str(obligation)
+                    and prior.get("source_revision") == record.get("revision")
+                    and prior.get("outcome") == record.get("result")
+                )
+            public_receipt_id = content_wire_id(
+                self.journal, "probe-receipt", step, identity_content,
+                ordinal=ordinal,
+            )
             self.probe_receipts.append({
                 "kind": "probe", "receipt_id": public_receipt_id,
                 "obligation": str(obligation), "source_revision": record.get("revision"),
@@ -21059,41 +21161,6 @@ class StateFrameRuntime:
         return prepare_replacement(self, original_capture, immutable_input,
                                    transport_body, deadline=deadline, endpoint=endpoint, key=key)
 
-    def _prepare_continuation_boundary(
-            self, messages: Sequence[dict]) -> PreparedRequest | None:
-        continuation = getattr(self, "continuation", None)
-        if continuation is None:
-            return None
-        continuation.prepare(messages)
-        if continuation.completed:
-            self.continuation_terminal = True
-            capture = RequestCapture(
-                self.journal, getattr(self.owner, "current_step", 0), self.snapshot_id,
-                endpoint_profile=self.endpoint_profile,
-            )
-            return PreparedRequest((), capture, {"kind": "CONTINUATION_COMPLETE"})
-        if getattr(continuation, "terminal_blocked", False):
-            from kernel_terminal_policy import (
-                deliver_pending_advisories,
-                enabled as hard_budget_only_enabled,
-                queue_advisory,
-            )
-            if hard_budget_only_enabled(self):
-                queue_advisory(self, "continuation_blocked")
-                deliver_pending_advisories(self, messages)
-                return None
-            self.system_outcome = "blocked"
-            capture = RequestCapture(
-                self.journal, getattr(self.owner, "current_step", 0), self.snapshot_id,
-                endpoint_profile=self.endpoint_profile,
-            )
-            return PreparedRequest(
-                (), capture,
-                {"kind": "CONTINUATION_BLOCKED",
-                 "finding": continuation.completion_finding()},
-            )
-        return None
-
     def _prepare_lean_plain_loop(
             self, messages: Sequence[dict], uncapped: Sequence[dict],
             tools: object, *, provider_request: bool) -> PreparedRequest:
@@ -21105,9 +21172,6 @@ class StateFrameRuntime:
             stack_enabled, stack_tail_blocks, validate_deferred_reads,
         )
 
-        continuation_outcome = self._prepare_continuation_boundary(uncapped)
-        if continuation_outcome is not None:
-            return continuation_outcome
         started = time.perf_counter()
         provided_tools = (
             list(tools)
@@ -21421,6 +21485,12 @@ class StateFrameRuntime:
             if isinstance(tools, list):
                 tools[:] = copy.deepcopy(selected_tools)
 
+        if provider_request:
+            continuation_stop = self._finalize_continuation_menu(
+                capture, tuple(selected_tools))
+            if continuation_stop is not None:
+                return continuation_stop
+
         prefix_ratio = shared_prefix_ratio(
             getattr(self, "_lean_previous_messages", None), prepared)
         before_bytes = request_size_bytes(
@@ -21509,32 +21579,78 @@ class StateFrameRuntime:
         """Advance continuation state before rendering or sending its next frame."""
         if self.continuation is None:
             return None
+        # Source replans may re-enter preparation without sending a request.
+        # A stuck scheduler must not silently spin at the same model step.
+        guard_key = getattr(getattr(self, "owner", None), "current_step", None)
+        if (not hasattr(self, "_continuation_prepare_guard_count")
+                or getattr(self, "_continuation_prepare_guard_key", None) != guard_key):
+            self._continuation_prepare_guard_key = guard_key
+            self._continuation_prepare_guard_count = 0
+        self._continuation_prepare_guard_count += 1
+        if self._continuation_prepare_guard_count > 8:
+            raise RuntimeError("continuation preparation exceeded eight attempts without a request")
+        # Candidate menus can be narrower than the eventual capability floor.
+        # Use the registered surface for repair projection until the wire menu
+        # is final; no blocked decision is made at this boundary.
+        self.continuation._request_tools = (
+            getattr(self, "_completion_owner_full_tools", ())
+            or getattr(self, "_continuation_request_tools", ()))
+        self.continuation._final_request_surface_bound = False
         self.continuation.prepare(uncapped)
+        identity = self.continuation.engine.state.active_id
+        details = self.continuation._unresolved_effect_details(identity)
+        # Stop before optional request work only when no typed write
+        # reobservation can be offered on the eventual menu.
+        intrinsic_block = any(
+            detail.get("status") in {"pending", "unknown"}
+            and isinstance(detail.get("tool"), str)
+            and detail.get("tool") not in {"read", "run_tests"}
+            and not self.continuation._dispatchable_repair(detail)
+            for detail in details)
+        if intrinsic_block:
+            self.continuation.terminal_blocked = True
+            self.system_outcome = "continuation_blocked"
+            capture = RequestCapture(
+                self.journal, getattr(self.owner, "current_step", 0), self.snapshot_id,
+                endpoint_profile=self.endpoint_profile)
+            return PreparedRequest((), capture, {
+                "kind": "CONTINUATION_BLOCKED",
+                "finding": self.continuation.completion_finding(),
+            })
         if self.continuation.completed:
             self.continuation_terminal = True
             capture = RequestCapture(
                 self.journal, getattr(self.owner, "current_step", 0), self.snapshot_id,
                 endpoint_profile=self.endpoint_profile)
             return PreparedRequest((), capture, {"kind": "CONTINUATION_COMPLETE"})
-        if getattr(self.continuation, "terminal_blocked", False):
-            from kernel_terminal_policy import (
-                deliver_pending_advisories,
-                enabled as hard_budget_only_enabled,
-                queue_advisory,
-            )
-            if hard_budget_only_enabled(self):
-                queue_advisory(self, "continuation_blocked")
-                deliver_pending_advisories(self, uncapped)
-                return None
-            self.system_outcome = "blocked"
-            capture = RequestCapture(
-                self.journal, getattr(self.owner, "current_step", 0), self.snapshot_id,
-                endpoint_profile=self.endpoint_profile)
-            finding = self.continuation.completion_finding()
-            return PreparedRequest(
-                (), capture,
-                {"kind": "CONTINUATION_BLOCKED", "finding": finding})
         return None
+
+    def _finalize_continuation_menu(
+            self, capture: RequestCapture,
+            prepared_tools: Sequence[Mapping[str, object]]) -> PreparedRequest | None:
+        """Decide effect repairability once, against the final provider surface."""
+        continuation = self.continuation
+        if continuation is None:
+            return None
+        continuation._request_tools = tuple(prepared_tools)
+        continuation._final_request_surface_bound = True
+        identity = continuation.engine.state.active_id
+        details = continuation._unresolved_effect_details(identity)
+        failed_source_read = getattr(continuation, "_exhausted_source_read_failure", None)
+        source_read_failure = failed_source_read() if callable(failed_source_read) else None
+        continuation.terminal_blocked = source_read_failure is not None or any(
+            detail.get("status") in {"pending", "unknown"} and not continuation._live_repair(detail)
+            for detail in details)
+        if not continuation.terminal_blocked:
+            return None
+        # There is no admissible action that can settle this unresolved effect.
+        # Sending another request (even with an advisory) would strand the model
+        # behind the same fence until its hard budget expires.
+        self.system_outcome = "continuation_blocked"
+        return PreparedRequest((), capture, {
+            "kind": "CONTINUATION_BLOCKED",
+            "finding": continuation.completion_finding(),
+        })
 
     @_reprepare_on_source_change
     @_host_phase("prepare")
@@ -21709,6 +21825,10 @@ class StateFrameRuntime:
         # deliver that result in this same provider request.
         if not _frame_routes.ROUTES_ACTIVE or frozen_route_capture is None:
             self._deliver_auto_verify(messages, uncapped)
+        if self.continuation is not None:
+            # Resume reaches the continuation gate before menu composition has
+            # registered the owner cache. Supply the candidate request surface.
+            self._continuation_request_tools = tuple(tools) if isinstance(tools, (list, tuple)) else ()
         if lean_on:
             # Plain LEAN requests skip the projected-frame arm below, so they
             # must advance the same host continuation boundary here.
@@ -24660,6 +24780,10 @@ class StateFrameRuntime:
             for tool in tools
             if isinstance(tool, Mapping)
         )
+        if provider_request:
+            continuation_stop = self._finalize_continuation_menu(capture, prepared_tools)
+            if continuation_stop is not None:
+                return continuation_stop
         if framefit_on and not framefit_minimum_terminal:
             from kernel_stateframe_framefit5 import validate_final_product_boundary
             try:
@@ -24847,6 +24971,7 @@ class StateFrameRuntime:
         from kernel_request_kind import RequestKindError, is_auxiliary
         if is_auxiliary(prepared.capture):
             raise RequestKindError("auxiliary_cannot_activate_workspace_dispatch")
+        self._continuation_prepare_guard_count = 0
         self._active_capture = prepared.capture
         return ACTIVE_REQUEST.set(prepared.capture)
 
@@ -24854,9 +24979,9 @@ class StateFrameRuntime:
     def finish(self, result: Mapping[str, object], *, messages: Sequence[dict] | None = None) -> None:
         if self._finished:
             return
-        hook_terminated = str(result.get("result", "")).upper() in {
-            "HOOK_BLOCKED", "HOOK_CONTAINMENT"}
-        if (not hook_terminated
+        boundary_terminated = str(result.get("result", "")).upper() in {
+            "HOOK_BLOCKED", "HOOK_CONTAINMENT", "CONTINUATION_BLOCKED"}
+        if (not boundary_terminated
                 and getattr(self, "stateframe_completion_owner_mode", "off") == "on"):
             from kernel_completion_owner import reconcile_submitted_request, request_pending
             reconcile_submitted_request(self)
@@ -24891,6 +25016,12 @@ class StateFrameRuntime:
                 host_done_facts_on or repair_blocks_done_stopped or delivery_contract_on
             ) else result
         )
+        if str(terminal_result.get("result", "")).upper() == "CONTINUATION_BLOCKED":
+            finding = (self.continuation.completion_finding()
+                       if self.continuation is not None else None)
+            if isinstance(finding, Mapping) and isinstance(finding.get("detail"), str):
+                terminal_result = dict(terminal_result)
+                terminal_result["error_message"] = finding["detail"]
         if (sealed_terminal is None
                 and getattr(self, "stateframe_completion_owner_mode", "off") == "on"):
             from kernel_completion_owner import terminal_result as owner_terminal_result
@@ -24901,27 +25032,9 @@ class StateFrameRuntime:
             terminal_result["result_class"] = "STOPPED_INCOMPLETE"
             terminal_result["accepted"] = False
             terminal_result["behaviour"] = "STOPPED_INCOMPLETE"
-        if host_done_facts_on and sealed_terminal is None:
-            terminal_gates = list(self._host_done_facts_gating_items)
-            terminal_status = str(terminal_result.get("result", "")).upper()
-            if terminal_status in {"HARNESS_ERROR", "HARNESS_SUSPECT",
-                                   "ATTEMPT_BUDGET_EXHAUSTED", "RENDER_OVERFLOW",
-                                   "STOPPED_INCOMPLETE",
-                                   "HOOK_BLOCKED", "HOOK_CONTAINMENT",
-                                   "BLOCKED", "NEEDS_WORK", "UNCERTIFIED_SUBMIT"}:
-                terminal_gates.append("terminal:" + terminal_status)
-            facts = self._compute_host_done_facts(
-                claims=terminal_result.get("claims", self._host_done_facts_claims),
-                unresolved_gating_items=terminal_result.get("unresolved_gating_items",
-                                                             terminal_gates),
-            )
-            terminal_result["done_facts"] = facts.to_dict()
-            terminal_result["claims"] = copy.deepcopy(dict(facts.claims))
-            self.journal.emit(
-                "done_facts_finalized", producer="kernel_host_done_facts",
-                facts=facts.to_dict(), claims=copy.deepcopy(dict(facts.claims)),
-                accepted=facts.accepted, rejection_reasons=list(facts.rejection_reasons),
-                evidence_digest=facts.evidence_digest, phase="finalization", dispatch=False)
+        if host_done_facts_on:
+            self._finalize_host_done_facts(
+                terminal_result, sealed_terminal=sealed_terminal)
         if sealed_terminal is not None:
             from kernel_terminal_disposition import mint, project
             terminal_result = project(

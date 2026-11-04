@@ -26,6 +26,7 @@ from pathlib import Path
 from kernel_cache_layout import apply_layout, canonical_request_bytes, layout_message_kind
 from kernel_context import token_estimate
 
+from kernel_safe_paths import safe_expanduser
 
 MODE_ENV = "STATEFRAME_KV_CHUNK_REUSE"
 SLOT_ENV = "STATEFRAME_KV_CHUNK_SLOT"
@@ -216,7 +217,7 @@ def _cache_path(plan: ChunkPlan, environ: Mapping[str, str]) -> Path | None:
     directory = environ.get(CACHE_DIR_ENV, "").strip()
     if not directory or not plan.cache_filename:
         return None
-    return Path(directory).expanduser() / plan.cache_filename
+    return safe_expanduser(Path(directory)) / plan.cache_filename
 
 
 def _origin(endpoint: str) -> str:

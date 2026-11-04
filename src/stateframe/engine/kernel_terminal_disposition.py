@@ -25,6 +25,7 @@ _UNCERTIFIED_RESULTS = frozenset({
     "INCOMPLETE",
     "STOPPED_INCOMPLETE",
     "BLOCKED",
+    "CONTINUATION_BLOCKED",
     "NEEDS_WORK",
     "HOOK_BLOCKED",
     "HOOK_CONTAINMENT",
@@ -157,6 +158,7 @@ def _stop_reason(result: Mapping[str, object], terminal: str, *, accepted: bool)
         "UNCERTIFIED_SUBMIT": "UNCERTIFIED_SUBMIT",
         "HOOK_BLOCKED": "HOOK_BLOCKED",
         "HOOK_CONTAINMENT": "HOOK_CONTAINMENT",
+        "CONTINUATION_BLOCKED": "CONTINUATION_BLOCKED",
     }
     if value in aliases:
         return aliases[value]

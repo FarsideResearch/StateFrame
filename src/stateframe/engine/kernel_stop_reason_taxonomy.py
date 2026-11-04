@@ -251,7 +251,7 @@ def _event_reason(event: Mapping[str, object]) -> str | None:
     kind = _normalise(event.get("kind"))
     if kind == "V2_TERMINAL":
         terminal = _reason_from_value(event.get("terminal"))
-        if terminal in {HOOK_BLOCKED, HOOK_CONTAINMENT}:
+        if terminal in {HOOK_BLOCKED, HOOK_CONTAINMENT, CONTINUATION_BLOCKED}:
             return terminal
     direct = _reason_from_value(kind)
     if direct is not None and direct != DONE_ACCEPTED:

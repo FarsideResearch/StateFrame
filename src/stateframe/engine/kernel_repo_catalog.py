@@ -33,6 +33,8 @@ from mc_repo_intel_vendor.call_graph import build_graph, enforce_repo_cache_cap,
 from mc_repo_intel_vendor.ts_dispatch import outline_source
 from kernel_measurement import profiled_function_span
 
+from kernel_safe_paths import safe_expanduser, safe_home
+
 logger = logging.getLogger(__name__)
 
 SCHEMA = "catalog-structural-index/1"
@@ -703,10 +705,9 @@ def _outline_span_records(
 
 def _cache_fallback_bases() -> tuple[Path, ...]:
     candidates: list[Path] = []
-    try:
-        candidates.append(Path.home() / ".cache" / "stateframe" / "repo-intel")
-    except (OSError, RuntimeError):
-        pass
+    home = safe_home()
+    if home is not None:
+        candidates.append(home / ".cache" / "stateframe" / "repo-intel")
     try:
         candidates.append(Path(tempfile.gettempdir()) / "stateframe" / "repo-intel")
     except (OSError, RuntimeError):
@@ -717,7 +718,7 @@ def _cache_fallback_bases() -> tuple[Path, ...]:
     seen: set[Path] = set()
     for candidate in candidates:
         try:
-            path = candidate.expanduser().resolve()
+            path = safe_expanduser(candidate).resolve()
         except (OSError, RuntimeError, ValueError):
             continue
         if path not in seen:

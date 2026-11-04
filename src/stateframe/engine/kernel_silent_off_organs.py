@@ -258,8 +258,9 @@ def wire_expectation_ledger(journal: object) -> OrganWiring:
         return OrganWiring(None, False, "off", reason=reason)
     try:
         from expectation_ledger import ExpectationLedger
+        from kernel_wire_identity import wire_run_seed
 
-        ledger = ExpectationLedger()
+        ledger = ExpectationLedger(run_seed=wire_run_seed(journal))
     except Exception as error:  # noqa: BLE001 - startup wiring must remain fail-open
         _emit_state(
             journal, organ="expectation_ledger", requested=True,

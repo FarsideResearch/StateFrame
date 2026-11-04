@@ -10,6 +10,7 @@ ACCEPTANCE = Path(__file__).resolve().parent
 BUDGETED = {
     "test_resume_completion.py": "test_e19_volatile_shell_observation_is_byte_identical_on_resume",
     "test_no_skills_wire_compat.py": "_run_tree",
+    "../test_refusal_names_live_action.py": "recorded_blocked_run",
 }
 
 
@@ -19,10 +20,10 @@ def _budget_cases(tree: ast.AST) -> set[str]:
             and node.args and isinstance(node.args[0], ast.Constant)}
 
 
-def _literal_timeouts(function: ast.FunctionDef) -> list[int]:
+def _literal_deadlines(function: ast.FunctionDef) -> list[int]:
     return [keyword.value.lineno for node in ast.walk(function) if isinstance(node, ast.Call)
             for keyword in node.keywords
-            if keyword.arg == "timeout" and isinstance(keyword.value, ast.Constant)
+            if keyword.arg in {"timeout", "expected_seconds"} and isinstance(keyword.value, ast.Constant)
             and keyword.value.value > 60]
 
 
@@ -33,7 +34,7 @@ def test_every_measured_case_is_used_and_budgeted_functions_have_no_bare_timeout
         used |= _budget_cases(tree)
         function = next(node for node in ast.walk(tree)
                         if isinstance(node, ast.FunctionDef) and node.name == function_name)
-        assert not _literal_timeouts(function), f"{name}:{function_name} uses a bare timeout literal"
+        assert not _literal_deadlines(function), f"{name}:{function_name} uses a bare deadline literal"
     assert used == set(MEASURED_SECONDS)
 
 

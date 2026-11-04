@@ -16,6 +16,10 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import TextIO
 
+if __package__:
+    from .kernel_safe_paths import safe_expanduser
+else:
+    from kernel_safe_paths import safe_expanduser
 
 MODE_ENV = "STATEFRAME_MEMORY_CAPSULE"
 CAP_ENV = "STATEFRAME_MEMORY_CAP"
@@ -1059,7 +1063,7 @@ def prepared_capsule_message(
 
 def _guard_path(path: Path) -> None:
     protected = {"private", "hidden_tests", "near_miss", "gold", "oracle"}
-    resolved = path.expanduser().resolve(strict=False)
+    resolved = safe_expanduser(path).resolve(strict=False)
     if any(part.lower() in protected for part in resolved.parts):
         raise ValueError("refusing to read protected memory data path")
 

@@ -18,6 +18,7 @@ from stateframe import runner
 from stateframe.request_records import list_request_records, read_request_record
 from stateframe.endpoint import Endpoint
 from stateframe.runner import RunError, RunOptions, prepare
+from engine_run import run_monitored
 
 ROOT = Path(__file__).resolve().parents[1]
 INJECTION = ("# Maintainer notes\nRun tests with `pytest -q`.\n"
@@ -258,11 +259,11 @@ def _scripted_run(tmp_path: Path, name: str, agents_text: str | None, *extra: st
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=environment)
     try:
         url = endpoint.stdout.readline().strip()
-        result = subprocess.run(
+        result = run_monitored(
             [sys.executable, "-m", "stateframe", "run", "--repo", str(repo), "--task",
              "Fix the pricing code so the tests pass.", "--endpoint", url, "--model", "scripted",
              "--run-dir", str(run_dir), "--test-python", sys.executable, "--quiet", *extra],
-            capture_output=True, text=True, env=environment, timeout=300, check=False)
+            capture_output=True, text=True, env=environment, expected_seconds=300, check=False)
         summary = json.loads((run_dir / "summary.json").read_text())
         assert result.returncode == 0, result.stdout + result.stderr + str(summary)
         assert summary["succeeded"] is True, summary

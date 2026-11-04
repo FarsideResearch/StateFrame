@@ -13,9 +13,11 @@ from pathlib import Path
 
 import pytest
 
-from fixtures.process_signals import record_identity, signal_owned, signal_verified
+from fixtures.process_signals import (record_identity, signal_run_owned, signal_run_verified,
+                                      wait_for_checkpoint_saved)
 
 from ._support import Endpoint, PYTHON, ROOT, copy_repo, environment, read_measurement_events
+from engine_run import EngineProcess, run_monitored, start_monitored
 
 
 pytestmark = [pytest.mark.host_sandbox,
@@ -24,15 +26,19 @@ pytestmark = [pytest.mark.host_sandbox,
                                  reason="routing engine lane not installed")]
 
 
-def _kill_run(process: subprocess.Popen[str], run_dir: Path | None = None) -> None:
+def _kill_run(process: EngineProcess, run_dir: Path, *,
+              require_checkpoint_saved: bool = True) -> None:
     """Kill the CLI and, like a machine crash, the engine: it runs in its own session and holds the run lock."""
     # The lock holder is matched by its engine command and re-verified before the signal.
     launched_after = 0.0
+    deadline = time.monotonic() + 120
+    if require_checkpoint_saved:
+        wait_for_checkpoint_saved(run_dir, deadline=deadline, what="routed run crash")
     if process.poll() is None:
-        signal_owned(process, signal.SIGKILL)
+        # The shared barrier above covers both signals in this crash simulation.
+        signal_run_owned(run_dir, process, signal.SIGKILL, deadline=deadline,
+                         what="routed runner crash", require_checkpoint_saved=False, group=True)
     process.communicate(timeout=5)
-    if run_dir is None:
-        return
     from stateframe.resume import ENGINE_LOCK, _lock_holder
 
     cutoff = time.monotonic() + 15
@@ -40,7 +46,8 @@ def _kill_run(process: subprocess.Popen[str], run_dir: Path | None = None) -> No
         try:
             pid = int(holder)
             identity = record_identity(pid, launched_after=launched_after, command_fragment="_child.py")
-            signal_verified(pid, identity, signal.SIGKILL)
+            signal_run_verified(run_dir, pid, identity, signal.SIGKILL, deadline=deadline,
+                                what="routed engine crash", require_checkpoint_saved=False)
         except (ProcessLookupError, PermissionError, ValueError, RuntimeError):
             pass
         time.sleep(0.1)
@@ -75,14 +82,14 @@ def test_public_cli_routes_first_plan_send_to_second_endpoint(tmp_path):
     default_script = tmp_path / "default.script.json"
     default_script.write_text(json.dumps({"model": "scripted", "steps": []}))
     with Endpoint(default_script) as default, Endpoint(cheap_script) as cheap:
-        process = subprocess.run([
+        process = run_monitored([
             PYTHON, "-m", "stateframe", "run", "--repo", str(repo), "--task", "Inspect app.py",
             "--endpoint", default.url, "--model", "scripted", "--run-dir", str(run_dir),
             "--test-python", PYTHON, "--test-cmd", "python -m unittest discover -s tests -q",
             "--max-turns", "3", "--quiet", "--route", f"plan.endpoint={cheap.url}",
             "--route", "plan.model=cheap", "--route", f"read.endpoint={cheap.url}",
             "--route", "read.model=cheap"], capture_output=True, text=True,
-            env=environment(), timeout=240, check=False)
+            env=environment(), expected_seconds=240, check=False)
     assert process.returncode in (0, 1), process.stdout + process.stderr
     spec = json.loads((run_dir / "spec.json").read_text())
     first = json.loads((run_dir / "wire" / "0001.route.json").read_text())
@@ -107,13 +114,13 @@ def test_failed_check_replans_then_read_action_returns_to_read_route(tmp_path):
         {"tool": "read", "required": True,
          "arguments": {"path": "shop/pricing.py"}}]}))
     with Endpoint(default_script) as default, Endpoint(plan_script) as plan:
-        process = subprocess.run([
+        process = run_monitored([
             PYTHON, "-m", "stateframe", "run", "--repo", str(repo),
             "--task", "Run tests/test_pricing.py, then inspect shop/pricing.py twice.",
             "--endpoint", default.url, "--model", "scripted", "--run-dir", str(run_dir),
             "--test-python", PYTHON, "--max-turns", "3", "--quiet",
             "--route", f"plan.endpoint={plan.url}", "--route", "plan.model=plan",
-        ], capture_output=True, text=True, env=environment(), timeout=300, check=False)
+        ], capture_output=True, text=True, env=environment(), expected_seconds=300, check=False)
     assert process.returncode in (0, 1), process.stdout + process.stderr
     wire = run_dir / "wire"
     routes = [json.loads((wire / f"{index:04d}.route.json").read_text())
@@ -140,7 +147,7 @@ def test_read_edit_reply_is_discarded_and_reasked_on_default(tmp_path):
             {"tool": "file_create", "arguments": {"path": "accepted.txt", "content": "right model"}},
             {"tool": "done", "arguments": {"summary": "complete"}}]}))
     with Endpoint(default_script) as default, Endpoint(cheap_script) as cheap:
-        process = subprocess.run([
+        process = run_monitored([
             PYTHON, "-m", "stateframe", "run", "--repo", str(repo),
             "--task", "Read app.py, then create accepted.txt containing right model.",
             "--endpoint", default.url, "--model", "scripted", "--run-dir", str(run_dir),
@@ -148,7 +155,7 @@ def test_read_edit_reply_is_discarded_and_reasked_on_default(tmp_path):
             "--max-turns", "5", "--quiet", "--route", f"plan.endpoint={cheap.url}",
             "--route", "plan.model=cheap", "--route", f"read.endpoint={cheap.url}",
             "--route", "read.model=cheap"], capture_output=True, text=True,
-            env=environment(), timeout=300, check=False)
+            env=environment(), expected_seconds=300, check=False)
     assert process.returncode in (0, 1), process.stdout + process.stderr
     cheap_requests = [json.loads(line) for line in cheap_log.read_text().splitlines()]
     default_requests = [json.loads(line) for line in default_log.read_text().splitlines()]
@@ -210,18 +217,18 @@ def test_killed_second_leg_replays_first_leg_and_verifies_pending_bytes(tmp_path
     with Endpoint(default_script) as default, Endpoint(cheap_script) as cheap:
         routes = ["--route", f"plan.endpoint={cheap.url}", "--route", "plan.model=cheap",
                   "--route", f"read.endpoint={cheap.url}", "--route", "read.model=cheap"]
-        process = subprocess.Popen([
+        process = start_monitored([
             PYTHON, "-m", "stateframe", "run", "--repo", str(repo),
             "--task", "Create accepted.txt containing right model.",
             "--endpoint", default.url, "--model", "scripted", "--run-dir", str(run_dir),
             "--test-python", PYTHON, "--test-cmd", "python -m unittest discover -s tests -q",
             "--max-turns", "3", "--quiet", *routes], stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE, text=True, env=environment(), start_new_session=True)
+            stderr=subprocess.PIPE, text=True, env=environment(), start_new_session=True,
+            expected_seconds=120, step="routed second-leg interruption")
         pending_route = run_dir / "wire" / "0002.route.json"
         pending_request = run_dir / "wire" / "0002.request.json"
-        cutoff = time.monotonic() + 120
         try:
-            while time.monotonic() < cutoff and process.poll() is None and not pending_request.is_file():
+            while process.poll() is None and not pending_request.is_file():
                 time.sleep(0.02)
             assert pending_route.is_file() and pending_request.is_file(), process.communicate(timeout=3)
             first = (run_dir / "wire" / "0001.request.json").read_bytes()
@@ -229,12 +236,13 @@ def test_killed_second_leg_replays_first_leg_and_verifies_pending_bytes(tmp_path
             route_bytes = pending_route.read_bytes()
             recorded_routes = json.loads((run_dir / "spec.json").read_text())["routes"]
             _kill_run(process, run_dir)
-            resumed = subprocess.run([PYTHON, "-m", "stateframe", "resume", str(run_dir),
+            resumed = run_monitored([PYTHON, "-m", "stateframe", "resume", str(run_dir),
                                       "--quiet"], capture_output=True, text=True,
-                                      env=environment(), timeout=300, check=False)
+                                      env=environment(), expected_seconds=300, check=False)
         finally:
             if process.poll() is None:
-                _kill_run(process, run_dir)
+                # Failure cleanup may precede the first checkpoint.
+                _kill_run(process, run_dir, require_checkpoint_saved=False)
     assert resumed.returncode in (0, 1), resumed.stdout + resumed.stderr
     assert (run_dir / "wire" / "0001.request.json").read_bytes() == first
     assert (run_dir / "wire" / "0002.request.json").read_bytes() == second
@@ -258,7 +266,7 @@ def test_routed_crash_boundary_replays_with_same_route_and_request_bytes(tmp_pat
     with Endpoint(default_script) as default, Endpoint(cheap_script) as cheap:
         routes = ["--route", f"plan.endpoint={cheap.url}", "--route", "plan.model=cheap",
                   "--route", f"read.endpoint={cheap.url}", "--route", "read.model=cheap"]
-        process = subprocess.Popen([
+        process = start_monitored([
             PYTHON, "-m", "stateframe", "run", "--repo", str(repo),
             "--task", "Create accepted.txt containing right.",
             "--endpoint", default.url, "--model", "scripted", "--run-dir", str(run_dir),
@@ -267,13 +275,13 @@ def test_routed_crash_boundary_replays_with_same_route_and_request_bytes(tmp_pat
             "--max-turns", "3", "--quiet", *routes], stdout=subprocess.PIPE,
             stderr=subprocess.PIPE, text=True,
             env=environment(),
-            start_new_session=True)
+            start_new_session=True, expected_seconds=120,
+            step="routed crash-boundary interruption")
         wire = run_dir / "wire"
         route2 = wire / "0002.route.json"
         request2 = wire / "0002.request.json"
-        cutoff = time.monotonic() + 120
         try:
-            while time.monotonic() < cutoff and process.poll() is None and not marker.is_file():
+            while process.poll() is None and not marker.is_file():
                 time.sleep(0.02)
             assert marker.is_file(), process.communicate(timeout=3)
             assert process.poll() is None, process.communicate(timeout=3)
@@ -284,14 +292,16 @@ def test_routed_crash_boundary_replays_with_same_route_and_request_bytes(tmp_pat
                 assert not route2.exists()
             saved = {path.name: path.read_bytes() for path in wire.glob("*.route.json")}
             saved.update({path.name: path.read_bytes() for path in wire.glob("*.request.json")})
-            _kill_run(process, run_dir)
+            # Crash injection is before a completed step, so no checkpoint is expected.
+            _kill_run(process, run_dir, require_checkpoint_saved=False)
             arm.unlink()
-            resumed = subprocess.run([PYTHON, "-m", "stateframe", "resume", str(run_dir),
+            resumed = run_monitored([PYTHON, "-m", "stateframe", "resume", str(run_dir),
                                       "--quiet", *routes], capture_output=True, text=True,
-                                     env=environment(), timeout=300, check=False)
+                                     env=environment(), expected_seconds=300, check=False)
         finally:
             if process.poll() is None:
-                _kill_run(process, run_dir)
+                # Failure cleanup may precede the first checkpoint.
+                _kill_run(process, run_dir, require_checkpoint_saved=False)
     assert resumed.returncode in (0, 1), resumed.stdout + resumed.stderr
     for name, data in saved.items():
         assert (wire / name).read_bytes() == data
@@ -312,14 +322,14 @@ def test_escalation_without_second_response_allowance_stops_before_dispatch(tmp_
         "steps": [{"tool": "file_create", "arguments": {
             "path": "accepted.txt", "content": "right"}}]}))
     with Endpoint(default_script) as default, Endpoint(cheap_script) as cheap:
-        process = subprocess.run([
+        process = run_monitored([
             PYTHON, "-m", "stateframe", "run", "--repo", str(repo),
             "--task", "Create accepted.txt containing right.",
             "--endpoint", default.url, "--model", "scripted", "--run-dir", str(run_dir),
             "--test-python", PYTHON, "--test-cmd", "python -m unittest discover -s tests -q",
             "--max-turns", "1", "--quiet", "--route", f"plan.endpoint={cheap.url}",
             "--route", "plan.model=cheap"], capture_output=True, text=True,
-            env=environment(), timeout=240, check=False)
+            env=environment(), expected_seconds=240, check=False)
     assert process.returncode in (0, 1), process.stdout + process.stderr
     assert (run_dir / "wire" / "0001.route.json").is_file()
     assert not (run_dir / "wire" / "0002.request.json").exists()
@@ -351,12 +361,12 @@ def test_routed_tokenizer_survives_sealing_on_a_separate_server(tmp_path):
         for role in ("plan", "read"):
             routes += ["--route", f"{role}.endpoint={cheap.url}", "--route", f"{role}.model=cheap",
                        "--route", f"{role}.tokenizer={tok.url}"]
-        process = subprocess.run([
+        process = run_monitored([
             PYTHON, "-m", "stateframe", "run", "--repo", str(repo), "--task", "Inspect app.py",
             "--endpoint", default.url, "--model", "scripted", "--run-dir", str(run_dir),
             "--test-python", PYTHON, "--test-cmd", "python -m unittest discover -s tests -q",
             "--max-turns", "2", "--quiet", *routes], capture_output=True, text=True,
-            env=environment(), timeout=240, check=False)
+            env=environment(), expected_seconds=240, check=False)
     assert process.returncode in (0, 1), process.stdout + process.stderr
     roles = [json.loads(path.read_text())["role"] for path in sorted((run_dir / "wire").glob("*.route.json"))]
     assert roles and set(roles) <= {"plan", "read"}
@@ -461,13 +471,13 @@ def test_routed_generic_shell_check_escalates_edit_and_passes(tmp_path):
         {"tool": "done", "arguments": {"summary": "The shell check passes."}},
     ], request_log=default_log)
     with Endpoint(default_script) as default, Endpoint(cheap_script) as cheap:
-        process = subprocess.run([
+        process = run_monitored([
             PYTHON, "-m", "stateframe", "run", "--repo", str(repo),
             "--task", "Read app.sh, fix its value, and run sh check.sh.",
             "--endpoint", default.url, "--model", "scripted", "--run-dir", str(run_dir),
             "--test-cmd", "sh check.sh", "--runner-kind", "generic", "--target", "app.sh",
             "--max-turns", "8", "--quiet", *_route_flags(cheap)],
-            capture_output=True, text=True, env=environment(), timeout=300, check=False)
+            capture_output=True, text=True, env=environment(), expected_seconds=300, check=False)
     summary = json.loads((run_dir / "summary.json").read_text())
     assert process.returncode == 0, process.stdout + process.stderr
     assert summary["runner_kind"] == "generic"
@@ -525,14 +535,14 @@ def test_routed_protect_all_refuses_escalated_test_edit(tmp_path):
         {"tool": "done", "arguments": {"summary": "The test passes."}},
     ])
     with Endpoint(default_script) as default, Endpoint(cheap_script) as cheap:
-        process = subprocess.run([
+        process = run_monitored([
             PYTHON, "-m", "stateframe", "run", "--repo", str(repo),
             "--task", "Read the existing test, fix value.py, and run the test.",
             "--endpoint", default.url, "--model", "scripted", "--run-dir", str(run_dir),
             "--test-python", PYTHON, "--test-cmd", "python -m pytest -q tests/test_value.py",
             "--protect-tests", "all", "--target", "value.py", "--max-turns", "10",
             "--quiet", *_route_flags(cheap)], capture_output=True, text=True,
-            env=environment(), timeout=300, check=False)
+            env=environment(), expected_seconds=300, check=False)
     assert process.returncode == 0, process.stdout + process.stderr
     spec = json.loads((run_dir / "spec.json").read_text())
     summary = json.loads((run_dir / "summary.json").read_text())
@@ -569,13 +579,13 @@ def test_routed_hook_runs_once_for_escalated_edit_and_context_reaches_each_route
         {"tool": "done", "arguments": {"summary": "Check passed."}},
     ])
     with Endpoint(default_script) as default, Endpoint(cheap_script) as cheap:
-        process = subprocess.run([
+        process = run_monitored([
             PYTHON, "-m", "stateframe", "run", "--repo", str(repo),
             "--task", "Read app.sh, fix its value, and run sh check.sh.",
             "--endpoint", default.url, "--model", "scripted", "--run-dir", str(run_dir),
             "--test-cmd", "sh check.sh", "--runner-kind", "generic", "--target", "app.sh",
             "--hooks", str(config), "--max-turns", "8", "--quiet", *_route_flags(cheap)],
-            capture_output=True, text=True, env=environment(), timeout=300, check=False)
+            capture_output=True, text=True, env=environment(), expected_seconds=300, check=False)
     assert process.returncode == 0, process.stdout + process.stderr
     assert json.loads((run_dir / "summary.json").read_text())["succeeded"] is True
     assert (run_dir / "workspace" / "app.sh").read_text() == "VALUE=good\n"
@@ -621,7 +631,7 @@ def test_routed_hooks_resume_after_discard_replays_tape_without_skipped_check(tm
         {"tool": "done", "arguments": {"summary": "Check passed."}},
     ])
     with Endpoint(default_script) as default, Endpoint(cheap_script) as cheap:
-        process = subprocess.Popen([
+        process = start_monitored([
             PYTHON, "-m", "stateframe", "run", "--repo", str(repo),
             "--task", "Read app.sh, fix its value, and run sh check.sh.",
             "--endpoint", default.url, "--model", "scripted", "--run-dir", str(run_dir),
@@ -629,10 +639,10 @@ def test_routed_hooks_resume_after_discard_replays_tape_without_skipped_check(tm
             "--runner-kind", "generic", "--target", "app.sh", "--hooks", str(config),
             "--max-turns", "8", "--quiet", *_route_flags(cheap)],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-            env=environment(), start_new_session=True)
+            env=environment(), start_new_session=True, expected_seconds=120,
+            step="routed hooks interruption")
         try:
-            cutoff = time.monotonic() + 120
-            while time.monotonic() < cutoff and process.poll() is None and not marker.is_file():
+            while process.poll() is None and not marker.is_file():
                 time.sleep(0.02)
             assert marker.is_file() and process.poll() is None, process.communicate(timeout=3)
             wire = run_dir / "wire"
@@ -647,12 +657,13 @@ def test_routed_hooks_resume_after_discard_replays_tape_without_skipped_check(tm
             assert all(row["kind"] == "complete" for row in old_tape[1::2])
             _kill_run(process, run_dir)
             arm.unlink()
-            resumed = subprocess.run([PYTHON, "-m", "stateframe", "resume", str(run_dir),
+            resumed = run_monitored([PYTHON, "-m", "stateframe", "resume", str(run_dir),
                                       "--quiet"], capture_output=True, text=True,
-                                     env=environment(), timeout=300, check=False)
+                                     env=environment(), expected_seconds=300, check=False)
         finally:
             if process.poll() is None:
-                _kill_run(process, run_dir)
+                # Failure cleanup may precede the first checkpoint.
+                _kill_run(process, run_dir, require_checkpoint_saved=False)
     assert resumed.returncode == 0, resumed.stdout + resumed.stderr
     assert "resuming by full replay without that check" not in resumed.stdout + resumed.stderr
     assert not (run_dir / "resume-divergence.json").exists()

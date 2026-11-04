@@ -27,6 +27,7 @@ import uuid
 
 from kernel_measurement import externalize_journal_fields
 import kernel_workspace_truth as _workspace_truth
+from kernel_wire_identity import seeded_content_wire_id, wire_identity_content, wire_run_seed
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -799,12 +800,14 @@ class PortfolioManager:
 
     def __init__(self, baseline_workspace: str | Path, *, store_root: str | Path,
                  policy: PortfolioPolicy | None = None, ticket_id: str = "",
-                 parent_ledger: object | None = None, enabled_mode: bool = True):
+                 parent_ledger: object | None = None, enabled_mode: bool = True,
+                 run_seed: str | None = None):
         self.baseline_workspace = Path(baseline_workspace).resolve()
         self.store_root = Path(store_root).resolve()
         self.store_root.mkdir(parents=True, exist_ok=True)
         self.policy = policy or PortfolioPolicy.from_env()
         self.ticket_id = str(ticket_id or "")
+        self.run_seed = str(run_seed or wire_run_seed(None))
         self.journal = PortfolioJournal(self.store_root / "portfolio-events.jsonl")
         self.ledger = PortfolioLedger(self.policy, parent=parent_ledger)
         self.store = CandidateStore(self.store_root / "candidates",
@@ -847,16 +850,44 @@ class PortfolioManager:
             "expected": payload.get("expected"),
         }))
 
+    @staticmethod
+    def _request_step(request: Mapping[str, object] | None) -> int:
+        if isinstance(request, Mapping):
+            for key in ("step", "turn"):
+                value = request.get(key)
+                if type(value) is int and value >= 0:
+                    return value
+        return 0
+
     def _new_branch(self, parent: Path, *, root_index: int | None,
-                    fork_index: int | None, temperature: float | None) -> BranchContext:
+                    fork_index: int | None, temperature: float | None,
+                    request: Mapping[str, object] | None = None) -> BranchContext:
         prefix = "root" if fork_index is None else "fork"
+        step = self._request_step(request)
+        ordinal = ((root_index if root_index is not None else 0) + 1
+                   if fork_index is None else fork_index + 1)
+        identity_content = {
+            "ticket_id": self.ticket_id,
+            "parent_revision": workspace_tree_hash(parent),
+            "root_index": root_index,
+            "fork_index": fork_index,
+            "request": wire_identity_content(request or {}),
+        }
+        branch_wire_id = seeded_content_wire_id(
+            self.run_seed, "portfolio-branch", step, identity_content, ordinal=ordinal,
+        )
         branch_id = f"{prefix}-{(root_index if root_index is not None else 0):02d}-"
-        branch_id += f"{(fork_index if fork_index is not None else 0):02d}-{uuid.uuid4().hex[:10]}"
+        branch_id += f"{(fork_index if fork_index is not None else 0):02d}-{branch_wire_id[:10]}"
         branch_dir = self.store_root / "branches" / branch_id
         workspace = branch_dir / "workspace"
         _copy_workspace(parent, workspace)
-        journal = PortfolioJournal(branch_dir / "events.jsonl", journal_id="journal:" + uuid.uuid4().hex)
-        request_id = "request:" + uuid.uuid4().hex
+        journal_id = "journal:" + seeded_content_wire_id(
+            self.run_seed, "portfolio-journal", step, identity_content, ordinal=ordinal,
+        )
+        journal = PortfolioJournal(branch_dir / "events.jsonl", journal_id=journal_id)
+        request_id = "request:" + seeded_content_wire_id(
+            self.run_seed, "portfolio-request", step, identity_content, ordinal=ordinal,
+        )
         context = BranchContext(
             branch_id=branch_id, workspace=workspace, journal_id=journal.journal_id,
             journal_path=journal.path, request_id=request_id, temperature=temperature,
@@ -947,7 +978,7 @@ class PortfolioManager:
                            else self.policy.temperature_for(index))
             try:
                 context = self._new_branch(parent, root_index=None, fork_index=index,
-                                           temperature=temperature)
+                                           temperature=temperature, request=request)
                 children.append(self._run_branch(context, request=request,
                                                  model_request=model_request))
             except Exception as error:
@@ -970,7 +1001,7 @@ class PortfolioManager:
             try:
                 context = self._new_branch(
                     parent, root_index=index, fork_index=None,
-                    temperature=self.policy.temperature_for(index))
+                    temperature=self.policy.temperature_for(index), request=request)
                 roots.append(self._run_branch(context, request=request,
                                               model_request=model_request))
             except Exception as error:

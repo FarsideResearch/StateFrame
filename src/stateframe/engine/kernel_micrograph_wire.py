@@ -25,6 +25,10 @@ _RESULTS = {
     "test": frozenset({"RED", "GREEN"}),
 }
 _WEIGHTS = {"RED": 5, "APPLIED": 3, "OK": 1, "READ": 1, "SUCCESS": 1, "GREEN": 0}
+_STABLE_RECEIPT_ID = re.compile(
+    r"^(?:[0-9a-f]{20}|check-receipt:[0-9a-f]{24}|"
+    r"environment-receipt:[0-9a-f]{20})$"
+)
 
 
 def mode() -> str:
@@ -139,11 +143,10 @@ class MicroGraphWire:
             return ()
         kind = receipt.get("kind")
         result = receipt.get("result_class")
-        evidence_id = receipt.get("receipt_id", raw.get("event_id") if isinstance(raw, Mapping) else None)
+        evidence_id = receipt.get("receipt_id")
         if (not isinstance(kind, str) or kind not in _KINDS or not isinstance(result, str)
                 or result.upper() not in _RESULTS[kind]
-                or not isinstance(evidence_id, str) or not 1 <= len(evidence_id) <= 128
-                or any(ord(char) < 33 or ord(char) > 126 for char in evidence_id)):
+                or not isinstance(evidence_id, str) or not _STABLE_RECEIPT_ID.fullmatch(evidence_id)):
             self.skipped += 1
             return ()
         if kind == "test" and "exit_code" in receipt:

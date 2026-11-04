@@ -9,6 +9,7 @@ import math
 import os
 import re
 from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass, replace
 
 from kernel_frame_optional_allocation import identity, selection_from_frame
 from kernel_frame_request_allocation import (
@@ -57,6 +58,11 @@ def measured_request_tokens(body: Mapping[str, object], meter: object) -> int:
         return tokens
     if method != "tokenize":
         return calibrated_estimate(body, meter)
+    _remember_exact_pair(body, meter, tokens)
+    return tokens
+
+
+def _remember_exact_pair(body: Mapping[str, object], meter: object, tokens: int) -> None:
     overhead = getattr(meter, "template_overhead_tokens", 0)
     overhead = overhead if type(overhead) is int and overhead >= 0 else 0
     chars = len(json.dumps(body, sort_keys=True, ensure_ascii=False))
@@ -67,7 +73,103 @@ def measured_request_tokens(body: Mapping[str, object], meter: object) -> int:
         if (not isinstance(prior, tuple) or len(prior) != 2
                 or core * prior[1] > prior[0] * chars):
             meter._evictfix_token_pair = (core, chars)
-    return tokens
+
+
+def _calibrated_ratio(meter: object) -> float:
+    pair = getattr(meter, "_evictfix_token_pair", None)
+    if (isinstance(pair, tuple) and len(pair) == 2
+            and all(type(value) is int and value > 0 for value in pair)):
+        return pair[1] / pair[0]
+    return _DEFAULT_CHARS_PER_TOKEN
+
+
+def _serialized_chars(body: Mapping[str, object]) -> int:
+    return len(json.dumps(body, sort_keys=True, ensure_ascii=False))
+
+
+@dataclass(frozen=True, slots=True)
+class FrozenRequestCounter:
+    """The allocation's count and ratio remain authoritative for this request."""
+
+    method: str
+    tokens: int
+    chars: int
+    ratio: float
+    body_digest: str
+    tokenizer_identity: str
+    request_id: str
+    logical_request_id: str
+
+    @classmethod
+    def capture(cls, body: Mapping[str, object], meter: object,
+                tokens: int, method: str, request_id: str) -> FrozenRequestCounter:
+        from kernel_frame_optional_allocation import identity
+        return cls(method, tokens, _serialized_chars(body),
+                   _calibrated_ratio(meter), identity(body),
+                   meter.tokenizer_identity(body), request_id,
+                   meter._request_id or request_id)
+
+
+def final_request_tokens(body: Mapping[str, object], meter: object,
+                         capture: object) -> tuple[int, str]:
+    """Count the final body with the allocation's frozen measurement method.
+
+    A changed exact-counted body is tokenized when possible. If tokenize has
+    failed, only its size delta is estimated on top of the fitted exact count.
+    The independent byte envelope bounds serialized growth. If tokenize
+    recovers, the proof also checks its exact count for a real undercount; the
+    conservative fallback rejection bound remains diagnostic during an outage.
+    """
+    frozen = getattr(capture, "_frame_candidate_counter", None)
+    if not isinstance(frozen, FrozenRequestCounter):
+        from kernel_request_measurement import RequestMeasurement
+        carried = getattr(capture, "_frame_candidate_measurement", None)
+        request_id = str(getattr(capture, "request_id", ""))
+        if (isinstance(carried, RequestMeasurement)
+                and carried.matches(body, tokenizer_identity=meter.tokenizer_identity(body),
+                                    request_id=request_id,
+                                    logical_request_id=meter._request_id or request_id)
+                and carried.method == meter.measure_method
+                and carried.prompt_tokens is not None):
+            return carried.prompt_tokens, carried.method
+        return meter.measure(body)
+    request_id = str(getattr(capture, "request_id", ""))
+    if (frozen.tokenizer_identity != meter.tokenizer_identity(body)
+            or frozen.request_id != request_id
+            or frozen.logical_request_id != (meter._request_id or request_id)):
+        raise FrameRequestAllocationError("frozen request counter identity changed")
+    if frozen.method == "verified_byte_bound":
+        # This is an oversize rejection sentinel, not an allocation count.
+        # Freeze the real method only after trimming makes the body measurable.
+        tokens, method = meter.measure(body)
+        if method == "calibrated_bytes":
+            tokens = calibrated_estimate(body, meter)
+        elif method == "tokenize":
+            _remember_exact_pair(body, meter, tokens)
+        if method != "verified_byte_bound":
+            capture._frame_candidate_counter = FrozenRequestCounter.capture(
+                body, meter, tokens, method, request_id)
+        return tokens, method
+    if identity(body) == frozen.body_digest:
+        return frozen.tokens, frozen.method
+    if frozen.method == "tokenize":
+        tokens, method = meter.measure(body)
+        if method in {"tokenize", "verified_byte_bound"}:
+            if method == "tokenize":
+                _remember_exact_pair(body, meter, tokens)
+            return tokens, frozen.method
+    delta = _serialized_chars(body) - frozen.chars
+    return max(0, frozen.tokens + math.ceil(delta / frozen.ratio)), frozen.method
+
+
+def carry_final_request_tokens(body: Mapping[str, object], capture: object,
+                               tokens: int) -> None:
+    """Bind an admitted projection to the original method and ratio."""
+    frozen = getattr(capture, "_frame_candidate_counter", None)
+    if isinstance(frozen, FrozenRequestCounter):
+        capture._frame_candidate_counter = replace(
+            frozen, tokens=tokens, chars=_serialized_chars(body),
+            body_digest=identity(body))
 
 
 def _capture_carrier_roles(
@@ -537,15 +639,11 @@ def finalize_frame_candidate(
     )
 
     def frame_tokens(value: Mapping[str, object]) -> int:
-        return (measured_request_tokens(value, meter) if use_meter_for_frame
+        return (fitted_request_tokens(value) if use_meter_for_frame
                 else frame_counter(value))
 
     def fitted_request_tokens(value: Mapping[str, object]) -> int:
-        count, method = meter.measure(value)
-        # The outage count is a rejection bound for unknown tokenizers. Fit the
-        # whole request with the same calibrated estimate used by frame_tokens;
-        # the byte envelope remains an independent hard admission limit.
-        return measured_request_tokens(value, meter) if method == "calibrated_bytes" else count
+        return final_request_tokens(value, meter, capture)[0]
 
     def verified_envelope(method: str) -> bool:
         # A caller-supplied frame counter cannot change the meter's wire proof.
@@ -596,6 +694,22 @@ def finalize_frame_candidate(
         if active is not None
         else ENDPOINT_PROMPT_TOKEN_BUDGET
     )
+    existing_counter = getattr(capture, "_frame_candidate_counter", None)
+    if isinstance(existing_counter, FrozenRequestCounter):
+        # A later body rewrite can trigger a second fit. Keep the first fit's
+        # method and ratio, even if tokenizer availability has since changed.
+        final_request_tokens(candidate, meter, capture)
+    else:
+        initial_count, initial_method = meter.measure(candidate)
+        if initial_method == "calibrated_bytes":
+            initial_count = calibrated_estimate(candidate, meter)
+        elif initial_method == "tokenize":
+            _remember_exact_pair(candidate, meter, initial_count)
+        capture._frame_candidate_counter = FrozenRequestCounter.capture(
+            candidate, meter, initial_count, initial_method, str(capture.request_id))
+
+    def frozen_method() -> str:
+        return capture._frame_candidate_counter.method
 
     def request_byte_limit(method: str) -> int:
         # Exact admission already has a finite endpoint envelope. A saved
@@ -638,7 +752,7 @@ def finalize_frame_candidate(
         from kernel_execution_reply_budget import fit_execution_replies, project_execution_delivery
 
         fit_execution_replies(
-            candidate, max_request_bytes=request_byte_limit(meter.measure(candidate)[1]),
+            candidate, max_request_bytes=request_byte_limit(frozen_method()),
             measure_bytes=lambda: _wire_bytes(candidate),
             max_request_tokens=(max(1, token_limit - _TOKEN_FIT_RESERVE)
                                 if use_meter_for_frame else token_limit),
@@ -648,7 +762,7 @@ def finalize_frame_candidate(
         protected = project_execution_delivery(protected, candidate["messages"])
 
         def compact_history(*, allow_read_body_eviction: bool = False) -> None:
-            method = meter.measure(candidate)[1]
+            method = frozen_method()
             fit_limit = max(1, token_limit - _TOKEN_FIT_RESERVE) if use_meter_for_frame else token_limit
             frame_limit = (max(1, int(runtime.frame_ceiling) - _TOKEN_FIT_RESERVE)
                            if use_meter_for_frame else int(runtime.frame_ceiling))
@@ -683,7 +797,7 @@ def finalize_frame_candidate(
         # byte ceiling is needed before source qualification.
         for _ in range(2):
             compact_history(allow_read_body_eviction=False)
-            limit = request_byte_limit(meter.measure(candidate)[1])
+            limit = request_byte_limit(frozen_method())
             _graceful_trim_optional_messages(
                 candidate,
                 protected_contents=(),
@@ -701,10 +815,10 @@ def finalize_frame_candidate(
             fit_protected_source_overhead(
                 candidate, protected_messages=protected,
                 action_context=getattr(runtime, "_framefit_action_context", None),
-                exact_tokenizer=verified_envelope(meter.measure(candidate)[1]),
+                exact_tokenizer=verified_envelope(frozen_method()),
             )
             compact_history(allow_read_body_eviction=True)
-            current_limit = request_byte_limit(meter.measure(candidate)[1])
+            current_limit = request_byte_limit(frozen_method())
             if current_limit == limit:
                 break
         return current_limit
@@ -932,8 +1046,7 @@ def finalize_frame_candidate(
             )
             if not source_delivery_satisfied(receipt):
                 raise source_refusal(plan, receipt, sources)
-        rejection_bound, method = meter.measure(candidate)
-        tokens = fitted_request_tokens(candidate) if method == "calibrated_bytes" else rejection_bound
+        tokens, method = final_request_tokens(candidate, meter, capture)
         byte_limit = request_byte_limit(method)
         request_bytes = _wire_bytes(candidate)
         frame_token_count = frame_tokens(candidate)
@@ -1125,10 +1238,32 @@ def finalize_frame_candidate(
             byte_limit = trim_optional_candidate()
         else:
             raise source_refusal(plan, receipt, sources)
-        tokens, method = meter.measure(candidate)
+        tokens, method = final_request_tokens(candidate, meter, capture)
         byte_limit = request_byte_limit(method)
     # Carry the same source input through allocation and replacement snapshots.
     plan["source_contents"] = copy.deepcopy(sources)
+    # The last read-window pass can rewrite the candidate after the main fit.
+    # Refit that exact body before freezing its count for later projections.
+    tokens, method = final_request_tokens(candidate, meter, capture)
+    byte_limit = request_byte_limit(method)
+    if (tokens > token_limit or _wire_bytes(candidate) > byte_limit):
+        byte_limit = trim_optional_candidate()
+        receipt = verify_final_source_delivery(
+            plan, candidate["messages"], payload=json.dumps(candidate).encode(), sources=sources)
+        if not source_delivery_satisfied(receipt):
+            raise source_refusal(plan, receipt, sources)
+        tokens, method = final_request_tokens(candidate, meter, capture)
+        byte_limit = request_byte_limit(method)
+    if tokens > token_limit or _wire_bytes(candidate) > byte_limit:
+        raise FrameFit5ImpossibleMinimum({
+            "request_bytes": _wire_bytes(candidate), "prompt_tokens": tokens,
+            "measure_method": method, "max_request_bytes": byte_limit,
+            "max_prompt_tokens": token_limit,
+        })
+    # Bind the fitted body while retaining the method and ratio captured before
+    # trimming. Later tokenizer availability cannot change this allocation.
+    carry_final_request_tokens(candidate, capture, tokens)
+    tokens, method = final_request_tokens(candidate, meter, capture)
     capture._frame_candidate_measurement = meter.bind_measurement(
         candidate, tokens=tokens, method=method, request_id=str(capture.request_id),
         max_request_bytes=byte_limit, max_prompt_tokens=token_limit,
@@ -1141,7 +1276,7 @@ def finalize_frame_candidate(
     }
     capture._frame_candidate_fallback_fit = method == "calibrated_bytes"
     capture._frame_candidate_rejection_bound = (
-        rejection_bound if method == "calibrated_bytes" else None
+        meter.measure(candidate)[0] if method == "calibrated_bytes" else None
     )
     capture._request_source_closure_override = copy.deepcopy(plan)
     capture.request_source_final_delivery = receipt

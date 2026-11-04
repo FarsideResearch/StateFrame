@@ -314,11 +314,11 @@ class ContinuationExecutive:
         self._evidence.observe(event)
         self._sequence = event["sequence"]
 
-    def apply(self, operation: str, **fields: object) -> dict:
+    def apply(self, operation: str, *, at_us: int | None = None, **fields: object) -> dict:
         """Validate, fsync, then publish via the journal's ordered observer."""
         with self.journal.ownership():
             data = json.loads(canonical_bytes(fields))
-            now = self.clock_us()
+            now = self.clock_us() if at_us is None else at_us
             if type(now) is not int or now < 0:
                 raise ContinuationError("host clock must return nonnegative microseconds")
             data["now_us"] = max(now, self._state.last_time_us)
@@ -365,18 +365,34 @@ class ContinuationExecutive:
             return copy.deepcopy(self._evidence._read(reference, current_binding))
 
     def settle_host_effect(self, *, effect_id: str, receipt_ref: str,
-                           current_binding: dict) -> dict:
+                           current_binding: dict, allow_unknown: bool = True,
+                           at_us: int | None = None) -> dict | None:
         """Derive outcome under the writer lock, then durably validate and publish."""
         with self.journal.ownership():
             data = json.loads(canonical_bytes({
                 "effect_id": effect_id, "receipt_ref": receipt_ref,
                 "current_binding": current_binding}))
             outcome = self._evidence.effect_outcome(self._state, data)
-            event = self.apply("settle_effect", **data, status=outcome)
-            if outcome == "not_applied":
+            if outcome == "unknown" and not allow_unknown:
+                return None
+            event = (self.apply("settle_effect", **data, status=outcome) if at_us is None else
+                     self.apply("settle_effect", **data, status=outcome, at_us=at_us))
+            if event["data"]["status"] == "not_applied":
                 from kernel_greenlock_terminal_fixes import note_settled_by_rule
                 note_settled_by_rule(self.journal, self._evidence, effect_id)
             return event
+
+    def reobserve_host_effect(self, *, effect_id: str, current_binding: dict) -> str:
+        """Recheck a durable unknown receipt without repeating an unknown transition."""
+        with self.journal.ownership():
+            effect = self._state.effects.get(effect_id)
+            if effect is None or effect.status != "unknown" or not effect.receipt_ref:
+                raise ContinuationError("no recorded unknown effect to reobserve")
+            receipt_ref = effect.receipt_ref
+        committed = self.settle_host_effect(
+            effect_id=effect_id, receipt_ref=receipt_ref,
+            current_binding=current_binding, allow_unknown=False)
+        return "unknown" if committed is None else committed["data"]["status"]
 
     def settle_external_effect(self, *, effect_id: str, outcome: str,
                                external_event_ref: str, current_binding: dict) -> dict:
@@ -387,8 +403,7 @@ class ContinuationExecutive:
             effect = self._state.effects.get(effect_id)
             if effect is None or effect.status not in {"pending", "unknown"}:
                 raise ContinuationError("no unresolved effect to settle externally")
-            external = next((record for record in self.journal.records()
-                             if record.get("event_id") == external_event_ref), None)
+            external = self.journal.record_by_event_id(external_event_ref)
             if not isinstance(external, dict):
                 raise ContinuationError("missing external outcome evidence")
             if external.get("kind") == "guarded_effect_receipt":
@@ -463,33 +478,34 @@ class ContinuationExecutive:
                 tool=tool, receipt_ref=control["event_id"],
                 current_binding=current_binding)
 
-    def choose_next(self, current_binding: dict) -> str | None:
+    def choose_next(self, current_binding: dict, *, at_us: int | None = None) -> str | None:
         """Keep productive active work; schedule only when it yields or suspends."""
         with self.journal.ownership():
-            current_time = self.clock_us()
+            current_time = self.clock_us() if at_us is None else at_us
             if type(current_time) is not int or current_time < 0:
                 raise ContinuationError("host clock must return nonnegative microseconds")
             now = max(current_time, self._state.last_time_us)
             for item in list(self._state.intentions.values()):
                 if item.phase == "suspended" and item.wake and now >= item.wake.deadline_us:
-                    self.apply("expire", intention_id=item.intention_id)
+                    self.apply("expire", intention_id=item.intention_id, at_us=at_us)
             active = self._state.active_id
             if active is not None:
                 if unresolved(self._state, active):
                     return None
                 if self._state.intentions[active].turns_left == 0:
-                    self.apply("exhaust", intention_id=active)
+                    self.apply("exhaust", intention_id=active, at_us=at_us)
                 else:
                     self.apply("select", intention_id=active,
                                current_dependencies=binding_versions(current_binding),
-                               selection_reason="continue_productive_active_work", eligible=[active])
+                                selection_reason="continue_productive_active_work", eligible=[active],
+                                at_us=at_us)
                     return active
             registry = LaneRegistry()
             for item in list(self._state.intentions.values()):
                 if item.phase != "eligible":
                     continue
                 if item.turns_left == 0:
-                    self.apply("exhaust", intention_id=item.intention_id)
+                    self.apply("exhaust", intention_id=item.intention_id, at_us=at_us)
                     continue
                 lane = registry.register(
                     lane_id=item.intention_id, contract_id="continuation",
@@ -506,7 +522,7 @@ class ContinuationExecutive:
             self.apply("select", intention_id=selected,
                        current_dependencies=binding_versions(current_binding),
                        selection_reason="existing_juggler_priority_and_service_order",
-                       eligible=[item.lane_id for item in ranked])
+                        eligible=[item.lane_id for item in ranked], at_us=at_us)
             return selected
 
     def unfinished(self) -> list[str]:

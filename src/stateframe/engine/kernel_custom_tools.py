@@ -11,6 +11,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Mapping, Sequence
 
+if __package__:
+    from .kernel_safe_paths import safe_expanduser
+else:
+    from kernel_safe_paths import safe_expanduser
+
 NAME = re.compile(r"^[a-z][a-z0-9_]{1,40}$")
 PLACEHOLDER = re.compile(r"^\{([a-z][a-z0-9_]{0,40})\}$")
 NETWORK_ORDER = {"none": 0, "loopback": 1, "full": 2}
@@ -240,7 +245,7 @@ def load_tool_files(paths: Sequence[Path], *, builtin_names: frozenset[str],
     found: list[CustomTool] = []
     names = set(builtin_names)
     for path in paths:
-        path = Path(path).expanduser().resolve()
+        path = safe_expanduser(Path(path)).resolve()
         try:
             if path.stat().st_size > 1 << 20:
                 _fail(str(path), "tools", "file exceeds 1 MiB")

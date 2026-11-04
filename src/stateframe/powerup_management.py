@@ -10,6 +10,7 @@ import tempfile
 from pathlib import Path
 from typing import Callable
 
+from .engine.kernel_safe_paths import safe_expanduser
 from .powerup_manifest import (
     Manifest,
     PowerupError,
@@ -27,7 +28,7 @@ def install(
 ) -> Manifest:
     from .powerups import _materialize, _parts, _validate
 
-    supplied = Path(path).expanduser()
+    supplied = safe_expanduser(Path(path))
     if supplied.is_symlink():
         raise PowerupError(f"powerup directory is linked: {supplied}")
     source = supplied.resolve(strict=True)

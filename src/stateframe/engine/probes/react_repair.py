@@ -5157,7 +5157,7 @@ def _run_tests_impl(root: pathlib.Path, fn: str, explicit: str | None,
         def _run_check(command):
             nonlocal _check_output_truncated
             _check_output_truncated = None
-            from kernel_execution_policy import run_sandboxed
+            from kernel_execution_policy import policy_read_grants, run_sandboxed
             from kernel_pilot import ParentBudgetExhausted
             try:
                 # The CPU budget must match the wall budget: the policy default (30 s RLIMIT_CPU,
@@ -5194,6 +5194,12 @@ def _run_tests_impl(root: pathlib.Path, fn: str, explicit: str | None,
             if result.timed_out:
                 raise subprocess.TimeoutExpired(command, 300, output=result.completed.stdout,
                                                 stderr=result.completed.stderr)
+            from kernel_check_receipts import sandbox_open_denial
+            denial = sandbox_open_denial(
+                result.completed.stderr + "\n" + result.completed.stdout,
+                policy_read_grants(result))
+            if denial is not None:
+                raise _HostExecutionRefused(RuntimeError(denial))
             return result.completed
 
         _check_output_truncated = None
@@ -5735,6 +5741,14 @@ def _red_confrontation_target(symbol: object, path: object) -> tuple[str, str] |
     if not isinstance(path, str) or not path.strip():
         return None
     return path.strip(), symbol.strip()
+
+
+def _terminal_block_skips_final_grading(measurement: object) -> bool:
+    """A continuation block is not a submitted candidate for behavioural grading.
+
+    Hook terminals keep their released finalization; only the continuation block is guarded here.
+    """
+    return getattr(measurement, "system_outcome", None) == "continuation_blocked"
 
 
 def work(d, *, resume=None):
@@ -8986,7 +9000,7 @@ def work(d, *, resume=None):
                             (getattr(measurement, "project_registries", None) is not None
                              and _name == "registry_lookup")
                             or (getattr(measurement, "continuation", None) is not None
-                                and _name == "continuation_detour")
+                                and _name in {"continuation_detour", "continuation_reobserve"})
                             or (getattr(measurement, "working_sets", None) is not None
                                 and _name == "working_set")
                             or (getattr(measurement, "generated", None) is not None
@@ -13611,6 +13625,7 @@ def work(d, *, resume=None):
         # An AST match stays a diagnostic in `result`; `behaviour` is the only verdict.
         from kernel_done_is_submit_authority import done_sealed
         if (final and not target_gone_paths and not _v2_not_submitted
+                and not _terminal_block_skips_final_grading(measurement)
                 and done_sealed(measurement) is None
                 and not getattr(measurement, "_done_capture_error_class", None)):
             try:

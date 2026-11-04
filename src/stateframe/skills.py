@@ -16,8 +16,10 @@ from typing import Sequence
 
 if __package__:
     from .state_dirs import private_directory
+    from .engine.kernel_safe_paths import safe_expanduser, safe_home
 else:  # Loaded by the engine child as a sibling module.
     from state_dirs import private_directory
+    from engine.kernel_safe_paths import safe_expanduser, safe_home
 
 NAME = re.compile(r"^[a-z][a-z0-9-]{1,40}$")
 MAX_BODY_BYTES = 32 * 1024
@@ -47,9 +49,23 @@ class Skill:
                 "tools_trusted": trusted}
 
 
-def user_skills_dir() -> Path:
-    home = Path(os.environ.get("STATEFRAME_HOME") or Path.home() / ".stateframe").expanduser()
+def _user_skills_dir_or_none() -> Path | None:
+    configured = os.environ.get("STATEFRAME_HOME")
+    if configured:
+        home = safe_expanduser(Path(configured))
+    else:
+        user_home = safe_home()
+        if user_home is None:
+            return None
+        home = user_home / ".stateframe"
     return home / "skills"
+
+
+def user_skills_dir() -> Path:
+    directory = _user_skills_dir_or_none()
+    if directory is None:
+        raise SkillError("user skill directory unavailable; set STATEFRAME_HOME or configure a home directory")
+    return directory
 
 
 def _canonical_skill_root(path: Path) -> Path:
@@ -149,7 +165,7 @@ def _invalid_json_constant(value: str) -> object:
 
 
 def parse_skill(path: Path) -> Skill:
-    directory = Path(path).expanduser()
+    directory = safe_expanduser(Path(path))
     if directory.is_symlink() or not directory.is_dir():
         raise SkillError(f"skill directory missing or linked: {directory}")
     return _parse_skill_at_root(_canonical_skill_root(directory))
@@ -203,11 +219,14 @@ def resolve_skills(values: Sequence[str], *, trusted: bool) -> tuple[Skill, ...]
     selected = []
     names = set()
     for value in values:
-        path = Path(value).expanduser()
+        path = safe_expanduser(Path(value))
         if not path.is_dir() and os.sep not in value and (os.altsep is None or os.altsep not in value):
             if not NAME.fullmatch(value):
                 raise SkillError(f"invalid skill name: {value}")
-            path = user_skills_dir() / value
+            user_dir = _user_skills_dir_or_none()
+            if user_dir is None:
+                continue
+            path = user_dir / value
         skill = parse_skill(path)
         if skill.name in names:
             raise SkillError(f"duplicate selected skill: {skill.name}")

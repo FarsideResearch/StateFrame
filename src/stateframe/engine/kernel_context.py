@@ -16,7 +16,8 @@ def _mode(name: str, mode: Mode | None) -> Mode:
 
 def token_estimate(value: object) -> int:
     """Budget estimate only; never report this as measured model prefill."""
-    return (len(json.dumps(value, sort_keys=True, ensure_ascii=False)) + 3) // 4
+    from kernel_countdown_slot import canonical_countdown
+    return (len(json.dumps(canonical_countdown(value), sort_keys=True, ensure_ascii=False)) + 3) // 4
 
 
 @dataclasses.dataclass(frozen=True)

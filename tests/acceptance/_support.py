@@ -14,27 +14,33 @@ import sysconfig
 from dataclasses import dataclass
 from pathlib import Path
 
+from _journal import measurement_events
 from _stateframe_home import isolated_stateframe_home
 from stateframe.request_records import list_request_records, read_request_record
+from engine_run import run_monitored
 
 ROOT = Path(__file__).resolve().parents[2]
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
 PYTHON = sys.executable
 _PASS_ENV = ("PATH", "HOME", "LANG", "TMPDIR")
 
-# Slowest stateframe subprocess wall time per case, in seconds, from 3 reps on the slowest gate host
-# (2x Xeon E5-2680 v1 container, 1 worker; 850db00 at load5 61-70 and f8e8925 at load5 70-90, 2026-11-03).
-# Gates rarely run solo, so the loaded maximum is the reference. Re-measure when a case changes; tests/acceptance/test_acceptance_budgets.py
-# checks that every case is used and that the budgeted tests carry no bare timeout literal.
+# Slowest stateframe subprocess wall time per case, in seconds. The acceptance cases use
+# 3 reps on the slowest gate host (2x Xeon E5-2680 v1 container, 1 worker; 850db00 at
+# load5 61-70 and f8e8925 at load5 70-90, 2026-11-03). The recorded blocked case uses
+# Mike's completed 122.9s host run on 2026-11-03; remeasure it after the host can run
+# nested sandbox-exec. Gates rarely run solo, so the loaded maximum is the reference.
+# Re-measure when a case changes; tests/acceptance/test_acceptance_budgets.py checks that
+# every case is used and that measured callers carry no bare deadline literal.
 MEASURED_SECONDS = {
     "e19_resume": 307,
     "no_skills_run": 193,
+    "recorded_blocked_run": 123,
 }
 HEADROOM = 1.5
 
 
 def budget(case: str) -> int:
-    """Subprocess timeout for a measured case: HEADROOM x its slowest measured wall time."""
+    """Progress-idle expectation for a measured case: HEADROOM x its slowest wall time."""
     return math.ceil(HEADROOM * MEASURED_SECONDS[case])
 
 
@@ -226,14 +232,8 @@ def read_requests(run_dir: Path) -> tuple[dict, ...]:
                  for name in list_request_records(run_dir))
 
 
-def read_measurement_events(run_dir: Path) -> tuple[dict, ...]:
-    import kernel_measurement as measurement
-
-    rows = []
-    for path in measurement.journal_paths(run_dir / "worker" / "measurement-runs"):
-        with measurement.open_journal(path) as stream:
-            rows.extend(json.loads(line) for line in stream if line.strip())
-    return tuple(rows)
+def read_measurement_events(run_dir: Path) -> tuple[dict[str, object], ...]:
+    return tuple(measurement_events(run_dir))
 
 
 def run_case(tmp_path: Path, script: str, *, repo_name: str = "simple_repo",
@@ -246,7 +246,7 @@ def run_case(tmp_path: Path, script: str, *, repo_name: str = "simple_repo",
     run_dir = tmp_path / "run"
     script = str(script_path(tmp_path, script, substitutions))
     with Endpoint(Path(script), force_missing_tool=force_missing_tool) as endpoint:
-        process = subprocess.run(
+        process = run_monitored(
             [PYTHON, "-m", "stateframe", "run", "--repo", str(repo), "--task", task,
              "--endpoint", endpoint.url, "--model", "scripted", "--run-dir", str(run_dir),
              "--test-python", PYTHON,
@@ -254,7 +254,7 @@ def run_case(tmp_path: Path, script: str, *, repo_name: str = "simple_repo",
              "--max-turns", "32",
              "--quiet", *flags], capture_output=True, text=True,
             env={**environment(), **(env_overrides or {})},
-            timeout=timeout, check=False)
+            expected_seconds=timeout, check=False)
     path = run_dir / "summary.json"
     summary = json.loads(path.read_text()) if path.is_file() else None
     return Case(repo, run_dir, process, summary, read_requests(run_dir))

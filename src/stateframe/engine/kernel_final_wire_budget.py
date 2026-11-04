@@ -285,24 +285,19 @@ def reconcile_frozen_budget(capture, runtime, body, *, frozen_inputs=None):
         ENDPOINT_PROMPT_TOKEN_BUDGET, FREE_STAGE, HARD_MAX_REQUEST_BYTES,
         _lean_request_limits, _request_token_meter,
     )
-    from kernel_request_measurement import RequestMeasurement
+    from kernel_frame_allocation_capture import final_request_tokens
     meter = _request_token_meter(runtime, capture)
-    carried = getattr(capture, "_frame_candidate_measurement", None)
     request_id = str(getattr(capture, "request_id", ""))
-    if (isinstance(carried, RequestMeasurement)
-            and carried.matches(body, tokenizer_identity=meter.tokenizer_identity(body),
-                                request_id=request_id, logical_request_id=meter._request_id or request_id)
-            and carried.method == meter.measure_method
-            and carried.prompt_tokens is not None):
-        tokens, method = carried.prompt_tokens, carried.method
-    else:
-        tokens, method = meter.measure(body)
+    tokens, method = final_request_tokens(body, meter, capture)
+    exact_rejection = None
     if (method == "calibrated_bytes"
             and getattr(capture, "_frame_candidate_fallback_fit", False) is True):
-        from kernel_frame_allocation_capture import measured_request_tokens
-
-        rejection_bound = meter.measure(body)[0]
-        tokens = measured_request_tokens(body, meter)
+        rejection_bound, bound_method = meter.measure(body)
+        # A recovered tokenizer is independent evidence against a calibrated
+        # undercount. While it is down, the offline byte envelope remains hard;
+        # the conservative fallback rejection bound is retained as diagnostic.
+        if bound_method in {"tokenize", "verified_byte_bound"}:
+            exact_rejection = rejection_bound
         receipt["fallback_estimate_fit"] = True
         receipt["fallback_rejection_bound"] = rejection_bound
     offline_limit, token_limit = _lean_request_limits(body, FREE_STAGE)
@@ -324,6 +319,8 @@ def reconcile_frozen_budget(capture, runtime, body, *, frozen_inputs=None):
     fitted_ceiling = fitted_inputs.get("token_ceiling") if isinstance(fitted_inputs, Mapping) else None
     if type(fitted_ceiling) is int and fitted_ceiling >= 0:
         token_limit = min(token_limit, fitted_ceiling)
+    if exact_rejection is not None and exact_rejection > token_limit:
+        failures.append("request_tokens_exceed_max_prompt_tokens")
     measurement = meter.bind_measurement(
         body, tokens=tokens, method=method, request_id=request_id,
         max_request_bytes=byte_limit, max_prompt_tokens=token_limit,

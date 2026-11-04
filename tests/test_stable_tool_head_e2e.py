@@ -16,6 +16,7 @@ from pathlib import Path
 import pytest
 
 from stateframe.scripted_endpoint import Script, serve
+from engine_run import run_monitored
 
 ROOT = Path(__file__).resolve().parents[1]
 pytestmark = pytest.mark.host_sandbox
@@ -32,12 +33,12 @@ def _run(tmp_path: Path, switch: str | None) -> tuple[subprocess.CompletedProces
     if switch is not None:
         environment["STATEFRAME_STABLE_TOOL_HEAD"] = switch
     try:
-        result = subprocess.run(
+        result = run_monitored(
             [sys.executable, "-m", "stateframe", "run", "--repo", str(repo),
              "--task", "Fix the pricing code so the tests pass.",
              "--endpoint", f"http://127.0.0.1:{server.server_port}/v1", "--model", "scripted",
              "--run-dir", str(run), "--test-python", sys.executable, "--max-turns", "16", "--quiet"],
-            env=environment, capture_output=True, text=True, timeout=240)
+            env=environment, capture_output=True, text=True, expected_seconds=240)
         script.assert_consumed()
         return result, run
     finally:
@@ -151,7 +152,8 @@ def test_raw_tool_array_extractor_preserves_serialized_bytes(tmp_path):
 
 
 def test_switch_off_requests_match_the_released_baseline(tmp_path):
-    from tools.compare_no_mcp_requests import capture, write_launcher
+    from tools.compare_no_mcp_requests import (
+        capture, mask_wire_ids, unbacked_result_hash_changes, write_launcher)
 
     repo = tmp_path / "repo"
     shutil.copytree(ROOT / "examples/discount_bug", repo)
@@ -174,7 +176,12 @@ def test_switch_off_requests_match_the_released_baseline(tmp_path):
         )
         run_dir.rename(tmp_path / f"candidate-run-{index}")
 
-        assert actual == expected, f"STATEFRAME_STABLE_TOOL_HEAD=off changed requests vs {revision}"
+        # Wire IDs changed derivation on purpose (receipt determinism, 11-03); a masked
+        # result hash must still hash text that is sent and compared (see mask_wire_ids).
+        assert unbacked_result_hash_changes(
+            tmp_path / f"baseline-run-{index}", tmp_path / f"candidate-run-{index}") == []
+        assert mask_wire_ids(actual) == mask_wire_ids(expected), (
+            f"STATEFRAME_STABLE_TOOL_HEAD=off changed requests vs {revision}")
 
 
 def test_switch_off_keeps_per_turn_menus(tmp_path):

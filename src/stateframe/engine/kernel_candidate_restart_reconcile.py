@@ -11,6 +11,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import os
+from bisect import bisect_right
 from collections.abc import Mapping
 from pathlib import Path
 
@@ -128,27 +129,79 @@ def persist_intent(runtime, *, effect_id: str, arguments: Mapping[str, object],
     )
 
 
-def _intent_event(records: list[dict], effect_id: str) -> dict | None:
-    events = [event for event in records
-              if event.get("kind") == "candidate_restart_intent"
-              and event.get("effect_id") == effect_id]
-    return events[-1] if events else None
+class _RestartIndex:
+    """Latest and first-match joins over the validated restart journal."""
+
+    def __init__(self, records: list[dict]):
+        self.intents: dict[str, dict] = {}
+        self.begins: dict[str, dict] = {}
+        self.fences: dict[str, dict] = {}
+        self.fences_by_sequence: dict[int, dict] = {}
+        self.receipts: dict[tuple[str, str, str], dict] = {}
+        self.closures: dict[tuple[str, str], dict] = {}
+        self.unknown: set[tuple[str, str | None]] = set()
+        self.dispatches: dict[tuple[str, int], list[dict]] = {}
+        self.parent_budgets: list[dict] = []
+        self.predispatches: dict[int, list[dict]] = {}
+        self.last_sequence = 0
+        for event in records:
+            self.add(event)
+
+    def add(self, event: dict) -> None:
+        kind = event.get("kind")
+        sequence = event.get("sequence", 0)
+        self.last_sequence = max(self.last_sequence, sequence)
+        effect_id = event.get("effect_id")
+        if kind == "candidate_restart_intent" and isinstance(effect_id, str):
+            self.intents[effect_id] = event
+        elif kind == "continuation_transition" and event.get("operation") == "begin_effect":
+            data = event.get("data")
+            if isinstance(data, Mapping) and isinstance(data.get("effect_id"), str):
+                self.begins[data["effect_id"]] = event
+        elif kind == "step_dispatch_binding":
+            ref = event.get("event_id")
+            if isinstance(ref, str):
+                self.fences.setdefault(ref, event)
+            self.fences_by_sequence.setdefault(sequence, event)
+            request_id, step = event.get("request_id"), event.get("step")
+            if isinstance(request_id, str) and type(step) is int:
+                self.dispatches.setdefault((request_id, step), []).append(event)
+        elif kind == "action_receipt":
+            receipt = event.get("receipt")
+            if isinstance(receipt, Mapping):
+                key = (receipt.get("continuation_effect_id"),
+                       receipt.get("continuation_dispatch_ref"),
+                       receipt.get("continuation_id"))
+                if all(isinstance(part, str) for part in key):
+                    self.receipts[key] = event
+        elif kind == "action_outcome_closed":
+            record = event.get("record")
+            if isinstance(record, Mapping):
+                key = (record.get("continuation_effect_id"),
+                       record.get("continuation_dispatch_ref"))
+                if all(isinstance(part, str) for part in key):
+                    self.closures[key] = event
+        elif kind == "candidate_restart_reconciled" and event.get("outcome") == "UNKNOWN":
+            actual_hash = event.get("actual_hash")
+            if isinstance(effect_id, str) and (actual_hash is None or isinstance(actual_hash, str)):
+                self.unknown.add((effect_id, actual_hash))
+        elif (kind == "parent_budget" and event.get("category") == "tool_work"
+              and event.get("reason") == "worker dispatch"):
+            self.parent_budgets.append(event)
+        elif kind == "predispatch_decision" and type(event.get("step")) is int:
+            self.predispatches.setdefault(event["step"], []).append(event)
+
+    @staticmethod
+    def between(rows: list[dict], begin: int, end: int) -> list[dict]:
+        return rows[bisect_right(rows, begin, key=lambda row: row["sequence"]):
+                    bisect_right(rows, end - 1, key=lambda row: row["sequence"])]
 
 
-def _begin_event(records: list[dict], effect_id: str) -> dict | None:
-    events = [event for event in records
-              if event.get("kind") == "continuation_transition"
-              and event.get("operation") == "begin_effect"
-              and isinstance(event.get("data"), Mapping)
-              and event["data"].get("effect_id") == effect_id]
-    return events[-1] if events else None
-
-
-def _fence(records: list[dict], intent: Mapping[str, object], effect) -> dict | None:
+def _fence(index: _RestartIndex, intent: Mapping[str, object], effect) -> dict | None:
     reference = intent.get("dispatch_ref") or getattr(effect, "dispatch_ref", "")
-    fence = next((event for event in records
-                  if event.get("kind") == "step_dispatch_binding"
-                  and event.get("event_id") == reference), None)
+    if not isinstance(reference, str):
+        return None
+    fence = index.fences.get(reference)
     if not isinstance(fence, dict):
         return None
     if (fence.get("continuation_effect_id") != effect.effect_id
@@ -157,30 +210,6 @@ def _fence(records: list[dict], intent: Mapping[str, object], effect) -> dict | 
             or not isinstance(fence.get("current"), Mapping)):
         return None
     return fence
-
-
-def _action_receipt(records: list[dict], effect) -> dict | None:
-    events = []
-    for event in records:
-        if event.get("kind") != "action_receipt" or not isinstance(event.get("receipt"), Mapping):
-            continue
-        receipt = event["receipt"]
-        if (receipt.get("continuation_effect_id") == effect.effect_id
-                and receipt.get("continuation_dispatch_ref") == effect.dispatch_ref
-                and receipt.get("continuation_id") == effect.intention_id):
-            events.append(event)
-    return events[-1] if events else None
-
-
-def _closed_event(records: list[dict], effect) -> dict | None:
-    events = []
-    for event in records:
-        record = event.get("record")
-        if (event.get("kind") == "action_outcome_closed" and isinstance(record, Mapping)
-                and record.get("continuation_effect_id") == effect.effect_id
-                and record.get("continuation_dispatch_ref") == effect.dispatch_ref):
-            events.append(event)
-    return events[-1] if events else None
 
 
 def _recovery_payload(intent: Mapping[str, object], *, outcome: str,
@@ -260,44 +289,32 @@ def _emit_recovery(runtime, intent: Mapping[str, object], *, outcome: str,
 
 
 def _reconcile_effect(runtime, effect, intent_event: Mapping[str, object],
-                      records: list[dict]) -> set[str]:
+                      index: _RestartIndex) -> set[str]:
     intent = intent_event
     ids: set[str] = {str(intent_event["event_id"])}
-    begin = _begin_event(records, effect.effect_id)
+    begin = index.begins.get(effect.effect_id)
     if begin is not None:
         ids.add(str(begin["event_id"]))
-    fence = _fence(records, intent, effect)
+    fence = _fence(index, intent, effect)
     if fence is not None:
         ids.add(str(fence["event_id"]))
-        prior_fence = next((event for event in records
-                            if event.get("kind") == "step_dispatch_binding"
-                            and event.get("sequence") == fence.get("sequence", 0) - 1
-                            and event.get("current") == fence.get("current")
-                            and event.get("expected") == fence.get("expected")), None)
+        prior_fence = index.fences_by_sequence.get(fence.get("sequence", 0) - 1)
+        if prior_fence is not None and (prior_fence.get("current") != fence.get("current")
+                                        or prior_fence.get("expected") != fence.get("expected")):
+            prior_fence = None
         if prior_fence is not None:
             ids.add(str(prior_fence["event_id"]))
     begin_sequence = begin.get("sequence", 0) if begin is not None else 0
-    receipt_event = _action_receipt(records, effect)
+    receipt_event = index.receipts.get((effect.effect_id, effect.dispatch_ref, effect.intention_id))
     upper_sequence = (receipt_event.get("sequence") if receipt_event is not None
-                      else max((event.get("sequence", 0) for event in records), default=0) + 1)
-    for event in records:
-        if not begin_sequence < event.get("sequence", 0) < upper_sequence:
-            continue
-        if (event.get("kind") == "step_dispatch_binding"
-                and event.get("request_id") == effect.request_id
-                and event.get("step") == effect.step):
-            ids.add(str(event["event_id"]))
-        elif (event.get("kind") == "step_dispatch_binding" and fence is not None
-              and event.get("sequence") == fence.get("sequence", 0) - 1
-              and event.get("current") == fence.get("current")
-              and event.get("expected") == fence.get("expected")):
-            ids.add(str(event["event_id"]))
-        elif (event.get("kind") == "parent_budget"
-              and event.get("category") == "tool_work"
-              and event.get("reason") == "worker dispatch"):
-            ids.add(str(event["event_id"]))
-        elif (event.get("kind") == "predispatch_decision"
-              and event.get("step") == effect.step):
+                      else index.last_sequence + 1)
+    window_rows = (
+        index.dispatches.get((effect.request_id, effect.step), []),
+        index.parent_budgets,
+        index.predispatches.get(effect.step, []),
+    )
+    for rows in window_rows:
+        for event in index.between(rows, begin_sequence, upper_sequence):
             ids.add(str(event["event_id"]))
     located = _workspace_file(Path(runtime.owner.root).resolve(), intent.get("path"))
     actual_hash = None
@@ -322,12 +339,7 @@ def _reconcile_effect(runtime, effect, intent_event: Mapping[str, object],
     else:
         outcome = "UNKNOWN"
     if outcome == "UNKNOWN":
-        previous = [event for event in records
-                    if event.get("kind") == "candidate_restart_reconciled"
-                    and event.get("effect_id") == effect.effect_id
-                    and event.get("outcome") == "UNKNOWN"
-                    and event.get("actual_hash") == actual_hash]
-        if not previous:
+        if (effect.effect_id, actual_hash) not in index.unknown:
             _emit_recovery(runtime, intent, outcome=outcome, actual_hash=actual_hash,
                            candidate=intent.get("candidate", {}), ids=ids)
         else:
@@ -379,7 +391,7 @@ def _reconcile_effect(runtime, effect, intent_event: Mapping[str, object],
         receipt_event = runtime.journal.emit("action_receipt", receipt=receipt)
         ids.add(str(receipt_event["event_id"]))
 
-    closed = _closed_event(records, effect)
+    closed = index.closures.get((effect.effect_id, effect.dispatch_ref))
     if closed is None:
         record = {
             "step": effect.step, "tool": EDIT_TOOL, "target": intent.get("path", ""),
@@ -416,16 +428,23 @@ def reconcile(runtime) -> set[str]:
     if not enabled():
         return set()
     records = list(runtime.journal.records())
+    cursor = records[-1]["sequence"] if records else 0
+    index = _RestartIndex(records)
     state = runtime.continuation.engine.state
     consumed: set[str] = set()
     for effect in state.effects.values():
         if effect.tool != EDIT_TOOL or effect.status not in {"pending", "unknown"}:
             continue
-        intent_event = _intent_event(records, effect.effect_id)
+        intent_event = index.intents.get(effect.effect_id)
         if intent_event is None:
             continue
-        consumed.update(_reconcile_effect(runtime, effect, intent_event, records))
-        records = list(runtime.journal.records())
+        consumed.update(_reconcile_effect(runtime, effect, intent_event, index))
+        appended = runtime.journal.cached_records_since(cursor)
+        records.extend(appended)
+        for event in appended:
+            index.add(event)
+        if appended:
+            cursor = appended[-1]["sequence"]
     _restore_latest_recovery(runtime, records)
     return consumed
 
@@ -458,12 +477,8 @@ def maybe_promote_portfolio(runtime) -> None:
     preserve = getattr(runtime, "portfolio_preserve_candidate", None)
     if not callable(preserve) or getattr(runtime, "portfolio", None) is None:
         return
-    linked = [event for event in runtime.journal.records()
-              if event.get("kind") == "candidate_restart_portfolio_linked"
-              and event.get("candidate_digest") == recovery.get("candidate_digest")]
-    if linked:
-        recovery["portfolio_candidate_id"] = linked[-1].get("candidate_id")
-        return
+    # _restore_latest_recovery folds durable links into this projection on resume.
+    # A live promotion also sets the ID immediately after its link is appended.
     candidate = preserve(reason="candidate/restart reconciliation reached current public green")
     if candidate is None:
         return

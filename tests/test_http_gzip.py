@@ -4,7 +4,6 @@ import gzip
 import hashlib
 import json
 import os
-import subprocess
 import sys
 import threading
 import time
@@ -18,6 +17,7 @@ from stateframe.engine.kernel_plain_host import _PlainHTTPProvider, encode_reque
 from stateframe import _child
 from stateframe.replay_tape import build as build_replay_tape
 from stateframe.scripted_endpoint import Script, make_handler
+from engine_run import run_monitored
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -386,7 +386,7 @@ def test_default_profile_cli_run_sends_large_request_without_gzip(tmp_path):
         (str(ROOT / "src"), str(ROOT / "src/stateframe/engine")))
     run_dir = tmp_path / "run"
     try:
-        result = subprocess.run([
+        result = run_monitored([
             sys.executable, "-m", "stateframe", "run", "--repo", str(repo),
             # The task is capped at 4096 characters; system, tools and frame already carry about 30 KB,
             # so a task near the cap puts the first request over the 32 KiB compression threshold.
@@ -394,7 +394,7 @@ def test_default_profile_cli_run_sends_large_request_without_gzip(tmp_path):
             "--endpoint", f"http://127.0.0.1:{server.server_port}/v1",
             "--model", "scripted", "--run-dir", str(run_dir),
             "--test-python", sys.executable, "--max-turns", "4", "--quiet",
-        ], env=env, capture_output=True, text=True, timeout=240)
+        ], env=env, capture_output=True, text=True, expected_seconds=240)
         if (result.returncode != 0 and not seen
                 and "sandbox-exec: sandbox_apply: Operation not permitted" in result.stderr):
             pytest.skip("macOS sandbox-exec unavailable in this nested sandbox")

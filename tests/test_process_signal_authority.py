@@ -14,6 +14,9 @@ REVIEWED_SIGNALS = {
         "The child signals its own group only when it is that group's leader.",
     ("stateframe/engine/kernel_checkpoint.py", "os.kill(pid, 0)"):
         "Signal zero is a liveness query and delivers no signal.",
+    ("stateframe/engine/kernel_env_seed.py", "os.kill(pid, 0)"):
+        "Signal zero is a liveness query for an orphaned seed temp dir's owner; it delivers no "
+        "signal and only ESRCH counts as dead.",
     ("stateframe/engine/kernel_exec_supervisor.py", "os.kill(row.pid, signal.SIGKILL)"):
         "The row is this supervisor's direct child and only its serve loop reaps it.",
     ("stateframe/engine/kernel_exec_tracker.py", "os.killpg(launch_identity.pid, sig)"):

@@ -12,6 +12,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from _journal import measurement_journal_paths
+
 from stateframe.engine import kernel_bounded_http
 from stateframe.engine.probes import react_repair
 from stateframe import runner
@@ -506,7 +508,7 @@ def test_planted_raw_glob_misses_the_sealed_journal(tmp_path):
     # Control: the 0.3.29 implementation globbed */events.jsonl directly, so a finished (sealed) run
     # produced no warning at all. The same sealed run must defeat that reader.
     run = _sealed_queue_wait_run(tmp_path)
-    found = list((run / "worker" / "measurement-runs").glob("*/events.jsonl"))
+    found = [path for path in measurement_journal_paths(run) if path.name == "events.jsonl"]
     assert found == []
 
 

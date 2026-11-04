@@ -18,6 +18,7 @@ from collections import Counter, defaultdict
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 
+from kernel_safe_paths import safe_expanduser
 
 MODE_ENV = "STATEFRAME_REPO_SIGNALS"
 SCHEMA = "repo-signals/1"
@@ -88,7 +89,7 @@ def _relative_path(root: Path, value: object) -> str:
 
 
 def _safe_root(root: Path | str) -> Path:
-    return Path(root).expanduser().resolve()
+    return safe_expanduser(Path(root)).resolve()
 
 
 def _source_paths(root: Path) -> list[Path]:

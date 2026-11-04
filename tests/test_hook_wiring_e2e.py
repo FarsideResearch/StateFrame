@@ -8,11 +8,14 @@ import signal
 import subprocess
 import sys
 import threading
+import time
 from pathlib import Path
 
 import pytest
 
 from stateframe.scripted_endpoint import Script, ScriptStepUnavailable, serve
+from fixtures.process_signals import record_identity, signal_run_owned, signal_run_verified
+from engine_run import run_monitored, start_monitored
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -48,7 +51,7 @@ def _run(tmp_path: Path, steps: list[dict], hooks: list[dict] | None):
         "PYTHONPATH": str(ROOT / "src"),
     }
     try:
-        result = subprocess.run(
+        result = run_monitored(
             [
                 sys.executable,
                 "-m",
@@ -74,7 +77,7 @@ def _run(tmp_path: Path, steps: list[dict], hooks: list[dict] | None):
             env=environment,
             capture_output=True,
             text=True,
-            timeout=240,
+            expected_seconds=240,
         )
         try:
             script.assert_consumed()
@@ -302,9 +305,15 @@ def test_six_event_lifecycle_survives_kill_and_resume(tmp_path):
     ]
     process = None
     try:
-        process = subprocess.Popen(command, env=environment, stdout=subprocess.PIPE,
-                                   stderr=subprocess.PIPE, text=True)
-        assert script.waiting.wait(600), "first attempt did not reach the third request"
+        process = start_monitored(
+            command, env=environment, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, run_dir=run, expected_seconds=600,
+            step="interrupted hook lifecycle run",
+        )
+        while not script.waiting.wait(0.5):
+            if process.poll() is not None:
+                stdout, stderr = process.communicate()
+                pytest.fail(f"first attempt stopped before the third request: {stdout}{stderr}")
         prior_requests = {
             path.name: path.read_bytes()
             for path in (run / "wire").glob("*.request.json")
@@ -317,14 +326,17 @@ def test_six_event_lifecycle_survives_kill_and_resume(tmp_path):
             ["pgrep", "-P", str(process.pid)], text=True,
         ).split()
         assert len(child_pids) == 1, child_pids
-        os.kill(int(child_pids[0]), signal.SIGKILL)
+        child = int(child_pids[0])
+        identity = record_identity(child, launched_after=0, command_fragment="_child.py")
+        signal_run_verified(run, child, identity, signal.SIGKILL,
+                            deadline=time.monotonic() + 120, what="hook lifecycle resume")
         script.release.set()
         assert script.interrupted.wait(10)
         process.communicate(timeout=90)
-        resumed = subprocess.run(
+        resumed = run_monitored(
             [sys.executable, "-m", "stateframe", "resume", str(run),
              "--endpoint", endpoint], env=environment, capture_output=True,
-            text=True, timeout=240,
+            text=True, expected_seconds=240,
         )
         assert resumed.returncode == 0, resumed.stdout + resumed.stderr
         script.assert_consumed()
@@ -368,7 +380,9 @@ def test_six_event_lifecycle_survives_kill_and_resume(tmp_path):
         assert (run / "workspace/pkg/value.py").read_text() == "VALUE = 3\n"
     finally:
         if process is not None and process.poll() is None:
-            process.kill()
+            # Failure cleanup may precede the first checkpoint.
+            signal_run_owned(run, process, signal.SIGKILL, deadline=time.monotonic(),
+                             what="hook lifecycle cleanup", require_checkpoint_saved=False)
             process.communicate(timeout=10)
         server.shutdown()
         server.server_close()

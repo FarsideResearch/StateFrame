@@ -2,7 +2,6 @@
 
 import ast
 import re
-import sys
 from pathlib import Path
 
 
@@ -218,6 +217,7 @@ def test_no_nonportable_executable_literals():
 
 
 EXAMPLES = TESTS.parent / "examples" / "powerups"
+HOOK_EXAMPLES = TESTS.parent / "examples" / "hooks"
 
 
 def scan_example_argv(text: str, filename: str) -> list[str]:
@@ -254,6 +254,17 @@ def scan_example_programs(examples: Path) -> list[str]:
     return violations
 
 
+def scan_hook_scripts(examples: Path) -> list[str]:
+    violations = []
+    for path in sorted(examples.glob("*.py")):
+        with path.open("rb") as script:
+            if script.readline(4096).startswith(b"#!"):
+                violations.append(f"{path.name}: shebang")
+        if path.stat().st_mode & 0o111:
+            violations.append(f"{path.name}: executable mode")
+    return violations
+
+
 def test_example_scanner_flags_planted_absolute_python(tmp_path):
     example = tmp_path / "fake-powerup"
     example.mkdir()
@@ -273,7 +284,32 @@ def test_example_scanner_flags_planted_absolute_python(tmp_path):
     script.write_text('#!/usr/bin/env python3\nprint("hello")\n', encoding="utf-8")
     assert scan_example_programs(tmp_path) == []
 
+    hook_example = tmp_path / "fake-hooks"
+    hook_example.mkdir()
+    (hook_example / "hooks.json").write_text(
+        '{"hooks": [{"argv": ["{python}", "script.py"]}]}',
+        encoding="utf-8",
+    )
+    (hook_example / "script.py").write_text(
+        "#!" + "/usr/bin/" + "python3\nprint('hello')\n", encoding="utf-8"
+    )
+    assert scan_example_programs(tmp_path) == [
+        "fake-hooks/script.py: /usr/bin/python3",
+    ]
+    assert scan_hook_scripts(hook_example) == ["script.py: shebang"]
+
 
 def test_shipped_powerups_use_portable_programs():
     violations = scan_example_programs(EXAMPLES)
     assert not violations, "Nonportable programs in shipped powerups:\n" + "\n".join(violations)
+
+
+def test_shipped_hooks_use_python_token_without_shebangs_or_executable_modes():
+    import json
+
+    config = json.loads((HOOK_EXAMPLES / "hooks.json").read_text(encoding="utf-8"))
+    assert all(hook["argv"][0] == "{python}" for hook in config["hooks"])
+    scripts = sorted(HOOK_EXAMPLES.glob("*.py"))
+    assert scripts
+    violations = scan_hook_scripts(HOOK_EXAMPLES)
+    assert not violations, "Nonportable Python hook scripts:\n" + "\n".join(violations)

@@ -11,6 +11,7 @@ import stat
 from pathlib import Path
 
 from . import hook_host
+from .engine.kernel_safe_paths import safe_expanduser, safe_home
 from .powerup_manifest import (
     MODES, TREE_DIGEST_VERSION, Manifest, PowerupError, setting_value, tree_digest,
 )
@@ -21,9 +22,13 @@ SCHEMA = "stateframe-powerup-state/1"
 
 
 def home() -> Path:
-    return Path(
-        os.environ.get("STATEFRAME_HOME") or Path.home() / ".stateframe"
-    ).expanduser()
+    configured = os.environ.get("STATEFRAME_HOME")
+    if configured:
+        return safe_expanduser(Path(configured))
+    user_home = safe_home()
+    if user_home is None:
+        raise PowerupError("cannot find the StateFrame home: set HOME or STATEFRAME_HOME")
+    return safe_expanduser(user_home / ".stateframe")
 
 
 def _state_bytes(path: Path) -> bytes:
@@ -124,8 +129,23 @@ def _write(path: Path, value: dict) -> None:
         temporary.unlink(missing_ok=True)
 
 
+def user_home_or_none() -> Path | None:
+    """The StateFrame home for READING user-scope powerups on a run, or None when there is no home at all.
+
+    No home (HOME unset, no passwd entry, no STATEFRAME_HOME) means there can be no user powerups or user state,
+    so a run treats them as empty. Commands that WRITE (install, enable, trust, gc) keep using home() and its
+    clear error."""
+    try:
+        return home()
+    except PowerupError:
+        return None
+
+
 def user_state() -> dict:
-    return _read(home() / "powerups.json")
+    user_home = user_home_or_none()
+    if user_home is None:
+        return {"schema": SCHEMA, "global": {}, "profiles": {}}
+    return _read(user_home / "powerups.json")
 
 
 def update(

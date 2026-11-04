@@ -3587,7 +3587,7 @@ def _route_executed_checks(runtime: object) -> tuple[Mapping[str, object], ...]:
             if not selector_values or revision is None or status not in {
                     "PASS", "PASSED", "GREEN", "SUCCESS", "OK", "FAIL", "FAILED", "RED", "ERROR"}:
                 continue
-            receipt_id = str(raw.get("receipt_id", raw.get("event_id", raw.get("id", ""))))
+            receipt_id = str(raw.get("receipt_id", ""))
             key = _digest({"receipt_id": receipt_id, "selectors": selector_values,
                            "revision": revision, "status": status})
             if key in seen:
@@ -8367,7 +8367,7 @@ def terminal_result(runtime: object, result: Mapping[str, object]) -> dict[str, 
             runtime, sealed, writer="kernel_completion_owner.terminal_result",
         )
     hook_terminal = str(result.get("result", "")).upper()
-    if hook_terminal in {"HOOK_BLOCKED", "HOOK_CONTAINMENT"}:
+    if hook_terminal in {"HOOK_BLOCKED", "HOOK_CONTAINMENT", "CONTINUATION_BLOCKED"}:
         terminal = dict(result)
         terminal["accepted"] = False
         terminal["certified"] = False

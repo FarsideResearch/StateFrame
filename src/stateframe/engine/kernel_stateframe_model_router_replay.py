@@ -267,7 +267,6 @@ def public_projection(state: Mapping[str, object] | None) -> dict[str, object]:
         return {
             "schema": REPLAY_SCHEMA,
             "status": "replayed",
-            "lease_id": str(lease.get("lease_id")),
             "endpoint": str(lease.get("endpoint")),
             "actions_remaining": int(lease.get("actions_remaining", 0)),
             "dedup_receipts": len(state.get("consumed_receipts", ())),

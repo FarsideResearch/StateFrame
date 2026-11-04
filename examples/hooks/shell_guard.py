@@ -1,4 +1,3 @@
-#!/usr/bin/python3
 """Refuse simple shell command strings that contain selected risky commands."""
 
 import json
