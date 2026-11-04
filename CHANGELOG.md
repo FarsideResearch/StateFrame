@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.3.32 (2026-11-04)
 
 - Added AST and live-server guards for bearer authentication across model-server routes and for reasons on unavailable journal events. A configured API key is now also sent to loopback endpoints and to /slots observation.
 
