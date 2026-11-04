@@ -10,6 +10,7 @@ from pathlib import Path
 
 import pytest
 
+from _journal import journal_bytes, write_journal_bytes
 from stateframe.engine import kernel_checkpoint as checkpoint
 
 
@@ -187,8 +188,7 @@ def _checkpoint_series(tmp_path, monkeypatch, *, whole_copy=False):
     written = []
     try:
         for step in range(1, 41):
-            with journal.open("ab") as stream:
-                stream.write(bytes(range(256)) * 512)
+            write_journal_bytes(journal, bytes(range(256)) * 512, append=True)
             saved = _save_series_step(run, step)
             new_bytes = 0
             for path in (run / "checkpoints").rglob("*"):
@@ -200,7 +200,7 @@ def _checkpoint_series(tmp_path, monkeypatch, *, whole_copy=False):
                     seen.add(identity)
                     new_bytes += info.st_size
             written.append(new_bytes)
-        return run, saved, journal.read_bytes(), written
+        return run, saved, journal_bytes(journal), written
     finally:
         checkpoint._STATE.clear()
         checkpoint._STATE.update(previous_state)
@@ -225,8 +225,11 @@ def test_audit_journal_checkpoint_bytes_stay_bounded_and_control_detects_regress
         if not source.is_file() or "checkpoints" in source.parts:
             continue
         relative = source.relative_to(run)
-        assert (restored / relative).read_bytes() == source.read_bytes()
-    assert (restored / "worker/measurement-runs/a/events.jsonl").read_bytes() == expected
+        if source == run / "worker/measurement-runs/a/events.jsonl":
+            assert journal_bytes(restored / relative) == journal_bytes(source)
+        else:
+            assert (restored / relative).read_bytes() == source.read_bytes()
+    assert journal_bytes(restored / "worker/measurement-runs/a/events.jsonl") == expected
 
     _, _, _, control_written = _checkpoint_series(tmp_path, monkeypatch, whole_copy=True)
     with pytest.raises(AssertionError):
@@ -239,16 +242,16 @@ def test_rewritten_audit_journal_starts_new_chunk_lineage(tmp_path):
     root = tmp_path / "checkpoints"
     root.mkdir()
     relative = "worker/measurement-runs/a/events.jsonl"
-    source.write_bytes(b"first\n")
+    write_journal_bytes(source, b"first\n")
     first = {}
     assert checkpoint._snapshot_appended_file(source, target, relative, root, (), first, 1)
-    source.write_bytes(b"other\n")  # same length, different prefix
+    write_journal_bytes(source, b"other\n")  # same length, different prefix
     second = {}
     assert checkpoint._snapshot_appended_file(source, tmp_path / "replacement", relative,
                                               root, first[relative], second, 2)
     assert len(second[relative]) == 1
     assert second[relative][0][1:3] == [0, len(b"other\n")]
-    source.write_bytes(b"x\n")  # truncated
+    write_journal_bytes(source, b"x\n")  # truncated
     third = {}
     assert checkpoint._snapshot_appended_file(source, tmp_path / "truncated", relative,
                                               root, second[relative], third, 3)
@@ -263,7 +266,7 @@ def test_rewritten_audit_journal_starts_new_chunk_lineage(tmp_path):
         restored.mkdir()
         checkpoint._restore_files(saved, restored,
                                   {"entries": ["worker"], "file_chunks": rows})
-        assert (restored / relative).read_bytes() == expected
+        assert journal_bytes(restored / relative) == expected
     chunk = root / checkpoint.CACHE_DIR / third[relative][0][0]
     chunk.write_bytes(b"!" * chunk.stat().st_size)
     damaged = tmp_path / "damaged"

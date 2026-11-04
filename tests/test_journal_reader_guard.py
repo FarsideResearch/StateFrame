@@ -5,7 +5,11 @@ import ast
 import json
 from pathlib import Path
 
-from _journal import measurement_events, measurement_journal_paths
+import pytest
+
+from _journal import (
+    journal_bytes, measurement_events, measurement_journal_paths, write_journal_bytes,
+)
 from stateframe.engine.kernel_journal_store import seal_measurement_run
 
 TESTS = Path(__file__).resolve().parent
@@ -49,6 +53,16 @@ def _assigned_names(node: ast.AST) -> set[str]:
             if isinstance(child, ast.Name)}
 
 
+def _path_expression(node: ast.AST) -> bool:
+    """Only carry journal-path aliases through expressions that produce paths."""
+    return (isinstance(node, ast.Name)
+            or isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div)
+            or isinstance(node, ast.Call) and _call_name(node) in {
+                "Path", "glob", "rglob", "joinpath", "with_name", "with_suffix",
+                "resolve", "absolute",
+            })
+
+
 def _raw_measurement_reads(root: Path) -> list[str]:
     violations = []
     for path in sorted(root.rglob("*.py")):
@@ -90,8 +104,8 @@ def _raw_measurement_reads(root: Path) -> list[str]:
                     target_names = _assigned_names(node)
                     referenced = _names(value)
                     values = _strings(value)
-                    if (any("events.jsonl" in item for item in values)
-                            or referenced & event_names):
+                    if _path_expression(value) and (any("events.jsonl" in item for item in values)
+                                                    or referenced & event_names):
                         before = len(event_names)
                         event_names.update(target_names)
                         changed |= len(event_names) != before
@@ -157,6 +171,35 @@ def test_measurement_reader_handles_live_and_sealed_journals(tmp_path):
     assert measurement_events(tmp_path) == [*live_events, *sealed_events]
 
 
+def test_journal_bytes_preserve_live_and_sealed_disk_bytes(tmp_path):
+    live = tmp_path / "live" / "events.jsonl"
+    sealed = tmp_path / "sealed" / "events.jsonl"
+    live.parent.mkdir()
+    sealed.parent.mkdir()
+    live_bytes = b'{"kind":"live"}\n{"torn":'
+    sealed_bytes = b'{"kind":"sealed"}\n'
+    write_journal_bytes(live, live_bytes)
+    write_journal_bytes(live, b"tail", append=True)
+    write_journal_bytes(sealed, sealed_bytes)
+    seal_measurement_run(sealed.parent)
+
+    assert journal_bytes(live) == live_bytes + b"tail"
+    assert journal_bytes(live.parent, decompress=True) == live_bytes + b"tail"
+    assert journal_bytes(sealed) == journal_bytes(sealed.parent)
+    assert journal_bytes(sealed) != sealed_bytes
+    assert journal_bytes(sealed, decompress=True) == sealed_bytes
+
+    run_journal = tmp_path / "run" / "worker" / "measurement-runs" / "only" / "events.jsonl"
+    run_journal.parent.mkdir(parents=True)
+    write_journal_bytes(run_journal, live_bytes)
+    assert journal_bytes(tmp_path / "run") == live_bytes
+
+
+def test_journal_bytes_missing_file_raises(tmp_path):
+    with pytest.raises(FileNotFoundError, match="measurement journal is absent"):
+        journal_bytes(tmp_path / "missing" / "events.jsonl")
+
+
 def test_test_sources_use_the_shared_measurement_reader():
     violations = _raw_measurement_reads(TESTS)
     assert violations == [], f"read measurement journals through tests/_journal.py: {violations}"
@@ -173,3 +216,18 @@ def test_planted_raw_events_glob_is_caught(tmp_path):
         encoding="utf-8",
     )
     assert _raw_measurement_reads(tmp_path) == ["planted.py:3"]
+
+
+def test_planted_journal_alias_is_caught_but_cache_chunk_is_not(tmp_path):
+    source = tmp_path / "planted.py"
+    source.write_text(
+        'from pathlib import Path\n'
+        'journal = Path("run/worker/measurement-runs/a/events.jsonl")\n'
+        'alias = journal\n'
+        'alias.read_bytes()\n'
+        'rows = next(iter({"worker/measurement-runs/a/events.jsonl": [("chunk",)]}.values()))\n'
+        'for name, in rows:\n'
+        '    (Path("run/journal-cache") / name).read_bytes()\n',
+        encoding="utf-8",
+    )
+    assert _raw_measurement_reads(tmp_path) == ["planted.py:4"]

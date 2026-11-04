@@ -15,6 +15,7 @@ from pathlib import Path
 
 import pytest
 
+from _journal import measurement_journal_paths
 from ._support import Endpoint, FIXTURES, PYTHON, ROOT, copy_repo, environment, run_case
 from fixtures.process_signals import record_identity, signal_run_owned, signal_run_verified
 from engine_run import EngineProcess, run_monitored, start_monitored
@@ -291,7 +292,7 @@ def _wait_for(path: Path, process: EngineProcess, timeout: float = 600,
             error = path.parent / "sitecustomize-error"
             trace = path.parent / "checkpoint-save-trace.jsonl"
             journals = ([(str(journal), journal.stat().st_size)
-                         for journal in run_dir.glob("worker/measurement-runs/*/events.jsonl")]
+                         for journal in measurement_journal_paths(run_dir)]
                         if run_dir is not None else [])
             saves = _events(run_dir) if run_dir is not None else []
             raise AssertionError(f"run exited before {path.name}: {out} {err}; "

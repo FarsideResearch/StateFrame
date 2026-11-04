@@ -18,6 +18,7 @@ from pathlib import Path
 
 import pytest
 
+from _journal import measurement_events
 from stateframe.replay_tape import (
     Replayer, recorded_countdown_seconds, with_recorded_countdown)
 from stateframe.scripted_endpoint import Script, ScriptStepUnavailable, serve
@@ -156,14 +157,7 @@ class _StopAtThirdRequest(Script):
 
 
 def _events(run: Path) -> list[dict]:
-    import lzma
-
-    rows = []
-    for path in [*(run / "worker/measurement-runs").glob("*/events.jsonl"),
-                 *(run / "worker/measurement-runs").glob("*/events.jsonl.xz")]:
-        raw = lzma.decompress(path.read_bytes()) if path.suffix == ".xz" else path.read_bytes()
-        rows += [json.loads(line) for line in raw.decode().splitlines() if line.strip()]
-    return rows
+    return measurement_events(run)
 
 
 @pytest.mark.host_sandbox

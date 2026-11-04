@@ -11,6 +11,7 @@ from time import monotonic
 
 import pytest
 
+from _stateframe_home import isolated_stateframe_home
 import kernel_agent_schemas
 import kernel_request_diet as request_diet
 from kernel_shell_tool import SHELL_SCHEMA
@@ -114,6 +115,7 @@ def _schema_meter_startup_digest() -> str:
         if not key.startswith("STATEFRAME_")
     }
     environment.update({
+        "STATEFRAME_HOME": isolated_stateframe_home(),
         "PYTHONPATH": os.pathsep.join((str(source_root), str(engine_root))),
         "PYTHONDONTWRITEBYTECODE": "1",
         "PYTHONHASHSEED": "0",

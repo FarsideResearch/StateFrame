@@ -1,5 +1,4 @@
 import json
-import lzma
 import re
 import subprocess
 import sys
@@ -9,6 +8,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from _journal import measurement_events, measurement_journal_paths
 from acceptance._support import budget
 from test_shell_e2e import command, environment, fixture_repo, run_script, step
 from kernel_completion_owner import REFUSAL_REASON_CODES
@@ -465,13 +465,8 @@ def test_recorded_blocked_run_uses_host_refusal_codes(recorded_blocked_run):
     run = recorded_blocked_run
     assert json.loads((run / "engine-result.json").read_text())["result"]["result"] == (
         "CONTINUATION_BLOCKED")
-    # Since 0.3.29 a finished run seals its journal as events.jsonl.xz; read either layout.
-    measurement = run / "worker" / "measurement-runs"
-    journals = [*measurement.glob("*/events.jsonl"), *measurement.glob("*/events.jsonl.xz")]
-    assert journals
-    events = [json.loads(line) for journal in journals
-              for line in (lzma.decompress(journal.read_bytes()).decode("utf-8") if journal.suffix == ".xz"
-                           else journal.read_text()).splitlines()]
+    assert measurement_journal_paths(run)
+    events = measurement_events(run)
     receipts = [event["receipt"] for event in events if event.get("kind") == "action_receipt"]
     denied = [receipt for receipt in receipts
               if receipt.get("result_class") == "REJECTED"
