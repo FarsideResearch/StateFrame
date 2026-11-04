@@ -17,6 +17,8 @@ import sys
 import threading
 import time
 from pathlib import Path
+from urllib import error, request
+from urllib.parse import urlsplit
 
 import pytest
 from acceptance._support import assert_tree_imports, tree_python
@@ -25,21 +27,117 @@ from _journal import measurement_events
 from stateframe.scripted_endpoint import Script, ScriptStepUnavailable, serve
 from fixtures.process_signals import record_identity, signal_run_owned, signal_run_verified
 from tools.compare_no_mcp_requests import (
-    MOVED_ID_FIELDS, changed_id_chars, id_length_deltas, planted_body_change_is_caught,
-    request_id_handle_mismatches, wire_id_drift)
+    DERIVED_RESULT_FIELDS, MOVED_ID_FIELDS, changed_id_chars, id_length_deltas,
+    planted_body_change_is_caught, request_id_handle_mismatches,
+    unbacked_result_hash_changes, wire_id_drift)
 from tools.pinned_tree import pinned_tree
 
 
 def _assert_journal_kinds_match_release(baseline_kinds, current_kinds):
-    """Journal kinds match the base release, except one intended addition: a sealed submit now
-    also journals done_facts_finalized (receipt determinism, 11-03, caches terminal done facts
-    before the journal closes). Exactly one extra, nothing removed or reordered."""
-    extra = "done_facts_finalized"
-    assert current_kinds.count(extra) == baseline_kinds.count(extra) + 1, (
-        baseline_kinds.count(extra), current_kinds.count(extra))
+    """Allow provider dialect and, for older baselines only, one done-facts event."""
     trimmed = list(current_kinds)
-    del trimmed[len(trimmed) - 1 - trimmed[::-1].index(extra)]
+    done_kind = "done_facts_finalized"
+    baseline_done = baseline_kinds.count(done_kind)
+    current_done = trimmed.count(done_kind)
+    assert current_done == baseline_done or (baseline_done == 0 and current_done == 1), (
+        done_kind, baseline_done, current_done)
+    if current_done > baseline_done:
+        del trimmed[len(trimmed) - 1 - trimmed[::-1].index(done_kind)]
+    dialect_kind = "provider_dialect"
+    assert trimmed.count(dialect_kind) == baseline_kinds.count(dialect_kind) + 1, (
+        dialect_kind, baseline_kinds.count(dialect_kind), trimmed.count(dialect_kind))
+    del trimmed[len(trimmed) - 1 - trimmed[::-1].index(dialect_kind)]
     assert trimmed == baseline_kinds
+
+
+def test_journal_kind_parity_rejects_unexpected_extra_kind():
+    baseline = ["run_started", "request_sent", "prompt_cache_accounting", "run_done"]
+    allowed = ["run_started", "provider_dialect", "request_sent",
+               "prompt_cache_accounting", "done_facts_finalized", "run_done"]
+    _assert_journal_kinds_match_release(baseline, allowed)
+    _assert_journal_kinds_match_release(baseline, [kind for kind in allowed
+                                                   if kind != "done_facts_finalized"])
+    baseline_with_done = [*baseline[:-1], "done_facts_finalized", baseline[-1]]
+    _assert_journal_kinds_match_release(baseline_with_done, allowed)
+    with pytest.raises(AssertionError):
+        _assert_journal_kinds_match_release(baseline_with_done,
+                                            [*allowed[:-1], "done_facts_finalized", allowed[-1]])
+    with pytest.raises(AssertionError):
+        _assert_journal_kinds_match_release(baseline_with_done,
+                                            [kind for kind in allowed if kind != "done_facts_finalized"])
+    with pytest.raises(AssertionError):
+        _assert_journal_kinds_match_release(baseline, [*allowed, "unexpected_kind"])
+    with pytest.raises(AssertionError):
+        _assert_journal_kinds_match_release(baseline, [*allowed, "provider_feature_degraded"])
+    with pytest.raises(AssertionError):
+        _assert_journal_kinds_match_release([*baseline, "unexpected_kind"], allowed)
+    with pytest.raises(AssertionError):
+        _assert_journal_kinds_match_release(baseline, [kind for kind in allowed
+                                                        if kind != "prompt_cache_accounting"])
+
+
+def _assert_spec_keys_match_release(baseline_keys, current_keys):
+    # The fixture proves llama.cpp via /props, so the candidate records that proof in spec.json.
+    assert "provider_capabilities" not in baseline_keys
+    assert current_keys == baseline_keys | RUNNER_SPEC_FIELDS | {"provider_capabilities"}
+
+
+def test_spec_key_parity_rejects_unexpected_extra_key():
+    baseline = {"schema", "chat_url"}
+    allowed = baseline | RUNNER_SPEC_FIELDS | {"provider_capabilities"}
+    _assert_spec_keys_match_release(baseline, allowed)
+    with pytest.raises(AssertionError):
+        _assert_spec_keys_match_release(baseline, allowed | {"unexpected_spec_key"})
+
+
+def _assert_proven_fixture_capabilities(run: Path) -> None:
+    spec = json.loads((run / "spec.json").read_text())
+    endpoint = urlsplit(spec["chat_url"])
+    origin = f"{endpoint.scheme}://{endpoint.netloc}"
+    assert spec["provider_capabilities"] == {
+        origin: {
+            "dialect": "llama.cpp",
+            "slots": False,
+            "slot_ids": [],
+            "reason": "proven by /props",
+            "props_status": 200,
+            "slots_status": 404,
+            "reasoning_controls": "llama.cpp reasoning controls unchanged",
+        },
+    }
+
+
+def _assert_unpinned_without_degradation(run: Path) -> None:
+    slot = json.loads((run / "spec.json").read_text())["prompt_cache_slot"]
+    assert slot["selection"] == "not_pinned" and slot["slot"] is None
+    assert slot.get("degraded") is not True
+
+
+def _assert_automatic_idle_pin(run: Path, requests: list[bytes]) -> None:
+    spec = json.loads((run / "spec.json").read_text())
+    assert spec["prompt_cache_slot"]["selection"] == "automatic_idle"
+    assert spec["prompt_cache_slot"]["slot"] == 0
+    assert spec["prompt_cache_slot"].get("degraded") is not True
+    assert spec["environment"]["REACT_SLOT_ID"] == "0"
+    assert requests
+    assert all(json.loads(body)["id_slot"] == 0 and json.loads(body)["cache_prompt"] is True
+               for body in requests)
+
+
+def _assert_parity_endpoint_shape(origin: str, slots: list[int] | None) -> None:
+    with request.urlopen(origin + "/props", timeout=2) as response:
+        props = json.load(response)
+    assert props["default_generation_settings"]["n_ctx"] == 65536
+    assert props["model_path"] == "scripted-endpoint"
+    if slots is None:
+        with pytest.raises(error.HTTPError) as missing:
+            request.urlopen(origin + "/slots", timeout=2)
+        assert missing.value.code == 404
+    else:
+        with request.urlopen(origin + "/slots", timeout=2) as response:
+            actual = json.load(response)
+        assert actual == [{"id": index, "n_ctx": size, "is_processing": False}
+                          for index, size in enumerate(slots)]
 
 
 def _is_size_count(key, value) -> bool:
@@ -109,16 +207,20 @@ def _assert_diet_payloads_match_release(baseline_payloads, current_payloads,
     assert set(kinds) <= MOVED_ID_FIELDS, kinds
 
 
-def _assert_only_wire_ids_moved(baseline_requests, current_requests, current_run=None):
+def _assert_only_wire_ids_moved(baseline_requests, current_requests, current_run=None,
+                                baseline_run=None):
     """The receipt-determinism change (11-03) moved request_id and the receipt IDs that are
     derived like it. Everything else must still be byte-identical to the base release."""
     problems, kinds = wire_id_drift(list(baseline_requests), list(current_requests))
     assert not problems, problems
-    assert set(kinds) <= MOVED_ID_FIELDS, kinds
+    assert set(kinds) <= MOVED_ID_FIELDS | DERIVED_RESULT_FIELDS, kinds
     # The comparison itself still fails on any other one-byte change.
     assert planted_body_change_is_caught(current_requests[0])
     if current_run is not None:
         assert request_id_handle_mismatches(current_run) == []
+    if baseline_run is not None:
+        assert current_run is not None
+        assert unbacked_result_hash_changes(baseline_run, current_run) == []
 
 
 CURRENT = Path(__file__).resolve().parents[1]
@@ -214,14 +316,15 @@ def _write_launchers(launcher: Path, wrapper: Path) -> None:
 
 def _run_checkout(
     checkout: Path, repo: Path, run: Path, launcher: Path, wrapper: Path, trace: Path,
-    *, stable_tool_head: str | None,
+    *, stable_tool_head: str | None, slots: list[int] | None = None,
 ):
     python = tree_python(checkout / "src",
                          run.parent / f"{run.name}-{checkout.name}-python")
     assert_tree_imports(python, checkout / "src", run.parent)
-    script = Script(
-        json.loads((CURRENT / "examples/discount_bug.script.json").read_text())
-    )
+    document = json.loads((CURRENT / "examples/discount_bug.script.json").read_text())
+    if slots is not None:
+        document["slots"] = slots
+    script = Script(document)
     server = serve(script)
     environment = dict(os.environ)
     environment.pop("PYTHONPATH", None)
@@ -229,6 +332,7 @@ def _run_checkout(
     if stable_tool_head is not None:
         environment["STATEFRAME_STABLE_TOOL_HEAD"] = stable_tool_head
     try:
+        _assert_parity_endpoint_shape(f"http://127.0.0.1:{server.server_port}", slots)
         command = [
             python,
             str(launcher),
@@ -263,11 +367,12 @@ def _run_checkout(
         events = measurement_events(run)
         kinds = [event["kind"] for event in events]
         # Hash-chain fields and tokenizer measurement/endpoint identity vary
-        # between runs because each scripted server uses a fresh port.
+        # between runs because each scripted server uses a fresh port. The
+        # allowed journal additions also shift sequence numbers.
         diet_payloads = [
             {key: value for key, value in event.items()
              if key not in {"timestamp_ns", "previous_hash", "record_hash",
-                            "run_id", "task_id", "event_id",
+                            "run_id", "task_id", "event_id", "sequence",
                             "tokenize_latency_ms", "tokenize_route",
                             "tokenizer_identity"}}
             for event in events if event["kind"] == "request_diet_applied"
@@ -305,14 +410,17 @@ def test_no_hooks_raw_requests_and_journal_match_release(tmp_path, baseline_chec
         baseline_checkout, repo, run, launcher, wrapper, tmp_path / "baseline_modules.json", stable_tool_head="off",
     )
     run.rename(tmp_path / "baseline_run")
+    _assert_unpinned_without_degradation(tmp_path / "baseline_run")
     current = _run_checkout(
         CURRENT, repo, run, launcher, wrapper, tmp_path / "current_modules.json",
         stable_tool_head="off",
     )
-    _assert_only_wire_ids_moved(baseline[0], current[0], run)
+    _assert_unpinned_without_degradation(run)
+    _assert_only_wire_ids_moved(baseline[0], current[0], run, tmp_path / "baseline_run")
     _assert_journal_kinds_match_release(baseline[1], current[1])
     assert current[2] == baseline[2]
-    assert current[3] == baseline[3] | RUNNER_SPEC_FIELDS
+    _assert_spec_keys_match_release(baseline[3], current[3])
+    _assert_proven_fixture_capabilities(run)
     assert current[5], "fixture did not exercise request-diet journal payloads"
     _assert_diet_payloads_match_release(baseline[5], current[5], baseline[0], current[0])
     assert "hooks" not in current[3]
@@ -340,12 +448,44 @@ def test_no_hooks_regular_stateframe_file_matches_release(tmp_path, baseline_che
     baseline = _run_checkout(baseline_checkout, repo, run, launcher, wrapper, tmp_path / "baseline.json",
                              stable_tool_head="off")
     run.rename(tmp_path / "baseline_run")
+    _assert_unpinned_without_degradation(tmp_path / "baseline_run")
     current = _run_checkout(CURRENT, repo, run, launcher, wrapper, tmp_path / "current.json",
                             stable_tool_head="off")
-    _assert_only_wire_ids_moved(baseline[0], current[0], run)
+    _assert_unpinned_without_degradation(run)
+    _assert_only_wire_ids_moved(baseline[0], current[0], run, tmp_path / "baseline_run")
     _assert_journal_kinds_match_release(baseline[1], current[1])
     assert current[2] == baseline[2]
-    assert current[3] == baseline[3] | RUNNER_SPEC_FIELDS
+    _assert_spec_keys_match_release(baseline[3], current[3])
+    _assert_proven_fixture_capabilities(run)
+    _assert_diet_payloads_match_release(baseline[5], current[5], baseline[0], current[0])
+
+
+def test_no_hooks_real_shaped_llama_keeps_automatic_pin_and_release_bytes(
+    tmp_path, baseline_checkout,
+):
+    """An idle /slots response pins the default profile on both release and candidate."""
+    import shutil
+
+    repo = tmp_path / "repo"
+    shutil.copytree(CURRENT / "examples/discount_bug", repo)
+    launcher = tmp_path / "launcher.py"
+    wrapper = tmp_path / "child_wrapper.py"
+    _write_launchers(launcher, wrapper)
+    run = tmp_path / "run"
+    baseline = _run_checkout(
+        baseline_checkout, repo, run, launcher, wrapper, tmp_path / "baseline.json",
+        stable_tool_head="off", slots=[65536],
+    )
+    _assert_automatic_idle_pin(run, baseline[0])
+    run.rename(tmp_path / "baseline_run")
+    current = _run_checkout(
+        CURRENT, repo, run, launcher, wrapper, tmp_path / "current.json",
+        stable_tool_head="off", slots=[65536],
+    )
+    _assert_automatic_idle_pin(run, current[0])
+    _assert_only_wire_ids_moved(baseline[0], current[0], run, tmp_path / "baseline_run")
+    _assert_journal_kinds_match_release(baseline[1], current[1])
+    assert "provider_feature_degraded" not in current[1]
     _assert_diet_payloads_match_release(baseline[5], current[5], baseline[0], current[0])
 
 
@@ -443,4 +583,4 @@ def test_no_hooks_resume_rebuilt_requests_match_release(tmp_path, baseline_check
     # current/baseline are (original, rebuilt) request lists; resume parity inside one
     # version stays byte-exact (asserted in _resume_checkout), across versions only IDs move.
     _assert_only_wire_ids_moved(baseline[0], current[0])
-    _assert_only_wire_ids_moved(baseline[1], current[1], run)
+    _assert_only_wire_ids_moved(baseline[1], current[1], run, tmp_path / "baseline_run")

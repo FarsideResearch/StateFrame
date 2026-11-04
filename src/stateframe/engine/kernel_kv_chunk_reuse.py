@@ -184,10 +184,14 @@ def describe_request(messages: Sequence[Mapping[str, object]], tools: object, *,
 
 def _slot_id(body: Mapping[str, object], environ: Mapping[str, str]) -> int:
     raw = environ.get(SLOT_ENV)
-    if raw is None and type(body.get("id_slot")) is int:
+    if raw is None and "id_slot" in body:
         value = body["id_slot"]
     elif raw is None:
-        raw = environ.get("REACT_SLOT_ID", "0")
+        raw = environ.get("REACT_SLOT_ID")
+        if raw is None:
+            from kernel_provider_dialect import ProviderCapabilityError
+            raise ProviderCapabilityError(
+                "KV_CHUNK_REUSE", "an explicitly selected slot (slot 0 is never inferred)")
         try:
             value = int(raw)
         except (TypeError, ValueError) as error:
@@ -229,7 +233,7 @@ def _origin(endpoint: str) -> str:
 
 def slot_action(endpoint: str, slot: int, action: str, filename: str | None,
                 key: str = "", *, timeout: float = 30,
-                opener=None) -> dict[str, object]:
+                opener=None, capabilities=None) -> dict[str, object]:
     """Call llama.cpp's ``POST /slots/{slot}?action=...`` endpoint."""
     if type(slot) is not int or slot < 0:
         raise ValueError("slot must be a nonnegative integer")
@@ -240,6 +244,12 @@ def slot_action(endpoint: str, slot: int, action: str, filename: str | None,
     safe_filename = Path(filename).name if filename is not None else None
     if action != "erase" and not safe_filename:
         raise ValueError(f"{action} requires a filename")
+    if capabilities is None:
+        from kernel_provider_dialect import capabilities_for
+        capabilities = capabilities_for(endpoint, key)
+    from kernel_provider_dialect import require_feature
+    require_feature(capabilities, f"KV_CHUNK_REUSE slot {action}",
+                    slots=True, slot_id=slot)
     payload = {} if safe_filename is None else {"filename": safe_filename}
     url = f"{_origin(endpoint)}/slots/{slot}?action={action}"
     request = urllib.request.Request(
@@ -263,7 +273,7 @@ def slot_action(endpoint: str, slot: int, action: str, filename: str | None,
 
 def configure_transport(body: MutableMapping[str, object], endpoint: str, key: str,
                         *, environ: Mapping[str, str] | None = None,
-                        opener=None) -> dict[str, object] | None:
+                        opener=None, capabilities=None) -> dict[str, object] | None:
     """Apply the on-only transport flags and restore a known stable slot cache.
 
     A missing artifact is a normal cold start.  Restore failures are fail-open
@@ -276,6 +286,11 @@ def configure_transport(body: MutableMapping[str, object], endpoint: str, key: s
     env = _source(environ)
     if mode(env) == "off":
         return None
+    if capabilities is None:
+        from kernel_provider_dialect import capabilities_for
+        capabilities = capabilities_for(endpoint, key, environ=env)
+    from kernel_provider_dialect import require_feature
+    require_feature(capabilities, "KV_CHUNK_REUSE", slots=True)
     messages = body.get("messages", ())
     tools = body.get("tools")
     plan = describe_request(messages, tools, environ=env)
@@ -284,6 +299,7 @@ def configure_transport(body: MutableMapping[str, object], endpoint: str, key: s
         audit.update({"transport_applied": False, "restore_status": "not_eligible"})
         return audit
     slot = _slot_id(body, env)
+    require_feature(capabilities, "KV_CHUNK_REUSE", slots=True, slot_id=slot)
     body["id_slot"] = slot
     body["cache_prompt"] = True
     audit.update({"transport_applied": True, "slot_id": slot})
@@ -297,7 +313,8 @@ def configure_transport(body: MutableMapping[str, object], endpoint: str, key: s
         return audit
     try:
         restored = slot_action(endpoint, slot, "restore", plan.cache_filename, key,
-                               timeout=_timeout(env), opener=opener)
+                               timeout=_timeout(env), opener=opener,
+                               capabilities=capabilities)
     except Exception as error:  # noqa: BLE001 - fail-open is part of this prototype contract
         audit["restore_status"] = "restore_error"
         audit["restore_error_type"] = type(error).__name__

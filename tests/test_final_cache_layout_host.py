@@ -19,6 +19,7 @@ from stateframe.scripted_endpoint import Script, serve
 from tools.pinned_tree import pinned_tree
 
 ROOT = Path(__file__).resolve().parents[1]
+BASELINE = os.environ.get("SF_TEST_PARITY_BASELINE")
 pytestmark = pytest.mark.host_sandbox
 # Per scripted run. tiny_site measured ~420 s solo for the whole parity test on the foundry host;
 # a 240 s per-call limit flaked under full-suite load, so allow ~1.5x the solo time per call.
@@ -63,12 +64,20 @@ def _parity_launchers(tmp_path):
     ("brief_to_report", "Write the report the brief asks for."),
 ])
 def test_switch_off_bytes_match_base_release(tmp_path, tmp_path_factory, example, task):
-    baseline = pinned_tree("e19c325", tmp_path_factory)
+    if BASELINE is not None:
+        if not BASELINE.strip():
+            pytest.fail("SF_TEST_PARITY_BASELINE is set but empty", pytrace=False)
+        baseline = Path(BASELINE).expanduser().resolve()
+        released = subprocess.run(
+            ["git", "-C", str(baseline), "show", "HEAD:src/stateframe/engine/ENGINE_SOURCE.json"],
+            cwd=ROOT, capture_output=True, check=True).stdout
+    else:
+        baseline = pinned_tree("e19c325", tmp_path_factory)
+        released = subprocess.run(
+            ["git", "show", "e19c325:src/stateframe/engine/ENGINE_SOURCE.json"],
+            cwd=ROOT, capture_output=True, check=True).stdout
     engine_record = baseline / "src/stateframe/engine/ENGINE_SOURCE.json"
     assert engine_record.is_file()
-    released = subprocess.run(
-        ["git", "show", "e19c325:src/stateframe/engine/ENGINE_SOURCE.json"],
-        cwd=ROOT, capture_output=True, check=True).stdout
     assert engine_record.read_bytes() == released
     repo = tmp_path / "repo"
     shutil.copytree(ROOT / "examples" / example, repo)
@@ -100,10 +109,12 @@ def test_switch_off_bytes_match_base_release(tmp_path, tmp_path_factory, example
     # The receipt-determinism change (11-03) moved request_id and the receipt IDs derived
     # like it; every other byte must still match the base release.
     from tools.compare_no_mcp_requests import (
-        MOVED_ID_FIELDS, planted_body_change_is_caught, request_id_handle_mismatches, wire_id_drift)
+        DERIVED_RESULT_FIELDS, MOVED_ID_FIELDS, planted_body_change_is_caught,
+        request_id_handle_mismatches, unbacked_result_hash_changes, wire_id_drift)
     problems, kinds = wire_id_drift(outputs[0], outputs[1])
     assert not problems, problems
-    assert set(kinds) <= MOVED_ID_FIELDS, kinds
+    assert set(kinds) <= MOVED_ID_FIELDS | DERIVED_RESULT_FIELDS, kinds
+    assert unbacked_result_hash_changes(tmp_path / "baseline_run", tmp_path / "run") == []
     assert planted_body_change_is_caught(outputs[1][0])
     assert request_id_handle_mismatches(tmp_path / "run") == []
 

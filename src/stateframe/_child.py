@@ -106,6 +106,7 @@ def install_environment(spec: dict) -> None:
     for key in list(os.environ):
         if key.startswith(ENGINE_PREFIXES) and not key.startswith("STATEFRAME_TASK_"):
             del os.environ[key]
+    os.environ.pop("SF_PROMPT_CACHE_PIN_DEGRADED_REASON", None)
     os.environ.update({str(k): str(v) for k, v in spec["environment"].items()})
     if checkpoint_off:
         os.environ["STATEFRAME_CHECKPOINT"] = "off"
@@ -956,6 +957,8 @@ def main(argv: list[str]) -> int:
             for settings in spec["routes"]["roles"].values())
         HOST_STATE["frame_routes_last_action"] = kernel_frame_routes.LAST_CLOSED_ACTION
         HOST_STATE["frame_routes_accounting"] = kernel_frame_routes.ACCOUNTING
+    from kernel_provider_dialect import seed_run_capability_cache
+    seed_run_capability_cache(spec.get("provider_capabilities"))
     from kernel_custom_tools import CustomToolError, load_tool_files
     from kernel_mcp_tools import load_mcp_files
     from kernel_tool_settings import ToolSettingsError, load_tool_settings
@@ -1056,6 +1059,13 @@ def main(argv: list[str]) -> int:
                                        "live_grader_feedback": "FINAL_ONLY",
                                        "target_disclosure": "PUBLIC_PATHS_UNLOCALIZED"})
         emit_resume_pending_check(spec, resume)
+        provider_records = spec.get("provider_capabilities")
+        if isinstance(provider_records, dict) and provider_records:
+            emit("provider_dialects", endpoints=[
+                {"origin": origin, **record}
+                for origin, record in sorted(provider_records.items())
+                if isinstance(origin, str) and isinstance(record, dict)
+            ])
         emit("engine_start", turns=rr.MAX_STEPS,
              **({"resume_attempt": resume.get("attempt"), "replay_sends": len(replayer.tape)}
                 if resume is not None and replayer is not None else {}))

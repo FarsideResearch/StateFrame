@@ -188,6 +188,14 @@ def test_same_origin_redirect_strips_key_before_cross_origin_tokenizer(monkeypat
     redirect_authorization = []
 
     class RedirectHandler(BaseHTTPRequestHandler):
+        def do_GET(self):  # noqa: N802
+            payload = b'{"default_generation_settings":{"n_ctx":65536},"model_path":"mock-llama"}'
+            self.send_response(200 if self.path == "/props" else 404)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
         def do_POST(self):  # noqa: N802
             redirect_authorization.append(self.headers.get("Authorization"))
             self.send_response(303)

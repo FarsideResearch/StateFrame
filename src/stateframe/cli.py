@@ -353,6 +353,26 @@ def _print_summary(summary: dict) -> None:
         result_line += f"; {len(changed)} test file{'s' if len(changed) != 1 else ''} changed: {test_paths}"
     if result_line and summary.get("test_lock_note"):
         result_line += f"; {summary['test_lock_note']}"
+    provider_records = summary.get("provider_capabilities")
+    provider_summary = "not recorded"
+    if isinstance(provider_records, dict) and provider_records:
+        provider_summary = " | ".join(
+            f"{origin}: {record.get('dialect')} ({record.get('reason')}); "
+            f"{record.get('reasoning_controls', 'reasoning controls not recorded')}"
+            for origin, record in sorted(provider_records.items())
+            if isinstance(origin, str) and isinstance(record, dict)
+        ) or "not recorded"
+    slot_info = summary.get("prompt_cache_slot")
+    if isinstance(slot_info, dict):
+        slot_reason = str(slot_info.get("reason") or "reason not recorded")
+        if slot_info.get("degraded") is True:
+            slot_summary = f"degraded: {slot_reason}"
+        elif type(slot_info.get("slot")) is int:
+            slot_summary = f"pinned to slot {slot_info['slot']} ({slot_reason})"
+        else:
+            slot_summary = f"not pinned ({slot_reason})"
+    else:
+        slot_summary = "not recorded"
     rows = [
         ("outcome", f"runtime={summary['runtime_outcome']} checks={summary['check_outcome']} "
          f"artifact={summary['artifact']}"),
@@ -360,6 +380,8 @@ def _print_summary(summary: dict) -> None:
         *([("test evidence", json.dumps(summary["wrong_test_evidence"], sort_keys=True))]
           if summary.get("wrong_test_evidence") else []),
         ("engine result", summary.get("engine_result")),
+        ("provider dialects", provider_summary),
+        ("prompt-cache slot", slot_summary),
         *([("engine error", summary["engine_error_reason"])] if summary.get("engine_error_reason") else []),
         *([("hook containment", summary["hook_containment"])] if summary.get("hook_containment") else []),
         ("model requests", summary.get("requests")),

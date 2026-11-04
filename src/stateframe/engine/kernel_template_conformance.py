@@ -527,6 +527,10 @@ def render_endpoint_request(body: Mapping[str, object], endpoint: str, key: str,
                             post: Callable[[str, Mapping[str, object]], Mapping[str, object]] | None = None
                             ) -> dict[str, object]:
     """Render and tokenize one body through the selected endpoint's routes."""
+    if post is None:
+        from kernel_provider_dialect import capabilities_for, require_feature
+        capabilities = capabilities_for(endpoint, key)
+        require_feature(capabilities, "template-conformance /apply-template")
     base = _endpoint_base(endpoint) if post is None else ""
     post_json = post or (lambda route, payload: _post_json(base + route, payload, key,
                                                             deadline=deadline))
@@ -718,7 +722,11 @@ def capture_submitted(capture: object, body: Mapping[str, object], endpoint: str
             verification["valid"] and identity["template_identity_match"]
             and identity["tokenizer_identity_match"])
         render_status = "verified" if verification["valid"] else "mismatch"
-    except Exception as error:  # noqa: BLE001 - evidence must record live failures
+    except Exception as error:  # noqa: BLE001 - evidence records live failures; missing capability is terminal
+        from kernel_provider_dialect import ProviderCapabilityError
+
+        if isinstance(error, ProviderCapabilityError):
+            raise
         rendered = {}
         verification = {
             "rendered_token_ids": [], "rendered_token_count": 0,

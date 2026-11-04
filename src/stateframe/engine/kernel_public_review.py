@@ -326,6 +326,10 @@ class PublicReview:
                 return None
             receipt = self._execute()
         except Exception as error:
+            from kernel_provider_dialect import ProviderCapabilityError
+
+            if isinstance(error, ProviderCapabilityError):
+                raise
             # Review failure must not acquire completion authority; preserve its exact failure class.
             runtime.journal.emit('public_review_unexposed', reason='review_unavailable',
                                  error_type=type(error).__name__, detail=str(error)[:300])
@@ -358,6 +362,10 @@ class PublicReview:
         try:
             receipt = self._execute()
         except Exception as error:
+            from kernel_provider_dialect import ProviderCapabilityError
+
+            if isinstance(error, ProviderCapabilityError):
+                raise
             self.runtime.journal.emit('public_probe_rerun_unavailable', error_type=type(error).__name__,
                                       reason=f"probe rerun failed: {type(error).__name__}",
                                       detail=str(error)[:300])

@@ -4731,6 +4731,15 @@ class StateFrameRuntime:
                 self.journal = resume_journal(self, output, manifest, resume)
         else:
             self.journal = AuditJournal(output, getattr(owner, "task_id"), manifest)
+        prompt_cache_degradation = os.environ.get("SF_PROMPT_CACHE_PIN_DEGRADED_REASON")
+        if resume is None and isinstance(prompt_cache_degradation, str) and prompt_cache_degradation:
+            self.journal.emit(
+                "provider_feature_degraded",
+                producer="kernel_provider_dialect",
+                feature="prompt-cache pinned slot",
+                reason=prompt_cache_degradation,
+                dispatch=False,
+            )
         from kernel_history_spool import bind_histories
         bind_histories(owner, self.journal)
         from kernel_release_switch_registry import enforce_stateframe_switch_registry

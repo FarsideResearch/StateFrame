@@ -1092,7 +1092,7 @@ run_tests accepts a pytest path or selector, not shell commands or package insta
     return instructions
 
 
-REASONING_EFFORTS = frozenset({'none', 'low', 'medium', 'high', 'xhigh'})
+REASONING_EFFORTS = frozenset({'none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'})
 
 
 # 10-08 CONFIRMED_BUILD (FRAMELAB, pooled 100 bands): a 4k thinking budget matches unbounded on correctness (benchmark 57 vs
@@ -1104,9 +1104,10 @@ DEFAULT_REASONING_BUDGET_TOKENS = 4096
 def configure_reasoning_budget(body: dict) -> None:
     """Apply explicit reasoning settings before the final wire guard.
 
-    REACT_REASONING_EFFORT is the OpenAI-compatible provider knob (DeepInfra DeepSeek V4
-    ignores llama.cpp's reasoning_budget_tokens and runs with thinking OFF unless it
-    receives reasoning_effort; measured 09-25).  Never 'max' (MC rule #45).
+     REACT_REASONING_EFFORT is the OpenAI-compatible provider knob (DeepInfra DeepSeek V4
+     ignores llama.cpp's reasoning_budget_tokens and runs with thinking OFF unless it
+     receives reasoning_effort; measured 09-25). Values match the OpenAI Chat Completions
+     reasoning-effort schema; the selected provider must support the operator's choice.
 
     An explicit global OFF profile wins over optional capacity overrides.  The
     final provider boundary repeats this transformation after all routers and
@@ -1121,10 +1122,13 @@ def configure_reasoning_budget(body: dict) -> None:
         body.clear()
         body.update(transformed)
         return
-    effort = os.environ.get('REACT_REASONING_EFFORT')
+    raw_effort = os.environ.get('REACT_REASONING_EFFORT')
+    effort = raw_effort.strip().lower() if isinstance(raw_effort, str) else None
+    if not effort:
+        effort = None
     if effort is not None:
         if effort not in REASONING_EFFORTS:
-            raise ValueError('REACT_REASONING_EFFORT must be one of none|low|medium|high|xhigh')
+            raise ValueError('REACT_REASONING_EFFORT must be one of none|minimal|low|medium|high|xhigh|max')
         body['reasoning_effort'] = effort
     raw = os.environ.get('REACT_REASONING_BUDGET_TOKENS')
     budget = DEFAULT_REASONING_BUDGET_TOKENS if raw is None else int(raw)

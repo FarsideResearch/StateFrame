@@ -141,6 +141,12 @@ class TapeServer:
                 path = self.path.rstrip("/")
                 if path.endswith("/models"):
                     self._send_json(200, {"object": "list", "data": [{"id": tape._model, "object": "model"}]})
+                elif path.endswith("/props"):
+                    # Match the llama.cpp identification shape used by scripted_endpoint.
+                    self._send_json(200, {
+                        "default_generation_settings": {"n_ctx": 65536},
+                        "model_path": "allocation-replay-model",
+                    })
                 elif path.endswith("/slots"):
                     self._send_json(200, [
                         {"id": index, "n_ctx": size, "is_processing": False}

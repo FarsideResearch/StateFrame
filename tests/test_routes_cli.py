@@ -8,6 +8,7 @@ import pytest
 
 from stateframe import _child, cli, replay_tape, routes, runner
 from stateframe.endpoint import Endpoint, EndpointError
+from stateframe.engine.kernel_provider_dialect import ProviderCapabilityError
 from stateframe.scripted_endpoint import Script, make_handler
 from http.server import ThreadingHTTPServer
 from threading import Thread
@@ -49,7 +50,9 @@ def test_route_shell_names_are_recognized_but_unit_spec_names_are_ignored():
 def servers():
     active = []
     for model in ("base", "small"):
-        server = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(Script({"model": model})))
+        server = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(Script({
+            "model": model, "slots": [65536, 65536],
+        })))
         thread = Thread(target=server.serve_forever, daemon=True)
         thread.start()
         active.append((server, thread))
@@ -83,6 +86,35 @@ def test_routed_start_lines_and_public_spec(servers, tmp_path, monkeypatch):
     assert json.loads((run_dir / "spec.json").read_text())["routes"] == spec["routes"]
 
 
+def test_default_endpoint_pin_is_removed_before_routed_capability_checks(servers, monkeypatch):
+    from stateframe.engine.kernel_provider_dialect import ProviderCapabilities
+
+    default, small = servers
+    options = runner.RunOptions(
+        repo=None, task="task", endpoint=Endpoint(default, "base"),
+        route_cli=[f"read.endpoint={small}", "read.model=small"],
+    )
+    options._cache_slot = 0
+    monkeypatch.setattr(
+        runner,
+        "_provider_capabilities_for",
+        lambda endpoint, *_args: (
+            ProviderCapabilities("llama.cpp", True, frozenset({0}))
+            if endpoint.startswith(default)
+            else ProviderCapabilities("openai-strict", reason="openai-strict because /props was 404")
+        ),
+    )
+    monkeypatch.setattr(
+        Endpoint, "get_slots",
+        lambda self: [{"id": 0, "n_ctx": 65536}] if self.base_url == default else [],
+    )
+
+    runner._probe_routes(options, lambda *_args: None)
+
+    assert options._routes is not None
+    assert options._routes.roles["read"]["slot"] is None
+
+
 def test_start_refusals_name_route_and_repair(servers, monkeypatch):
     default, small = servers
     options = runner.RunOptions(repo=None, task="task", endpoint=Endpoint(default, "base"))
@@ -93,8 +125,12 @@ def test_start_refusals_name_route_and_repair(servers, monkeypatch):
     with pytest.raises(runner.RunError, match="route read endpoint unreachable"):
         runner._probe_routes(options, lambda *_: None)
     options.route_cli = [f"read.endpoint={small}", "read.model=small", "read.slot=auto"]
-    with pytest.raises(runner.RunError, match="no idle slot"):
-        runner._probe_routes(options, lambda *_: None)
+    from stateframe.engine.kernel_provider_dialect import ProviderCapabilities
+    with monkeypatch.context() as patch:
+        patch.setattr(runner, "_provider_capabilities_for", lambda *_args: ProviderCapabilities())
+        # Explicit route.slot=auto requires proof; only the runner's optional profile pin degrades.
+        with pytest.raises(ProviderCapabilityError, match=r"routed static slot.*/slots"):
+            runner._probe_routes(options, lambda *_: None)
     options.route_cli = [f"read.endpoint={small}", "read.model=small", f"read.tokenizer={default}"]
     with pytest.raises(runner.RunError, match="tokenizer does not list model"):
         runner._probe_routes(options, lambda *_: None)
@@ -146,7 +182,7 @@ def test_unit_overlay_slot_is_checked_on_request_endpoint(servers, monkeypatch):
     options = runner.RunOptions(repo=None, task="task", endpoint=Endpoint(default, "base"),
                                 route_cli=[f"read.endpoint={small}", "read.model=small",
                                            "unit.slot=1"])
-    with pytest.raises(runner.RunError, match="route read.*unit.*slot 1 is not reported"):
+    with pytest.raises(runner.RunError, match=r"route read \(unit default\).slot 1 is not reported"):
         runner._probe_routes(options, lambda *_: None)
 
 
@@ -306,6 +342,37 @@ def test_resolved_inactive_auto_slot_emits_no_route_output(servers, monkeypatch,
     runner._probe_routes(options)
     assert options._routes is None
     assert capsys.readouterr().err == ""
+
+
+def test_proven_llama_auto_route_refuses_when_every_slot_is_busy():
+    handler = make_handler(Script({"model": "base", "slots": [65536, 65536]}))
+    normal_get = handler.do_GET
+
+    def busy_slots(self):
+        if self.path.rstrip("/") == "/slots":
+            self._send(200, [
+                {"id": 0, "n_ctx": 65536, "is_processing": True},
+                {"id": 1, "n_ctx": 65536, "is_processing": True},
+            ])
+        else:
+            normal_get(self)
+
+    handler.do_GET = busy_slots
+    server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    thread = Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        endpoint = f"http://127.0.0.1:{server.server_port}/v1"
+        options = runner.RunOptions(
+            repo=None, task="task", endpoint=Endpoint(endpoint, "base"),
+            route_cli=["read.slot=auto"],
+        )
+        with pytest.raises(runner.RunError, match="found no idle slot"):
+            runner._probe_routes(options, lambda *_: None)
+    finally:
+        server.shutdown()
+        thread.join(timeout=2)
+        server.server_close()
 
 
 def test_resume_reuses_resolved_auto_slot(servers, monkeypatch):

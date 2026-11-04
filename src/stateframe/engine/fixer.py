@@ -3170,6 +3170,24 @@ def _post(body, url, timeout=600):
         _model = os.environ.get("LLM_MODEL")
         if _model:
             body = dict(body, model=_model)
+    from kernel_launch_identity_cost import enforce_provider_body, reasoning_profile
+    from kernel_provider_dialect import ProviderCapabilityError, capabilities_for
+    capabilities = capabilities_for(url, _key if _remote else "")
+    if capabilities.dialect == "openai-strict":
+        if "messages" not in body:
+            raise ProviderCapabilityError(
+                "fixer request", "OpenAI Chat Completions messages",
+            )
+        if not body.get("model"):
+            _model = os.environ.get("LLM_MODEL")
+            if not _model:
+                raise ProviderCapabilityError(
+                    "fixer request", "model for OpenAI Chat Completions",
+                )
+            body = dict(body, model=_model)
+    body = enforce_provider_body(
+        body, profile=reasoning_profile(), dialect=capabilities.dialect,
+    )
     req = urllib.request.Request(url, data=json.dumps(body).encode(), headers=headers)
     last = None
     for attempt in range(1, _TRANSPORT_RETRIES + 1):
@@ -3750,6 +3768,15 @@ def _call(prompt, *, seed, url, max_tokens=budget_for(96), n_probs=0,
     global _GRAMMAR_UNSUPPORTED
     last = None
     _call_meta_reset()
+    from kernel_provider_dialect import capabilities_for
+    _remote = not url.startswith("http://127.0.0.1")
+    _provider_key = ((os.environ.get("LLM_API_KEY") or os.environ.get("DEEPINFRA_API_KEY"))
+                     if _remote else "")
+    capabilities = capabilities_for(url, _provider_key or "")
+    if capabilities.dialect == "openai-strict":
+        # GBNF is llama.cpp-only. The ordinary parser-backed menu remains a
+        # supported Chat Completions variant, so select it before dispatch.
+        grammar = None
     rungs = []
     for raw_budget in (max_tokens, max_tokens * 2, max_tokens * 3):
         b, clamped = clamp_to_slot(raw_budget, prompt)

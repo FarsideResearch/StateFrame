@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.3.37 (2026-11-04)
+
+### Hosted OpenAI-compatible endpoints
+- Each run records the endpoint's proven capabilities (dialect, slots, how they were proven) in spec.json; runs from earlier versions without that record still inspect and resume.
+- StateFrame now classifies the selected endpoint from a bounded, authenticated `/props` probe. The first run line and summary show the dialect, reason, and reasoning-control disposition. Unproven endpoints use the strict OpenAI Chat Completions schema; `STATEFRAME_PROVIDER=llama.cpp` remains the operator override, while slot features still require `/slots` proof.
+- Strict requests omit llama.cpp-only controls, drop unsupported `top_k` and `min_p`, map `n_probs` to `logprobs` and `top_logprobs`, and emit `reasoning_effort` only when explicitly configured. Native tokenization falls back to calibrated bytes; explicitly selected cache, continuation, template, capacity-preflight, and slot features stop with a named capability error when the selected endpoint cannot prove support.
+- The shipped profile's automatic prompt-cache pin degrades to an unpinned run when `/slots` is unproven; StateFrame disables the optimization and records why. A populated llama.cpp-shaped `/slots` response can prove the dialect when a gateway omits `/props`; endpoints with neither proof keep strict OpenAI request filtering.
+- Budget-recovery refits keep the selected endpoint dialect, and empty or whitespace-only `REACT_REASONING_EFFORT` is treated as unset while OpenAI Chat Completions values (`none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`) are normalized consistently for body construction and status output.
+- History compaction without cache reuse remains available on strict endpoints. Cache-enabled summary requests require an explicit slot ID reported by the selected `/slots` response; no implicit default slot is used.
+- Strict auxiliary fixer and detreason chat calls now require `LLM_MODEL` when the selected endpoint needs an explicit model, and refuse before dispatch if it is missing.
+- Local llama.cpp servers that answer `/props` keep their request bytes: on the bundled examples, requests are byte-identical to a build without endpoint classification.
+
 ## 0.3.36 (2026-11-04)
 
 - Tests: the deferred pre-fit parity test compares against the immediate base tree (as the hook parity test does) instead of a fixed commit, derives its planted control in-process, and the tokenizer-flip live control starts the engine through the shared monitored helper. Test-only; no product change.

@@ -142,11 +142,13 @@ def test_no_hooks_prepare_has_no_hook_spec_or_files(tmp_path):
         "model", "api_key_env", "max_turns", "parent_snapshot", "public_row", "tool_settings",
         "custom_tools_digest", "custom_executables", "environment", "environment_sources",
         "prompt_cache_slot", "test_cmd", "run_identity_seed", "repo", "in_place",
+        # No endpoint was probed by this direct prepare call.
         # Since 0.2.4 every run pins its (possibly empty) skill selection.
         "skills", "skills_digest",
         # Since 0.2.7 every run pins its resolved check and test-protection settings for resume.
         "check_cmd", "check_source", "runner_kind", "protected_test_globs", "protect_tests",
     }
+    assert "provider_capabilities" not in spec
     assert json.loads((run / "tool-settings.json").read_text(encoding="utf-8")) == spec["tool_settings"]
     assert not any((run / name).exists() for name in ("hooks", "hook-bundle", "hook-tape.jsonl"))
     files = {path.relative_to(run).as_posix() for path in run.rglob("*") if path.is_file()}
@@ -155,6 +157,20 @@ def test_no_hooks_prepare_has_no_hook_spec_or_files(tmp_path):
         expected.update(f"{base}/{rel}" for rel in ("sample.py", "tests/test_sample.py"))
     assert files == expected
     assert work.copy == run / "workspace"
+
+
+def test_no_hooks_prepare_records_probed_provider_when_present(tmp_path):
+    from stateframe.engine.kernel_provider_dialect import ProviderCapabilities
+
+    repo = _repo(tmp_path / "repo")
+    options = _options(repo, tmp_path / "run")
+    options._provider_capabilities["http://127.0.0.1:8080"] = ProviderCapabilities(
+        "llama.cpp", reason="proven by /props",
+    )
+
+    _, _, spec = runner.prepare(options, printer=lambda *_: None)
+
+    assert spec["provider_capabilities"]["http://127.0.0.1:8080"]["dialect"] == "llama.cpp"
 
 
 def test_untrusted_project_file_only_prints_notice_and_does_not_enable_hooks(tmp_path, monkeypatch):

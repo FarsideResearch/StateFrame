@@ -6,7 +6,6 @@ import json
 import os
 import time
 import urllib.parse
-import urllib.request
 
 
 class CapacityRefusal(ValueError):
@@ -70,29 +69,39 @@ def install(spec, capture_class):
 
     def send(capture, body, endpoint, key, *, deadline=None):
         parsed = urllib.parse.urlsplit(endpoint)
+        from kernel_provider_dialect import (
+            ProviderCapabilityError, capabilities_for, require_feature,
+        )
+        capabilities = capabilities_for(endpoint, key)
+        require_feature(capabilities, "study capacity preflight", slots=True)
         if parsed.scheme != "http" or parsed.hostname != "127.0.0.1" or parsed.path != "/v1/chat/completions":
-            raise ValueError("capacity preflight requires the local study server")
+            raise ProviderCapabilityError(
+                "study capacity preflight", "local llama.cpp study endpoint",
+            )
         base = urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, "", "", ""))
         def post(route, payload):
             from kernel_bounded_http import request_bytes
             expires = min(deadline, time.monotonic() + 15) if deadline is not None else time.monotonic() + 15
             return json.loads(request_bytes(json.dumps(payload).encode(), base + route, key,
-                                           deadline=expires, socket_timeout=10))
+                                           deadline=expires, socket_timeout=10,
+                                           route_meta={"role": "capacity_preflight"},
+                                           route_allow_remote=False))
         timeout = min(10, deadline - time.monotonic()) if deadline is not None else 10
         if timeout <= 0:
             raise TimeoutError("capacity preflight deadline expired")
-        slots_request = urllib.request.Request(base + "/slots", method="GET")
-        if key:
-            # A server started with an API key answers /slots with 401 otherwise.
-            slots_request.add_header("Authorization", "Bearer " + key)
-        with urllib.request.urlopen(slots_request, timeout=timeout) as response:
-            raw = response.read(1024 * 1024 + 1)
-        if len(raw) > 1024 * 1024:
-            raise ValueError("oversized live slot metadata")
-        slots = json.loads(raw)
         slot_id = body.get("id_slot")
-        if type(slot_id) is not int or not isinstance(slots, list):
-            raise ValueError("explicit live slot required")
+        if type(slot_id) is not int or slot_id < 0:
+            raise ProviderCapabilityError(
+                "study capacity preflight", "an explicitly selected /slots id",
+            )
+        require_feature(
+            capabilities, "study capacity preflight", slots=True, slot_id=slot_id,
+        )
+        from kernel_bounded_http import bounded_json_probe
+        slot_result = bounded_json_probe(base, key, "/slots", timeout=min(2.0, timeout))
+        if slot_result is None or slot_result[0] != 200 or not isinstance(slot_result[1], list):
+            raise ProviderCapabilityError("study capacity preflight", "/slots")
+        slots = slot_result[1]
         selected = [item for item in slots if isinstance(item, dict) and item.get("id") == slot_id]
         if len(selected) != 1 or type(selected[0].get("n_ctx")) is not int or selected[0]["n_ctx"] != limit:
             raise ValueError("live slot differs from declared capacity")

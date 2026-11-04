@@ -195,7 +195,9 @@ def test_gzip_then_identity_415_stops_after_one_resend(monkeypatch, transport_se
 def test_plain_provider_gzip_415_resends_identity(monkeypatch, transport_server):
     monkeypatch.setenv("STATEFRAME_PLAIN_GZIP", "on")
     endpoint, seen, _ = transport_server
-    reply = _PlainHTTPProvider(endpoint, "")({"content": "x" * 40_000}, timeout=5)
+    # The fake server is not llama.cpp, so the provider sends strict OpenAI chat bodies; use one so the body stays above the gzip threshold.
+    reply = _PlainHTTPProvider(endpoint, "")(
+        {"messages": [{"role": "user", "content": "x" * 40_000}]}, timeout=5)
     assert reply == {"ok": True}
     assert [entry[0] for entry in seen] == ["gzip", None]
     assert gzip.decompress(seen[0][1]) == seen[1][1]

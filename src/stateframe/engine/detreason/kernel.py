@@ -52,8 +52,12 @@ class Sensor:
     def answer(self, atom: Atom) -> AtomResult:
         # P0 fix (crucible): a sensor failure is an UNKNOWN observation, never an
         # exception that escapes the certificate.
+        from kernel_provider_dialect import ProviderCapabilityError
+
         try:
             v, m, raw = self._answer(atom)
+        except ProviderCapabilityError:
+            raise
         except Exception as e:
             return AtomResult(atom.id, UNKNOWN, 0.0, self.name,
                               f"sensor-error:{type(e).__name__}:{str(e)[:120]}")
@@ -92,17 +96,34 @@ class LlamaSensor(Sensor):
     fragility detector the A10G-vs-M3 flip measured the need for)."""
     name = "llama-1b"
 
-    def __init__(self, url, seed=31, margin_probe=True, timeout=240, api_key=None):
+    def __init__(self, url, seed=31, margin_probe=True, timeout=240,
+                 api_key=None, key=None):
         self.url, self.seed = url, seed
         self.margin_probe, self.timeout = margin_probe, timeout
-        self.api_key = api_key if api_key is not None else (
-            os.environ.get("LLM_API_KEY") or os.environ.get("DEEPINFRA_API_KEY") or "")
+        credential = key if key is not None else api_key
+        if credential is None:
+            credential = (os.environ.get("LLM_API_KEY")
+                          or os.environ.get("DEEPINFRA_API_KEY") or "")
+        self.api_key = self.key = credential
 
     def _call(self, prompt, seed):
         body = {"messages": [{"role": "user", "content": prompt}],
                 "temperature": 0, "top_p": 1, "max_tokens": 500, "seed": seed}
         if self.margin_probe:
             body["n_probs"] = 8
+        from kernel_launch_identity_cost import enforce_provider_body, reasoning_profile
+        from kernel_provider_dialect import ProviderCapabilityError, capabilities_for
+        capabilities = capabilities_for(self.url, self.key)
+        if capabilities.dialect == "openai-strict":
+            model = os.environ.get("LLM_MODEL")
+            if not model:
+                raise ProviderCapabilityError(
+                    "detreason/kernel sensor", "LLM_MODEL for OpenAI Chat Completions",
+                )
+            body["model"] = model
+        body = enforce_provider_body(
+            body, profile=reasoning_profile(), dialect=capabilities.dialect,
+        )
         req = urllib.request.Request(self.url, data=json.dumps(body).encode(),
                                      headers={"Content-Type": "application/json",
                                               **({"Authorization": f"Bearer {self.api_key}"}

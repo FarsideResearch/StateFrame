@@ -213,6 +213,37 @@ def build_chat_request(request: ScoreRequest) -> dict[str, object]:
     return body
 
 
+def build_openai_chat_request(request: ScoreRequest) -> dict[str, object]:
+    """Build the score request using only OpenAI Chat Completions fields."""
+    if not isinstance(request, ScoreRequest):
+        raise ProtocolError("request must be ScoreRequest")
+    unsupported = []
+    if request.top_k != 0:
+        unsupported.append("top_k")
+    if request.min_p != 0.0:
+        unsupported.append("min_p")
+    if request.repeat_penalty != 1.0:
+        unsupported.append("repeat_penalty")
+    if unsupported:
+        from kernel_provider_dialect import ProviderCapabilityError
+        raise ProviderCapabilityError(
+            "sys1/adapter sampler", "OpenAI Chat Completions mapping for " + ", ".join(unsupported),
+        )
+    return {
+        "model": request.model,
+        "messages": [{"role": "user", "content": request.prompt}],
+        "temperature": request.temperature,
+        "top_p": request.top_p,
+        "presence_penalty": request.presence_penalty,
+        "frequency_penalty": request.frequency_penalty,
+        "seed": request.seed,
+        "max_tokens": 1,
+        "logprobs": True,
+        "top_logprobs": request.top_logprobs,
+        "stream": False,
+    }
+
+
 def build_native_request(request: ScoreRequest) -> dict[str, object]:
     """Build the declared native ``n_probs`` alternative.
 
@@ -632,6 +663,7 @@ __all__ = [
     "ScoreTransportAdapter",
     "TransportOutcome",
     "build_chat_request",
+    "build_openai_chat_request",
     "build_native_request",
     "parse_chat_response",
     "parse_native_response",

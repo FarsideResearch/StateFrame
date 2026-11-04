@@ -282,6 +282,7 @@ class RunOptions:
     _context_tokens: int = field(default=65_536, init=False, repr=False)
     _prompt_budget: int = field(default=33_344, init=False, repr=False)
     _context_env: dict[str, str] = field(default_factory=dict, init=False, repr=False)
+    _context_display: str = field(default="default", init=False, repr=False)
     slot: int | None = None
     timeout_s: float | None = None  # None: no time limit (the product default)
     quiet: bool = False
@@ -289,6 +290,7 @@ class RunOptions:
     _cache_slot: int | None = field(default=None, init=False, repr=False)
     _cache_slot_selection: str | None = field(default=None, init=False, repr=False)
     _cache_slot_reason: str | None = field(default=None, init=False, repr=False)
+    _cache_slot_degraded: bool = field(default=False, init=False, repr=False)
     _capabilities: dict[str, object] = field(default_factory=dict, init=False, repr=False)
     # Environment for the repository's tests (engine checks and --test-cmd), e.g. test-only
     # settings a project needs to import. Declared to the engine as host task env keys.
@@ -315,6 +317,9 @@ class RunOptions:
     _routes: routes.RouteTable | None = field(default=None, init=False, repr=False)
     _recorded_routes: object = field(default=None, init=False, repr=False)
     _recorded_route_default: dict[str, object] | None = field(default=None, init=False, repr=False)
+    _provider_capabilities: dict[str, object] = field(default_factory=dict, init=False, repr=False)
+    _provider_route_dialects: dict[str, dict[str, str]] = field(default_factory=dict,
+                                                                  init=False, repr=False)
 
 
 TEST_ENV_KEY = re.compile(r"^[A-Z][A-Z0-9_]{0,63}$")
@@ -493,6 +498,7 @@ OPT_IN_SWITCHES = {
     "STATEFRAME_EDIT_SCOPE_WIDEN": ("on", "off"),  # scoped runs admit an edited product file outside the scope
     "STATEFRAME_REQUIREMENT_RECHECK": ("on", "off"),  # first done answered once with the task's requirement checklist
     "STATEFRAME_FINAL_CACHE_LAYOUT": ("on", "off"),  # cacheable final request layout: volatile authority last
+    "STATEFRAME_PROVIDER": ("llama.cpp",),  # operator-confirmed llama.cpp dialect override
     "STATEFRAME_QUEUE_WAIT_MAX_S": (),  # finite positive seconds; a profile may set it too
     "STATEFRAME_SEND_STALL_S": (),  # 10-600 seconds without request-body progress
     "STATEFRAME_FL_CHECKPOINT_CAPTURE": ("on", "off"),  # opt-in settled-boundary observer capture
@@ -971,6 +977,7 @@ def prepare(options: RunOptions, printer=print) -> tuple[Path, workcopy.WorkCopy
     _validate_timeout(options.timeout_s)
     _remaining(options)
     environment = profiles.load(options.profile)
+    _apply_operator_reasoning_effort(environment)
     if options._routes is not None:
         routed_keys = {settings.get("api_key_env") for settings in options._routes.roles.values()}
         stored_names = set(environment) | set(options.extra_env) | set(options.test_env) | set(options._context_env)
@@ -1162,6 +1169,14 @@ def prepare(options: RunOptions, printer=print) -> tuple[Path, workcopy.WorkCopy
     # Host authority wins over every caller-supplied environment overlay.
     environment["STATEFRAME_TOOL_SETTINGS_FILE"] = str(settings_file)
     environment["STATEFRAME_SKILL_SETTINGS_FILE"] = str(skills_file)
+    environment.pop("SF_PROMPT_CACHE_PIN_DEGRADED_REASON", None)
+    if options._cache_slot_degraded:
+        # Prompt-cache reuse is optional unless an explicit slot was requested. With
+        # no slot proof, disable it so secondary cache-enabled bodies also degrade.
+        environment["STATEFRAME_PROMPT_CACHE"] = "off"
+        environment["SF_PROMPT_CACHE_PIN_DEGRADED_REASON"] = (
+            options._cache_slot_reason or "provider did not prove llama.cpp /slots"
+        )
     # Slot selection is a runner-owned contract. A stale ambient value or an
     # extra environment entry must not pin a slot after discovery found none.
     environment.pop("REACT_SLOT_ID", None)
@@ -1183,8 +1198,12 @@ def prepare(options: RunOptions, printer=print) -> tuple[Path, workcopy.WorkCopy
     for name in opt_in:
         environment_sources[name] = ("ambient:" + name if os.environ.get(name, "").strip()
                                      else "runner:default-" + OPT_IN_RUNNER_DEFAULTS[name])
+    if options._cache_slot_degraded:
+        environment_sources["STATEFRAME_PROMPT_CACHE"] = "runner:optional-pin-degraded"
+        environment_sources["SF_PROMPT_CACHE_PIN_DEGRADED_REASON"] = "runner:provider-capability-degradation"
     if selected_slot is not None:
         environment_sources["REACT_SLOT_ID"] = "runner:" + (options._cache_slot_selection or "explicit")
+    provider_records = _provider_preflight_records(options)
     spec = {
         "schema": "stateframe-run/1",
         "created": datetime.now(timezone.utc).isoformat(timespec="seconds"),
@@ -1192,6 +1211,7 @@ def prepare(options: RunOptions, printer=print) -> tuple[Path, workcopy.WorkCopy
         "engine_source": profiles.engine_source_summary(),
         "profile": options.profile,
         "capabilities": options._capabilities,
+        **({"provider_capabilities": provider_records} if provider_records else {}),
         "chat_url": options.endpoint.chat_url,
         "model": options.endpoint.model,
         "api_key_env": options.endpoint.api_key_env,
@@ -1211,6 +1231,7 @@ def prepare(options: RunOptions, printer=print) -> tuple[Path, workcopy.WorkCopy
             "slot": selected_slot,
             "selection": (options._cache_slot_selection or
                           ("explicit" if options.slot is not None else "not_selected")),
+            **({"degraded": True} if options._cache_slot_degraded else {}),
             "reason": (options._cache_slot_reason or
                        ("requested by --slot" if options.slot is not None else
                         "slot discovery has not run")),
@@ -1338,6 +1359,11 @@ def check_slot_context(options: RunOptions, printer=print) -> None:
     expose slots is not refused (the requirement stays in the banner and docs).
     """
     assert options.endpoint is not None
+    capabilities = _provider_capabilities_for(
+        options.endpoint.chat_url, options.endpoint.api_key(), options,
+    )
+    if not capabilities.slots:
+        return
     endpoint = replace(options.endpoint, timeout_s=min(options.endpoint.timeout_s, _remaining(options)))
     try:
         slots = endpoint.get_slots()
@@ -1365,14 +1391,36 @@ def _select_prompt_cache_slot(options: RunOptions, printer=print) -> None:
     options._cache_slot = None
     options._cache_slot_selection = None
     options._cache_slot_reason = None
+    options._cache_slot_degraded = False
+    assert options.endpoint is not None
+    from .engine.kernel_provider_dialect import require_feature
+    capabilities = _provider_capabilities_for(
+        options.endpoint.chat_url, options.endpoint.api_key(), options,
+    )
     if options.slot is not None:
         if type(options.slot) is not int or options.slot < 0:
             raise RunError("--slot must be a nonnegative integer")
+        require_feature(
+            capabilities, "prompt-cache pinned slot", slots=True, slot_id=options.slot,
+        )
         slot = options.slot
         selection = "explicit"
         reason = "requested by --slot"
     else:
-        assert options.endpoint is not None
+        if not capabilities.slots:
+            options._cache_slot_selection = "not_pinned"
+            if capabilities.dialect == "llama.cpp":
+                # A proven llama.cpp without slot status was unpinned before dialect
+                # probing; no optional pin or prompt-cache mode has been degraded.
+                options._cache_slot_reason = "server did not expose usable slot status"
+                printer("cache: server does not expose slots; not pinned")
+            else:
+                options._cache_slot_degraded = True
+                options._cache_slot_reason = (
+                    "provider did not prove llama.cpp /slots; optional prompt-cache pin dropped"
+                )
+                printer("cache: prompt-cache pin dropped because provider did not prove llama.cpp /slots")
+            return
         endpoint = replace(options.endpoint,
                            timeout_s=min(options.endpoint.timeout_s, _remaining(options)))
         try:
@@ -1431,12 +1479,23 @@ def _routed_endpoint(settings: dict[str, object]) -> Endpoint:
                     bool(settings.get("allow_remote")))
 
 
-def _probe_routes(options: RunOptions, printer=print, *, resume_roles: dict | None = None) -> None:
+def _probe_routes(options: RunOptions, printer=print, *, resume_roles: dict | None = None,
+                  warnings: list[str] | None = None) -> None:
+    options._provider_route_dialects.clear()
     table = _resolve_routes(options)
     if not table.active:
         options._routes = None
         return
+    from .engine.kernel_launch_identity_cost import reasoning_profile
+    from .engine.kernel_provider_dialect import origin_of, reasoning_controls_summary
+
+    provider_environment = _provider_environment(options)
+    selected_profile = reasoning_profile(environ=provider_environment)
     assert options.endpoint is not None
+    from .engine.kernel_provider_dialect import require_routed_static_slot
+    base_provider_capabilities = _provider_capabilities_for(
+        options.endpoint.chat_url, options.endpoint.api_key(), options,
+    )
     mismatched = [role for role, settings in table.roles.items()
                   if routes.uses_other_model(role, settings["model"], options.endpoint.model)
                   and table.sources[role].get("tokenizer", "default") == "default"]
@@ -1445,11 +1504,13 @@ def _probe_routes(options: RunOptions, printer=print, *, resume_roles: dict | No
                        f"{mismatched[0]}.tokenizer or unset LLAMA_CPP_TOKENIZE_URL")
     checked: set[tuple[str, str, str | None]] = set()
     slots_by_endpoint: dict[str, object] = {}
+    provider_routes: dict[str, dict[str, str]] = {}
     # Resolve default-endpoint auto pins before constructing probe endpoints. The
     # resolved table may be inactive, and Endpoint construction can print a warning.
     for role, settings in table.roles.items():
         if settings.get("slot") != "auto" or settings.get("endpoint") != options.endpoint.base_url:
             continue
+        require_routed_static_slot(base_provider_capabilities)
         if options.endpoint.base_url not in slots_by_endpoint:
             slots_by_endpoint[options.endpoint.base_url] = options.endpoint.get_slots()
         recorded = (resume_roles or {}).get(role, {})
@@ -1484,10 +1545,18 @@ def _probe_routes(options: RunOptions, printer=print, *, resume_roles: dict | No
             ((role, settings, table.sources[role]) for role, settings in table.roles.items()),
             effective_unit_routes()):
         endpoint = _routed_endpoint(settings)
+        provider_capabilities = _provider_capabilities_for(
+            endpoint.chat_url, endpoint.api_key(), options,
+        )
         if (endpoint.base_url != options.endpoint.base_url
                 and sources.get("slot") == "default"):
             # A pin discovered on the default server is not a pin on this one.
             settings["slot"] = None
+        selected_slot = settings.get("slot")
+        if selected_slot == "auto":
+            require_routed_static_slot(provider_capabilities)
+        elif type(selected_slot) is int:
+            require_routed_static_slot(provider_capabilities, selected_slot)
         identity = (endpoint.base_url, endpoint.model, endpoint.api_key_env)
         if identity not in checked:
             try:
@@ -1501,7 +1570,9 @@ def _probe_routes(options: RunOptions, printer=print, *, resume_roles: dict | No
             else:
                 checked.add(identity)
         if endpoint.base_url not in slots_by_endpoint:
-            slots_by_endpoint[endpoint.base_url] = endpoint.get_slots()
+            slots_by_endpoint[endpoint.base_url] = (
+                endpoint.get_slots() if provider_capabilities.slots else None
+            )
         slots = slots_by_endpoint[endpoint.base_url]
         selected = settings.get("slot")
         if selected == "auto":
@@ -1513,6 +1584,7 @@ def _probe_routes(options: RunOptions, printer=print, *, resume_roles: dict | No
                 raise RunError(f"route {role}.slot = auto found no idle slot at {endpoint.base_url}; "
                                "choose a slot number or free a server slot")
             settings["slot"] = selected
+            require_routed_static_slot(provider_capabilities, selected)
         if selected is not None and isinstance(slots, list) and slots and not any(
                 isinstance(entry, dict) and _slot_id(entry) == selected
                 for entry in slots):
@@ -1533,8 +1605,12 @@ def _probe_routes(options: RunOptions, printer=print, *, resume_roles: dict | No
                            f"need {need:,} ({options._prompt_budget:,} prompt + reply). Give {role} a model "
                            f"with a {need:,}-token slot, or run with {CONTEXT_TOKENS_ENV}={size}")
         if not _is_loopback(endpoint.base_url):
-            print(f"WARNING: route {role} uses remote endpoint {endpoint.base_url}; "
-                  "source code will leave the machine", file=sys.stderr)
+            warning = (f"WARNING: route {role} uses remote endpoint {endpoint.base_url}; "
+                       "source code will leave the machine")
+            if warnings is None:
+                print(warning, file=sys.stderr)
+            else:
+                warnings.append(warning)
         tokenizer = settings.get("tokenizer")
         if tokenizer:
             try:
@@ -1546,19 +1622,123 @@ def _probe_routes(options: RunOptions, printer=print, *, resume_roles: dict | No
             if result.get("model_found") is not True:
                 raise RunError(f"route {role}.tokenizer does not list model {endpoint.model!r}; "
                                f"change {role}.tokenizer to a server for that model")
+        provider_routes[role] = {
+            "origin": origin_of(endpoint.chat_url),
+            "dialect": provider_capabilities.dialect,
+            "reason": provider_capabilities.reason,
+            "reasoning_controls": reasoning_controls_summary(
+                provider_capabilities.dialect,
+                reasoning_off=selected_profile.off,
+                environ=provider_environment,
+            ),
+        }
     # An auto slot is an effective setting: hash the resolved table the engine receives.
     table = routes.with_effective_roles(routes.RouteTable(table.roles, table.sources, True, ""))
     options._routes = table
+    options._provider_route_dialects.update(provider_routes)
     for role, settings in table.roles.items():
         from urllib.parse import urlsplit
         host = urlsplit(str(settings["endpoint"])).netloc
         locality = "local" if _is_loopback(str(settings["endpoint"])) else "remote"
         slot = f", slot {settings['slot']}" if settings.get("slot") is not None else ""
         inherited = all(source == "default" for source in table.sources[role].values())
+        route_provider = provider_routes.get(role)
+        if route_provider is None:
+            continue
         if inherited:
-            printer(f"route {role}: default ({settings['model']} at {host}, {locality}{slot})")
+            printer(f"route {role}: default ({settings['model']} at {host}, {locality}{slot}); "
+                    f"provider {route_provider['dialect']} ({route_provider['reason']})")
         else:
-            printer(f"route {role}: {settings['model']} at {host} ({locality}{slot})")
+            printer(f"route {role}: {settings['model']} at {host} ({locality}{slot}); "
+                    f"provider {route_provider['dialect']} ({route_provider['reason']})")
+
+
+def _provider_preflight_summary(options: RunOptions) -> str:
+    from .engine.kernel_launch_identity_cost import reasoning_profile
+    from .engine.kernel_provider_dialect import reasoning_controls_summary
+
+    environment = _provider_environment(options)
+    profile = reasoning_profile(environ=environment)
+    default = _provider_capabilities_for(
+        options.endpoint.chat_url, options.endpoint.api_key(), options,
+    )
+    default_controls = reasoning_controls_summary(
+        default.dialect, reasoning_off=profile.off, environ=environment,
+    )
+    result = (f"provider dialect: {default.dialect} ({default.reason}); "
+              f"{default_controls}")
+    if options._provider_route_dialects:
+        routes_summary = " | ".join(
+            f"{role}@{record['origin']}={record['dialect']} ({record['reason']}); "
+            f"{record['reasoning_controls']}"
+            for role, record in sorted(options._provider_route_dialects.items())
+        )
+        result += "; routes: " + routes_summary
+    return result
+
+
+def _provider_environment(options: RunOptions) -> dict[str, str]:
+    """Resolve the same operator/profile environment used by the engine."""
+    result = dict(os.environ)
+    result.update(profiles.load(options.profile))
+    result.update(resolve_opt_in_switches())
+    result.update(options.extra_env)
+    return result
+
+
+def _apply_operator_reasoning_effort(
+    environment: dict[str, str], *, environ=None,
+) -> None:
+    """Preserve the shell's existing reasoning setting in the isolated run spec.
+
+    The child purges inherited REACT_* variables before installing that spec.
+    Profile values keep precedence; command-specific extra_env is applied later.
+    """
+    source = os.environ if environ is None else environ
+    value = source.get("REACT_REASONING_EFFORT")
+    if "REACT_REASONING_EFFORT" not in environment and isinstance(value, str) and value.strip():
+        environment["REACT_REASONING_EFFORT"] = value
+
+
+def _provider_capabilities_for(endpoint: str, key: str, options: RunOptions):
+    from .engine.kernel_provider_dialect import capabilities_for
+
+    return capabilities_for(
+        endpoint, key, cache=options._provider_capabilities,
+        environ=_provider_environment(options),
+    )
+
+
+def _provider_preflight_records(options: RunOptions) -> dict[str, dict[str, object]]:
+    from .engine.kernel_launch_identity_cost import reasoning_profile
+    from .engine.kernel_provider_dialect import reasoning_controls_summary
+
+    environment = _provider_environment(options)
+    selected = reasoning_profile(environ=environment)
+    return {
+        origin: {
+            **capability.to_record(),
+            "reasoning_controls": reasoning_controls_summary(
+                capability.dialect, reasoning_off=selected.off, environ=environment,
+            ),
+        }
+        for origin, capability in options._provider_capabilities.items()
+        if isinstance(origin, str) and hasattr(capability, "to_record")
+    }
+
+
+def _print_run_banner(options: RunOptions, printer=print) -> None:
+    """Print general run settings after the provider decision leads the output."""
+    printer(_time_limit_line(options))
+    printer(_step_limit_line(options))
+    printer("per-check timeout: outer 900s; engine 300s; per model request: the profile's timeout")
+    ignored = ignored_shell_settings()
+    if ignored:
+        printer(f"note: {', '.join(ignored)} {'is' if len(ignored) == 1 else 'are'} set in your shell but "
+                "not passed to the engine (engine settings come from the profile; see docs/guide/running.md)")
+    printer(f"prompt budget: {options._prompt_budget:,} tokens; {options._context_tokens:,}-token server slot required"
+            + ("" if options._context_display == "default" else f" ({options._context_display})"))
+    printer("endpoint policy: local-only by default; a loopback URL can still forward elsewhere")
 
 
 # Plain-language CLI text for known engine refusals whose engine wording is consumed by engine code
@@ -1572,6 +1752,19 @@ USER_ERROR_TEXT = {
 
 def _render_event(event: dict) -> str | None:
     kind = event.get("kind")
+    if kind == "provider_dialects":
+        endpoints = event.get("endpoints")
+        if not isinstance(endpoints, list):
+            return None
+        rows = []
+        for item in endpoints:
+            if not isinstance(item, dict):
+                continue
+            rows.append(
+                f"{item.get('origin')}: {item.get('dialect')} ({item.get('reason')}); "
+                f"{item.get('reasoning_controls', 'reasoning controls not recorded')}"
+            )
+        return "provider dialects: " + " | ".join(rows) if rows else None
     if kind == "engine_start":
         turns = event.get("turns")
         line = "engine started (no step limit)" if turns in (None, 0) else f"engine started (step limit {turns})"
@@ -2181,6 +2374,7 @@ def summarize(run: Path, started: float) -> dict[str, object]:
     slot_info: dict[str, object] = {"slot": None, "selection": "not_recorded",
                                    "reason": "run did not record slot selection"}
     capabilities: dict[str, object] = {}
+    provider_capabilities: dict[str, object] = {}
     spec: dict = {}
     spec_path = run / "spec.json"
     if spec_path.is_file():
@@ -2192,6 +2386,8 @@ def summarize(run: Path, started: float) -> dict[str, object]:
             slot_info = spec["prompt_cache_slot"]
         if isinstance(spec, dict) and isinstance(spec.get("capabilities"), dict):
             capabilities = spec["capabilities"]
+        if isinstance(spec, dict) and isinstance(spec.get("provider_capabilities"), dict):
+            provider_capabilities = spec["provider_capabilities"]
     paired_total = sum(total for total, _ in pairs)
     paired_cached = sum(cached for _, cached in pairs)
     summary: dict[str, object] = {
@@ -2210,6 +2406,7 @@ def summarize(run: Path, started: float) -> dict[str, object]:
                          if pairs and len(pairs) == len(sends) and paired_total > 0 else None),
         "cache_coverage": {"n_sends_with_both": len(pairs), "n_sends": len(sends)},
         "capabilities": capabilities,
+        "provider_capabilities": provider_capabilities,
         "prompt_cache_slot": slot_info,
         "wall_seconds": round(time.monotonic() - started, 1),
     }
@@ -2308,18 +2505,9 @@ def run(options: RunOptions, printer=print) -> dict[str, object]:
     options._deadline = started + options.timeout_s if options.timeout_s is not None else None
     try:
         with _wall_deadline(options):
-            printer(_time_limit_line(options))
-            printer(_step_limit_line(options))
-            printer("per-check timeout: outer 900s; engine 300s; per model request: the profile's timeout")
-            ignored = ignored_shell_settings()
-            if ignored:
-                printer(f"note: {', '.join(ignored)} {'is' if len(ignored) == 1 else 'are'} set in your shell but "
-                        "not passed to the engine (engine settings come from the profile; see docs/guide/running.md)")
             options._context_tokens, options._prompt_budget, how, options._context_env = resolve_context(
                 profiles.load(options.profile))
-            printer(f"prompt budget: {options._prompt_budget:,} tokens; {options._context_tokens:,}-token server slot required"
-                    + ("" if how == "default" else f" ({how})"))
-            printer("endpoint policy: local-only by default; a loopback URL can still forward elsewhere")
+            options._context_display = how
             with _sigterm_as_interrupt():
                 return _run(options, started, printer)
     finally:
@@ -2793,16 +2981,25 @@ def _run(options: RunOptions, started: float, printer=print) -> dict[str, object
     except ValueError as error:
         raise RunError(str(error)) from error
     _check_engine_python(options)
+    options._provider_capabilities.clear()
+    options._provider_route_dialects.clear()
     options._capabilities = _probe_capabilities(options)
-    printer(str(options._capabilities["display"]))
-    options._test_python = _select_test_python(options, printer)
     probe = replace(options.endpoint, timeout_s=min(options.endpoint.timeout_s, _remaining(options))).probe()
     if probe.get("model_found") is False:
         raise RunError(f"endpoint does not serve model {options.endpoint.model!r}; it lists: "
                        + ", ".join(probe.get("served_models") or []))
-    check_slot_context(options, printer)
-    _select_prompt_cache_slot(options, printer)
-    _probe_routes(options, printer)
+    preflight_messages: list[str] = []
+    preflight_warnings: list[str] = []
+    check_slot_context(options, preflight_messages.append)
+    _select_prompt_cache_slot(options, preflight_messages.append)
+    _probe_routes(options, preflight_messages.append, warnings=preflight_warnings)
+    printer(f"{options._capabilities['display']}; {_provider_preflight_summary(options)}")
+    _print_run_banner(options, printer)
+    for message in preflight_messages:
+        printer(message)
+    for warning in preflight_warnings:
+        print(warning, file=sys.stderr)
+    options._test_python = _select_test_python(options, printer)
     run_dir, work, spec = prepare(options, printer=printer)
     from .shell_host import provision
     provision(options, run_dir, spec)
@@ -3003,6 +3200,7 @@ def _execute(options: RunOptions, started: float, printer, run_dir: Path, work: 
            if "test_lock_note" in spec["public_row"] else {}),
         "protect_tests": spec.get("protect_tests", "all"),
         "endpoint": options.endpoint.public(),
+        "provider_capabilities": _provider_preflight_records(options),
         "profile": options.profile,
         "engine_source_hash": spec["engine_source"].get("source_hash"),
         "engine_shipped_hash": spec["engine_source"].get("shipped_hash"),

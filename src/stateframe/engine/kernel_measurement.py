@@ -910,6 +910,11 @@ def refit_guarded_body(candidate, *, limit, budget, finalize, guard, emit=None):
     return refit
 
 
+def _finalize_provider_refit(body, *, profile, dialect):
+    """Revalidate a budget refit with the selected endpoint's provider dialect."""
+    return enforce_provider_body(body, profile=profile, dialect=dialect)
+
+
 @dataclass(frozen=True, slots=True)
 class HostSpan:
     """Host-owned monotonic interval; timing never enters a model request."""
@@ -5055,7 +5060,10 @@ class RequestCapture:
                 if ticket:
                     value = self._ensure_final_wire_ticket(value)
                 if provider_profile is not None:
-                    value = enforce_provider_body(value, profile=provider_profile)
+                    value = _finalize_provider_refit(
+                        value, profile=provider_profile,
+                        dialect=provider_capabilities.dialect,
+                    )
                 return value
 
             def emit(**fields: object) -> None:
@@ -5163,6 +5171,60 @@ class RequestCapture:
                                   endpoint_host=urllib.parse.urlsplit(endpoint).hostname,
                                   model=route.model, overridden_fields=route.overridden_fields,
                                   escalated_from=route.escalated_from, dispatch=False)
+        from kernel_provider_dialect import (
+            RUN_CAPABILITY_CACHE, ProviderCapabilityError, capabilities_for,
+            mark_dialect_journaled, origin_of,
+            reasoning_controls_summary, require_selected_request_features,
+        )
+        provider_capabilities = capabilities_for(endpoint, key, cache=RUN_CAPABILITY_CACHE)
+        provider_origin = origin_of(endpoint)
+        # The qualified-request branch skips legacy body finalization but still
+        # reaches provider_call, whose strict check closes over this profile.
+        final_profile = reasoning_profile(manifest=self.journal.manifest)
+        if mark_dialect_journaled(provider_origin):
+            self.journal.emit(
+                "provider_dialect", producer="kernel_provider_dialect",
+                endpoint_origin=provider_origin, dialect=provider_capabilities.dialect,
+                reason=provider_capabilities.reason,
+                props_status=provider_capabilities.props_status,
+                slots=provider_capabilities.slots,
+                slots_status=provider_capabilities.slots_status,
+                slot_ids=sorted(provider_capabilities.slot_ids),
+                reasoning_controls=reasoning_controls_summary(
+                    provider_capabilities.dialect,
+                    reasoning_off=final_profile.off),
+                dispatch=False)
+
+        route = getattr(self, "frame_route", None)
+        route_slot = (route.settings.get("slot") if route is not None
+                      and type(route.settings.get("slot")) is int else None)
+        call_purpose = (getattr(self, "call_purpose", None)
+                        or self.model_router_call_purpose or self.model_router_child_purpose)
+
+        def _require_provider_features(candidate: Mapping[str, object]) -> None:
+            try:
+                require_selected_request_features(
+                    provider_capabilities,
+                    candidate,
+                    route_slot=route_slot,
+                    call_purpose=call_purpose,
+                )
+            except ProviderCapabilityError as error:
+                self.journal.emit(
+                    "provider_capability_refused",
+                    producer="kernel_provider_dialect",
+                    request_id=self.request_id,
+                    feature=error.feature,
+                    capability=error.capability,
+                    code=error.code,
+                    error=str(error),
+                    outcome=error.outcome,
+                    failure_origin=error.failure_origin,
+                    dispatch=False,
+                )
+                raise
+
+        _require_provider_features(body)
         if not _recovery_prepared:
             self._v43g_prepare_body(body)
         # Preserve the once-adapted transport input before budget/fact edits.
@@ -5407,13 +5469,14 @@ class RequestCapture:
                     preparation = PreparationInput.capture(self, wire_truth_runtime, entry_body)
                 if _boundary_state is not None:
                     _boundary_state.preparation = preparation
-            final_profile = reasoning_profile(manifest=self.journal.manifest)
             if _boundary_state is not None:
                 _boundary_state.phase = "provider_body_validation"
             try:
                 # This is the last mutable request seam.  It intentionally runs
                 # after router, sampler, template, and budget transforms.
-                body = enforce_provider_body(body, profile=final_profile)
+                _require_provider_features(body)
+                body = enforce_provider_body(body, profile=final_profile,
+                                             dialect=provider_capabilities.dialect)
             except ProviderBoundaryContractError as error:
                 self.journal.emit(
                     "provider_boundary_contract_error",
@@ -5533,6 +5596,9 @@ class RequestCapture:
                     and final_tool_surface.get("source_tool_schema_digest")
                     != final_tool_surface.get("tool_schema_digest")):
                 enforce_context_capacity(self, body, endpoint=endpoint, key=key)
+            _require_provider_features(body)
+            body = enforce_provider_body(body, profile=final_profile,
+                                         dialect=provider_capabilities.dialect)
             wire = _serialize_final_request_body(body, wire_truth_runtime, self.request_id)
             if _boundary_state is not None:
                 _boundary_state.phase = "final_serialization_validation"
@@ -5743,7 +5809,8 @@ class RequestCapture:
             try:
                 body = _apply_request_capture_budget(self, body)
                 body = self._ensure_final_wire_ticket(body)
-                body = enforce_provider_body(body, profile=final_profile)
+                body = enforce_provider_body(body, profile=final_profile,
+                                             dialect=provider_capabilities.dialect)
                 body = _guard_final_wire(body)
                 body = _rebudget_if_guard_grew(
                     body, ticket=True, provider_profile=final_profile,
@@ -5774,7 +5841,8 @@ class RequestCapture:
                         preparation=preparation)
                     body = _apply_request_capture_budget(self, body)
                     body = self._ensure_final_wire_ticket(body)
-                    body = enforce_provider_body(body, profile=final_profile)
+                    body = enforce_provider_body(body, profile=final_profile,
+                                                 dialect=provider_capabilities.dialect)
                     body = _guard_final_wire(body)
                     body = _rebudget_if_guard_grew(
                         body, ticket=True, provider_profile=final_profile,
@@ -5870,7 +5938,8 @@ class RequestCapture:
                         )
                         body = _apply_request_capture_budget(self, body)
                         body = self._ensure_final_wire_ticket(body)
-                        body = enforce_provider_body(body, profile=final_profile)
+                        body = enforce_provider_body(body, profile=final_profile,
+                                                     dialect=provider_capabilities.dialect)
                         body = _guard_final_wire(body)
                         body = _rebudget_if_guard_grew(
                             body, ticket=True, provider_profile=final_profile,
@@ -5929,7 +5998,9 @@ class RequestCapture:
                 from kernel_kv_chunk_reuse import enabled as kv_chunk_reuse_enabled
                 if kv_chunk_reuse_enabled():
                     from kernel_kv_chunk_reuse import configure_transport
-                    kv_chunk_reuse_transport = configure_transport(body, endpoint, key)
+                    kv_chunk_reuse_transport = configure_transport(
+                        body, endpoint, key, capabilities=provider_capabilities,
+                    )
             except ImportError:
                 pass
             template_mode = getattr(self, "template_conformance_mode", "off")
@@ -6014,6 +6085,8 @@ class RequestCapture:
                         refresh_headcarry=False,
                         frame_request_allocation=self.frame_request_allocation,
                     )
+            body = enforce_provider_body(body, profile=final_profile,
+                                         dialect=provider_capabilities.dialect)
             wire = _serialize_final_request_body(body, wire_truth_runtime, self.request_id)
             if _boundary_state is not None:
                 _boundary_state.phase = "final_serialization_validation"
@@ -6282,6 +6355,8 @@ class RequestCapture:
                     "final FrameFit5 recovery lost its shared frame state")
 
             if framefit5_request:
+                body = enforce_provider_body(body, profile=final_profile,
+                                             dialect=provider_capabilities.dialect)
                 wire = _serialize_final_request_body(
                     body, wire_truth_runtime, self.request_id,
                 )
@@ -6512,6 +6587,15 @@ class RequestCapture:
         host_spans = getattr(self.journal, "host_spans", None)
 
         def provider_call():
+            if provider_capabilities.dialect == "openai-strict":
+                from kernel_launch_identity_cost import assert_openai_chat_body
+                assert_openai_chat_body(body)
+                checked = enforce_provider_body(
+                    body, profile=final_profile, dialect="openai-strict")
+                if checked != body or json.dumps(body).encode() != wire:
+                    raise ProviderBoundaryContractError(
+                        "strict_final_body_changed",
+                        "final wire contains fields outside the OpenAI Chat Completions schema")
             if self.qualified_request is not None:
                 self.qualified_request.validate(self, wire_truth_runtime, body)
                 if wire != self.qualified_request.wire:

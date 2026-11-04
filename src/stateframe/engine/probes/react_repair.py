@@ -3237,6 +3237,8 @@ def ask_tools(messages, mt=4000, temp=None, tools=None, known_refs=None):
                 return capture.send(body, API, KEY, transport_attempt_limit=1,
                                     journal_timeouts=False)
             return capture.send(body, API, KEY)
+        from kernel_provider_dialect import enforce_selected_endpoint_body
+        body = enforce_selected_endpoint_body(body, API, KEY)
         req = urllib.request.Request(
             API, data=json.dumps(body).encode(),
             headers={"Content-Type": "application/json", "Authorization": f"Bearer {KEY}"})
@@ -3675,6 +3677,8 @@ def ask(messages, mt=4000, temp=None):
                 return capture.send(body, API, KEY, transport_attempt_limit=1,
                                     journal_timeouts=False)
             return capture.send(body, API, KEY)
+        from kernel_provider_dialect import enforce_selected_endpoint_body
+        body = enforce_selected_endpoint_body(body, API, KEY)
         req = urllib.request.Request(
             API, data=json.dumps(body).encode(),
             headers={"Content-Type": "application/json", "Authorization": f"Bearer {KEY}"})

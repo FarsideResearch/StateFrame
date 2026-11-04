@@ -419,7 +419,11 @@ class HistoryCompactor:
                                     summary_tokens=summary_count,
                                     turn_index=turn_index,
                                     summary_request_id=request_id)
-        except Exception as error:  # compaction is recoverable; preserve the old request
+        except Exception as error:  # compaction is recoverable; capability refusals are terminal
+            from kernel_provider_dialect import ProviderCapabilityError
+
+            if isinstance(error, ProviderCapabilityError):
+                raise
             self._emit("history_compaction_failed", turn_index=turn_index,
                        tokens_before=before, reason=type(error).__name__)
             return unchanged

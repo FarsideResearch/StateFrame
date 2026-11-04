@@ -476,12 +476,54 @@ def encode_request_body(body: dict, environ: Mapping[str, str] | None = None) ->
 
 
 class _PlainHTTPProvider:
-    def __init__(self, url: str, key: str) -> None:
+    def __init__(self, url: str, key: str, *, journal=None,
+                 environ: Mapping[str, str] | None = None) -> None:
         self.url = url
         self.key = key
         self.transport = AbortiveHTTPTransport()
+        self.journal = journal
+        self.environ = dict(os.environ if environ is None else environ)
+        self.capability_cache: dict[str, object] = {}
+        self.journaled_origins: set[str] = set()
+
+    def prepare_body(self, body: dict) -> None:
+        """Apply strict-provider rules before the plain loop journals request bytes."""
+        from kernel_launch_identity_cost import (
+            assert_openai_chat_body, enforce_provider_body, reasoning_profile,
+        )
+        from kernel_provider_dialect import (
+            capabilities_for, origin_of, reasoning_controls_summary,
+            require_selected_request_features,
+        )
+
+        capabilities = capabilities_for(
+            self.url, self.key, cache=self.capability_cache, environ=self.environ,
+        )
+        origin = origin_of(self.url)
+        if self.journal is not None and origin not in self.journaled_origins:
+            self.journaled_origins.add(origin)
+            profile = reasoning_profile(environ=self.environ)
+            self.journal.write(
+                "provider_dialect", endpoint_origin=origin, dialect=capabilities.dialect,
+                reason=capabilities.reason, slots=capabilities.slots,
+                props_status=capabilities.props_status, slots_status=capabilities.slots_status,
+                slot_ids=sorted(capabilities.slot_ids),
+                reasoning_controls=reasoning_controls_summary(
+                    capabilities.dialect, reasoning_off=profile.off, environ=self.environ,
+                ),
+            )
+        require_selected_request_features(capabilities, body, environ=self.environ)
+        if capabilities.dialect == "openai-strict":
+            strict_body = enforce_provider_body(
+                body, profile=reasoning_profile(environ=self.environ), dialect="openai-strict",
+                environ=self.environ,
+            )
+            assert_openai_chat_body(strict_body)
+            body.clear()
+            body.update(strict_body)
 
     def __call__(self, body: dict, timeout: float) -> Mapping[str, object]:
+        self.prepare_body(body)
         data, encoding = encode_request_body(body)
         if encoding.get("Content-Encoding") == "gzip":
             import gzip
@@ -545,8 +587,9 @@ class _PlainHTTPProvider:
         self.transport.abort_active()
 
 
-def http_provider(url: str, key: str) -> Callable[[dict, float], Mapping[str, object]]:
-    return _PlainHTTPProvider(url, key)
+def http_provider(url: str, key: str, *, journal=None,
+                  environ: Mapping[str, str] | None = None) -> Callable[[dict, float], Mapping[str, object]]:
+    return _PlainHTTPProvider(url, key, journal=journal, environ=environ)
 
 
 def limits_from_env(environ: Mapping[str, str]) -> Limits:
@@ -628,6 +671,15 @@ def run_plain(row: Mapping[str, object], output: Path, *,
     limits = limits_from_env(env)
     settings = HookSettings.from_env(env)
     journal = PlainJournal(output / "plain")
+    prompt_cache_degradation = env.get("SF_PROMPT_CACHE_PIN_DEGRADED_REASON")
+    if isinstance(prompt_cache_degradation, str) and prompt_cache_degradation:
+        journal.write(
+            "provider_feature_degraded",
+            producer="kernel_provider_dialect",
+            feature="prompt-cache pinned slot",
+            reason=prompt_cache_degradation,
+            dispatch=False,
+        )
     capture_dest = row.get("_bridge_capture")
     root = Path(tempfile.mkdtemp(prefix="plain_", dir=str(output / "scratch"))) / "repo"
     root.mkdir()
@@ -675,7 +727,10 @@ def run_plain(row: Mapping[str, object], output: Path, *,
         url = env.get("DS_URL", "")
         if not url:
             raise PlainContractError("plain engine requires DS_URL")
-        provider = http_provider(url, env.get("DS_API_KEY") or env.get("DEEPINFRA_API_KEY", ""))
+        provider = http_provider(
+            url, env.get("DS_API_KEY") or env.get("DEEPINFRA_API_KEY", ""),
+            journal=journal, environ=env,
+        )
     task_text = str(row.get("msg") or "") + "\n\n" + EDITABLE_NOTICE + ", ".join(authority.declared)
     parent_revision = authority.product_revision()
     journal.save("engine.json", {"engine": ENGINE_ID, "hooks": settings.receipt(), "limits": limits.__dict__,
