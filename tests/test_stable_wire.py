@@ -938,12 +938,13 @@ def test_stable_wire_failed_open_reason_is_recorded_and_sends_the_layout_body(mo
 
     import kernel_bounded_http
     from kernel_measurement import ACTIVE_REQUEST
-    from stateframe._child import install_wire_recorder
+    from stateframe import _child
     monkeypatch.setattr(kernel_bounded_http, "request_bytes",
                         lambda *_args, **_kwargs: b"{}")
+    monkeypatch.setattr(_child, "HOST_STATE", dict(_child.HOST_STATE))
     run = tmp_path / "failed-open-send"
     run.mkdir()
-    install_wire_recorder(run, "http://127.0.0.1:8000/v1/chat/completions")
+    _child.install_wire_recorder(run, "http://127.0.0.1:8000/v1/chat/completions")
     active = ACTIVE_REQUEST.set(capture)
     try:
         kernel_bounded_http.request_bytes(
@@ -1027,7 +1028,7 @@ def test_stable_wire_reserves_040b_projection_overhead_before_fail_open(monkeypa
 def test_resume_recorded_plain_stable_wire_send_does_not_project(monkeypatch, tmp_path):
     import kernel_bounded_http
     import kernel_cache_layout_candidate as candidate
-    from stateframe._child import install_wire_recorder
+    from stateframe import _child
     from stateframe.replay_tape import Replayer
     from kernel_stable_wire import is_stable_wire_projection
 
@@ -1054,10 +1055,11 @@ def test_resume_recorded_plain_stable_wire_send_does_not_project(monkeypatch, tm
 
     monkeypatch.setattr(candidate, "_REPLAY_LAYOUT_DECISION_PROVIDER", None, raising=False)
     monkeypatch.setattr(candidate, "_REPLAY_STABLE_WIRE_DECISION_PROVIDER", None, raising=False)
+    monkeypatch.setattr(_child, "HOST_STATE", dict(_child.HOST_STATE))
     monkeypatch.setattr(kernel_bounded_http, "request_bytes", kernel_bounded_http.request_bytes)
     run = tmp_path / "replay-run"
     run.mkdir()
-    install_wire_recorder(run, "http://127.0.0.1:8000/v1/chat/completions", replay)
+    _child.install_wire_recorder(run, "http://127.0.0.1:8000/v1/chat/completions", replay)
 
     monkeypatch.setenv("STATEFRAME_STABLE_WIRE", "on")
     rebuilt = render_final_cache_candidate

@@ -537,9 +537,11 @@ def test_no_replay_decision_hook_preserves_request_bytes(monkeypatch):
 def test_child_installs_layout_decision_from_recorded_wire(tmp_path, monkeypatch, recorded_layout):
     import kernel_bounded_http
     import kernel_cache_layout_candidate as candidate
-    from stateframe._child import install_wire_recorder
+    from stateframe import _child
 
     monkeypatch.setattr(candidate, "_REPLAY_LAYOUT_DECISION_PROVIDER", None, raising=False)
+    monkeypatch.setattr(candidate, "_REPLAY_STABLE_WIRE_DECISION_PROVIDER", None, raising=False)
+    monkeypatch.setattr(_child, "HOST_STATE", dict(_child.HOST_STATE))
     body = _body()
     if recorded_layout:
         monkeypatch.setenv("STATEFRAME_FINAL_CACHE_LAYOUT", "on")
@@ -555,22 +557,24 @@ def test_child_installs_layout_decision_from_recorded_wire(tmp_path, monkeypatch
     monkeypatch.setattr(kernel_bounded_http, "request_bytes", kernel_bounded_http.request_bytes)
     run = tmp_path / "child-run"
     run.mkdir()
-    install_wire_recorder(run, "http://127.0.0.1:8000/v1/chat/completions", replay)
+    _child.install_wire_recorder(run, "http://127.0.0.1:8000/v1/chat/completions", replay)
     assert candidate.replay_final_layout_decision() == ("layout" if recorded_layout else "plain")
 
 
 def test_pending_replay_without_request_body_has_no_layout_decision(tmp_path, monkeypatch):
     import kernel_bounded_http
     import kernel_cache_layout_candidate as candidate
+    from stateframe import _child
     from stateframe.replay_tape import Replayer
-    from stateframe._child import install_wire_recorder
 
     monkeypatch.setattr(candidate, "_REPLAY_LAYOUT_DECISION_PROVIDER", None, raising=False)
+    monkeypatch.setattr(candidate, "_REPLAY_STABLE_WIRE_DECISION_PROVIDER", None, raising=False)
+    monkeypatch.setattr(_child, "HOST_STATE", dict(_child.HOST_STATE))
     monkeypatch.setattr(kernel_bounded_http, "request_bytes", kernel_bounded_http.request_bytes)
     replay = Replayer([], pending={"send": 1})
     run = tmp_path / "child-run"
     run.mkdir()
-    install_wire_recorder(run, "http://127.0.0.1:8000/v1/chat/completions", replay)
+    _child.install_wire_recorder(run, "http://127.0.0.1:8000/v1/chat/completions", replay)
     assert candidate.replay_final_layout_decision() is None
 
 
@@ -588,6 +592,7 @@ def test_physical_send_records_layout_disposition_from_capture(monkeypatch, tmp_
         return response_bytes
 
     monkeypatch.setattr(kernel_bounded_http, "request_bytes", request_bytes)
+    monkeypatch.setattr(_child, "HOST_STATE", dict(_child.HOST_STATE))
     _child.install_wire_recorder(tmp_path, endpoint)
 
     body = {
