@@ -1,6 +1,8 @@
 # Changelog
 
-## Unreleased
+## 0.3.30 (2026-11-04)
+
+- Docs: `KNOWN_LIMITATIONS.md` now lists two known issues. Every command needs `HOME` or `STATEFRAME_HOME` set. The bundled hook examples use `#!/usr/bin/python3`, which some Linux hosts lack.
 
 - Fixed: hosted HTTPS endpoints failed on Python 3.12+ since v0.1.0. The HTTPS handler read a private `urllib` attribute that Python 3.12 removed, so every `https://` send raised `AttributeError` before connecting. The handler now uses its own default TLS context; certificate and hostname checks stay on. Transport errors now carry a short redacted reason in `engine.log` (`send_error`) and `wire/*.error.txt`. A static test guard flags private stdlib attributes read from our urllib/http.client/ssl/socket subclasses.
 - Under `--protect-tests task/all`, creating files that change test collection (`conftest.py`, test-package `__init__.py`, pytest config, `sitecustomize.py`/`.pth`) is now refused; before, a new `tests/__init__.py` could import product code at collection time and change the test result.
