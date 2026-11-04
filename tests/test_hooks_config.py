@@ -34,6 +34,10 @@ def basic(**changes):
     }
 
 
+def external_interpreter(tmp_path, name):
+    return tmp_path.parent / f"{tmp_path.name}-{name}"
+
+
 def test_defaults_and_digest(tmp_path):
     hooks, _, _ = configured(tmp_path, [basic()])
     hook = hooks.definitions[0]
@@ -41,6 +45,156 @@ def test_defaults_and_digest(tmp_path):
     assert hook.writes == "none"
     assert hooks.for_event("pre_tool") == (hook,)
     assert len(hook.definition_digest()) == 64
+
+
+def test_python_token_runs_shebangless_bundled_script(tmp_path):
+    script = tmp_path / "context.py"
+    script.write_text("print('portable hook')\n", encoding="utf-8")
+    hooks, _, _ = configured(
+        tmp_path,
+        [
+            {
+                "name": "context",
+                "event": "session_start",
+                "argv": ["{python}", "context.py"],
+                "files": ["context.py"],
+            }
+        ],
+    )
+
+    hook = hooks.definitions[0]
+    assert hook.argv == (sys.executable, "context.py")
+    assert hook.executable == sys.executable
+    assert kernel_hooks._execution_pin(hook.executable, hook.files) == hook.executable_digest
+    bundle = tmp_path / "bundle"
+    kernel_hooks.create_bundle(hooks, bundle)
+    assert kernel_hooks.resolve_argv(hook, bundle) == [
+        sys.executable,
+        str(bundle / "0" / "context.py"),
+    ]
+
+
+@pytest.mark.parametrize("argv", [
+    ["prefix{python}", "context.py"],
+    ["{python}suffix", "context.py"],
+    [sys.executable, "{python}"],
+    [sys.executable, "prefix{python}"],
+])
+def test_python_token_is_only_allowed_as_whole_argv_zero(tmp_path, argv):
+    with pytest.raises(HookConfigError, match=r"\{python\}.*whole argv\[0\]"):
+        configured(tmp_path, [basic(argv=argv)])
+
+
+@pytest.mark.parametrize("kind", ["missing", "non_executable", "relative"])
+def test_python_token_rejects_invalid_resolved_interpreter(tmp_path, monkeypatch, kind):
+    if kind == "missing":
+        interpreter = tmp_path / "missing-python"
+        value = str(interpreter)
+    elif kind == "non_executable":
+        interpreter = tmp_path / "non-executable-python"
+        interpreter.write_text("not executable\n", encoding="utf-8")
+        interpreter.chmod(0o600)
+        value = str(interpreter)
+    else:
+        value = "relative/python"
+    monkeypatch.setattr(kernel_hooks.sys, "executable", value)
+
+    with pytest.raises(HookConfigError, match=r"\{python\}.*absolute executable file"):
+        configured(tmp_path, [basic(argv=["{python}", "-c", "pass"])])
+
+
+def test_python_token_digest_binds_resolved_interpreter_path(tmp_path, monkeypatch):
+    script = tmp_path / "context.py"
+    script.write_text("print('portable hook')\n", encoding="utf-8")
+    original = Path(sys.executable)
+    first = external_interpreter(tmp_path, "first-python")
+    second = external_interpreter(tmp_path, "second-python")
+    first.symlink_to(original)
+    second.symlink_to(original)
+    definition = {
+        "name": "context",
+        "event": "session_start",
+        "argv": ["{python}", "context.py"],
+        "files": ["context.py"],
+    }
+
+    monkeypatch.setattr(kernel_hooks.sys, "executable", str(first))
+    first_hooks, config, repo = configured(tmp_path, [definition])
+    monkeypatch.setattr(kernel_hooks.sys, "executable", str(second))
+    second_hooks = load_hook_files([config], shell_network="none", repo=repo)
+
+    assert first_hooks.definitions[0].argv[0] == str(first)
+    assert second_hooks.definitions[0].argv[0] == str(second)
+    assert (
+        first_hooks.definitions[0].definition_digest()
+        != second_hooks.definitions[0].definition_digest()
+    )
+    assert (
+        first_hooks.definitions[0].executable_digest
+        != second_hooks.definitions[0].executable_digest
+    )
+    assert hookset_trust_digest(first_hooks) != hookset_trust_digest(second_hooks)
+
+
+def test_python_token_is_rejected_from_pinned_spec(tmp_path):
+    hooks, _, _ = configured(tmp_path, [basic()])
+    spec = hooks.as_spec({})
+    spec["definitions"][0]["argv"][0] = "{python}"
+
+    with pytest.raises(HookConfigError, match="unresolved \\{python\\} token"):
+        kernel_hooks.HookSet.from_spec(spec)
+
+
+def test_python_interpreter_inside_hook_directory_is_refused(tmp_path, monkeypatch):
+    interpreter = tmp_path / "hook-python"
+    interpreter.symlink_to(sys.executable)
+    monkeypatch.setattr(kernel_hooks.sys, "executable", str(interpreter))
+
+    with pytest.raises(HookConfigError, match="inside repository or hook directory must be bundled"):
+        configured(tmp_path, [basic(argv=["{python}", "-c", "pass"])])
+
+
+def test_python_interpreter_bytes_are_revalidated(tmp_path, monkeypatch):
+    interpreter = external_interpreter(tmp_path, "hook-python")
+    interpreter.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    interpreter.chmod(0o755)
+    monkeypatch.setattr(kernel_hooks.sys, "executable", str(interpreter))
+    hooks, _, _ = configured(tmp_path, [basic(argv=["{python}", "-c", "pass"])])
+
+    interpreter.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+
+    with pytest.raises(HookConfigError, match="hook definition, executable or file changed"):
+        kernel_hooks.verify_sources(hooks.as_spec({}))
+
+
+def test_python_interpreter_symlink_is_revalidated(tmp_path, monkeypatch):
+    interpreter = external_interpreter(tmp_path, "hook-python")
+    interpreter.symlink_to(sys.executable)
+    monkeypatch.setattr(kernel_hooks.sys, "executable", str(interpreter))
+    hooks, _, _ = configured(tmp_path, [basic(argv=["{python}", "-c", "pass"])])
+
+    interpreter.unlink()
+    interpreter.symlink_to("/bin/sh")
+
+    with pytest.raises(HookConfigError, match="hook definition, executable or file changed"):
+        kernel_hooks.verify_sources(hooks.as_spec({}))
+
+
+def test_env_shebang_is_still_rejected(tmp_path):
+    script = tmp_path / "guard.py"
+    script.write_text("#!/usr/bin/env python3\nprint('no')\n", encoding="utf-8")
+    script.chmod(0o755)
+
+    with pytest.raises(HookConfigError, match="PATH-dispatched shebang"):
+        configured(
+            tmp_path,
+            [{
+                "name": "guard",
+                "event": "session_start",
+                "argv": ["guard.py"],
+                "files": ["guard.py"],
+            }],
+        )
 
 
 def test_path_dispatching_argv_zero_is_refused(tmp_path):

@@ -10,8 +10,13 @@ from pathlib import Path
 import pytest
 
 import kernel_hook_exec
+import kernel_hooks
 from kernel_effects import ContentStore, WorkspaceEffectPolicy, manifest_digest, scan
-from kernel_exec_capability import _macos_developer_roots, symlink_hops
+from kernel_exec_capability import (
+    _macos_developer_roots,
+    python_runtime_read_roots,
+    symlink_hops,
+)
 from kernel_exec_session import CleanupReport, ExecResult
 from kernel_hook_exec import (
     HookContainmentError,
@@ -22,7 +27,10 @@ from kernel_hook_exec import (
 from kernel_hooks import build_payload, create_bundle, event_id, load_hook_files
 
 
-def setup_runner(tmp_path, *, event="pre_tool", on_error="block", replay=lambda: False):
+def setup_runner(
+    tmp_path, *, event="pre_tool", on_error="block", replay=lambda: False,
+    python_token=False,
+):
     repo = tmp_path / "repo"
     repo.mkdir()
     config = tmp_path / "hooks.json"
@@ -34,7 +42,7 @@ def setup_runner(tmp_path, *, event="pre_tool", on_error="block", replay=lambda:
                     {
                         "name": "guard",
                         "event": event,
-                        "argv": [sys.executable, "-c", "pass"],
+                        "argv": ["{python}" if python_token else sys.executable, "-c", "pass"],
                         **(
                             {"on_error": on_error}
                             if event in ("pre_tool", "prompt_submit", "stop")
@@ -809,6 +817,99 @@ def test_real_sandbox_runner_and_read_only_workspace(tmp_path):
     assert result.decision == "continue"
     assert (workspace / "code.py").read_text() == "original"
     runner.close()
+
+
+@pytest.mark.host_sandbox
+def test_shebangless_python_hook_runs_with_pinned_interpreter(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    source = tmp_path / "context.py"
+    source.write_text("print('pinned python hook')\n", encoding="utf-8")
+    config = tmp_path / "hooks.json"
+    config.write_text(json.dumps({
+        "schema": "stateframe-hooks/1",
+        "hooks": [{
+            "name": "context",
+            "event": "session_start",
+            "argv": ["{python}", "context.py"],
+            "files": ["context.py"],
+        }],
+    }), encoding="utf-8")
+    hooks = load_hook_files([config], shell_network="none", repo=repo)
+    hook = hooks.definitions[0]
+    assert hook.argv[0] == hook.executable == sys.executable
+    run = tmp_path / "run"
+    run.mkdir()
+    workspace = run / "workspace"
+    workspace.mkdir()
+    bundle = run / "hook-bundle"
+    create_bundle(hooks, bundle)
+    runner = HookRunner(
+        run,
+        hooks,
+        bundle_dir=bundle,
+        workspace=workspace,
+        shell_network="none",
+        run_seed="seed",
+        run_id="run",
+        version="0.3.31",
+    )
+
+    try:
+        result = runner.run_event(
+            "session_start", boundary="session_start:python", data={}, match={}
+        )
+        assert result.decision == "continue"
+        assert result.runs[0].outcome.exit_code == 0
+        assert result.runs[0].outcome.context == "pinned python hook"
+    finally:
+        runner.close()
+
+
+def test_python_runtime_roots_cover_venv_symlink_and_framework(tmp_path):
+    interpreter = tmp_path / "venv" / "bin" / "python"
+    interpreter.parent.mkdir(parents=True)
+    (interpreter.parent.parent / "pyvenv.cfg").write_text("home = /usr\n")
+    interpreter.symlink_to(sys.executable)
+
+    roots = set(python_runtime_read_roots(interpreter))
+    resolved = Path(sys.executable).resolve(strict=True)
+    non_venv = tmp_path / "unconfigured" / "bin" / "python"
+    non_venv.parent.mkdir(parents=True)
+    non_venv.symlink_to(sys.executable)
+    non_venv_roots = set(python_runtime_read_roots(non_venv))
+
+    assert interpreter in roots
+    assert tmp_path / "venv" in roots
+    assert resolved in roots
+    assert tmp_path / "unconfigured" not in non_venv_roots
+    frameworks = {
+        parent
+        for candidate in (Path(sys.executable), resolved)
+        for parent in candidate.parents
+        if parent.name.endswith(".framework")
+    }
+    if sys.platform == "darwin":
+        assert frameworks
+        assert frameworks <= roots
+
+
+def test_python_interpreter_rechecked_immediately_before_invocation(tmp_path, monkeypatch):
+    interpreter = tmp_path.parent / f"{tmp_path.name}-selected-python"
+    interpreter.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    interpreter.chmod(0o755)
+    monkeypatch.setattr(kernel_hooks.sys, "executable", str(interpreter))
+    runner, _ = setup_runner(tmp_path, python_token=True)
+    calls = fake_session(monkeypatch)
+    interpreter.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+
+    result = runner.run_event(
+        "pre_tool", boundary="pre_tool:changed-python", data={}, match={"tool": "shell"}
+    )
+
+    assert result.runs[0].outcome.error_code == "changed"
+    assert result.runs[0].skipped == "changed"
+    assert calls == []
 
 
 def test_labeled_capability_identity_ignores_scratch_path(tmp_path):

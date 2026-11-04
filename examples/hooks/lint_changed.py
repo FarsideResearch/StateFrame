@@ -1,4 +1,3 @@
-#!/usr/bin/python3
 """Parse changed Python files and report syntax errors."""
 
 import ast

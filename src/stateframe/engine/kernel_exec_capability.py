@@ -88,6 +88,27 @@ def executable_read_roots(path: Path) -> tuple[Path, ...]:
     return tuple(sorted(roots))
 
 
+def python_runtime_read_roots(path: Path) -> tuple[Path, ...]:
+    """Include Python installation roots reached by a pinned interpreter."""
+    executable = Path(path)
+    roots = set(executable_read_roots(executable))
+    resolved = executable.resolve(strict=True)
+    for candidate in (executable.absolute(), resolved):
+        is_python = candidate.name.casefold().startswith("python")
+        if is_python and candidate.parent.name in {"bin", "Scripts"}:
+            prefix = candidate.parent.parent
+            is_virtualenv = (prefix / "pyvenv.cfg").is_file()
+            if prefix != Path("/") and (candidate == resolved or is_virtualenv):
+                roots.add(prefix)
+        for parent in candidate.parents:
+            if parent.name.casefold().startswith("python") and parent.name.endswith(
+                ".framework"
+            ):
+                roots.add(parent)
+                break
+    return tuple(sorted(roots))
+
+
 @dataclass(frozen=True)
 class ExecLimits:
     wall_seconds: float = 120.0

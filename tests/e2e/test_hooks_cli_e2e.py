@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -56,6 +57,32 @@ def _environment(tmp_path: Path) -> dict[str, str]:
         "HOME": str(home),
         "PYTHONPATH": str(ROOT / "src"),
     }
+
+
+def _path_without_python3(tmp_path: Path) -> Path:
+    path = tmp_path / "path-without-python3"
+    path.mkdir()
+    seen = set()
+    for directory in os.environ.get("PATH", "").split(os.pathsep):
+        if not directory:
+            continue
+        try:
+            with os.scandir(directory) as entries:
+                for entry in entries:
+                    if entry.name.startswith("python3") or entry.name in seen:
+                        continue
+                    if not entry.is_file(follow_symlinks=True) or not os.access(
+                        entry.path, os.X_OK
+                    ):
+                        continue
+                    try:
+                        (path / entry.name).symlink_to(entry.path)
+                    except FileExistsError:
+                        continue
+                    seen.add(entry.name)
+        except OSError:
+            continue
+    return path
 
 
 def _step(tool: str, **arguments: object) -> dict[str, object]:
@@ -131,6 +158,11 @@ def _run(
             command, environment=environment, run_dir=run_dir, timeout=240,
             step="hooked engine CLI run",
         )
+        if result.returncode != 0:
+            raise AssertionError(
+                f"StateFrame CLI exited {result.returncode}\n"
+                f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+            )
         script.assert_consumed()
         return result, run_dir, script
     finally:
@@ -348,10 +380,14 @@ def test_shipped_profile_puts_hook_context_in_first_wire_request(tmp_path):
     repo = _repo(tmp_path)
     (repo / "pkg/value.py").write_text("VALUE = 1   \n", encoding="utf-8")
     config = ROOT / "examples/hooks/hooks.json"
+    path_without_python3 = _path_without_python3(tmp_path)
+    environment = _environment(tmp_path)
+    environment["PATH"] = str(path_without_python3)
+    assert shutil.which("python3", path=environment["PATH"]) is None
     result, run_dir, _ = _run(
         repo,
         tmp_path / "profile-run",
-        environment=_environment(tmp_path),
+        environment=environment,
         hooks=config,
     )
 

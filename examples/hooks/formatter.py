@@ -1,4 +1,3 @@
-#!/usr/bin/python3
 """Trim trailing whitespace and ensure a final newline in changed text files."""
 
 from pathlib import Path

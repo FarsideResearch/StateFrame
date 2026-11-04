@@ -9,7 +9,7 @@ stateframe run --repo ~/code/shop --task "Fix the pricing bug." \
   --hooks examples/hooks/hooks.json
 ```
 
-The bundled scripts use an absolute `/usr/bin/python3` shebang. Use a Python 3.11+ interpreter at an absolute path on your machine if that path is unavailable or too old. The separate notification examples are described below.
+The bundled Python scripts have no shebang. Their configuration starts each command with the exact `"{python}"` argument, which StateFrame resolves at hook-config load time to the CLI process's `sys.executable`. StateFrame requires that interpreter to be an absolute executable and pins its path, symlink chain and bytes. It does not need to be named `python3` or appear on `PATH`. This is the StateFrame CLI interpreter, not the repository's `--test-python`. Explicit absolute interpreters remain supported. The separate notification examples are described below.
 
 ## Events
 
@@ -36,7 +36,7 @@ Files are UTF-8 JSON with schema `stateframe-hooks/1`. Unknown keys, duplicate J
       "name": "no-push",
       "event": "pre_tool",
       "tools": ["shell"],
-      "argv": ["guard.py"],
+      "argv": ["{python}", "guard.py"],
       "files": ["guard.py"],
       "timeout": 10
     }
@@ -50,7 +50,7 @@ The main fields are:
 |---|---|
 | `name` | Unique identifier, 1 to 48 lowercase letters, digits, `_` or `-`, starting with a letter. |
 | `event` | One of the six event names above. |
-| `argv` | 1 to 64 strings, passed as separate arguments without a shell. The executable is absolute or a bundled `files` entry. `{paths}` is permitted only as a whole argument on `post_tool`. |
+| `argv` | 1 to 64 strings, passed as separate arguments without a shell. The executable is absolute or a bundled `files` entry. The exact `{python}` token is permitted only at `argv[0]` and selects the StateFrame CLI interpreter at load time. `{paths}` is permitted only as a whole argument on `post_tool`. |
 | `files` | Up to 32 regular files relative to the definition file's directory. Each is at most 1 MiB and all files for a hook total at most 4 MiB. Symlinks, traversal and absolute paths are rejected. Files are snapshotted for the run. |
 | `tools` | Exact names or `fnmatch` globs for `pre_tool` and `post_tool`; defaults to `*`. `done` never matches. |
 | `changed` | `true` limits a `post_tool` hook to calls that applied workspace changes. `writes: "changed"` implies this filter. |
@@ -89,13 +89,13 @@ stateframe hooks trust --repo ~/code/shop
 stateframe run --repo ~/code/shop --task "..."
 ```
 
-Trust covers the JSON file, each pinned executable and every declared `files` entry. A changed or untrusted file is not loaded; StateFrame prints a notice and continues without its hooks. Trust the changed files again after reviewing them. Use `--no-project-hooks` to skip project hooks for one `run` or `chat` command, or `stateframe hooks trust --repo PATH --remove` to withdraw trust.
+Trust covers the JSON file, each pinned executable and every declared `files` entry. With `{python}`, the resolved absolute interpreter path and its executable chain are part of the trust digest. Trust created by another StateFrame installation may not match when that installation uses a different interpreter path; review the project hook file and run `stateframe hooks trust --repo PATH` again on that installation. A changed or untrusted file is not loaded; StateFrame prints a notice and continues without its hooks. Use `--no-project-hooks` to skip project hooks for one `run` or `chat` command, or `stateframe hooks trust --repo PATH --remove` to withdraw trust.
 
 The hook file and its bundled scripts are snapshotted and protected from edits during a run. Project trust is resolved against the original repository, not the generated working copy. Hooks do not come from profiles or environment variables.
 
 ## Sandbox and network
 
-Hooks always run inside StateFrame's execution sandbox with a minimal environment, a fresh scratch home, bounded time and output, and no read access to the run's records or endpoint key. There is no host-execution option and no unsandboxed fallback. The declared network mode can be `none`, `loopback` or `full`, but never broader than `--shell-network`. On Linux, `loopback` is a private network namespace, as it is for commands: a hook that must reach a service listening on the host's loopback needs `full`. `writes: "changed"` cannot use full network.
+Hooks always run inside StateFrame's execution sandbox with a minimal environment, a fresh scratch home, bounded time and output, and no read access to the run's records or endpoint key. Interpreter read roots come from the pinned executable, including virtual-environment links to a base Python and macOS framework installs. There is no host-execution option and no unsandboxed fallback. The declared network mode can be `none`, `loopback` or `full`, but never broader than `--shell-network`. On Linux, `loopback` is a private network namespace, as it is for commands: a hook that must reach a service listening on the host's loopback needs `full`. `writes: "changed"` cannot use full network.
 
 The entry point is pinned, but a hook can deliberately run project code from the working copy, such as `make lint` or a project test command. The agent can edit that code during the run, so such a check can be influenced by the edits. Use bundled hook scripts when the hook's own code must stay fixed.
 
@@ -105,7 +105,7 @@ Hook output is bounded, sanitized and labeled in the `[USER HOOKS]` panel. That 
 
 Every hook invocation is recorded in `hook-tape.jsonl` before its result is published. A completed hook is served from that record during replay and is not executed again, including network notifications. Formatter post-bytes are re-applied from the run's recorded effect store and checked against their pre-digests. Request replay for a hook-enabled run is strict: a changed hook result or request refuses replay instead of silently switching to a live request.
 
-A durable hook intent without a completion record may have produced an outside effect. StateFrame refuses to resume that run; reconcile the effect and start a new run. Changing a pinned definition, executable or bundled file also prevents resume.
+A durable hook intent without a completion record may have produced an outside effect. StateFrame refuses to resume that run; reconcile the effect and start a new run. Changing a pinned definition, executable or bundled file also prevents resume. A hook using `{python}` resumes only while the originally recorded absolute interpreter and its pinned chain are still present and unchanged, so cross-host resume requires those same paths and bytes to exist on the new host along with matching sandbox and engine identities. A missing or changed interpreter refuses resume even when the hook has a completed tape record. StateFrame never substitutes the new host's `sys.executable`; start a new run on that host and trust project hooks there if needed.
 
 When no hook source is enabled, the child does not import hook modules, the run spec gains no hook keys or files, and the request bytes, tool tape and journal event kinds match the base release. The raw parity proof compares a run with an untouched checkout of that release.
 
