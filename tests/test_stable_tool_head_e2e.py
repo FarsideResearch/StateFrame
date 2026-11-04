@@ -184,6 +184,52 @@ def test_switch_off_requests_match_the_released_baseline(tmp_path):
             f"STATEFRAME_STABLE_TOOL_HEAD=off changed requests vs {revision}")
 
 
+def test_deferred_prefit_layout_off_keeps_released_request_bytes(tmp_path, monkeypatch):
+    from tools.compare_no_mcp_requests import capture, write_launcher
+
+    monkeypatch.setenv("STATEFRAME_FINAL_CACHE_LAYOUT", "off")
+    monkeypatch.setenv("STATEFRAME_STABLE_TOOL_HEAD", "off")
+    baseline = _archive_revision("7ea0b8c", tmp_path / "released")
+    repo = tmp_path / "repo"
+    shutil.copytree(ROOT / "examples/discount_bug", repo)
+    launcher = tmp_path / "fixed_seed_run.py"
+    write_launcher(launcher)
+    script = ROOT / "examples/discount_bug.script.json"
+    run_dir = tmp_path / "run"
+
+    released = capture(baseline, sys.executable, launcher, script, repo, run_dir,
+                       stable_tool_head="off")
+    run_dir.rename(tmp_path / "released-run")
+    current = capture(ROOT, sys.executable, launcher, script, repo, run_dir,
+                      stable_tool_head="off")
+    assert len(_wire(run_dir)) >= 2
+    from stateframe.engine.kernel_journal_store import journal_paths, open_journal
+    events = []
+    for path in journal_paths(run_dir / "worker" / "measurement-runs"):
+        with open_journal(path) as source:
+            events.extend(json.loads(line) for line in source if line.strip())
+    deferred = [row for row in events
+                if row.get("kind") == "request_budget_final_wire"
+                and row.get("status") == "PRE_FIT_DEFERRED"]
+    proofs = [row for row in events
+              if row.get("kind") == "request_budget_final_wire"
+              and row.get("phase") == "frozen_transport_revalidation"]
+    assert deferred and proofs
+    assert all(row.get("status") == "READY" and row.get("measure_method") == "tokenize"
+               for row in proofs)
+    assert current == released  # Includes every provider-visible request_id.
+    run_dir.rename(tmp_path / "current-run")
+
+    # Planted control: ddc59ca skipped this pre-fit event and shifted request 2.
+    skipped_tree = _archive_revision("ddc59ca", tmp_path / "skipped-event")
+    skipped = capture(skipped_tree, sys.executable, launcher, script, repo, run_dir,
+                      stable_tool_head="off")
+    from stateframe.request_records import read_request_record
+    released_id = json.loads(read_request_record(tmp_path / "released-run", "0002.json"))["request_id"]
+    skipped_id = json.loads(read_request_record(run_dir, "0002.json"))["request_id"]
+    assert skipped != released and skipped_id != released_id
+
+
 def test_switch_off_keeps_per_turn_menus(tmp_path):
     result, run = _run(tmp_path, "off")
     assert result.returncode == 0, result.stdout + result.stderr

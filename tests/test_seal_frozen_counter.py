@@ -45,10 +45,12 @@ def test_prefit_menu_binding_defers_final_proof_until_after_fit(monkeypatch):
     import kernel_final_wire_budget
     import kernel_read_lockout
     import kernel_request_tool_surface
+    from kernel_wire_identity import next_wire_id
 
     monkeypatch.setenv("STATEFRAME_TOOL_MENU_MEMO", "off")
     monkeypatch.setenv("STATEFRAME_STABLE_TOOL_HEAD", "off")
     monkeypatch.setenv("STATEFRAME_REQUEST_TOOL_FLOOR", "off")
+    monkeypatch.delenv("SF_LAB_DETFIX3", raising=False)
     monkeypatch.setattr(kernel_done_is_submit_authority, "enabled", lambda _runtime: False)
     monkeypatch.setattr(kernel_done_is_submit_authority, "candidate_exists", lambda _runtime: False)
     monkeypatch.setattr(kernel_read_lockout, "filter_tools", lambda _runtime, tools: list(tools))
@@ -56,6 +58,15 @@ def test_prefit_menu_binding_defers_final_proof_until_after_fit(monkeypatch):
                         lambda *_args, **_kwargs: True)
 
     proofs = []
+
+    class Journal:
+        def __init__(self):
+            self._sequence = 0
+            self.events = []
+
+        def emit(self, kind, **fields):
+            self._sequence += 1
+            self.events.append({"kind": kind, **fields})
 
     def counted_proof(capture, _runtime, body):
         status = "HOST_BLOCKED" if len(body["messages"][0]["content"]) > 5000 else "READY"
@@ -68,6 +79,8 @@ def test_prefit_menu_binding_defers_final_proof_until_after_fit(monkeypatch):
         }
         capture.request_budget_final_wire = receipt
         proofs.append(status)
+        capture.journal.emit("request_budget_final_wire", status=status,
+                             phase="frozen_transport_revalidation")
         return receipt
 
     monkeypatch.setattr(kernel_final_wire_budget, "reconcile_frozen_budget", counted_proof)
@@ -76,7 +89,8 @@ def test_prefit_menu_binding_defers_final_proof_until_after_fit(monkeypatch):
 
     def bind(*, final_fit_pending):
         capture = SimpleNamespace(request_id="seal-r1", request_action_contract={},
-                                  request_budget_final_wire={"status": "READY"})
+                                  request_budget_final_wire={"status": "READY"},
+                                  journal=Journal())
         runtime = SimpleNamespace()
         body = {"messages": [{"role": "user", "content": "x" * 10000}],
                 "tools": [copy.deepcopy(tool)]}
@@ -94,6 +108,18 @@ def test_prefit_menu_binding_defers_final_proof_until_after_fit(monkeypatch):
     capture, runtime, body = bind(final_fit_pending=True)
     assert proofs == ["HOST_BLOCKED"]
     assert capture.request_budget_final_wire["status"] == "READY"
+    assert capture.journal.events == [{
+        "kind": "request_budget_final_wire", "producer": "kernel_request_budget",
+        "request_id": "seal-r1", "step": None, "dispatch": False,
+        "phase": "pre_fit_tool_surface", "status": "PRE_FIT_DEFERRED",
+        "tool_names": ["read"],
+        "tool_schema_digest": capture.final_tool_surface["tool_schema_digest"],
+    }]
+    # Planted skipped-event control: the next provider-visible ID changes.
+    expected_next_id = next_wire_id(capture.journal, "request", 2)
+    skipped = Journal()
+    with pytest.raises(AssertionError):
+        assert next_wire_id(skipped, "request", 2) == expected_next_id
     body["messages"][0]["content"] = "x" * 1000
     assert counted_proof(capture, runtime, body)["status"] == "READY"
     assert proofs == ["HOST_BLOCKED", "READY"]
