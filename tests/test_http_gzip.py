@@ -248,7 +248,8 @@ def test_wire_recorder_keeps_refused_resend_evidence_on_failure(monkeypatch, tmp
     record = json.loads((tmp_path / "sends.jsonl").read_text())
     assert [attempt["http_status"] for attempt in record["transport_attempts"]] == [415, 415]
     assert record["request_sha256"] == hashlib.sha256(WIRE).hexdigest()
-    assert (tmp_path / "wire/0001.error.txt").read_text() == "BoundedTransportError\n"
+    assert (tmp_path / "wire/0001.error.txt").read_text() == (
+        f"BoundedTransportError: {failure.value.error_detail}\n")
     assert build_replay_tape(tmp_path / "wire", tmp_path / "sends.jsonl") == []
 
 
@@ -283,7 +284,8 @@ def test_wire_recorder_keeps_resend_when_server_closes_without_response(
     assert [attempt["body_sha256"] for attempt in attempts] == [
         hashlib.sha256(entry[1]).hexdigest() for entry in seen]
     assert record["error"] == "BoundedTransportError"
-    assert (tmp_path / "wire/0001.error.txt").read_text() == "BoundedTransportError\n"
+    assert (tmp_path / "wire/0001.error.txt").read_text() == (
+        f"BoundedTransportError: {failure.value.error_detail}\n")
 
 
 @pytest.mark.host_sandbox

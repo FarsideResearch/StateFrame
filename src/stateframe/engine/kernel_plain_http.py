@@ -4,6 +4,7 @@ from __future__ import annotations
 import functools
 import http.client
 import socket
+import ssl
 import struct
 import threading
 import urllib.request
@@ -97,13 +98,18 @@ class _TrackedHTTPSHandler(urllib.request.HTTPSHandler):
     def __init__(self, tracker: "AbortiveHTTPTransport", tracker_id: int) -> None:
         self._tracker = tracker
         self._tracker_id = tracker_id
-        super().__init__()
+        # Built lazily on the first https send: a default context loads the CA store (~80 ms on 3.11
+        # under load), and 3.12+ HTTPSHandler.__init__ builds one eagerly even for plain-http sends.
+        # Never read HTTPSHandler private state: 3.12+ removed _check_hostname and broke every https send.
+        self._tls_context: ssl.SSLContext | None = None
+        urllib.request.AbstractHTTPHandler.__init__(self)
 
     def https_open(self, request):
         factory = functools.partial(
             _TrackedHTTPSConnection, tracker=self._tracker, tracker_id=self._tracker_id)
-        return self.do_open(
-            factory, request, context=self._context, check_hostname=self._check_hostname)
+        if self._tls_context is None:
+            self._tls_context = ssl.create_default_context()
+        return self.do_open(factory, request, context=self._tls_context)
 
 
 class AbortiveHTTPTransport:

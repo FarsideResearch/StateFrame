@@ -264,14 +264,18 @@ def install_wire_recorder(run: Path, chat_url: str, replayer: Replayer | None = 
                 wire, endpoint, key, record_attempts=transport_attempts.extend,
                 **({**kwargs, "route_meta": route} if routed_endpoints is not None else kwargs)))
         except Exception as error:
-            (wire_dir / f"{index:04d}.error.txt").write_text(type(error).__name__ + "\n")
+            detail = getattr(error, "error_detail", None)
+            detail = detail if isinstance(detail, str) and detail else None
+            (wire_dir / f"{index:04d}.error.txt").write_text(
+                type(error).__name__ + (f": {detail}" if detail else "") + "\n")
             if transport_attempts:
                 with (run / "sends.jsonl").open("a") as stream:
                     stream.write(json.dumps({"send": index, "request_bytes": len(wire),
                                              "request_sha256": hashlib.sha256(wire).hexdigest(),
                                              "transport_attempts": transport_attempts,
                                              "error": type(error).__name__}) + "\n")
-            emit("send_error", send=index, error=type(error).__name__)
+            emit("send_error", send=index, error=type(error).__name__,
+                 **({"detail": detail} if detail else {}))
             raise
         if hook_wiring is not None:
             from kernel_measurement import ACTIVE_REQUEST

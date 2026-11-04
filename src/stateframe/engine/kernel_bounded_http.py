@@ -14,8 +14,10 @@ import json
 import math
 import os
 from pathlib import Path
+import re
 import select
 import socket
+import ssl
 import struct
 import subprocess
 import sys
@@ -70,12 +72,15 @@ class BoundedTransportError(ConnectionError):
     """Safe child-process transport metadata, without response bodies or headers."""
 
     def __init__(self, *, error_type: str, http_status: int | None,
-                 relay_error: str | None, server_error: str | None = None) -> None:
+                 relay_error: str | None, server_error: str | None = None,
+                 error_detail: str | None = None) -> None:
         suffix = f" HTTP {http_status}" if http_status is not None else ""
-        super().__init__(f"bounded HTTP child failed: {error_type}{suffix}")
+        detail_suffix = f": {error_detail}" if error_detail else ""
+        super().__init__(f"bounded HTTP child failed: {error_type}{suffix}{detail_suffix}")
         self.error_type = error_type
         self.http_status = http_status
         self.relay_error = relay_error
+        self.error_detail = error_detail
         # Redacted, <= 2 KB provider error text (see safe_server_error).
         self.server_error = server_error
 
@@ -104,6 +109,40 @@ def safe_server_error(body: bytes | None, key: str = "") -> str | None:
     if key and len(key) >= 4:
         text = text.replace(key, "[redacted]")
     return _SECRET_PATTERN.sub(lambda match: match.group(1) + "[redacted]", text)
+
+
+_DETAIL_URL = re.compile(r"(?i)\b[a-z][a-z0-9+.-]*://[^\s<>\"']+")
+_DETAIL_USERINFO = re.compile(r"[^\s/@:]+:[^\s/@]+@[^\s/]+")
+_DETAIL_QUERY = re.compile(r"\?[^\s<>\"']+")
+_DETAIL_CREDENTIAL = re.compile(
+    r"(?i)\b(authorization|api[_-]?key|access[_-]?token|token|key|secret|password)"
+    r"(\s*[:=]\s*)(?:(?:bearer|basic|token)\s+)?[^\s,;]+")
+_DETAIL_BEARER = re.compile(r"(?i)\bbearer\s+[^\s,;]+")
+
+
+def safe_transport_detail(error: BaseException | str, key: str = "") -> str | None:
+    """Return a short diagnostic without destinations or credentials.
+
+    Called in the HTTP child before crossing the pipe and again in the parent
+    with the endpoint key, which is deliberately unavailable to the child guard.
+    """
+    reason: object = error.reason if isinstance(error, urllib.error.URLError) else error
+    if isinstance(reason, ssl.SSLCertVerificationError):
+        reason = reason.verify_message or reason.reason or reason
+    elif isinstance(reason, ssl.SSLError):
+        reason = reason.reason or reason
+    detail = str(reason)[:4096]
+    detail = _DETAIL_URL.sub("[redacted URL]", detail)
+    detail = _DETAIL_USERINFO.sub("[redacted userinfo]", detail)
+    detail = _DETAIL_QUERY.sub("?[redacted query]", detail)
+    detail = _DETAIL_CREDENTIAL.sub(
+        lambda match: match.group(1) + match.group(2) + "[redacted]", detail)
+    detail = _DETAIL_BEARER.sub("Bearer [redacted]", detail)
+    if key and len(key) >= 4:
+        detail = detail.replace(key, "[redacted]")
+    detail = safe_server_error(detail.encode("utf-8", errors="replace"), key) or ""
+    detail = " ".join(detail.split())[:300]
+    return detail or None
 
 
 def transport_class(http_status: int | None, server_error: str | None = None,
@@ -545,6 +584,9 @@ def _child_transport_error(diagnostic: bytes, key: str, endpoint: str) -> Except
     server_error = failure.get("server_error")
     server_error = (safe_server_error(server_error.encode("utf-8"), key)
                     if isinstance(server_error, str) else None)
+    error_detail = failure.get("error_detail")
+    error_detail = (safe_transport_detail(error_detail, key)
+                    if isinstance(error_detail, str) else None)
     if kind == "SendStallTimeout":
         sent = failure.get("bytes_sent")
         total = failure.get("bytes_total")
@@ -564,6 +606,7 @@ def _child_transport_error(diagnostic: bytes, key: str, endpoint: str) -> Except
         http_status=status if type(status) is int and 100 <= status <= 599 else None,
         relay_error=relay_error,
         server_error=server_error,
+        error_detail=error_detail,
     )
 
 
@@ -993,12 +1036,17 @@ class _AbortiveHTTPHandler(urllib.request.HTTPHandler):
 class _AbortiveHTTPSHandler(urllib.request.HTTPSHandler):
     def __init__(self, tracker: _AbortiveConnectionTracker) -> None:
         self._tracker = tracker
-        super().__init__()
+        # Built lazily on the first https send: a default context loads the CA store (~80 ms on 3.11
+        # under load), and 3.12+ HTTPSHandler.__init__ builds one eagerly even for plain-http sends.
+        # Never read HTTPSHandler private state: 3.12+ removed _check_hostname and broke every https send.
+        self._tls_context: ssl.SSLContext | None = None
+        urllib.request.AbstractHTTPHandler.__init__(self)
 
     def https_open(self, request):
         factory = functools.partial(_AbortiveHTTPSConnection, tracker=self._tracker)
-        return self.do_open(
-            factory, request, context=self._context, check_hostname=self._check_hostname)
+        if self._tls_context is None:
+            self._tls_context = ssl.create_default_context()
+        return self.do_open(factory, request, context=self._tls_context)
 
 
 def _read_response_body(
@@ -1159,12 +1207,13 @@ if __name__ == "__main__":
     try:
         _child()
     except Exception as error:
-        # No exception message, URL, or credentials cross this channel; only the
-        # redacted, 2 KB-bounded provider error body (server_error) does.
+        # Only a short sanitized reason crosses the pipe; the parent redacts
+        # again using the endpoint key before exposing it to the run log.
         status = getattr(error, "code", None)
         relay_error = getattr(error, "relay_error", None)
         server_error = getattr(error, "server_error", None)
         sys.stderr.write(json.dumps({"error_type": type(error).__name__,
+                                     "error_detail": safe_transport_detail(error),
                                      "http_status": status if type(status) is int else None,
                                      "relay_error": relay_error
                                      if isinstance(relay_error, str)
