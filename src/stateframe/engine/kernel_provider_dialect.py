@@ -131,17 +131,34 @@ def _llama_props(payload: object) -> bool:
             or isinstance(model_path, str) and bool(model_path.strip()))
 
 
-def _slots_proof(result: tuple[int, object] | None) -> tuple[bool, frozenset[int], int | None]:
+def _slots_proof(
+    result: tuple[int, object] | None, *, require_llama_shape: bool = False,
+) -> tuple[bool, frozenset[int], int | None]:
     if result is None:
         return False, frozenset(), None
     status, payload = result
     if status != 200 or not isinstance(payload, list):
         return False, frozenset(), status
-    slot_ids = frozenset(
-        item["id"] for item in payload
-        if isinstance(item, Mapping) and type(item.get("id")) is int and item["id"] >= 0
-    )
-    return True, slot_ids, status
+    if not require_llama_shape:
+        # /props already established the dialect; preserve the older slot contract.
+        slot_ids = frozenset(
+            item["id"] for item in payload
+            if isinstance(item, Mapping) and type(item.get("id")) is int and item["id"] >= 0
+        )
+        return True, slot_ids, status
+    if not payload:
+        return False, frozenset(), status
+    slot_ids: set[int] = set()
+    for item in payload:
+        if (not isinstance(item, Mapping)
+                or type(item.get("id")) is not int or item["id"] < 0
+                or type(item.get("n_ctx")) is not int or item["n_ctx"] <= 0
+                or type(item.get("is_processing")) is not bool):
+            return False, frozenset(), status
+        slot_ids.add(item["id"])
+    if len(slot_ids) != len(payload):
+        return False, frozenset(), status
+    return True, frozenset(slot_ids), status
 
 
 def capabilities_for(
@@ -172,6 +189,11 @@ def capabilities_for(
         props_status = props[0] if props is not None else None
         props_is_llama = props is not None and props[0] == 200 and _llama_props(props[1])
 
+        slots, slot_ids, slots_status = _slots_proof(
+            bounded_json_probe(origin, key, "/slots"),
+            require_llama_shape=not (override or props_is_llama),
+        )
+
         if override:
             dialect = LLAMA_CPP
             if props is None:
@@ -187,23 +209,21 @@ def capabilities_for(
         elif props_is_llama:
             dialect = LLAMA_CPP
             reason = "proven by /props"
+        elif slots:
+            # A populated llama.cpp slot array has its own typed fields and remains
+            # authoritative when a relay or gateway omits the separate /props route.
+            dialect = LLAMA_CPP
+            reason = "proven by /slots"
         elif props is None:
             dialect = OPENAI_STRICT
-            reason = "openai-strict because /props was unreachable"
+            reason = "openai-strict because /props was unreachable and /slots was unproven"
         elif props_status == 404:
             dialect = OPENAI_STRICT
-            reason = "openai-strict because /props was 404"
+            reason = "openai-strict because /props was 404 and /slots was unproven"
         else:
             dialect = OPENAI_STRICT
-            reason = "openai-strict because /props was not llama.cpp"
+            reason = "openai-strict because /props was not llama.cpp and /slots was unproven"
 
-        slots = False
-        slot_ids = frozenset()
-        slots_status = None
-        if dialect == LLAMA_CPP:
-            slots, slot_ids, slots_status = _slots_proof(
-                bounded_json_probe(origin, key, "/slots"),
-            )
         result = ProviderCapabilities(
             dialect=dialect,
             slots=slots,
@@ -241,7 +261,7 @@ def require_routed_static_slot(
     capabilities: ProviderCapabilities,
     slot_id: int | None = None,
 ) -> None:
-    """Require endpoint proof before a route pins a llama.cpp slot."""
+    """Require proof for a route's explicitly configured static or automatic slot."""
     require_feature(
         capabilities, "routed static slot", slots=True, slot_id=slot_id,
     )
@@ -255,7 +275,7 @@ def require_selected_request_features(
     call_purpose: str | None = None,
     environ: Mapping[str, str] | None = None,
 ) -> None:
-    """Refuse selected native request features before a provider request is sent."""
+    """Refuse explicitly selected native request features before provider dispatch."""
     source = os.environ if environ is None else environ
     if source.get("STATEFRAME_KV_CHUNK_REUSE", "off").strip().lower() in {
             "on", "1", "true", "yes"}:

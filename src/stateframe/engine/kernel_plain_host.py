@@ -671,6 +671,15 @@ def run_plain(row: Mapping[str, object], output: Path, *,
     limits = limits_from_env(env)
     settings = HookSettings.from_env(env)
     journal = PlainJournal(output / "plain")
+    prompt_cache_degradation = env.get("SF_PROMPT_CACHE_PIN_DEGRADED_REASON")
+    if isinstance(prompt_cache_degradation, str) and prompt_cache_degradation:
+        journal.write(
+            "provider_feature_degraded",
+            producer="kernel_provider_dialect",
+            feature="prompt-cache pinned slot",
+            reason=prompt_cache_degradation,
+            dispatch=False,
+        )
     capture_dest = row.get("_bridge_capture")
     root = Path(tempfile.mkdtemp(prefix="plain_", dir=str(output / "scratch"))) / "repo"
     root.mkdir()

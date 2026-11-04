@@ -290,6 +290,7 @@ class RunOptions:
     _cache_slot: int | None = field(default=None, init=False, repr=False)
     _cache_slot_selection: str | None = field(default=None, init=False, repr=False)
     _cache_slot_reason: str | None = field(default=None, init=False, repr=False)
+    _cache_slot_degraded: bool = field(default=False, init=False, repr=False)
     _capabilities: dict[str, object] = field(default_factory=dict, init=False, repr=False)
     # Environment for the repository's tests (engine checks and --test-cmd), e.g. test-only
     # settings a project needs to import. Declared to the engine as host task env keys.
@@ -1168,6 +1169,14 @@ def prepare(options: RunOptions, printer=print) -> tuple[Path, workcopy.WorkCopy
     # Host authority wins over every caller-supplied environment overlay.
     environment["STATEFRAME_TOOL_SETTINGS_FILE"] = str(settings_file)
     environment["STATEFRAME_SKILL_SETTINGS_FILE"] = str(skills_file)
+    environment.pop("SF_PROMPT_CACHE_PIN_DEGRADED_REASON", None)
+    if options._cache_slot_degraded:
+        # Prompt-cache reuse is optional unless an explicit slot was requested. With
+        # no slot proof, disable it so secondary cache-enabled bodies also degrade.
+        environment["STATEFRAME_PROMPT_CACHE"] = "off"
+        environment["SF_PROMPT_CACHE_PIN_DEGRADED_REASON"] = (
+            options._cache_slot_reason or "provider did not prove llama.cpp /slots"
+        )
     # Slot selection is a runner-owned contract. A stale ambient value or an
     # extra environment entry must not pin a slot after discovery found none.
     environment.pop("REACT_SLOT_ID", None)
@@ -1189,8 +1198,12 @@ def prepare(options: RunOptions, printer=print) -> tuple[Path, workcopy.WorkCopy
     for name in opt_in:
         environment_sources[name] = ("ambient:" + name if os.environ.get(name, "").strip()
                                      else "runner:default-" + OPT_IN_RUNNER_DEFAULTS[name])
+    if options._cache_slot_degraded:
+        environment_sources["STATEFRAME_PROMPT_CACHE"] = "runner:optional-pin-degraded"
+        environment_sources["SF_PROMPT_CACHE_PIN_DEGRADED_REASON"] = "runner:provider-capability-degradation"
     if selected_slot is not None:
         environment_sources["REACT_SLOT_ID"] = "runner:" + (options._cache_slot_selection or "explicit")
+    provider_records = _provider_preflight_records(options)
     spec = {
         "schema": "stateframe-run/1",
         "created": datetime.now(timezone.utc).isoformat(timespec="seconds"),
@@ -1198,7 +1211,7 @@ def prepare(options: RunOptions, printer=print) -> tuple[Path, workcopy.WorkCopy
         "engine_source": profiles.engine_source_summary(),
         "profile": options.profile,
         "capabilities": options._capabilities,
-        "provider_capabilities": _provider_preflight_records(options),
+        **({"provider_capabilities": provider_records} if provider_records else {}),
         "chat_url": options.endpoint.chat_url,
         "model": options.endpoint.model,
         "api_key_env": options.endpoint.api_key_env,
@@ -1218,6 +1231,7 @@ def prepare(options: RunOptions, printer=print) -> tuple[Path, workcopy.WorkCopy
             "slot": selected_slot,
             "selection": (options._cache_slot_selection or
                           ("explicit" if options.slot is not None else "not_selected")),
+            **({"degraded": True} if options._cache_slot_degraded else {}),
             "reason": (options._cache_slot_reason or
                        ("requested by --slot" if options.slot is not None else
                         "slot discovery has not run")),
@@ -1377,6 +1391,7 @@ def _select_prompt_cache_slot(options: RunOptions, printer=print) -> None:
     options._cache_slot = None
     options._cache_slot_selection = None
     options._cache_slot_reason = None
+    options._cache_slot_degraded = False
     assert options.endpoint is not None
     from .engine.kernel_provider_dialect import require_feature
     capabilities = _provider_capabilities_for(
@@ -1394,8 +1409,11 @@ def _select_prompt_cache_slot(options: RunOptions, printer=print) -> None:
     else:
         if not capabilities.slots:
             options._cache_slot_selection = "not_pinned"
-            options._cache_slot_reason = "provider did not prove llama.cpp /slots"
-            printer("cache: provider did not prove llama.cpp /slots; not pinned")
+            options._cache_slot_degraded = True
+            options._cache_slot_reason = (
+                "provider did not prove llama.cpp /slots; optional prompt-cache pin dropped"
+            )
+            printer("cache: prompt-cache pin dropped because provider did not prove llama.cpp /slots")
             return
         endpoint = replace(options.endpoint,
                            timeout_s=min(options.endpoint.timeout_s, _remaining(options)))

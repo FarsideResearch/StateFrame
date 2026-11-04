@@ -106,6 +106,7 @@ def install_environment(spec: dict) -> None:
     for key in list(os.environ):
         if key.startswith(ENGINE_PREFIXES) and not key.startswith("STATEFRAME_TASK_"):
             del os.environ[key]
+    os.environ.pop("SF_PROMPT_CACHE_PIN_DEGRADED_REASON", None)
     os.environ.update({str(k): str(v) for k, v in spec["environment"].items()})
     if checkpoint_off:
         os.environ["STATEFRAME_CHECKPOINT"] = "off"

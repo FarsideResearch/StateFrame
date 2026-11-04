@@ -33,7 +33,10 @@ def test_llama_props_and_slots_prove_independent_capabilities(monkeypatch):
         calls.append((origin, key, path))
         if path == "/props":
             return 200, LLAMA_PROPS
-        return 200, [{"id": 0}, {"id": 2}]
+        return 200, [
+            {"id": 0, "n_ctx": 65536, "is_processing": False},
+            {"id": 2, "n_ctx": 65536, "is_processing": True},
+        ]
 
     monkeypatch.setattr(dialect, "bounded_json_probe", probe)
     cache = {}
@@ -47,13 +50,68 @@ def test_llama_props_and_slots_prove_independent_capabilities(monkeypatch):
                      ("http://localhost:8080", "secret", "/slots")]
 
 
+@pytest.mark.parametrize("slots, expected_ids", [([], frozenset()),
+    ([{"id": 0}], frozenset({0})),
+])
+def test_props_proven_llama_keeps_legacy_slot_contract(monkeypatch, slots, expected_ids):
+    monkeypatch.setattr(
+        dialect, "bounded_json_probe",
+        lambda _origin, _key, path: (200, LLAMA_PROPS) if path == "/props" else (200, slots),
+    )
+
+    result = capabilities_for("https://api.example/v1", "key", cache={})
+
+    assert result.dialect == "llama.cpp"
+    assert result.reason == "proven by /props"
+    assert result.slots is True
+    assert result.slot_ids == expected_ids
+    assert result.slots_status == 200
+
+
+def test_populated_llama_slots_prove_dialect_when_props_is_missing(monkeypatch):
+    calls = []
+    slots = [{"id": 3, "n_ctx": 65536, "is_processing": False}]
+
+    def probe(_origin, _key, path):
+        calls.append(path)
+        return (404, None) if path == "/props" else (200, slots)
+
+    monkeypatch.setattr(dialect, "bounded_json_probe", probe)
+    result = capabilities_for("https://api.example/v1", "key", cache={})
+
+    assert result.dialect == "llama.cpp"
+    assert result.reason == "proven by /slots"
+    assert result.slots is True
+    assert result.slot_ids == frozenset({3})
+    assert result.props_status == 404
+    assert result.slots_status == 200
+    assert calls == ["/props", "/slots"]
+
+
+@pytest.mark.parametrize("slots", [[], [{"id": 3}], [
+    {"id": 3, "n_ctx": 65536, "is_processing": False},
+    {"id": 3, "n_ctx": 65536, "is_processing": False},
+]])
+def test_non_slot_shaped_responses_do_not_prove_llama_dialect(monkeypatch, slots):
+    monkeypatch.setattr(
+        dialect, "bounded_json_probe",
+        lambda _origin, _key, path: (404, None) if path == "/props" else (200, slots),
+    )
+
+    result = capabilities_for("https://api.example/v1", "key", cache={})
+
+    assert result.dialect == "openai-strict"
+    assert result.reason == "openai-strict because /props was 404 and /slots was unproven"
+    assert result.slots is False
+
+
 @pytest.mark.parametrize(
     ("props", "reason"),
     [
-        ((404, None), "openai-strict because /props was 404"),
-        ((200, {"models": ["hosted"]}), "openai-strict because /props was not llama.cpp"),
-        ((302, None), "openai-strict because /props was not llama.cpp"),
-        (None, "openai-strict because /props was unreachable"),
+        ((404, None), "openai-strict because /props was 404 and /slots was unproven"),
+        ((200, {"models": ["hosted"]}), "openai-strict because /props was not llama.cpp and /slots was unproven"),
+        ((302, None), "openai-strict because /props was not llama.cpp and /slots was unproven"),
+        (None, "openai-strict because /props was unreachable and /slots was unproven"),
     ],
 )
 def test_unproven_props_are_openai_strict(monkeypatch, props, reason):
@@ -67,12 +125,12 @@ def test_unproven_props_are_openai_strict(monkeypatch, props, reason):
 @pytest.mark.parametrize(
     ("props", "expected_reason"),
     [
-        ((200, None), "openai-strict because /props was not llama.cpp"),
-        ((401, None), "openai-strict because /props was not llama.cpp"),
+        ((200, None), "openai-strict because /props was not llama.cpp and /slots was unproven"),
+        ((401, None), "openai-strict because /props was not llama.cpp and /slots was unproven"),
         ((200, {"default_generation_settings": {}, "n_ctx": "65536"}),
-         "openai-strict because /props was not llama.cpp"),
+         "openai-strict because /props was not llama.cpp and /slots was unproven"),
         ((200, {"default_generation_settings": {}, "n_ctx": 0}),
-         "openai-strict because /props was not llama.cpp"),
+         "openai-strict because /props was not llama.cpp and /slots was unproven"),
     ],
 )
 def test_unclassifiable_answer_is_not_reported_as_unreachable(monkeypatch, props, expected_reason):
@@ -146,7 +204,7 @@ def test_probe_timeout_selects_openai_strict(monkeypatch):
     monkeypatch.setattr(dialect, "bounded_json_probe", lambda *_args: response)
     result = capabilities_for("https://api.example/v1", "key", cache={})
     assert result.dialect == "openai-strict"
-    assert result.reason == "openai-strict because /props was unreachable"
+    assert result.reason == "openai-strict because /props was unreachable and /slots was unproven"
 
 
 def test_scripted_endpoint_emulates_llama_props_and_optional_slots():
@@ -172,6 +230,18 @@ def test_scripted_endpoint_emulates_llama_props_and_optional_slots():
     assert slots == [{"id": 0, "n_ctx": 65536, "is_processing": False}]
 
 
+def test_recorded_tape_server_emulates_llama_props_and_slots():
+    from tests.tape_server import TapeServer
+
+    with TapeServer({"turns": [{"message": {"role": "assistant", "content": "done"}}]}) as tape:
+        result = capabilities_for(tape.url, "", cache={})
+
+    assert result.dialect == "llama.cpp"
+    assert result.reason == "proven by /props"
+    assert result.slots is True
+    assert result.slot_ids == frozenset(range(8))
+
+
 @pytest.mark.parametrize("example", ["discount_bug", "tiny_site", "brief_to_report"])
 def test_bundled_identity_scripts_prove_llama_without_slots_or_cache_pin(example):
     from stateframe import runner
@@ -192,7 +262,8 @@ def test_bundled_identity_scripts_prove_llama_without_slots_or_cache_pin(example
         options = runner.RunOptions(
             repo=None, task="task", endpoint=Endpoint(origin + "/v1", "scripted"),
         )
-        runner._select_prompt_cache_slot(options, lambda *_args: None)
+        messages = []
+        runner._select_prompt_cache_slot(options, messages.append)
     finally:
         server.shutdown()
         server.server_close()
@@ -205,6 +276,11 @@ def test_bundled_identity_scripts_prove_llama_without_slots_or_cache_pin(example
     assert capabilities.slots is False
     assert options._cache_slot is None
     assert options._cache_slot_selection == "not_pinned"
+    assert options._cache_slot_degraded is True
+    assert options._cache_slot_reason == (
+        "provider did not prove llama.cpp /slots; optional prompt-cache pin dropped"
+    )
+    assert messages == ["cache: prompt-cache pin dropped because provider did not prove llama.cpp /slots"]
 
 
 def test_strict_endpoint_refuses_native_tokenize_before_post():
@@ -295,12 +371,12 @@ def test_provider_status_summary_includes_configured_routes(monkeypatch):
     monkeypatch.setattr(
         runner, "_provider_capabilities_for",
         lambda *_args: ProviderCapabilities(
-            "openai-strict", reason="openai-strict because /props was 404"),
+            "openai-strict", reason="openai-strict because /props was 404 and /slots was unproven"),
     )
 
     summary = runner._provider_preflight_summary(options)
 
-    assert "provider dialect: openai-strict (openai-strict because /props was 404)" in summary
+    assert "provider dialect: openai-strict (openai-strict because /props was 404 and /slots was unproven)" in summary
     assert "reasoning controls dropped" in summary
     assert "routes: edit@https://edit.example=llama.cpp (operator override, /props unreachable)" in summary
 
@@ -325,7 +401,7 @@ def test_provider_summary_reports_operator_mapped_reasoning_effort(monkeypatch):
     monkeypatch.setattr(
         runner, "_provider_capabilities_for",
         lambda *_args: ProviderCapabilities(
-            "openai-strict", reason="openai-strict because /props was 404"),
+            "openai-strict", reason="openai-strict because /props was 404 and /slots was unproven"),
     )
 
     summary = runner._provider_preflight_summary(options)
@@ -358,6 +434,7 @@ def test_provider_override_promotes_only_dialect_and_keeps_slots_proof(monkeypat
     assert result.reason == "operator override, /props unreachable"
     assert not result.slots
     assert calls == ["/props", "/slots"]
+    # The caller explicitly requests a slot capability; the provider override alone is not slot proof.
     with pytest.raises(ProviderCapabilityError, match="slot requires proven /slots"):
         require_feature(result, "slot", slots=True)
 
@@ -399,6 +476,7 @@ def test_missing_slots_proof_refuses_slot_zero_before_dispatch(monkeypatch):
     capabilities = capabilities_for("https://api.example/v1", "key", cache={})
     sent = []
 
+    # An explicitly supplied id_slot requires proof; optional profile pins degrade in runner preflight.
     with pytest.raises(ProviderCapabilityError, match="id_slot requires proven /slots"):
         require_selected_request_features(
             capabilities, {"id_slot": 0},
@@ -520,12 +598,14 @@ def test_provider_dialect_journal_marker_is_once_per_origin_per_run():
 
 
 def test_old_spec_without_provider_capabilities_seeds_empty_run_cache():
+    old_spec = {"schema": "stateframe-run/1", "prompt_cache_slot": {"slot": None}}
+    assert "provider_capabilities" not in old_spec
     dialect.seed_run_capability_cache({
         "https://api.example": ProviderCapabilities("llama.cpp").to_record(),
     })
     assert dialect.RUN_CAPABILITY_CACHE
 
-    dialect.seed_run_capability_cache(None)
+    dialect.seed_run_capability_cache(old_spec.get("provider_capabilities"))
 
     assert dialect.RUN_CAPABILITY_CACHE == {}
 
@@ -719,6 +799,7 @@ def test_slot_action_refuses_before_network_without_slots_proof(action):
         called.append(True)
         raise AssertionError("slot API must not be called")
 
+    # This is an explicit KV slot operation, so it still requires live slot proof.
     with pytest.raises(ProviderCapabilityError, match=rf"KV_CHUNK_REUSE slot {action}.*\/slots"):
         slot_action("https://api.example/v1", 0, action, "cache.bin", opener=opener,
                     capabilities=ProviderCapabilities("llama.cpp", False))
@@ -748,6 +829,7 @@ def test_slot_action_refuses_before_network_without_slots_proof(action):
 )
 def test_unproven_selected_feature_is_typed_and_refuses_before_dispatch(
         feature, body, route_slot, purpose, environ):
+    # These cases explicitly select a native feature or slot; automatic profile pins are tested separately.
     sends = []
 
     def dispatch():
@@ -764,6 +846,7 @@ def test_unproven_selected_feature_is_typed_and_refuses_before_dispatch(
 
 def test_history_compaction_cache_requires_an_explicit_reported_slot():
     capabilities = ProviderCapabilities("llama.cpp", True, frozenset({0}))
+    # Explicit cache_prompt=True keeps the history-cache contract strict when no slot is selected.
     with pytest.raises(ProviderCapabilityError, match="history-compaction cache/slot.*explicitly selected"):
         require_selected_request_features(
             capabilities,
@@ -810,6 +893,33 @@ def test_hosted_history_compaction_without_cache_uses_strict_request(monkeypatch
     assert_openai_chat_body(strict)
 
 
+def test_plain_loop_journals_prompt_cache_pin_degradation(tmp_path):
+    from kernel_plain_contracts import PlainContractError
+    from kernel_plain_host import run_plain
+
+    output = tmp_path / "worker"
+    output.mkdir()
+    (output / "scratch").mkdir()
+    reason = "provider did not prove llama.cpp /slots; optional prompt-cache pin dropped"
+
+    with pytest.raises(PlainContractError, match="multi-file public row with declared files"):
+        run_plain(
+            {"files": {}, "msg": "task"}, output,
+            provider=lambda _body, _timeout: {},
+            check_runner=lambda *_args: None,
+            environ={
+                "STATEFRAME_PROMPT_CACHE": "off",
+                "SF_PROMPT_CACHE_PIN_DEGRADED_REASON": reason,
+            },
+        )
+
+    events = [json.loads(line) for line in (output / "plain" / "events.jsonl").read_text().splitlines()]
+    notices = [event for event in events if event.get("kind") == "provider_feature_degraded"]
+    assert len(notices) == 1
+    assert notices[0]["feature"] == "prompt-cache pinned slot"
+    assert notices[0]["reason"] == reason
+
+
 def test_explicit_cli_slot_refuses_when_selected_endpoint_has_no_slots_proof(monkeypatch):
     from stateframe import runner
     from stateframe.endpoint import Endpoint
@@ -826,12 +936,14 @@ def test_explicit_cli_slot_refuses_when_selected_endpoint_has_no_slots_proof(mon
         runner, "_provider_capabilities_for",
         lambda *_args: RunnerProviderCapabilities("openai-strict"),
     )
+    # --slot is the existing explicit requirement path and keeps its named refusal.
     with pytest.raises(RunnerProviderCapabilityError, match=r"prompt-cache pinned slot.*/slots"):
         runner._select_prompt_cache_slot(options, lambda *_args: None)
 
 
 def test_enabled_prompt_cache_requires_its_selected_slot_on_each_request():
     capabilities = ProviderCapabilities("llama.cpp", True, frozenset({2}))
+    # A runner-selected REACT_SLOT_ID requires the matching id_slot/cache_prompt fields per request.
     with pytest.raises(ProviderCapabilityError, match="STATEFRAME_PROMPT_CACHE.*request fields"):
         require_selected_request_features(
             capabilities, {"model": "local", "messages": []},
@@ -853,6 +965,7 @@ def test_enabled_prompt_cache_needs_endpoint_slot_proof_before_dispatch():
         ProviderCapabilities("openai-strict"), {},
         environ={"STATEFRAME_PROMPT_CACHE": "on"},
     )
+    # The request contains id_slot and REACT_SLOT_ID, so this explicit pin stays a hard refusal.
     with pytest.raises(ProviderCapabilityError, match=r"STATEFRAME_PROMPT_CACHE.*llama.cpp.*/slots"):
         require_selected_request_features(
             ProviderCapabilities("openai-strict"),
@@ -860,6 +973,7 @@ def test_enabled_prompt_cache_needs_endpoint_slot_proof_before_dispatch():
             environ={"STATEFRAME_PROMPT_CACHE": "on", "REACT_SLOT_ID": "0"},
         )
     with pytest.raises(ProviderCapabilityError, match=r"STATEFRAME_PROMPT_CACHE.*/slots"):
+        # Even a llama.cpp dialect cannot honor an explicit ID without /slots proof.
         require_selected_request_features(
             ProviderCapabilities("llama.cpp", False),
             {"model": "local", "messages": [], "id_slot": 0, "cache_prompt": True},

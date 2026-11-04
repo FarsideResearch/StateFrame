@@ -31,15 +31,24 @@ from tools.pinned_tree import pinned_tree
 
 
 def _assert_journal_kinds_match_release(baseline_kinds, current_kinds):
-    """Journal kinds match the base release, except one intended addition: a sealed submit now
-    also journals done_facts_finalized (receipt determinism, 11-03, caches terminal done facts
-    before the journal closes). Exactly one extra, nothing removed or reordered."""
-    extra = "done_facts_finalized"
-    assert current_kinds.count(extra) == baseline_kinds.count(extra) + 1, (
-        baseline_kinds.count(extra), current_kinds.count(extra))
+    """Allow only the two known additions while preserving all release event ordering."""
     trimmed = list(current_kinds)
-    del trimmed[len(trimmed) - 1 - trimmed[::-1].index(extra)]
+    # Sealed submit adds done_facts_finalized; dialect selection journals once for this
+    # fixture's single provider origin. No other new kind may be silently accepted.
+    for extra in ("done_facts_finalized", "provider_dialect"):
+        assert trimmed.count(extra) == baseline_kinds.count(extra) + 1, (
+            extra, baseline_kinds.count(extra), trimmed.count(extra))
+        del trimmed[len(trimmed) - 1 - trimmed[::-1].index(extra)]
     assert trimmed == baseline_kinds
+
+
+def test_journal_kind_parity_rejects_unexpected_extra_kind():
+    baseline = ["run_started", "request_sent", "run_done"]
+    allowed = ["run_started", "provider_dialect", "request_sent",
+               "done_facts_finalized", "run_done"]
+    _assert_journal_kinds_match_release(baseline, allowed)
+    with pytest.raises(AssertionError):
+        _assert_journal_kinds_match_release(baseline, [*allowed, "unexpected_kind"])
 
 
 def _is_size_count(key, value) -> bool:

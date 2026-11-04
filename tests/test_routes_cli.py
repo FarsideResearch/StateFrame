@@ -128,6 +128,7 @@ def test_start_refusals_name_route_and_repair(servers, monkeypatch):
     from stateframe.engine.kernel_provider_dialect import ProviderCapabilities
     with monkeypatch.context() as patch:
         patch.setattr(runner, "_provider_capabilities_for", lambda *_args: ProviderCapabilities())
+        # Explicit route.slot=auto requires proof; only the runner's optional profile pin degrades.
         with pytest.raises(ProviderCapabilityError, match=r"routed static slot.*/slots"):
             runner._probe_routes(options, lambda *_: None)
     options.route_cli = [f"read.endpoint={small}", "read.model=small", f"read.tokenizer={default}"]

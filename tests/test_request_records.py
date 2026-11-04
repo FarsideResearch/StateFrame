@@ -83,12 +83,14 @@ def test_inspect_and_summary_count_sealed_preflight_records(tmp_path, monkeypatc
 
 def test_summary_of_old_spec_reports_no_provider_dialects(tmp_path, monkeypatch):
     run, _ = _run_with_requests(tmp_path)
-    (run / "spec.json").write_text(json.dumps({"model": "scripted"}))
+    old_slot = {"slot": None, "selection": "not_selected", "reason": "slot discovery has not run"}
+    (run / "spec.json").write_text(json.dumps({"model": "scripted", "prompt_cache_slot": old_slot}))
     monkeypatch.setattr(runner, "_read_send_metrics", lambda *_args: [])
 
     result = runner.summarize(run, 0.0)
 
     assert result["provider_capabilities"] == {}
+    assert result["prompt_cache_slot"] == old_slot
 
 
 def test_reading_a_sealed_run_decompresses_the_pack_once(tmp_path, monkeypatch):
