@@ -32,6 +32,7 @@
 - When counting never fails, request bytes are unchanged.
 - Tests: measurement-journal checks share `tests/_journal.py` for live and sealed runs, a guard catches direct reads from the old `events.jsonl` location, and the masked request oracle pins baseline bytes while normalizing the countdown field.
 - Tests: the clean-meter replay pins masked request hashes for requests 1-2 against 0.3.30's base, plus countdown-copy counts for requests 1-6; a callsite census that fires depending on run timing changes later requests (finding filed). The tokenizer outage test derives schema-meter calls from the tape server's request log.
+- Fixed final request proof under tokenizer outages. Allocation now carries its token count, measurement method, and calibrated ratio through cache layout admission and final proof. Post fit growth falls back to the fitted request or is trimmed again before proof. A recovered exact count still rejects an undercount.
 
 ## 0.3.30 (2026-11-04)
 
