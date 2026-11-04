@@ -1756,10 +1756,13 @@ OUTPUT_DRAIN_SECONDS = 10.0
 
 def _queue_wait_warning(run: Path) -> str | None:
     """Summarize the longest durable queue wait, including failed sends."""
+    from .engine.kernel_journal_store import journal_paths, open_journal
+
     longest = 0.0
-    for path in (run / "worker" / "measurement-runs").glob("*/events.jsonl"):
+    # A finished run seals each journal as events.jsonl.xz; journal_paths/open_journal read both layouts.
+    for path in journal_paths(run / "worker" / "measurement-runs"):
         try:
-            with path.open(encoding="utf-8") as source:
+            with open_journal(path) as source:
                 for line in source:
                     record = json.loads(line)
                     if record.get("kind") == "provider_queue_wait":

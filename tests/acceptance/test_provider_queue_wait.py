@@ -13,6 +13,8 @@ from urllib.parse import urlsplit
 
 import pytest
 
+from stateframe.engine.kernel_journal_store import journal_paths, open_journal
+
 from ._support import Endpoint, PYTHON, ROOT, environment
 
 
@@ -97,9 +99,11 @@ def test_first_queued_send_submits_once_and_run_succeeds(tmp_path):
             assert posts
             assert posts.count(posts[0]) == 1
             assert "warning: the model server queued requests" in result.stdout
-            journals = list((run / "worker" / "measurement-runs").glob("*/events.jsonl"))
+            # A finished run seals its journal as events.jsonl.xz; read through the store so either layout counts.
+            journals = journal_paths(run / "worker" / "measurement-runs")
             assert len(journals) == 1
-            events = [json.loads(line) for line in journals[0].read_text().splitlines()]
+            with open_journal(journals[0]) as source:
+                events = [json.loads(line) for line in source if line.strip()]
             waits = [event for event in events if event.get("kind") == "provider_queue_wait"]
             assert len(waits) == 1
             assert waits[0]["seconds_waited"] >= 2

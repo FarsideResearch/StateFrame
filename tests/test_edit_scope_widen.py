@@ -15,6 +15,7 @@ import signal
 import subprocess
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -514,7 +515,19 @@ def test_acceptance_widened_run_resumes_by_replay(tmp_path):
         assert marker.exists(), "paused model request was not reached"
         expected = read_requests(run_dir)[1]
         child = _engine_child(runner.pid)
-        assert child is not None
+        if child is None:
+            rows = subprocess.run(("ps", "-ww", "-eo", "pid=,ppid=,args="), capture_output=True,
+                                  text=True, check=True).stdout.splitlines()
+            related = [row.strip() for row in rows
+                       if len((parts := row.strip().split(maxsplit=2))) == 3
+                       and (parts[1] == str(runner.pid)
+                            or ("_child.py" in parts[2] and str(run_dir) in parts[2]
+                                and parts[2].startswith(("/usr/bin/python", PYTHON))))]
+        else:
+            related = []
+        assert child is not None, (
+            f"engine child missing at paused request; runner_exit={runner.poll()} "
+            f"endpoint_exit={endpoint.poll()} related_processes={related[:5]}")
         signal_verified(child, record_identity(child, launched_after=launched_after,
                                                command_fragment="_child.py"), signal.SIGKILL)
         runner.communicate(timeout=30)
@@ -540,6 +553,22 @@ def test_acceptance_widened_run_resumes_by_replay(tmp_path):
     diff = (run_dir / "final.diff").read_text()
     assert "app/rates.py" in diff and "p / 100" in diff, output
     assert (repo / "app" / "rates.py").read_text() == BROKEN_RATES
+
+
+def test_engine_child_lookup_requests_untruncated_ps_arguments(monkeypatch):
+    from acceptance.test_resume_completion import _engine_child
+
+    observed = []
+
+    def fake_run(argv, **_kwargs):
+        observed.append(argv)
+        return SimpleNamespace(stdout=(
+            " 25 4321 /usr/bin/python3 -B /very/long/source/path/stateframe/_child.py /tmp/run\n"
+        ))
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    assert _engine_child(4321) == 25
+    assert observed == [("ps", "-ww", "-eo", "pid=,ppid=,args=")]
 
 
 @pytest.mark.host_sandbox

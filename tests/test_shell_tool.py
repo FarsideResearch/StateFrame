@@ -82,6 +82,89 @@ def test_shell_restores_protected_test_and_keeps_product_edit(setup_tool):
     assert "restored (not allowed): test_app.py" in reply.observation
 
 
+@pytest.mark.parametrize("explicit_mode", [False, True])
+def test_shell_removes_new_collection_hook_and_reports_typed_refusal(setup_tool, explicit_mode):
+    make, root, _ = setup_tool
+    (root / "tests").mkdir()
+    (root / "tests/test_app.py").write_text("assert True\n")
+    row = {"files": {"app.py": "VALUE = 1\n"}, "scoped_edits": False,
+           "tier": "USER-REPO", "allowed_product_paths": ["app.py"],
+           "new_file_roots": [],
+           "test_file_paths": ["tests/test_app.py"]}
+    if explicit_mode:
+        row.update(runner_kind="pytest", protect_tests="all")
+
+    def write(cwd):
+        (cwd / "tests/conftest.py").write_text("# hook\n")
+
+    tool, _ = make(write, row_override=row)
+    reply = tool.execute({"command": "python change.py"}, "call-collection")
+    assert reply.observation.startswith("REFUSED PROTECTED_TEST:")
+    assert "tests/conftest.py (protected test tree: new conftest.py would run at test collection)" in reply.observation
+    assert not (root / "tests/conftest.py").exists()
+    assert not reply.applied
+
+
+@pytest.mark.parametrize("replacement,restored", [
+    ('[project]\nname = "new-app"\n[tool.pytest.ini_options]\naddopts = "-q"\n', False),
+    ('[project]\nname = "app"\n[tool.pytest.ini_options]\naddopts = "-x"\n', True),
+])
+def test_shell_pyproject_allows_product_edits_but_restores_pytest_edits(
+        setup_tool, replacement, restored):
+    make, root, _ = setup_tool
+    original = '[project]\nname = "app"\n[tool.pytest.ini_options]\naddopts = "-q"\n'
+    (root / "pyproject.toml").write_text(original)
+    row = {"files": {"app.py": "VALUE = 1\n", "pyproject.toml": original},
+           "scoped_edits": False, "tier": "USER-REPO",
+           "allowed_product_paths": ["app.py", "pyproject.toml"],
+           "new_file_roots": [], "runner_kind": "pytest", "protect_tests": "all",
+           "test_file_paths": ["test_app.py"]}
+
+    def write(cwd):
+        (cwd / "pyproject.toml").write_text(replacement)
+
+    tool, _ = make(write, row_override=row)
+    reply = tool.execute({"command": "python change.py"}, "call-config")
+    assert (root / "pyproject.toml").read_text() == (original if restored else replacement)
+    assert reply.observation.startswith("REFUSED PROTECTED_TEST:") is restored
+
+
+def test_shell_off_does_not_apply_collection_guard(setup_tool):
+    make, root, _ = setup_tool
+    (root / "tests").mkdir()
+    row = {"files": {"app.py": "VALUE = 1\n"}, "scoped_edits": False,
+           "tier": "USER-REPO", "allowed_product_paths": ["app.py"],
+           "new_file_roots": [], "runner_kind": "pytest", "protect_tests": "off"}
+
+    def write(cwd):
+        (cwd / "tests/__init__.py").write_text("# package\n")
+
+    tool, _ = make(write, row_override=row)
+    reply = tool.execute({"command": "python change.py"}, "call-off")
+    # The existing shell new-product rule still rejects tests/ in off mode.
+    assert "restored (not allowed): tests/__init__.py" in reply.observation
+    assert "REFUSED PROTECTED_TEST" not in reply.observation
+
+
+def test_shell_restores_deleted_pytest_configuration(setup_tool):
+    make, root, _ = setup_tool
+    original = '[tool.pytest.ini_options]\naddopts = "-q"\n'
+    (root / "pyproject.toml").write_text(original)
+    row = {"files": {"app.py": "VALUE = 1\n", "pyproject.toml": original},
+           "scoped_edits": False, "tier": "USER-REPO",
+           "allowed_product_paths": ["app.py", "pyproject.toml"],
+           "new_file_roots": [], "runner_kind": "pytest", "protect_tests": "all",
+           "test_file_paths": ["test_app.py"]}
+
+    def remove(cwd):
+        (cwd / "pyproject.toml").unlink()
+
+    tool, _ = make(remove, row_override=row)
+    reply = tool.execute({"command": "rm pyproject.toml"}, "call-remove-config")
+    assert reply.observation.startswith("REFUSED PROTECTED_TEST:")
+    assert (root / "pyproject.toml").read_text() == original
+
+
 def test_shell_reports_restored_out_of_scope_write_as_refused(setup_tool):
     make, root, _ = setup_tool
     (root / "rates.py").write_text("RATE = 1\n")

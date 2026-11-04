@@ -2,11 +2,14 @@
 from __future__ import annotations
 
 import kernel_bounded_http
+import pytest
+
 from stateframe import _child
 
 REAL = kernel_bounded_http.request_bytes
 
 
+@pytest.mark.expected_installer_leak
 def test_a_installs_a_routed_recorder(tmp_path):
     _child.install_wire_recorder(tmp_path, "http://127.0.0.1:1/v1/chat/completions",
                                  routed_endpoints={"http://127.0.0.1:1/v1/chat/completions"})

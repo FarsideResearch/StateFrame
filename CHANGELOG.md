@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.3.30 (2026-11-04)
+
+- Docs: `KNOWN_LIMITATIONS.md` now lists two known issues. Every command needs `HOME` or `STATEFRAME_HOME` set. The bundled hook examples use `#!/usr/bin/python3`, which some Linux hosts lack.
+
+- Fixed: hosted HTTPS endpoints failed on Python 3.12+ since v0.1.0. The HTTPS handler read a private `urllib` attribute that Python 3.12 removed, so every `https://` send raised `AttributeError` before connecting. The handler now uses its own default TLS context; certificate and hostname checks stay on. Transport errors now carry a short redacted reason in `engine.log` (`send_error`) and `wire/*.error.txt`. A static test guard flags private stdlib attributes read from our urllib/http.client/ssl/socket subclasses.
+- Under `--protect-tests task/all`, creating files that change test collection (`conftest.py`, test-package `__init__.py`, pytest config, `sitecustomize.py`/`.pth`) is now refused; before, a new `tests/__init__.py` could import product code at collection time and change the test result.
+- Fixed: the queue-wait warning now reads sealed run journals (`events.jsonl.xz`), so finished runs report provider queue waits again; the reader also satisfies the journal shim guard.
+- Tests: the engine-child lookup in the resume acceptance tests asks `ps` for untruncated arguments (`ps -ww`). On macOS, `ps` cut the command line to the terminal width under captured pytest output, so the `_child.py` suffix disappeared and `test_acceptance_widened_run_resumes_by_replay` failed on an untouched checkout. Test-only; no product change.
+- Tests: `test_routes_cli`'s resume test installed the wire recorder without monkeypatching, so later tests in the same process inherited it. It now restores it, `HOST_STATE` is isolated in five more test files, an autouse fixture names any test that leaves an installer attribute behind, and a forced-order subprocess test reproduces the original leak. Test-only; no product change.
+- Tests: a guard requires every Linux bwrap launch-argv builder to give the command its own PID namespace (`--unshare-pid` or `--unshare-all`), so an orphaned descendant always dies with its namespace instead of escaping tracking. Builders are found mechanically; a reviewed exemption covers the release runner's write guard. Test-only; no product change.
+- Tests: helpers that start subprocesses without inherited `STATEFRAME_*` switches now give them a temporary `STATEFRAME_HOME`, so test runs no longer pile env seeds into the real `~/.stateframe`; a guard keeps every such helper honest.
+- Tests: the tokenizer end-to-end test reads sealed measurement journals (`events.jsonl.xz`), so it checks real tokenizer measurements again instead of finding none.
+- Tests: a test that leaks installer state on purpose declares it with the `expected_installer_leak` marker; the leak guard then requires the leak and still restores it, and an unmarked leak still fails.
+
 ## 0.3.29 (2026-11-03)
 
 - Finished runs take far less disk. A fixed scripted run with a run environment went from 35.8 MB to 0.9 MB, and the bundled examples shrink about 3x before any environment is counted. Measurement journals are sealed as `events.jsonl.xz`, their blobs go into one append-only pack, preflight `requests/` records go into `requests.pack.xz`, and checkpoints and the run environment are removed once the result cannot be resumed. Interrupted, killed and stopped runs keep everything resume needs. `wire/` and `spec.json` are never touched, and request bytes are unchanged.

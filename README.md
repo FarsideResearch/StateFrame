@@ -32,7 +32,7 @@ Details: [ARCHITECTURE.md](ARCHITECTURE.md), [KNOWN_LIMITATIONS.md](KNOWN_LIMITA
 
 Upcoming, not in this release:
 
-- Provider-specific adapters for routed roles (for example the Anthropic API). Routed roles speak the OpenAI-compatible chat API today.
+- Provider-specific adapters for routed roles (APIs other than OpenAI-compatible chat). Routed roles speak the OpenAI-compatible chat API today.
 - Published agents-per-GPU benchmark (how many concurrent agents fit on one card).
 - Measurements over longer runs than the ranges tested so far.
 - Smaller checkpoints.
