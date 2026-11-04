@@ -1,5 +1,8 @@
 # Changelog
 
+## Unreleased
+
+
 ## 0.3.35 (2026-11-04)
 
 - Tests: the checkpoint-bytes bound counts a file as new when its inode was not live in the previous step, so Linux filesystems that reuse freed inode numbers no longer hide new bytes from the regression control. Test-only.
@@ -56,6 +59,7 @@
 - Upgrade note: the bundled `examples/hooks/*.py` scripts are no longer executable files with a shebang line; StateFrame launches them through the `"{python}"` argv token. If your own `hooks.json` points directly at one of those example scripts as an executable, change that entry to `["{python}", "<path to script>"]`. Hooks you wrote yourself are not affected.
 - Tests: full runs now collect the top-level end-to-end tests in `tests/e2e/`; an ignore pattern meant for the fixture repositories there had hidden them from every full run. Fixture repositories stay uncollected, and a guard with a planted control checks both. The guard also rejects and names fixture-repository `conftest.py` files before collection can import them. Test-only; no product change.
 - Fixed final request proof under tokenizer outages. Allocation now carries its token count, measurement method, and calibrated ratio through cache layout admission and final proof. Post fit growth falls back to the fitted request or is trimmed again before proof. A recovered exact count still rejects an undercount.
+- Final tool binding now waits for the completed request fit before emitting a final budget proof. Expanded provisional bodies can be trimmed without leaving rejected final proof records; the fitted send still receives the full proof.
 
 ## 0.3.30 (2026-11-04)
 

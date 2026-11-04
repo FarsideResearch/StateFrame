@@ -426,6 +426,7 @@ def author_final_tool_surface(
         bind_current_surface: bool = False,
         stabilize_cache_tools: bool = False,
         framefit5_preassembly: bool = False,
+        final_fit_pending: bool = False,
 ) -> Mapping[str, object] | None:
     """Project once, then bind the exact schemas, names and digest to each gate."""
     request_key = str(request_id or "")
@@ -728,7 +729,10 @@ def author_final_tool_surface(
         capture.request_budget_final_wire = budget
         capture.final_tool_surface = surface
 
-        if isinstance(getattr(capture, "request_action_contract", None), Mapping):
+        # The qualified builder binds this menu before it fits the completed
+        # envelope. Its final budget proof runs after that fit, on send bytes.
+        if (not final_fit_pending
+                and isinstance(getattr(capture, "request_action_contract", None), Mapping)):
             from kernel_final_wire_budget import reconcile_frozen_budget
             budget = reconcile_frozen_budget(capture, runtime, body)
             if (budget.get("tool_schema_digest") != digest

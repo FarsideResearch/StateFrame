@@ -39,6 +39,66 @@ def _proof(monkeypatch, body, meter, capture):
     return reconcile_frozen_budget(capture, SimpleNamespace(), body)
 
 
+def test_prefit_menu_binding_defers_final_proof_until_after_fit(monkeypatch):
+    import kernel_completion_owner
+    import kernel_done_is_submit_authority
+    import kernel_final_wire_budget
+    import kernel_read_lockout
+    import kernel_request_tool_surface
+
+    monkeypatch.setenv("STATEFRAME_TOOL_MENU_MEMO", "off")
+    monkeypatch.setenv("STATEFRAME_STABLE_TOOL_HEAD", "off")
+    monkeypatch.setenv("STATEFRAME_REQUEST_TOOL_FLOOR", "off")
+    monkeypatch.setattr(kernel_done_is_submit_authority, "enabled", lambda _runtime: False)
+    monkeypatch.setattr(kernel_done_is_submit_authority, "candidate_exists", lambda _runtime: False)
+    monkeypatch.setattr(kernel_read_lockout, "filter_tools", lambda _runtime, tools: list(tools))
+    monkeypatch.setattr(kernel_completion_owner, "bind_final_tool_surface",
+                        lambda *_args, **_kwargs: True)
+
+    proofs = []
+
+    def counted_proof(capture, _runtime, body):
+        status = "HOST_BLOCKED" if len(body["messages"][0]["content"]) > 5000 else "READY"
+        receipt = {
+            "status": status,
+            "final_validation_failures": (
+                ["request_tokens_exceed_max_prompt_tokens"] if status == "HOST_BLOCKED" else []),
+            "tool_schema_digest": capture.final_tool_surface["tool_schema_digest"],
+            "tool_names": capture.final_tool_surface["names"],
+        }
+        capture.request_budget_final_wire = receipt
+        proofs.append(status)
+        return receipt
+
+    monkeypatch.setattr(kernel_final_wire_budget, "reconcile_frozen_budget", counted_proof)
+    tool = {"type": "function", "function": {"name": "read", "description": "Read a file",
+            "parameters": {"type": "object", "properties": {}}}}
+
+    def bind(*, final_fit_pending):
+        capture = SimpleNamespace(request_id="seal-r1", request_action_contract={},
+                                  request_budget_final_wire={"status": "READY"})
+        runtime = SimpleNamespace()
+        body = {"messages": [{"role": "user", "content": "x" * 10000}],
+                "tools": [copy.deepcopy(tool)]}
+        surface = kernel_request_tool_surface.author_final_tool_surface(
+            capture, runtime, body, request_id=capture.request_id,
+            bind_current_surface=True, final_fit_pending=final_fit_pending)
+        assert surface is not None
+        return capture, runtime, body
+
+    # Planted control: the old pre-fit call emits a rejected final proof.
+    control, _runtime, _body_before_fit = bind(final_fit_pending=False)
+    assert control.request_budget_final_wire["status"] == "HOST_BLOCKED"
+    assert proofs == ["HOST_BLOCKED"]
+
+    capture, runtime, body = bind(final_fit_pending=True)
+    assert proofs == ["HOST_BLOCKED"]
+    assert capture.request_budget_final_wire["status"] == "READY"
+    body["messages"][0]["content"] = "x" * 1000
+    assert counted_proof(capture, runtime, body)["status"] == "READY"
+    assert proofs == ["HOST_BLOCKED", "READY"]
+
+
 @pytest.mark.parametrize("layout", ["off", "on"])
 def test_exact_allocation_survives_tokenizer_failure(monkeypatch, layout):
     monkeypatch.setenv("STATEFRAME_FINAL_CACHE_LAYOUT", layout)
