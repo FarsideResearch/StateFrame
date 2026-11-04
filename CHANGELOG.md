@@ -55,6 +55,7 @@
 - Shipped Python lifecycle hook examples now select the StateFrame CLI interpreter through the load-time `"{python}"` argv token, so they run on hosts without `/usr/bin/python3` or `python3` on PATH, while project trust and resume stay pinned to that absolute interpreter. The hook shebang known issue is gone from `KNOWN_LIMITATIONS.md`.
 - Upgrade note: the bundled `examples/hooks/*.py` scripts are no longer executable files with a shebang line; StateFrame launches them through the `"{python}"` argv token. If your own `hooks.json` points directly at one of those example scripts as an executable, change that entry to `["{python}", "<path to script>"]`. Hooks you wrote yourself are not affected.
 - Tests: full runs now collect the top-level end-to-end tests in `tests/e2e/`; an ignore pattern meant for the fixture repositories there had hidden them from every full run. Fixture repositories stay uncollected, and a guard with a planted control checks both. The guard also rejects and names fixture-repository `conftest.py` files before collection can import them. Test-only; no product change.
+- Fixed final request proof under tokenizer outages. Allocation now carries its token count, measurement method, and calibrated ratio through cache layout admission and final proof. Post fit growth falls back to the fitted request or is trimmed again before proof. A recovered exact count still rejects an undercount.
 
 ## 0.3.30 (2026-11-04)
 
