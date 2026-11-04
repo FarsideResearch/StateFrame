@@ -8,6 +8,8 @@
 - Tests: `test_routes_cli`'s resume test installed the wire recorder without monkeypatching, so later tests in the same process inherited it. It now restores it, `HOST_STATE` is isolated in five more test files, an autouse fixture names any test that leaves an installer attribute behind, and a forced-order subprocess test reproduces the original leak. Test-only; no product change.
 - Tests: a guard requires every Linux bwrap launch-argv builder to give the command its own PID namespace (`--unshare-pid` or `--unshare-all`), so an orphaned descendant always dies with its namespace instead of escaping tracking. Builders are found mechanically; a reviewed exemption covers the release runner's write guard. Test-only; no product change.
 
+- Tests: helpers that start subprocesses without inherited `STATEFRAME_*` switches now give them a temporary `STATEFRAME_HOME`, so test runs no longer pile env seeds into the real `~/.stateframe`; a guard keeps every such helper honest.
+
 ## 0.3.29 (2026-11-03)
 
 - Finished runs take far less disk. A fixed scripted run with a run environment went from 35.8 MB to 0.9 MB, and the bundled examples shrink about 3x before any environment is counted. Measurement journals are sealed as `events.jsonl.xz`, their blobs go into one append-only pack, preflight `requests/` records go into `requests.pack.xz`, and checkpoints and the run environment are removed once the result cannot be resumed. Interrupted, killed and stopped runs keep everything resume needs. `wire/` and `spec.json` are never touched, and request bytes are unchanged.

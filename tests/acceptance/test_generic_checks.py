@@ -69,7 +69,8 @@ def test_acceptance_environment_ignores_inherited_stateframe_switches(monkeypatc
     monkeypatch.setenv("STATEFRAME_ENDPOINT", "http://127.0.0.1:1/v1")
     monkeypatch.setenv("ACCEPTANCE_KEEP", "yes")
     env = environment()
-    assert not any(key.startswith("STATEFRAME_") for key in env)
+    # The only STATEFRAME_* a run gets is its isolated home (never the real ~/.stateframe).
+    assert not any(key.startswith("STATEFRAME_") for key in env if key != "STATEFRAME_HOME")
     assert env["ACCEPTANCE_KEEP"] == "yes"
     assert env["PYTHONPATH"]
 

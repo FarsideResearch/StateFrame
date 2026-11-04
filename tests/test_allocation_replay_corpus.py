@@ -13,6 +13,7 @@ from urllib.request import urlopen
 
 import pytest
 
+from _stateframe_home import isolated_stateframe_home
 from tests.tape_server import TapeServer
 
 
@@ -213,6 +214,7 @@ def _run_case(tmp_path: Path, case_id: str, *, break_deferral: bool = False) -> 
 
     environment = {key: value for key, value in os.environ.items()
                    if not key.startswith("STATEFRAME_")}
+    environment["STATEFRAME_HOME"] = isolated_stateframe_home()
     environment["PYTHONPATH"] = os.pathsep.join((str(source_root), str(source_root / "stateframe" / "engine")))
     environment["PYTHONDONTWRITEBYTECODE"] = "1"
     environment["PYTHONHASHSEED"] = "0"

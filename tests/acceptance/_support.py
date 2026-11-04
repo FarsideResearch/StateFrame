@@ -14,6 +14,7 @@ import sysconfig
 from dataclasses import dataclass
 from pathlib import Path
 
+from _stateframe_home import isolated_stateframe_home
 from stateframe.request_records import list_request_records, read_request_record
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -72,6 +73,7 @@ def environment() -> dict[str, str]:
     # Acceptance runs must observe the packaged profile, not a caller's switch overrides.
     env = {key: value for key, value in os.environ.items()
            if not key.startswith("STATEFRAME_")}
+    env["STATEFRAME_HOME"] = isolated_stateframe_home()  # never the real ~/.stateframe (env seeds pile up there)
     env["PYTHONPATH"] = os.pathsep.join((str(ROOT / "src"),
                                         str(ROOT / "src" / "stateframe" / "engine")))
     env["PYTHONDONTWRITEBYTECODE"] = "1"

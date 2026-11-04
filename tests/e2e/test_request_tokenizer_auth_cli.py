@@ -10,6 +10,7 @@ from pathlib import Path
 
 import pytest
 
+from _stateframe_home import isolated_stateframe_home
 from stateframe.scripted_endpoint import Script, serve
 
 
@@ -44,6 +45,7 @@ def _run(tmp_path: Path, *, key: str) -> tuple[subprocess.CompletedProcess[str],
             name: value for name, value in os.environ.items()
             if not name.startswith("STATEFRAME_") and name not in _TOKENIZER_ENV
         },
+        "STATEFRAME_HOME": isolated_stateframe_home(),
         "PYTHONPATH": str(ROOT / "src"),
         "PYTHONDONTWRITEBYTECODE": "1",
         "SF_TOKENIZER_E2E_KEY": key,
