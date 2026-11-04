@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.3.36 (2026-11-04)
 
 - Tests: the deferred pre-fit parity test compares against the immediate base tree (as the hook parity test does) instead of a fixed commit, derives its planted control in-process, and the tokenizer-flip live control starts the engine through the shared monitored helper. Test-only; no product change.
 - Tests: a guard plants one extra internal journal event in the engine before request 2 and requires every request file to stay byte-identical, so wire-visible IDs cannot drift with the journal sequence again; a control that ties request IDs to the sequence must change the bytes. Test-only; no product change.
