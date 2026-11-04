@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Tests: a guard plants one extra internal journal event in the engine before request 2 and requires every request file to stay byte-identical, so wire-visible IDs cannot drift with the journal sequence again; a control that ties request IDs to the sequence must change the bytes. Test-only; no product change.
 - FrameFit5 defers both provisional tool bindings until the request is fitted, preserving their journal sequence slots without recording a rejected final proof; the fitted request still receives token and byte validation.
 
 ## 0.3.35 (2026-11-04)
