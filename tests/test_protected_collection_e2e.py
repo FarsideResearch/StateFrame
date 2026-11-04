@@ -1,6 +1,7 @@
 """Exercise collection guards through the scripted model and real dispatch."""
 
 import json
+import lzma
 import shutil
 import subprocess
 import sys
@@ -16,8 +17,19 @@ pytestmark = pytest.mark.host_sandbox
 
 
 def _journal_events(run):
-    return [json.loads(line) for file in (run / "worker").rglob("events.jsonl")
-            for line in file.read_text().splitlines()]
+    # A finished run seals its measurement journal as events.jsonl.xz (0.3.29 run storage); an unsealed
+    # one keeps events.jsonl. Read both so the assertion does not depend on the storage layout.
+    events = []
+    for file in sorted((run / "worker").rglob("events.jsonl*")):
+        if file.name == "events.jsonl":
+            text = file.read_text()
+        elif file.name == "events.jsonl.xz":
+            text = lzma.decompress(file.read_bytes()).decode("utf-8")
+        else:
+            continue
+        events += [json.loads(line) for line in text.splitlines() if line.strip()]
+    assert events, f"no measurement journal (events.jsonl or events.jsonl.xz) under {run / 'worker'}"
+    return events
 
 
 @pytest.fixture(autouse=True)
