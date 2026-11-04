@@ -78,10 +78,10 @@ def first_difference(recorded: bytes, replayed: bytes, context: int = 160) -> di
 
 
 # The run's wall-clock countdown in the [CONTINUATION LIMITS] line: "unbounded", or seconds left
-# with a plain-language note ("10737.6 (about 179 minutes left, ~12 turns at your pace)").
+# with a plain-language note ("10737.6 (about 0179 minutes left, ~---- turns at your pace)").
 _COUNTDOWN = re.compile(
-    rb"(sandbox_seconds_remaining=)(unbounded|[0-9]+\.[0-9] \(about [0-9]+ minutes left"
-    rb"(?:, ~[0-9]+ turns at your pace)?\))")
+    rb"(sandbox_seconds_remaining=)(unbounded|[0-9]+\.[0-9] \(about (?:[0-9]+|999\+) minutes left"
+    rb"(?:, ~(?:[0-9]+|999\+|----) turns at your pace)?\))")
 
 
 def with_recorded_countdown(request: bytes, recorded: bytes) -> bytes | None:

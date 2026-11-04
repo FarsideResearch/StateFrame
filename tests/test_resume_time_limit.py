@@ -15,10 +15,12 @@ import sys
 import threading
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from _journal import measurement_events
+import kernel_countdown_slot as countdown
 from stateframe.replay_tape import (
     Replayer, recorded_countdown_seconds, with_recorded_countdown)
 from stateframe.scripted_endpoint import Script, ScriptStepUnavailable, serve
@@ -57,6 +59,25 @@ def test_recorded_countdown_seconds_reads_the_last_finite_value():
     assert recorded_countdown_seconds(b"{}") is None
 
 
+@pytest.mark.parametrize(("seconds", "now", "used", "expected_seconds", "expected_note"), (
+    (0, 100.0, 0, 0.0, "about 0000 minutes left, ~---- turns"),
+    (10**1000, 100.0, 0, 99999.9, "about 999+ minutes left, ~---- turns"),
+    (60, 60.0, 1, 60.0, "about 0001 minutes left, ~0001 turns"),
+    (60, 0.01, 1, 60.0, "about 0001 minutes left, ~999+ turns"),
+))
+def test_rendered_countdown_is_read_and_swapped(
+    monkeypatch, seconds, now, used, expected_seconds, expected_note,
+):
+    monkeypatch.setattr(countdown.time, "monotonic", lambda: now)
+    limits = SimpleNamespace(model_decisions_used=used, _time_left_clock_start=0.0,
+                             _time_left_decisions_at_start=0)
+    slot = countdown.render_time_slot(limits, seconds)
+    assert expected_note in slot
+    recorded = _limits(slot)
+    assert recorded_countdown_seconds(recorded) == expected_seconds
+    assert with_recorded_countdown(_limits("unbounded"), recorded) == recorded
+
+
 def _tape(tmp_path: Path, request: bytes) -> list[dict]:
     request_path, response_path = tmp_path / "0001.request.json", tmp_path / "0001.response.json"
     request_path.write_bytes(request)
@@ -68,8 +89,14 @@ def _tape(tmp_path: Path, request: bytes) -> list[dict]:
 
 
 @pytest.mark.parametrize("strict", [False, True])
-def test_replay_answers_a_rebuilt_request_whose_only_difference_is_the_countdown(tmp_path, strict):
-    replayer = Replayer(_tape(tmp_path, RECORDED), strict=strict)
+@pytest.mark.parametrize("recorded", (
+    RECORDED,
+    _limits("00060.0 (about 0001 minutes left, ~---- turns at your pace)"),
+))
+def test_replay_answers_a_rebuilt_request_whose_only_difference_is_the_countdown(
+    tmp_path, strict, recorded,
+):
+    replayer = Replayer(_tape(tmp_path, recorded), strict=strict)
     assert replayer.answer(_limits("unbounded")) is not None
     assert replayer.diverged is None and replayer.cursor == 1
 
@@ -81,9 +108,13 @@ def test_replay_still_diverges_on_any_other_difference(tmp_path, strict):
     assert replayer.diverged is not None
 
 
-def test_pending_request_check_takes_the_recorded_countdown(tmp_path):
+@pytest.mark.parametrize("recorded", (
+    RECORDED,
+    _limits("99999.9 (about 999+ minutes left, ~999+ turns at your pace)"),
+))
+def test_pending_request_check_takes_the_recorded_countdown(tmp_path, recorded):
     pending = tmp_path / "0002.request.json"
-    pending.write_bytes(RECORDED)
+    pending.write_bytes(recorded)
     replayer = Replayer([], pending={"send": 2, "request": str(pending)})
     assert replayer.answer(_limits("4000.0 (about 67 minutes left)")) is None
     assert replayer.diverged is None and replayer.pending_verified is not None

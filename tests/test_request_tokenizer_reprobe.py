@@ -21,11 +21,10 @@ from tests.tape_server import TapeServer
 
 TOKENIZE_TIMEOUT_SECONDS = 0.05
 TOKENIZE_DELAY_SECONDS = 0.08
-# Mirrors _time_left_text in kernel_read_fixes.py: one decimal for seconds, rounded
-# integer minutes, and an optional pace-derived turns clause.
+# Matches the fixed-width slot from kernel_countdown_slot.py and older rounded-minute slots.
 _CLEAN_METER_COUNTDOWN = re.compile(
-    rb"sandbox_seconds_remaining=\d+\.\d \(about \d+ minutes left"
-    rb"(?:, ~\d+ turns at your pace)?\)"
+    rb"sandbox_seconds_remaining=\d+\.\d \(about (?:\d+|999\+) minutes left"
+    rb"(?:, ~(?:\d+|999\+|----) turns at your pace)?\)"
 )
 _CLEAN_METER_COUNTDOWN_MASK = b"sandbox_seconds_remaining=<masked>"
 # Derived on a rel330b 012e0b5 checkout run through pytest_gate.sh (two runs agree); an external
@@ -89,6 +88,17 @@ def test_countdown_mask_preserves_non_countdown_byte_changes():
 
 def test_countdown_mask_matches_one_active_frame_occurrence():
     assert len(_active_frame_countdowns(_COUNTDOWN_MASK_CONTROL_BODY)) == 1
+
+
+@pytest.mark.parametrize("slot", (
+    b"00000.0 (about 0000 minutes left, ~---- turns at your pace)",
+    b"00060.0 (about 0001 minutes left, ~0001 turns at your pace)",
+    b"00060.0 (about 0001 minutes left, ~999+ turns at your pace)",
+    b"99999.9 (about 999+ minutes left, ~---- turns at your pace)",
+))
+def test_countdown_mask_covers_fixed_width_slot(slot: bytes):
+    field = b"sandbox_seconds_remaining=" + slot
+    assert _CLEAN_METER_COUNTDOWN.sub(_CLEAN_METER_COUNTDOWN_MASK, field) == _CLEAN_METER_COUNTDOWN_MASK
 
 
 def _body(label: str) -> dict[str, object]:
