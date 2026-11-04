@@ -1,9 +1,9 @@
 """A scripted OpenAI-compatible chat endpoint, for tests and offline demos.
 
 It answers ``POST /v1/chat/completions`` with tool calls taken, in order, from a script
-file, and ``GET /v1/models`` with one model. Every other route answers 404, like a plain
-OpenAI-compatible server (no llama.cpp extras). It is not a model: it proves the CLI,
-the engine wiring and the request recording without a GPU.
+file, ``GET /v1/models`` with one model, and ``GET /props`` with llama.cpp's public
+identification shape. ``GET /slots`` remains optional. It is not a model: it proves the
+CLI, engine wiring and request recording without a GPU.
 
 Script file (JSON):
     {"model": "scripted", "steps": [
@@ -29,8 +29,270 @@ import hmac
 import json
 import threading
 import time
+from collections.abc import Mapping
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+
+
+_STRICT_TOP_LEVEL_KEYS = frozenset({
+    "model", "messages", "tools", "tool_choice", "parallel_tool_calls",
+    "temperature", "top_p", "max_tokens", "max_completion_tokens", "n",
+    "stop", "stream", "stream_options", "seed", "logprobs", "top_logprobs",
+    "response_format", "frequency_penalty", "presence_penalty", "logit_bias",
+    "user", "reasoning_effort", "service_tier", "store", "metadata",
+    "modalities", "audio", "moderation", "prediction", "functions", "function_call",
+    "prompt_cache_key", "prompt_cache_options", "prompt_cache_retention", "safety_identifier",
+    "verbosity", "web_search_options",
+})
+_STRICT_MESSAGE_KEYS = frozenset({"role", "content", "name", "tool_call_id", "tool_calls",
+                                  "function_call", "refusal", "audio"})
+_STRICT_CONTENT_KEYS = frozenset({"type", "text", "image_url", "input_audio", "file", "refusal",
+                                  "prompt_cache_breakpoint"})
+_STRICT_TOOL_KEYS = frozenset({"type", "function"})
+_STRICT_FUNCTION_KEYS = frozenset({"name", "description", "parameters", "strict"})
+_STRICT_LEGACY_FUNCTION_KEYS = frozenset({"name", "description", "parameters"})
+_STRICT_TOOL_CALL_KEYS = frozenset({"id", "type", "function"})
+_STRICT_TOOL_CALL_FUNCTION_KEYS = frozenset({"name", "arguments"})
+_STRICT_MESSAGE_FUNCTION_CALL_KEYS = frozenset({"name", "arguments"})
+_STRICT_AUDIO_MESSAGE_KEYS = frozenset({"id"})
+_STRICT_SCHEMA_KEYS = frozenset({
+    "$schema", "$id", "$ref", "$anchor", "$dynamicRef", "$dynamicAnchor", "$defs",
+    "$comment", "$vocabulary", "definitions", "type", "properties", "patternProperties",
+    "additionalProperties", "unevaluatedProperties", "propertyNames", "required",
+    "dependentRequired", "dependentSchemas", "items", "prefixItems", "additionalItems",
+    "contains", "minContains", "maxContains", "unevaluatedItems", "enum", "const",
+    "anyOf", "oneOf", "allOf", "not", "if", "then", "else", "title", "description",
+    "default", "deprecated", "readOnly", "writeOnly", "examples", "format",
+    "contentEncoding", "contentMediaType", "contentSchema", "minimum", "maximum",
+    "exclusiveMinimum", "exclusiveMaximum", "multipleOf", "minLength", "maxLength",
+    "pattern", "minItems", "maxItems", "uniqueItems", "minProperties", "maxProperties",
+})
+_STRICT_RESPONSE_FORMAT_KEYS = frozenset({"type", "json_schema"})
+_STRICT_JSON_SCHEMA_FORMAT_KEYS = frozenset({"name", "description", "strict", "schema"})
+_STRICT_CACHE_BREAKPOINT_KEYS = frozenset({"mode", "ttl"})
+_STRICT_PROMPT_CACHE_OPTIONS_KEYS = frozenset({"mode", "ttl"})
+_STRICT_MODERATION_KEYS = frozenset({"model", "policy"})
+_STRICT_MODERATION_POLICY_KEYS = frozenset({"input", "output"})
+_STRICT_MODERATION_MODE_KEYS = frozenset({"mode"})
+
+
+def _strict_schema_error(value: object, path: str) -> str | None:
+    if isinstance(value, bool):
+        return None
+    if not isinstance(value, Mapping):
+        return f"{path} must be an object"
+    unknown = set(value) - _STRICT_SCHEMA_KEYS
+    if unknown:
+        return f"unknown keys at {path}: {', '.join(sorted(map(str, unknown)))}"
+    for field in ("properties", "$defs", "definitions", "patternProperties", "dependentSchemas"):
+        nested = value.get(field)
+        if isinstance(nested, Mapping):
+            for name, schema in nested.items():
+                error = _strict_schema_error(schema, f"{path}.{field}.{name}")
+                if error:
+                    return error
+    for field in ("items", "additionalItems", "additionalProperties", "not", "if", "then", "else",
+                  "contains", "propertyNames", "unevaluatedItems", "unevaluatedProperties", "contentSchema"):
+        nested = value.get(field)
+        if isinstance(nested, Mapping):
+            error = _strict_schema_error(nested, f"{path}.{field}")
+            if error:
+                return error
+    for field in ("items", "prefixItems"):
+        nested = value.get(field)
+        if isinstance(nested, list):
+            for index, schema in enumerate(nested):
+                error = _strict_schema_error(schema, f"{path}.{field}[{index}]")
+                if error:
+                    return error
+    for field in ("anyOf", "oneOf", "allOf"):
+        nested = value.get(field)
+        if isinstance(nested, list):
+            for index, schema in enumerate(nested):
+                error = _strict_schema_error(schema, f"{path}.{field}[{index}]")
+                if error:
+                    return error
+    return None
+
+
+def _strict_openai_error(body: object) -> str | None:
+    if not isinstance(body, Mapping):
+        return "request body must be an object"
+
+    def check(value: Mapping[str, object], allowed: frozenset[str], path: str) -> str | None:
+        unknown = set(value) - allowed
+        return f"unknown keys at {path}: {', '.join(sorted(map(str, unknown)))}" if unknown else None
+
+    error = check(body, _STRICT_TOP_LEVEL_KEYS, "request")
+    if error:
+        return error
+    messages = body.get("messages")
+    if isinstance(messages, list):
+        for index, message in enumerate(messages):
+            if not isinstance(message, Mapping):
+                return f"messages[{index}] must be an object"
+            path = f"messages[{index}]"
+            error = check(message, _STRICT_MESSAGE_KEYS, path)
+            if error:
+                return error
+            content = message.get("content")
+            if content is not None and not isinstance(content, (str, list)):
+                return f"{path}.content must be a string or content-part array"
+            if isinstance(content, list):
+                for part_index, part in enumerate(content):
+                    if not isinstance(part, Mapping):
+                        return f"{path}.content[{part_index}] must be an object"
+                    error = check(part, _STRICT_CONTENT_KEYS, f"{path}.content[{part_index}]")
+                    if error:
+                        return error
+                    for field, allowed in (("image_url", frozenset({"url", "detail"})),
+                                           ("input_audio", frozenset({"data", "format"})),
+                                           ("file", frozenset({"file_data", "file_id", "filename"})),
+                                           ("prompt_cache_breakpoint", _STRICT_CACHE_BREAKPOINT_KEYS)):
+                        nested = part.get(field)
+                        if isinstance(nested, Mapping):
+                            error = check(nested, allowed, f"{path}.content[{part_index}].{field}")
+                            if error:
+                                return error
+            audio = message.get("audio")
+            if isinstance(audio, Mapping):
+                error = check(audio, _STRICT_AUDIO_MESSAGE_KEYS, f"{path}.audio")
+                if error:
+                    return error
+            function_call = message.get("function_call")
+            if isinstance(function_call, Mapping):
+                error = check(function_call, _STRICT_MESSAGE_FUNCTION_CALL_KEYS,
+                              f"{path}.function_call")
+                if error:
+                    return error
+            calls = message.get("tool_calls")
+            if isinstance(calls, list):
+                for call_index, call in enumerate(calls):
+                    if not isinstance(call, Mapping):
+                        return f"{path}.tool_calls[{call_index}] must be an object"
+                    call_path = f"{path}.tool_calls[{call_index}]"
+                    error = check(call, _STRICT_TOOL_CALL_KEYS, call_path)
+                    if error:
+                        return error
+                    function = call.get("function")
+                    if not isinstance(function, Mapping):
+                        return f"{call_path}.function must be an object"
+                    error = check(function, _STRICT_TOOL_CALL_FUNCTION_KEYS, f"{call_path}.function")
+                    if error:
+                        return error
+    tools = body.get("tools")
+    if isinstance(tools, list):
+        for index, tool in enumerate(tools):
+            if not isinstance(tool, Mapping):
+                return f"tools[{index}] must be an object"
+            path = f"tools[{index}]"
+            error = check(tool, _STRICT_TOOL_KEYS, path)
+            if error:
+                return error
+            function = tool.get("function")
+            if not isinstance(function, Mapping):
+                return f"{path}.function must be an object"
+            error = check(function, _STRICT_FUNCTION_KEYS, f"{path}.function")
+            if error:
+                return error
+            parameters = function.get("parameters")
+            if parameters is not None:
+                error = _strict_schema_error(parameters, f"{path}.function.parameters")
+                if error:
+                    return error
+    functions = body.get("functions")
+    if isinstance(functions, list):
+        for index, function in enumerate(functions):
+            if not isinstance(function, Mapping):
+                return f"functions[{index}] must be an object"
+            error = check(function, _STRICT_LEGACY_FUNCTION_KEYS, f"functions[{index}]")
+            if error:
+                return error
+            schema = function.get("parameters")
+            if schema is not None:
+                error = _strict_schema_error(schema, f"functions[{index}].parameters")
+                if error:
+                    return error
+    tool_choice = body.get("tool_choice")
+    if isinstance(tool_choice, Mapping):
+        error = check(tool_choice, frozenset({"type", "function"}), "tool_choice")
+        if error:
+            return error
+        function = tool_choice.get("function")
+        if isinstance(function, Mapping):
+            error = check(function, frozenset({"name"}), "tool_choice.function")
+            if error:
+                return error
+    function_call = body.get("function_call")
+    if isinstance(function_call, Mapping):
+        error = check(function_call, frozenset({"name"}), "function_call")
+        if error:
+            return error
+    response_format = body.get("response_format")
+    if isinstance(response_format, Mapping):
+        error = check(response_format, _STRICT_RESPONSE_FORMAT_KEYS, "response_format")
+        if error:
+            return error
+        schema_format = response_format.get("json_schema")
+        if isinstance(schema_format, Mapping):
+            error = check(schema_format, _STRICT_JSON_SCHEMA_FORMAT_KEYS, "response_format.json_schema")
+            if error:
+                return error
+            schema = schema_format.get("schema")
+            if schema is not None:
+                error = _strict_schema_error(schema, "response_format.json_schema.schema")
+                if error:
+                    return error
+    for field, allowed in (("stream_options", frozenset({"include_usage"})),
+                           ("prompt_cache_options", _STRICT_PROMPT_CACHE_OPTIONS_KEYS)):
+        value = body.get(field)
+        if isinstance(value, Mapping):
+            error = check(value, allowed, field)
+            if error:
+                return error
+    audio = body.get("audio")
+    if isinstance(audio, Mapping):
+        error = check(audio, frozenset({"voice", "format"}), "audio")
+        if error:
+            return error
+    prediction = body.get("prediction")
+    if isinstance(prediction, Mapping):
+        error = check(prediction, frozenset({"type", "content"}), "prediction")
+        if error:
+            return error
+    search = body.get("web_search_options")
+    if isinstance(search, Mapping):
+        error = check(search, frozenset({"search_context_size", "user_location"}), "web_search_options")
+        if error:
+            return error
+        location = search.get("user_location")
+        if isinstance(location, Mapping):
+            error = check(location, frozenset({"type", "approximate"}), "web_search_options.user_location")
+            if error:
+                return error
+            approximate = location.get("approximate")
+            if isinstance(approximate, Mapping):
+                error = check(approximate, frozenset({"city", "country", "region", "timezone"}),
+                              "web_search_options.user_location.approximate")
+                if error:
+                    return error
+    moderation = body.get("moderation")
+    if isinstance(moderation, Mapping):
+        error = check(moderation, _STRICT_MODERATION_KEYS, "moderation")
+        if error:
+            return error
+        policy = moderation.get("policy")
+        if isinstance(policy, Mapping):
+            error = check(policy, _STRICT_MODERATION_POLICY_KEYS, "moderation.policy")
+            if error:
+                return error
+            for channel in ("input", "output"):
+                value = policy.get(channel)
+                if isinstance(value, Mapping):
+                    error = check(value, _STRICT_MODERATION_MODE_KEYS, f"moderation.policy.{channel}")
+                    if error:
+                        return error
+    return None
 
 
 class ScriptStepUnavailable(RuntimeError):
@@ -40,6 +302,11 @@ class ScriptStepUnavailable(RuntimeError):
 class Script:
     def __init__(self, document: dict) -> None:
         self.model = str(document.get("model") or "scripted")
+        strict_openai = document.get("strict_openai", False)
+        if not isinstance(strict_openai, bool):
+            raise ValueError("strict_openai must be a boolean")
+        self.strict_openai = strict_openai
+        self.strict_openai_errors: list[str] = []
         steps = document.get("steps") or []
         if not isinstance(steps, list):
             raise ValueError("script steps must be a list")
@@ -183,7 +450,15 @@ def make_handler(script: Script):
             self._send(200, {"tokens": list(range(count))})
 
         def do_GET(self) -> None:  # noqa: N802
-            if self.path.rstrip("/") == "/v1/models":
+            if self.path.rstrip("/") == "/props":
+                if script.strict_openai:
+                    self._send(404, {"error": {"message": "not found"}})
+                else:
+                    self._send(200, {
+                        "default_generation_settings": {"n_ctx": 65536},
+                        "model_path": "scripted-endpoint",
+                    })
+            elif self.path.rstrip("/") == "/v1/models":
                 self._send(200, {"object": "list", "data": [{"id": script.model, "object": "model"}]})
             elif self.path.rstrip("/") == "/slots" and script.slots:
                 with script.lock:
@@ -234,6 +509,12 @@ def make_handler(script: Script):
                 self._send(400, {"error": {"message": "invalid JSON"}})
                 return
             script.requests.append(body)
+            if script.strict_openai:
+                schema_error = _strict_openai_error(body)
+                if schema_error:
+                    script.strict_openai_errors.append(schema_error)
+                    self._send(400, {"error": {"message": schema_error}})
+                    return
             if script.request_log is not None:
                 with script.lock, script.request_log.open("a", encoding="utf-8") as stream:
                     stream.write(json.dumps(body, ensure_ascii=False) + "\n")

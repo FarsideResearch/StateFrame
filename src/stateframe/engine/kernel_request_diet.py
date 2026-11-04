@@ -78,6 +78,7 @@ _TOKENIZER_ENDPOINT_ATTRS = (
 _MAX_TOKENIZE_RESPONSE_BYTES = 2 * 1024 * 1024
 _TOKENIZER_UNAVAILABLE_REASONS = frozenset({
     "unauthorized", "http_error", "connection", "timeout", "bad_response", "no_url", "disabled",
+    "provider_unsupported",
 })
 # The cache stores only a digest and integer per exact prompt projection. A
 # pressure walk can exceed 64 distinct bodies, then revisit them on another
@@ -221,6 +222,12 @@ def request_tokenizer_credentials(capture: object | None = None) -> tuple[str | 
 
 
 def _tokenizer_failure_reason(error: Exception) -> str:
+    try:
+        from kernel_provider_dialect import ProviderCapabilityError
+    except ImportError:
+        from .kernel_provider_dialect import ProviderCapabilityError
+    if isinstance(error, ProviderCapabilityError):
+        return "provider_unsupported"
     if isinstance(error, urllib.error.HTTPError):
         return "unauthorized" if error.code in {401, 403} else "http_error"
     if isinstance(error, TimeoutError):
@@ -253,13 +260,25 @@ def _http_tokenize(content: str, url: str, *, deadline: float | None = None,
                    route_allow_remote: bool | None = None,
                    auth_key: str | None = None,
                    generation_endpoint: str | None = None) -> Sequence[int]:
+    if route_allow_remote is not None:
+        from kernel_frame_routes import require_local
+        require_local(url, allow_remote=route_allow_remote)
+
+    try:
+        from kernel_provider_dialect import capabilities_for, require_feature
+    except ImportError:
+        from .kernel_provider_dialect import capabilities_for, require_feature
+    tokenizer_origin = _url_origin(url)
+    generation_origin = _url_origin(generation_endpoint)
+    probe_key = auth_key if tokenizer_origin is not None and tokenizer_origin == generation_origin else ""
+    capabilities = capabilities_for(url, probe_key or "")
+    require_feature(capabilities, "request tokenization")
+
     payload = json.dumps({
         "content": content, "add_special": False, "parse_special": True,
     }, ensure_ascii=False).encode("utf-8")
-    generation_origin = _url_origin(generation_endpoint)
     headers = {"Content-Type": "application/json"}
-    if (auth_key and generation_origin is not None
-            and _url_origin(url) == generation_origin):
+    if auth_key and generation_origin is not None and tokenizer_origin == generation_origin:
         headers["Authorization"] = "Bearer " + auth_key
     request = urllib.request.Request(url, data=payload, headers=headers, method="POST")
     # Budget the actual UTF-8 JSON payload, including escaping. Three times
@@ -275,10 +294,6 @@ def _http_tokenize(content: str, url: str, *, deadline: float | None = None,
         if remaining <= 0:
             raise TimeoutError("tokenizer request deadline expired")
         timeout = min(timeout, remaining)
-    if route_allow_remote is not None:
-        from kernel_frame_routes import require_local
-        require_local(url, allow_remote=route_allow_remote)
-
     class TokenizeRedirects(urllib.request.HTTPRedirectHandler):
         def redirect_request(self, req, fp, code, msg, headers, newurl):
             if route_allow_remote is not None:

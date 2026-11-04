@@ -63,6 +63,15 @@
 - Upgrade note: the bundled `examples/hooks/*.py` scripts are no longer executable files with a shebang line; StateFrame launches them through the `"{python}"` argv token. If your own `hooks.json` points directly at one of those example scripts as an executable, change that entry to `["{python}", "<path to script>"]`. Hooks you wrote yourself are not affected.
 - Tests: full runs now collect the top-level end-to-end tests in `tests/e2e/`; an ignore pattern meant for the fixture repositories there had hidden them from every full run. Fixture repositories stay uncollected, and a guard with a planted control checks both. The guard also rejects and names fixture-repository `conftest.py` files before collection can import them. Test-only; no product change.
 
+### Hosted OpenAI-compatible endpoints
+- StateFrame now classifies the selected endpoint from a bounded, authenticated `/props` probe. The first run line and summary show the dialect, reason, and reasoning-control disposition. Unproven endpoints use the strict OpenAI Chat Completions schema; `STATEFRAME_PROVIDER=llama.cpp` remains the operator override, while slot features still require `/slots` proof.
+- Strict requests omit llama.cpp-only controls, drop unsupported `top_k` and `min_p`, map `n_probs` to `logprobs` and `top_logprobs`, and emit `reasoning_effort` only when explicitly configured. Native tokenization falls back to calibrated bytes; cache, continuation, template, capacity-preflight, and slot features stop with a named capability error when the selected endpoint cannot prove support.
+- The shipped profile's optional prompt-cache optimization stays unpinned on an endpoint without `/slots`, so it does not block hosted runs; StateFrame reports that it was not pinned. An actual cache request or slot selection still requires capability proof.
+- Budget-recovery refits keep the selected endpoint dialect, and empty or whitespace-only `REACT_REASONING_EFFORT` is treated as unset while OpenAI Chat Completions values (`none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`) are normalized consistently for body construction and status output.
+- History compaction without cache reuse remains available on strict endpoints. Cache-enabled summary requests require an explicit slot ID reported by the selected `/slots` response; no implicit default slot is used.
+- Strict auxiliary fixer and detreason chat calls now require `LLM_MODEL` when the selected endpoint needs an explicit model, and refuse before dispatch if it is missing.
+- Local llama.cpp servers that answer `/props` keep their request bytes: on the bundled examples, requests are byte-identical to a build without endpoint classification.
+
 ## 0.3.30 (2026-11-04)
 
 - Docs: `KNOWN_LIMITATIONS.md` now lists two known issues. Every command needs `HOME` or `STATEFRAME_HOME` set. The bundled hook examples use `#!/usr/bin/python3`, which some Linux hosts lack.

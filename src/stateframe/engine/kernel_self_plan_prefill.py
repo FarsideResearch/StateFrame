@@ -80,7 +80,13 @@ def pair_cache_enabled(environ: Mapping[str, str] | None = None) -> bool:
 
 def self_plan_id_slot(environ: Mapping[str, str] | None = None) -> int:
     source = _source(environ)
-    raw = source.get(SLOT_ENV, source.get(REACT_SLOT_ENV, "0"))
+    raw = source.get(SLOT_ENV, source.get(REACT_SLOT_ENV))
+    if raw is None:
+        from kernel_provider_dialect import ProviderCapabilityError
+        raise ProviderCapabilityError(
+            "THINK_PREFILL=self_plan",
+            "an explicitly selected slot (slot 0 is never inferred)",
+        )
     try:
         value = int(raw)
     except (TypeError, ValueError) as error:

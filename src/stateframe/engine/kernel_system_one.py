@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from collections.abc import Callable, Mapping, Sequence
 
 import kernel_py39_compat  # noqa: F401  # install v46's Python 3.9 shims first
@@ -24,6 +25,7 @@ try:  # Flat v46 module loading.
         ScoreTransportAdapter,
         TransportOutcome,
         build_chat_request,
+        build_openai_chat_request,
         build_native_request,
     )
     from sys1.calibration import CalibrationArtifact, CalibratedDistribution
@@ -64,7 +66,10 @@ try:  # Flat v46 module loading.
     )
     from sys1.registry import DecisionSiteRegistry, emit_decision_recorded
 except ImportError:  # pragma: no cover - package import path.
-    from .sys1.adapter import ScoreTransportAdapter, TransportOutcome, build_chat_request, build_native_request
+    from .sys1.adapter import (
+        ScoreTransportAdapter, TransportOutcome, build_chat_request,
+        build_openai_chat_request, build_native_request,
+    )
     from .sys1.calibration import CalibrationArtifact, CalibratedDistribution
     from .sys1.contracts import DecisionRecord, DecisionSite, QuestionType
     from .sys1.policy import (
@@ -300,6 +305,7 @@ class SystemOne:
         boundary_renderer: Callable[[tuple[Mapping[str, str], ...]], TemplateBoundary | str | Mapping[str, object]] | None = None,
         model: str = "decision-tier",
         transport_kind: TransportKind = TransportKind.CHAT,
+        provider_capabilities: object | None = None,
         retain_diagnostics: bool = False,
     ) -> None:
         if not isinstance(registry, DecisionSiteRegistry):
@@ -319,6 +325,7 @@ class SystemOne:
         self.boundary_renderer = boundary_renderer
         self.model = model
         self.transport_kind = _as_transport_kind(transport_kind)
+        self.provider_capabilities = provider_capabilities
         self.adapter = ScoreTransportAdapter(retain_diagnostics=retain_diagnostics)
         self._attempts: dict[str, int] = {}
 
@@ -514,7 +521,31 @@ class SystemOne:
             if not isinstance(wrapped, Mapping):
                 raise FacadeError("wire wrapper must return a mapping")
             body = dict(wrapped)
-        return inspect_scored_wire(body)
+        inspected = inspect_scored_wire(body)
+        capabilities = self.provider_capabilities
+        if getattr(capabilities, "dialect", "openai-strict") == "llama.cpp":
+            return inspected
+        from kernel_provider_dialect import ProviderCapabilityError
+        if kind is not TransportKind.CHAT:
+            raise ProviderCapabilityError(
+                "sys1/adapter native score transport", "proven llama.cpp native scoring capability",
+            )
+        if os.environ.get("REACT_REASONING_EFFORT") != "none":
+            raise ProviderCapabilityError(
+                "sys1/adapter reasoning-off score request",
+                "operator-confirmed REACT_REASONING_EFFORT=none support",
+            )
+        openai_body = build_openai_chat_request(score_request)
+        openai_body["messages"] = prepared_body["messages"]
+        openai_body["reasoning_effort"] = "none"
+        from kernel_launch_identity_cost import (
+            ReasoningProfile, assert_openai_chat_body, enforce_provider_body,
+        )
+        openai_body = enforce_provider_body(
+            openai_body, profile=ReasoningProfile(), dialect="openai-strict",
+        )
+        assert_openai_chat_body(openai_body)
+        return MappingProxyType(openai_body)
 
     def _budget_reserve(self, budget: object | None, decision_id: str) -> bool:
         if budget is None:
@@ -683,7 +714,10 @@ class SystemOne:
                 return self._result(request, FacadeStatus.UNAVAILABLE, receipt, preparation=preparation, final_request=final_request, ledger_key=key)
         except Exception as error:
             self.ledger.release(reservation)
-            return self._preflight_result(request, FacadeStatus.PREFLIGHT_FAILED.value, type(error).__name__, attempt, ledger_key=key)
+            return self._preflight_result(
+                request, FacadeStatus.PREFLIGHT_FAILED.value,
+                f"{type(error).__name__}: {error}", attempt, ledger_key=key,
+            )
 
         dispatched = True
         try:

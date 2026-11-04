@@ -108,6 +108,35 @@ def _recover_post_fit_growth(candidate, context, body, fitted_body, fitted_count
     return recovered, True
 
 
+def _finalize_provider_request_body(capture, body, capabilities):
+    """Apply feature refusals and dialect filtering at the final serialization seam."""
+    from kernel_launch_identity_cost import (
+        assert_openai_chat_body, enforce_provider_body, reasoning_profile,
+    )
+    from kernel_provider_dialect import require_selected_request_features
+
+    route = getattr(capture, "frame_route", None)
+    route_settings = getattr(route, "settings", None)
+    route_slot = (route_settings.get("slot") if isinstance(route_settings, Mapping)
+                  and type(route_settings.get("slot")) is int else None)
+    call_purpose = (getattr(capture, "call_purpose", None)
+                    or getattr(capture, "model_router_call_purpose", None)
+                    or getattr(capture, "model_router_child_purpose", None))
+    require_selected_request_features(
+        capabilities, body, route_slot=route_slot, call_purpose=call_purpose,
+    )
+    selected = enforce_provider_body(
+        body,
+        profile=reasoning_profile(
+            manifest=getattr(getattr(capture, "journal", None), "manifest", None),
+        ),
+        dialect=capabilities.dialect,
+    )
+    if capabilities.dialect == "openai-strict":
+        assert_openai_chat_body(selected)
+    return selected
+
+
 def build_qualified_request(capture, runtime, body, *, endpoint, key, deadline=None):
     """Complete, fit and prove detached state, then publish one coherent record."""
     from kernel_request_kind import classify, gate_required, validate_adapter, RequestKindError
@@ -168,7 +197,13 @@ def build_qualified_request(capture, runtime, body, *, endpoint, key, deadline=N
     body, visibility = prepare_final_visibility(candidate, context, body, preserve_deferred=True)
     body = render_visibility_sources(candidate, context, body, visibility)
     body = candidate._ensure_final_wire_ticket(body)
-    body = enforce_provider_body(body, profile=reasoning_profile(manifest=capture.journal.manifest))
+    from kernel_provider_dialect import RUN_CAPABILITY_CACHE, capabilities_for
+    provider_capabilities = capabilities_for(endpoint, key, cache=RUN_CAPABILITY_CACHE)
+    body = enforce_provider_body(
+        body,
+        profile=reasoning_profile(manifest=capture.journal.manifest),
+        dialect=provider_capabilities.dialect,
+    )
     from kernel_stateframe_tool_stable import tool_mode
     author_final_tool_surface(candidate, context, body, request_id=candidate.request_id,
                               stabilize_cache_tools=True,
@@ -294,6 +329,9 @@ def build_qualified_request(capture, runtime, body, *, endpoint, key, deadline=N
         byte_ceiling=budget["max_request_bytes"], token_ceiling=budget["max_prompt_tokens"],
         measurement_identity=budget["measure_method"],
     )
+    # Final candidate and tool-surface producers run after the early fit pass.
+    # Re-apply the provider dialect at the actual serialization boundary.
+    body = _finalize_provider_request_body(capture, body, provider_capabilities)
     wire = json.dumps(body).encode()
     candidate._assert_wire_string_hygiene(wire)
     visibility, visibility_receipt = qualify_visibility(

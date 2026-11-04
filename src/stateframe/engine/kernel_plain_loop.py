@@ -247,9 +247,12 @@ def run_loop(task_text: str, *, provider: Provider, execute: Executor, limits: L
             wire_messages = prepare(list(msgs)) if prepare is not None else msgs
             validate_pairing(wire_messages)
             body = scrub(build_body(wire_messages, limits))
-            encoded = json.dumps(body).encode()
             if before_request is not None:
                 before_request(body)
+            provider_prepare = getattr(provider, "prepare_body", None)
+            if callable(provider_prepare):
+                provider_prepare(body)
+            encoded = json.dumps(body).encode()
             remaining = int(limits.wall_s - (clock() - t0)) + 5
             timeout = min(limits.request_timeout_s, max(remaining, 30))
             journal.write("request_submitted", request=result.requests + 1, body_sha256="sha256:"

@@ -275,6 +275,69 @@ def _provider_probe_status(origin: tuple[str, str, int | None], path: str,
         _close_probe_connection(connection)
 
 
+def _provider_probe_json_response(origin: tuple[str, str, int | None], path: str,
+                                  key: str, timeout: float) -> list[object] | None:
+    """Read one small JSON probe response without redirecting or leaking credentials."""
+    scheme, host, port = origin
+    connection_type = (http.client.HTTPSConnection if scheme == "https"
+                       else http.client.HTTPConnection)
+    connection = None
+    try:
+        connection = connection_type(host, port, timeout=timeout)
+        headers = {"Accept": "application/json"}
+        if key:
+            headers["Authorization"] = "Bearer " + key
+        connection.request("GET", path, headers=headers)
+        response = connection.getresponse()
+        status = response.status
+        raw = response.read(65537)
+        response.close()
+        if len(raw) > 65536:
+            return [status, None]
+        if status != 200:
+            return [status, None]
+        try:
+            return [status, json.loads(raw)]
+        except (UnicodeDecodeError, ValueError):
+            # The endpoint answered, but its payload cannot prove a dialect.
+            return [status, None]
+    except (OSError, http.client.HTTPException):
+        return None
+    finally:
+        _close_probe_connection(connection)
+
+
+def bounded_json_probe(endpoint: str, key: str, path: str, *,
+                       timeout: float = 2.0) -> tuple[int, object] | None:
+    """Probe the request origin in the existing killable child with a hard deadline."""
+    origin = _provider_probe_origin(endpoint)
+    if origin is None or path not in {"/props", "/slots"}:
+        return None
+    stop_at = time.monotonic() + timeout
+    try:
+        process = subprocess.Popen(
+            [sys.executable, "-I", "-B", str(Path(__file__).resolve()), "--probe-child"],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    except OSError:
+        return None
+    packet = json.dumps({"origin": origin, "paths": [path], "key": key,
+                         "stop_at": stop_at, "json_body": True}).encode()
+    try:
+        remaining = stop_at - time.monotonic()
+        if remaining <= 0:
+            return None
+        output, _ = process.communicate(packet, timeout=remaining)
+        if process.returncode == 0 and output:
+            result = json.loads(output)
+            if isinstance(result, list) and len(result) == 2 and type(result[0]) is int:
+                return result[0], result[1]
+    except (subprocess.TimeoutExpired, ValueError):
+        pass
+    finally:
+        _terminate_child(process)
+    return None
+
+
 def _direct_http_probe(origin: tuple[str, str, int | None], path: str,
                        key: str, stop_at: float, read_ok: bool) -> tuple[int, bool] | None:
     """Bound a numeric HTTP origin without process startup on short liveness windows."""
@@ -1191,8 +1254,11 @@ def _probe_child() -> None:
         remaining = packet["stop_at"] - time.monotonic()
         if remaining <= 0:
             break
-        result = _provider_probe_status(
-            origin, path, packet["key"], remaining, packet["read_ok"])
+        if packet.get("json_body"):
+            result = _provider_probe_json_response(origin, path, packet["key"], remaining)
+        else:
+            result = _provider_probe_status(
+                origin, path, packet["key"], remaining, packet["read_ok"])
         if result is not None:
             sys.stdout.write(json.dumps(result))
             return

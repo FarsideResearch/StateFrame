@@ -39,8 +39,16 @@ def servers():
 
         def do_GET(self):  # noqa: N802
             target_requests.append((self.path, None, dict(self.headers)))
-            reply = b'{"ok":true}'
-            self.send_response(200)
+            if self.path == "/props":
+                reply = b'{"default_generation_settings":{"n_ctx":65536},"model_path":"mock-llama"}'
+                status = 200
+            elif self.path == "/slots":
+                reply = b'[{"id":0,"n_ctx":65536,"is_processing":false}]'
+                status = 200
+            else:
+                reply = b'{"ok":true}'
+                status = 404
+            self.send_response(status)
             self.send_header("Content-Length", str(len(reply)))
             self.end_headers()
             self.wfile.write(reply)
@@ -105,8 +113,9 @@ def test_tokenize_ignores_proxy(monkeypatch, servers):
     target_url, target_requests, proxy_url, proxy_requests = servers
     _set_proxy(monkeypatch, proxy_url)
     assert _http_tokenize("hello", target_url + "/tokenize") == [1, 2]
-    assert len(target_requests) == 1
-    assert json.loads(target_requests[0][1]) == {
+    assert [path for path, _body, _headers in target_requests] == ["/props", "/slots", "/tokenize"]
+    assert target_requests[0][1] is None
+    assert json.loads(target_requests[2][1]) == {
         "content": "hello", "add_special": False, "parse_special": True}
     assert proxy_requests == []
 
@@ -137,7 +146,8 @@ def test_engine_child_global_opener_ignores_proxy(monkeypatch, servers):
     try:
         _child._install_direct_opener()
         with urllib.request.urlopen(target_url + "/slots", timeout=5) as response:
-            assert response.read() == b'{"ok":true}'
+            assert json.loads(response.read()) == [
+                {"id": 0, "n_ctx": 65536, "is_processing": False}]
     finally:
         urllib.request._opener = original
     assert [path for path, _, _ in target_requests] == ["/slots"]

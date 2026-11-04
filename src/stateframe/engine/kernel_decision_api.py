@@ -429,7 +429,7 @@ def build_request(
     frame: str,
     *,
     model: str | None = None,
-    native_n_probs: bool = True,
+    native_n_probs: bool = False,
     seed: int | None = None,
 ) -> dict[str, object]:
     """Build the exact one-token OpenAI-compatible request body."""
@@ -571,6 +571,19 @@ def _score(
     if response is None:
         if request_fn is None:
             raise DecisionAPIError("provide response or request_fn; the kernel does not create an implicit client")
+        # This adapter has no selected-endpoint capability contract. Default its
+        # injected transport to the strict Chat Completions shape; native n_probs
+        # is mapped by the shared boundary unless a higher-level sender proves llama.cpp.
+        if not request.get("model"):
+            from kernel_provider_dialect import ProviderCapabilityError
+
+            raise ProviderCapabilityError(
+                "kernel_decision_api", "model for OpenAI Chat Completions",
+            )
+        from kernel_launch_identity_cost import enforce_provider_body, reasoning_profile
+        request = enforce_provider_body(
+            request, profile=reasoning_profile(), dialect="openai-strict",
+        )
         response = request_fn(request)
     if not isinstance(response, Mapping):
         raise DecisionAPIError("provider response must be a mapping")
@@ -640,7 +653,7 @@ def score_choice(
     response: Mapping[str, object] | None = None,
     request_fn: Callable[[Mapping[str, object]], Mapping[str, object]] | None = None,
     model: str | None = None,
-    native_n_probs: bool = True,
+    native_n_probs: bool = False,
     seed: int | None = None,
     decision_id: str | None = None,
     site_id: str = "default",
@@ -678,7 +691,7 @@ def score_score(
     response: Mapping[str, object] | None = None,
     request_fn: Callable[[Mapping[str, object]], Mapping[str, object]] | None = None,
     model: str | None = None,
-    native_n_probs: bool = True,
+    native_n_probs: bool = False,
     seed: int | None = None,
     decision_id: str | None = None,
     site_id: str = "default",
@@ -711,7 +724,7 @@ def score_boolean(
     response: Mapping[str, object] | None = None,
     request_fn: Callable[[Mapping[str, object]], Mapping[str, object]] | None = None,
     model: str | None = None,
-    native_n_probs: bool = True,
+    native_n_probs: bool = False,
     seed: int | None = None,
     decision_id: str | None = None,
     site_id: str = "default",
