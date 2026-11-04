@@ -6503,11 +6503,11 @@ class RequestCapture:
         ).strip().lower() in {"on", "1", "true", "yes"}
         if decode_depth_per_arm_on and not hasattr(self, "decode_depth_per_arm_slots_busy"):
             from decode_depth_per_arm import observe_slots
-            observe_slots(self, endpoint, deadline=deadline)
+            observe_slots(self, endpoint, key=key, deadline=deadline)
         if os.environ.get("LONG_HORIZON_TELEMETRY", "off").strip().lower() in {
                 "on", "1", "true", "yes"} and not hasattr(self, "decode_depth_slots_busy"):
             from long_horizon_decode_logging import observe_slots
-            observe_slots(self, endpoint, deadline=deadline)
+            observe_slots(self, endpoint, key=key, deadline=deadline)
         cost_meter = getattr(self.journal, "host_cost_meter", None)
         host_spans = getattr(self.journal, "host_spans", None)
 

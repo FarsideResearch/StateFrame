@@ -18,6 +18,7 @@ negation clauses after the answer schema.
 from __future__ import annotations
 
 import json
+import os
 import re
 import urllib.request
 from dataclasses import dataclass
@@ -54,13 +55,18 @@ class Reply:
 
 
 def ask(prompt: str, *, seed: int = 1, max_tokens: int = 2500,
-        url: str = DEFAULT_URL, timeout: int = 600) -> Reply:
+        url: str = DEFAULT_URL, timeout: int = 600,
+        api_key: str | None = None) -> Reply:
+    key = api_key if api_key is not None else (
+        os.environ.get("LLM_API_KEY") or os.environ.get("DEEPINFRA_API_KEY") or "")
     last_note = "empty"
     for budget in (max_tokens, max_tokens * 2, max_tokens * 3):
         body = {"messages": [{"role": "user", "content": prompt}], "temperature": 0,
                 "top_p": 1, "max_tokens": budget, "seed": seed}
         req = urllib.request.Request(url, data=json.dumps(body).encode(),
-                                     headers={"Content-Type": "application/json"})
+                                     headers={"Content-Type": "application/json",
+                                              **({"Authorization": f"Bearer {key}"}
+                                                 if key else {})})
         r = json.loads(urllib.request.urlopen(req, timeout=timeout).read())
         c = (r["choices"][0]["message"].get("content") or "").strip()
         if not c:

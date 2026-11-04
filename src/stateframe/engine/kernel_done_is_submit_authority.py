@@ -278,6 +278,7 @@ def _ownerless_gate_preflight(
             return "parent_unproven", actions
     except Exception as error:  # noqa: BLE001 - unavailable proof cannot create a false refusal
         _emit(runtime, "done_submit_ownerless_gate_unavailable",
+              reason=f"ownerless proof preflight failed: {type(error).__name__}",
               error_type=type(error).__name__)
         return "proof_unavailable", ()
     return None, actions
@@ -303,6 +304,7 @@ def ownerless_early_done_refusal(
         setattr(runtime, "_done_submit_ownerless_early_refusals", count)
     except (AttributeError, TypeError):
         _emit(runtime, "done_submit_ownerless_gate_unavailable",
+              reason="runtime cannot record the ownerless refusal count",
               error_type="RuntimeStateUnavailable")
         record_ownerless_gate_skipped(runtime, "proof_unavailable")
         return None
@@ -553,7 +555,9 @@ def capture_and_seal(runtime: object, *, destination: str | Path, task_id: objec
         labels = completion_labels(runtime, certification=certification)
     except Exception as error:  # labels never gate a captured candidate
         labels = {"status": "unavailable"}
-        _emit(runtime, "done_labels_unavailable", error_type=type(error).__name__)
+        _emit(runtime, "done_labels_unavailable",
+              reason=f"completion label generation failed: {type(error).__name__}",
+              error_type=type(error).__name__)
     seal = seal_submission(
         runtime, source=intent.source, artifact_digest_value=stored["artifact_digest"],
         label=label, labels=labels, artifact_stored=stored.get("stored") is True,

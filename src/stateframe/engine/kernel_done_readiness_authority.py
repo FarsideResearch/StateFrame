@@ -995,7 +995,7 @@ def decision_for_runtime(
         # A state with no callable recovery must not crash request
         # preparation (a harness-contract stop is worse than the legacy refusal). Journal a
         # typed, reasoned fallback and let the existing authorities decide this step.
-        _record_decision_unavailable(runtime, error, key)
+        _record_decision_unavailable(runtime, error, key, "readiness decision construction failed")
         step = _current_step(runtime)
         if step is not None:
             setattr(runtime, "_done_decision_abandoned_step", step)
@@ -1022,7 +1022,7 @@ def abandon_decision(runtime: object, decision: "DoneReadinessDecision | None",
     """Drop the shared decision for EVERY consumer for the rest of this step (one authority)."""
     key = getattr(decision, "key", None)
     if isinstance(key, tuple):
-        _record_decision_unavailable(runtime, error, key)
+        _record_decision_unavailable(runtime, error, key, "readiness decision consumer failed")
     # Without a known step, abandonment stays per-key (never permanent).
     step = _current_step(runtime)
     if step is not None:
@@ -1030,7 +1030,8 @@ def abandon_decision(runtime: object, decision: "DoneReadinessDecision | None",
     setattr(runtime, "_done_readiness_decision", None)
 
 
-def _record_decision_unavailable(runtime: object, error: Exception, key: tuple[str, str, str]) -> None:
+def _record_decision_unavailable(runtime: object, error: Exception, key: tuple[str, str, str],
+                                 context: str) -> None:
     journal = getattr(runtime, "journal", None)
     emit = getattr(journal, "emit", None)
     if not callable(emit) or getattr(runtime, "_done_decision_unavailable_key", None) == key:
@@ -1043,6 +1044,7 @@ def _record_decision_unavailable(runtime: object, error: Exception, key: tuple[s
             producer="kernel_done_readiness_authority",
             decision="FALLBACK_LEGACY",
             reason_code="NO_CALLABLE_RECOVERY",
+            reason=f"{context}: {type(error).__name__}",
             specifics=[safe_error_detail(error)],
             recovery=None,
             dispatch=False,
