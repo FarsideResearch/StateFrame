@@ -542,6 +542,27 @@ def _blobs_intact(folder: Path, meta: dict) -> bool:
     return _blob_integrity_problem(folder, meta) is None
 
 
+def _resumed_time(tape: list[dict[str, object]], pending: dict[str, object] | None,
+                  wire_dir: Path) -> dict[str, float]:
+    """The run's --timeout as the recorded requests showed it, so a resume keeps it.
+
+    ``seconds_left`` is the countdown of the newest recorded request (the one in flight when the
+    run stopped, else the last replayed one); ``time_allowance_seconds`` is the first one, about
+    the whole allowance. Empty when the run had no time limit.
+    """
+    requests = [Path(str(item["request"])) for item in tape if item.get("request")]
+    if pending is not None and pending.get("request"):
+        requests.append(Path(str(pending["request"])))
+    seconds = [value for value in (replay_tape.recorded_countdown_seconds(path.read_bytes())
+                                   for path in requests if path.is_file()) if value is not None]
+    if not seconds:
+        window = replay_tape.recorded_countdown_window(wire_dir)
+        seconds = list(window) if window is not None else []
+    if not seconds:
+        return {}
+    return {"seconds_left": seconds[-1], "time_allowance_seconds": seconds[0]}
+
+
 def archive_attempt(state: dict[str, object], engine_dir: Path, *, use_checkpoint: bool = True,
                     tape_from: Path | None = None, replay_external: bool = False) -> Path:
     """Move the stopped attempt's files to attempts/<n>/ and point the spec at its tape."""
@@ -612,6 +633,7 @@ def archive_attempt(state: dict[str, object], engine_dir: Path, *, use_checkpoin
                       "archived_external_operations": (external if restart_live else
                           (spec.get("resume") or {}).get("archived_external_operations", [])),
                       **({"model_swap": swap} if isinstance(swap, dict) else {})}
+    spec["resume"].update(_resumed_time(tape, pending, source / "wire"))
     if checkpoint is not None:
         spec["resume"]["checkpoint"] = checkpoint
     elif (run / "checkpoints").is_dir():

@@ -15,6 +15,23 @@ from dataclasses import dataclass
 from collections.abc import Iterable, Mapping
 
 
+# A resumed run's deadline once its replayed steps are done: the time that was left at the
+# last completed step, counted from when the run goes live again. None outside a resume.
+_RESUMED_DEADLINE_MONOTONIC: float | None = None
+
+
+def resume_sandbox_deadline(seconds_left: float, *, now: float | None = None) -> None:
+    """Start the time that was left when the run stopped, from now, for every budget in this process.
+
+    Called once replay ends, so replaying the recorded steps never spends the remaining time.
+    """
+    global _RESUMED_DEADLINE_MONOTONIC
+    seconds = float(seconds_left)
+    if not seconds == seconds or seconds < 0:
+        raise ValueError("resumed time left must be a non-negative number of seconds")
+    _RESUMED_DEADLINE_MONOTONIC = (time.monotonic() if now is None else float(now)) + seconds
+
+
 READ_RECEIPT_ENV = "STATEFRAME_READ_RECEIPT"
 SOURCE_LABELS_ENV = "STATEFRAME_SOURCE_LABELS"
 BUDGET_UNIT_ENV = "STATEFRAME_BUDGET_UNIT"
@@ -326,10 +343,12 @@ class ResponseBudget:
         return max(0, self.terminal_reserve_limit - self.terminal_reserves_used)
 
     def _sandbox_seconds_remaining(self, now: float | None = None) -> float | None:
-        if self.sandbox_deadline_monotonic is None:
+        deadline = (_RESUMED_DEADLINE_MONOTONIC if _RESUMED_DEADLINE_MONOTONIC is not None
+                    else self.sandbox_deadline_monotonic)
+        if deadline is None:
             return None
         current = time.monotonic() if now is None else float(now)
-        return max(0.0, self.sandbox_deadline_monotonic - current)
+        return max(0.0, deadline - current)
 
     def charge_automatic_check(self, *, selector: str | None = None) -> bool:
         if self._sandbox_seconds_remaining() is not None and self._sandbox_seconds_remaining() <= 0:

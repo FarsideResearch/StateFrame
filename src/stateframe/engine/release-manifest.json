@@ -465,7 +465,7 @@
   "kernel_questions.py": "835bddaa29e864efeb2a8dff1779aa2b0dddf40b9f1295ad71d6d0a98ddc7acb",
   "kernel_raising_h_packets.py": "e459fc4bb46d678f52ac9aa168d1783db46701fdec9d0655c4334a69192579e4",
   "kernel_read_exec.py": "eff5f613bf0686a4ccc52f01d42fe5866b5ac39e92b5f12e31e4534c020a8990",
-  "kernel_read_fixes.py": "f868a210e7f597f5e037337b6a8b0c9ccfa9856b01913bb7736bff04b974ea1f",
+  "kernel_read_fixes.py": "23458a56060f9976a653e913d6de02e568ad9cbfc9cad78de014b3ac14b2fa14",
   "kernel_read_lockout.py": "4668cda43dac3f52b46539017d2a53f1557bf5d14ded52e3188696e432906cd9",
   "kernel_read_newline_fix.py": "3c709ffa3565a473942dbf0692b68d106c45dd4f64a6c7dd63a30138f4e76b56",
   "kernel_read_once.py": "cecc1283bc3ad3df67b3c6356dcc196f6b4b006523dfec854816434cb265340e",

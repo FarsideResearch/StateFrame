@@ -42,6 +42,19 @@ else:  # Executed by path under the selected project interpreter.
 # these by value and a checkpoint restore refills them in place (kernel_checkpoint participants), so
 # the re-installed wrappers continue exactly where the interrupted attempt's wrappers were.
 HOST_STATE: dict[str, dict] = {}
+# A resumed run's time left at its last completed step ({"seconds": float, "started": bool}).
+_RESUMED_TIME: dict[str, object] = {}
+
+
+def _start_resumed_deadline() -> None:
+    """Once replay is over, give the run the time it had left, counted from now (once)."""
+    seconds = _RESUMED_TIME.get("seconds")
+    if seconds is None or _RESUMED_TIME.get("started"):
+        return
+    _RESUMED_TIME["started"] = True
+    from kernel_read_fixes import resume_sandbox_deadline
+    resume_sandbox_deadline(float(seconds))
+    emit("resume_time_left_started", seconds_left=float(seconds))
 CHECKPOINT_RESTORE_ENV = "STATEFRAME_CHECKPOINT_RESTORE"
 
 ENGINE_PREFIXES = ("DS_", "KERNEL_", "STATEFRAME_", "REACT_", "PILOT_", "UNIT_PLAN_")
@@ -246,6 +259,8 @@ def install_wire_recorder(run: Path, chat_url: str, replayer: Replayer | None = 
                                                        if k != "first_difference"})
             elif replayed is not None and not replayer.active:
                 emit("replay_done", send=index, replayed=replayer.cursor)
+                # The next request is the first one built live: it shows the resumed time left.
+                _start_resumed_deadline()
             if replayer.strict and replayer.diverged is None and not replayer.active \
                     and replayer.pending is None \
                     and not getattr(replayer, "verified_emitted", False):
@@ -254,10 +269,12 @@ def install_wire_recorder(run: Path, chat_url: str, replayer: Replayer | None = 
         elif replayer is not None:
             from kernel_tool_tape import end_replay
             end_replay()
+            _start_resumed_deadline()
         if (replayer is not None and replayed is None and replayer.diverged is None
                 and not replayer.active and replayer.pending is None):
             from kernel_tool_tape import end_replay
             end_replay()
+            _start_resumed_deadline()
         transport_attempts: list[dict[str, object]] = []
         try:
             response = (replayed if replayed is not None else original(
@@ -880,6 +897,11 @@ def main(argv: list[str]) -> int:
     if checkpoint is not None:
         os.environ[CHECKPOINT_RESTORE_ENV] = str(checkpoint["dir"])
     install_run_identity(spec.get("run_identity_seed"))  # before any engine import
+    seconds_left = resume.get("seconds_left") if resume is not None else None
+    if isinstance(seconds_left, (int, float)) and not isinstance(seconds_left, bool):
+        _RESUMED_TIME["seconds"] = float(seconds_left)
+        if replayer is None or (not replayer.active and replayer.pending is None):
+            _start_resumed_deadline()  # nothing to replay: the run is live from its first request
     key = os.environ.get(spec["api_key_env"], "") if spec.get("api_key_env") else ""
     try:
         skill_records = spec.get("skills", [])

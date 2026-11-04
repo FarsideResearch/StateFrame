@@ -77,6 +77,57 @@ def first_difference(recorded: bytes, replayed: bytes, context: int = 160) -> di
             "replayed_window": b[start:offset + context].decode("utf-8", "replace")}
 
 
+# The run's wall-clock countdown in the [CONTINUATION LIMITS] line: "unbounded", or seconds left
+# with a plain-language note ("10737.6 (about 179 minutes left, ~12 turns at your pace)").
+_COUNTDOWN = re.compile(
+    rb"(sandbox_seconds_remaining=)(unbounded|[0-9]+\.[0-9] \(about [0-9]+ minutes left"
+    rb"(?:, ~[0-9]+ turns at your pace)?\))")
+
+
+def with_recorded_countdown(request: bytes, recorded: bytes) -> bytes | None:
+    """``request`` with each run countdown value replaced by the recorded request's, in order.
+
+    A rebuilt request is made later than the one it replays, so its live countdown can never
+    match; the recorded value is what the model saw at that send. Only this field moves, and
+    only when both requests carry the same number of countdowns; None otherwise.
+    """
+    ours, theirs = list(_COUNTDOWN.finditer(request)), list(_COUNTDOWN.finditer(recorded))
+    if not ours or len(ours) != len(theirs):
+        return None
+    pieces, position = [], 0
+    for mine, recorded_match in zip(ours, theirs):
+        pieces += [request[position:mine.start(2)], recorded_match.group(2)]
+        position = mine.end(2)
+    return b"".join(pieces) + request[position:]
+
+
+def recorded_countdown_seconds(request: bytes) -> float | None:
+    """The last finite countdown a recorded request showed, in seconds; None if unbounded or absent."""
+    values = [match.group(2) for match in _COUNTDOWN.finditer(request)]
+    if not values or values[-1] == b"unbounded":
+        return None
+    return float(values[-1].split(b" ", 1)[0])
+
+
+def recorded_countdown_window(wire_dir: Path) -> tuple[float, float] | None:
+    """(first, last) finite countdown over the completed sends of an attempt, or None.
+
+    first is about the whole time allowance the run started with; last is what was left at the
+    most recent model step the attempt completed.
+    """
+    if not wire_dir.is_dir():
+        return None
+    seconds = []
+    for request in sorted(wire_dir.glob("[0-9][0-9][0-9][0-9].request.json")):
+        response = request.with_name(request.name.replace(".request.", ".response."))
+        if not response.is_file() or not _response_ok(response.read_bytes()):
+            continue
+        value = recorded_countdown_seconds(request.read_bytes())
+        if value is not None:
+            seconds.append(value)
+    return (seconds[0], seconds[-1]) if seconds else None
+
+
 def _leading_model(request: bytes) -> tuple[str, int] | None:
     """The leading top-level ``"model"`` value of a chat request and the byte offset just past it, else None."""
     if not request.startswith(_MODEL_FIELD):
@@ -309,6 +360,7 @@ class Replayer:
                                                   self._route_model_swap(expected.get("route")))
                     if swapped is not None:
                         compared = swapped
+                    compared = with_recorded_countdown(compared, recorded) or compared
                 if compared != recorded:
                     self.pending_mismatch = True
                     self.diverged = {
@@ -341,6 +393,9 @@ class Replayer:
                 compared, digest = swapped, self._digest(swapped)
                 if swapped == recorded:
                     self.model_swapped += 1
+            countdown = with_recorded_countdown(compared, recorded)
+            if countdown is not None and countdown != compared:
+                compared, digest = countdown, self._digest(countdown)
         if compared != recorded:
             self.active = False
             self.pending = None  # the later in-flight request belongs to the abandoned replay path

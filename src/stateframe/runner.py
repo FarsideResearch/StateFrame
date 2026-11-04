@@ -2227,6 +2227,29 @@ def _time_limit_line(options: RunOptions) -> str:
             "finalization; stop earlier with Ctrl-C")
 
 
+def _apply_resumed_time_limit(options: RunOptions, resume: dict, started: float,
+                              timeout_s: float | None, printer) -> None:
+    """Keep the run's own --timeout across a resume.
+
+    The engine gets the time that was left at the run's newest recorded request, started once
+    its replay ends (replaying recorded steps spends none of it). The runner's outer limit is
+    the run's whole allowance from now, so a slow replay cannot outlive what the run was given.
+    A --timeout passed to resume replaces all of this.
+    """
+    seconds_left = resume.get("seconds_left")
+    if timeout_s is not None:
+        resume.pop("seconds_left", None)
+        resume.pop("time_allowance_seconds", None)
+        return
+    if not isinstance(seconds_left, (int, float)) or isinstance(seconds_left, bool):
+        return
+    allowance = float(resume.get("time_allowance_seconds") or seconds_left)
+    options.timeout_s = max(allowance, float(seconds_left))
+    options._deadline = started + options.timeout_s
+    printer(f"time limit: this run's --timeout continues with {float(seconds_left):.0f}s left, "
+            "counted from the end of replay; stop earlier with Ctrl-C")
+
+
 def step_limit_restart_warning(old: int, new: int) -> str:
     """Resume with a different step limit: the limit is part of request 1, so nothing recorded can be reused."""
     def name(turns: int) -> str:
@@ -2461,7 +2484,10 @@ def resume_run(run_dir: Path, *, endpoint: Endpoint | None = None, max_turns: in
     options._deadline = started + timeout_s if timeout_s is not None else None
     try:
         with _wall_deadline(options), _sigterm_as_interrupt():
-            printer(_time_limit_line(options))
+            # A run that had a --timeout prints the time it has left once its attempt is archived.
+            if timeout_s is not None or resume_module.replay_tape.recorded_countdown_window(
+                    run_dir / "wire") is None:
+                printer(_time_limit_line(options))
             printer(_step_limit_line(options))
             options.endpoint.check_locality()
             options.python = _check_python(options.python,
@@ -2545,6 +2571,7 @@ def resume_run(run_dir: Path, *, endpoint: Endpoint | None = None, max_turns: in
             if options._routes is not None:
                 spec["routes"] = options._routes.public()
             _compose_resume_route_changes(spec, route_changes)
+            _apply_resumed_time_limit(options, spec["resume"], started, timeout_s, printer)
             (run_dir / "spec.json").write_text(json.dumps(spec, indent=1, sort_keys=True))
             # The cache slot stays the one the run started with: it is part of the request bytes.
             slot = spec.get("prompt_cache_slot") or {}

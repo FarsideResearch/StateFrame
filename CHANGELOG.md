@@ -15,6 +15,7 @@
 - No run is left with only `done` when a host refusal or an unresolved effect blocks completion. Ordinary refusals stay recoverable when a live action exists; an effect that cannot be settled or re-observed ends the run instead of fencing it. `KNOWN_DEAD_END_FENCES` is now empty.
 - `CONTINUATION_BLOCKED` is a named terminal with its reason in the summary, a distinct CLI exit and a resume refusal. A failed source read in a sub-task with no turns left names its path and result kind.
 - Crash recovery replays the normal closure path, so a run that crashed after an action closed resumes to the same state as one that did not. A shell command whose receipt shows it finished, such as a local `pip install` into the run environment, settles from that receipt; only an interrupted command with no receipt ends the run blocked. Continuation evidence uses a sequence cursor after its first validated scan, so later steps resolve only newly appended journal records.
+- A run started with `--timeout` can now be resumed. Its requests show the time left, so a rebuilt request never matched the recorded one: the checkpoint was refused, replay stopped at the first exchange and the run went live. Replay now compares each request with the countdown it recorded (only that value; any other difference still stops replay), and the resumed run keeps its time limit: it gets the time that was left when it stopped, counted from the end of replay. `--timeout` on `stateframe resume` still sets a new limit instead.
 
 ## 0.3.30 (2026-11-04)
 
