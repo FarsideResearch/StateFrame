@@ -15,6 +15,11 @@ import shutil
 import subprocess
 import sys
 
+if __package__:
+    from .kernel_sbpl import sbpl_string
+else:
+    from kernel_sbpl import sbpl_string
+
 ROOT = Path(__file__).resolve().parent
 PROTECTED = (ROOT / "results", ROOT / "results.SNAPSHOT-20260920")
 
@@ -58,7 +63,7 @@ def guarded_command(command, roots=PROTECTED):
         backend = shutil.which("sandbox-exec")
         if not backend:
             raise RuntimeError("sandbox-exec is required for indirect-worker protection")
-        paths = " ".join(f"(subpath {json.dumps(str(root))})" for root in roots)
+        paths = " ".join(f"(subpath {sbpl_string(str(root))})" for root in roots)
         return [backend, "-p", f"(version 1) (allow default) (deny file-write* {paths})", *command]
     backend = shutil.which("bwrap")
     if not backend:

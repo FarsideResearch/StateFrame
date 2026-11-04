@@ -1,7 +1,11 @@
 from dataclasses import replace
+from contextlib import contextmanager
 import os
+from pathlib import Path
+import re
 import subprocess
 import sys
+import tempfile
 import time
 import uuid
 
@@ -155,18 +159,46 @@ def _installer_pids():
     return {line.split()[0] for line in listing.splitlines() if "Install Command Line Developer Tools" in line}
 
 
+@contextmanager
+def _planted_xcrun_dir(monkeypatch):
+    import kernel_test_isolation as isolation
+
+    temporary = tempfile.TemporaryDirectory(prefix='sfxcrun', dir='/private/tmp')
+    try:
+        directory = Path(temporary.name) / 'T'
+        directory.mkdir()
+        assert re.fullmatch(r'[A-Za-z0-9_/]+', str(directory.resolve(strict=True)))
+        monkeypatch.setattr(isolation, '_darwin_user_temp_dir', lambda: directory)
+        yield directory
+    finally:
+        temporary.cleanup()
+
+
+def _run_planted_xcrun_probe(cap, code):
+    # ExecSession builds the profile in a host helper, outside this process's monkeypatch.
+    from kernel_test_isolation import capability_command
+
+    argv, env = capability_command([PYTHON, '-I', '-c', code], cap)
+    return subprocess.run(argv, cwd=cap.workspace, env=env, capture_output=True, timeout=15)
+
+
 @pytest.mark.skipif(sys.platform != "darwin", reason="macOS developer-tool shims")
 def test_developer_tool_shims_run_without_triggering_installer(setup):
     # Regression: a hidden /var/db/xcode_select_link made /usr/bin/make open the CLT install
     # dialog on the user's desktop from inside the sandbox.
     root, cap = setup
     before = _installer_pids()
+    from kernel_test_isolation import _darwin_user_temp_dir
+    directory = _darwin_user_temp_dir()
+    temp_count_before = sum(entry.name.startswith('xcrun_db-') for entry in directory.iterdir())
     with ExecSession(root / "run") as session:
         result = session.run(["/bin/sh", "-c", "/usr/bin/make --version && /usr/bin/git --version"], cap)
+    temp_count_after = sum(entry.name.startswith('xcrun_db-') for entry in directory.iterdir())
     time.sleep(1.0)
     assert result.exit_code == 0, result.output
     assert b"GNU Make" in result.output and b"git version" in result.output
     assert b"couldn't create cache file" not in result.output
+    assert temp_count_after == temp_count_before, "sandboxed shims leaked xcrun_db-* temp files"
     assert _installer_pids() <= before, "sandboxed shim launched the Command Line Tools installer"
 
 
@@ -198,6 +230,45 @@ def test_xcrun_cache_exception_cannot_write_siblings_or_follow_links(setup):
         cache.unlink(missing_ok=True)
         sibling.unlink(missing_ok=True)
         link.unlink()
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="macOS developer-tool cache")
+def test_shared_xcrun_cache_cannot_be_written_or_replaced(setup, monkeypatch):
+    root, cap = setup
+    with _planted_xcrun_dir(monkeypatch) as directory:
+        cache = directory / 'xcrun_db'
+        cache.write_text('original')
+        replacement = cap.workspace / 'replacement'
+        replacement.write_text('changed')
+        code = (f'from pathlib import Path\nimport os\n'
+                f'cache = Path({str(cache)!r})\n'
+                f'replacement = Path({str(replacement)!r})\n'
+                'try:\n cache.write_text("changed")\n'
+                'except PermissionError:\n pass\n'
+                'else:\n raise AssertionError("shared cache write succeeded")\n'
+                'try:\n os.replace(replacement, cache)\n'
+                'except PermissionError:\n pass\n'
+                'else:\n raise AssertionError("shared cache replace succeeded")\n')
+        result = _run_planted_xcrun_probe(cap, code)
+        assert result.returncode == 0, result.stderr
+        assert cache.read_text() == 'original'
+        assert replacement.read_text() == 'changed'
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="macOS developer-tool cache")
+def test_shared_xcrun_cache_symlink_cannot_read_outside_secret(setup, monkeypatch):
+    root, cap = setup
+    with _planted_xcrun_dir(monkeypatch) as directory:
+        cache = directory / 'xcrun_db'
+        secret = root / 'outside-cache-secret'
+        secret.write_text('outside-secret')
+        cache.symlink_to(secret)
+        code = f'from pathlib import Path\nprint(Path({str(cache)!r}).read_text())\n'
+        denied = _run_planted_xcrun_probe(cap, code)
+        granted = _run_planted_xcrun_probe(replace(cap, read_roots=(*cap.read_roots, secret)), code)
+        assert denied.returncode != 0 and b'outside-secret' not in denied.stdout + denied.stderr
+        assert granted.returncode == 0, granted.stderr
+        assert granted.stdout == b'outside-secret\n'
 
 
 def test_selected_python_extensions_load_with_readonly_runtime_libraries(setup):

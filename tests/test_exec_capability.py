@@ -231,17 +231,71 @@ def test_darwin_cache_filter_only_matches_cache_basename(cap, tmp_path, monkeypa
     monkeypatch.setattr(isolation.os, 'confstr', lambda key: str(directory) + '/')
     monkeypatch.setattr(isolation.shutil, 'which', lambda name: '/usr/bin/' + name)
     cache_filter = isolation._darwin_xcrun_filter()
-    encoded = re.findall(r'\(regex #("(?:[^"\\]|\\.)*")\)', cache_filter)
-    patterns = [json.loads(value) for value in encoded]
+    # #"..." is a raw SBPL regex literal, not a JSON string. Decoding it as
+    # JSON doubles backslashes away and masks a vacuous sandbox rule.
+    encoded = re.findall(r'\(regex #("[^"]*")\)', cache_filter)
+    patterns = [value[1:-1] for value in encoded]
     assert patterns
     assert any(re.fullmatch(pattern, str(directory / 'xcrun_db-Ab123')) for pattern in patterns)
     for path in (directory, directory / 'unrelated', directory / 'xcrun_db-',
                  directory / 'xcrun_db-dir/child', directory / 'prefix-xcrun_db-a',
-                 directory.parent / 'other/xcrun_db-a'):
+                 directory.parent / 'other/xcrun_db-a',
+                 directory.parent / 'tempX[literal]/xcrun_db-a'):
         assert not any(re.fullmatch(pattern, str(path)) for pattern in patterns)
     command, _ = capability_command([TRUE], cap, platform_backend='sandbox-exec')
     assert command[2].count(cache_filter) == 2
     assert f'(subpath {json.dumps(str(directory))})' not in command[2]
+
+
+def _deny_clause(profile: str, operation: str) -> str:
+    start = profile.index(f'(deny {operation} ')
+    depth = 0
+    quoted = False
+    escaped = False
+    for index in range(start, len(profile)):
+        character = profile[index]
+        if escaped:
+            escaped = False
+        elif quoted and character == '\\':
+            escaped = True
+        elif character == '"':
+            quoted = not quoted
+        elif not quoted and character == '(':
+            depth += 1
+        elif not quoted and character == ')':
+            depth -= 1
+            if depth == 0:
+                return profile[start:index + 1]
+    raise AssertionError(f'unclosed sandbox rule: {operation}')
+
+
+def test_darwin_shared_xcrun_cache_is_read_only_in_both_profiles(cap, tmp_path, monkeypatch):
+    import kernel_test_isolation as isolation
+
+    directory = tmp_path / 'planted-temp'
+    directory.mkdir()
+    alias = tmp_path / 'temp-alias'
+    alias.symlink_to(directory, target_is_directory=True)
+    monkeypatch.setattr(isolation.sys, 'platform', 'darwin')
+    monkeypatch.setattr(isolation.platform, 'system', lambda: 'Darwin')
+    monkeypatch.setattr(isolation, '_darwin_user_temp_dir', lambda: alias)
+    monkeypatch.setattr(isolation, 'sandbox_executable', lambda name: '/usr/bin/sandbox-exec')
+    root = tmp_path / 'repo'
+    root.mkdir()
+
+    shell_profile = isolation.capability_command([TRUE], cap, platform_backend='sandbox-exec')[0][2]
+    check_profile = isolation.isolated_command([TRUE], root, {'PATH': '/usr/bin'})[0][2]
+    cache_literals = {f'(literal {json.dumps(str(path / "xcrun_db"))})'
+                      for path in (alias, directory)}
+    for profile, read_operations in ((shell_profile, ('file-read*',)),
+                                     (check_profile, ('file-read-data', 'file-read-metadata'))):
+        for operation in read_operations:
+            assert all(literal in _deny_clause(profile, operation)
+                       for literal in cache_literals)
+        assert all(literal not in _deny_clause(profile, 'file-write*')
+                   for literal in cache_literals)
+        assert f'(subpath {json.dumps(str(alias))})' not in profile
+        assert f'(subpath {json.dumps(str(directory))})' not in profile
 
 
 @pytest.mark.parametrize('directory', [None, '', 'relative/path'])

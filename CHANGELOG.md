@@ -10,6 +10,8 @@
 - The checkpoint on/off wire test now checks that every request shows `sandbox_seconds_remaining=unbounded`, the reason raw bytes can match across runs, and includes planted controls showing it still catches one changed byte outside the receipt IDs and a change in how many distinct receipts a request declares.
 - Acceptance coverage now kills the second checkpoint save during an audit-journal suffix chunk write and, on Darwin, during seeded run-environment cloning; resume must restore the previous complete journal bytes and preserve request parity.
 - Fixed: the live continuation countdown now occupies one fixed-width slot, and request sizing counts a canonical version of that slot so clock speed cannot change source selection or call-site census admission.
+- Fixed: macOS developer tools under the sandbox no longer fail with "couldn't create cache file" or leave xcrun_db-* temp files.
+- Security (macOS): protected-tree deny rules on paths containing non-ASCII characters were not enforced, so a sandboxed process could write inside such a protected tree. The sandbox profile quoted paths as JSON, which turned characters like `é` into `\u00e9` escapes that macOS does not decode, so the rule named a different path. This affected every release since 0.1.0. Paths are now quoted for the macOS sandbox directly, and allow rules on paths containing punctuation (`.`, `-`, `+`) now match too.
 
 ## 0.3.30 (2026-11-04)
 

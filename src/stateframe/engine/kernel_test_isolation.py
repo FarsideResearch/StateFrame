@@ -24,9 +24,11 @@ import sys
 
 if __package__:
     from .kernel_exec_capability import system_runtime_read_roots
+    from .kernel_sbpl import sbpl_path_regex, sbpl_string
     from .kernel_test_python import selected_test_python
 else:
     from kernel_exec_capability import system_runtime_read_roots
+    from kernel_sbpl import sbpl_path_regex, sbpl_string
     from kernel_test_python import selected_test_python
 
 
@@ -189,19 +191,20 @@ def isolated_command(command: list[str], root: Path, env: dict[str, str], *,
                for p in (Path(sys.executable), Path(sys.executable).resolve())):
             readable.update({"/opt/homebrew/Cellar", "/opt/homebrew/opt", "/opt/homebrew/lib"})
         readable.update(str(Path(value).resolve()) for value in site.getsitepackages())
-        rules = " ".join(f"(subpath {json.dumps(value)})" for value in sorted(readable))
+        rules = " ".join(f"(subpath {sbpl_string(value)})" for value in sorted(readable))
         ancestors = {str(parent) for value in readable for parent in Path(value).parents}
-        metadata = " ".join(f"(literal {json.dumps(value)})" for value in sorted(ancestors))
+        metadata = " ".join(f"(literal {sbpl_string(value)})" for value in sorted(ancestors))
         devices = '(subpath "/dev")'
+        shared_xcrun_cache = _darwin_xcrun_shared_cache_read_filter()
         # Keep ordinary interpreter Mach/IPC operations while restricting its
         # information-bearing filesystem and network capabilities explicitly.
         writable = scratch if readonly_workspace else root
         profile = ("(version 1) (allow default) (deny network*) "
                    # The launcher reads ancestor directories while resolving its
                    # executable. Permit those exact directories, not their children.
-                   f"(deny file-read-data (require-not (require-any {rules} {metadata} {devices}))) "
-                   f"(deny file-read-metadata (require-not (require-any {rules} {metadata} {devices}))) "
-                   f"(deny file-write* (require-not (require-any (subpath {json.dumps(str(writable))}) {devices})))")
+                   f"(deny file-read-data (require-not (require-any {rules} {metadata} {devices} {shared_xcrun_cache}))) "
+                   f"(deny file-read-metadata (require-not (require-any {rules} {metadata} {devices} {shared_xcrun_cache}))) "
+                   f"(deny file-write* (require-not (require-any (subpath {sbpl_string(str(writable))}) {devices})))")
         return [executable, "-p", profile, *command], clean
     # No host home, repository, private result tree, sockets or audit directory is mounted.
     arguments = [executable, "--die-with-parent", "--unshare-all", "--new-session",
@@ -277,17 +280,24 @@ def _darwin_user_temp_dir() -> Path:
     return Path(directory)
 
 
-def _darwin_xcrun_filter() -> str:
+def _darwin_xcrun_cache_paths() -> list[Path]:
     """Developer shims use confstr's cache directory even with a private TMPDIR."""
     if sys.platform != "darwin":
-        return ""
+        return []
     directory = _darwin_user_temp_dir()
+    return sorted({directory, directory.resolve(strict=True)})
+
+
+def _darwin_xcrun_filter() -> str:
     # Anchor both ends and exclude slashes: never grant the directory or children
     # of a cache-named directory. Admit the canonical /private path and its alias.
-    paths = {directory, directory.resolve(strict=True)}
-    return " ".join('(regex #' + json.dumps("^" + re.escape(str(path)) +
-                                          "/xcrun_db-[^/]+$") + ')'
-                    for path in sorted(paths))
+    return " ".join('(regex ' + sbpl_path_regex(path, "/xcrun_db-[^/]+$") + ')'
+                    for path in _darwin_xcrun_cache_paths())
+
+
+def _darwin_xcrun_shared_cache_read_filter() -> str:
+    return " ".join(f'(literal {sbpl_string(str(path / "xcrun_db"))})'
+                    for path in _darwin_xcrun_cache_paths())
 
 
 _BWRAP_SPECIAL_MOUNTS = (Path("/dev"), Path("/proc"))
@@ -360,13 +370,14 @@ def capability_command(command, cap, *, platform_backend=None, shared_namespace=
     writes = set(cap.write_roots) | ({cap.workspace} if cap.workspace_writable else set())
     if selected == "sandbox-exec":
         cache_filter = _darwin_xcrun_filter()
+        shared_cache_read_filter = _darwin_xcrun_shared_cache_read_filter()
         def filters(paths):
-            return " ".join(f"(subpath {json.dumps(str(p))})" for p in sorted(paths))
+            return " ".join(f"(subpath {sbpl_string(str(p))})" for p in sorted(paths))
         ancestors = {p for root in reads for p in root.parents}
-        metadata = " ".join(f"(literal {json.dumps(str(p))})" for p in sorted(ancestors))
+        metadata = " ".join(f"(literal {sbpl_string(str(p))})" for p in sorted(ancestors))
         devices = '(literal "/dev/null") (literal "/dev/zero") (literal "/dev/random") (literal "/dev/urandom") (literal "/dev/fd")'
         profile = ("(version 1) (allow default) "
-                   f"(deny file-read* (require-not (require-any {filters(reads)} {metadata} {devices} {cache_filter}))) "
+                   f"(deny file-read* (require-not (require-any {filters(reads)} {metadata} {devices} {cache_filter} {shared_cache_read_filter}))) "
                    f"(deny file-write* (require-not (require-any {filters(writes)} {cache_filter} (literal \"/dev/null\")))) ")
         if single_process:
             profile += "(deny process-fork) "

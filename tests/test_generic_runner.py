@@ -310,6 +310,9 @@ def test_pytest_profile_matches_987ae68_fixture(monkeypatch):
     with tempfile.TemporaryDirectory(dir="/private/tmp") as directory:
         root = Path(directory) / "repo"
         root.mkdir()
+        xcrun_dir = Path(directory) / "xcrun-temp"
+        xcrun_dir.mkdir()
+        monkeypatch.setattr(isolation, "_darwin_user_temp_dir", lambda: xcrun_dir)
         argv, _ = isolation.isolated_command(
             [fake_sys.executable, "-m", "pytest", "-q"], root, {"PATH": "/usr/bin"})
         actual = argv[2].replace(str(root.resolve()), "<ROOT>").replace(directory, "<DIR>")
