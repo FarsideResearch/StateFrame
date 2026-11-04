@@ -15,6 +15,7 @@ from fixtures.process_signals import signal_run_owned
 from stateframe.scripted_endpoint import Script, serve
 from stateframe.request_records import list_request_records, read_request_record
 import kernel_measurement as measurement
+from engine_run import run_monitored, start_monitored
 
 ROOT = Path(__file__).resolve().parents[1]
 pytestmark = pytest.mark.host_sandbox
@@ -55,8 +56,11 @@ def run_script(tmp_path, steps, *, failing=False, flags=(), prepare=None):
     server = serve(script)
     run = tmp_path / "run"
     try:
-        result = subprocess.run(command(repo, run, f"http://127.0.0.1:{server.server_port}/v1", flags),
-                                env=environment(), capture_output=True, text=True, timeout=240)
+        result = run_monitored(
+            command(repo, run, f"http://127.0.0.1:{server.server_port}/v1", flags),
+            env=environment(), capture_output=True, text=True, expected_seconds=240,
+            run_dir=run,
+        )
         summary_path = run / "summary.json"
         assert summary_path.is_file(), ("run wrote no summary.json\nSTDOUT:\n" + result.stdout[-4000:]
                                         + "\nSTDERR:\n" + result.stderr[-4000:])
@@ -183,11 +187,17 @@ def test_kill_resume_serves_byte_identical_next_request(tmp_path):
     script = PausedScript()
     server = serve(script)
     url = f"http://127.0.0.1:{server.server_port}/v1"
-    output = (tmp_path / "first.log").open("w")
-    process = subprocess.Popen(command(repo, run, url), env=environment(), stdout=output,
-                               stderr=subprocess.STDOUT)
+    process = start_monitored(
+        command(repo, run, url), env=environment(), stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE, text=True, run_dir=run, expected_seconds=120,
+        step="interrupted shell run",
+    )
     try:
-        assert script.arrived.wait(120), (tmp_path / "first.log").read_text()
+        while not script.arrived.wait(0.1):
+            if process.poll() is not None:
+                stdout, stderr = process.communicate()
+                pytest.fail(f"first attempt stopped before the provider pause: {stdout}{stderr}")
+        assert script.arrived.is_set()
         tape = [json.loads(line) for line in (run / "tool-tape.jsonl").read_text().splitlines()]
         assert [row["kind"] for row in tape] == ["intent", "complete"]
         assert tape[0]["call_id"] == tape[1]["call_id"]
@@ -204,9 +214,9 @@ def test_kill_resume_serves_byte_identical_next_request(tmp_path):
         while script.position == 1 and time.monotonic() < deadline:
             time.sleep(0.01)
         script.position = 1
-        result = subprocess.run([sys.executable, "-m", "stateframe", "resume", str(run),
+        result = run_monitored([sys.executable, "-m", "stateframe", "resume", str(run),
                                  "--endpoint", url, "--model", "scripted", "--quiet"],
-                                env=environment(), capture_output=True, text=True, timeout=240)
+                                env=environment(), capture_output=True, text=True, expected_seconds=240)
         assert result.returncode == 0, result.stdout + result.stderr
         rebuilt = {name: read_request_record(run, name) for name in list_request_records(run)}
         assert original.keys() <= rebuilt.keys()
@@ -220,7 +230,6 @@ def test_kill_resume_serves_byte_identical_next_request(tmp_path):
             signal_run_owned(run, process, signal.SIGTERM, deadline=time.monotonic(),
                              what="shell replay cleanup", require_checkpoint_saved=False)
             process.wait(timeout=20)
-        output.close()
         server.shutdown()
         server.server_close()
 def test_kill_resume_preserves_repeated_read_request_bytes(tmp_path):
@@ -249,15 +258,18 @@ def test_kill_resume_preserves_repeated_read_request_bytes(tmp_path):
     script = PausedScript()
     server = serve(script)
     url = f"http://127.0.0.1:{server.server_port}/v1"
-    output = (tmp_path / "first.log").open("w")
     env = environment()  # Both switches use their default engine values.
-    process = subprocess.Popen(command(repo, run, url), env=env, stdout=output,
-                               stderr=subprocess.STDOUT)
+    process = start_monitored(
+        command(repo, run, url), env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        text=True, run_dir=run, expected_seconds=120,
+        step="interrupted repeated-read run",
+    )
     try:
-        deadline = time.monotonic() + 120
-        while not script.arrived.wait(0.1) and process.poll() is None:
-            assert time.monotonic() < deadline, "provider request timed out"
-        assert script.arrived.is_set(), (tmp_path / "first.log").read_text()
+        while not script.arrived.wait(0.1):
+            if process.poll() is not None:
+                stdout, stderr = process.communicate()
+                pytest.fail(f"first attempt stopped before the provider pause: {stdout}{stderr}")
+        assert script.arrived.is_set()
         original = {name: read_request_record(run, name) for name in list_request_records(run)}
         assert len(original) >= 3
         assert any(b"unchanged since request" in body for body in original.values())
@@ -270,9 +282,9 @@ def test_kill_resume_preserves_repeated_read_request_bytes(tmp_path):
         while script.position == 2 and time.monotonic() < deadline:
             time.sleep(0.01)
         script.position = 2
-        result = subprocess.run([sys.executable, "-m", "stateframe", "resume", str(run),
+        result = run_monitored([sys.executable, "-m", "stateframe", "resume", str(run),
                                  "--endpoint", url, "--model", "scripted", "--quiet"],
-                                env=env, capture_output=True, text=True, timeout=240)
+                                env=env, capture_output=True, text=True, expected_seconds=240)
         assert result.returncode == 0, result.stdout + result.stderr
         rebuilt = {name: read_request_record(run, name) for name in list_request_records(run)}
         assert original.keys() <= rebuilt.keys()
@@ -286,6 +298,5 @@ def test_kill_resume_preserves_repeated_read_request_bytes(tmp_path):
             signal_run_owned(run, process, signal.SIGTERM, deadline=time.monotonic(),
                              what="repeated read cleanup", require_checkpoint_saved=False)
             process.wait(timeout=20)
-        output.close()
         server.shutdown()
         server.server_close()

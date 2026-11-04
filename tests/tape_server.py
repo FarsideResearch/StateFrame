@@ -3,8 +3,10 @@ from __future__ import annotations
 
 import gzip
 import json
+import math
 import re
 import threading
+import time
 from collections.abc import Mapping, Sequence
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -17,7 +19,12 @@ _MAX_BODY_BYTES = 32 * 1024 * 1024
 class TapeServer:
     """Serve a fixed sequence of assistant messages and calibrated token counts."""
 
-    def __init__(self, script: Mapping[str, object] | str | Path) -> None:
+    def __init__(
+        self,
+        script: Mapping[str, object] | str | Path,
+        *,
+        turn_delay_seconds: float = 0.0,
+    ) -> None:
         if isinstance(script, (str, Path)):
             try:
                 with gzip.open(script, "rt", encoding="utf-8") as source:
@@ -33,6 +40,12 @@ class TapeServer:
         if not isinstance(turns, Sequence) or isinstance(turns, (str, bytes)) or not turns:
             raise ValueError("replay script must contain at least one turn")
         self._turns = tuple(turns)
+        if (isinstance(turn_delay_seconds, bool)
+                or not isinstance(turn_delay_seconds, (int, float))
+                or not math.isfinite(turn_delay_seconds)
+                or not 0 <= turn_delay_seconds <= 5):
+            raise ValueError("turn delay must be a finite number between 0 and 5 seconds")
+        self._turn_delay_seconds = float(turn_delay_seconds)
         self._model = str(script.get("model") or "allocation-replay-model")
         self._divisor = float(script.get("tokenize_divisor", 1.245))
         if self._divisor <= 0:
@@ -40,8 +53,10 @@ class TapeServer:
         slots = script.get("slots", [65536] * 8)
         self._slots = tuple(slots) if isinstance(slots, Sequence) and not isinstance(slots, (str, bytes)) else (65536,)
         self._lock = threading.Lock()
+        self._served_lock = threading.Lock()
         self._turn_index = 0
         self._request_count = 0
+        self._served_turn_indexes: set[int] = set()
         self._server = ThreadingHTTPServer(("127.0.0.1", 0), self._handler())
         self._server.daemon_threads = True
         self._thread: threading.Thread | None = None
@@ -54,6 +69,20 @@ class TapeServer:
     def request_count(self) -> int:
         with self._lock:
             return self._request_count
+
+    @property
+    def total_steps(self) -> int:
+        return len(self._turns)
+
+    @property
+    def served_steps(self) -> int:
+        with self._served_lock:
+            return len(self._served_turn_indexes)
+
+    @property
+    def terminal_served(self) -> bool:
+        with self._served_lock:
+            return self.total_steps - 1 in self._served_turn_indexes
 
     def _token_count(self, text: str) -> int:
         return max(1, round(len(_PIECE.findall(text)) / self._divisor))
@@ -122,19 +151,26 @@ class TapeServer:
                     index = tape._turn_index
                     tape._turn_index += 1
                     tape._request_count += 1
-                turn = tape._turns[min(index, len(tape._turns) - 1)]
+                turn_index = min(index, len(tape._turns) - 1)
+                turn = tape._turns[turn_index]
                 message = turn.get("message") if isinstance(turn, Mapping) else None
                 if not isinstance(message, Mapping):
                     self._send_json(500, {"error": {"message": "invalid replay turn"}})
                     return
                 prompt = tape._token_count(json.dumps(messages, ensure_ascii=False))
-                self._send_json(200, {
-                    "id": f"chatcmpl-{index + 1}",
-                    "object": "chat.completion",
-                    "model": tape._model,
-                    "choices": [{"index": 0, "finish_reason": "tool_calls", "message": dict(message)}],
-                    "usage": {"prompt_tokens": prompt, "completion_tokens": 200, "total_tokens": prompt + 200},
-                })
+                if tape._turn_delay_seconds:
+                    time.sleep(tape._turn_delay_seconds)
+                # Hold the observation lock through the write so a client that has received
+                # the response cannot observe stale served-turn state immediately afterward.
+                with tape._served_lock:
+                    self._send_json(200, {
+                        "id": f"chatcmpl-{index + 1}",
+                        "object": "chat.completion",
+                        "model": tape._model,
+                        "choices": [{"index": 0, "finish_reason": "tool_calls", "message": dict(message)}],
+                        "usage": {"prompt_tokens": prompt, "completion_tokens": 200, "total_tokens": prompt + 200},
+                    })
+                    tape._served_turn_indexes.add(turn_index)
 
         return Handler
 

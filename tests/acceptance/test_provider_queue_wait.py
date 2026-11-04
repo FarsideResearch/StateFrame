@@ -5,7 +5,6 @@ from __future__ import annotations
 import http.client
 import json
 import shutil
-import subprocess
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -16,6 +15,7 @@ import pytest
 from stateframe.engine.kernel_journal_store import journal_paths, open_journal
 
 from ._support import Endpoint, PYTHON, ROOT, environment
+from engine_run import run_monitored
 
 
 @pytest.mark.host_sandbox
@@ -80,7 +80,7 @@ def test_first_queued_send_submits_once_and_run_succeeds(tmp_path):
             profile_path.write_text(json.dumps(profile))
             # The run-level budget is generous: loaded CI hosts (load 60-80) exhausted 60 s on the
             # whole run. The queue timings under test (2 s cap, 4.2 s hold, 8 s max) are unchanged.
-            result = subprocess.run([
+            result = run_monitored([
                 PYTHON, "-m", "stateframe", "run", "--repo", str(repo),
                 "--task", "Fix the pricing code so the tests pass.",
                 "--endpoint", f"http://127.0.0.1:{proxy.server_port}/v1",
@@ -88,7 +88,7 @@ def test_first_queued_send_submits_once_and_run_succeeds(tmp_path):
                 "--run-dir", str(run),
                 "--test-python", PYTHON, "--max-turns", "16", "--timeout", "240",
                 "--quiet",
-            ], capture_output=True, text=True, env=environment(), timeout=300, check=False)
+            ], capture_output=True, text=True, env=environment(), expected_seconds=300, check=False)
             if ("engine interpreter" in result.stderr
                     and "sandbox_apply: Operation not permitted" in result.stderr):
                 pytest.skip("nested host sandbox prevents the engine startup probe")

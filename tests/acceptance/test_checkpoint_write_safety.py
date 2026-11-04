@@ -17,6 +17,7 @@ import pytest
 
 from ._support import Endpoint, FIXTURES, PYTHON, ROOT, copy_repo, environment, run_case
 from fixtures.process_signals import record_identity, signal_run_owned, signal_run_verified
+from engine_run import EngineProcess, run_monitored, start_monitored
 
 
 pytestmark = pytest.mark.host_sandbox
@@ -252,7 +253,7 @@ def _wait_pid_gone(pid: int, timeout: float = 40) -> None:
     raise AssertionError(f"pid {pid} was still present after {timeout} seconds")
 
 
-def _stop_paused_run(run_dir: Path, runner: subprocess.Popen[str], engine_pid: int,
+def _stop_paused_run(run_dir: Path, runner: EngineProcess, engine_pid: int,
                      writer_pid: int, launched_after: float) -> None:
     # The synchronous fault modes use the engine as their writer; keep both PIDs explicit.
     children = tuple(dict.fromkeys((engine_pid, writer_pid)))
@@ -281,7 +282,7 @@ def _stop_paused_run(run_dir: Path, runner: subprocess.Popen[str], engine_pid: i
     _wait_pid_gone(runner.pid)
 
 
-def _wait_for(path: Path, process: subprocess.Popen[str], timeout: float = 600,
+def _wait_for(path: Path, process: EngineProcess, timeout: float = 600,
               run_dir: Path | None = None) -> None:
     deadline = time.monotonic() + timeout
     while not path.exists() and time.monotonic() < deadline:
@@ -353,11 +354,12 @@ def test_killed_second_save_restores_previous_complete_journal(
             command = _run_command(launcher, repo, run_dir, endpoint.url,
                                    run_env=mode == "env")
             launched_after = time.time()
-            runner = subprocess.Popen(
+            runner = start_monitored(
                 command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
                 env=_fault_environment(tmp_path, marker, mode,
-                                       checkpoint_every=2 if mode == "journal" else 1),
-                start_new_session=True)
+                                        checkpoint_every=2 if mode == "journal" else 1),
+                run_dir=run_dir, expected_seconds=600,
+                step="paused second checkpoint save", watch_paths=(run_dir / "checkpoints",))
             if mode == "env":
                 _wait_for(run_dir / "env-seed.json", runner)
             _wait_for(marker, runner, run_dir=run_dir)
@@ -406,13 +408,13 @@ def test_killed_second_save_restores_previous_complete_journal(
             _assert_latest(pointer, previous)
             assert pending[0].is_dir() and not (root / pending[0].name[1:-4]).exists()
 
-            resumed = subprocess.run(
+            resumed = run_monitored(
                 [PYTHON, str(launcher), "resume", str(run_dir), "--endpoint", endpoint.url,
                  "--model", "scripted", "--quiet", "--keep-checkpoints"],
                 capture_output=True, text=True,
                 env=_fault_environment(tmp_path, marker, "observe_restore", restored_journal,
                                        checkpoint_every=2 if mode == "journal" else 1),
-                timeout=240, check=False)
+                expected_seconds=240, check=False)
             assert resumed.returncode == 0, resumed.stdout + resumed.stderr
             _assert_injection_ok(tmp_path, minimum_saves=2)
             assert json.loads((run_dir / "summary.json").read_text())["succeeded"] is True
@@ -467,9 +469,13 @@ def test_killed_writer_leaves_no_published_partial_checkpoint_and_replays(tmp_pa
         assert endpoint.stdout is not None
         url = endpoint.stdout.readline().strip()
         assert url.startswith("http://127.0.0.1:")
-        runner = subprocess.Popen(_run_command(launcher, repo, run_dir, url),
-                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-                                  env=_fault_environment(tmp_path, writer_marker, "pause"))
+        runner = start_monitored(
+            _run_command(launcher, repo, run_dir, url),
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            env=_fault_environment(tmp_path, writer_marker, "pause"), run_dir=run_dir,
+            expected_seconds=600, step="interrupted checkpoint writer run",
+            watch_paths=(run_dir / "checkpoints",),
+        )
         _wait_for(writer_marker, runner)
         _assert_injection_ok(tmp_path, minimum_saves=1)
         writer_pid = int(writer_marker.read_text())
@@ -495,10 +501,10 @@ def test_killed_writer_leaves_no_published_partial_checkpoint_and_replays(tmp_pa
         runner.communicate(timeout=40)
         assert not pointer.exists()
         assert list((run_dir / "checkpoints").glob(".*.tmp"))
-        resumed = subprocess.run(
+        resumed = run_monitored(
             [PYTHON, "-m", "stateframe", "resume", str(run_dir), "--endpoint", url,
              "--model", "scripted", "--quiet"], capture_output=True, text=True,
-            env=environment(), timeout=240, check=False)
+            env=environment(), expected_seconds=240, check=False)
         assert resumed.returncode == 0, resumed.stdout + resumed.stderr
         assert json.loads((run_dir / "summary.json").read_text())["succeeded"] is True
         assert _wire(run_dir)[1] == _wire(control.run_dir)[1]
@@ -543,10 +549,10 @@ def test_corrupt_state_refuses_restore_and_replays(tmp_path: Path, damage: str) 
         changed[len(changed) // 2] ^= 0x80
         state.write_bytes(changed)
     try:
-        resumed = subprocess.run(
+        resumed = run_monitored(
             [PYTHON, "-m", "stateframe", "resume", str(run_dir), "--endpoint", url,
              "--model", "scripted", "--quiet"], capture_output=True, text=True,
-            env=environment(), timeout=240, check=False)
+            env=environment(), expected_seconds=240, check=False)
     finally:
         endpoint.terminate()
         endpoint.wait(timeout=5)
@@ -567,10 +573,12 @@ def test_writer_enospc_does_not_block_next_request(tmp_path: Path) -> None:
     launcher, marker = _fault_files(tmp_path)
     run_dir = tmp_path / "failed-write"
     with Endpoint(SCRIPT) as endpoint:
-        process = subprocess.run(_run_command(launcher, repo, run_dir, endpoint.url),
-                                 capture_output=True, text=True,
-                                 env=_fault_environment(tmp_path, marker, "enospc"),
-                                 timeout=240, check=False)
+        process = run_monitored(
+            _run_command(launcher, repo, run_dir, endpoint.url),
+            capture_output=True, text=True,
+            env=_fault_environment(tmp_path, marker, "enospc"),
+            expected_seconds=240, run_dir=run_dir, check=False,
+        )
     assert process.returncode == 0, process.stdout + process.stderr
     assert json.loads((run_dir / "summary.json").read_text())["succeeded"] is True
     _assert_injection_ok(tmp_path, minimum_saves=1)

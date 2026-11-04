@@ -16,6 +16,7 @@ from pathlib import Path
 import pytest
 
 from stateframe.scripted_endpoint import Script, serve
+from engine_run import run_monitored
 
 ROOT = Path(__file__).resolve().parents[1]
 pytestmark = pytest.mark.host_sandbox
@@ -32,12 +33,12 @@ def _run(tmp_path: Path, switch: str | None) -> tuple[subprocess.CompletedProces
     if switch is not None:
         environment["STATEFRAME_STABLE_TOOL_HEAD"] = switch
     try:
-        result = subprocess.run(
+        result = run_monitored(
             [sys.executable, "-m", "stateframe", "run", "--repo", str(repo),
              "--task", "Fix the pricing code so the tests pass.",
              "--endpoint", f"http://127.0.0.1:{server.server_port}/v1", "--model", "scripted",
              "--run-dir", str(run), "--test-python", sys.executable, "--max-turns", "16", "--quiet"],
-            env=environment, capture_output=True, text=True, timeout=240)
+            env=environment, capture_output=True, text=True, expected_seconds=240)
         script.assert_consumed()
         return result, run
     finally:

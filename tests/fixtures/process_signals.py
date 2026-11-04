@@ -14,6 +14,8 @@ import subprocess
 import sys
 import time
 
+from engine_run import EngineProcess
+
 
 @dataclass(frozen=True)
 class ProcessIdentity:
@@ -107,8 +109,19 @@ def _safe_target(pid: int) -> int:
     return pgid
 
 
-def signal_owned(popen: subprocess.Popen[object], sig: signal.Signals | int) -> None:
-    """Signal a Popen held by this test, including its private process group."""
+def signal_owned(popen: subprocess.Popen[object] | EngineProcess,
+                 sig: signal.Signals | int) -> None:
+    """Signal a held child or monitored child group without trusting a free PID."""
+    if isinstance(popen, EngineProcess):
+        if popen.returncode is not None:
+            raise ProcessLookupError("owned process is no longer running")
+        if popen.process_group_id != popen.pid:
+            raise RuntimeError("monitored process group does not match its launch identity")
+        pgid = _safe_target(popen.pid)
+        if pgid != popen.process_group_id:
+            raise RuntimeError("owned process is no longer in its monitored process group")
+        os.killpg(pgid, sig)
+        return
     if not isinstance(popen, subprocess.Popen) or popen.poll() is not None:
         raise ProcessLookupError("owned process is no longer running")
     pgid = _safe_target(popen.pid)
@@ -132,6 +145,17 @@ def signal_verified(pid: int, recorded_identity: ProcessIdentity,
         os.killpg(pid, sig)
     else:
         os.kill(pid, sig)
+
+
+def monitored_group_exists(process_group_id: int) -> bool:
+    """Probe a monitored child's process group without signalling it."""
+    try:
+        os.killpg(process_group_id, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
 
 
 def wait_for_checkpoint_saved(run_dir: Path, *, deadline: float, minimum: int = 1,
@@ -177,7 +201,7 @@ def signal_run_verified(run_dir: Path, pid: int, identity: ProcessIdentity,
     signal_verified(pid, identity, sig)
 
 
-def signal_run_owned(run_dir: Path, popen: subprocess.Popen[object],
+def signal_run_owned(run_dir: Path, popen: subprocess.Popen[object] | EngineProcess,
                      sig: signal.Signals | int, *, deadline: float, what: str,
                      require_checkpoint_saved: bool = True, group: bool = False) -> None:
     """Interrupt a held run process, optionally including its private group."""
@@ -186,6 +210,13 @@ def signal_run_owned(run_dir: Path, popen: subprocess.Popen[object],
     if group:
         signal_owned(popen, sig)
     else:
+        if isinstance(popen, EngineProcess):
+            if popen.returncode is not None or popen.process_group_id != popen.pid:
+                raise ProcessLookupError("owned run process is no longer running")
+            if _safe_target(popen.pid) != popen.process_group_id:
+                raise RuntimeError("owned process is no longer in its monitored process group")
+            os.kill(popen.pid, sig)
+            return
         if not isinstance(popen, subprocess.Popen) or popen.poll() is not None:
             raise ProcessLookupError("owned run process is no longer running")
         popen.send_signal(sig)

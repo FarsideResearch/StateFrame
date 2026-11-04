@@ -16,8 +16,10 @@ _RETIRED_PARITY_BASELINES = {
 }
 # Fixture repositories under tests/e2e carry their own tests; they run inside engine runs only.
 collect_ignore_glob = ["e2e/*", "fixtures/*"]  # recorded repo copies in fixtures/ are data, never tests
-for path in (ROOT / "src", ROOT / "src" / "stateframe" / "engine"):
+for path in (ROOT / "tests", ROOT / "src", ROOT / "src" / "stateframe" / "engine"):
     sys.path.insert(0, str(path))
+
+import serial_lane_plugin  # noqa: E402 -- pytest adds tests/ to sys.path when importing the root conftest
 
 
 @pytest.fixture(autouse=True, scope="session")
@@ -214,6 +216,29 @@ def pytest_configure(config):
         "markers", "host_sandbox: starts an OS sandbox (sandbox-exec/bwrap) or a local socket service")
     config.addinivalue_line(
         "markers", "expected_installer_leak: the test leaks _child installer state on purpose; the guard restores it")
+    serial_lane_plugin.configure_serial_lane(config)
+
+
+def pytest_collection_modifyitems(items, config):
+    serial_lane_plugin.collect_serial_lane_items(items, config)
+
+
+@pytest.hookimpl(hookwrapper=True)
+def pytest_runtest_makereport(item, call):
+    outcome = yield
+    serial_lane_plugin.record_call(item, outcome.get_result())
+
+
+def pytest_runtest_logreport(report):
+    serial_lane_plugin.record_logreport(report)
+
+
+def pytest_sessionfinish(session, exitstatus):
+    serial_lane_plugin.finish_session(session)
+
+
+def pytest_terminal_summary(terminalreporter, exitstatus, config):
+    serial_lane_plugin.terminal_summary(terminalreporter, exitstatus, config)
 
 
 @pytest.fixture(autouse=True)

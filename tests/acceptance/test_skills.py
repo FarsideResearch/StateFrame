@@ -12,6 +12,7 @@ import pytest
 
 from ._support import Endpoint, PYTHON, copy_repo, environment, read_requests, run_case
 from fixtures.process_signals import record_identity, signal_run_owned, signal_run_verified
+from engine_run import run_monitored, start_monitored
 
 
 pytestmark = pytest.mark.host_sandbox
@@ -142,17 +143,17 @@ def test_changed_skill_refuses_resume_before_attempt_archive(tmp_path):
     run_dir = tmp_path / "run"
     first_script = script(tmp_path, standard_steps())
     with Endpoint(first_script) as endpoint:
-        first = subprocess.run(
+        first = run_monitored(
             [PYTHON, "-m", "stateframe", "run", "--repo", str(repo), "--task", "Change app value",
              "--endpoint", endpoint.url, "--model", "scripted", "--run-dir", str(run_dir),
              "--test-python", PYTHON, "--test-cmd", "python -m unittest discover -s tests -q",
              "--max-turns", "1", "--skill", str(selected), "--quiet"],
-            capture_output=True, text=True, env=environment(), timeout=240, check=False)
+            capture_output=True, text=True, env=environment(), expected_seconds=240, check=False)
     assert read_requests(run_dir), first.stdout + first.stderr
     before = sorted(run_dir.glob("attempt-*"))
     (selected / "SKILL.md").write_text((selected / "SKILL.md").read_text() + "changed\n")
-    refused = subprocess.run([PYTHON, "-m", "stateframe", "resume", str(run_dir), "--max-turns", "5"],
-                             capture_output=True, text=True, env=environment(), timeout=30, check=False)
+    refused = run_monitored([PYTHON, "-m", "stateframe", "resume", str(run_dir), "--max-turns", "5"],
+                             capture_output=True, text=True, env=environment(), expected_seconds=30, check=False)
     assert refused.returncode == 2
     assert "skill edit-app changed since the run started (SKILL.md digest" in refused.stderr
     assert sorted(run_dir.glob("attempt-*")) == before
@@ -176,17 +177,18 @@ def test_unchanged_skill_resume_rebuilds_loaded_body(tmp_path, first_mode, resum
         assert ready
         url = endpoint.stdout.readline().strip()
         launched_after = time.time()
-        runner = subprocess.Popen(
+        runner = start_monitored(
             [PYTHON, "-m", "stateframe", "run", "--repo", str(repo), "--task", "Change app value",
              "--endpoint", url, "--model", "scripted", "--run-dir", str(run_dir),
              "--test-python", PYTHON, "--test-cmd", "python -m unittest discover -s tests -q",
              "--max-turns", "8", "--skill", str(selected), "--quiet"],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=environment(),
-            start_new_session=True)
+            start_new_session=True, run_dir=run_dir, expected_seconds=600,
+             step="interrupted skill resume run")
         deadline = time.monotonic() + 600
-        while time.monotonic() < deadline and not marker.exists():
+        while not marker.exists():
             if runner.poll() is not None:
-                stdout, stderr = runner.communicate(timeout=5)
+                stdout, stderr = runner.communicate()
                 raise AssertionError(stdout + stderr)
             time.sleep(0.1)
         assert marker.exists(), "second model request was not reached"
@@ -216,10 +218,10 @@ def test_unchanged_skill_resume_rebuilds_loaded_body(tmp_path, first_mode, resum
             endpoint.wait(timeout=5)
     remaining = script(tmp_path, standard_steps()[1:], tokenize_mode=resume_mode)
     with Endpoint(remaining) as endpoint:
-        resumed = subprocess.run(
+        resumed = run_monitored(
             [PYTHON, "-m", "stateframe", "resume", str(run_dir),
              "--endpoint", endpoint.url, "--model", "scripted", "--quiet"],
-            capture_output=True, text=True, env=environment(), timeout=240, check=False)
+            capture_output=True, text=True, env=environment(), expected_seconds=240, check=False)
     assert resumed.returncode == 0, resumed.stdout + resumed.stderr
     replayed = read_requests(run_dir)
     replayed_next = json.loads((run_dir / "wire/0002.request.json").read_bytes())
@@ -259,28 +261,28 @@ def test_limit_change_requires_external_consent_with_or_without_skills(tmp_path,
     ])
     flags = ["--skill", str(selected)] if selected is not None else []
     with Endpoint(calls) as endpoint:
-        first = subprocess.run(
+        first = run_monitored(
             [PYTHON, "-m", "stateframe", "run", "--repo", str(repo), "--task", "Check app value",
              "--endpoint", endpoint.url, "--model", "scripted", "--run-dir", str(run_dir),
              "--test-python", PYTHON, "--test-cmd", "python -m unittest discover -s tests -q",
              "--max-turns", "1", "--shell-network", "full", "--quiet", *flags],
-            capture_output=True, text=True, env=environment(), timeout=240, check=False)
+            capture_output=True, text=True, env=environment(), expected_seconds=240, check=False)
     assert len(read_requests(run_dir)) == 1, first.stdout + first.stderr
     old_tape = (run_dir / "tool-tape.jsonl").read_bytes()
     assert any(row["replay_class"] == "external" for row in
                (json.loads(line) for line in old_tape.splitlines()) if row["kind"] == "intent")
-    refused = subprocess.run(
+    refused = run_monitored(
         [PYTHON, "-m", "stateframe", "resume", str(run_dir), "--max-turns", "8", "--quiet"],
-        capture_output=True, text=True, env=environment(), timeout=30, check=False)
+        capture_output=True, text=True, env=environment(), expected_seconds=30, check=False)
     assert refused.returncode == 2
     assert "--replay-external" in refused.stderr
     assert not (run_dir / "attempts").exists()
     assert (run_dir / "tool-tape.jsonl").read_bytes() == old_tape
     with Endpoint(calls) as endpoint:
-        approved = subprocess.run(
+        approved = run_monitored(
             [PYTHON, "-m", "stateframe", "resume", str(run_dir), "--max-turns", "8",
              "--endpoint", endpoint.url, "--model", "scripted", "--replay-external", "--quiet"],
-            capture_output=True, text=True, env=environment(), timeout=240, check=False)
+            capture_output=True, text=True, env=environment(), expected_seconds=240, check=False)
     assert approved.returncode == 0, approved.stdout + approved.stderr
     spec = json.loads((run_dir / "spec.json").read_text())
     assert spec["resume"]["restart_live"] is True
@@ -298,18 +300,18 @@ def test_changed_step_limit_restarts_skill_run_live(tmp_path):
     run_dir = tmp_path / "run"
     calls = script(tmp_path, standard_steps())
     with Endpoint(calls) as endpoint:
-        first = subprocess.run(
+        first = run_monitored(
             [PYTHON, "-m", "stateframe", "run", "--repo", str(repo), "--task", "Change app value",
              "--endpoint", endpoint.url, "--model", "scripted", "--run-dir", str(run_dir),
              "--test-python", PYTHON, "--test-cmd", "python -m unittest discover -s tests -q",
              "--max-turns", "1", "--skill", str(selected), "--quiet"],
-            capture_output=True, text=True, env=environment(), timeout=240, check=False)
+            capture_output=True, text=True, env=environment(), expected_seconds=240, check=False)
     assert len(read_requests(run_dir)) == 1, first.stdout + first.stderr
     with Endpoint(calls) as endpoint:
-        resumed = subprocess.run(
+        resumed = run_monitored(
             [PYTHON, "-m", "stateframe", "resume", str(run_dir), "--max-turns", "8",
              "--endpoint", endpoint.url, "--model", "scripted", "--quiet"],
-            capture_output=True, text=True, env=environment(), timeout=240, check=False)
+            capture_output=True, text=True, env=environment(), expected_seconds=240, check=False)
     assert resumed.returncode == 0, resumed.stdout + resumed.stderr
     summary = json.loads((run_dir / "summary.json").read_text())
     assert summary["succeeded"] is True
@@ -379,21 +381,21 @@ def test_changed_skill_command_executable_refuses_call(tmp_path):
         ready, _, _ = select.select([server.stdout], [], [], 15)
         assert ready
         url = server.stdout.readline().strip()
-        runner = subprocess.Popen(
+        runner = start_monitored(
             [PYTHON, "-m", "stateframe", "run", "--repo", str(repo), "--task", "Check command change",
              "--endpoint", url, "--model", "scripted", "--run-dir", str(run_dir),
              "--test-python", PYTHON, "--test-cmd", "python -m unittest discover -s tests -q",
              "--max-turns", "8", "--skill", str(selected), "--trust-skill-tools", "--quiet"],
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=environment())
-        deadline = time.monotonic() + 90
-        while time.monotonic() < deadline and not marker.exists():
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=environment(),
+            run_dir=run_dir, expected_seconds=180, step="skill command mutation run")
+        while not marker.exists():
             if runner.poll() is not None:
-                out, err = runner.communicate(timeout=5)
+                out, err = runner.communicate()
                 raise AssertionError(out + err)
             time.sleep(0.1)
         assert marker.exists()
         executable.write_text("#!/bin/sh\nprintf 'changed\\n'\n")
-        runner.communicate(timeout=180)
+        runner.communicate()
         assert "REFUSED TOOL_CHANGED" in json.dumps(read_requests(run_dir))
     finally:
         if runner is not None and runner.poll() is None:

@@ -13,6 +13,7 @@ import pytest
 from stateframe.task_row import TaskRowError, _public_hint, build_row
 from stateframe.workcopy import create
 from acceptance._support import assert_tree_imports, tree_python
+from engine_run import run_monitored
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -172,13 +173,13 @@ def test_tests_only_repo_can_submit_declared_output(tmp_path, protection):
     environment.pop("PYTHONPATH", None)
     server = serve(script)
     try:
-        result = subprocess.run(
+        result = run_monitored(
             [python, "-m", "stateframe", "run", "--repo", str(repo),
              "--task", "Create output/result.txt. Make tests/test_output.py pass.",
              "--endpoint", f"http://127.0.0.1:{server.server_port}/v1", "--model", "scripted",
              "--test-python", sys.executable, "--run-dir", str(run),
              *(["--protect-tests", "all"] if protection == "all" else [])],
-            capture_output=True, text=True, timeout=240, env=environment,
+            capture_output=True, text=True, expected_seconds=240, env=environment,
         )
         summary = json.loads((run / "summary.json").read_text())
         assert result.returncode == 0, result.stdout + result.stderr

@@ -25,6 +25,7 @@ from stateframe import _child, resume
 from stateframe.scripted_endpoint import Script, ScriptStepUnavailable, serve
 from fixtures.process_signals import (record_identity, signal_run_owned, signal_run_verified,
                                       wait_for_checkpoint_saved)
+from engine_run import run_monitored, start_monitored
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -340,15 +341,14 @@ def test_checkpoint_resume_matches_uninterrupted_control(
             "--profile", str(profile_path),
             *flags, "--quiet",
         ]
-        process = subprocess.Popen(command, env=environment, stdout=subprocess.PIPE,
-                                   stderr=subprocess.PIPE, text=True)
-        deadline = time.monotonic() + 600  # generous: a loaded machine slows the run, not the behavior checked
+        process = start_monitored(command, env=environment, stdout=subprocess.PIPE,
+                                  stderr=subprocess.PIPE, text=True, run_dir=run,
+                                  expected_seconds=600, step="checkpoint resume interrupted run",
+                                  watch_paths=(run / "checkpoints",))
         while not script.waiting.wait(0.5):
             if process.poll() is not None:
-                stdout, stderr = process.communicate(timeout=10)
+                stdout, stderr = process.communicate()
                 pytest.fail(f"first attempt stopped before the interrupted request: {stdout}{stderr}")
-            if time.monotonic() >= deadline:
-                pytest.fail("first attempt did not reach the interrupted request in 600 seconds")
         completed = {
             name: data for name, data in _requests(run).items()
             if (run / "wire" / name.replace(".request.", ".response.")).exists()
@@ -377,7 +377,7 @@ def test_checkpoint_resume_matches_uninterrupted_control(
         assert len(child_pids) == 1, child_pids
         child = int(child_pids[0])
         identity = record_identity(child, launched_after=0, command_fragment="_child.py")
-        signal_run_verified(run, child, identity, signal.SIGKILL, deadline=deadline,
+        signal_run_verified(run, child, identity, signal.SIGKILL, deadline=checkpoint_deadline,
                             what="hook checkpoint resume")
         script.release.set()
         assert script.interrupted.wait(10)
@@ -392,8 +392,9 @@ def test_checkpoint_resume_matches_uninterrupted_control(
             control_command[control_command.index(
                 f"http://127.0.0.1:{server.server_port}/v1"
             )] = f"http://127.0.0.1:{control_server.server_port}/v1"
-            result = subprocess.run(control_command, env=environment,
-                                    capture_output=True, text=True, timeout=240)
+            result = run_monitored(control_command, env=environment, run_dir=control,
+                                   step="uninterrupted checkpoint control",
+                                   capture_output=True, text=True, expected_seconds=240)
             assert result.returncode == 0, result.stdout + result.stderr
             control_script.assert_consumed()
         finally:
@@ -402,11 +403,11 @@ def test_checkpoint_resume_matches_uninterrupted_control(
         control_requests = _requests(control)
         assert len(control_requests) >= len(_steps(variant))
 
-        resumed = subprocess.run(
+        resumed = run_monitored(
             [sys.executable, "-m", "stateframe", "resume", str(run),
              "--endpoint", f"http://127.0.0.1:{server.server_port}/v1",
              "--keep-checkpoints"],
-            env=environment, capture_output=True, text=True, timeout=240,
+            env=environment, capture_output=True, text=True, expected_seconds=240,
         )
         if resumed.returncode != 0:
             expected = script.steps[script.position - 1] if script.position else None

@@ -14,6 +14,7 @@ import pytest
 from stateframe.replay_tape import first_difference, normalized_digest
 from ._support import (Endpoint, PYTHON, ROOT, assert_tree_imports, budget, copy_repo,
                        environment, pass_environment, tree_python)
+from engine_run import run_monitored
 
 
 pytestmark = pytest.mark.host_sandbox
@@ -70,7 +71,7 @@ def _run_tree(root: Path, case: Path, repo: Path, script: Path, *,
     if stable_tool_head is not None:
         env["STATEFRAME_STABLE_TOOL_HEAD"] = stable_tool_head
     with Endpoint(script) as endpoint:
-        result = subprocess.run(
+        result = run_monitored(
             [python, "-m", "stateframe", "run", "--repo", str(repo),
              "--task", "Change app value and verify it", "--endpoint", endpoint.url,
              "--model", "scripted", "--run-dir", str(run_dir), "--test-python", PYTHON,
@@ -78,7 +79,7 @@ def _run_tree(root: Path, case: Path, repo: Path, script: Path, *,
              "--shell", "off", "--quiet",
              *(("--runner-kind", "pytest", "--protect-tests", "all") if legacy_mode else ())],
             capture_output=True, text=True,
-            env=env, timeout=budget("no_skills_run"), check=False)
+            env=env, expected_seconds=budget("no_skills_run"), check=False)
     requests = tuple(path.read_bytes() for path in sorted((run_dir / "wire").glob("*.request.json")))
     assert result.returncode == 0 and requests, result.stdout + result.stderr
     return requests

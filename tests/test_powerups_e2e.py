@@ -16,6 +16,7 @@ from stateframe.engine.kernel_effects import WorkspaceEffectPolicy
 from stateframe.engine.kernel_hook_exec import HookRunner
 from stateframe.engine.kernel_hooks import create_bundle, load_hook_files
 from stateframe.scripted_endpoint import Script, serve
+from engine_run import run_monitored
 
 ROOT = Path(__file__).resolve().parents[1]
 EXAMPLES = ROOT / "examples" / "powerups"
@@ -45,7 +46,7 @@ def _run(tmp_path, steps, *flags):
         "STATEFRAME_HOME": str(tmp_path / "home"),
     }
     try:
-        result = subprocess.run(
+        result = run_monitored(
             [
                 sys.executable,
                 "-m",
@@ -72,7 +73,7 @@ def _run(tmp_path, steps, *flags):
             env=env,
             capture_output=True,
             text=True,
-            timeout=600,
+            expected_seconds=600,
         )
         try:
             script.assert_consumed()

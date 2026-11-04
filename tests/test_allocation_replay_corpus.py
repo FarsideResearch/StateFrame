@@ -5,15 +5,15 @@ import json
 import os
 from pathlib import Path
 import shutil
-import subprocess
 import sys
 import time
 from dataclasses import dataclass
-from urllib.request import urlopen
+from urllib.request import Request, urlopen
 
 import pytest
 
 from _stateframe_home import isolated_stateframe_home
+from engine_run import EngineRunTimeout, run_monitored
 from tests.tape_server import TapeServer
 
 
@@ -21,6 +21,12 @@ ROOT = Path(__file__).resolve().parents[1]
 CORPUS = ROOT / "tests" / "replay_corpus"
 REPO_ROOT = (CORPUS / "_repos").resolve()
 ALLOCATION_ERRORS = ("FrameRequestAllocationError", "FrameFit5ImpossibleMinimum")
+# econ-flat-r1-p2 alone: 244 s / 23 requests (~10 s per turn). This is a generous
+# backstop only; progress-aware deadlines come from the shared family-1 helper.
+BACKSTOP_SECONDS_PER_TURN = 10
+BACKSTOP_HEADROOM_MULTIPLIER = 6
+BACKSTOP_FLOOR_SECONDS = 600
+PARENT_TIMEOUT_MARGIN_SECONDS = 30
 EXPECTED_CASE_IDS = frozenset({
     "econ-flat-r1-off",
     "econ-flat-r1-p1",
@@ -81,6 +87,9 @@ class ReplayOutcome:
     stderr: str
     elapsed_seconds: float
     endpoint_requests: int
+    served_steps: int
+    total_steps: int
+    terminal_served: bool
 
     @property
     def evidence(self) -> str:
@@ -194,6 +203,15 @@ def _broken_engine_python(tmp_path: Path) -> Path:
     return wrapper
 
 
+def _backstop_timeout_seconds(total_steps: int) -> int:
+    if type(total_steps) is not int or total_steps <= 0:
+        raise ValueError("tape must contain at least one step")
+    return max(
+        BACKSTOP_FLOOR_SECONDS,
+        BACKSTOP_SECONDS_PER_TURN * total_steps * BACKSTOP_HEADROOM_MULTIPLIER,
+    )
+
+
 def _run_case(tmp_path: Path, case_id: str, *, break_deferral: bool = False) -> ReplayOutcome:
     case_dir = CORPUS / case_id
     metadata = CASE_METADATA[case_id]
@@ -220,30 +238,37 @@ def _run_case(tmp_path: Path, case_id: str, *, break_deferral: bool = False) -> 
     environment["PYTHONHASHSEED"] = "0"
     started = time.monotonic()
     with TapeServer(script_path) as endpoint:
+        case_timeout = _backstop_timeout_seconds(endpoint.total_steps)
         command = [
             sys.executable, "-m", "stateframe", "run", "--repo", str(repo), "--task", task,
             "--endpoint", endpoint.url,
             "--model", str(recorded_settings.get("model") or "allocation-replay-model"),
             "--run-dir", str(run_dir), "--test-python", sys.executable,
             "--shell-read", str(source_root),
-            "--slot", str(slot), "--max-turns", "120", "--timeout", "1800", "--quiet",
+            "--slot", str(slot), "--max-turns", "120", "--timeout", str(case_timeout), "--quiet",
         ]
         if profile_path is not None:
             command.extend(("--profile", str(profile_path)))
         if break_deferral:
             command.extend(("--python", str(_broken_engine_python(tmp_path))))
         try:
-            process = subprocess.run(
-                command, capture_output=True, text=True, env=environment,
-                timeout=1860, check=False,
+            process = run_monitored(
+                command,
+                expected_seconds=case_timeout + PARENT_TIMEOUT_MARGIN_SECONDS,
+                run_dir=run_dir,
+                step=f"corpus {case_id}",
+                env=environment,
+                progress_probe=lambda: endpoint.request_count,
             )
             returncode = process.returncode
             stdout, stderr = process.stdout, process.stderr
-        except subprocess.TimeoutExpired as error:
+        except EngineRunTimeout as error:
             returncode = None
-            stdout = error.stdout.decode(errors="replace") if isinstance(error.stdout, bytes) else error.stdout or ""
-            stderr = error.stderr.decode(errors="replace") if isinstance(error.stderr, bytes) else error.stderr or ""
+            stdout, stderr = error.stdout_tail, error.stderr_tail
         request_count = endpoint.request_count
+        served_steps = endpoint.served_steps
+        total_steps = endpoint.total_steps
+        terminal_served = endpoint.terminal_served
 
     summary_path = run_dir / "summary.json"
     summary = json.loads(summary_path.read_text(encoding="utf-8")) if summary_path.is_file() else None
@@ -251,7 +276,8 @@ def _run_case(tmp_path: Path, case_id: str, *, break_deferral: bool = False) -> 
     engine_result = summary.get("engine_result") if isinstance(summary, dict) else None
     return ReplayOutcome(case_id, returncode,
                          engine_result if isinstance(engine_result, str) else None,
-                         summary, engine_log, stdout, stderr, time.monotonic() - started, request_count)
+                         summary, engine_log, stdout, stderr, time.monotonic() - started, request_count,
+                         served_steps, total_steps, terminal_served)
 
 
 def test_corpus_keeps_its_case_set_and_uses_shared_repositories():
@@ -275,6 +301,11 @@ def test_tape_server_reads_a_gzip_script_and_keeps_neutral_model_id():
 
 
 def _violation(outcome: ReplayOutcome) -> str | None:
+    if not outcome.terminal_served:
+        return (
+            "INCOMPLETE: terminal tape turn was not served "
+            f"(served/total={outcome.served_steps}/{outcome.total_steps})"
+        )
     errors = [error for error in ALLOCATION_ERRORS if error in outcome.evidence]
     allowlist = HONEST_UNDER_CAPACITY_ALLOWLIST.get(outcome.case_id)
     if allowlist is not None:
@@ -303,6 +334,7 @@ def _violation(outcome: ReplayOutcome) -> str | None:
 
 
 @pytest.mark.host_sandbox
+@pytest.mark.serial_lane
 @pytest.mark.parametrize("case_id", CASE_IDS, ids=CASE_IDS)
 def test_recorded_allocation_refusal_reaches_submitted(tmp_path, case_id):
     global _SCANNED, _VIOLATED
@@ -314,6 +346,8 @@ def test_recorded_allocation_refusal_reaches_submitted(tmp_path, case_id):
     assert violation is None, (
         f"{case_id}: {violation}; result={outcome.engine_result!r}; "
         f"exit={outcome.returncode}; endpoint requests={outcome.endpoint_requests}; "
+        f"tape served/total={outcome.served_steps}/{outcome.total_steps}; "
+        f"terminal_served={outcome.terminal_served}; "
         f"elapsed={outcome.elapsed_seconds:.2f}s\n{outcome.engine_log[-6000:]}\n"
         f"{outcome.stdout[-2000:]}\n{outcome.stderr[-2000:]}"
     )
@@ -325,19 +359,22 @@ def test_under_capacity_allowlist_requires_its_documented_error():
         case_id="legacy-b8-p2", returncode=2,
         engine_result=f"ERR:{entry['error']}", summary=None,
         engine_log=entry["error"], stdout="", stderr="",
-        elapsed_seconds=0.0, endpoint_requests=4,
+        elapsed_seconds=0.0, endpoint_requests=4, served_steps=6, total_steps=6,
+        terminal_served=True,
     )
     unrelated = ReplayOutcome(
         case_id="legacy-b8-p2", returncode=2,
         engine_result="ERR:FrameRequestAllocationError", summary=None,
         engine_log="FrameRequestAllocationError", stdout="", stderr="",
-        elapsed_seconds=0.0, endpoint_requests=4,
+        elapsed_seconds=0.0, endpoint_requests=4, served_steps=6, total_steps=6,
+        terminal_served=True,
     )
     assert _violation(expected) is None
     assert _violation(unrelated) is not None
 
 
 @pytest.mark.host_sandbox
+@pytest.mark.serial_lane
 def test_planted_broken_deferral_is_reported_as_a_corpus_violation(tmp_path):
     # guard22 is the host-measured late-fit deferral case (refused before the fix, SUBMITTED after).
     case_id = "legacy-guard22"
@@ -353,4 +390,74 @@ def test_planted_broken_deferral_is_reported_as_a_corpus_violation(tmp_path):
     )
     assert any(error in outcome.evidence for error in ALLOCATION_ERRORS), (
         "planted deferral failure did not reach a guarded allocation refusal: " + violation
+    )
+
+
+def _synthetic_tape(messages: list[dict[str, object]]) -> dict[str, object]:
+    return {"turns": [{"message": message} for message in messages]}
+
+
+def _request_tape_turn(endpoint_url: str) -> dict[str, object]:
+    body = json.dumps({
+        "model": "allocation-replay-model",
+        "messages": [{"role": "user", "content": "continue"}],
+    }).encode("utf-8")
+    request = Request(
+        f"{endpoint_url}/chat/completions",
+        data=body,
+        headers={"Content-Type": "application/json"},
+    )
+    with urlopen(request, timeout=2) as response:
+        payload = json.load(response)
+    return payload["choices"][0]["message"]
+
+
+def test_backstop_timeout_scales_with_tape_length():
+    assert _backstop_timeout_seconds(1) == 600
+    assert _backstop_timeout_seconds(10) == 600
+    assert _backstop_timeout_seconds(11) == 660
+    assert _backstop_timeout_seconds(23) == 1380
+    with pytest.raises(ValueError, match="at least one step"):
+        _backstop_timeout_seconds(0)
+
+
+@pytest.mark.host_sandbox
+def test_slow_progressing_tape_serves_its_terminal_turn():
+    messages = [
+        {"role": "assistant", "content": f"turn-{index}"}
+        for index in range(3)
+    ]
+    with TapeServer(_synthetic_tape(messages), turn_delay_seconds=0.01) as endpoint:
+        for _ in range(endpoint.total_steps):
+            _request_tape_turn(endpoint.url)
+        assert endpoint.served_steps == endpoint.total_steps == 3
+        assert endpoint.terminal_served is True
+
+
+@pytest.mark.host_sandbox
+def test_repeated_nonterminal_tape_is_reported_incomplete():
+    repeat_turn = {
+        "role": "assistant",
+        "tool_calls": [{
+            "id": "repeat",
+            "type": "function",
+            "function": {"name": "continue", "arguments": "{}"},
+        }],
+    }
+    terminal_turn = {"role": "assistant", "content": "submitted"}
+    with TapeServer(_synthetic_tape([repeat_turn, repeat_turn, terminal_turn])) as endpoint:
+        first = _request_tape_turn(endpoint.url)
+        repeated = _request_tape_turn(endpoint.url)
+        assert repeated == first
+        outcome = ReplayOutcome(
+            case_id="synthetic-incomplete", returncode=0, engine_result="SUBMITTED",
+            summary=None, engine_log="", stdout="", stderr="", elapsed_seconds=0.0,
+            endpoint_requests=endpoint.request_count, served_steps=endpoint.served_steps,
+            total_steps=endpoint.total_steps, terminal_served=endpoint.terminal_served,
+        )
+
+    assert outcome.terminal_served is False
+    assert outcome.served_steps == 2
+    assert _violation(outcome) == (
+        "INCOMPLETE: terminal tape turn was not served (served/total=2/3)"
     )

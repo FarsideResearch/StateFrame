@@ -13,6 +13,7 @@ import pytest
 from _stateframe_home import isolated_stateframe_home
 from stateframe.engine.kernel_journal_store import journal_paths, open_journal
 from stateframe.scripted_endpoint import Script, serve
+from engine_run import run_monitored
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -52,7 +53,7 @@ def _run(tmp_path: Path, *, key: str) -> tuple[subprocess.CompletedProcess[str],
         "SF_TOKENIZER_E2E_KEY": key,
     }
     try:
-        process = subprocess.run(
+        process = run_monitored(
             [
                 sys.executable, "-m", "stateframe", "run",
                 "--repo", str(repo),
@@ -68,7 +69,7 @@ def _run(tmp_path: Path, *, key: str) -> tuple[subprocess.CompletedProcess[str],
             env=environment,
             capture_output=True,
             text=True,
-            timeout=240,
+            expected_seconds=240,
             check=False,
         )
         output = process.stdout + process.stderr

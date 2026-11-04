@@ -1781,7 +1781,7 @@ def test_applied_edit_frame_detector_requires_a_real_edit_row():
 def _run_scripted_example(monkeypatch, example: str, task: str, work: Path,
                           *, observer: bool = False, package_root: Path | None = None):
     import os
-    import subprocess
+    from engine_run import run_monitored
     import sys
 
     from stateframe import cli, runner
@@ -1815,9 +1815,9 @@ def _run_scripted_example(monkeypatch, example: str, task: str, work: Path,
         else:
             # A separate interpreter imports the (planted) package copy, not this tree.
             environment = dict(os.environ, PYTHONPATH=str(package_root))
-            completed = subprocess.run(
+            completed = run_monitored(
                 [sys.executable, "-m", "stateframe", *arguments], env=environment,
-                capture_output=True, text=True, timeout=600, check=False)
+                capture_output=True, text=True, expected_seconds=600, check=False)
             assert completed.returncode == 0, completed.stdout[-4000:] + completed.stderr[-4000:]
     finally:
         server.shutdown()

@@ -2,13 +2,13 @@
 
 import json
 import shutil
-import subprocess
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
 
 from ._support import Endpoint, PYTHON, ROOT, environment, read_requests
+from engine_run import run_monitored
 
 
 pytestmark = pytest.mark.host_sandbox
@@ -50,13 +50,13 @@ def test_profile_proxy_does_not_receive_model_requests(tmp_path):
         for name in ("HTTP_PROXY", "http_proxy", "NO_PROXY", "no_proxy"):
             env.pop(name, None)
         with Endpoint(ROOT / "examples/discount_bug.script.json") as endpoint:
-            process = subprocess.run([
+            process = run_monitored([
                 PYTHON, "-m", "stateframe", "run", "--repo", str(repo),
                 "--task", "Fix the pricing code so the tests pass.",
                 "--endpoint", endpoint.url, "--model", "scripted",
                 "--profile", str(profile_path), "--run-dir", str(run_dir),
                 "--test-python", PYTHON, "--max-turns", "16", "--quiet",
-            ], capture_output=True, text=True, env=env, timeout=240, check=False)
+            ], capture_output=True, text=True, env=env, expected_seconds=240, check=False)
         summary_path = run_dir / "summary.json"
         summary = json.loads(summary_path.read_text()) if summary_path.exists() else None
         assert process.returncode == 0, process.stdout + process.stderr + str(summary)

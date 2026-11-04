@@ -13,14 +13,16 @@ import signal
 import subprocess
 import sys
 import threading
+import time
 from pathlib import Path
 
 import pytest
 
-from stateframe import replay_tape
 from stateframe.replay_tape import (
     Replayer, recorded_countdown_seconds, with_recorded_countdown)
 from stateframe.scripted_endpoint import Script, ScriptStepUnavailable, serve
+from engine_run import run_monitored, start_monitored
+from fixtures.process_signals import record_identity, signal_run_owned, signal_run_verified
 
 ROOT = Path(__file__).resolve().parents[1]
 ENGINE = ROOT / "src" / "stateframe" / "engine"
@@ -176,30 +178,44 @@ def test_timeout_run_killed_mid_run_resumes_faithfully(tmp_path, checkpoint):
     environment = {**os.environ, "PYTHONPATH": str(ROOT / "src"), "STATEFRAME_CHECKPOINT": checkpoint}
     process = None
     try:
-        process = subprocess.Popen(
+        launched_after = time.time()
+        process = start_monitored(
             [sys.executable, "-m", "stateframe", "run", "--repo", str(repo),
              "--task", "Fix the pricing code so the tests pass.", "--endpoint", endpoint,
              "--model", "scripted", "--run-dir", str(run), "--test-python", sys.executable,
              "--max-turns", "16", "--timeout", "3600", "--quiet"],
-            env=environment, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-        assert script.waiting.wait(600), "the run did not reach its third request"
+            env=environment, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            run_dir=run, expected_seconds=600, step="time-limit interrupted run",
+            watch_paths=(run / "checkpoints",))
+        while not script.waiting.wait(0.5):
+            assert process.poll() is None, "run ended before its third request"
         original = [path.read_bytes() for path in sorted((run / "wire").glob("*.request.json"))]
         assert len(original) == 3  # two answered, the third in flight
         assert all(recorded_countdown_seconds(body) is not None for body in original)
         children = subprocess.check_output(["pgrep", "-P", str(process.pid)], text=True).split()
         assert len(children) == 1, children
-        os.kill(int(children[0]), signal.SIGKILL)
+        child = int(children[0])
+        identity = record_identity(child, launched_after=launched_after,
+                                   command_fragment="_child.py")
+        # Checkpoint-off runs have no save event to wait for.
+        signal_run_verified(run, child, identity, signal.SIGKILL,
+                            deadline=time.monotonic() + 120,
+                            what="time-limit resume interruption",
+                            require_checkpoint_saved=checkpoint == "on")
         script.release.set()
         process.communicate(timeout=120)
-        resumed = subprocess.run([sys.executable, "-m", "stateframe", "resume", str(run),
-                                  "--endpoint", endpoint], env=environment,
-                                 capture_output=True, text=True, timeout=600)
+        resumed = run_monitored([sys.executable, "-m", "stateframe", "resume", str(run),
+                                 "--endpoint", endpoint], env=environment,
+                                capture_output=True, text=True, expected_seconds=600)
         assert resumed.returncode == 0, resumed.stdout + resumed.stderr
         script.assert_consumed()
     finally:
         script.release.set()
         if process is not None and process.poll() is None:
-            process.kill()
+            # Failure cleanup may precede any completed checkpoint.
+            signal_run_owned(run, process, signal.SIGKILL, deadline=time.monotonic(),
+                             what="time-limit run cleanup", require_checkpoint_saved=False,
+                             group=True)
             process.communicate(timeout=10)
         server.shutdown()
         server.server_close()

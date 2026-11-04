@@ -10,9 +10,14 @@ import select
 import shlex
 import subprocess
 import sys
-import venv
 from dataclasses import dataclass
 from pathlib import Path
+
+TESTS_ROOT = Path(__file__).resolve().parents[1]
+if str(TESTS_ROOT) not in sys.path:
+    sys.path.insert(0, str(TESTS_ROOT))
+
+from engine_run import run_monitored  # noqa: E402
 
 
 @dataclass(frozen=True)
@@ -72,10 +77,11 @@ def sweep(source: Path, work: Path, *, cases: tuple[ExampleCommand, ...] | None 
     cases = cases if cases is not None else commands(source)
     wheel_dir = work / "wheels"
     wheel_dir.mkdir(parents=True)
-    build = subprocess.run(
+    build = run_monitored(
         [sys.executable, "-m", "pip", "wheel", "--no-deps", "--no-build-isolation",
          "--wheel-dir", str(wheel_dir), str(source)],
-        capture_output=True, text=True, timeout=180,
+        capture_output=True, text=True, expected_seconds=180,
+        step="build StateFrame wheel", watch_paths=(wheel_dir,),
     )
     if build.returncode:
         raise AssertionError(build.stdout + build.stderr)
@@ -83,12 +89,22 @@ def sweep(source: Path, work: Path, *, cases: tuple[ExampleCommand, ...] | None 
     if len(wheels) != 1:
         raise AssertionError(f"expected one wheel, found {wheels}")
     environment_dir = work / "venv"
-    venv.create(environment_dir, with_pip=True)
+    virtualenv = run_monitored(
+        [sys.executable, "-m", "venv", str(environment_dir)],
+        capture_output=True, text=True, expected_seconds=180,
+        step="create StateFrame example virtual environment",
+        watch_paths=(environment_dir,),
+    )
+    if virtualenv.returncode:
+        raise AssertionError(virtualenv.stdout + virtualenv.stderr)
     python = environment_dir / "bin/python"
     executable = environment_dir / "bin/stateframe"
     for arguments in (("--no-deps", str(wheels[0])), ("-r", str(source / "requirements.txt"))):
-        install = subprocess.run([str(python), "-m", "pip", "install", *arguments],
-                                 capture_output=True, text=True, timeout=180)
+        install = run_monitored(
+            [str(python), "-m", "pip", "install", *arguments],
+            capture_output=True, text=True, expected_seconds=180,
+            step="install StateFrame example environment", watch_paths=(executable,),
+        )
         if install.returncode:
             raise AssertionError(install.stdout + install.stderr)
     home = work / "home"
@@ -114,10 +130,11 @@ def sweep(source: Path, work: Path, *, cases: tuple[ExampleCommand, ...] | None 
             run_dir = work / f"run-{index}"
             argv = list(case.arguments)
             argv[argv.index("--repo") + 1] = str(source / "examples" / case.example)
-            process = subprocess.run(
+            process = run_monitored(
                 [str(executable), *argv, "--endpoint", endpoint, "--model", "scripted",
                  "--run-dir", str(run_dir)], cwd=source, env=environment,
-                capture_output=True, text=True, timeout=300,
+                capture_output=True, text=True, expected_seconds=300,
+                run_dir=run_dir, step=case.label,
             )
             summary_path = run_dir / "summary.json"
             summary = json.loads(summary_path.read_text()) if summary_path.is_file() else {}

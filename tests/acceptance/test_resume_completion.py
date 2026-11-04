@@ -10,6 +10,7 @@ import pytest
 
 from ._support import Endpoint, FIXTURES, budget, PYTHON, copy_repo, environment, read_requests, run_case
 from fixtures.process_signals import record_identity, signal_run_owned, signal_run_verified
+from engine_run import run_monitored, start_monitored
 
 
 pytestmark = pytest.mark.host_sandbox
@@ -57,19 +58,21 @@ def _interrupted_run(tmp_path, *, network="none", script_name="resume.script.jso
         url = endpoint.stdout.readline().strip()
         assert url.startswith("http://127.0.0.1:")
         launched_after = time.time()
-        runner = subprocess.Popen(
+        runner = start_monitored(
             [PYTHON, "-m", "stateframe", "run", "--repo", str(repo), "--task", run_task,
              "--endpoint", url, "--model", "scripted",
              "--run-dir", str(run_dir), "--test-python", PYTHON,
              "--test-cmd", "python -m unittest discover -s tests -q",
-             "--max-turns", "32", "--quiet",
-             "--shell-network", network, "--shell", shell],
+            "--max-turns", "32", "--quiet",
+            "--shell-network", network, "--shell", shell],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            text=True, env=environment(), start_new_session=True)
-        deadline = time.monotonic() + 600  # generous: a loaded machine slows the run, not the behavior checked
-        while time.monotonic() < deadline and not marker.exists():
+            text=True, env=environment(), start_new_session=True,
+            expected_seconds=600, step="interrupted run",
+            watch_paths=(run_dir / "checkpoints",))
+        deadline = time.monotonic() + 600
+        while not marker.exists():
             if runner.poll() is not None:
-                stdout, stderr = runner.communicate(timeout=5)
+                stdout, stderr = runner.communicate()
                 raise AssertionError(f"run ended before interruption: {stdout} {stderr}")
             time.sleep(0.1)
         assert marker.exists(), "paused model request was not reached"
@@ -78,7 +81,8 @@ def _interrupted_run(tmp_path, *, network="none", script_name="resume.script.jso
         assert len(requests_before) > paused_index
         if wait_for_checkpoint:
             pointer = run_dir / "checkpoints" / "LATEST"
-            while time.monotonic() < deadline and not pointer.is_file():
+            while not pointer.is_file():
+                assert runner.poll() is None, "run ended before the checkpoint was saved"
                 time.sleep(0.1)
             assert pointer.is_file(), "checkpoint was not saved before the paused request"
         child = _engine_child(runner.pid)
@@ -109,10 +113,10 @@ def _interrupted_run(tmp_path, *, network="none", script_name="resume.script.jso
 def test_e16_local_shell_resume_replays_identical_next_request(tmp_path):
     repo, run_dir, expected = _interrupted_run(tmp_path)
     with Endpoint(FIXTURES / "scripts" / "resume_remaining.script.json") as endpoint:
-        resumed = subprocess.run(
+        resumed = run_monitored(
             [PYTHON, "-m", "stateframe", "resume", str(run_dir), "--endpoint", endpoint.url,
              "--model", "scripted", "--quiet"], capture_output=True, text=True,
-            env=environment(), timeout=240, check=False)
+            env=environment(), expected_seconds=240, check=False)
     summary = json.loads((run_dir / "summary.json").read_text())
     assert resumed.returncode == 0, resumed.stdout + resumed.stderr + str(summary)
     actual = read_requests(run_dir)[1]
@@ -137,10 +141,10 @@ def test_continuation_resume_sends_uncrashed_prepared_request_bytes(tmp_path, mo
     script_path = tmp_path / "resume-with-request-log.script.json"
     script_path.write_text(json.dumps(script))
     with Endpoint(script_path) as endpoint:
-        resumed = subprocess.run(
+        resumed = run_monitored(
             [PYTHON, "-m", "stateframe", "resume", str(run_dir), "--endpoint", endpoint.url,
              "--model", "scripted", "--quiet"], capture_output=True, text=True,
-            env=environment(), timeout=240, check=False)
+            env=environment(), expected_seconds=240, check=False)
     assert resumed.returncode == 0, resumed.stdout + resumed.stderr
     sent = tuple(json.loads(line) for line in request_log.read_text().splitlines())
     assert sent, "resume did not send a provider request"
@@ -153,10 +157,10 @@ def test_checkpoint_restores_and_verifies_paused_request(tmp_path, monkeypatch):
     monkeypatch.setenv("STATEFRAME_CHECKPOINT_EVERY", "1")
     _, run_dir, expected, endpoint, url = _interrupted_run(tmp_path, wait_for_checkpoint=True)
     try:
-        resumed = subprocess.run(
+        resumed = run_monitored(
             [PYTHON, "-m", "stateframe", "resume", str(run_dir), "--endpoint", url,
              "--model", "scripted", "--quiet"], capture_output=True, text=True,
-            env=environment(), timeout=240, check=False)
+            env=environment(), expected_seconds=240, check=False)
     finally:
         endpoint.terminate()
         try:
@@ -179,10 +183,10 @@ def test_shell_run_restores_checkpoint_after_shell_step(tmp_path, monkeypatch):
         tmp_path, wait_for_checkpoint=True, shell="standard", pause_at=3)
     try:
         started = time.monotonic()
-        resumed = subprocess.run(
+        resumed = run_monitored(
             [PYTHON, "-m", "stateframe", "resume", str(run_dir), "--endpoint", url,
              "--model", "scripted", "--quiet", "--keep-checkpoints"], capture_output=True, text=True,
-            env=environment(), timeout=240, check=False)
+            env=environment(), expected_seconds=240, check=False)
         seconds = time.monotonic() - started
     finally:
         endpoint.terminate()
@@ -218,10 +222,10 @@ def test_full_replay_verifies_check_receipt_request_in_flight(tmp_path, monkeypa
     script = tmp_path / "remaining.json"
     script.write_text(json.dumps(remaining))
     with Endpoint(script) as endpoint:
-        resumed = subprocess.run(
+        resumed = run_monitored(
             [PYTHON, "-m", "stateframe", "resume", str(run_dir), "--endpoint", endpoint.url,
              "--model", "scripted", "--quiet"], capture_output=True, text=True,
-            env=environment(), timeout=240, check=False)
+            env=environment(), expected_seconds=240, check=False)
     assert resumed.returncode == 0, resumed.stdout + resumed.stderr
     assert (run_dir / "wire" / "0002.request.json").read_bytes() == recorded
     assert not (run_dir / "resume-divergence.json").exists()
@@ -238,10 +242,10 @@ def test_checkpoint_verifies_check_receipt_request_in_flight(tmp_path, monkeypat
     assert b"check-execution:" in recorded and b"check-receipt:" in recorded
     tokenize_off.write_text("off\n")
     try:
-        resumed = subprocess.run(
+        resumed = run_monitored(
             [PYTHON, "-m", "stateframe", "resume", str(run_dir), "--endpoint", url,
              "--model", "scripted", "--quiet"], capture_output=True, text=True,
-            env=environment(), timeout=240, check=False)
+            env=environment(), expected_seconds=240, check=False)
     finally:
         endpoint.terminate()
         endpoint.wait(timeout=5)
@@ -257,10 +261,10 @@ def test_checkpoint_off_on_resume_skips_restore_and_later_saves(tmp_path, monkey
     try:
         env = environment()
         env["STATEFRAME_CHECKPOINT"] = "off"
-        resumed = subprocess.run(
+        resumed = run_monitored(
             [PYTHON, "-m", "stateframe", "resume", str(run_dir), "--endpoint", url,
              "--model", "scripted", "--quiet"], capture_output=True, text=True,
-            env=env, timeout=240, check=False)
+            env=env, expected_seconds=240, check=False)
     finally:
         endpoint.terminate()
         endpoint.wait(timeout=5)
@@ -281,10 +285,10 @@ def test_checkpoint_hex_mismatch_refuses_after_fallback(tmp_path, monkeypatch):
     assert original_hex.encode() in raw
     pending.write_bytes(raw.replace(original_hex.encode(), b"b" * 32))
     try:
-        resumed = subprocess.run(
+        resumed = run_monitored(
             [PYTHON, "-m", "stateframe", "resume", str(run_dir), "--endpoint", url,
              "--model", "scripted", "--quiet"], capture_output=True, text=True,
-            env=environment(), timeout=240, check=False)
+            env=environment(), expected_seconds=240, check=False)
     finally:
         endpoint.terminate()
         endpoint.wait(timeout=5)
@@ -299,17 +303,17 @@ def test_checkpoint_hex_mismatch_refuses_after_fallback(tmp_path, monkeypatch):
 def test_e23_full_network_shell_requires_replay_external(tmp_path):
     _, run_dir, _ = _interrupted_run(tmp_path, network="full")
     with Endpoint(FIXTURES / "scripts" / "resume_remaining.script.json") as endpoint:
-        resumed = subprocess.run(
+        resumed = run_monitored(
             [PYTHON, "-m", "stateframe", "resume", str(run_dir), "--endpoint", endpoint.url,
              "--model", "scripted", "--quiet"], capture_output=True, text=True,
-            env=environment(), timeout=60, check=False)
+            env=environment(), expected_seconds=60, check=False)
     assert resumed.returncode != 0
     assert "--replay-external" in resumed.stderr + resumed.stdout
     with Endpoint(FIXTURES / "scripts" / "resume_remaining.script.json") as endpoint:
-        approved = subprocess.run(
+        approved = run_monitored(
             [PYTHON, "-m", "stateframe", "resume", str(run_dir), "--endpoint", endpoint.url,
              "--model", "scripted", "--replay-external", "--quiet"],
-            capture_output=True, text=True, env=environment(), timeout=240, check=False)
+            capture_output=True, text=True, env=environment(), expected_seconds=240, check=False)
     assert approved.returncode == 0, approved.stdout + approved.stderr
     assert json.loads((run_dir / "summary.json").read_text())["succeeded"] is True
 
@@ -317,10 +321,10 @@ def test_e23_full_network_shell_requires_replay_external(tmp_path):
 def test_e19_volatile_shell_observation_is_byte_identical_on_resume(tmp_path):
     _, run_dir, expected = _interrupted_run(tmp_path, script_name="volatile.script.json", wait_for_saved=True)
     with Endpoint(FIXTURES / "scripts" / "volatile_remaining.script.json") as endpoint:
-        resumed = subprocess.run(
+        resumed = run_monitored(
             [PYTHON, "-m", "stateframe", "resume", str(run_dir), "--endpoint", endpoint.url,
              "--model", "scripted", "--quiet"], capture_output=True, text=True,
-            env=environment(), timeout=budget("e19_resume"), check=False)
+            env=environment(), expected_seconds=budget("e19_resume"), check=False)
     assert resumed.returncode == 0, resumed.stdout + resumed.stderr
     actual = read_requests(run_dir)[1]
     assert actual["messages"] == expected["messages"]
@@ -360,10 +364,10 @@ def test_file_move_kill_resume_replays_identical_request_and_sealed_rename(tmp_p
         {"tool": "run_tests", "arguments": {"target": "tests/test_app.py"}},
         {"tool": "done", "arguments": {"summary": "Rename verified after restart."}}]}))
     with Endpoint(remaining) as endpoint:
-        resumed = subprocess.run(
+        resumed = run_monitored(
             [PYTHON, "-m", "stateframe", "resume", str(run_dir), "--endpoint", endpoint.url,
              "--model", "scripted", "--quiet"], capture_output=True, text=True,
-            env=environment(), timeout=240, check=False)
+            env=environment(), expected_seconds=240, check=False)
     assert resumed.returncode == 0, resumed.stdout + resumed.stderr
     actual = read_requests(run_dir)[1]
     assert actual["messages"] == expected["messages"]

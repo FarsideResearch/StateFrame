@@ -12,6 +12,7 @@ import pytest
 
 from stateframe.profiles import DEFAULT as DEFAULT_PROFILE
 from stateframe.scripted_endpoint import Script, serve
+from engine_run import start_monitored
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -74,6 +75,21 @@ def _steps() -> list[dict[str, object]]:
     ]
 
 
+def _run_engine_cli(
+    command: list[str],
+    *,
+    environment: dict[str, str],
+    run_dir: Path,
+    timeout: float,
+    step: str,
+) -> subprocess.CompletedProcess[str]:
+    with start_monitored(command, expected_seconds=timeout, run_dir=run_dir, step=step,
+                         cwd=ROOT, env=environment) as process:
+        returncode = process.wait(timeout=timeout)
+        return subprocess.CompletedProcess(
+            command, returncode, process.stdout_text, process.stderr_text)
+
+
 def _run(
     repo: Path,
     run_dir: Path,
@@ -111,13 +127,9 @@ def _run(
     if in_place:
         command.append("--in-place")
     try:
-        result = subprocess.run(
-            command,
-            cwd=ROOT,
-            env=environment,
-            capture_output=True,
-            text=True,
-            timeout=240,
+        result = _run_engine_cli(
+            command, environment=environment, run_dir=run_dir, timeout=240,
+            step="hooked engine CLI run",
         )
         script.assert_consumed()
         return result, run_dir, script
@@ -185,13 +197,9 @@ def test_prompt_submit_refusal_exits_two_without_starting_child(tmp_path):
         str(interpreter),
     ]
     try:
-        result = subprocess.run(
-            command,
-            cwd=ROOT,
-            env=environment,
-            capture_output=True,
-            text=True,
-            timeout=120,
+        result = _run_engine_cli(
+            command, environment=environment, run_dir=run_dir, timeout=120,
+            step="prompt refusal CLI run",
         )
         script.assert_consumed()
     finally:
