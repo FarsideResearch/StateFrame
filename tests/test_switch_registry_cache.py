@@ -32,10 +32,10 @@ def _toy_root(tmp_path: Path) -> Path:
     return root
 
 
-def _forbid_ast(monkeypatch):
+def _forbid_scan(monkeypatch):
     def refuse(*_args, **_kwargs):
-        raise AssertionError("AST scan ran although the shipped registry matches")
-    monkeypatch.setattr(registry.ast, "parse", refuse)
+        raise AssertionError("source scan ran although the shipped registry matches")
+    monkeypatch.setattr(registry, "_scan", refuse)
 
 
 def test_shipped_registry_matches_a_fresh_scan_of_this_release():
@@ -52,13 +52,19 @@ def test_matching_shipped_registry_is_used_without_parsing(tmp_path, monkeypatch
     scanned = json.loads((root / registry.REGISTRY_FILE).read_text())
     assert scanned["switches"] == ["STATEFRAME_ALPHA", "STATEFRAME_BETA"]
     registry._release_registry.cache_clear()
-    _forbid_ast(monkeypatch)
+    _forbid_scan(monkeypatch)
     switches, digest = registry.release_stateframe_switches(root)
     assert switches == frozenset({"STATEFRAME_ALPHA", "STATEFRAME_BETA"}) and digest == scanned["digest"]
 
 
+def test_shipped_registry_fingerprint_matches_the_real_engine_sources():
+    shipped = json.loads((ENGINE / registry.REGISTRY_FILE).read_text())
+    files = registry._declared_python_files(ENGINE)
+    assert shipped["sources_sha256"] == registry._sources_fingerprint(ENGINE, files)
+
+
 def test_the_real_engine_starts_without_parsing_its_sources(monkeypatch):
-    _forbid_ast(monkeypatch)
+    _forbid_scan(monkeypatch)
     switches, digest = registry.release_stateframe_switches(ENGINE)
     assert len(switches) > 100 and digest.startswith("sha256:")
 
