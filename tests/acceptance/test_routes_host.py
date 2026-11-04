@@ -163,10 +163,17 @@ def test_read_edit_reply_is_discarded_and_reasked_on_default(tmp_path):
     assert all(request["model"] == "cheap" for request in cheap_requests)
     assert all(request["model"] == "scripted" for request in default_requests)
     import re
+    from kernel_cache_layout_view import FINAL_LAYOUT_NAME, semantic_messages
 
     def frame(request):
         """The typed frame, and the live owner budget line, which leg two's own charge changes by design."""
-        texts = [message["content"] for message in request["messages"]
+        physical_messages = request["messages"]
+        if physical_messages[-1].get("name") == FINAL_LAYOUT_NAME:
+            # 040b moved the live budget line to the overlay; it remains visible on the physical wire.
+            assert "[CONTINUATION LIMITS | stateframe-continuation-limits/1]" in (
+                physical_messages[-1]["content"])
+        messages = semantic_messages(physical_messages)
+        texts = [message["content"] for message in messages
                  if isinstance(message.get("content"), str)
                  and message["content"].startswith("[StateFrame]\n")]
         assert len(texts) == 1

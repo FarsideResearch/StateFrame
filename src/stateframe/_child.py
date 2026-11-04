@@ -255,7 +255,10 @@ def install_wire_recorder(run: Path, chat_url: str, replayer: Replayer | None = 
         record = getattr(capture, "_final_cache_layout_record", None)
         if not isinstance(record, dict) or record.get("final_layout") not in {
                 "applied", "plain", "failed_open"}:
-            return {"final_layout": "plain"}
+            return {}
+        if record["final_layout"] == "plain":
+            # Plain sends keep the original 0.2.2 sends.jsonl shape.
+            return {}
         result = {"final_layout": record["final_layout"]}
         reason = record.get("final_layout_reason")
         if isinstance(reason, str) and reason:

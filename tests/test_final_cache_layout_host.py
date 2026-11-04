@@ -192,7 +192,7 @@ def test_unset_switch_applies_layout_with_estimated_meter(tmp_path):
     }
     sends_by_number = {row["send"]: row for row in sends}
     assert frame_send_numbers
-    assert all(sends_by_number[number].get("final_layout") == "applied"
+    assert all(sends_by_number[number].get("final_layout", "plain") == "applied"
                for number in frame_send_numbers)
 
 
