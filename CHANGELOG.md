@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Test-only: the allocation replay corpus gives the engine at least its old 1800 s timeout again, so slow recorded cases are not cut short.
+
 ## 0.3.33 (2026-11-04)
 
 - Repo maps now list Go, Rust, Java, Ruby, PHP, C, C++ and C# files, and report the parser mode actually used in the header and a `repo_map_modes` journal event.
