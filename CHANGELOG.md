@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.3.37 (2026-11-04)
 
 ### Hosted OpenAI-compatible endpoints
 - Each run records the endpoint's proven capabilities (dialect, slots, how they were proven) in spec.json; runs from earlier versions without that record still inspect and resume.
