@@ -17,8 +17,24 @@ ROOT = Path(__file__).resolve().parents[1]
 E2E_TESTS = Path("tests/e2e")
 
 
+def _fixture_repo_conftests(root: Path) -> list[str]:
+    e2e_root = root / E2E_TESTS
+    return sorted(
+        path.relative_to(root).as_posix()
+        for path in e2e_root.rglob("conftest.py")
+        if len(path.relative_to(e2e_root).parts) > 1
+    )
+
+
 def _assert_e2e_collection(root: Path) -> tuple[str, ...]:
     """Collect the suite in a fresh process and enforce the e2e/fixture boundary."""
+    fixture_conftests = _fixture_repo_conftests(root)
+    if fixture_conftests:
+        raise AssertionError(
+            "fixture-repository conftest.py files found under tests/e2e: "
+            + ", ".join(fixture_conftests)
+        )
+
     environment = {
         **os.environ,
         "PYTHONPATH": str(root / "src"),
@@ -126,4 +142,20 @@ def test_collection_guard_detects_the_old_glob_and_accepts_the_fixed_glob(pytest
     node_ids = _assert_e2e_collection(pytester.path)
     assert any(node_id.startswith("tests/e2e/test_x.py::") for node_id in node_ids)
     assert not any("tests/e2e/repo/" in node_id for node_id in node_ids)
+    assert not imported.exists()
+
+    conftest = pytester.path / "tests/e2e/repo/conftest.py"
+    conftest.write_text(
+        "from pathlib import Path\n"
+        f"Path({str(imported)!r}).write_text('imported', encoding='utf-8')\n",
+        encoding="utf-8",
+    )
+    assert _fixture_repo_conftests(pytester.path) == ["tests/e2e/repo/conftest.py"]
+    with pytest.raises(AssertionError, match=r"tests/e2e/repo/conftest\.py"):
+        _assert_e2e_collection(pytester.path)
+    assert not imported.exists()
+
+    conftest.unlink()
+    assert _fixture_repo_conftests(pytester.path) == []
+    _assert_e2e_collection(pytester.path)
     assert not imported.exists()
