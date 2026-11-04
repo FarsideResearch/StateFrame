@@ -725,14 +725,25 @@ def _seed_has_external_hardlinks(seed: Path) -> bool:
     return any(count > internal for count, internal in links.values())
 
 
+def _seed_storage_bytes(seed: Path, *, cache: bool = True) -> int:
+    from .engine.kernel_env_seed import _SEED_KEY, _seed_bytes
+
+    return _seed_bytes(seed, cache=cache) if _SEED_KEY.fullmatch(seed.name) else _logical_tree_bytes(seed)
+
+
 def _remove_seed(seed: Path) -> int:
     if seed.is_symlink() or not seed.is_dir():
         return 0
     if _seed_has_external_hardlinks(seed):
         raise OSError("environment seed still has files hard-linked into another environment")
-    size = _logical_tree_bytes(seed)
+    size = _seed_storage_bytes(seed)
     _make_tree_writable(seed)
     shutil.rmtree(seed)
+    from .engine.kernel_env_seed import _SEED_KEY, _fsync_directory
+
+    if _SEED_KEY.fullmatch(seed.name):
+        (seed.parent / f".{seed.name}.bytes").unlink(missing_ok=True)
+        _fsync_directory(seed.parent)
     return size
 
 
@@ -826,8 +837,8 @@ def run_gc(roots: list[str | os.PathLike[str]] | None = None, *, apply: bool = F
     if prune_seeds is None:
         prune_seeds = not roots
         if roots:
-            printer("environment seeds were not considered: gc of explicit roots cannot see every "
-                    "run that shares them; add --prune-seeds to include them")
+            printer("age-based environment seed pruning was skipped: gc of explicit roots cannot see every "
+                    "run that shares them; add --prune-seeds to include it")
     seed_references = _seed_references(all_runs, projected_release_runs, seed_store)
     seed_candidates = []
     if seed_store.is_dir() and not seed_store.is_symlink():
@@ -842,7 +853,7 @@ def run_gc(roots: list[str | os.PathLike[str]] | None = None, *, apply: bool = F
                     and (quarantine or seed.resolve() not in seed_references)
                     and not _seed_has_external_hardlinks(seed)):
                 seed_candidates.append(seed)
-    seed_bytes = sum(_logical_tree_bytes(path) for path in seed_candidates)
+    seed_bytes = sum(_seed_storage_bytes(path, cache=apply) for path in seed_candidates)
     if apply:
         removed_seed_bytes = 0
         removed_seed_count = 0
@@ -879,11 +890,26 @@ def run_gc(roots: list[str | os.PathLike[str]] | None = None, *, apply: bool = F
     else:
         seed_count = len(seed_candidates)
 
+    from .engine.kernel_env_seed import _cap_bytes, evict_to_cap
+
+    cap = {"count": 0, "bytes": 0, "paths": []}
+    if seed_store.is_dir() and not seed_store.is_symlink():
+        def cap_event(event: dict[str, object]) -> None:
+            if event["event"] == "env_seed_cap_invalid":
+                printer("warning: invalid environment seed cap; using the 10 GB default")
+            elif event["event"] == "env_seed_evict_failed":
+                printer(f"warning: environment seed cap eviction failed: {event['error']}")
+
+        cap = evict_to_cap(seed_store, _cap_bytes(cap_event), "", cap_event,
+                           dry_run=not apply,
+                           excluded=frozenset(seed_candidates) if not apply else frozenset())
+
     totals = {key: sum(int(row["reclaimable"][key]) for row in rows) for key in ARTIFACTS}
     totals["total"] = sum(totals.values())
     result = {"roots": [str(root) for root in selected_roots], "runs": rows, "totals": totals,
               "seeds": {"count": seed_count, "bytes": seed_bytes,
-                        "paths": [str(path) for path in seed_candidates]}}
+                        "paths": [str(path) for path in seed_candidates]},
+              "seed_cap": cap}
     if not apply:
         _print_gc_table(result, printer)
     else:
@@ -904,3 +930,6 @@ def _print_gc_table(result: dict[str, object], printer, *, applied: bool = False
     seeds = result["seeds"]
     printer(f"environment seeds | {'removed' if applied else 'unreferenced'} | count={seeds['count']} "
             f"bytes={seeds['bytes']}")
+    cap = result["seed_cap"]
+    printer(f"environment seed cap | {'removed' if applied else 'dry run'} | count={cap['count']} "
+            f"bytes={cap['bytes']}")

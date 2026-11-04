@@ -1,5 +1,9 @@
 # Known limitations
 
+## Environment seed storage
+
+The `STATEFRAME_ENV_SEED_MAX_GB` cap is soft: the newest seed and seeds in use can keep the store above it. On Linux, a seed whose files are still hard-linked into a run environment cannot be evicted until that run is removed with `stateframe gc`.
+
 ## Request-compatible digest residual
 
 `_revision12`, `dependency_revision`, the source-closure revision, the coordinated-change tree revision, and `kernel_state_owner_inventory._source_revision_vector` keep the 0.3.18 encoding for readable NUL-free regular files so that request bytes stay identical. That encoding puts no terminator after a file's content, so two different lists of files can produce the same revision when one file's content ends with the start of the next path in the other list (`a`="bc", `d`="e" equals `a`="b", `cd`="e"). Their comparing cache keys and closure freshness checks now include the ordered path list. A fully typed encoding for these sites is planned for a release that is allowed to change request bytes; no version is set. The digest class guard's allowlist is empty.

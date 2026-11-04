@@ -8,11 +8,13 @@ import signal
 import subprocess
 import sys
 import threading
+import time
 from pathlib import Path
 
 import pytest
 
 from stateframe.scripted_endpoint import Script, ScriptStepUnavailable, serve
+from fixtures.process_signals import record_identity, signal_run_owned, signal_run_verified
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -317,7 +319,10 @@ def test_six_event_lifecycle_survives_kill_and_resume(tmp_path):
             ["pgrep", "-P", str(process.pid)], text=True,
         ).split()
         assert len(child_pids) == 1, child_pids
-        os.kill(int(child_pids[0]), signal.SIGKILL)
+        child = int(child_pids[0])
+        identity = record_identity(child, launched_after=0, command_fragment="_child.py")
+        signal_run_verified(run, child, identity, signal.SIGKILL,
+                            deadline=time.monotonic() + 120, what="hook lifecycle resume")
         script.release.set()
         assert script.interrupted.wait(10)
         process.communicate(timeout=90)
@@ -368,7 +373,9 @@ def test_six_event_lifecycle_survives_kill_and_resume(tmp_path):
         assert (run / "workspace/pkg/value.py").read_text() == "VALUE = 3\n"
     finally:
         if process is not None and process.poll() is None:
-            process.kill()
+            # Failure cleanup may precede the first checkpoint.
+            signal_run_owned(run, process, signal.SIGKILL, deadline=time.monotonic(),
+                             what="hook lifecycle cleanup", require_checkpoint_saved=False)
             process.communicate(timeout=10)
         server.shutdown()
         server.server_close()

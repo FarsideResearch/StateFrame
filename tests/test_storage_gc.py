@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import fcntl
 import os
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -298,6 +299,117 @@ def test_gc_uses_runner_runs_home_when_no_root_is_passed(tmp_path, monkeypatch):
 
     assert result["roots"] == [str(runs)]
     assert result["runs"][0]["run"] == str(run)
+
+
+def _cap_store(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    store = home / "env-seeds"
+    store.mkdir(parents=True)
+    seeds = []
+    for index in range(3):
+        seed = store / f"{index:064x}"
+        seed.mkdir()
+        (seed / "payload").write_bytes(b"x" * 400)
+        os.utime(seed, ns=(index + 1, index + 1))
+        seeds.append(seed)
+    monkeypatch.setenv("STATEFRAME_HOME", str(home))
+    monkeypatch.setenv("STATEFRAME_ENV_SEED_MAX_GB", "0.0000008")
+    runs = tmp_path / "explicit-runs"
+    runs.mkdir()
+    return runs, store, seeds
+
+
+def test_gc_cap_eviction_after_pruning_applies_to_explicit_roots(tmp_path, monkeypatch):
+    runs, store, seeds = _cap_store(tmp_path, monkeypatch)
+    sidecar = store / f".{seeds[0].name}.bytes"
+    sidecar.write_text("400")
+    result = storage_gc.run_gc([runs], apply=True, printer=lambda _line: None)
+    assert result["seed_cap"]["count"] == 1
+    assert result["seed_cap"]["bytes"] == 400
+    assert result["seed_cap"]["paths"] == [str(seeds[0])]
+    assert not seeds[0].exists() and not sidecar.exists()
+    assert all(seed.exists() for seed in seeds[1:])
+    assert sum(storage_gc._logical_tree_bytes(seed) for seed in store.iterdir() if seed.is_dir()) <= 800
+
+
+def test_gc_cap_can_evict_seed_referenced_by_finished_run(tmp_path, monkeypatch):
+    runs, _, seeds = _cap_store(tmp_path, monkeypatch)
+    run = _finished_run(runs)
+    (run / "env-seed.json").write_text(json.dumps({"path": str(seeds[0])}))
+    result = storage_gc.run_gc([runs], apply=True, printer=lambda _line: None)
+    assert result["seed_cap"]["paths"] == [str(seeds[0])]
+    assert not seeds[0].exists() and (run / "env-seed.json").is_file()
+
+
+def test_gc_cap_uses_sidecars_without_opening_manifests(tmp_path, monkeypatch):
+    runs, store, seeds = _cap_store(tmp_path, monkeypatch)
+    for seed in seeds:
+        (seed / "seed.json").write_text("unreadable")
+        (store / f".{seed.name}.bytes").write_text("400")
+    original_read_text = Path.read_text
+
+    def no_manifest_read(path, *args, **kwargs):
+        if path.name == "seed.json":
+            raise AssertionError(f"gc opened {path}")
+        return original_read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", no_manifest_read)
+    result = storage_gc.run_gc([runs], apply=True, printer=lambda _line: None)
+    assert result["seed_cap"]["bytes"] == 400
+    assert not seeds[0].exists()
+
+
+def test_gc_age_pruning_removes_seed_sidecar(tmp_path, monkeypatch):
+    runs, store, seeds = _cap_store(tmp_path, monkeypatch)
+    sidecar = store / f".{seeds[0].name}.bytes"
+    sidecar.write_text("400")
+    result = storage_gc.run_gc([runs], apply=True, older_than_days=1,
+                               prune_seeds=True, printer=lambda _line: None)
+    assert result["seeds"]["count"] == 3
+    assert not seeds[0].exists() and not sidecar.exists()
+
+
+def test_gc_zero_cap_keeps_seeds(tmp_path, monkeypatch):
+    runs, _, seeds = _cap_store(tmp_path, monkeypatch)
+    monkeypatch.setenv("STATEFRAME_ENV_SEED_MAX_GB", "0")
+    result = storage_gc.run_gc([runs], apply=True, printer=lambda _line: None)
+    assert result["seed_cap"] == {"count": 0, "bytes": 0, "paths": []}
+    assert all(seed.exists() for seed in seeds)
+
+
+def test_gc_cap_dry_run_reports_without_deleting(tmp_path, monkeypatch):
+    runs, store, seeds = _cap_store(tmp_path, monkeypatch)
+    result = storage_gc.run_gc([runs], printer=lambda _line: None)
+    assert result["seed_cap"] == {"count": 1, "bytes": 400, "paths": [str(seeds[0])]}
+    assert all(seed.exists() for seed in seeds)
+    assert not list(store.glob(".*.lock"))
+
+
+def test_gc_cap_dry_run_accounts_for_age_pruning_first(tmp_path, monkeypatch):
+    runs, _, seeds = _cap_store(tmp_path, monkeypatch)
+    result = storage_gc.run_gc([runs], older_than_days=1, prune_seeds=True,
+                               printer=lambda _line: None)
+    assert result["seeds"]["count"] == 3
+    assert result["seed_cap"]["count"] == 0
+    assert all(seed.exists() for seed in seeds)
+
+
+def test_gc_cap_skips_in_use_seed(tmp_path, monkeypatch):
+    runs, store, seeds = _cap_store(tmp_path, monkeypatch)
+    code = ("import fcntl,sys; lock=open(sys.argv[1], 'a+b'); "
+            "fcntl.flock(lock, fcntl.LOCK_EX); print('ready', flush=True); sys.stdin.read(1)")
+    process = subprocess.Popen([sys.executable, "-c", code, str(store / f".{seeds[0].name}.lock")],
+                               stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                               text=True)
+    try:
+        assert process.stdout.readline().strip() == "ready"
+        result = storage_gc.run_gc([runs], apply=True, printer=lambda _line: None)
+        assert seeds[0].exists() and not seeds[1].exists() and seeds[2].exists()
+        assert result["seed_cap"]["paths"] == [str(seeds[1])]
+    finally:
+        process.stdin.write("x")
+        process.stdin.flush()
+        process.communicate(timeout=10)
 
 
 def test_gc_of_explicit_roots_never_prunes_seeds_other_runs_may_use(tmp_path, monkeypatch, capsys):

@@ -33,6 +33,7 @@
 - `--shell-allow PROGRAM`, `--shell-deny PROGRAM`, `--shell-read PATH`: repeatable program and readable-root settings.
 - `--shell-sandbox on|off` (default `on`): `off` requires `--shell unrestricted`, prints a host-access warning and is recorded as host authorization.
 - `--run-env` / `--no-run-env`: run-local dependency environment; default on when shell is enabled, otherwise off.
+- `STATEFRAME_ENV_SEED_MAX_GB` (environment): soft limit for the shared environment seed store in decimal GB, default 10. Set it to `0` for unbounded storage. Eviction removes old seeds after a successful clone or during `stateframe gc`; rehydration rebuilds from the recorded distributions instead of copying when its seed is gone.
 - `--git-tool` / `--no-git-tool`: read-only Git tool, on by default when the source has Git metadata.
 - `--web` / `--no-web`: web fetch, off by default. `--web-allow DOMAIN` repeats to restrict hosts.
 - `--tools FILE`: repeatable trusted custom command definitions in `stateframe-tools/1` JSON.

@@ -11,7 +11,7 @@ from pathlib import Path
 import pytest
 
 from ._support import Endpoint, PYTHON, copy_repo, environment, read_requests, run_case
-from fixtures.process_signals import record_identity, signal_verified
+from fixtures.process_signals import record_identity, signal_run_owned, signal_run_verified
 
 
 pytestmark = pytest.mark.host_sandbox
@@ -202,11 +202,14 @@ def test_unchanged_skill_resume_rebuilds_loaded_body(tmp_path, first_mode, resum
         child = _engine_child(runner.pid)
         assert child is not None
         identity = record_identity(child, launched_after=launched_after, command_fragment="_child.py")
-        signal_verified(child, identity, signal.SIGKILL)
+        signal_run_verified(run_dir, child, identity, signal.SIGKILL, deadline=deadline,
+                            what="skill replay interruption")
         runner.communicate(timeout=30)
     finally:
         if runner is not None and runner.poll() is None:
-            runner.kill()
+            # Failure cleanup may run before a checkpoint exists.
+            signal_run_owned(run_dir, runner, signal.SIGKILL, deadline=time.monotonic(),
+                             what="skill replay cleanup", require_checkpoint_saved=False)
             runner.wait(timeout=5)
         if endpoint.poll() is None:
             endpoint.terminate()
@@ -395,7 +398,9 @@ def test_changed_skill_command_executable_refuses_call(tmp_path):
         assert "REFUSED TOOL_CHANGED" in json.dumps(read_requests(run_dir))
     finally:
         if runner is not None and runner.poll() is None:
-            runner.kill()
+            # Failure cleanup may run before a checkpoint exists.
+            signal_run_owned(run_dir, runner, signal.SIGKILL, deadline=time.monotonic(),
+                             what="trusted skill cleanup", require_checkpoint_saved=False)
             runner.wait(timeout=5)
         if server.poll() is None:
             server.terminate()

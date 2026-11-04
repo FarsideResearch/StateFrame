@@ -13,7 +13,8 @@ from pathlib import Path
 
 import pytest
 
-from fixtures.process_signals import record_identity, signal_owned, signal_verified
+from fixtures.process_signals import (record_identity, signal_run_owned, signal_run_verified,
+                                      wait_for_checkpoint_saved)
 
 from ._support import Endpoint, PYTHON, ROOT, copy_repo, environment, read_measurement_events
 
@@ -24,15 +25,19 @@ pytestmark = [pytest.mark.host_sandbox,
                                  reason="routing engine lane not installed")]
 
 
-def _kill_run(process: subprocess.Popen[str], run_dir: Path | None = None) -> None:
+def _kill_run(process: subprocess.Popen[str], run_dir: Path, *,
+              require_checkpoint_saved: bool = True) -> None:
     """Kill the CLI and, like a machine crash, the engine: it runs in its own session and holds the run lock."""
     # The lock holder is matched by its engine command and re-verified before the signal.
     launched_after = 0.0
+    deadline = time.monotonic() + 120
+    if require_checkpoint_saved:
+        wait_for_checkpoint_saved(run_dir, deadline=deadline, what="routed run crash")
     if process.poll() is None:
-        signal_owned(process, signal.SIGKILL)
+        # The shared barrier above covers both signals in this crash simulation.
+        signal_run_owned(run_dir, process, signal.SIGKILL, deadline=deadline,
+                         what="routed runner crash", require_checkpoint_saved=False, group=True)
     process.communicate(timeout=5)
-    if run_dir is None:
-        return
     from stateframe.resume import ENGINE_LOCK, _lock_holder
 
     cutoff = time.monotonic() + 15
@@ -40,7 +45,8 @@ def _kill_run(process: subprocess.Popen[str], run_dir: Path | None = None) -> No
         try:
             pid = int(holder)
             identity = record_identity(pid, launched_after=launched_after, command_fragment="_child.py")
-            signal_verified(pid, identity, signal.SIGKILL)
+            signal_run_verified(run_dir, pid, identity, signal.SIGKILL, deadline=deadline,
+                                what="routed engine crash", require_checkpoint_saved=False)
         except (ProcessLookupError, PermissionError, ValueError, RuntimeError):
             pass
         time.sleep(0.1)
@@ -234,7 +240,8 @@ def test_killed_second_leg_replays_first_leg_and_verifies_pending_bytes(tmp_path
                                       env=environment(), timeout=300, check=False)
         finally:
             if process.poll() is None:
-                _kill_run(process, run_dir)
+                # Failure cleanup may precede the first checkpoint.
+                _kill_run(process, run_dir, require_checkpoint_saved=False)
     assert resumed.returncode in (0, 1), resumed.stdout + resumed.stderr
     assert (run_dir / "wire" / "0001.request.json").read_bytes() == first
     assert (run_dir / "wire" / "0002.request.json").read_bytes() == second
@@ -284,14 +291,16 @@ def test_routed_crash_boundary_replays_with_same_route_and_request_bytes(tmp_pat
                 assert not route2.exists()
             saved = {path.name: path.read_bytes() for path in wire.glob("*.route.json")}
             saved.update({path.name: path.read_bytes() for path in wire.glob("*.request.json")})
-            _kill_run(process, run_dir)
+            # Crash injection is before a completed step, so no checkpoint is expected.
+            _kill_run(process, run_dir, require_checkpoint_saved=False)
             arm.unlink()
             resumed = subprocess.run([PYTHON, "-m", "stateframe", "resume", str(run_dir),
                                       "--quiet", *routes], capture_output=True, text=True,
                                      env=environment(), timeout=300, check=False)
         finally:
             if process.poll() is None:
-                _kill_run(process, run_dir)
+                # Failure cleanup may precede the first checkpoint.
+                _kill_run(process, run_dir, require_checkpoint_saved=False)
     assert resumed.returncode in (0, 1), resumed.stdout + resumed.stderr
     for name, data in saved.items():
         assert (wire / name).read_bytes() == data
@@ -652,7 +661,8 @@ def test_routed_hooks_resume_after_discard_replays_tape_without_skipped_check(tm
                                      env=environment(), timeout=300, check=False)
         finally:
             if process.poll() is None:
-                _kill_run(process, run_dir)
+                # Failure cleanup may precede the first checkpoint.
+                _kill_run(process, run_dir, require_checkpoint_saved=False)
     assert resumed.returncode == 0, resumed.stdout + resumed.stderr
     assert "resuming by full replay without that check" not in resumed.stdout + resumed.stderr
     assert not (run_dir / "resume-divergence.json").exists()

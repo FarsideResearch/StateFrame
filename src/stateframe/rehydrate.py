@@ -426,6 +426,10 @@ def _rehydrate_body(run: Path, manifest: dict[str, object], seed: Path | None, u
             assert seed is not None
             try:
                 _copy_seed(seed, staging, run, manifest)
+                try:
+                    os.utime(seed)
+                except OSError:
+                    pass  # A failed recency update must not undo a completed copy.
             except RehydrateError as error:
                 printer(f"!!! environment seed could not be restored ({error}); "
                         "rebuilding from the recorded distributions instead !!!")

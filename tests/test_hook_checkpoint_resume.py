@@ -23,6 +23,8 @@ from kernel_hooks import create_bundle, load_hook_files
 from kernel_checkpoint import SKIP_RUN_ENTRIES, _restore_files
 from stateframe import _child, resume
 from stateframe.scripted_endpoint import Script, ScriptStepUnavailable, serve
+from fixtures.process_signals import (record_identity, signal_run_owned, signal_run_verified,
+                                      wait_for_checkpoint_saved)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -363,11 +365,8 @@ def test_checkpoint_resume_matches_uninterrupted_control(
             assert any(record["event"] == "post_tool" and record["executed"] for record in old_records)
         checkpoint_events_path = run / "checkpoints/events.jsonl"
         checkpoint_deadline = time.monotonic() + 120
-        while (not checkpoint_events_path.exists() or
-               not any(row["event"] == "checkpoint_saved" for row in
-                       _rows(checkpoint_events_path))):
-            assert time.monotonic() < checkpoint_deadline, "checkpoint writer did not finish"
-            time.sleep(0.1)
+        wait_for_checkpoint_saved(run, deadline=checkpoint_deadline,
+                                  what="hook checkpoint resume")
         if variant == "hooks_after_first_edit":
             saved = [row for row in _rows(checkpoint_events_path)
                      if row["event"] == "checkpoint_saved"]
@@ -376,7 +375,10 @@ def test_checkpoint_resume_matches_uninterrupted_control(
         child_pids = subprocess.check_output(["pgrep", "-P", str(process.pid)],
                                              text=True).split()
         assert len(child_pids) == 1, child_pids
-        os.kill(int(child_pids[0]), signal.SIGKILL)
+        child = int(child_pids[0])
+        identity = record_identity(child, launched_after=0, command_fragment="_child.py")
+        signal_run_verified(run, child, identity, signal.SIGKILL, deadline=deadline,
+                            what="hook checkpoint resume")
         script.release.set()
         assert script.interrupted.wait(10)
         process.communicate(timeout=90)
@@ -475,7 +477,9 @@ def test_checkpoint_resume_matches_uninterrupted_control(
                     }
     finally:
         if process is not None and process.poll() is None:
-            process.kill()
+            # Failure cleanup may precede any completed checkpoint.
+            signal_run_owned(run, process, signal.SIGKILL, deadline=time.monotonic(),
+                             what="hook resume cleanup", require_checkpoint_saved=False)
             process.communicate(timeout=10)
         server.shutdown()
         server.server_close()

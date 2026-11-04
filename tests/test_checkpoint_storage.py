@@ -5,6 +5,7 @@ import json
 import os
 import hashlib
 import sys
+import contextvars
 from pathlib import Path
 
 import pytest
@@ -118,6 +119,158 @@ def test_snapshot_links_only_seed_linked_readonly_files(tmp_path):
     assert (out / shared.relative_to(seed)).stat().st_ino == shared.stat().st_ino
     assert (out / "pyvenv.cfg").stat().st_ino != private.stat().st_ino
     assert counts["linked"] == 1
+
+
+def test_seeded_env_second_snapshot_adds_no_file_bytes(tmp_path):
+    seed = tmp_path / "seed"
+    run = tmp_path / "env"
+    for root in (seed, run):
+        root.mkdir()
+    for name in ("module.py", "config.txt"):
+        (seed / name).write_bytes(b"seed contents" * 1024)
+        (run / name).write_bytes((seed / name).read_bytes())
+        os.utime(run / name, ns=((seed / name).stat().st_atime_ns,
+                                 (seed / name).stat().st_mtime_ns))
+    first, second = tmp_path / "first", tmp_path / "second"
+    checkpoint._copy_tree(run, first, None, set(), seed=seed)
+    counts = checkpoint._copy_tree(run, second, first, set(), seed=seed)
+    assert counts["copied"] == 0
+    assert all((second / name).stat().st_ino == (first / name).stat().st_ino
+               for name in ("module.py", "config.txt"))
+
+
+def test_darwin_seeded_env_uses_writable_clones_when_tree_clone_fails(tmp_path, monkeypatch):
+    seed, run, out = (tmp_path / name for name in ("seed", "env", "snapshot"))
+    seed.mkdir()
+    run.mkdir()
+    original = seed / "writable.py"
+    original.write_text("initial")
+    live = run / original.name
+    live.write_text("initial")
+    os.utime(live, ns=(original.stat().st_atime_ns, original.stat().st_mtime_ns))
+    cloned = []
+
+    def clone(source, target):
+        cloned.append(source)
+        checkpoint.shutil.copy2(source, target)
+        return True
+
+    monkeypatch.setattr(checkpoint.sys, "platform", "darwin")
+    monkeypatch.setattr(checkpoint, "_clonefile", clone)
+    counts = checkpoint._copy_tree(run, out, None, set(), seed=seed)
+    assert cloned == [live] and counts["cloned"] == 1
+    (out / original.name).write_text("checkpoint can change independently")
+    assert live.read_text() == "initial" and original.read_text() == "initial"
+
+
+def _save_series_step(run, step):
+    checkpoint._STATE["setup"] = {
+        "code": sys._getframe().f_code, "line": 0, "funcs": frozenset()}
+    return checkpoint.save(sys._getframe(), step, run)
+
+
+def _checkpoint_series(tmp_path, monkeypatch, *, whole_copy=False):
+    run = tmp_path / ("control" if whole_copy else "optimized")
+    journal = run / "worker/measurement-runs/a/events.jsonl"
+    journal.parent.mkdir(parents=True)
+    (journal.parent / "config.json").write_text('{"source":"audit"}')
+    previous_state = checkpoint._STATE.copy()
+    previous_key = checkpoint._SIGNING_KEY.copy()
+    previous_scans = checkpoint._SCANS.copy()
+    monkeypatch.setattr(checkpoint, "_is_state_module", lambda *_args: False)
+    monkeypatch.setattr(checkpoint, "_context_items", lambda: [])
+    monkeypatch.setattr(checkpoint.contextvars, "copy_context", contextvars.Context)
+    checkpoint.register_signing_key(b"checkpoint-storage-test-key-0123456789")
+    if whole_copy:
+        monkeypatch.setattr(checkpoint, "_snapshot_appended_file", lambda *_args: False)
+    seen = set()
+    written = []
+    try:
+        for step in range(1, 41):
+            with journal.open("ab") as stream:
+                stream.write(bytes(range(256)) * 512)
+            saved = _save_series_step(run, step)
+            new_bytes = 0
+            for path in (run / "checkpoints").rglob("*"):
+                if not path.is_file():
+                    continue
+                info = path.stat()
+                identity = (info.st_dev, info.st_ino)
+                if identity not in seen:
+                    seen.add(identity)
+                    new_bytes += info.st_size
+            written.append(new_bytes)
+        return run, saved, journal.read_bytes(), written
+    finally:
+        checkpoint._STATE.clear()
+        checkpoint._STATE.update(previous_state)
+        checkpoint._SIGNING_KEY[:] = previous_key
+        checkpoint._SCANS.clear()
+        checkpoint._SCANS.update(previous_scans)
+
+
+def test_audit_journal_checkpoint_bytes_stay_bounded_and_control_detects_regression(
+        tmp_path, monkeypatch):
+    run, saved, expected, written = _checkpoint_series(tmp_path, monkeypatch)
+    delta = 256 * 512
+
+    def bounded(samples):
+        assert max(samples[-5:]) <= 3 * max(samples[:5]) + 2 * delta
+
+    bounded(written)
+    restored = tmp_path / "restored"
+    restored.mkdir()
+    checkpoint._restore_files(saved, restored, json.loads((saved / checkpoint.META_FILE).read_text()))
+    for source in run.rglob("*"):
+        if not source.is_file() or "checkpoints" in source.parts:
+            continue
+        relative = source.relative_to(run)
+        assert (restored / relative).read_bytes() == source.read_bytes()
+    assert (restored / "worker/measurement-runs/a/events.jsonl").read_bytes() == expected
+
+    _, _, _, control_written = _checkpoint_series(tmp_path, monkeypatch, whole_copy=True)
+    with pytest.raises(AssertionError):
+        bounded(control_written)
+
+
+def test_rewritten_audit_journal_starts_new_chunk_lineage(tmp_path):
+    source = tmp_path / "events.jsonl"
+    target = tmp_path / "placeholder"
+    root = tmp_path / "checkpoints"
+    root.mkdir()
+    relative = "worker/measurement-runs/a/events.jsonl"
+    source.write_bytes(b"first\n")
+    first = {}
+    assert checkpoint._snapshot_appended_file(source, target, relative, root, (), first, 1)
+    source.write_bytes(b"other\n")  # same length, different prefix
+    second = {}
+    assert checkpoint._snapshot_appended_file(source, tmp_path / "replacement", relative,
+                                              root, first[relative], second, 2)
+    assert len(second[relative]) == 1
+    assert second[relative][0][1:3] == [0, len(b"other\n")]
+    source.write_bytes(b"x\n")  # truncated
+    third = {}
+    assert checkpoint._snapshot_appended_file(source, tmp_path / "truncated", relative,
+                                              root, second[relative], third, 3)
+    assert len(third[relative]) == 1 and third[relative][0][1:3] == [0, 2]
+
+    for seq, rows, expected in ((2, second, b"other\n"), (3, third, b"x\n")):
+        saved = root / f"{seq:04d}-1"
+        placeholder = saved / "run" / relative
+        placeholder.parent.mkdir(parents=True)
+        placeholder.touch()
+        restored = tmp_path / f"restored-{seq}"
+        restored.mkdir()
+        checkpoint._restore_files(saved, restored,
+                                  {"entries": ["worker"], "file_chunks": rows})
+        assert (restored / relative).read_bytes() == expected
+    chunk = root / checkpoint.CACHE_DIR / third[relative][0][0]
+    chunk.write_bytes(b"!" * chunk.stat().st_size)
+    damaged = tmp_path / "damaged"
+    damaged.mkdir()
+    with pytest.raises(checkpoint.CheckpointError, match="checksum mismatch"):
+        checkpoint._restore_files(root / "0003-1", damaged,
+                                  {"entries": ["worker"], "file_chunks": third})
 
 
 def test_pool_gc_keeps_every_manifest_reference(tmp_path):

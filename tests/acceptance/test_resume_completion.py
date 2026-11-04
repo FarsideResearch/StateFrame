@@ -9,7 +9,7 @@ import time
 import pytest
 
 from ._support import Endpoint, FIXTURES, budget, PYTHON, copy_repo, environment, read_requests, run_case
-from fixtures.process_signals import record_identity, signal_verified
+from fixtures.process_signals import record_identity, signal_run_owned, signal_run_verified
 
 
 pytestmark = pytest.mark.host_sandbox
@@ -81,19 +81,11 @@ def _interrupted_run(tmp_path, *, network="none", script_name="resume.script.jso
             while time.monotonic() < deadline and not pointer.is_file():
                 time.sleep(0.1)
             assert pointer.is_file(), "checkpoint was not saved before the paused request"
-        if wait_for_saved:
-            # The step-1 checkpoint is written by a forked writer in the engine's process group, which the
-            # group SIGKILL below would kill mid-save under load: wait until it has recorded the save.
-            events = run_dir / "checkpoints" / "events.jsonl"
-            while time.monotonic() < deadline and not (
-                    events.is_file() and '"checkpoint_saved"' in events.read_text(errors="replace")):
-                time.sleep(0.1)
-            assert events.is_file() and '"checkpoint_saved"' in events.read_text(errors="replace"), \
-                "checkpoint was not saved before the paused request"
         child = _engine_child(runner.pid)
         assert child is not None
         identity = record_identity(child, launched_after=launched_after, command_fragment="_child.py")
-        signal_verified(child, identity, signal.SIGKILL)
+        signal_run_verified(run_dir, child, identity, signal.SIGKILL, deadline=deadline,
+                            what="paused resume request")
         runner.communicate(timeout=30)
         if wait_for_checkpoint:
             retain_endpoint = True
@@ -101,7 +93,9 @@ def _interrupted_run(tmp_path, *, network="none", script_name="resume.script.jso
         return repo, run_dir, requests_before[paused_index]
     finally:
         if runner is not None and runner.poll() is None:
-            runner.kill()
+            # Failure cleanup may run before the first checkpoint exists.
+            signal_run_owned(run_dir, runner, signal.SIGKILL, deadline=time.monotonic(),
+                             what="interrupted run cleanup", require_checkpoint_saved=False)
             runner.wait(timeout=5)
         if not retain_endpoint and endpoint.poll() is None:
             endpoint.terminate()

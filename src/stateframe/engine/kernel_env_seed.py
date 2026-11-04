@@ -6,16 +6,23 @@ import fcntl
 import hashlib
 import json
 import os
+import re
 import shutil
 import stat
 import subprocess
 import sys
 import time
+from contextlib import nullcontext
+from decimal import Decimal
 from pathlib import Path
 from typing import Callable
 
 
 FICLONE = 0x40049409
+DEFAULT_MAX_GB = 10
+_DECIMAL_GB = re.compile(r"(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)\Z")
+_SEED_KEY = re.compile(r"[0-9a-f]{64}\Z")
+_TEMPORARY = re.compile(r"\.[0-9a-f]{64}\.tmp-([0-9]+)-[0-9]+\Z")
 
 
 def _digest(path: Path) -> str:
@@ -214,6 +221,264 @@ def _link(source: Path, target: Path) -> bool:
         return False
 
 
+def _tree_bytes(root: Path) -> int:
+    # Keep the logical-size semantics of storage_gc._logical_tree_bytes in the engine child.
+    total = 0
+    for directory, dirs, names in os.walk(root, followlinks=False):
+        dirs[:] = [name for name in dirs if not (Path(directory) / name).is_symlink()]
+        for name in names:
+            path = Path(directory) / name
+            if path.is_file() and not path.is_symlink():
+                total += path.stat().st_size
+    return total
+
+
+def _write_seed_bytes(seed: Path, size: int) -> None:
+    sidecar = seed.parent / f".{seed.name}.bytes"
+    temporary = seed.parent / f".{seed.name}.bytes.tmp-{os.getpid()}-{time.time_ns()}"
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0)
+    try:
+        with os.fdopen(os.open(temporary, flags, 0o600), "wb") as stream:
+            stream.write(str(size).encode("ascii"))
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, sidecar)
+        _fsync_directory(seed.parent)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _seed_bytes(seed: Path, *, cache: bool = True) -> int:
+    sidecar = seed.parent / f".{seed.name}.bytes"
+    flags = (os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+             | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
+    try:
+        with os.fdopen(os.open(sidecar, flags), "rb") as stream:
+            if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+                raise ValueError("invalid seed size sidecar")
+            raw = stream.read(65)
+        if not raw or len(raw) > 64 or not raw.isdigit():
+            raise ValueError("invalid seed size sidecar")
+        return int(raw)
+    except (OSError, ValueError):
+        pass
+
+    try:
+        manifest = seed / "seed.json"
+        if manifest.is_symlink():
+            raise ValueError("symlinked seed manifest")
+        files = json.loads(manifest.read_text())["files"]
+        if not isinstance(files, dict):
+            raise ValueError("invalid seed files")
+        if any(not isinstance(row, dict) or ("size" not in row and not isinstance(row.get("link"), str))
+               for row in files.values()):
+            raise ValueError("invalid seed file")
+        sizes = [row["size"] for row in files.values() if "size" in row]
+        if any(not isinstance(size, int) or isinstance(size, bool) or size < 0 for size in sizes):
+            raise ValueError("invalid seed size")
+        size = sum(sizes)
+    except (OSError, ValueError, KeyError, TypeError):
+        size = _tree_bytes(seed)
+    if cache and seed.is_dir() and not seed.is_symlink():
+        try:
+            _write_seed_bytes(seed, size)
+        except OSError:
+            pass  # Cache repair must not prevent eviction or a clone.
+    return size
+
+
+def _external_hardlinks(seed: Path) -> bool:
+    # Mirror storage_gc._seed_has_external_hardlinks; the engine cannot import product GC.
+    links: dict[tuple[int, int], tuple[int, int]] = {}
+
+    def fail(error: OSError) -> None:
+        raise error
+
+    try:
+        for directory, _, names in os.walk(seed, followlinks=False, onerror=fail):
+            for name in names:
+                info = (Path(directory) / name).lstat()
+                if not stat.S_ISREG(info.st_mode):
+                    continue
+                identity = (info.st_dev, info.st_ino)
+                count, internal = links.get(identity, (info.st_nlink, 0))
+                links[identity] = (max(count, info.st_nlink), internal + 1)
+    except OSError:
+        return True
+    return any(count > internal for count, internal in links.values())
+
+
+def _make_tree_writable(root: Path) -> None:
+    # Mirror storage_gc._make_tree_writable without changing hard-linked file modes.
+    for directory, dirs, _ in os.walk(root, topdown=False, followlinks=False):
+        for name in dirs:
+            path = Path(directory) / name
+            if not path.is_symlink():
+                path.chmod(stat.S_IMODE(path.lstat().st_mode) | stat.S_IWUSR | stat.S_IXUSR)
+    root.chmod(stat.S_IMODE(root.lstat().st_mode) | stat.S_IWUSR | stat.S_IXUSR)
+
+
+def _fsync_directory(directory: Path) -> None:
+    descriptor = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _remove_eviction_target(store: Path, target: Path) -> None:
+    _make_tree_writable(target)
+    shutil.rmtree(target)
+    _fsync_directory(store)
+
+
+def _evict_to_cap(store: Path, max_bytes: int, keep: str,
+                  event: Callable[[dict], None] | None, result: dict[str, object], *, dry_run: bool = False,
+                  excluded: frozenset[Path] = frozenset()) -> dict[str, object]:
+    removed: list[str] = []
+    removed_bytes = 0
+    flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    lock = (nullcontext() if dry_run else
+            os.fdopen(os.open(store / ".evict.lock", flags, 0o600), "a+b"))
+    with lock as eviction_lock:
+        if eviction_lock is not None:
+            fcntl.flock(eviction_lock, fcntl.LOCK_EX)
+        if not dry_run:
+            for path in store.iterdir():
+                try:
+                    if path.name.startswith(".evicting-") and path.is_dir() and not path.is_symlink():
+                        _remove_eviction_target(store, path)
+                except FileNotFoundError:
+                    continue
+
+        candidates: list[tuple[int, int, Path, str, str, int]] = []
+        total = 0
+        for path in store.iterdir():
+            try:
+                if path in excluded or path.is_symlink() or not path.is_dir():
+                    continue
+                name = path.name
+                if name.startswith("quarantine-"):
+                    priority, reason, size = 0, "quarantine", _tree_bytes(path)
+                elif _TEMPORARY.fullmatch(name):
+                    priority, reason, size = 1, "orphan_tmp", _tree_bytes(path)
+                elif _SEED_KEY.fullmatch(name):
+                    priority, reason, size = 2, "cap", _seed_bytes(path, cache=not dry_run)
+                else:
+                    continue
+                mtime = path.stat().st_mtime_ns
+            except FileNotFoundError:
+                continue
+            total += size
+            candidates.append((priority, mtime, path, reason, name, size))
+
+        for priority, listed_mtime, path, reason, name, listed_size in sorted(candidates):
+            if total <= max_bytes:
+                break
+            if priority == 2 and name == keep:
+                continue
+            if priority == 1:
+                pid = int(_TEMPORARY.fullmatch(name).group(1))
+                try:
+                    os.kill(pid, 0)
+                except OSError as error:
+                    if error.errno != errno.ESRCH:
+                        continue
+                else:
+                    continue
+            try:
+                if priority == 2:
+                    try:
+                        descriptor = os.open(store / f".{name}.lock",
+                                             flags & ~os.O_CREAT if dry_run else flags, 0o600)
+                    except FileNotFoundError:
+                        if not dry_run:
+                            raise
+                        descriptor = None
+                    try:
+                        if descriptor is not None:
+                            try:
+                                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                            except BlockingIOError:
+                                continue
+                        if (not path.is_dir() or path.is_symlink()
+                                or path.stat().st_mtime_ns > listed_mtime
+                                or _external_hardlinks(path)):
+                            continue
+                        size = _seed_bytes(path, cache=not dry_run)
+                        if not dry_run:
+                            _make_tree_writable(path)
+                            target = store / f".evicting-{name}-{time.time_ns()}"
+                            path.rename(target)
+                            _remove_eviction_target(store, target)
+                            (store / f".{name}.bytes").unlink(missing_ok=True)
+                            _fsync_directory(store)
+                    finally:
+                        if descriptor is not None:
+                            os.close(descriptor)
+                else:
+                    if (not path.is_dir() or path.is_symlink()
+                            or path.stat().st_mtime_ns > listed_mtime
+                            or _external_hardlinks(path)):
+                        continue
+                    size = _tree_bytes(path)
+                    if not dry_run:
+                        target = store / f".evicting-{name}-{time.time_ns()}"
+                        path.rename(target)
+                        _remove_eviction_target(store, target)
+            except FileNotFoundError:
+                continue
+            total -= listed_size
+            removed.append(str(path))
+            removed_bytes += size
+            result.update(count=len(removed), bytes=removed_bytes, paths=removed.copy())
+            if event is not None and not dry_run:
+                key = name
+                if priority == 1:
+                    key = name[1:65]
+                elif priority == 0 and _SEED_KEY.fullmatch(name.rsplit("-", 1)[-1]):
+                    key = name.rsplit("-", 1)[-1]
+                event({"event": "env_seed_evicted", "key": key, "bytes": size, "reason": reason})
+    return result
+
+
+def evict_to_cap(store: Path, max_bytes: int, keep: str,
+                 event: Callable[[dict], None] | None, *, dry_run: bool = False,
+                 excluded: frozenset[Path] = frozenset()) -> dict[str, object]:
+    """Best-effort serialized eviction after the clone's per-seed lock is released."""
+    result: dict[str, object] = {"count": 0, "bytes": 0, "paths": []}
+    if max_bytes == 0:
+        return result
+    try:
+        return _evict_to_cap(store, max_bytes, keep, event, result,
+                             dry_run=dry_run, excluded=excluded)
+    except Exception as error:
+        if event is not None:
+            try:
+                event({"event": "env_seed_evict_failed",
+                       "error": f"{type(error).__name__}: eviction failed"})
+            except Exception:
+                pass
+        return result
+
+
+def _cap_bytes(event: Callable[[dict], None] | None) -> int:
+    raw = os.environ.get("STATEFRAME_ENV_SEED_MAX_GB", str(DEFAULT_MAX_GB)).strip()
+    try:
+        if not _DECIMAL_GB.fullmatch(raw):
+            raise ValueError("invalid cap")
+        amount = Decimal(raw)
+        size = int(amount * 10**9)
+        return max(1, size) if amount else 0
+    except (ValueError, ArithmeticError):
+        if event is not None:
+            try:
+                event({"event": "env_seed_cap_invalid"})
+            except Exception:
+                pass
+        return DEFAULT_MAX_GB * 10**9
+
+
 def clone(source: Path, destination: Path, interpreter: Path, source_repo: Path | None,
           authorized_roots: tuple[Path, ...], *,
           event: Callable[[dict], None] | None = None) -> Path:
@@ -246,6 +511,7 @@ def clone(source: Path, destination: Path, interpreter: Path, source_repo: Path 
                     {"key": key, "inputs": inputs, "files": files,
                      "directories": directories}, sort_keys=True))
                 _fsync_tree(temporary)
+                _write_seed_bytes(seed, sum(row["size"] for row in files.values() if "size" in row))
                 temporary.rename(seed)
                 fd = os.open(store, os.O_RDONLY | os.O_DIRECTORY)
                 try:
@@ -254,9 +520,14 @@ def clone(source: Path, destination: Path, interpreter: Path, source_repo: Path 
                     os.close(fd)
             except BaseException:
                 shutil.rmtree(temporary, ignore_errors=True)
+                try:
+                    (store / f".{key}.bytes").unlink(missing_ok=True)
+                except OSError:
+                    pass
                 raise
         manifest = json.loads((seed / "seed.json").read_text())
         _clone_files(seed, destination, manifest["files"], manifest["directories"])
         # The seed directory's mtime records its last use; gc prunes only long-unused seeds.
         os.utime(seed)
+    evict_to_cap(store, _cap_bytes(event), key, event)
     return seed

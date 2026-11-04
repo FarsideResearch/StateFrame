@@ -486,7 +486,7 @@ def _remaining_script(tmp_path: Path) -> Path:
 def test_acceptance_widened_run_resumes_by_replay(tmp_path):
     """Kill the engine after the widened edit; resume replays the tape (never a checkpoint)."""
     from acceptance.test_resume_completion import _engine_child
-    from fixtures.process_signals import record_identity, signal_verified
+    from fixtures.process_signals import record_identity, signal_run_owned, signal_run_verified
 
     repo = _large_repo(tmp_path)
     run_dir, marker = tmp_path / "run", tmp_path / "paused"
@@ -528,14 +528,19 @@ def test_acceptance_widened_run_resumes_by_replay(tmp_path):
         assert child is not None, (
             f"engine child missing at paused request; runner_exit={runner.poll()} "
             f"endpoint_exit={endpoint.poll()} related_processes={related[:5]}")
-        signal_verified(child, record_identity(child, launched_after=launched_after,
-                                               command_fragment="_child.py"), signal.SIGKILL)
+        signal_run_verified(run_dir, child, record_identity(
+            child, launched_after=launched_after, command_fragment="_child.py"),
+            signal.SIGKILL, deadline=deadline, what="widened edit replay")
         runner.communicate(timeout=30)
     finally:
-        for process in (runner, endpoint):
-            if process is not None and process.poll() is None:
-                process.kill()
-                process.wait(timeout=5)
+        if runner is not None and runner.poll() is None:
+            # Failure cleanup may run before a checkpoint exists.
+            signal_run_owned(run_dir, runner, signal.SIGKILL, deadline=time.monotonic(),
+                             what="widened run cleanup", require_checkpoint_saved=False)
+            runner.wait(timeout=5)
+        if endpoint.poll() is None:
+            endpoint.kill()
+            endpoint.wait(timeout=5)
     spec = json.loads((run_dir / "spec.json").read_text())
     assert spec["environment"]["STATEFRAME_EDIT_SCOPE_WIDEN"] == "on"
     with Endpoint(_remaining_script(tmp_path)) as remaining:

@@ -10,6 +10,7 @@ import zlib
 from pathlib import Path
 
 import pytest
+from fixtures.process_signals import signal_run_owned
 
 from stateframe.scripted_endpoint import Script, serve
 from stateframe.request_records import list_request_records, read_request_record
@@ -190,7 +191,8 @@ def test_kill_resume_serves_byte_identical_next_request(tmp_path):
         tape = [json.loads(line) for line in (run / "tool-tape.jsonl").read_text().splitlines()]
         assert [row["kind"] for row in tape] == ["intent", "complete"]
         assert tape[0]["call_id"] == tape[1]["call_id"]
-        process.send_signal(signal.SIGTERM)
+        signal_run_owned(run, process, signal.SIGTERM, deadline=time.monotonic() + 120,
+                         what="shell completion replay")
         process.wait(timeout=20)
         original = {name: read_request_record(run, name) for name in list_request_records(run)}
         assert original and (run / "tool-tape.jsonl").exists()
@@ -214,7 +216,9 @@ def test_kill_resume_serves_byte_identical_next_request(tmp_path):
     finally:
         script.release.set()
         if process.poll() is None:
-            process.terminate()
+            # Failure cleanup may precede the first checkpoint.
+            signal_run_owned(run, process, signal.SIGTERM, deadline=time.monotonic(),
+                             what="shell replay cleanup", require_checkpoint_saved=False)
             process.wait(timeout=20)
         output.close()
         server.shutdown()
@@ -257,7 +261,8 @@ def test_kill_resume_preserves_repeated_read_request_bytes(tmp_path):
         original = {name: read_request_record(run, name) for name in list_request_records(run)}
         assert len(original) >= 3
         assert any(b"unchanged since request" in body for body in original.values())
-        process.send_signal(signal.SIGTERM)
+        signal_run_owned(run, process, signal.SIGTERM, deadline=time.monotonic() + 120,
+                         what="repeated read replay")
         process.wait(timeout=20)
         script.pause = False
         script.release.set()
@@ -277,7 +282,9 @@ def test_kill_resume_preserves_repeated_read_request_bytes(tmp_path):
     finally:
         script.release.set()
         if process.poll() is None:
-            process.terminate()
+            # Failure cleanup may precede the first checkpoint.
+            signal_run_owned(run, process, signal.SIGTERM, deadline=time.monotonic(),
+                             what="repeated read cleanup", require_checkpoint_saved=False)
             process.wait(timeout=20)
         output.close()
         server.shutdown()

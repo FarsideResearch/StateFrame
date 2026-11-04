@@ -477,6 +477,7 @@ DEFAULT_PROMPT_BUDGET = 33_344
 # ambient over the profile. Never a blanket STATEFRAME_* passthrough.
 OPT_IN_SWITCHES = {
     "STATEFRAME_ENV_SEED": ("auto", "copy"),  # host-side run environment creation policy
+    "STATEFRAME_ENV_SEED_MAX_GB": (),  # non-negative decimal GB; 0 disables seed eviction
     "STATEFRAME_KEEP_RUN_ENV": ("on", "off"),  # host-side finished-run retention policy
     "STATEFRAME_CACHE_LAYOUT": ("on", "off"),
     "STATEFRAME_SLOT_AFFINITY": ("on", "off"),
@@ -510,6 +511,10 @@ def resolve_opt_in_switches(engine_dir: Path = ENGINE_DIR) -> dict[str, str]:
             default = OPT_IN_RUNNER_DEFAULTS.get(name)
             if default is not None and name in engine_switches(engine_dir):
                 chosen[name] = default
+            continue
+        if name == "STATEFRAME_ENV_SEED_MAX_GB":
+            # The host seed builder reports an invalid ambient value and uses the default.
+            chosen[name] = raw if re.fullmatch(r"(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)", raw) else "10"
             continue
         if name in {"STATEFRAME_QUEUE_WAIT_MAX_S", "STATEFRAME_SEND_STALL_S"}:
             try:

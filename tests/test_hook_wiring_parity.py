@@ -15,6 +15,7 @@ import signal
 import subprocess
 import sys
 import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -23,6 +24,7 @@ from acceptance._support import assert_tree_imports, tree_python
 import kernel_measurement as measurement
 from stateframe.scripted_endpoint import Script, ScriptStepUnavailable, serve
 from tools.pinned_tree import pinned_tree
+from fixtures.process_signals import record_identity, signal_run_owned, signal_run_verified
 
 
 CURRENT = Path(__file__).resolve().parents[1]
@@ -304,7 +306,10 @@ def _resume_checkout(checkout: Path, repo: Path, run: Path, launcher: Path,
         assert len(original) == 2
         children = subprocess.check_output(["pgrep", "-P", str(process.pid)], text=True).split()
         assert len(children) == 1, children
-        os.kill(int(children[0]), signal.SIGKILL)
+        child = int(children[0])
+        identity = record_identity(child, launched_after=0, command_fragment="_child.py")
+        signal_run_verified(run, child, identity, signal.SIGKILL,
+                            deadline=time.monotonic() + 120, what="hook wiring parity")
         script.release.set()
         process.communicate(timeout=90)
         resumed = subprocess.run([python, "-m", "stateframe", "resume", str(run),
@@ -318,7 +323,9 @@ def _resume_checkout(checkout: Path, repo: Path, run: Path, launcher: Path,
     finally:
         script.release.set()
         if process is not None and process.poll() is None:
-            process.kill()
+            # Failure cleanup may precede the first checkpoint.
+            signal_run_owned(run, process, signal.SIGKILL, deadline=time.monotonic(),
+                             what="hook parity cleanup", require_checkpoint_saved=False)
             process.communicate(timeout=10)
         server.shutdown()
         server.server_close()
