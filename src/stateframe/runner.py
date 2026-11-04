@@ -492,6 +492,7 @@ OPT_IN_SWITCHES = {
     "STATEFRAME_FINAL_CACHE_LAYOUT": ("on", "off"),  # cacheable final request layout: volatile authority last
     "STATEFRAME_QUEUE_WAIT_MAX_S": (),  # finite positive seconds; a profile may set it too
     "STATEFRAME_SEND_STALL_S": (),  # 10-600 seconds without request-body progress
+    "STATEFRAME_FL_CHECKPOINT_CAPTURE": ("on", "off"),  # opt-in settled-boundary observer capture
 }
 # Accepted aliases -> the engine's own value (EVICTFIX "off" is sent as "legacy").
 OPT_IN_ALIASES = {"STATEFRAME_EVICTFIX": {"off": "legacy"}}
@@ -543,6 +544,27 @@ def resolve_opt_in_switches(engine_dir: Path = ENGINE_DIR) -> dict[str, str]:
         if name not in engine_switches(engine_dir):
             raise RunError(f"{name} is set, but this engine does not support it; unset it to run")
         chosen[name] = value
+    capture_enabled = chosen.get("STATEFRAME_FL_CHECKPOINT_CAPTURE") == "on"
+    capture_limits = {
+        "STATEFRAME_FL_CAPTURE_EVERY_K": 1000,
+        "STATEFRAME_FL_CAPTURE_MAX_COUNT": 1000,
+        "STATEFRAME_FL_CAPTURE_MAX_FILES": 10000,
+        "STATEFRAME_FL_CAPTURE_MAX_BYTES": 16 * 1024 * 1024,
+    }
+    for name, maximum in capture_limits.items():
+        raw = os.environ.get(name, "").strip()
+        if not raw:
+            continue
+        if not capture_enabled:
+            raise RunError(f"{name} requires STATEFRAME_FL_CHECKPOINT_CAPTURE=on")
+        try:
+            value = int(raw)
+        except ValueError:
+            raise RunError(f"{name} must be an integer") from None
+        if value <= 0 or value > maximum:
+            raise RunError(f"{name} must be between 1 and {maximum}")
+        # The child environment is allowlisted from this spec, not inherited.
+        chosen[name] = str(value)
     return chosen
 
 

@@ -223,11 +223,10 @@ def test_unchanged_skill_resume_rebuilds_loaded_body(tmp_path, first_mode, resum
     assert resumed.returncode == 0, resumed.stdout + resumed.stderr
     replayed = read_requests(run_dir)
     replayed_next = json.loads((run_dir / "wire/0002.request.json").read_bytes())
-    # What skills own must rebuild byte for byte: the loaded body message and the catalog.
-    # (The rest of an in-flight request is not byte-stable across a restore even without
-    # skills: journal-minted check-execution and wire-truth ids move. That is a core resume
-    # issue tracked separately, so it is not asserted or masked here.)
+    # Same-seed replay rebuilds the complete provider request, including the
+    # check-execution and wire-truth references, byte for byte.
     recorded_doc = json.loads(recorded_next)
+    assert replayed_next == recorded_doc
 
     def _skill_parts(request: dict) -> tuple[list[str], list[str]]:
         bodies = [text for text in _messages(request) if text.startswith("USER-PROVIDED SKILL INSTRUCTIONS")]

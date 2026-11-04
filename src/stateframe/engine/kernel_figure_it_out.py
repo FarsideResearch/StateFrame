@@ -12,7 +12,6 @@ import hashlib
 import json
 import math
 import os
-import uuid
 from collections.abc import Callable, Mapping, Sequence
 
 
@@ -264,10 +263,24 @@ def _finish(name: str, status: str, authority: str, result: Mapping[str, object]
     # input, so it must never itself raise.
     bounded_result = _safe_bounded(dict(result))
     bounded_input = _safe_bounded(dict(input_payload))
-    from kernel_wire_identity import next_wire_id
-    public_id = (next_wire_id(journal, "figure-it-out", canonical,
-                              _safe_digest(bounded_input), _safe_digest(bounded_result))
-                 if journal is not None else uuid.uuid4().hex)
+    context_mapping = context if isinstance(context, Mapping) else {}
+    step = next((context_mapping.get(name) for name in ("step", "turn", "current_step")
+                 if type(context_mapping.get(name)) is int), 0)
+    if not context_mapping:
+        step = next((getattr(context, name, None) for name in ("step", "turn", "current_step")
+                     if type(getattr(context, name, None)) is int), 0)
+    request_id = context_mapping.get("request_id")
+    if request_id is None:
+        request_id = getattr(context, "request_id", None)
+    from kernel_wire_identity import content_wire_id
+    public_id = content_wire_id(
+        journal, "figure-it-out", step, {
+            "request_id": request_id if isinstance(request_id, str) else "",
+            "operator": canonical,
+            "input_digest": _safe_digest(bounded_input),
+            "output_digest": _safe_digest(bounded_result),
+        },
+    )
     receipt: dict[str, object] = {
         "schema": SCHEMA,
         "receipt_id": "figure-it-out:" + public_id,

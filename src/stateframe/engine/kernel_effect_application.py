@@ -24,7 +24,6 @@ import hashlib
 import json
 import os
 import time
-import uuid
 from collections.abc import Callable, Mapping, Sequence
 from enum import Enum
 from pathlib import Path
@@ -191,11 +190,18 @@ def _make_receipt(*, operation: str, selected_mode: Mode, status: str,
                   effect_applied: bool | None, authoritative_updated: bool,
                   frozen_snapshot: object, before_state: object, proposal: object,
                   after_snapshot: object, error_type: str | None = None,
-                  journal: object = None) -> EffectReceipt:
-    from kernel_wire_identity import next_wire_id
-    receipt_id = (next_wire_id(journal, "effect-application", operation,
-                               selected_mode.value, status, _digest(proposal))
-                  if journal is not None else uuid.uuid4().hex)
+                  journal: object = None, request_id: object = None,
+                  step: object = 0) -> EffectReceipt:
+    from kernel_wire_identity import content_wire_id
+    receipt_id = content_wire_id(
+        journal, "effect-application", step, {
+            "request_id": request_id if isinstance(request_id, str) else "",
+            "operation": operation,
+            "mode": selected_mode.value,
+            "status": status,
+            "proposal_digest": _digest(proposal),
+        },
+    )
     return EffectReceipt(
         receipt_id=receipt_id,
         operation=operation,
@@ -236,6 +242,12 @@ def apply_effect(*, operation: str, snapshot: object, dispatch: Callable[[], obj
     sink = _runtime_owner(owner)
     journal = (getattr(sink, "journal", None) or getattr(sink, "audit_journal", None)
                if sink is not None else None)
+    step = getattr(sink, "current_step", None) if sink is not None else None
+    if step is None and sink is not None:
+        step = getattr(getattr(sink, "owner", None), "current_step", 0)
+    request_id = getattr(sink, "current_request_id", None) if sink is not None else None
+    if request_id is None and sink is not None:
+        request_id = getattr(getattr(sink, "owner", None), "current_request_id", None)
 
     frozen_snapshot = freeze_snapshot(snapshot)
     before_state = (freeze_snapshot(before_snapshot())
@@ -248,6 +260,7 @@ def apply_effect(*, operation: str, snapshot: object, dispatch: Callable[[], obj
             authoritative_updated=False,
             frozen_snapshot=frozen_snapshot, before_state=before_state,
             proposal=proposal, after_snapshot=before_state, journal=journal,
+            request_id=request_id, step=step,
         )
         _publish(owner, receipt)
         rendered = render(receipt) if render is not None else render_receipt(receipt)
@@ -293,6 +306,7 @@ def apply_effect(*, operation: str, snapshot: object, dispatch: Callable[[], obj
             frozen_snapshot=frozen_snapshot, before_state=before_state,
             proposal=proposal,
             after_snapshot=after, error_type=type(error).__name__, journal=journal,
+            request_id=request_id, step=step,
         )
         _publish(owner, receipt)
         raise
@@ -305,7 +319,7 @@ def apply_effect(*, operation: str, snapshot: object, dispatch: Callable[[], obj
         effect_applied=applied, authoritative_updated=authoritative_updated,
         frozen_snapshot=frozen_snapshot, before_state=before_state,
         proposal=proposal,
-        after_snapshot=after, journal=journal,
+        after_snapshot=after, journal=journal, request_id=request_id, step=step,
     )
     _publish(owner, receipt)
     rendered = render(receipt) if render is not None else render_receipt(receipt)

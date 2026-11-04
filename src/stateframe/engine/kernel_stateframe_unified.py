@@ -12,6 +12,7 @@ import copy
 import hashlib
 import json
 import os
+import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 
@@ -25,6 +26,7 @@ EVIDENCE_AXES = ("binding", "assessment", "interpretation")
 DECISION_EXITS = ("OPEN", "RESOLVED", "NARROWED", "NO_DISCRIMINATION", "INCONCLUSIVE")
 _PASS = {"GREEN", "PASS", "PASSED", "SUCCESS", "CERTIFIED", "REUSED_VERIFICATION", "OK"}
 _FAIL = {"RED", "FAIL", "FAILED", "ERROR", "DEFECT"}
+_CHECK_RECEIPT_ID = re.compile(r"^check-receipt:[0-9a-f]{24}$")
 
 
 def unified_mode() -> str:
@@ -418,7 +420,10 @@ def render_unified_frame(frame: Mapping[str, object], *, lifecycle: DecisionLife
         axis = _axis_status(latest, current,
                             mapped=bool(latest.get("selector", latest.get("selectors", latest.get("target")))),
                             interpreted=True)
-        lines.append(f"receipt={_text(latest.get('receipt_id', latest.get('event_id', 'UNKNOWN')), 60)} "
+        receipt_id = latest.get("receipt_id")
+        receipt_label = (receipt_id if isinstance(receipt_id, str)
+                         and _CHECK_RECEIPT_ID.fullmatch(receipt_id) else "UNKNOWN")
+        lines.append(f"receipt={_text(receipt_label, 60)} "
                      f"selector={_selector(latest)} revision={_revision(latest) or 'UNKNOWN'} {_axis_text(axis)}")
     else:
         lines.append("receipt=none binding=UNKNOWN assessment=UNEXERCISED interpretation=INTERPRETATION_OPEN")

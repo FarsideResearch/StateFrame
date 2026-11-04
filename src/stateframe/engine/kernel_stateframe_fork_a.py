@@ -25,6 +25,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from kernel_wire_identity import seeded_content_wire_id, wire_identity_content, wire_run_seed
 from kernel_stateframe_portfolio import (
     PortfolioJournal,
     _readonly_tree,
@@ -302,7 +303,8 @@ class ForkAController:
     def __init__(self, parent_workspace: str | Path, *, store_root: str | Path,
                  budget: int = DEFAULT_BUDGET, ticket_id: str = "",
                  parent_ledger: object | None = None,
-                 excluded_roots: Sequence[str | Path] = ()):
+                 excluded_roots: Sequence[str | Path] = (),
+                 run_seed: str | None = None):
         self.parent_workspace = Path(parent_workspace).resolve()
         if not self.parent_workspace.is_dir():
             raise ForkAError(f"parent workspace must be a directory: {self.parent_workspace}")
@@ -313,13 +315,17 @@ class ForkAController:
             *(Path(path).resolve() for path in excluded_roots),
         })
         self.ticket_id = str(ticket_id or "")
+        self.run_seed = str(run_seed or wire_run_seed(None))
         self.parent_ledger = parent_ledger
         self.budget = SharedBudget(budget)
+        parent_revision = _workspace_revision(self.parent_workspace, self.excluded_roots)
         self.parent_journal = PortfolioJournal(
             self.store_root / "parent-events.jsonl",
-            journal_id="fork-a-parent:" + uuid.uuid4().hex,
+            journal_id="fork-a-parent:" + seeded_content_wire_id(
+                self.run_seed, "fork-a-parent-journal", 0,
+                {"ticket_id": self.ticket_id, "parent_revision": parent_revision},
+            ),
         )
-        parent_revision = _workspace_revision(self.parent_workspace, self.excluded_roots)
         checkpoint_workspace = self.store_root / "checkpoint" / "workspace"
         _copy_workspace(self.parent_workspace, checkpoint_workspace, self.excluded_roots)
         if _workspace_revision(checkpoint_workspace) != parent_revision:
@@ -381,15 +387,42 @@ class ForkAController:
             )
         return allowed
 
-    def _new_worker(self, index: int) -> ForkAWorker:
-        worker_id = f"worker-{index:02d}-{uuid.uuid4().hex[:10]}"
+    @staticmethod
+    def _request_step(request: Mapping[str, object] | None) -> int:
+        if isinstance(request, Mapping):
+            for key in ("step", "turn"):
+                value = request.get(key)
+                if type(value) is int and value >= 0:
+                    return value
+        return 0
+
+    def _new_worker(self, index: int, *, request: Mapping[str, object] | None = None) -> ForkAWorker:
+        step = self._request_step(request)
+        identity_content = {
+            "ticket_id": self.ticket_id,
+            "parent_revision": self.checkpoint.parent_revision,
+            "checkpoint_id": self.checkpoint.checkpoint_id,
+            "worker_index": index,
+            "request": wire_identity_content(request or {}),
+        }
+        ordinal = index + 1
+        worker_wire_id = seeded_content_wire_id(
+            self.run_seed, "fork-a-worker", step, identity_content, ordinal=ordinal,
+        )
+        worker_id = f"worker-{index:02d}-{worker_wire_id[:10]}"
         worker_dir = self.store_root / "workers" / worker_id
         workspace = worker_dir / "workspace"
         _copy_workspace(self.checkpoint.workspace, workspace)
         _writable_tree(workspace)
-        journal_id = "fork-a-worker:" + uuid.uuid4().hex
+        journal_id = "fork-a-worker:" + seeded_content_wire_id(
+            self.run_seed, "fork-a-worker-journal", step, identity_content,
+            ordinal=ordinal,
+        )
         journal_path = worker_dir / "events.jsonl"
-        request_id = "request:" + uuid.uuid4().hex
+        request_id = "request:" + seeded_content_wire_id(
+            self.run_seed, "fork-a-worker-request", step, identity_content,
+            ordinal=ordinal,
+        )
         worker = ForkAWorker(
             worker_id=worker_id,
             worker_index=index,
@@ -527,7 +560,7 @@ class ForkAController:
             if not self._charge(f"worker:{index}"):
                 self.status = "needs_review"
                 break
-            worker = self._new_worker(index)
+            worker = self._new_worker(index, request=request)
             self._execute(worker, request=request, model_request=model_request)
         if len(self.workers) == WORKER_COUNT and all(
                 worker.status == "completed" for worker in self.workers):

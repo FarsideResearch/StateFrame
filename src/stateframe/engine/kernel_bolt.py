@@ -1357,38 +1357,57 @@ class KernelBolt:
         if attempt is not None:
             rec["attempt"] = dict(attempt)
             rec["attempt_id"] = attempt["fingerprint"]
-        from kernel_wire_identity import next_wire_id
-        rec["receipt_id"] = next_wire_id(
-            getattr(self, "audit_journal", None), "action-receipt",
-            getattr(self, "current_step", None), kind, rec["fingerprint"])
-        self.last_receipt_id = rec["receipt_id"]
         journal = getattr(self, "audit_journal", None)
+        runtime = getattr(self, "measurement", None)
+        continuation = getattr(runtime, "continuation", None) if runtime is not None else None
+        dispatch = getattr(continuation, "dispatch", None)
+        dispatch_is_current = (
+            isinstance(dispatch, Mapping)
+            and dispatch.get("accepted") is True
+            and dispatch.get("step") == getattr(self, "current_step", None)
+        )
+        dispatch_request_id = dispatch.get("request_id") if dispatch_is_current else None
+        request_id = (
+            dispatch_request_id
+            if isinstance(dispatch_request_id, str) and dispatch_request_id.strip()
+            else getattr(self, "current_request_id", None)
+        )
+        if request_id is None and runtime is not None:
+            request_id = getattr(runtime, "current_request_id", None)
+        tool_call_id = getattr(runtime, "current_tool_call_id", None)
+        dispatch_arguments_hash = (
+            dispatch.get("arguments_hash")
+            if dispatch_is_current and isinstance(dispatch.get("arguments_hash"), str)
+            else rec["fingerprint"]
+        )
+        if not hasattr(self, "_receipts"):
+            self._receipts = _receipt_history(directory=_journal_directory(journal))
+        from kernel_wire_identity import action_receipt_ordinal, action_receipt_wire_id
+        receipt_step = getattr(self, "current_step", None)
+        receipt_ordinal = action_receipt_ordinal(
+            journal if journal is not None else self._receipts,
+            request_id=request_id,
+            step=receipt_step,
+            action_kind=kind,
+            target_path=target_path,
+        )
+        rec["receipt_id"] = action_receipt_wire_id(
+            journal,
+            request_id=request_id,
+            step=receipt_step,
+            tool_call_id=tool_call_id,
+            action_kind=kind,
+            fingerprint=dispatch_arguments_hash,
+            target_path=target_path,
+            ordinal=receipt_ordinal,
+        )
+        self.last_receipt_id = rec["receipt_id"]
         if journal is not None:
             rec["run_id"] = self.run_id
-            runtime = getattr(self, "measurement", None)
-            continuation = getattr(runtime, "continuation", None) if runtime is not None else None
-            dispatch = getattr(continuation, "dispatch", None)
-            dispatch_is_current = (
-                isinstance(dispatch, Mapping)
-                and dispatch.get("accepted") is True
-                and dispatch.get("step") == getattr(self, "current_step", None)
-            )
-            dispatch_request_id = (
-                dispatch.get("request_id") if dispatch_is_current else None
-            )
-            request_id = (
-                dispatch_request_id
-                if isinstance(dispatch_request_id, str) and dispatch_request_id.strip()
-                else getattr(self, "current_request_id", None)
-            )
-            if request_id is None and runtime is not None:
-                request_id = getattr(runtime, "current_request_id", None)
             rec["request_id"] = request_id
             if continuation is not None:
                 rec.update(continuation.lineage())
             journal.emit("action_receipt", receipt=rec)
-        if not hasattr(self, "_receipts"):
-            self._receipts = _receipt_history(directory=_journal_directory(journal))
         rec = _append_receipt(self._receipts, rec)
         runtime = getattr(self, "measurement", None)
         if runtime is not None:

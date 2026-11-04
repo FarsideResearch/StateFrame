@@ -17,6 +17,7 @@ from collections.abc import Iterable, Iterator, Mapping, Sequence
 import hashlib
 import json
 import os
+import re
 from dataclasses import dataclass, field, replace as dataclass_replace
 from typing import Callable
 
@@ -1014,12 +1015,67 @@ def _event_rows(events: object) -> list[tuple[int, Mapping[str, object]]]:
     return rows
 
 
+def _event_ref_material(row: Mapping[str, object]) -> dict[str, object]:
+    """Keep semantic test evidence and drop host ordering/identity metadata.
+
+    The shared wire-identity filter removes generated IDs, journal chain hashes
+    and journal positions at every depth; this adds the row-level host keys.
+    """
+    from kernel_wire_identity import wire_identity_content
+
+    kept = {key: value for key, value in row.items() if key not in {"run_id", "ref"}}
+    try:
+        material = wire_identity_content(kept)
+    except TypeError:
+        # Non-JSON values: identify the row by its key set; the caller's
+        # ordinal keeps equal key sets apart.
+        return {"unrepresentable_keys": sorted(str(key) for key in kept)}
+    return material if isinstance(material, dict) else {}
+
+
 def _event_ref(row: Mapping[str, object], position: int) -> str:
+    """Preserve legacy internal references when no provider identity is supplied."""
     for key in ("event_id", "receipt_id", "id", "ref"):
         value = row.get(key)
         if value is not None and str(value).strip():
             return str(value)
     return f"event@{position}"
+
+
+def _wire_event_refs(
+        rows: Sequence[tuple[int, Mapping[str, object]]], *,
+        wire_seed: object, wire_step: object,
+) -> dict[int, str]:
+    """Give evidence without a check receipt a stable content reference."""
+    from kernel_wire_identity import seeded_content_wire_id
+
+    references: dict[int, str] = {}
+    occurrences: dict[str, int] = {}
+    for position, row in rows:
+        receipt_id = row.get("receipt_id")
+        if (isinstance(receipt_id, str)
+                and re.fullmatch(r"check-receipt:[0-9a-f]{24}", receipt_id)):
+            references[position] = receipt_id
+            continue
+        material = _event_ref_material(row)
+        try:
+            encoded = json.dumps(
+                material, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+                allow_nan=False,
+            )
+        except (TypeError, ValueError):
+            encoded = json.dumps(
+                {"unrepresentable_type": type(row).__name__,
+                 "keys": sorted(str(key) for key in material)},
+                sort_keys=True, separators=(",", ":"),
+            )
+        occurrences[encoded] = occurrences.get(encoded, 0) + 1
+        # A bare ID, the same shape as the event ID it replaces on the wire.
+        references[position] = seeded_content_wire_id(
+            wire_seed, "check-evidence", wire_step, material,
+            ordinal=occurrences[encoded],
+        )
+    return references
 
 
 def _selectors(row: Mapping[str, object]) -> list[str]:
@@ -1132,6 +1188,8 @@ def evaluate_required_tests(
     events: object,
     *,
     identity: object = None,
+    wire_seed: object = None,
+    wire_step: object = 0,
 ) -> Verdict:
     """Evaluate the newest trusted, current result for every required selector.
 
@@ -1173,6 +1231,11 @@ def evaluate_required_tests(
             return Verdict(UNRESOLVED, [], ["MISSING_RUN_IDENTITY"], identity=verdict_identity)
 
     rows = _event_rows(events)
+    wire_event_refs = (
+        _wire_event_refs(rows, wire_seed=wire_seed, wire_step=wire_step)
+        if wire_seed is not None
+        else {position: _event_ref(row, position) for position, row in rows}
+    )
     trusted: list[tuple[int, Mapping[str, object]]] = []
     ignored_producer = False
     for position, row in rows:
@@ -1211,11 +1274,11 @@ def evaluate_required_tests(
             reasons.append(_binding_instability_reason(next(
                 row for _position, row in winners
                 if not _binding_is_current(row, current))) + ":" + required_selector)
-            supporting.extend(_event_ref(row, position) for position, row in winners)
+            supporting.extend(wire_event_refs[position] for position, _row in winners)
             continue
         winner_states = [_exit_state(row) for _position, row in winners]
         for position, row in winners:
-            supporting.append(_event_ref(row, position))
+            supporting.append(wire_event_refs[position])
             winning_rows.append((position, row))
         distinct = {state for state, _reason in winner_states}
         if len(distinct) > 1:

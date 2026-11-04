@@ -198,7 +198,9 @@ def _kind_name(row: Mapping[str, object]) -> str:
 
 def _evidence_ids(row: Mapping[str, object], fallback: object) -> tuple[str, ...]:
     values: list[str] = []
-    for key in ("receipt_id", "evidence_ref", "event_id", "record_id", "instance_key"):
+    # Journal event IDs encode the global sequence. They are deliberately not
+    # exported as fact evidence; a content-derived fallback is replay-stable.
+    for key in ("receipt_id", "evidence_ref", "record_id", "instance_key"):
         value = row.get(key)
         if value:
             values.append(str(value))

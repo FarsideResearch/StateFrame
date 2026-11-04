@@ -583,11 +583,11 @@ def engine_step_limit(max_turns: object) -> int | None:
 
 
 def install_run_identity(seed: object) -> None:
-    """Make the engine's run-scoped ids (uuid4: run ids, receipts, handles) a stream fixed by the run's seed.
+    """Make the engine's run-scoped host ids (uuid4: run ids, journal handles) a stream fixed by the run's seed.
 
     Ids stay unique per run (the runner draws a random seed for each run), but the SAME run started again
-    from the same seed gets the same ids in the same order. ``stateframe resume`` relies on that: the replayed
-    requests then match the recorded ones byte for byte, including the receipts and hashes derived from ids.
+    from the same seed gets the same host ids in the same order. Provider-visible ids do not use this
+    stream: they derive from the task identity, step and content (kernel_wire_identity.wire_run_seed).
     """
     import uuid
 

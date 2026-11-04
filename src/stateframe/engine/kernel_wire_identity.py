@@ -1,25 +1,19 @@
 """Stable, compact identities for values that can enter provider messages.
 
-Journal run IDs remain random storage/lease identities. Wire IDs instead use
-the task identity and a journal position, so an A/A replay presents the same
-bytes while a resumed journal continues past its durable sequence.
+Journal run IDs remain storage/lease identities. Wire IDs use the persisted run
+seed, request step, and the content being identified. Journal traffic is never
+part of a provider-visible identity.
 """
 from __future__ import annotations
 
 import hashlib
 import json
-import logging
 import os
 import re
-import threading
-import uuid
-from contextlib import nullcontext
+from collections.abc import Mapping
 
 
 WIRE_ID_HEX_LENGTH = 20  # 80 bits; birthday bound at 10^6 IDs is < 4.2e-13.
-_ORPHAN_LOCK = threading.Lock()
-_ORPHAN_POSITIONS: dict[tuple[str, str], int] = {}
-ORPHAN_MINTS = 0
 _WORKSPACE_ID = re.compile(r"(?<=continuation-workspaces/)[0-9a-f]{32}(?=/)")
 _ABSOLUTE_WORKSPACE = re.compile(
     r"(?<![\w])/(?:[^/\s\"'\\]+/)*continuation-workspaces/[0-9a-f]{32}/repo/"
@@ -29,7 +23,7 @@ _OBJECT_ADDRESS = re.compile(r"\b0x[0-9a-fA-F]{6,}\b")
 
 
 def detfix3_legacy() -> bool:
-    """Restore the pre-DETFIX3 model-visible random IDs for controlled comparison."""
+    """Restore pre-DETFIX3 volatile-text handling for controlled comparison."""
     return os.environ.get("SF_LAB_DETFIX3", "on").strip().lower() == "legacy"
 
 
@@ -59,25 +53,147 @@ def emit_mode_line(stream=None) -> None:
     print(mode_line(), file=target, flush=True)
 
 
-def stable_wire_id(task_id: object, kind: str, *position: object) -> str:
-    """Derive a domain-separated ID from stable content and a position."""
-    identity = [str(task_id or ""), kind, *position]
+def stable_wire_id(run_seed: object, kind: str, *position: object) -> str:
+    """Derive a domain-separated ID from the persisted run seed and content."""
+    identity = [str(run_seed or "unseeded"), kind, *position]
     encoded = json.dumps(identity, ensure_ascii=False, sort_keys=True,
                          separators=(",", ":"))
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()[:WIRE_ID_HEX_LENGTH]
 
 
+# Task identity of the journal this process opened (one task per engine child).
+# Set from the journal on create and on resume, never from a random source.
+_BOUND_TASK_IDENTITY = ""
+
+
+def bind_wire_task_identity(task_id: object) -> None:
+    """Record the open journal's task identity for callers that hold no journal."""
+    global _BOUND_TASK_IDENTITY
+    _BOUND_TASK_IDENTITY = str(task_id or "")
+
+
+def wire_run_seed(journal: object = None) -> str:
+    """Return the wire-identity root: the task identity, never a per-run random seed.
+
+    The host's ``run_identity_seed`` is a fresh random token per run. Rooting
+    wire IDs in it made two runs of the same task, and a resumed run against
+    its uninterrupted control, send different bytes. The task identity is the
+    same for all of them, so IDs depend only on task + step + content.
+    """
+    task_id = getattr(journal, "task_id", None) if journal is not None else None
+    if isinstance(task_id, str) and task_id:
+        return "task:" + task_id
+    if _BOUND_TASK_IDENTITY:
+        return "task:" + _BOUND_TASK_IDENTITY
+    return "unseeded"
+
+
+def _content_digest(content: object) -> str:
+    """Hash JSON-shaped identity content with stable key and number handling."""
+    encoded = json.dumps(
+        content, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _checked_ordinal(value: object) -> int:
+    """Require a caller-supplied ordinal that can be reconstructed on replay."""
+    if type(value) is not int or value < 1:
+        raise ValueError("wire identity ordinal must be a positive integer")
+    return value
+
+
+def content_wire_id(journal: object, kind: str, step: object,
+                    content: object, *, ordinal: object = 1) -> str:
+    """Derive an ID from persisted run seed, step, content, and stable ordinal.
+
+    The default ordinal is one for idempotent identities. Callers that need
+    distinct IDs for duplicate actions must recompute the ordinal from durable
+    action history and pass it explicitly; this helper keeps no process state.
+    """
+    content_digest = _content_digest(content)
+    return stable_wire_id(
+        wire_run_seed(journal), kind, step, content_digest, _checked_ordinal(ordinal),
+    )
+
+
+def seeded_content_wire_id(seed: object, kind: str, step: object,
+                           content: object, *, ordinal: object = 1) -> str:
+    """Derive an ID for a nested request that has no primary audit journal."""
+    seed_text = str(seed or "unseeded")
+    content_digest = _content_digest(content)
+    return stable_wire_id(seed_text, kind, step, content_digest,
+                          _checked_ordinal(ordinal))
+
+
+_WIRE_IDENTITY_METADATA_KEYS = frozenset({
+    "request_id", "receipt_id", "edit_receipt", "check_receipt_id",
+    "execution_id", "worker_id", "branch_id", "journal_id",
+    "id", "event_id", "source_event_id", "journal_event_id",
+    "message_id", "ask_id", "session_id", "sequence",
+    "event_sequence", "timestamp", "timestamp_ns", "recorded_at_ns",
+    "tool_call_id", "attempt_id", "experiment_id", "stimulus_correlation_id",
+    "correlation_id", "correlation", "action_id", "dispatch_ref", "receipt_ref",
+    "provider_call_id", "call_id",
+    "_wire_identity_key", "_wire_identity_step", "_wire_identity_ordinal",
+    # Journal chain hashes cover timestamps, so they differ on every run.
+    "previous_hash", "record_hash",
+})
+
+
+# "<32-hex journal run id>:<sequence>" is a journal position under any key name
+# (continuation_dispatch_ref, ...). Positions shift whenever an observer adds
+# events, so they never enter a wire identity.
+_JOURNAL_POSITION = re.compile(r"[0-9a-f]{32}:[0-9]+")
+
+
+def wire_identity_content(value: object) -> object:
+    """Remove generated identity metadata before hashing nested request content."""
+    if isinstance(value, str) and _JOURNAL_POSITION.fullmatch(value):
+        return "<journal-position>"
+    if isinstance(value, Mapping):
+        return {
+            str(key): wire_identity_content(item)
+            for key, item in sorted(value.items(), key=lambda pair: str(pair[0]))
+            if str(key) not in _WIRE_IDENTITY_METADATA_KEYS
+        }
+    if isinstance(value, (list, tuple)):
+        return [wire_identity_content(item) for item in value]
+    if isinstance(value, (set, frozenset)):
+        items = [wire_identity_content(item) for item in value]
+        return sorted(items, key=lambda item: json.dumps(
+            item, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+            allow_nan=False,
+        ))
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    raise TypeError("wire identity content must contain JSON values")
+
+
+def request_wire_id(journal: object, step: object, content: object,
+                    *, purpose: object = None, ordinal: object = 1) -> str:
+    """Identify one provider request from its model-visible content and purpose."""
+    return content_wire_id(
+        journal, "request", step,
+        {"purpose": str(purpose or ""), "content": content},
+        ordinal=ordinal,
+    )
+
+
 def wire_run_id(journal: object) -> str:
     """Public alias for a run; never expose its random journal directory name."""
-    if detfix3_legacy():
-        return str(getattr(journal, "run_id", ""))
-    return stable_wire_id(getattr(journal, "task_id", ""), "wire-run")
+    return stable_wire_id(
+        wire_run_seed(journal), "wire-run",
+    )
 
 
 def public_wire_text(value: str, journal: object) -> str:
     """Normalize volatile model text, leaving host journal and audit data intact."""
     if detfix3_legacy():
-        return value
+        # Legacy comparison retains its output text, but host-generated run and
+        # workspace IDs are never allowed to escape into provider messages.
+        return _public_identity_text(value, journal)
     value = _PYTEST_DURATION.sub("in <duration>", value)
     value = _OBJECT_ADDRESS.sub("0x<addr>", value)
     return _public_identity_text(value, journal)
@@ -85,14 +201,12 @@ def public_wire_text(value: str, journal: object) -> str:
 
 def _public_identity_text(value: str, journal: object) -> str:
     """Alias host IDs in arbitrary frame fields without rewriting source text."""
-    if detfix3_legacy():
-        return value
     if journal is None:
         # DETFIX4b: callers holding only stored output (no journal) still must not leak the
         # random continuation-workspace directory; a fixed placeholder is replay-stable.
         value = _ABSOLUTE_WORKSPACE.sub("continuation-workspaces/<workspace>/repo/", value)
         return _WORKSPACE_ID.sub("<workspace>", value)
-    workspace_id = stable_wire_id(getattr(journal, "task_id", ""), "continuation-workspace")
+    workspace_id = stable_wire_id(wire_run_seed(journal), "continuation-workspace")
     value = _ABSOLUTE_WORKSPACE.sub(
         f"continuation-workspaces/{workspace_id}/repo/", value)
     value = _WORKSPACE_ID.sub(workspace_id, value)
@@ -123,45 +237,74 @@ def public_wire_value(value: object, journal: object, *,
     return value
 
 
-def next_wire_id(journal: object, kind: str, *content: object) -> str:
-    """Mint a unique ID at the current durable journal position.
+def next_wire_id(journal: object, kind: str, *content: object,
+                 ordinal: object = 1) -> str:
+    """Compatibility wrapper; derive from step/content, never journal sequence."""
+    step = content[0] if content and type(content[0]) is int else 0
+    identity_content = content[1:] if content and type(content[0]) is int else content
+    return content_wire_id(journal, kind, step, identity_content, ordinal=ordinal)
 
-    Multiple captures/receipts before the next append receive increasing local
-    ordinals. After restore, the replayed journal sequence moves the position
-    beyond every previously recorded provider-visible identity.
+
+def action_receipt_ordinal(receipts: object, *, request_id: object,
+                           step: object, action_kind: str,
+                           target_path: object = None) -> int:
+    """Recompute a duplicate-action ordinal from the durable receipt history."""
+    journal_ordinal = getattr(receipts, "action_receipt_ordinal", None)
+    if callable(journal_ordinal):
+        return journal_ordinal(
+            request_id=request_id, step=step, action_kind=action_kind,
+            target_path=target_path,
+        )
+    if isinstance(receipts, Mapping) or isinstance(receipts, (str, bytes, bytearray)):
+        return 1
+    try:
+        iterator = reversed(receipts)  # receipt history is append-only and indexed on disk
+    except TypeError:
+        return 1
+    previous = 0
+    for receipt in iterator:
+        if not isinstance(receipt, Mapping):
+            continue
+        if receipt.get("turn") != step:
+            # Receipt history is chronological. Earlier steps cannot contribute.
+            break
+        if (receipt.get("request_id") == request_id
+                and receipt.get("kind") == action_kind
+                and receipt.get("target_path") == target_path):
+            previous += 1
+    return previous + 1
+
+
+def action_receipt_wire_id(
+        journal: object, *, request_id: object, step: object, tool_call_id: object,
+        action_kind: str, fingerprint: str, target_path: object = None,
+        ordinal: object = 1) -> str:
+    """Bind action receipt IDs to the request/action that produced them.
+
+    The global journal sequence also counts host telemetry emitted after a send.
+    That sequence can shift without changing the model action, so it is not a
+    stable position for an action receipt. The seeded request ID, model step,
+    and canonical receipt content remain stable through replay. The ordinal is
+    recomputed from persisted receipt history. Provider tool-call IDs are
+    excluded because they are transport metadata and may vary independently.
     """
-    if detfix3_legacy():
-        return uuid.uuid4().hex
-    if journal is None:
-        # Synthetic callers without a journal have no durable replay authority.
-        # Live runs never get here: MeasurementRuntime attaches owner.audit_journal
-        # before any Bolt receipt (runtime.py ~5348). ORPHAN_MINTS is the tripwire
-        # A nonzero count during a real run is a bug.
-        global ORPHAN_MINTS
-        with _ORPHAN_LOCK:
-            ORPHAN_MINTS += 1
-            if ORPHAN_MINTS == 1:
-                logging.getLogger(__name__).warning(
-                    "wire identity minted without a journal (kind=%s); replay-unstable", kind)
-            key = (kind, repr(content))
-            ordinal = _ORPHAN_POSITIONS.get(key, 0) + 1
-            _ORPHAN_POSITIONS[key] = ordinal
-        return stable_wire_id("orphan", kind, ordinal, *content)
-    lock = getattr(journal, "_lock", None)
-    with lock if lock is not None else nullcontext():
-        sequence = getattr(journal, "_sequence", 0)
-        positions = getattr(journal, "_wire_identity_positions", None)
-        if positions is None:
-            positions = {}
-            setattr(journal, "_wire_identity_positions", positions)
-        key = (kind, sequence)
-        ordinal = positions.get(key, 0) + 1
-        positions[key] = ordinal
-        # One active sequence at a time; avoid retaining a long run's positions.
-        # Evict only OTHER sequences: dropping a current-sequence key would let a
-        # later mint of that kind at this position reuse ordinal 1 (DETFIX2 F1).
-        if len(positions) > 8:
-            for stale in [k for k in positions if k[1] != sequence]:
-                del positions[stale]
-        return stable_wire_id(getattr(journal, "task_id", ""), kind,
-                              sequence, ordinal, *content)
+    return content_wire_id(
+        journal, "action-receipt", step, {
+            "request_id": request_id if isinstance(request_id, str) else "",
+            "action_kind": action_kind,
+            "target_path": target_path if isinstance(target_path, str) else "",
+            "fingerprint": fingerprint,
+        }, ordinal=ordinal,
+    )
+
+
+def completion_root_budget_wire_id(journal: object) -> str:
+    """Derive the completion fuel identity from the seeded journal run.
+
+    The root budget is rendered into the opt-in completion frame. Do not use
+    its standalone time-based default for a live request-path budget.
+    """
+    return stable_wire_id(
+        wire_run_seed(journal), "completion-root-budget",
+        0, "root-fuel-budget",
+    )

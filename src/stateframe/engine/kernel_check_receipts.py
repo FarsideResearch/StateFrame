@@ -263,6 +263,7 @@ def _execution_termination(exit_code: object, reported: object = None) -> str:
 def canonical_execution_id(
         runtime: object | None = None, *, execution_id: object = None,
         selector: object = "", sequence: object = None, fresh: bool = False,
+        selector_scope: object = None, producer: object = None,
 ) -> str:
     """Return the one opaque host identity shared by every view of one check."""
     explicit = _text(execution_id).strip()
@@ -272,21 +273,46 @@ def canonical_execution_id(
     if not fresh and pending not in (None, ""):
         return str(pending).strip()
     journal = getattr(runtime, "journal", None) if runtime is not None else None
-    from kernel_wire_identity import next_wire_id, stable_wire_id
+    from kernel_wire_identity import content_wire_id
     owner = getattr(runtime, "owner", None) if runtime is not None else None
-    task_id = getattr(owner, "task_id", None)
     step = getattr(owner, "current_step", None)
-    if journal is not None:
-        # The journal sequence survives checkpoint/crash replay. A runtime-local
-        # counter does not, and could repeat an already published check ID.
-        digest = next_wire_id(journal, "check-execution", step, selector, sequence)
-    else:
-        ordinal = int(getattr(runtime, "_check_execution_ordinal", 0) or 0) + 1
-        if runtime is not None:
-            setattr(runtime, "_check_execution_ordinal", ordinal)
-        digest = stable_wire_id(task_id, "check-execution", step, selector,
-                                sequence, ordinal)
+    # Only inputs every view of the check passes identically: callers that look
+    # an execution up do not know its scope or producer, so hashing those made
+    # the views disagree. selector_scope/producer stay accepted for call sites.
+    del selector_scope, producer
+    # Each allocation needs its own ID: equal IDs share one pinned pre-launch
+    # binding, so a second check would be judged against the first one's
+    # revision. The ordinal counts check executions: completed receipts in the
+    # journal (rebuilt on replay) or allocations made since, whichever is larger,
+    # so a check started before an earlier one's receipt lands still gets a new
+    # number. Observer events never touch either count.
+    ordinal = _next_check_execution_ordinal(journal)
+    digest = content_wire_id(
+        journal, "check-execution", step, {
+            "selector": str(selector or ""),
+            # This sequence belongs to the check receipt itself, not the global
+            # journal. It is replayed with the receipt.
+            "sequence": sequence,
+        },
+        ordinal=ordinal,
+    )
     return "check-execution:" + digest
+
+
+def _next_check_execution_ordinal(journal: object | None) -> int:
+    """Allocate the next check-execution number from journal-derived counts."""
+    if journal is None:
+        return 1
+    completed = getattr(journal, "check_receipt_count", 0)
+    allocated = getattr(journal, "check_execution_allocations", 0)
+    completed = completed if isinstance(completed, int) else 0
+    allocated = allocated if isinstance(allocated, int) else 0
+    ordinal = max(completed, allocated) + 1
+    try:
+        setattr(journal, "check_execution_allocations", ordinal)
+    except (AttributeError, TypeError):
+        pass
+    return ordinal
 
 
 def _execution_receipt_id(execution_id: str) -> str:
@@ -736,7 +762,8 @@ def record_check_output(
     if ordinal is None:
         ordinal = getattr(getattr(runtime, "owner", None), "current_step", 0)
     execution_text = canonical_execution_id(
-        runtime, execution_id=execution_id, selector=selector_text, sequence=ordinal)
+        runtime, execution_id=execution_id, selector=selector_text, sequence=ordinal,
+        selector_scope=scope, producer=producer)
     execution_binding_mode = check_execution_binding_mode(runtime)
     execution_context = (
         _check_execution_context(runtime, execution_text)

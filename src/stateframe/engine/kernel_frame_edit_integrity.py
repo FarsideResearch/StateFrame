@@ -11,6 +11,7 @@ from __future__ import annotations
 import ast
 import copy
 import os
+import re
 from collections.abc import Mapping, Sequence
 
 
@@ -20,6 +21,7 @@ _DEFINITION_TYPES = (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)
 _TEST_KINDS = {"test", "run_tests", "pytest", "verification",
                "test_subprocess_completed", "test_subprocess_complete",
                "host_test_receipt", "test_receipt"}
+_CHECK_RECEIPT_ID = re.compile(r"^check-receipt:[0-9a-f]{24}$")
 
 
 def mode() -> str:
@@ -233,16 +235,25 @@ def collapse_check_results(rows: object) -> list[dict[str, object]]:
         winner_position, winner_source = max(
             group, key=lambda item: _order_key(item[1], item[0]))
         winner = copy.deepcopy(winner_source)
+        for volatile_key in ("event_id", "source_event_id", "sequence", "event_sequence",
+                             "timestamp", "timestamp_ns"):
+            winner.pop(volatile_key, None)
+        receipt_id = winner.get("receipt_id")
+        if not isinstance(receipt_id, str) or not _CHECK_RECEIPT_ID.fullmatch(receipt_id):
+            winner.pop("receipt_id", None)
         winner.setdefault("check_id", key)
         superseded = []
         for position, row in sorted(group, key=lambda item: _order_key(item[1], item[0])):
             if position == winner_position and row is winner_source:
                 continue
-            superseded.append({
-                "receipt_id": str(row.get("receipt_id", row.get("event_id", "UNKNOWN"))),
+            superseded_row = {
                 "status": _status(row),
                 "revision": _revision(row),
-            })
+            }
+            receipt_id = row.get("receipt_id")
+            if isinstance(receipt_id, str) and _CHECK_RECEIPT_ID.fullmatch(receipt_id):
+                superseded_row["receipt_id"] = receipt_id
+            superseded.append(superseded_row)
         if superseded:
             winner["superseded"] = superseded
             winner["superseded_count"] = len(superseded)

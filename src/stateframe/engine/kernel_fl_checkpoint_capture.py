@@ -28,6 +28,14 @@ _PRIVATE_SEGMENTS = frozenset({
 })
 
 
+# Named constants so the release switch registry sees these reads; a name
+# passed through _positive_int alone is invisible to it and preflight rejects it.
+EVERY_K = "STATEFRAME_FL_CAPTURE_EVERY_K"
+MAX_COUNT = "STATEFRAME_FL_CAPTURE_MAX_COUNT"
+MAX_FILES = "STATEFRAME_FL_CAPTURE_MAX_FILES"
+MAX_BYTES = "STATEFRAME_FL_CAPTURE_MAX_BYTES"
+
+
 class CaptureBoundaryError(RuntimeError):
     """A public checkpoint cannot be exported without weakening its contract."""
 
@@ -52,10 +60,10 @@ def _positive_int(name: str, default: int, *, maximum: int) -> int:
 
 def _limits() -> tuple[int, int, int, int]:
     return (
-        _positive_int("STATEFRAME_FL_CAPTURE_EVERY_K", 5, maximum=1000),
-        _positive_int("STATEFRAME_FL_CAPTURE_MAX_COUNT", 32, maximum=1000),
-        _positive_int("STATEFRAME_FL_CAPTURE_MAX_FILES", 64, maximum=10000),
-        _positive_int("STATEFRAME_FL_CAPTURE_MAX_BYTES", 4 * 1024 * 1024, maximum=16 * 1024 * 1024),
+        _positive_int(EVERY_K, 5, maximum=1000),
+        _positive_int(MAX_COUNT, 32, maximum=1000),
+        _positive_int(MAX_FILES, 64, maximum=10000),
+        _positive_int(MAX_BYTES, 4 * 1024 * 1024, maximum=16 * 1024 * 1024),
     )
 
 

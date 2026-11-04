@@ -33,6 +33,7 @@ TAIL_ENV = "STATEFRAME_HSTATE_PLUS_TAIL"
 SCHEMA = "stateframe-hstate-plus/1"
 TAIL_PLACEMENTS = frozenset({"replace", "append"})
 _TEST_KINDS = frozenset({"test", "run_tests", "pytest", "probe"})
+_WIRE_RECEIPT_ID = re.compile(r"^(?:[0-9a-f]{20}|check-receipt:[0-9a-f]{24})$")
 _PASS = frozenset({"PASS", "PASSED", "GREEN", "SUCCESS", "OK", "SATISFIED", "RESOLVED"})
 _FAIL = frozenset({"FAIL", "FAILED", "RED", "ERROR", "COUNTEREXAMPLE", "VIOLATED",
                    "UNSATISFIED", "PRODUCT_RED", "REGRESSION"})
@@ -96,6 +97,11 @@ def _text(value: object) -> str:
     if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
         return " ".join(item for item in (_text(item) for item in value) if item)
     return str(value).strip()
+
+
+def _stable_receipt_id(value: object) -> str:
+    text = _text(value)
+    return text if _WIRE_RECEIPT_ID.fullmatch(text) else ""
 
 
 def _history_selection(runtime: object) -> bool:
@@ -683,10 +689,15 @@ def full_suite_status(runtime: object, frame: Mapping[str, object] | None = None
         status = "PASS"
     elif status in {"FAILED", "RED", "ERROR", "REGRESSION"}:
         status = "FAIL"
-    return {"status": status if status in {"PASS", "FAIL"} else "UNPROBED",
-            "scope": _text(row.get("scope") or row.get("suite") or row.get("selectors")) or "full suite",
-            "revision": _text(row.get("revision") or row.get("product_revision") or current) or "unknown",
-            "receipt_id": _text(row.get("receipt_id") or row.get("event_id"))}
+    result = {
+        "status": status if status in {"PASS", "FAIL"} else "UNPROBED",
+        "scope": _text(row.get("scope") or row.get("suite") or row.get("selectors")) or "full suite",
+        "revision": _text(row.get("revision") or row.get("product_revision") or current) or "unknown",
+    }
+    receipt_id = _stable_receipt_id(row.get("receipt_id"))
+    if receipt_id:
+        result["receipt_id"] = receipt_id
+    return result
 
 
 def _basis(runtime: object, *, revision: object, evidence: object) -> CompletionBasis:
@@ -1019,7 +1030,7 @@ def note_test_receipt(runtime: object, receipt: Mapping[str, object]) -> None:
     arguments = receipt.get("arguments") if isinstance(receipt.get("arguments"), Mapping) else receipt
     setattr(runtime, "_hstate_plus_last_test", {
         "revision": revision, "signature": _canonical_test_arguments(arguments),
-        "result": "PASS", "receipt_id": _text(receipt.get("receipt_id") or receipt.get("event_id")),
+        "result": "PASS", "receipt_id": _stable_receipt_id(receipt.get("receipt_id")),
     })
 
 
@@ -1031,8 +1042,11 @@ def note_applied_edit(runtime: object, receipt: Mapping[str, object]) -> str | N
     changed = _text(receipt.get("changed_region") or receipt.get("diff") or receipt.get("detail"))
     marker = f"APPLIED at revision {revision}; changed region ({path}):\n{changed or 'edit result recorded by host'}"
     setattr(runtime, "_hstate_plus_last_applied", marker)
-    _record(runtime, "hstate_plus_applied_receipt", revision=revision, target=path,
-            receipt_id=_text(receipt.get("receipt_id") or receipt.get("event_id")))
+    receipt_id = _stable_receipt_id(receipt.get("receipt_id"))
+    fields = {"revision": revision, "target": path}
+    if receipt_id:
+        fields["receipt_id"] = receipt_id
+    _record(runtime, "hstate_plus_applied_receipt", **fields)
     return marker
 
 
@@ -1056,8 +1070,10 @@ def ground_verdicts(rows: Sequence[Mapping[str, object]], runtime: object,
             oracle_ledger = _ledger(runtime, frame)
         except (ImportError, TypeError, ValueError):
             pass
-    receipts = {(_text(row.get("receipt_id") or row.get("event_id"))): row
-                for row in _receipts(runtime, frame)}
+    receipts = {
+        receipt_id: row for row in _receipts(runtime, frame)
+        if (receipt_id := _stable_receipt_id(row.get("receipt_id")))
+    }
     aligned = {_text(item.get("clause_id")) for item in _aligned_violations(runtime, frame)}
     grounded: list[dict[str, object]] = []
     for row in rows:

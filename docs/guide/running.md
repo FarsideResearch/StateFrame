@@ -227,7 +227,7 @@ Checkpoints are on by default, with a save attempted at every engine step bounda
 
 ## Determinism scope
 
-Identical inputs give identical requests on the measured workload apart from three clock fields (the time in the environment panel, how long a job has run, when a navigation handle expires) and an edit-receipt ID. Tool output the engine does not recognize as volatile can still differ. See KNOWN_LIMITATIONS.md.
+Identical inputs give identical requests on the measured workload apart from three clock fields (the time in the environment panel, how long a job has run, when a navigation handle expires). Tool output the engine does not recognize as volatile can still differ. See KNOWN_LIMITATIONS.md.
 
 
 ## Agent tools

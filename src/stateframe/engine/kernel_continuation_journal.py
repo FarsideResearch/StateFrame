@@ -697,6 +697,8 @@ class ContinuationJournal(AuditJournal):
         try:
             self._open(create=True)
             self.run_id, self.task_id = run_id, task_id
+            from kernel_wire_identity import bind_wire_task_identity
+            bind_wire_task_identity(task_id)
             self.manifest = frozen_manifest
             self.config_hash = digest(self.manifest)
             self._start_cold_start_host_span()
@@ -747,6 +749,9 @@ class ContinuationJournal(AuditJournal):
         self._framefit_receipt_overflow = False
         self._framefit_latest_check: dict[str, object] | None = None
         self._framefit_last_applied_edit_after_check: dict[str, object] | None = None
+        self._action_receipt_ordinal_step = None
+        self._action_receipt_ordinal_step_set = False
+        self._action_receipt_ordinal_counts: dict[tuple[str, str, str], int] = {}
         self._framefit_journal_origin_mode = framefit5_journal_origin_mode()
         self._framefit_origin_shadow_mismatches: dict[str, dict[str, int]] = {}
         self._replaying = False
@@ -770,6 +775,9 @@ class ContinuationJournal(AuditJournal):
         self._journal_applied_edit_rows: list[dict[str, object]] = []
         self._vacuity_latest_check: dict[str, object] | None = None
         self._vacuity_last_edit: dict[str, object] | None = None
+        # Completed check receipts so far; rebuilt on replay, so a resumed run
+        # numbers check executions exactly as the original did.
+        self.check_receipt_count = 0
         self._receipt_generation = 0
         self._outline_capability_reports: set[tuple[str, str, str, str]] = set()
         self._outline_capability_listener_token: contextvars.Token | None = None
@@ -925,6 +933,8 @@ class ContinuationJournal(AuditJournal):
             if expected_head is not None and last["record_hash"] != expected_head:
                 raise JournalError("trusted journal head mismatch")
             obj.run_id, obj.task_id = first["run_id"], task_id
+            from kernel_wire_identity import bind_wire_task_identity
+            bind_wire_task_identity(task_id)
             obj.manifest = copy.deepcopy(first["manifest"])
             obj.config_hash = expected_config
             obj._sequence, obj._head = last["sequence"], last["record_hash"]
@@ -1011,6 +1021,7 @@ class ContinuationJournal(AuditJournal):
                         "kind": kind, "record": {**projected, field: identity},
                     }
         if kind == "check_receipt":
+            self.check_receipt_count += 1
             self._vacuity_latest_check = {
                 key: copy.deepcopy(record[key])
                 for key in ("kind", "status", "revision", "tested_rev", "receipt_id")
@@ -1018,6 +1029,24 @@ class ContinuationJournal(AuditJournal):
             }
             self._vacuity_last_edit = None
         elif kind == "action_receipt":
+            receipt = record.get("receipt")
+            if isinstance(receipt, Mapping):
+                step = receipt.get("turn")
+                if (not self._action_receipt_ordinal_step_set
+                        or step != self._action_receipt_ordinal_step):
+                    self._action_receipt_ordinal_step = step
+                    self._action_receipt_ordinal_step_set = True
+                    self._action_receipt_ordinal_counts = {}
+                request_id = receipt.get("request_id")
+                action_kind = receipt.get("kind")
+                target_path = receipt.get("target_path")
+                key = (
+                    request_id if isinstance(request_id, str) else "",
+                    action_kind if isinstance(action_kind, str) else "",
+                    target_path if isinstance(target_path, str) else "",
+                )
+                self._action_receipt_ordinal_counts[key] = (
+                    self._action_receipt_ordinal_counts.get(key, 0) + 1)
             from kernel_vacuity_truth import journal_applied_edit_rows
 
             rows = journal_applied_edit_rows((record,))
@@ -1316,12 +1345,35 @@ class ContinuationJournal(AuditJournal):
         self._journal_applied_edit_rows = []
         self._vacuity_latest_check = None
         self._vacuity_last_edit = None
+        self.check_receipt_count = 0
         self._receipt_generation = 0
+        self._action_receipt_ordinal_step = None
+        self._action_receipt_ordinal_step_set = False
+        self._action_receipt_ordinal_counts = {}
         for record in records:
             self._index_receipt_record(record)
             # Advance on every durable event, including an irrelevant one.
             # Derived receipt refs still fold only admitted fact identities.
             self._receipt_generation = int(record["sequence"])
+
+    def action_receipt_ordinal(self, *, request_id: object, step: object,
+                               action_kind: str, target_path: object = None) -> int:
+        """Return the next duplicate-action ordinal from the validated journal index."""
+        with self._lock:
+            self.assert_owner()
+            if (self._receipt_generation != self._sequence
+                    or not isinstance(getattr(self, "_action_receipt_ordinal_counts", None), dict)):
+                for _ in self.records():
+                    pass
+            if (not self._action_receipt_ordinal_step_set
+                    or step != self._action_receipt_ordinal_step):
+                return 1
+            key = (
+                request_id if isinstance(request_id, str) else "",
+                action_kind if isinstance(action_kind, str) else "",
+                target_path if isinstance(target_path, str) else "",
+            )
+            return self._action_receipt_ordinal_counts.get(key, 0) + 1
 
     def journal_applied_edit_rows(self) -> tuple[dict[str, object], ...]:
         """Exact applied-edit ledger for delivery manifests, in journal order."""
@@ -1477,6 +1529,9 @@ class ContinuationJournal(AuditJournal):
             if rebuild and not legacy:
                 # Publish derived state only after the entire pass validates.
                 projection = copy.copy(self)
+                projection._action_receipt_ordinal_step = None
+                projection._action_receipt_ordinal_step_set = False
+                projection._action_receipt_ordinal_counts = {}
                 projection._receipt_refs = []
                 projection._receipt_ref_set = set()
                 projection._response_request_ids = set()
@@ -1600,7 +1655,10 @@ class ContinuationJournal(AuditJournal):
                     for name in ("_receipt_refs", "_receipt_ref_set", "_response_request_ids",
                                  "_request_sequences", "_tool_reconciliation_records",
                                  "_journal_applied_edit_rows", "_vacuity_latest_check",
-                                 "_vacuity_last_edit", "_receipt_generation"):
+                                 "_vacuity_last_edit", "_receipt_generation",
+                                 "_action_receipt_ordinal_step",
+                                 "_action_receipt_ordinal_step_set",
+                                 "_action_receipt_ordinal_counts"):
                         setattr(self, name, getattr(projection, name))
                     if sequence == self._sequence:
                         for name in ("_framefit_receipt_records", "_framefit_receipt_history",

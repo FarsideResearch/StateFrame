@@ -209,7 +209,7 @@ def test_0_2_8_parity_ignores_a_powerup_enabled_in_the_inherited_home(tmp_path, 
 
 
 def _assert_discount_requests_match_0_2_8(tmp_path):
-    from tools.compare_no_mcp_requests import capture, write_launcher
+    from tools.compare_no_mcp_requests import capture, mask_wire_ids, write_launcher
 
     archive = subprocess.run(
         ["git", "-C", str(ROOT), "archive", "--format=tar", "f848c2e"],
@@ -234,4 +234,5 @@ def _assert_discount_requests_match_0_2_8(tmp_path):
     # 0.3.13 turned the stable tool head on by default; switched off, request bytes stay those of 0.2.8.
     after = capture(ROOT, current_python, launcher, script, repo, run_dir, stable_tool_head="off",
                     source_on_pythonpath=False, test_python=sys.executable)
-    assert before == after
+    # Wire IDs changed derivation on purpose (receipt determinism, 11-03); see mask_wire_ids.
+    assert mask_wire_ids(before) == mask_wire_ids(after)

@@ -21,6 +21,7 @@ import copy
 import hashlib
 import json
 import os
+import re
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from types import MappingProxyType
@@ -32,6 +33,10 @@ MAX_STATUS_CHARS = 32
 MAX_IDENTITY_CHARS = 40
 MAX_RECEIPT_ID_CHARS = 40
 MAX_REUSE_NOTES = 16
+_WIRE_RECEIPT_ID = re.compile(
+    r"^(?:[0-9a-f]{20}|check-receipt:[0-9a-f]{24}|"
+    r"expectation-receipt:[0-9a-f]{24}|receipt:(?:[0-9a-f]{24}|[0-9a-f]{64}))$"
+)
 PASS_STATUSES = frozenset({
     "PASS", "PASSED", "GREEN", "SUCCESS", "OK", "CERTIFIED",
     "REUSED", "REUSED_VERIFICATION",
@@ -199,7 +204,9 @@ def normalize_receipt(row: Mapping[str, object],
         if type(row.get("passed")) is int and type(row.get("total")) is int:
             passed, total = row["passed"], row["total"]
     current_identity = current.get(kind) if isinstance(current, Mapping) else None
-    receipt_id = row.get("receipt_id") or row.get("prior_receipt_ref") or row.get("event_id")
+    candidate_receipt_id = row.get("receipt_id") or row.get("prior_receipt_ref")
+    receipt_id = (candidate_receipt_id if isinstance(candidate_receipt_id, str)
+                  and _WIRE_RECEIPT_ID.fullmatch(candidate_receipt_id) else None)
     return {
         "scope": clip(scope, MAX_SCOPE_CHARS),
         "status": clip(status, MAX_STATUS_CHARS),

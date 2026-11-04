@@ -354,6 +354,77 @@ def test_generic_done_requires_current_whole_command_pass():
     assert "CHECK_FAILED" in failed.rejection_reasons
 
 
+def test_sealed_submit_caches_done_facts_before_journal_close():
+    from stateframe.engine.kernel_stateframe_runtime import StateFrameRuntime
+
+    facts = DoneFacts(
+        current_revision="r2", changed_files=("app.js",), empty_diff=False,
+        public_tests_required=(), claims={"summary": "submitted"},
+    )
+
+    class Journal:
+        closed = False
+
+        def emit(self, kind, **_fields):
+            assert not self.closed
+            assert kind == "done_facts_finalized"
+
+    journal = Journal()
+    runtime = object.__new__(StateFrameRuntime)
+    runtime.stateframe_host_done_facts_mode = "on"
+    runtime._host_done_facts_gating_items = ()
+    runtime._host_done_facts_claims = {}
+    runtime._host_done_facts = None
+    runtime.journal = journal
+
+    def compute_facts(**_kwargs):
+        assert not journal.closed
+        runtime._host_done_facts = facts
+        return facts
+
+    runtime._compute_host_done_facts = compute_facts
+    terminal = {"result": "SUBMITTED", "claims": {"summary": "submitted"}}
+    StateFrameRuntime._finalize_host_done_facts(
+        runtime, terminal, sealed_terminal=terminal)
+    journal.closed = True
+
+    assert terminal["done_facts"] == facts.to_dict()
+    assert runtime.done_facts_payload() == facts.to_dict()
+
+
+def test_continuation_blocked_is_an_unsealed_done_fact_gate():
+    from stateframe.engine.kernel_stateframe_runtime import StateFrameRuntime
+
+    facts = DoneFacts(
+        current_revision="r2", changed_files=(), empty_diff=True,
+        public_tests_required=(), claims={},
+    )
+    observed_gates = []
+    emitted = []
+    runtime = object.__new__(StateFrameRuntime)
+    runtime.stateframe_host_done_facts_mode = "on"
+    runtime._host_done_facts_gating_items = ("existing_gate",)
+    runtime._host_done_facts_claims = {}
+
+    def compute_facts(*, claims, unresolved_gating_items):
+        assert claims == {}
+        observed_gates.append(tuple(unresolved_gating_items))
+        return facts
+
+    def emit(kind, **_fields):
+        emitted.append(kind)
+
+    runtime._compute_host_done_facts = compute_facts
+    runtime.journal = SimpleNamespace(emit=emit)
+    terminal = {"result": "CONTINUATION_BLOCKED"}
+
+    StateFrameRuntime._finalize_host_done_facts(runtime, terminal)
+
+    assert observed_gates == [("existing_gate", "terminal:CONTINUATION_BLOCKED")]
+    assert terminal["done_facts"] == facts.to_dict()
+    assert emitted == ["done_facts_finalized"]
+
+
 @pytest.mark.parametrize("cache_layout", [False, True])
 def test_framefit_preassembly_defers_terminal_wire_proof(monkeypatch, cache_layout):
     import kernel_completion_owner as completion_owner

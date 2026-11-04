@@ -16,6 +16,7 @@ _ON_VALUES = frozenset({"1", "true", "yes", "on"})
 MAX_EDIT_ROWS = 128
 MAX_PANEL_CHARS = 512_000
 _HEX_REVISION = re.compile(r"^(?:sha256:)?[0-9a-fA-F]{64}$")
+_WIRE_RECEIPT_ID = re.compile(r"^[0-9a-f]{20}$")
 _SAFE_SELECTOR = re.compile(r"^[A-Za-z0-9_./:@+-]{1,256}$")
 _JOURNAL_EVENT_KINDS = frozenset({
     "action_receipt", "check_receipt", "completion_authority_state",
@@ -266,11 +267,13 @@ def _is_applied_edit(value: object) -> bool:
     return value.get("kind") == "edit" and str(value.get("result_class", "")).upper() == "APPLIED"
 
 
-def _edit_row(receipt: Mapping[str, object], sequence: int) -> dict[str, object]:
+def _edit_row(receipt: Mapping[str, object], _sequence: int) -> dict[str, object]:
     row: dict[str, object] = {
         "status": "APPLIED",
-        "receipt_id": _safe_short_text(receipt.get("receipt_id")) or f"sequence:{sequence}",
     }
+    receipt_id = receipt.get("receipt_id")
+    if isinstance(receipt_id, str) and _WIRE_RECEIPT_ID.fullmatch(receipt_id):
+        row["receipt_id"] = receipt_id
     path = _safe_product_path(receipt.get("target_path"))
     if path is not None:
         row["path"] = path

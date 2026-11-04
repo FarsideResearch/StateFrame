@@ -2505,7 +2505,8 @@ class RequestCapture:
     def __init__(self, journal: AuditJournal, step: int, snapshot_id: str, *,
                  call_purpose: str | None = None,
                  endpoint_profile: object | None = None,
-                 parent_meter: object | None = None):
+                 parent_meter: object | None = None,
+                 identity_content: object = None):
         self.journal = journal
         self.step = step
         self.snapshot_id = snapshot_id
@@ -2524,17 +2525,30 @@ class RequestCapture:
                 setattr(journal, "parent_meter", parent_meter)
             except (AttributeError, TypeError):
                 pass
-        # Provider-visible identity is distinct from the random host journal directory.
-        # The profiler adopts this identity; it never supplies it.
-        from kernel_wire_identity import next_wire_id
-        # DETFIX3: never feed snapshot_id here. It digests a frame that
-        # carries live environment readings (timestamps, disk bytes, host epoch), so it
-        # differs between any two runs and made this model-visible ID per-run random.
-        # Journal sequence + step + the per-position ordinal are unique and replay-stable.
-        if os.environ.get("SF_LAB_DETFIX3") == "legacy":
-            self.request_id = next_wire_id(journal, "request", step, snapshot_id)
-        else:
-            self.request_id = next_wire_id(journal, "request", step)
+        # Request identity uses the public content being prepared, never the
+        # journal position or the diagnostic snapshot hash (which includes live
+        # host readings). The profiler adopts this ID; it never supplies it.
+        from kernel_wire_identity import request_wire_id
+        identity_content = (
+            identity_content if identity_content is not None else
+            {"task_id": getattr(journal, "task_id", ""), "purpose": call_purpose or ""}
+        )
+        # A step can send the same purpose twice (a route escalation, a discarded
+        # reply asked again). Skip IDs the journal already shows as submitted, so
+        # each send has its own request contract; an unsent request keeps its ID
+        # on resume because nothing was submitted under it.
+        ordinal = 1
+        self.request_id = request_wire_id(
+            journal, step, identity_content, purpose=call_purpose, ordinal=ordinal,
+        )
+        request_records = getattr(journal, "request_records", None)
+        while callable(request_records) and any(
+                isinstance(row, dict) and row.get("kind") == "request_submitted"
+                for row in request_records(self.request_id)):
+            ordinal += 1
+            self.request_id = request_wire_id(
+                journal, step, identity_content, purpose=call_purpose, ordinal=ordinal,
+            )
         active_profile = _ACTIVE_HOST_SPAN_PROFILE.get()
         if active_profile is not None:
             recorder = getattr(active_profile, "recorder", None)

@@ -23,8 +23,102 @@ from acceptance._support import assert_tree_imports, tree_python
 
 import kernel_measurement as measurement
 from stateframe.scripted_endpoint import Script, ScriptStepUnavailable, serve
-from tools.pinned_tree import pinned_tree
 from fixtures.process_signals import record_identity, signal_run_owned, signal_run_verified
+from tools.compare_no_mcp_requests import (
+    MOVED_ID_FIELDS, changed_id_chars, id_length_deltas, planted_body_change_is_caught,
+    request_id_handle_mismatches, wire_id_drift)
+from tools.pinned_tree import pinned_tree
+
+
+def _assert_journal_kinds_match_release(baseline_kinds, current_kinds):
+    """Journal kinds match the base release, except one intended addition: a sealed submit now
+    also journals done_facts_finalized (receipt determinism, 11-03, caches terminal done facts
+    before the journal closes). Exactly one extra, nothing removed or reordered."""
+    extra = "done_facts_finalized"
+    assert current_kinds.count(extra) == baseline_kinds.count(extra) + 1, (
+        baseline_kinds.count(extra), current_kinds.count(extra))
+    trimmed = list(current_kinds)
+    del trimmed[len(trimmed) - 1 - trimmed[::-1].index(extra)]
+    assert trimmed == baseline_kinds
+
+
+def _is_size_count(key, value) -> bool:
+    return (isinstance(key, str) and type(value) is int
+            and any(word in key for word in ("bytes", "tokens", "chars")))
+
+
+def _size_count_problems(old, new, delta, path="", changed_chars=0) -> list[str]:
+    """Walk two payloads together.
+
+    A byte/char count may move only with the request's ID-length change `delta`: same
+    direction, never by more. A token count follows the IDs' characters, not just their
+    length, so it may move either way, but never by more than `changed_chars` (the characters
+    in IDs whose value changed). Everything else is left for the masked byte comparison.
+    """
+    problems = []
+    if isinstance(old, dict) and isinstance(new, dict):
+        for key in old.keys() & new.keys():
+            if _is_size_count(key, old[key]) and _is_size_count(key, new[key]):
+                change = new[key] - old[key]
+                if "tokens" in key:
+                    bad = abs(change) > changed_chars
+                else:
+                    bad = change != 0 and (change * delta < 0 or abs(change) > abs(delta))
+                if bad:
+                    problems.append(f"{path}.{key}: {old[key]} -> {new[key]} with ID-length change "
+                                    f"{delta}, {changed_chars} changed ID characters")
+            else:
+                problems += _size_count_problems(old[key], new[key], delta, f"{path}.{key}",
+                                                 changed_chars)
+    elif isinstance(old, list) and isinstance(new, list):
+        for index, (left, right) in enumerate(zip(old, new)):
+            problems += _size_count_problems(left, right, delta, f"{path}[{index}]", changed_chars)
+    return problems
+
+
+def _without_size_counts(value):
+    if isinstance(value, dict):
+        return {key: _without_size_counts(item) for key, item in value.items()
+                if not _is_size_count(key, item)}
+    if isinstance(value, list):
+        return [_without_size_counts(item) for item in value]
+    return value
+
+
+def _assert_diet_payloads_match_release(baseline_payloads, current_payloads,
+                                        baseline_requests, current_requests):
+    """request_diet_applied payloads name their request and record its sizes.
+
+    Only the named IDs may move. Every request body's size change must be exactly its
+    wire-ID length change (older releases suffixed IDs with ':<sequence>'). Size, token and
+    char counts in the payload may move only for such a request, in the same direction and
+    by no more than that change; with no ID-length change they must be equal.
+    """
+    deltas, problems = id_length_deltas(list(baseline_requests), list(current_requests))
+    assert not problems, problems
+    changed = changed_id_chars(list(baseline_requests), list(current_requests))
+    assert len(baseline_payloads) == len(current_payloads)
+    for index, (old, new) in enumerate(zip(baseline_payloads, current_payloads)):
+        delta = deltas[index] if index < len(deltas) else 0
+        chars = changed[index] if index < len(changed) else 0
+        problems = _size_count_problems(old, new, delta, f"payload[{index}]", chars)
+        assert not problems, problems
+    encode = lambda rows: json.dumps(_without_size_counts(rows), sort_keys=True).encode()  # noqa: E731
+    problems, kinds = wire_id_drift([encode(baseline_payloads)], [encode(current_payloads)])
+    assert not problems, problems
+    assert set(kinds) <= MOVED_ID_FIELDS, kinds
+
+
+def _assert_only_wire_ids_moved(baseline_requests, current_requests, current_run=None):
+    """The receipt-determinism change (11-03) moved request_id and the receipt IDs that are
+    derived like it. Everything else must still be byte-identical to the base release."""
+    problems, kinds = wire_id_drift(list(baseline_requests), list(current_requests))
+    assert not problems, problems
+    assert set(kinds) <= MOVED_ID_FIELDS, kinds
+    # The comparison itself still fails on any other one-byte change.
+    assert planted_body_change_is_caught(current_requests[0])
+    if current_run is not None:
+        assert request_id_handle_mismatches(current_run) == []
 
 
 CURRENT = Path(__file__).resolve().parents[1]
@@ -218,10 +312,12 @@ def test_no_hooks_raw_requests_and_journal_match_release(tmp_path, baseline_chec
         CURRENT, repo, run, launcher, wrapper, tmp_path / "current_modules.json",
         stable_tool_head="off",
     )
-    assert current[:3] == baseline[:3]
+    _assert_only_wire_ids_moved(baseline[0], current[0], run)
+    _assert_journal_kinds_match_release(baseline[1], current[1])
+    assert current[2] == baseline[2]
     assert current[3] == baseline[3] | RUNNER_SPEC_FIELDS
     assert current[5], "fixture did not exercise request-diet journal payloads"
-    assert current[5] == baseline[5]
+    _assert_diet_payloads_match_release(baseline[5], current[5], baseline[0], current[0])
     assert "hooks" not in current[3]
     assert not {
         "kernel_hooks",
@@ -249,9 +345,11 @@ def test_no_hooks_regular_stateframe_file_matches_release(tmp_path, baseline_che
     run.rename(tmp_path / "baseline_run")
     current = _run_checkout(CURRENT, repo, run, launcher, wrapper, tmp_path / "current.json",
                             stable_tool_head="off")
-    assert current[:3] == baseline[:3]
+    _assert_only_wire_ids_moved(baseline[0], current[0], run)
+    _assert_journal_kinds_match_release(baseline[1], current[1])
+    assert current[2] == baseline[2]
     assert current[3] == baseline[3] | RUNNER_SPEC_FIELDS
-    assert current[5] == baseline[5]
+    _assert_diet_payloads_match_release(baseline[5], current[5], baseline[0], current[0])
 
 
 def _resume_checkout(checkout: Path, repo: Path, run: Path, launcher: Path,
@@ -345,4 +443,7 @@ def test_no_hooks_resume_rebuilt_requests_match_release(tmp_path, baseline_check
     run.rename(tmp_path / "baseline_run")
     current = _resume_checkout(CURRENT, repo, run, launcher, wrapper, tmp_path / "current.json",
                                stable_tool_head="off")
-    assert current == baseline
+    # current/baseline are (original, rebuilt) request lists; resume parity inside one
+    # version stays byte-exact (asserted in _resume_checkout), across versions only IDs move.
+    _assert_only_wire_ids_moved(baseline[0], current[0])
+    _assert_only_wire_ids_moved(baseline[1], current[1], run)

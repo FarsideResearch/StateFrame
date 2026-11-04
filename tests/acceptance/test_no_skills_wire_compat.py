@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import io
 import json
-import re
 import site
 import subprocess
 import sysconfig
@@ -22,7 +21,7 @@ pytestmark = pytest.mark.host_sandbox
 _BASELINE_COMMIT = "33c6c511611cc249b90b47930905a8e60648c05c"
 
 
-_EDIT_RECEIPT = re.compile(rb'(edit_receipt\\*":\\*")[0-9a-f]{20}')
+
 def _raw_tools(request: bytes) -> bytes:
     """Extract the top-level tools value without changing its serialized bytes."""
     source = request.decode("utf-8")
@@ -151,16 +150,20 @@ def test_no_skills_wire_matches_023(tmp_path):
     # editable tests. Pin the old runner, protection and tool-list modes for exact bytes.
     current = _run_tree(ROOT, tmp_path / "current", repo, script, legacy_mode=True,
                         stable_tool_head="off")
+    from tools.compare_no_mcp_requests import mask_wire_ids, unbacked_result_hash_changes
+
     assert len(current) == len(old)
-    assert current[0] == old[0], first_difference(old[0], current[0])
+    # Wire IDs (edit receipts, wire-truth handles, request IDs) are derived differently
+    # since the receipt-determinism change (11-03), so they are masked; a masked result
+    # hash must still hash text that is sent and compared. Every other byte must match.
+    assert unbacked_result_hash_changes(tmp_path / "old", tmp_path / "current") == []
+    assert mask_wire_ids(current[0]) == mask_wire_ids(old[0]), first_difference(old[0], current[0])
     for number, (expected, actual) in enumerate(zip(old, current), 1):
         assert _raw_tools(actual) == _raw_tools(expected), number
-        # Each run seeds its own edit-receipt IDs (documented in KNOWN_LIMITATIONS.md), so two
-        # separate runs differ in exactly that 20-hex value. Every other byte must match literally.
-        assert _EDIT_RECEIPT.sub(rb"\1<receipt>", actual) == _EDIT_RECEIPT.sub(rb"\1<receipt>", expected), (
+        assert mask_wire_ids(actual) == mask_wire_ids(expected), (
             number, first_difference(expected, actual))
-        assert normalized_digest(_EDIT_RECEIPT.sub(rb"\1<receipt>", actual)) == normalized_digest(
-            _EDIT_RECEIPT.sub(rb"\1<receipt>", expected)), number
+        assert normalized_digest(mask_wire_ids(actual)) == normalized_digest(
+            mask_wire_ids(expected)), number
     default = _run_tree(ROOT, tmp_path / "default", repo, script, stable_tool_head=None)  # today's defaults, on purpose
     assert default[0] != old[0]
     assert b"no public selector was declared" in default[0]

@@ -5592,12 +5592,14 @@ class StateFrameRuntime:
         self.journal.emit("parent_attached", budget=self.parent.snapshot())
         if use_continuation and self.workspace is not None and resume is None:
             self.workspace.bind(self)
+        from kernel_wire_identity import wire_run_seed
         self.portfolio = None
         if self.stateframe_portfolio_mode == "on":
             self.portfolio = PortfolioManager(
                 Path(owner.root), store_root=self.journal.path.parent / "portfolio",
                 policy=PortfolioPolicy.from_env(), ticket_id=str(getattr(owner, "task_id", "")),
-                parent_ledger=self.parent)
+                parent_ledger=self.parent,
+                run_seed=wire_run_seed(self.journal))
             self.journal.emit("portfolio_attached", producer="stateframe_portfolio",
                               policy=self.portfolio.policy.to_dict(),
                               portfolio_journal_id=self.portfolio.journal.journal_id,
@@ -5611,6 +5613,7 @@ class StateFrameRuntime:
                 budget=int(os.environ.get("STATEFRAME_FORK_A_BUDGET", "2")),
                 ticket_id=str(getattr(owner, "task_id", "")),
                 parent_ledger=self.parent,
+                run_seed=wire_run_seed(self.journal),
                 excluded_roots=(self.journal.path.parent,),
             )
             self.journal.emit(
@@ -5892,6 +5895,7 @@ class StateFrameRuntime:
     def _init_completion_authority(self, *, step_limit: int | None, tools: object, resume=None) -> None:
         """Create completion authority only in its explicit opt-in mode."""
         from kernel_completion_authority import CompletionAuthority, POLICY_VERSION, RootFuelBudget
+        from kernel_wire_identity import completion_root_budget_wire_id
 
         raw_total = os.environ.get("STATEFRAME_COMPLETION_ROOT_FUEL",
                                    "unbounded" if step_limit is None else str(max(2, step_limit + 1)))
@@ -5948,8 +5952,11 @@ class StateFrameRuntime:
                     "required_selectors": selectors,
                     "environment_revision": self.journal.manifest.get("environment_revision"),
                 },
-                budget=RootFuelBudget(total=total, unbounded=total is None,
-                                      terminalization_reserve=reserve),
+                budget=RootFuelBudget(
+                    total=total, unbounded=total is None,
+                    terminalization_reserve=reserve,
+                    root_budget_id=completion_root_budget_wire_id(self.journal),
+                ),
                 required_evidence=selectors,
                 available_actions=available or None,
                 current_revision=revision,
@@ -5994,7 +6001,7 @@ class StateFrameRuntime:
         for row in getattr(self, "test_receipts", ()):
             if not isinstance(row, Mapping):
                 continue
-            receipt_id = str(row.get("receipt_id", row.get("event_id", "")))
+            receipt_id = str(row.get("receipt_id", ""))
             if not receipt_id or receipt_id in self._completion_authority_receipt_ids:
                 continue
             selectors = row.get("selectors", row.get("selector", ()))
@@ -8195,13 +8202,36 @@ class StateFrameRuntime:
         from kernel_check_receipts import canonical_identity
 
         owner = getattr(self, "owner", None)
-        from kernel_wire_identity import public_wire_text
+        step = getattr(owner, "current_step", 0)
+        canonical = canonical_identity(canonical_rows)
+        identity_content = {
+            "canonical_check_identity": canonical,
+            "selector": event.get("selector", event.get("selector_scope")),
+            "status": event.get("status", event.get("outcome")),
+            "revision": event.get("revision", event.get("tested_revision")),
+        }
+        from kernel_wire_identity import content_wire_id, wire_identity_content
+        # Two runs of the same check at one step can match on every field above;
+        # count the earlier equal receipts so each run keeps its own ID.
+        same_content = wire_identity_content(identity_content)
+        ordinal = 1 + sum(
+            1 for prior in getattr(self, "test_receipts", ())
+            if isinstance(prior, Mapping) and prior.get("step") == step
+            and prior.get("_receipt_identity_content") == same_content
+        )
+        receipt_id = content_wire_id(
+            self.journal, "test-completion-receipt", step, identity_content,
+            ordinal=ordinal,
+        )
 
         self.test_receipts.append({
+            # Host consumers join test and check receipts on the event fields;
+            # only receipt_id is the provider-visible identity.
             **event,
-            "receipt_id": public_wire_text(event["event_id"], getattr(self, "journal", None)),
-            "step": getattr(owner, "current_step", 0),
-            **canonical_identity(canonical_rows),
+            "_receipt_identity_content": same_content,
+            "receipt_id": receipt_id,
+            "step": step,
+            **canonical,
             **StateFrameRuntime._micrograph_failed_paths(self, canonical_rows),
             # LedgerIndex consumes action-shaped test receipts to reobserve the
             # selected test paths at the binding checked by this subprocess.
@@ -10351,6 +10381,33 @@ class StateFrameRuntime:
         """Public runtime hook for the host-owned terminal record."""
         return self._compute_host_done_facts(
             claims=claims, unresolved_gating_items=unresolved_gating_items)
+
+    def _finalize_host_done_facts(
+            self, terminal_result: dict[str, object], *, sealed_terminal: object = None,
+    ) -> None:
+        """Cache terminal facts while the journal is still open, including sealed submits."""
+        if getattr(self, "stateframe_host_done_facts_mode", "off") != "on":
+            return
+        terminal_gates = list(self._host_done_facts_gating_items)
+        terminal_status = str(terminal_result.get("result", "")).upper()
+        if sealed_terminal is None and terminal_status in {
+                "HARNESS_ERROR", "HARNESS_SUSPECT", "ATTEMPT_BUDGET_EXHAUSTED",
+                "RENDER_OVERFLOW", "STOPPED_INCOMPLETE", "HOOK_BLOCKED",
+                "HOOK_CONTAINMENT", "CONTINUATION_BLOCKED", "BLOCKED", "NEEDS_WORK",
+                "UNCERTIFIED_SUBMIT"}:
+            terminal_gates.append("terminal:" + terminal_status)
+        facts = self._compute_host_done_facts(
+            claims=terminal_result.get("claims", self._host_done_facts_claims),
+            unresolved_gating_items=terminal_result.get(
+                "unresolved_gating_items", terminal_gates),
+        )
+        terminal_result["done_facts"] = facts.to_dict()
+        terminal_result["claims"] = copy.deepcopy(dict(facts.claims))
+        self.journal.emit(
+            "done_facts_finalized", producer="kernel_host_done_facts",
+            facts=facts.to_dict(), claims=copy.deepcopy(dict(facts.claims)),
+            accepted=facts.accepted, rejection_reasons=list(facts.rejection_reasons),
+            evidence_digest=facts.evidence_digest, phase="finalization", dispatch=False)
 
     def done_facts_payload(self) -> dict[str, object] | None:
         if getattr(self, "stateframe_host_done_facts_mode", "off") != "on":
@@ -13673,9 +13730,18 @@ class StateFrameRuntime:
     def harness_fault(self, fault: str, scope: str) -> None:
         event = self.journal.emit("harness_fault", producer="harness_transport", validated=True,
                                   fault=fault, scope=scope, system_denominator_included=True)
-        self.fault_receipts.append({**event, "receipt_id": event["event_id"]})
+        from kernel_wire_identity import content_wire_id
+        step = getattr(getattr(self, "owner", None), "current_step", 0)
+        receipt_id = content_wire_id(
+            self.journal, "harness-fault-receipt", step,
+            {"fault": fault, "scope": scope},
+        )
+        self.fault_receipts.append({
+            key: value for key, value in event.items()
+            if key not in {"event_id", "sequence", "event_sequence", "timestamp", "timestamp_ns"}
+        } | {"receipt_id": receipt_id})
         self.actions.append(kind="harness_request", arguments={"scope": scope},
-                            resources=self.binding(), result=fault, observation=event["event_id"],
+                            resources=self.binding(), result=fault, observation=receipt_id,
                             pending="timeout" if fault == "transport_timeout" else "completed")
         self.lifecycle("harness_fault")
 
@@ -14547,7 +14613,8 @@ class StateFrameRuntime:
                 root = Path(self.owner.root).resolve()
                 report = self.where_used_ledger.observe_edit(
                     root, path, before or "", after,
-                    edit_receipt_id=str(receipt.get("receipt_id", "")) or None)
+                    edit_receipt_id=str(receipt.get("receipt_id", "")) or None,
+                    step=getattr(self.owner, "current_step", 0))
                 receipt["where_used_closure"] = report.to_dict()
                 if getattr(self, "completion_authority", None) is not None:
                     from kernel_where_used import sync_completion_authority
@@ -15810,24 +15877,59 @@ class StateFrameRuntime:
         """Record a worker probe with separate host/model provenance."""
         if not getattr(self, "probe_gate_enabled", False) or getattr(self, "probe_gate", None) is None:
             return {"accepted": False, "status": "OFF", "reason": "probe gate is off"}
+        step = getattr(getattr(self, "owner", None), "current_step", 0)
+        request_id = getattr(self, "current_request_id", None)
         result = self.probe_gate.record_probe(
             obligation, host_observed, model_interpretation,
             revision=getattr(self, "_probe_revision", None))
         record = result.get("record") if isinstance(result, Mapping) else None
-        event = self.journal.emit("probe_result", revision=getattr(self, "_probe_revision", None),
-                                  obligation=str(obligation), status=result.get("status"),
-                                  accepted=bool(result.get("accepted")),
-                                  authority="HOST_OBSERVED",
-                                  expected_authority="BRIEF",
-                                  expected=(record.get("expected") if isinstance(record, Mapping) else None),
-                                  expectation_authority="MODEL_INTERPRETATION",
-                                  observation=(record.get("result") if isinstance(record, Mapping) else None),
-                                  expectation=(record.get("expectation") if isinstance(record, Mapping) else None))
+        self.journal.emit("probe_result", revision=getattr(self, "_probe_revision", None),
+                          request_id=request_id, step=step,
+                          obligation=str(obligation), status=result.get("status"),
+                          accepted=bool(result.get("accepted")),
+                          authority="HOST_OBSERVED",
+                          expected_authority="BRIEF",
+                          expected=(record.get("expected") if isinstance(record, Mapping) else None),
+                          expectation_authority="MODEL_INTERPRETATION",
+                          observation=(record.get("result") if isinstance(record, Mapping) else None),
+                          expectation=(record.get("expectation") if isinstance(record, Mapping) else None))
         if result.get("accepted") and isinstance(record, Mapping):
             # Keep only host observation in the receipt projection; the model
             # expectation remains an explicitly separate journal field.
-            from kernel_wire_identity import wire_run_id
-            public_receipt_id = f"{wire_run_id(self.journal)}:{event['sequence']}"
+            from kernel_wire_identity import content_wire_id
+            identity_content = {
+                "obligation": str(obligation),
+                "status": result.get("status"),
+                "accepted": bool(result.get("accepted")),
+                "revision": record.get("revision"),
+                "observation": record.get("result"),
+            }
+            ordinal = 1
+            request_records = getattr(self.journal, "request_records", None)
+            if isinstance(request_id, str) and callable(request_records):
+                ordinal = sum(
+                    1 for row in request_records(request_id)
+                    if row.get("kind") == "probe_result"
+                    and row.get("step") == step
+                    and row.get("obligation") == str(obligation)
+                    and row.get("status") == result.get("status")
+                    and row.get("accepted") is True
+                    and row.get("revision") == record.get("revision")
+                    and row.get("observation") == record.get("result")
+                )
+            else:
+                ordinal += sum(
+                    1 for prior in getattr(self, "probe_receipts", ())
+                    if isinstance(prior, Mapping)
+                    and prior.get("kind") == "probe"
+                    and prior.get("obligation") == str(obligation)
+                    and prior.get("source_revision") == record.get("revision")
+                    and prior.get("outcome") == record.get("result")
+                )
+            public_receipt_id = content_wire_id(
+                self.journal, "probe-receipt", step, identity_content,
+                ordinal=ordinal,
+            )
             self.probe_receipts.append({
                 "kind": "probe", "receipt_id": public_receipt_id,
                 "obligation": str(obligation), "source_revision": record.get("revision"),
@@ -24930,27 +25032,9 @@ class StateFrameRuntime:
             terminal_result["result_class"] = "STOPPED_INCOMPLETE"
             terminal_result["accepted"] = False
             terminal_result["behaviour"] = "STOPPED_INCOMPLETE"
-        if host_done_facts_on and sealed_terminal is None:
-            terminal_gates = list(self._host_done_facts_gating_items)
-            terminal_status = str(terminal_result.get("result", "")).upper()
-            if terminal_status in {"HARNESS_ERROR", "HARNESS_SUSPECT",
-                                   "ATTEMPT_BUDGET_EXHAUSTED", "RENDER_OVERFLOW",
-                                   "STOPPED_INCOMPLETE",
-                                    "HOOK_BLOCKED", "HOOK_CONTAINMENT", "CONTINUATION_BLOCKED",
-                                   "BLOCKED", "NEEDS_WORK", "UNCERTIFIED_SUBMIT"}:
-                terminal_gates.append("terminal:" + terminal_status)
-            facts = self._compute_host_done_facts(
-                claims=terminal_result.get("claims", self._host_done_facts_claims),
-                unresolved_gating_items=terminal_result.get("unresolved_gating_items",
-                                                             terminal_gates),
-            )
-            terminal_result["done_facts"] = facts.to_dict()
-            terminal_result["claims"] = copy.deepcopy(dict(facts.claims))
-            self.journal.emit(
-                "done_facts_finalized", producer="kernel_host_done_facts",
-                facts=facts.to_dict(), claims=copy.deepcopy(dict(facts.claims)),
-                accepted=facts.accepted, rejection_reasons=list(facts.rejection_reasons),
-                evidence_digest=facts.evidence_digest, phase="finalization", dispatch=False)
+        if host_done_facts_on:
+            self._finalize_host_done_facts(
+                terminal_result, sealed_terminal=sealed_terminal)
         if sealed_terminal is not None:
             from kernel_terminal_disposition import mint, project
             terminal_result = project(

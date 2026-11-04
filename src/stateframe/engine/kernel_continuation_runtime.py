@@ -100,7 +100,7 @@ class _ContinuationJournalView:
                         key = data.get("submission_key")
                         if isinstance(key, list) and len(key) == 2 and all(isinstance(part, str) for part in key):
                             self.submissions[tuple(key)] = {
-                                "accepted": True, "submission_key": key, "event_id": ref,
+                                "accepted": True, "submission_key": key,
                             }
             elif kind == "continuation_closure_processed" and isinstance(row.get("closure_ref"), str):
                 self.processed.add(row["closure_ref"])
@@ -211,6 +211,94 @@ def reconciliation_action(tool: str, status: str, *, closure: bool = False,
             and status in {"pending", "unknown"}):
         return TYPED_REOBSERVE
     return action
+
+
+def _wire_effect_id(journal: object, *, request_id: object, step: object,
+                    tool: str, arguments_hash: str, ordinal: object = 1) -> str:
+    """Identify a pending effect by its request, turn and action content."""
+    from kernel_wire_identity import content_wire_id
+
+    return content_wire_id(
+        journal, "continuation-effect", step, {
+            "request_id": request_id if isinstance(request_id, str) else "",
+            "tool": tool,
+            "arguments_hash": arguments_hash,
+        },
+        ordinal=ordinal,
+    )
+
+
+def _wire_effect_ordinal(journal: object, *, request_id: object, step: object,
+                         tool: str, arguments_hash: str) -> int:
+    """Rebuild a duplicate dispatch ordinal from this request's durable journal rows."""
+    if not isinstance(request_id, str) or not request_id:
+        return 1
+    request_records = getattr(journal, "request_records", None)
+    if not callable(request_records):
+        return 1
+    return 1 + sum(
+        1 for row in request_records(request_id)
+        if row.get("kind") == "step_dispatch_binding"
+        and row.get("step") == step
+        and row.get("tool") == tool
+        and row.get("arguments_hash") == arguments_hash
+        and isinstance(row.get("continuation_effect_id"), str)
+        and row.get("continuation_effect_id")
+    )
+
+
+def _wire_intention_id(journal: object, *, step: object, content: object,
+                       ordinal: object = 1) -> str:
+    """Identify a continuation intention by its run, turn, and semantic contents."""
+    from kernel_wire_identity import content_wire_id, wire_identity_content
+
+    return "intention:" + content_wire_id(
+        journal, "continuation-intention", step, wire_identity_content(content),
+        ordinal=ordinal,
+    )
+
+
+_RAW_JOURNAL_REFERENCE_FIELDS = frozenset({
+    "action_ref", "dispatch_ref", "event_id", "event_ref", "journal_event_id",
+    "origin_ref", "outcome_event_ref", "receipt_ref", "return_receipts",
+    "source_event_id",
+})
+_OMIT_CONTEXT_VALUE = object()
+
+
+def _is_raw_journal_reference(value: object, journal: object) -> bool:
+    run_id = getattr(journal, "run_id", None)
+    if not isinstance(value, str) or not isinstance(run_id, str) or not run_id:
+        return False
+    prefix = run_id + ":"
+    suffix = value[len(prefix):] if value.startswith(prefix) else ""
+    return bool(suffix) and suffix.isdecimal()
+
+
+def _public_continuation_context(value: object, journal: object) -> object:
+    """Alias the host run and omit journal-position references from model context."""
+    from kernel_wire_identity import public_wire_value
+
+    if isinstance(value, str):
+        if _is_raw_journal_reference(value, journal):
+            return _OMIT_CONTEXT_VALUE
+        return public_wire_value(value, journal)
+    if isinstance(value, Mapping):
+        result: dict[object, object] = {}
+        for key, item in value.items():
+            if isinstance(key, str) and key in _RAW_JOURNAL_REFERENCE_FIELDS:
+                continue
+            public_item = _public_continuation_context(item, journal)
+            if public_item is _OMIT_CONTEXT_VALUE:
+                continue
+            public_key = public_wire_value(key, journal) if isinstance(key, str) else key
+            result[public_key] = public_item
+        return result
+    if isinstance(value, (list, tuple)):
+        return [public_item for item in value
+                if (public_item := _public_continuation_context(item, journal))
+                is not _OMIT_CONTEXT_VALUE]
+    return value
 
 
 def _guarded_host_outcome(result: object) -> str:
@@ -813,14 +901,24 @@ class LiveContinuation:
             if not isinstance(objective, str) or not objective.strip():
                 objective = str(messages[1].get("content", "")) if len(messages) > 1 else ""
             required = required_acceptance_selectors(self.runtime)
-            self.engine.apply("create", new_id="root", objective=objective,
-                pending_decision="Complete the original objective and verify its public requirements.",
-                dependencies=binding_versions(current), turns=self.runtime.step_limit,
-                acceptance={
-                    "kind": "public_checks" if required else "no_public_checks",
-                    "selectors": required,
-                    "host_check_state": "REQUIRED_PUBLIC_CHECKS" if required else NO_HOST_CHECKS,
-                })
+            pending_decision = "Complete the original objective and verify its public requirements."
+            dependencies = binding_versions(current)
+            acceptance = {
+                "kind": "public_checks" if required else "no_public_checks",
+                "selectors": required,
+                "host_check_state": "REQUIRED_PUBLIC_CHECKS" if required else NO_HOST_CHECKS,
+            }
+            step = getattr(owner, "current_step", 0)
+            root_id = _wire_intention_id(self.journal, step=step, content={
+                "role": "root", "objective": objective,
+                "pending_decision": pending_decision, "dependencies": dependencies,
+                "turns": self.runtime.step_limit, "acceptance": acceptance,
+            }, ordinal=1)
+            self.engine.apply(
+                "create", new_id=root_id, objective=objective,
+                pending_decision=pending_decision, dependencies=dependencies,
+                turns=self.runtime.step_limit, acceptance=acceptance,
+            )
         # Retention runs at the request boundary, before selection can consume
         # a return-pending child.  This keeps source needed for the current
         # parent frame hot while allowing the following boundary to reclaim it.
@@ -1119,8 +1217,19 @@ class LiveContinuation:
         if (not prefix and self.runtime.continuation_source_refresh and tool in EDIT_TOOLS
                 and (item.stale_dependencies or item.dependencies != binding_versions(current))):
             self.refresh_delivered_source(current)
-        effect = None if (tool in CONTROL_TOOLS | WITNESS_TOOLS or authoring) else uuid.uuid4().hex
         args_hash = digest({k: v for k, v in arguments.items() if k not in {"why", "reason"}})
+        effect = None
+        if tool not in CONTROL_TOOLS | WITNESS_TOOLS and not authoring:
+            effect_ordinal = _wire_effect_ordinal(
+                self.journal, request_id=runtime.current_request_id,
+                step=runtime.owner.current_step, tool=tool,
+                arguments_hash=args_hash,
+            )
+            effect = _wire_effect_id(
+                self.journal, request_id=runtime.current_request_id,
+                step=runtime.owner.current_step, tool=tool,
+                arguments_hash=args_hash, ordinal=effect_ordinal,
+            )
         fence = self.journal.emit("step_dispatch_binding", producer="stateframe_runtime",
             snapshot_id=runtime.snapshot_id, accepted=True, expected=current, current=current,
             continuation_id=identity, continuation_effect_id=effect,
@@ -1325,7 +1434,23 @@ class LiveContinuation:
             relative = path.relative_to(root).as_posix()
             if relative not in current.get("product_files", {}) and relative not in current.get("harness_files", {}):
                 raise ContinuationError("detour source lacks a tracked file revision")
-            child = uuid.uuid4().hex
+            objective = "Acquire source: " + relative
+            pending_decision = arguments.get("pending_decision")
+            dependencies = binding_versions(current)
+            turns = (12 if self.runtime.step_limit is None else
+                     max(1, min(12, self.runtime.step_limit - self.runtime.owner.current_step - 1)))
+            acceptance = {"kind": "source_read", "path": relative,
+                          "start_line": start, "end_line": end}
+            child = _wire_intention_id(
+                self.journal, step=self.runtime.owner.current_step, content={
+                    "role": "source_detour", "parent_id": parent,
+                    "objective": objective, "pending_decision": pending_decision,
+                    "dependencies": dependencies, "turns": turns,
+                    "acceptance": acceptance,
+                    "request_id": self.runtime.current_request_id,
+                },
+                ordinal=len(state.intentions) + 1,
+            )
             parent_item = state.intentions.get(parent) if parent is not None else None
             if parent_item is not None:
                 acceptance = getattr(parent_item, "acceptance", {})
@@ -1346,13 +1471,10 @@ class LiveContinuation:
                 )
             self.engine.apply("detour", intention_id=parent, reason=arguments.get("reason"),
                 wake_token=uuid.uuid4().hex, deadline_us=self.engine.clock_us() + 300_000_000,
-                child={"new_id": child, "objective": "Acquire source: " + relative,
-                    "pending_decision": arguments.get("pending_decision"),
-                    "dependencies": binding_versions(current),
-                    "turns": (12 if self.runtime.step_limit is None else
-                              max(1, min(12, self.runtime.step_limit - self.runtime.owner.current_step - 1))),
-                    "acceptance": {"kind": "source_read", "path": relative,
-                                   "start_line": start, "end_line": end}})
+                child={"new_id": child, "objective": objective,
+                    "pending_decision": pending_decision,
+                    "dependencies": dependencies, "turns": turns,
+                    "acceptance": acceptance})
         except (ContinuationError, OSError) as error:
             feedback = "[continuation] Detour rejected: " + str(error)
             self.runtime.owner.receipt("state", tool, tool, "REJECTED", feedback)
@@ -1891,15 +2013,14 @@ class LiveContinuation:
             raise ContinuationError("accepted done lacks current host certification")
         current = self.runtime.binding()
         expected = [str(key[0]), str(key[1])]
-        event = self.engine.apply("complete", intention_id=self.dispatch["continuation_id"],
-                                  receipt_ref=self._pending_completion_ref,
-                                  current_binding=current,
-                                  current_dependencies=binding_versions(current),
-                                  submission_key=expected)
+        self.engine.apply("complete", intention_id=self.dispatch["continuation_id"],
+                          receipt_ref=self._pending_completion_ref,
+                          current_binding=current,
+                          current_dependencies=binding_versions(current),
+                          submission_key=expected)
         self.completed = True
         self._pending_completion_ref = None
-        return {"accepted": True, "submission_key": expected,
-                "event_id": (event or {}).get("event_id")}
+        return {"accepted": True, "submission_key": expected}
 
     def keyed_destination(self, verdict: dict | None):
         """The done callback as a keyed destination (idempotency switch on)."""
@@ -2001,7 +2122,33 @@ class LiveContinuation:
                 " The continuation is temporarily stranded; resolve this blocker before claiming completion: "
                 + self._stranded_blocker)
         if self.context_scope is not None:
-            value["context_scope"] = self.context_scope.public_context()
+            scope = self.context_scope.public_context()
+            identity = scope.get("identity") if isinstance(scope, Mapping) else None
+            if isinstance(identity, dict):
+                from kernel_wire_identity import (
+                    seeded_content_wire_id, wire_identity_content, wire_run_id,
+                    wire_run_seed,
+                )
+
+                seed = wire_run_seed(self.journal)
+                owner = getattr(self.runtime, "owner", None)
+                step = getattr(owner, "current_step", 0)
+                identity["run_id"] = wire_run_id(self.journal)
+                try:
+                    workspace_binding = self.runtime.binding()
+                except (AttributeError, TypeError, ValueError):
+                    workspace_binding = {}
+                try:
+                    workspace_content = wire_identity_content(workspace_binding)
+                except (TypeError, ValueError):
+                    workspace_content = {"binding_unavailable": True}
+                identity["workspace_id"] = "workspace-scope:" + seeded_content_wire_id(
+                    seed, "continuation-context-workspace", step, workspace_content,
+                )
+                identity["grant_id"] = "grant-scope:" + seeded_content_wire_id(
+                    seed, "continuation-context-grant", step, identity.get("grant_id", ""),
+                )
+            value["context_scope"] = scope
         adapter = self._unknown_outcome_adapter()
         if adapter is not None:
             value["external_outcomes"] = adapter.context()
@@ -2031,7 +2178,8 @@ class LiveContinuation:
                 " Complete current Working source in this model request also counts as a source "
                 "observation after the kernel verifies actual delivery. It does not refresh test "
                 "results or prove completion. Queued actions do not receive a fresh model observation.")
-        return "[Continuation]\n" + json.dumps(value, ensure_ascii=False, sort_keys=True)
+        public_value = _public_continuation_context(value, self.journal)
+        return "[Continuation]\n" + json.dumps(public_value, ensure_ascii=False, sort_keys=True)
 
     def finish(self) -> None:
         self.journal.emit("continuation_worker_stopped", state=self.engine.state.document(),

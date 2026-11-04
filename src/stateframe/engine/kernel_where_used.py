@@ -666,6 +666,7 @@ def analyze_accepted_edit(root: str | Path, path: str | Path,
                           journal: object | None = None,
                           ledger: "WhereUsedLedger | None" = None,
                           edit_receipt_id: str | None = None,
+                          step: int = 0,
                           include_literals: bool = True) -> WhereUsedReport:
     """Compute closure for one host-accepted edit.
 
@@ -710,15 +711,26 @@ def analyze_accepted_edit(root: str | Path, path: str | Path,
     active_journal = journal if journal is not None else _ACTIVE_JOURNAL.get()
     if active_journal is None:
         raise RuntimeError("where-used closure requires a journal when enabled")
-    event_id = _journal_emit(
+    source_event_id = _journal_emit(
         active_journal, edit_path=relative, changed_identities=identities,
         site_count=len(sites), open_count=len(obligations), files=len(pack.files),
         imports=len(pack.imports), edit_receipt_id=edit_receipt_id,
         open_obligation_ids=tuple(item.obligation_id for item in obligations),
         literal_channel=include_literals)
+    from kernel_wire_identity import content_wire_id
+    stable_step = step if type(step) is int and step >= 0 else 0
+    event_id = "where-used:" + content_wire_id(
+        active_journal, "where-used-report", stable_step, {
+            "edit_receipt_id": edit_receipt_id or "",
+            "edit_path": relative,
+            "changed_identities": identities,
+            "touched_site_ids": touched,
+            "open_obligation_ids": tuple(item.obligation_id for item in obligations),
+        },
+    )
     report = WhereUsedReport(
         True, relative, identities, changes, sites, touched, obligations,
-        pack.files, pack.imports, event_id, event_id is not None, include_literals)
+        pack.files, pack.imports, event_id, source_event_id is not None, include_literals)
     if ledger is not None:
         ledger._ingest_report(report)
     return report
@@ -744,7 +756,8 @@ class WhereUsedLedger:
 
     def observe_edit(self, root: str | Path, path: str | Path,
                      before: str | None, after: str | None, *,
-                     edit_receipt_id: str | None = None) -> WhereUsedReport:
+                     edit_receipt_id: str | None = None,
+                     step: int = 0) -> WhereUsedReport:
         root_path = Path(root).resolve()
         path_obj = Path(path)
         if not path_obj.is_absolute():
@@ -758,7 +771,7 @@ class WhereUsedLedger:
         self._edit_keys.add(key)
         report = analyze_accepted_edit(
             root_path, path_obj, before, after, journal=self.journal, ledger=None,
-            edit_receipt_id=edit_receipt_id)
+            edit_receipt_id=edit_receipt_id, step=step)
         self._ingest_report(report)
         return report
 
@@ -795,12 +808,48 @@ class WhereUsedLedger:
                             receipt: Mapping[str, object]) -> None:
         if not isinstance(receipt, Mapping):
             raise TypeError("read receipt must be a mapping")
-        receipt_id = str(receipt.get("receipt_id", receipt.get("event_id", ""))).strip()
+        receipt_id = str(receipt.get("receipt_id") or "").strip()
+        stored_receipt = dict(receipt)
+        if not receipt_id:
+            from kernel_wire_identity import (
+                content_wire_id, seeded_content_wire_id, wire_identity_content, wire_run_seed,
+            )
+
+            step_value = receipt.get("turn", receipt.get("step", 0))
+            step = step_value if type(step_value) is int and step_value >= 0 else 0
+            identity_content = wire_identity_content(receipt)
+            identity_key = hashlib.sha256(json.dumps(
+                identity_content, ensure_ascii=False, sort_keys=True,
+                separators=(",", ":"), allow_nan=False,
+            ).encode("utf-8")).hexdigest()
+            ordinal = 1
+            for previous in self._read_receipts.values():
+                if (previous.get("_wire_identity_step") == step
+                        and previous.get("_wire_identity_key") == identity_key):
+                    previous_ordinal = previous.get("_wire_identity_ordinal")
+                    if type(previous_ordinal) is int and previous_ordinal >= ordinal:
+                        ordinal = previous_ordinal + 1
+            if self.journal is not None:
+                wire_id = content_wire_id(
+                    self.journal, "where-used-read-receipt", step, identity_content,
+                    ordinal=ordinal,
+                )
+            else:
+                wire_id = seeded_content_wire_id(
+                    wire_run_seed(), "where-used-read-receipt", step,
+                    identity_content, ordinal=ordinal,
+                )
+            receipt_id = "where-used-read:" + wire_id
+            stored_receipt.pop("event_id", None)
+            stored_receipt["receipt_id"] = receipt_id
+            stored_receipt["_wire_identity_key"] = identity_key
+            stored_receipt["_wire_identity_step"] = step
+            stored_receipt["_wire_identity_ordinal"] = ordinal
         if not receipt_id:
             raise ValueError("read receipt needs receipt_id")
         if obligation_id not in self._obligations:
             raise KeyError(obligation_id)
-        self._read_receipts[str(obligation_id)] = dict(receipt)
+        self._read_receipts[str(obligation_id)] = stored_receipt
 
     def _close(self, obligation_id: str, disposition: str, *, reason: str,
                evidence_refs: Iterable[str] = (), authority: str = "MODEL_DISPOSITION") -> SiteObligation:

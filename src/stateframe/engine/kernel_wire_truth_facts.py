@@ -155,12 +155,21 @@ def _public_evidence_refs(evidence: object, journal: object) -> str | None:
     host_run_id = getattr(journal, "run_id", None)
     from kernel_wire_identity import wire_run_id
     public_run_id = wire_run_id(journal) if journal is not None else None
-    return ",".join(
-        public_run_id + str(item)[len(host_run_id):]
-        if isinstance(host_run_id, str) and public_run_id is not None
-        and str(item).startswith(host_run_id + ":") else str(item)
-        for item in evidence if str(item).strip()
-    ) or None
+    refs = []
+    for item in evidence:
+        value = str(item).strip()
+        if not value:
+            continue
+        if (isinstance(host_run_id, str) and public_run_id is not None
+                and value.startswith(host_run_id + ":")):
+            suffix = value[len(host_run_id) + 1:]
+            # Journal event IDs encode the global sequence. A missing stable
+            # receipt reference is omitted instead of forwarding that position.
+            if suffix.isdecimal():
+                continue
+            value = public_run_id + ":" + suffix
+        refs.append(value)
+    return ",".join(refs) or None
 
 
 def _current_public_check(runtime: object, binding: Mapping[str, object] | None
@@ -175,8 +184,13 @@ def _current_public_check(runtime: object, binding: Mapping[str, object] | None
         selectors = _declared_selectors(runtime)
         if not selectors:
             return False, None, None, None
+        journal = getattr(runtime, "journal", None)
+        owner = getattr(runtime, "owner", None)
+        from kernel_wire_identity import wire_run_seed
         verdict = evaluate_required_tests(
             binding, selectors, getattr(runtime, "test_receipts", ()) or (),
+            wire_seed=wire_run_seed(journal),
+            wire_step=getattr(owner, "current_step", 0),
         )
     except (ImportError, AttributeError, OSError, RuntimeError, TypeError, ValueError):
         return False, None, None, None
