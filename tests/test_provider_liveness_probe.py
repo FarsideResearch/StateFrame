@@ -478,6 +478,38 @@ def test_queue_wait_warning_is_printed_once(tmp_path):
                      "consider fewer parallel runs"]
 
 
+def _sealed_queue_wait_run(tmp_path):
+    """A finished run whose measurement journal is sealed the way the product seals it (events.jsonl.xz)."""
+    from stateframe.engine.kernel_journal_store import seal_measurement_run
+
+    measurement = tmp_path / "worker" / "measurement-runs" / "one"
+    measurement.mkdir(parents=True)
+    (measurement / "events.jsonl").write_text("\n".join(json.dumps(event) for event in (
+        {"kind": "provider_queue_wait", "seconds_waited": 1.25},
+        {"kind": "provider_queue_wait", "seconds_waited": 4.0},
+    )) + "\n")
+    seal_measurement_run(measurement)
+    assert not (measurement / "events.jsonl").exists()
+    assert (measurement / "events.jsonl.xz").is_file()
+    return tmp_path
+
+
+def test_queue_wait_warning_reads_a_sealed_journal(tmp_path):
+    run = _sealed_queue_wait_run(tmp_path)
+    lines = []
+    runner._print_queue_wait_warning(run, lines.append)
+    assert lines == ["warning: the model server queued requests for up to 4.0 s; "
+                     "consider fewer parallel runs"]
+
+
+def test_planted_raw_glob_misses_the_sealed_journal(tmp_path):
+    # Control: the 0.3.29 implementation globbed */events.jsonl directly, so a finished (sealed) run
+    # produced no warning at all. The same sealed run must defeat that reader.
+    run = _sealed_queue_wait_run(tmp_path)
+    found = list((run / "worker" / "measurement-runs").glob("*/events.jsonl"))
+    assert found == []
+
+
 @pytest.mark.parametrize("value", ["0", "nan", "inf", "bad"])
 def test_runner_rejects_invalid_queue_wait_override(monkeypatch, value):
     monkeypatch.setenv("STATEFRAME_QUEUE_WAIT_MAX_S", value)

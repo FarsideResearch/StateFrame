@@ -3,6 +3,7 @@
 ## Unreleased
 
 - Under `--protect-tests task/all`, creating files that change test collection (`conftest.py`, test-package `__init__.py`, pytest config, `sitecustomize.py`/`.pth`) is now refused; before, a new `tests/__init__.py` could import product code at collection time and change the test result.
+- Fixed: the queue-wait warning now reads sealed run journals (`events.jsonl.xz`), so finished runs report provider queue waits again; the reader also satisfies the journal shim guard.
 
 ## 0.3.29 (2026-11-03)
 
