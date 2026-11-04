@@ -5,7 +5,6 @@ import json
 import os
 from pathlib import Path
 import shutil
-import subprocess
 import sys
 import time
 
@@ -13,6 +12,7 @@ import pytest
 
 from _stateframe_home import isolated_stateframe_home
 from _journal import measurement_events
+from engine_run import run_monitored
 from tests import test_allocation_replay_corpus as corpus
 from tests.tape_server import TapeServer
 
@@ -162,8 +162,11 @@ def test_layout_tokenizer_flip_seals_live_request(tmp_path, sticky):
         if profile is not None:
             command.extend(("--profile", str(profile)))
         started = time.monotonic()
-        process = subprocess.run(command, capture_output=True, text=True,
-                                 env=environment, timeout=1860, check=False)
+        # A 620-second measured window gives the prior 1860-second hard ceiling
+        # at normal load; the shared runner adjusts it for host load and progress.
+        process = run_monitored(
+            command, run_dir=run_dir, expected_seconds=620,
+            env=environment, capture_output=True, text=True, check=False)
         endpoint_requests = endpoint.request_count
         successful = endpoint.successful_tokenizations
         failed = endpoint.failed_tokenizations
