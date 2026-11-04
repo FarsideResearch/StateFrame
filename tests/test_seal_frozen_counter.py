@@ -454,6 +454,36 @@ def test_permanent_outage_post_fit_growth_recovers_before_submission(monkeypatch
     assert len([row for row in records if row["kind"] == "request_submitted"]) == 1
 
 
+def test_post_fit_recovery_does_not_restore_projection_trim_callback():
+    from inspect import signature
+
+    from kernel_final_wire_allocation import _recover_post_fit_growth
+    from kernel_frame_allocation_capture import capture_candidate
+
+    body = _body(0)
+    meter = RequestTokenMeter(disabled=True)
+    meter.bind_request("seal-r1", "seal-r1")
+    capture = _capture(body, meter, method="calibrated_bytes", tokens=meter.measure(body)[0])
+    capture.request_source_final_delivery = {"status": "COMPLETE"}
+    fitted_inputs = {"token_ceiling": 33344, "byte_ceiling": 82000,
+                     "receipt": {"status": "COMPLETE"},
+                     "_final_layout_trim": lambda *_args: True}
+    capture._frame_candidate_inputs = copy.deepcopy(fitted_inputs)
+    grown = copy.deepcopy(body)
+    grown["messages"][0]["content"] += "x" * 100000
+
+    # Planted control: the callback is not part of capture_candidate's contract.
+    with pytest.raises(TypeError, match="_final_layout_trim"):
+        signature(capture_candidate).bind_partial(**fitted_inputs)
+    recovered, changed = _recover_post_fit_growth(
+        capture, SimpleNamespace(), grown, body, capture._frame_candidate_counter,
+        fitted_inputs, capture.request_source_final_delivery,
+        meter=meter, endpoint=None, key="")
+    assert changed and recovered == body
+    assert "_final_layout_trim" not in capture._frame_candidate_inputs
+    signature(capture_candidate).bind_partial(**capture._frame_candidate_inputs)
+
+
 def test_late_rewrite_refits_with_the_frozen_counter(monkeypatch):
     from kernel_final_wire_allocation import _recover_post_fit_growth
     from kernel_frame_allocation_capture import (

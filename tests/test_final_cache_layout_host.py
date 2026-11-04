@@ -152,7 +152,7 @@ def _scripted_wire(tmp_path, label, layout, *, example="discount_bug",
     finally:
         server.shutdown()
         server.server_close()
-    events = [json.loads(line) for file in run.rglob("events.jsonl") for line in file.read_text().splitlines()]
+    events = measurement_events(run)
     assert not [row for row in events if (row.get("kind") or row.get("event")) == "final_cache_layout_failed_open"]
     wires = [path.read_bytes() for path in sorted((run / "wire").glob("*.request.json"))]
     sends = [json.loads(line) for line in (run / "sends.jsonl").read_text().splitlines()]
