@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.3.33 (2026-11-04)
+
+- Repo maps now list Go, Rust, Java, Ruby, PHP, C, C++ and C# files, and report the parser mode actually used in the header and a `repo_map_modes` journal event.
+
 ## 0.3.32 (2026-11-04)
 
 - Added AST and live-server guards for bearer authentication across model-server routes and for reasons on unavailable journal events. A configured API key is now also sent to loopback endpoints and to /slots observation.
