@@ -34,12 +34,19 @@ from tools.pinned_tree import pinned_tree
 
 
 def _assert_journal_kinds_match_release(baseline_kinds, current_kinds):
-    """Allow only the two known additions while preserving release event ordering."""
+    """Allow provider dialect and, for older baselines only, one done-facts event."""
     trimmed = list(current_kinds)
-    for extra in ("done_facts_finalized", "provider_dialect"):
-        assert trimmed.count(extra) == baseline_kinds.count(extra) + 1, (
-            extra, baseline_kinds.count(extra), trimmed.count(extra))
-        del trimmed[len(trimmed) - 1 - trimmed[::-1].index(extra)]
+    done_kind = "done_facts_finalized"
+    baseline_done = baseline_kinds.count(done_kind)
+    current_done = trimmed.count(done_kind)
+    assert current_done == baseline_done or (baseline_done == 0 and current_done == 1), (
+        done_kind, baseline_done, current_done)
+    if current_done > baseline_done:
+        del trimmed[len(trimmed) - 1 - trimmed[::-1].index(done_kind)]
+    dialect_kind = "provider_dialect"
+    assert trimmed.count(dialect_kind) == baseline_kinds.count(dialect_kind) + 1, (
+        dialect_kind, baseline_kinds.count(dialect_kind), trimmed.count(dialect_kind))
+    del trimmed[len(trimmed) - 1 - trimmed[::-1].index(dialect_kind)]
     assert trimmed == baseline_kinds
 
 
@@ -48,6 +55,16 @@ def test_journal_kind_parity_rejects_unexpected_extra_kind():
     allowed = ["run_started", "provider_dialect", "request_sent",
                "prompt_cache_accounting", "done_facts_finalized", "run_done"]
     _assert_journal_kinds_match_release(baseline, allowed)
+    _assert_journal_kinds_match_release(baseline, [kind for kind in allowed
+                                                   if kind != "done_facts_finalized"])
+    baseline_with_done = [*baseline[:-1], "done_facts_finalized", baseline[-1]]
+    _assert_journal_kinds_match_release(baseline_with_done, allowed)
+    with pytest.raises(AssertionError):
+        _assert_journal_kinds_match_release(baseline_with_done,
+                                            [*allowed[:-1], "done_facts_finalized", allowed[-1]])
+    with pytest.raises(AssertionError):
+        _assert_journal_kinds_match_release(baseline_with_done,
+                                            [kind for kind in allowed if kind != "done_facts_finalized"])
     with pytest.raises(AssertionError):
         _assert_journal_kinds_match_release(baseline, [*allowed, "unexpected_kind"])
     with pytest.raises(AssertionError):
