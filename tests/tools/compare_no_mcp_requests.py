@@ -65,6 +65,11 @@ WIRE_ID_PATHS = (
     # The top-level StateFrame projection repeats those applied-edit request IDs.
     (("messages", "*", "content", "[StateFrame]", "state", "framefit5",
       "applied_edits", "*", "request_id"), "request_id", None, (20,)),
+    # Source-window pruning hashes older applied-edit rows, including their generated
+    # edit_receipt/request_id values. The digest moves when wire IDs are rederived.
+    (("messages", "*", "content", "[StateFrame]", "state", "framefit5",
+      "action_ledger", "historical_applied_edits", "sha256"),
+     "historical_applied_edits_sha256(edit_ids)", None, (64,)),
     # Native call IDs in edit action rows derive from the request ID and action index.
     (("messages", "*", "content", "[StateFrame]", "state", "framefit5",
       "action_ledger", "edits", "*", "call_ids", "*"), "native_call_id(request_id)", "native_", (20,)),
@@ -128,6 +133,10 @@ WIRE_ID_PATHS = (
     # The oracle's sent tool result repeats host-minted check execution and receipt IDs.
     (("messages", "*", "content"), "check_execution", "CHECK_FAILURE_SUMMARY execution_id=check-execution:", (20,)),
     (("messages", "*", "content"), "check_receipt", "full_output_handle=check-receipt:", (24,)),
+    # ExpectationLedger mints this receipt from the run seed and observation; its
+    # typed ID is repeated in prose when the observation is reported to the model.
+    (("messages", "*", "content"), "expectation_receipt",
+     "expectation-receipt:", (24,)),
 )
 
 # Used only to verify sent result hashes; masking itself uses WIRE_ID_PATHS exclusively.
@@ -217,6 +226,8 @@ def _replace_embedded_json(content: str, marker: str, path: tuple[str, ...], *,
 def _replace_marked_hex(value: str, marker: str,
                         lengths: tuple[int, ...]) -> tuple[str, list[str]]:
     """Replace hex IDs immediately following one known text label, never arbitrary hex text."""
+    if marker == "expectation-receipt:":
+        return _replace_expectation_receipts(value)
     if marker == "check_execution_ref: ":
         return _replace_check_execution_refs(value, marker, lengths)
     if marker == "journal receipts ":
@@ -320,6 +331,18 @@ def _replace_journal_receipts(value: str) -> tuple[str, list[str]]:
     return pattern.sub(replace, value), matches
 
 
+def _replace_expectation_receipts(value: str) -> tuple[str, list[str]]:
+    """Mask only complete ExpectationLedger receipt tokens in message prose."""
+    matches: list[str] = []
+    pattern = re.compile(r"(?<![A-Za-z0-9_-])expectation-receipt:([0-9a-f]{24})(?![A-Za-z0-9_-])")
+
+    def replace(match: re.Match[str]) -> str:
+        matches.append(match.group(1))
+        return "expectation-receipt:<wire-id>"
+
+    return pattern.sub(replace, value), matches
+
+
 def _mask_one_json_body(body: bytes) -> tuple[bytes, list[tuple[str, list[str]]]]:
     request = json.loads(body)
     if not isinstance(request, (dict, list)) or (isinstance(request, list)
@@ -395,7 +418,8 @@ def unbacked_result_hash_changes(before_run: Path, after_run: Path) -> list[str]
 MOVED_ID_FIELDS = frozenset({
     "tool_call_id", "wire_truth_handle(request_id)", "request_id", "native_call_id(request_id)",
     "edit_receipt", "check_receipt", "check_execution", "check_execution_ref",
-    "check_finding_id", "receipt_id", "continuation_workspace_dir",
+    "check_finding_id", "receipt_id", "continuation_workspace_dir", "expectation_receipt",
+    "historical_applied_edits_sha256(edit_ids)",
 })
 DERIVED_RESULT_FIELDS = frozenset({"result_sha256(tool_result)"})
 

@@ -152,30 +152,31 @@ def test_wire_id_drift_names_moved_fields_and_rejects_other_changes(tmp_path):
     assert request_id_handle_mismatches(run)
 
 
-def test_applied_edit_history_digest_is_compared_as_a_non_id_hash():
-    """A digest is not a wire ID, even when its preimage contains wire IDs."""
+def test_applied_edit_history_digest_masks_only_its_declared_path():
+    """The pruned-row digest contains generated IDs; adjacent data remains visible."""
     import json
 
     from tools.compare_no_mcp_requests import wire_id_drift
 
-    def body(rows, count):
+    def body(rows, count, note="stable"):
         digest = hashlib.sha256(json.dumps(rows, sort_keys=True).encode()).hexdigest()
         frame = {"state": {"framefit5": {"action_ledger": {
             "historical_applied_edits": {"count": count, "sha256": digest},
+            "note": note,
         }}}}
         content = "[StateFrame]\n" + json.dumps(frame, separators=(",", ":"))
         return json.dumps({"messages": [{"role": "user", "content": content}]}).encode()
 
     rows = [{"edit_receipt": "a" * 20, "file": "shop/pricing.py"}]
     moved_ids = [{"edit_receipt": "b" * 20, "file": "shop/pricing.py"}]
-    # Changing only an older edit receipt changes this digest, which remains visible.
-    problems, kinds = wire_id_drift([body(rows, 1)], [body(moved_ids, 1)])
-    assert problems and kinds == {}
+    # An older generated edit receipt moves the digest at this exact path.
+    assert wire_id_drift([body(rows, 1)], [body(moved_ids, 1)]) == (
+        [], {"historical_applied_edits_sha256(edit_ids)": 1})
     # The count is compared too: a different number of pruned edits fails.
     assert wire_id_drift([body(rows, 1)], [body(rows, 2)])[0]
-    # A non-ID change inside a pruned row also changes the visible digest.
-    planted = [{"edit_receipt": "a" * 20, "file": "shop/discount.py"}]
-    assert wire_id_drift([body(rows, 1)], [body(planted, 1)])[0]
+    # A non-ID hex change beside the digest, including another 64-hex hash, fails.
+    assert wire_id_drift([body(rows, 1, "c" * 64)],
+                         [body(moved_ids, 1, "d" * 64)])[0]
 
 
 def test_diet_size_counts_move_only_with_the_id_length_change():
@@ -247,6 +248,19 @@ def test_mask_wire_ids_uses_declared_paths_and_preserves_unrelated_hex():
     oracle_b = "CHECK_FAILURE_SUMMARY execution_id=check-execution:" + "c" * 20 + " full_output_handle=check-receipt:" + "d" * 24
     assert mask_wire_ids(body("call-good", oracle_a)) == mask_wire_ids(body("call-good", oracle_b))
     assert mask_wire_ids(body("call-good", oracle_a)) != mask_wire_ids(body("call-good", oracle_b + " changed"))
+    expectation_a = "receipt expectation-receipt:" + "a" * 24 + "."
+    expectation_b = "receipt expectation-receipt:" + "b" * 24 + "."
+    assert mask_wire_ids(body("call-good", expectation_a)) == mask_wire_ids(
+        body("call-good", expectation_b))
+    assert mask_wire_ids(body("call-good", expectation_a)) != mask_wire_ids(
+        body("call-good", expectation_b + " changed"))
+    # Similar looking prose and unrelated hex must not be treated as a minted receipt.
+    assert mask_wire_ids(body("call-good", "otherexpectation-receipt:" + "a" * 24)) != mask_wire_ids(
+        body("call-good", "otherexpectation-receipt:" + "b" * 24))
+    assert mask_wire_ids(body("call-good", "expectation-receipt:" + "a" * 24 + "suffix")) != mask_wire_ids(
+        body("call-good", "expectation-receipt:" + "b" * 24 + "suffix"))
+    assert mask_wire_ids(body("call-good", expectation_a + " value " + "c" * 24)) != mask_wire_ids(
+        body("call-good", expectation_b + " value " + "d" * 24))
 
     digest = "ab" * 32
     frame = {"state": {"framefit5": {"action_ledger": {"unclassified_actions": [
@@ -295,6 +309,15 @@ def test_wire_id_paths_match_real_captured_request_fixtures():
     _, path_values = _mask_wire_ids_with_values(json.dumps({
         "required_evidence_ids": ["R1", "receipt:" + "a" * 24],
     }).encode())
+    for index, (_kind, values) in enumerate(path_values):
+        coverage[index] += len(values)
+    historical = {"state": {"framefit5": {"action_ledger": {
+        "historical_applied_edits": {"count": 1, "sha256": "a" * 64},
+    }}}}
+    _, path_values = _mask_wire_ids_with_values(json.dumps({"messages": [
+        {"role": "user", "content": "[StateFrame]\n" + json.dumps(historical)},
+        {"role": "user", "content": "receipt expectation-receipt:" + "a" * 24},
+    ]}).encode())
     for index, (_kind, values) in enumerate(path_values):
         coverage[index] += len(values)
     missing = [f"{kind}: {'.'.join(path)}" for index, (path, kind, _marker, _lengths)
