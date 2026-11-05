@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.4.1 (2026-11-04)
+
+- Tests: retire four checks that were red on released main. The start-hint request comparison against fixed v0.2.8 becomes a comparison against the immediate base release (shared with the hook-wiring parity test) plus a check that an inherited powerup cannot change the request; seal-core and stable-wire CLI tests run through the shared process monitor; the final-cache layout test stops reading the retired `SF_TEST_PARITY_BASELINE`.
+
 ## 0.4.0 (2026-11-04)
 
 - Post-fit recovery keeps the final cache layout trim callback out of the saved allocation inputs, so a recovered request can be captured again without passing an unsupported callback.

@@ -6,12 +6,12 @@ import json
 import os
 import re
 import shutil
-import subprocess
 import sys
 from pathlib import Path
 
 import pytest
 
+from engine_run import run_monitored
 from stateframe.scripted_endpoint import Script, serve
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -124,13 +124,13 @@ def test_tiny_site_scripted_run_preserves_whole_stable_messages(tmp_path):
     environment["STATEFRAME_STABLE_WIRE_HEADROOM"] = "16000"
     environment["STATEFRAME_PAGE_LOG"] = "off"
     try:
-        result = subprocess.run(
+        result = run_monitored(
             [sys.executable, "-m", "stateframe", "run", "--repo", str(repo),
              "--task", "Build the small static shop site described in the README.",
              "--endpoint", f"http://127.0.0.1:{server.server_port}/v1",
              "--model", "scripted", "--run-dir", str(run),
              "--test-python", sys.executable, "--max-turns", "16", "--quiet"],
-            env=environment, capture_output=True, text=True, timeout=RUN_TIMEOUT_SECONDS)
+            env=environment, capture_output=True, text=True, expected_seconds=RUN_TIMEOUT_SECONDS, run_dir=run)
         assert result.returncode == 0, result.stdout + result.stderr
         script.assert_consumed()
     finally:
