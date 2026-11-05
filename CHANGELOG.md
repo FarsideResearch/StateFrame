@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.4.15 (2026-11-05)
 
 - Fixed: execution supervisors use an owner-lifetime pipe, so engine death stops jobs even through launch wrappers and while a forked checkpoint writer still holds the control socket; a wrapper exiting on its own leaves its live session running. Forked checkpoint writers and helper children close their inherited owner-write end.
 - Fixed: on Linux, checkpoint and environment-seed temp sweeps treated a zombie (unreaped) owner pid as alive and kept its temp file; they now read the process state and sweep it. macOS is unchanged.
