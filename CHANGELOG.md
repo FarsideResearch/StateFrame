@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.4.30 (2026-11-05)
+
+- Security: when a server redirects a request to a different scheme, host, or port, StateFrame removes authentication, API key, and cookie headers before following it. This protects users of servers that require credentials.
+- Fixed: routed requests can now follow allowed redirects in the isolated transport. Users whose API endpoint redirects before replying can complete the request, while credentials are removed when its origin changes.
+- Fixed: routed requests keep the original request deadline on every redirect hop. Users will not start a follow-up request when a server redirects after that deadline.
+- Tests: redirect checks now compare each handler with Python's built-in redirect behavior, including `HEAD` handling on supported versions. The source scan now detects unsafe returns in opposite conditional branches. Affected: contributors maintaining redirect behavior.
+
 ## 0.4.29 (2026-11-05)
 
 - Privacy fix: repo maps can no longer leak between projects. In environments with a writable `/workspace` directory (some containers and devcontainers), two projects at the same git commit could reuse each other's cached repo map (file names and signatures, not contents). The standalone cache is now written only under `STATEFRAME_HOME` and is keyed by the project root and its contents. Default macOS and Linux setups were not affected.

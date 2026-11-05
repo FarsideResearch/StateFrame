@@ -65,7 +65,22 @@ class _LocalRedirects(urllib.request.HTTPRedirectHandler):
 
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         _require_local(newurl, self.allow_remote)
-        return super().redirect_request(req, fp, code, msg, headers, newurl)
+        redirected = super().redirect_request(req, fp, code, msg, headers, newurl)
+        if redirected is None:
+            return None
+        from stateframe.engine.kernel_redirect_policy import (
+            REDIRECT_CREDENTIAL_ORIGIN_ATTRIBUTE,
+            REDIRECT_SECRET_HEADERS,
+            scope_redirect_credentials,
+        )
+
+        credential_origin = getattr(req, REDIRECT_CREDENTIAL_ORIGIN_ATTRIBUTE, req.full_url)
+        scope_redirect_credentials(
+            redirected,
+            credential_origin=credential_origin,
+            secret_headers=REDIRECT_SECRET_HEADERS,
+        )
+        return redirected
 
 
 def normalize_base_url(raw: str) -> str:

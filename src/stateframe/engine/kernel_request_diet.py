@@ -295,12 +295,22 @@ class _TokenizeRedirects(urllib.request.HTTPRedirectHandler):
             from kernel_frame_routes import require_local
             require_local(newurl, allow_remote=route_allow_remote)
         redirected = super().redirect_request(req, fp, code, msg, headers, newurl)
-        if redirected is not None:
-            redirected._stateframe_route_allow_remote = route_allow_remote
-            redirected._stateframe_generation_origin = generation_origin
-            if (generation_origin is not None
-                    and _url_origin(newurl) != generation_origin):
-                redirected.remove_header("Authorization")
+        if redirected is None:
+            return None
+        redirected._stateframe_route_allow_remote = route_allow_remote
+        redirected._stateframe_generation_origin = generation_origin
+        from kernel_redirect_policy import (
+            REDIRECT_CREDENTIAL_ORIGIN_ATTRIBUTE,
+            REDIRECT_SECRET_HEADERS,
+            scope_redirect_credentials,
+        )
+
+        credential_origin = getattr(req, REDIRECT_CREDENTIAL_ORIGIN_ATTRIBUTE, req.full_url)
+        scope_redirect_credentials(
+            redirected,
+            credential_origin=credential_origin,
+            secret_headers=REDIRECT_SECRET_HEADERS,
+        )
         return redirected
 
 

@@ -51,6 +51,7 @@ def _server(stalls: int, *, stall_seconds: float = 1.0, status: int = 200):
         server.server_close()
 
 
+@pytest.mark.host_sandbox
 def test_probe_retries_once_after_a_stall():
     with _server(stalls=1) as (url, seen):
         result = Endpoint(url, "served", timeout_s=0.3).probe()
@@ -58,6 +59,7 @@ def test_probe_retries_once_after_a_stall():
     assert seen == ["/v1/models", "/v1/models"]
 
 
+@pytest.mark.host_sandbox
 def test_probe_gives_up_after_one_retry():
     with _server(stalls=2) as (url, seen):
         with pytest.raises(EndpointError, match="unreachable.*TimeoutError"):
@@ -65,6 +67,7 @@ def test_probe_gives_up_after_one_retry():
     assert seen == ["/v1/models", "/v1/models"]
 
 
+@pytest.mark.host_sandbox
 def test_probe_does_not_retry_an_answer():
     with _server(stalls=0, status=500) as (url, seen):
         with pytest.raises(EndpointError, match="HTTP 500"):
@@ -152,6 +155,7 @@ def test_a_trickling_response_cannot_outlive_its_deadline(monkeypatch):
     assert 1000 - len(first.chunks) <= 4 and 1000 - len(second.chunks) <= 4
 
 
+@pytest.mark.host_sandbox
 def test_slot_discovery_retries_once_after_a_stall():
     with _server(stalls=1) as (url, seen):
         slots = Endpoint(url, "served", timeout_s=0.3).get_slots()
