@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 import threading
+import time
 import urllib.parse
 from collections.abc import Mapping, MutableMapping
 from dataclasses import dataclass
@@ -165,6 +166,8 @@ def capabilities_for(
     endpoint: str,
     key: str,
     *,
+    deadline: float | None = None,
+    require_slots: bool = True,
     cache: MutableMapping[str, ProviderCapabilities] | None = None,
     environ: Mapping[str, str] | None = None,
 ) -> ProviderCapabilities:
@@ -177,24 +180,67 @@ def capabilities_for(
     if not origin:
         return ProviderCapabilities()
     selected_cache = RUN_CAPABILITY_CACHE if cache is None else cache
+    cached = selected_cache.get(origin)
+    if cached is not None and (
+        not require_slots or cached.slots or cached.slots_status is not None
+    ):
+        return cached
     with _ORIGIN_LOCKS_GUARD:
         origin_lock = _ORIGIN_LOCKS.setdefault(origin, threading.Lock())
-    with origin_lock:
-        if origin in selected_cache:
-            return selected_cache[origin]
+    if deadline is None:
+        origin_lock.acquire()
+    else:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0 or not origin_lock.acquire(timeout=remaining):
+            raise TimeoutError("tokenizer request deadline expired")
+    try:
+        cached = selected_cache.get(origin)
+        if cached is not None and (
+            not require_slots or cached.slots or cached.slots_status is not None
+        ):
+            return cached
+        cached_llama_proof = None
+        if (cached is not None and cached.dialect == LLAMA_CPP
+                and not cached.slots and cached.slots_status is None):
+            cached_llama_proof = cached
 
         source = os.environ if environ is None else environ
         override = str(source.get(PROVIDER_OVERRIDE_ENV, "")).strip().casefold() == LLAMA_CPP
-        props = bounded_json_probe(origin, key, "/props")
-        props_status = props[0] if props is not None else None
-        props_is_llama = props is not None and props[0] == 200 and _llama_props(props[1])
 
+        def probe(path: str) -> tuple[tuple[int, object] | None, bool]:
+            if deadline is None:
+                return bounded_json_probe(origin, key, path), False
+            if deadline <= time.monotonic():
+                return None, True
+            result = bounded_json_probe(origin, key, path, deadline=deadline)
+            return result, result is None and time.monotonic() >= deadline
+
+        if cached_llama_proof is not None:
+            # A later slot request upgrades the cached dialect proof without
+            # redetecting it through an endpoint whose /props may now be absent.
+            props, props_cut_short = None, False
+            props_status = cached_llama_proof.props_status
+            props_is_llama = True
+        else:
+            props, props_cut_short = probe("/props")
+            props_status = props[0] if props is not None else None
+            props_is_llama = props is not None and props[0] == 200 and _llama_props(props[1])
+
+        # Dialect proof for tokenization needs /props, never slot discovery.
+        slots_probe_skipped = not require_slots
+        if slots_probe_skipped:
+            slots_result, slots_cut_short = None, False
+        else:
+            slots_result, slots_cut_short = probe("/slots")
         slots, slot_ids, slots_status = _slots_proof(
-            bounded_json_probe(origin, key, "/slots"),
+            slots_result,
             require_llama_shape=not (override or props_is_llama),
         )
 
-        if override:
+        if cached_llama_proof is not None:
+            dialect = LLAMA_CPP
+            reason = cached_llama_proof.reason
+        elif override:
             dialect = LLAMA_CPP
             if props is None:
                 reason = "operator override, /props unreachable"
@@ -232,8 +278,18 @@ def capabilities_for(
             props_status=props_status,
             slots_status=slots_status,
         )
-        selected_cache[origin] = result
+        if cached_llama_proof is not None:
+            if not slots_cut_short:
+                selected_cache[origin] = result
+        elif slots_probe_skipped and props_is_llama:
+            # Keep a successful /props proof even though this caller did not
+            # need /slots. A later caller can upgrade it if slots are required.
+            selected_cache[origin] = result
+        elif not (props_cut_short or slots_cut_short or slots_probe_skipped):
+            selected_cache[origin] = result
         return result
+    finally:
+        origin_lock.release()
 
 
 def require_feature(

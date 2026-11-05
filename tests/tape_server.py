@@ -55,12 +55,17 @@ class TapeServer:
         if (isinstance(delay, bool) or not isinstance(delay, (int, float))
                 or not math.isfinite(delay) or delay < 0):
             raise ValueError("tokenize_delay_s must be a finite non-negative number")
+        props_delay = script.get("props_delay_s", 0.0)
+        if (isinstance(props_delay, bool) or not isinstance(props_delay, (int, float))
+                or not math.isfinite(props_delay) or not 0 <= props_delay <= 5):
+            raise ValueError("props_delay_s must be a finite number between 0 and 5 seconds")
         slow_calls = script.get("tokenize_slow_calls", ())
         if (not isinstance(slow_calls, Sequence)
                 or isinstance(slow_calls, (str, bytes, bytearray))
                 or any(type(call) is not int or call < 1 for call in slow_calls)):
             raise ValueError("tokenize_slow_calls must contain positive call numbers")
         self._tokenize_delay_s = float(delay)
+        self._props_delay_s = float(props_delay)
         self._tokenize_slow_calls = frozenset(slow_calls)
         slots = script.get("slots", [65536] * 8)
         self._slots = tuple(slots) if isinstance(slots, Sequence) and not isinstance(slots, (str, bytes)) else (65536,)
@@ -143,6 +148,8 @@ class TapeServer:
                     self._send_json(200, {"object": "list", "data": [{"id": tape._model, "object": "model"}]})
                 elif path.endswith("/props"):
                     # Match the llama.cpp identification shape used by scripted_endpoint.
+                    if tape._props_delay_s:
+                        time.sleep(tape._props_delay_s)
                     self._send_json(200, {
                         "default_generation_settings": {"n_ctx": 65536},
                         "model_path": "allocation-replay-model",

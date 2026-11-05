@@ -13,6 +13,7 @@ import pytest
 
 from _stateframe_home import isolated_stateframe_home
 import kernel_agent_schemas
+import kernel_provider_dialect as provider_dialect
 import kernel_request_diet as request_diet
 from kernel_shell_tool import SHELL_SCHEMA
 from tests import test_allocation_replay_corpus as corpus
@@ -241,15 +242,154 @@ def test_reprobe_is_limited_to_one_attempt_per_request(monkeypatch):
     assert meter.unavailable_reason() == "timeout"
 
 
+def test_cold_tokenize_probe_reserves_post_budget_and_skips_slots(monkeypatch):
+    monkeypatch.delenv(provider_dialect.PROVIDER_OVERRIDE_ENV, raising=False)
+    cache = {}
+    monkeypatch.setattr(provider_dialect, "RUN_CAPABILITY_CACHE", cache)
+    probes = []
+
+    def probe(_origin, _key, path, *, deadline):
+        probes.append((path, deadline))
+        return 404, None
+
+    monkeypatch.setattr(provider_dialect, "bounded_json_probe", probe)
+    started = monotonic()
+    with pytest.raises(provider_dialect.ProviderCapabilityError):
+        request_diet._http_tokenize(
+            "unproven endpoint", "http://127.0.0.1:9/tokenize", deadline=started + 0.2,
+        )
+
+    assert len(probes) == 1
+    assert probes[0][0] == "/props"
+    assert started < probes[0][1] < started + 0.15
+    assert cache == {}
+
+
+def test_slow_capability_probe_obeys_request_deadline_without_caching(monkeypatch):
+    budget = 0.2
+    cache = {}
+    monkeypatch.setattr(provider_dialect, "RUN_CAPABILITY_CACHE", cache)
+    script = {
+        "model": "allocation-replay-model",
+        "turns": [{"message": {"role": "assistant", "content": "done"}}],
+        "props_delay_s": 0.5,
+    }
+    with TapeServer(script) as endpoint:
+        started = monotonic()
+        with pytest.raises(TimeoutError, match="tokenizer request deadline expired"):
+            request_diet._http_tokenize(
+                "slow capability probe", f"{endpoint.url}/tokenize",
+                deadline=started + budget,
+            )
+        elapsed = monotonic() - started
+
+    origin = provider_dialect.origin_of(endpoint.url)
+    assert elapsed <= budget + 0.1
+    assert origin not in cache
+    assert endpoint.tokenize_request_count == 0
+
+
+def test_props_proof_survives_a_later_probe_miss_and_slot_probe(monkeypatch):
+    script = {
+        "model": "allocation-replay-model",
+        "turns": [{"message": {"role": "assistant", "content": "done"}}],
+    }
+    cache = {}
+    monkeypatch.setattr(provider_dialect, "RUN_CAPABILITY_CACHE", cache)
+    real_probe = provider_dialect.bounded_json_probe
+    probe_misses_enabled = False
+    missed_paths = []
+
+    def probe_with_later_misses(origin, key, path, **kwargs):
+        if probe_misses_enabled:
+            missed_paths.append(path)
+            return None
+        return real_probe(origin, key, path, **kwargs)
+
+    monkeypatch.setattr(provider_dialect, "bounded_json_probe", probe_with_later_misses)
+
+    with TapeServer(script) as endpoint:
+        origin = provider_dialect.origin_of(endpoint.url)
+        first_tokens = request_diet._http_tokenize(
+            "props capability", f"{endpoint.url}/tokenize", deadline=monotonic() + 1.0,
+        )
+        probe_misses_enabled = True
+        slot_miss = provider_dialect.capabilities_for(endpoint.url, "", require_slots=True)
+        second_tokens = request_diet._http_tokenize(
+            "cached props capability after slot miss",
+            f"{endpoint.url}/tokenize", deadline=monotonic() + 1.0,
+        )
+
+        props_proof = cache[origin]
+        assert props_proof.dialect == provider_dialect.LLAMA_CPP
+        assert props_proof.reason == "proven by /props"
+        assert props_proof.props_status == 200
+        assert props_proof.slots is False
+        assert props_proof.slots_status is None
+        assert slot_miss.dialect == provider_dialect.LLAMA_CPP
+        assert slot_miss.slots is False
+        assert missed_paths == ["/slots"]
+        assert first_tokens and second_tokens
+        assert endpoint.tokenize_request_count == 2
+
+        monkeypatch.setattr(provider_dialect, "bounded_json_probe", real_probe)
+        slot_proof = provider_dialect.capabilities_for(endpoint.url, "", require_slots=True)
+
+    assert slot_proof.dialect == provider_dialect.LLAMA_CPP
+    assert slot_proof.slots is True
+    assert slot_proof.slot_ids == frozenset(range(8))
+    assert slot_proof.slots_status == 200
+    assert cache[origin] == slot_proof
+
+
+def test_cold_props_proof_leaves_time_for_late_tokenize_and_is_cached(monkeypatch):
+    monkeypatch.delenv(provider_dialect.PROVIDER_OVERRIDE_ENV, raising=False)
+    cache = {}
+    monkeypatch.setattr(provider_dialect, "RUN_CAPABILITY_CACHE", cache)
+    probe_paths = []
+    real_probe = provider_dialect.bounded_json_probe
+
+    def record_probe(origin, key, path, **kwargs):
+        probe_paths.append(path)
+        return real_probe(origin, key, path, **kwargs)
+
+    monkeypatch.setattr(provider_dialect, "bounded_json_probe", record_probe)
+    script = {
+        "model": "allocation-replay-model",
+        "turns": [{"message": {"role": "assistant", "content": "done"}}],
+        "tokenize_delay_s": 0.03,
+        "tokenize_slow_calls": [1],
+    }
+    with TapeServer(script) as endpoint:
+        meter = request_diet.RequestTokenMeter(
+            endpoint=f"{endpoint.url}/tokenize", template_overhead_tokens=0,
+        )
+        # The cold /props probe starts a Python child: allow its full 2s cap
+        # under loaded CI, then 2s for POST scheduling and its 30ms response.
+        meter.bind_request("request-1", "request-1", deadline=monotonic() + 4.0)
+        _count, method = meter.measure(_body("cold props proof and late tokenize"))
+
+    assert method == "tokenize"
+    assert endpoint.tokenize_request_count == 1
+    assert probe_paths == ["/props"]
+    assert cache[provider_dialect.origin_of(endpoint.url)].reason == "proven by /props"
+
+
 def test_late_tokenize_success_within_request_budget_is_not_a_failure(monkeypatch):
     monkeypatch.setattr(request_diet, "TOKENIZE_REQUEST_TIMEOUT_SECONDS", 0.005)
     monkeypatch.setattr(request_diet, "TOKENIZE_REQUEST_TIMEOUT_CAP_SECONDS", 0.2)
     monkeypatch.setattr(request_diet, "TOKENIZE_QUEUEING_TIMEOUT_SECONDS", 0.2)
     monkeypatch.setattr(request_diet, "TOKENIZE_RELAY_RTT_SECONDS", 0.0)
     monkeypatch.setattr(request_diet, "TOKENIZE_RELAY_LOAD_MARGIN", 0.0)
+    # With an operator-proven dialect, a slow /props must leave POST time.
+    # The timeout yields no /props proof to retain in the run cache.
+    monkeypatch.setenv(provider_dialect.PROVIDER_OVERRIDE_ENV, provider_dialect.LLAMA_CPP)
+    capability_cache = {}
+    monkeypatch.setattr(provider_dialect, "RUN_CAPABILITY_CACHE", capability_cache)
     script = {
         "model": "allocation-replay-model",
         "turns": [{"message": {"role": "assistant", "content": "done"}}],
+        "props_delay_s": 0.5,
         "tokenize_delay_s": 0.03,
         "tokenize_slow_calls": [1],
     }
@@ -264,6 +404,7 @@ def test_late_tokenize_success_within_request_budget_is_not_a_failure(monkeypatc
     assert endpoint.delayed_tokenize_calls == (1,)
     assert method == "tokenize"
     assert meter.journal_fields(method)["tokenize_consecutive_failures"] == 0
+    assert provider_dialect.origin_of(endpoint.url) not in capability_cache
 
 
 def test_tool_schema_meter_records_one_initial_retry_group(monkeypatch):
