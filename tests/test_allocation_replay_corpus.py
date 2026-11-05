@@ -279,6 +279,63 @@ def _short_tokenize_timeout_engine_python(
     return wrapper
 
 
+def _request_capped_engine_python(tmp_path: Path, request_limit: int) -> Path:
+    """Build a launcher that ends a replay after N fully recorded provider sends."""
+    if type(request_limit) is not int or request_limit < 1:
+        raise ValueError("request capture limit must be a positive integer")
+    wrapper = tmp_path / "python-with-request-capped-capture"
+    bootstrap = "\n".join((
+        "import sys",
+        "from pathlib import Path",
+        "child = Path(sys.argv[1]).resolve()",
+        "run = Path(sys.argv[2]).resolve()",
+        "sys.path.insert(0, str(child.parent.parent))",
+        "import stateframe._child as host",
+        "original_install_checked_ask = host.install_checked_ask",
+        "def install_checked_ask_with_capture_limit(engine, *args, **kwargs):",
+        "    original_install_checked_ask(engine, *args, **kwargs)",
+        "    from kernel_measurement import RequestCapture",
+        "    original_send = RequestCapture.send",
+        "    request_count = {'value': 0}",
+        "    class RequestCaptureLimit(RuntimeError):",
+        "        # react_repair maps this marker to its typed RUN_INCOMPLETE path.",
+        "        boundary_recovery_stop = True",
+        "    def capture_limited_send(capture, body, endpoint, key, *send_args, **send_kwargs):",
+        "        # Count only after send returns and the wire request/response are recorded.",
+        "        response = original_send(capture, body, endpoint, key, *send_args, **send_kwargs)",
+        "        is_provider_send = (isinstance(endpoint, str) and not send_kwargs.get('preview', False)"
+        "                            and endpoint.rstrip('/').endswith('/chat/completions'))",
+        "        if is_provider_send:",
+        "            request_count['value'] += 1",
+        f"            if request_count['value'] == {request_limit}:",
+        "                (run / 'capture-limit-reached').write_text(str(request_count['value']), encoding='ascii')",
+        "                raise RequestCaptureLimit('test request capture complete')",
+        "        return response",
+        "    RequestCapture.send = capture_limited_send",
+        "host.install_checked_ask = install_checked_ask_with_capture_limit",
+        "raise SystemExit(host.main([str(child), str(run)]))",
+    ))
+    compile(bootstrap, str(wrapper), "exec")
+    wrapper.write_text(
+        f"#!{sys.executable}\n"
+        "import os,sys\n"
+        f"real_python={sys.executable!r}\n"
+        "args=sys.argv[1:]\n"
+        "if len(args) >= 3 and args[0] == '-B' and os.path.basename(args[1]) == '_child.py':\n"
+        f"    os.execv(real_python, [real_python, '-B', '-c', {bootstrap!r}, *args[1:]])\n"
+        "os.execv(real_python, [real_python, *args])\n",
+        encoding="utf-8",
+    )
+    wrapper.chmod(0o755)
+    return wrapper
+
+
+def test_request_capped_engine_python_bootstrap_is_valid(tmp_path):
+    wrapper = _request_capped_engine_python(tmp_path, 6)
+    assert wrapper.is_file()
+    assert wrapper.read_text(encoding="utf-8").startswith(f"#!{sys.executable}\n")
+
+
 def _run_case(
         tmp_path: Path, case_id: str, *, break_deferral: bool = False,
         tokenize_delay_s: float | None = None,
@@ -286,8 +343,14 @@ def _run_case(
         tokenize_timeout_s: float | None = None,
         tokenize_reprobe_after_requests: int | None = None,
         tokenize_reprobe_after_s: float | None = None,
+        stop_after_provider_requests: int | None = None,
         max_turns: int = 120,
 ) -> ReplayOutcome:
+    if stop_after_provider_requests is not None:
+        if type(stop_after_provider_requests) is not int or stop_after_provider_requests < 1:
+            raise ValueError("provider request stop must be a positive integer")
+        if break_deferral or tokenize_timeout_s is not None:
+            raise ValueError("provider request stop cannot be combined with another engine wrapper")
     case_dir = CORPUS / case_id
     metadata = CASE_METADATA[case_id]
     source_root = _source_root()
@@ -339,6 +402,10 @@ def _run_case(
                     reprobe_after_requests=tokenize_reprobe_after_requests,
                     reprobe_after_s=tokenize_reprobe_after_s,
                 )
+            )))
+        elif stop_after_provider_requests is not None:
+            command.extend(("--python", str(
+                _request_capped_engine_python(tmp_path, stop_after_provider_requests)
             )))
         try:
             process = run_monitored(
