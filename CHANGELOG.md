@@ -7,6 +7,7 @@
 ## 0.4.4 (2026-11-04)
 
 - Tokenizer capability probes now share the request deadline, and a probe cut short by that deadline can be retried on a later request. Tokenization skips the optional `/slots` lookup after `/props` proves llama.cpp.
+- Tests: the late-tokenize budget test uses wide timing margins, so a loaded host cannot flip it. Test-only; no runtime change.
 
 ## 0.4.3 (2026-11-04)
 

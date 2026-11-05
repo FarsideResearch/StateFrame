@@ -377,19 +377,19 @@ def test_cold_props_proof_leaves_time_for_late_tokenize_and_is_cached(monkeypatc
 
 def test_late_tokenize_success_within_request_budget_is_not_a_failure(monkeypatch):
     monkeypatch.setattr(request_diet, "TOKENIZE_REQUEST_TIMEOUT_SECONDS", 0.005)
-    monkeypatch.setattr(request_diet, "TOKENIZE_REQUEST_TIMEOUT_CAP_SECONDS", 0.2)
-    monkeypatch.setattr(request_diet, "TOKENIZE_QUEUEING_TIMEOUT_SECONDS", 0.2)
+    monkeypatch.setattr(request_diet, "TOKENIZE_REQUEST_TIMEOUT_CAP_SECONDS", 2.0)
+    monkeypatch.setattr(request_diet, "TOKENIZE_QUEUEING_TIMEOUT_SECONDS", 2.0)
     monkeypatch.setattr(request_diet, "TOKENIZE_RELAY_RTT_SECONDS", 0.0)
     monkeypatch.setattr(request_diet, "TOKENIZE_RELAY_LOAD_MARGIN", 0.0)
-    # With an operator-proven dialect, a slow /props must leave POST time.
-    # The timeout yields no /props proof to retain in the run cache.
+    # Allow 2s for the cold /props child and about 2s for POST on a loaded host.
+    # Its 2.5s delay forces a miss; 30ms tokenization is late versus the 5ms attempt timeout.
     monkeypatch.setenv(provider_dialect.PROVIDER_OVERRIDE_ENV, provider_dialect.LLAMA_CPP)
     capability_cache = {}
     monkeypatch.setattr(provider_dialect, "RUN_CAPABILITY_CACHE", capability_cache)
     script = {
         "model": "allocation-replay-model",
         "turns": [{"message": {"role": "assistant", "content": "done"}}],
-        "props_delay_s": 0.5,
+        "props_delay_s": 2.5,
         "tokenize_delay_s": 0.03,
         "tokenize_slow_calls": [1],
     }
@@ -397,7 +397,7 @@ def test_late_tokenize_success_within_request_budget_is_not_a_failure(monkeypatc
         meter = request_diet.RequestTokenMeter(
             endpoint=f"{endpoint.url}/tokenize", template_overhead_tokens=0,
         )
-        meter.bind_request("request-1", "request-1", deadline=monotonic() + 0.2)
+        meter.bind_request("request-1", "request-1", deadline=monotonic() + 4.0)
         _count, method = meter.measure(_body("late but within request budget"))
 
     assert endpoint.tokenize_request_count == 1
