@@ -1406,6 +1406,24 @@
       "baseline": null,
       "witness_schema": "assertion_match",
       "witness_assertion": "assert str(error.value) == f\"process {live_child.pid} is no longer running\""
+    },
+    {
+      "scenario_id": "test_strict_provider_mock_gate_test_strict_provider_six_sends_seal_provider_bytes",
+      "nodeid": "tests/test_strict_provider_mock_gate.py::test_strict_provider_six_sends_seal_provider_bytes",
+      "item_nodeids": [
+        "tests/test_strict_provider_mock_gate.py::test_strict_provider_six_sends_seal_provider_bytes"
+      ],
+      "jobs": {
+        "linux": "RUN",
+        "darwin": "RUN"
+      },
+      "prerequisites": [
+        "host_sandbox"
+      ],
+      "optional_prerequisites": [],
+      "baseline": null,
+      "witness_schema": "assertion_match",
+      "witness_assertion": "assert len(script.requests) >= 6, output"
     }
   ],
   "optional_dependencies": [
