@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.4.24 (2026-11-05)
 
 - Tests: three tests that failed on clean main now pass. The tokenize proxy test expects the 0.4.4 /slots skip. The edit-scope widen switch-off parity check compares against the previous release instead of 0.3.8, whose bytes changed intentionally in 0.4.5. The concurrent identity-key test stops its workers through the checkpoint kill barrier's signal helper.
 
