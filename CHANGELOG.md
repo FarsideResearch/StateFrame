@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.4.25 (2026-11-05)
 
 - Tests: the no-MCP release comparison states its changed-default switches explicitly again, so the cross-version pin check can see them (a 0.4.21 wrapper had hidden them behind **kwargs).
 
