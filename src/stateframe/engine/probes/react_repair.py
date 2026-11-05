@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import ast
 import copy
-import concurrent.futures as cf
 from contextlib import nullcontext
 import hashlib
 import json
@@ -134,7 +133,6 @@ import kernel_workspace_truth as _workspace_truth  # noqa: E402
 import kernel_frame_routes as _frame_routes  # noqa: E402
 from stateframe.test_runners import collection_change_reason, pytest_plugin_modules  # noqa: E402
 
-CORPUS = POC / "results.SNAPSHOT-20260920" / (os.environ.get("BENCH_CORPUS") or "real_tasks_v3.jsonl")
 API = os.environ.get("DS_URL", "")
 # DeepSeek V4 Flash is the model we actually care about — it is the current agentic/coding
 # model and the one whose capability the whole "harness, not model" thesis is measured against.
@@ -159,13 +157,6 @@ PUBLIC_CHECK_CPU_SECONDS = float(os.environ.get("STATEFRAME_PUBLIC_CHECK_CPU_SEC
 TEMPERATURE = float(os.environ.get("REACT_TEMP", "0"))
 EDIT_HARDENING_ENV = "STATEFRAME_TOKENLAB_EDIT_HARDENING"
 EDIT_NORMALIZATION_ENV = "STATEFRAME_EDIT_NORMALIZATION"
-try:
-    N = int(sys.argv[1]) if len(sys.argv) > 1 and sys.argv[1].lstrip("-").isdigit() else 6
-except (TypeError, ValueError):
-    # This module is imported by offline contract tests as well as run as a
-    # script.  A unittest module name is not a task-count argument.
-    N = 6
-OUT = POC / "results" / "react_repair.jsonl"
 
 
 class _GreenLockRefused(Exception):
@@ -583,7 +574,7 @@ def _public_check_ids(row: Mapping[str, object], fn: str) -> list[str]:
     build_path = _build_test_path(row, fn)
     if build_path:
         return [build_path]
-    from converge import fail_to_pass_ids
+    from check_selection import fail_to_pass_ids
     return fail_to_pass_ids(row) or []
 
 
@@ -4501,37 +4492,6 @@ def _qualified_definitions_for_repair(tree: ast.Module):
     return found
 
 
-def _db_alive(port: int = 55432, timeout: float = 1.5) -> bool:
-    import socket
-    try:
-        with socket.create_connection(("127.0.0.1", port), timeout=timeout):
-            return True
-    except OSError:
-        return False
-
-
-def _ensure_db() -> bool:
-    """E338 per-invocation liveness guard: the shared mission-control-db has died
-    mid-round TWICE (E314, then again at 01:25Z under external stack restarts),
-    converting real model progress into contaminated verdicts. Probe before every
-    pytest; on failure attempt ONE bench-local recovery (the exact manual action
-    performed both times) and wait bounded for recovery."""
-    if _db_alive():
-        return True
-    print("    [kernel-wiring] mission-control-db unreachable — attempting recovery")
-    try:
-        subprocess.run(["docker", "start", "mission-control-db"],
-                       capture_output=True, timeout=30)
-    except Exception:                                                # noqa: BLE001
-        pass
-    for _ in range(45):
-        time.sleep(2)
-        if _db_alive():
-            print("    [kernel-wiring] mission-control-db recovered")
-            return True
-    return False
-
-
 def _effect_boundary_enabled() -> bool:
     """Cheap off-path check; do not import or snapshot when the arm is disabled."""
     return os.environ.get("STATEFRAME_EFFECT_BOUNDARY", "off").strip().lower() not in {
@@ -5003,20 +4963,6 @@ def _run_tests_impl(root: pathlib.Path, fn: str, explicit: str | None,
         explicit = requested[0]
     if _profile:
         _profile.end_span(_selector_span)
-    swebench = bool(row and row.get("source_dataset") and row.get("base_commit"))
-    _db_ok = True
-    if not swebench and not (row and row.get("_skip_db")):
-        _db_span = _profile.start_span("db_liveness_recovery") if _profile else None
-        try:
-            _db_ok = _ensure_db()
-        finally:
-            if _profile:
-                _profile.end_span(_db_span)
-    if not _db_ok:
-        # INFRA card without spending the model's epistemic budget on a lie.
-        return ("pytest NOT RUN — the test database is unreachable (environment "
-                "failure, NOT evidence about your patch). The harness attempted "
-                "recovery and failed; try again in a few steps.")
     _target_span = _profile.start_span("selector_target_resolution") if _profile else None
     if explicit:
         targets = [explicit]
@@ -5081,14 +5027,6 @@ def _run_tests_impl(root: pathlib.Path, fn: str, explicit: str | None,
         _profile.end_span(_target_span)
     _config_span = _profile.start_span("config_command_preparation") if _profile else None
     try:
-        # THE MC TEST ORACLE NEEDS ITS DEV POSTGRES. `mission-control-db` (pgvector on 55432,
-        # The local development database had been unavailable, so every
-        # MC test failed with `psycopg2.OperationalError: connection refused` and we read those
-        # as bug-related failures. That single stopped container is why the loop had no oracle.
-        #
-        # Point at an ISOLATED database (rule #190: never share a test DB between agents; MC's
-        # test DB accumulates and other lanes use their own). MC's conftest defaults to
-        # `mission_control_test` and never drops a schema, so dev data is untouched either way.
         env = dict(os.environ)
         # A FRESH DATABASE PER PYTEST INVOCATION. grading audit asked "is the parent-
         # control run genuinely independent?" and the answer was NO, measured: the parent run
@@ -5788,6 +5726,9 @@ def _record_post_finish_fact(measurement: object, kind: str, **fields: object) -
 def _attach_env_receipt(result: Mapping[str, object], measurement: object) -> dict[str, object]:
     """Carry the host receipt into the harness row without changing OFF rows."""
     result_payload = dict(result)
+    limitations = getattr(measurement, "run_limitations", ())
+    if limitations:
+        result_payload["limitations"] = list(limitations)
     if getattr(measurement, "_deferred_finalization_no_changes_classified", False):
         result_payload["result"] = "NO_CHANGES"
     if getattr(measurement, "stateframe_delivery_contract_mode", "off") == "on":
@@ -5830,6 +5771,7 @@ def work(d, *, resume=None):
     from kernel_arbitrary_repo_agent import ArbitraryRepoRow, run as run_arbitrary_repo
     if isinstance(d, ArbitraryRepoRow):
         return run_arbitrary_repo(d, resume=resume)
+    run_limitations: list[str] = []
     _edit_nturn_run_started = time.monotonic()
     _entry_ticket_text = str(d.get("msg") or "")
     from kernel_native_tools import NativeToolBatch, validate_configuration
@@ -5967,7 +5909,7 @@ def work(d, *, resume=None):
             root = None
             target = None
             if d.get("source_dataset") and d.get("base_commit"):
-                from converge import _swebench_path, _swebench_workspace, _write_swebench_runner
+                from check_selection import _swebench_path, _swebench_workspace, _write_swebench_runner
 
                 root = sbox / "repo"
                 shutil.copytree(
@@ -6149,7 +6091,7 @@ def work(d, *, resume=None):
             _probe = run_tests(root, fn, None, d["rel"], row=d)
             _initial_repro_probe = _probe
             # NEVER put an infrastructure error in the bug report. Measured TWICE now: first
-            # the dead mission-control-db fed "connection refused" as the brief (E262), then a
+            # the unavailable local database fed "connection refused" as the brief (E262), then a
             # transient "server closed the connection unexpectedly" did the same in the graded
             # v9 run — the agent spent 200 steps chasing a database outage as if it were the
             # bug. A brief containing infra text is worse than the keyword salad.
@@ -6929,6 +6871,9 @@ def work(d, *, resume=None):
                               "turn": 0, "workspace_revision": 0, "ts": 0,
                               "anchor": f"{d['rel']}:{d.get('changed_line', 1)}:{fn}"}]
                 _ev0 = bolt.sem.derive(_trigger0, _src0, producer=_pmap0.get(fn))
+                if _ev0 is not None and fn == "require_isolated_f2_database" \
+                        and "runtime_namespace_acceptance_not_observed" in _ev0.limitations:
+                    run_limitations.append("runtime_namespace_acceptance_not_observed")
                 _line0 = _render_semantic_facts(_ev0)
                 if _line0:
                     _line0 = bolt.organ_out("semantic", _line0)
@@ -7141,6 +7086,7 @@ def work(d, *, resume=None):
             temperature=TEMPERATURE, source_resolver=fn_src,
             step_limit=_budget.tool_attempt_limit,
             multi_file=multifile, edit_contract=_edit_contract, workspace=continuation_workspace, resume=resume)
+        measurement.run_limitations = run_limitations
         try:
             if d.get("runner_kind") == "generic" and not d.get("test_command") and resume is None:
                 measurement._authored_check_parent_binding = measurement.binding()
@@ -13752,7 +13698,7 @@ def work(d, *, resume=None):
                     if d.get("repo") == "build" and not multifile:
                         _materialize_build_test(root, d, fn)
                     elif d.get("runner_kind") != "generic" and d.get("protect_tests", "all") == "all":
-                        from converge import overlay_fix_tests
+                        from check_selection import overlay_fix_tests
                         overlay_fix_tests(root, _grading_row)
                     # GRADE WITH THE PREFLIGHT'S SELECTOR (E288). With explicit=None,
                     # run_tests greps for tests that CALL the function by name — minted
@@ -14276,92 +14222,3 @@ def work(d, *, resume=None):
                         continuation_workspace.record_stop(measurement.journal if measurement is not None else None)
                 finally:
                     continuation_workspace.close()
-
-
-def main() -> int:
-    if not KEY:
-        print("DEEPINFRA_API_KEY unset — refusing to report a vacuous zero.")
-        return 2
-    tasks = [json.loads(line) for line in CORPUS.read_text().splitlines()
-             if line.strip()][:N]
-
-    # WINNABILITY PREFLIGHT (FINDINGS E256). Four of 21 tasks were unwinnable BY CONSTRUCTION
-    # — the shipped patch itself could not grade as PASS — and they silently capped the bench
-    # at 17 while every score was reported out of 21. That is a corrupted DENOMINATOR, which
-    # is worse than a wrong result because it survives every rerun and every model change.
-    #
-    # So verify the ruler before spending a single model call: does the gold function extract,
-    # and does it differ from the parent? A task failing this cannot be scored and must be
-    # named, never silently included. Cheap (pure AST, no repo copy, no network).
-    unwinnable = []
-    for t in tasks:
-        _fs = FileSet.from_row(t)
-        if _fs.is_multi_file:
-            _label = str(t.get("task_id") or t.get("instance_id") or "multi_file")
-            _parent_norm = {path: norm(source) for path, source in _fs.parent.items()}
-            _fixed_norm = {path: norm(source) for path, source in _fs.fixed.items()}
-            if not _fs.paths or any(value is None for value in _parent_norm.values()) \
-                    or any(value is None for value in _fixed_norm.values()):
-                unwinnable.append((_label, "one or more declared files do not parse"))
-            elif _parent_norm == _fixed_norm:
-                unwinnable.append((_label, "gold workspace is identical to parent"))
-            continue
-        g = fn_src(t["fixed_src"], t["fn"])
-        p = fn_src(t["parent_src"], t["fn"])
-        if not g or not p:
-            unwinnable.append((t["fn"], "gold or parent function does not extract"))
-        elif norm(g) == norm(p):
-            unwinnable.append((t["fn"], "gold is identical to parent — nothing to repair"))
-    if unwinnable:
-        print("!! PREFLIGHT: these tasks cannot be scored and are EXCLUDED from the "
-              "denominator:")
-        for fn_, why in unwinnable:
-            print(f"     {fn_:34s} {why}")
-        bad = {f for f, _ in unwinnable}
-        tasks = [t for t in tasks
-                 if (str(t.get("task_id") or t.get("instance_id") or "multi_file")
-                     if isinstance(t.get("files"), Mapping) else t["fn"]) not in bad]
-        print()
-
-    print(f"ReAct REPAIR — {MODEL}, {len(tasks)} real bugs, {limit_text(parse_step_limit(MAX_STEPS))} steps each\n")
-    rows = []
-    with OUT.open("a") as sink, cf.ThreadPoolExecutor(max_workers=4) as ex:
-        for r in ex.map(work, tasks):
-            rows.append(r)
-            sink.write(json.dumps(r) + "\n")
-            sink.flush()                     # per line: an interrupted run keeps everything
-            print(f"  {r['fn'][:34]:36s} {r['result']:8s} "
-                  f"steps={r['steps']:<3} edits={r['edits']} tests={r['tests']}", flush=True)
-
-    p = sum(1 for r in rows if r["result"] == "PASS")
-    g = sum(1 for r in rows if r["result"] in ("PASS", "fail"))
-    used = [r["steps"] for r in rows if r["steps"]]
-    # TWO GRADES, REPORTED SEPARATELY AND NEVER MERGED.
-    # AST = "reproduced the shipped implementation exactly" — a strict, legacy diagnostic.
-    # BEHAVIOURAL = "the repository own test passes with this patch AND fails without it" —
-    # a discriminating check, which is the only kind worth anything (a test that passes on the
-    # buggy code proves nothing). Merging them would let the softer grade quietly inflate the
-    # headline, so both are printed with their own denominators.
-    beh = sum(1 for r in rows if r.get("behaviour") == "PASS_behavioural")
-    uncovered = sum(1 for r in rows if r.get("behaviour") == "test_does_not_cover_bug")
-    notest = sum(1 for r in rows if r.get("behaviour") == "no_test_oracle")
-    print(f"\n  ReAct SCORE : {p}/{g}   (exact-AST)")
-    if beh or uncovered or notest:
-        print(f"  BEHAVIOURAL : +{beh} additional task(s) where the repo test passes with the "
-              f"patch and FAILS without it")
-        print(f"                {uncovered} candidate(s) passed a test that also passes on "
-              f"the BUGGY code (proves nothing)")
-        print(f"                {notest} task(s) have no test oracle at all")
-        print(f"  COMBINED    : {p + beh}/{g}  (AST-exact OR behaviourally verified)")
-    print("  one-shot kernel : 1/21     naked one-shot : 2/21")
-    print(f"  steps used: median {sorted(used)[len(used)//2] if used else 0}, max "
-          f"{max(used) if used else 0} of {limit_text(parse_step_limit(MAX_STEPS))}")
-    print(f"  runs that ran tests: {sum(1 for r in rows if r['tests'])}/{len(rows)}")
-    print("\n  READ: if ReAct >> 2/21 the missing ingredient was ITERATION, not filtering,")
-    print("  and the kernel should be rebuilt around a loop that can act and observe. If it")
-    print("  does not move, iteration is not the lever either and the ceiling is elsewhere.")
-    return 0
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())

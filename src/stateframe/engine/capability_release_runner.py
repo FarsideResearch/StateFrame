@@ -695,7 +695,10 @@ def child(run: Path, *, resume: bool = False, follow_up: str | None = None) -> N
     result = rr.work(row, resume=descriptor)
     _postflight_effective_config(run, spec)
     outcome_name = "resume-outcome-" + uuid.uuid4().hex + ".json" if resume else "first-outcome.json"
-    save(run / outcome_name, unscored_solver_result(result))
+    unscored = unscored_solver_result(result)
+    if isinstance(result, Mapping) and isinstance(result.get("limitations"), list) and result["limitations"]:
+        unscored["limitations"] = result["limitations"]
+    save(run / outcome_name, unscored)
     result_mapping = result if isinstance(result, Mapping) else {}
     parent_status = str(result_mapping.get("parent_status", "UNCOVERED"))
     candidate_status = str(result_mapping.get("candidate_status", "UNCOVERED"))

@@ -14,12 +14,14 @@ import pathlib
 import os
 import sys
 
-POC = pathlib.Path(__file__).resolve().parent
+POC = pathlib.Path(__file__).resolve().parents[2] / "src" / "stateframe" / "engine"
+sys.path.insert(0, str(POC.parents[1]))
 sys.path.insert(0, str(POC))
 sys.path.insert(0, str(POC / "probes"))
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 
 import converge                                                  # noqa: E402
-import react_repair as rr                                        # noqa: E402
+from probes import react_repair as rr                                        # noqa: E402
 
 N = int(sys.argv[1]) if len(sys.argv) > 1 else 21
 K = int(sys.argv[2]) if len(sys.argv) > 2 else 1

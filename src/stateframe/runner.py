@@ -2422,6 +2422,11 @@ def summarize(run: Path, started: float) -> dict[str, object]:
         if key in result}
     if isinstance(result.get("wrong_test_evidence"), dict):
         summary["wrong_test_evidence"] = result["wrong_test_evidence"]
+    limitations = result.get("limitations")
+    if isinstance(limitations, list):
+        selected = [item for item in limitations if isinstance(item, str) and item]
+        if selected:
+            summary["limitations"] = selected
     if isinstance(result.get("authored_check_receipt_id"), str):
         summary["authored_check_receipt_id"] = result["authored_check_receipt_id"]
     for key in ("steps", "edits", "tests"):

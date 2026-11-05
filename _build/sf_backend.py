@@ -54,6 +54,8 @@ SDIST_FILES = (SDIST_TOP_LEVEL | SDIST_DOCS | SDIST_SCRIPTS | SDIST_TESTS | SDIS
 
 
 def _sdist_includes(relative: Path) -> bool:
+    if relative.parts[:2] == ("bench", "lab"):
+        return False
     if SKIP_PARTS & set(relative.parts):
         return False
     name = relative.as_posix()
