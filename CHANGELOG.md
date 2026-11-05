@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.4.9 (2026-11-05)
 
 - Engine: the countdown inside the StateFrame frame and in hook panels is now normalized for sizing and token counting like the standalone limits line, so a clock-only change no longer re-tokenizes a request or shifts its measured size.
 
