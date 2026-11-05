@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.4.3 (2026-11-04)
+
+- Tests: the final-cache layout switch-off parity test compares against the immediate base release (the same discovery as the hook-wiring and start-hint parity tests) instead of a fixed old commit. Test-only; no product change.
+
 ## 0.4.2 (2026-11-04)
 
 - Tests: the strict-endpoint end-to-end test and the plain-loop dialect test read measurement journals through the shared reader, so they also see sealed `events.jsonl.xz` journals; the journal-reader guard passes on main again. Test-only; no product change.
