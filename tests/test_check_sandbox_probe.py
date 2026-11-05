@@ -169,6 +169,7 @@ def test_probe_still_reports_a_real_sandbox_exec_refusal(monkeypatch, tmp_path, 
                       "environment error, not a test result (no test ran)")
 
 
+@pytest.mark.host_sandbox
 def test_isolated_command_default_keeps_selected_interpreter_and_environment(monkeypatch, tmp_path):
     monkeypatch.delenv("STATEFRAME_TEST_PYTHON", raising=False)
     command = [sys.executable, "-I", "-B", "-c", "pass"]

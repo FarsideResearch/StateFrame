@@ -21,6 +21,8 @@ for path in (ROOT / "tests", ROOT / "src", ROOT / "src" / "stateframe" / "engine
 
 import serial_lane_plugin  # noqa: E402 -- pytest adds tests/ to sys.path when importing the root conftest
 
+pytest_plugins = ("must_run_plugin",)
+
 
 @pytest.fixture(autouse=True, scope="session")
 def _isolated_stateframe_home(tmp_path_factory):

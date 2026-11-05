@@ -40,7 +40,7 @@ def require_nested_sandbox():
     ("tests/__init__.py", "import summarize\n"),
     ("tests/conftest.py", "# collection hook\n"),
     ("conftest.py", "# collection hook\n"),
-])
+], ids=["tests_init", "tests_conftest", "root_conftest"])
 def test_model_create_collection_file_is_refused(tmp_path, path, content):
     run, requests = run_script(
         tmp_path, [step("file_create", path=path, content=content), *finish()],

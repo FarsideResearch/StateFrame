@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.4.8 (2026-11-05)
+
+- Tests: release checks now fail when a required test is missing, skipped, or passes without proving the behavior it exists to check. Optional extras are tracked present and absent, and parity tests must run against an explicitly provided immediate base release.
+- Tests: the release gate's own controls plant each failure mode and confirm the gate rejects it, so a broken gate cannot pass silently.
+
 ## 0.4.7 (2026-11-05)
 
 - Tests: the clean-meter reprobe check compares its first two requests against the immediate base release in the same environment instead of fixed hashes from one machine, so it no longer fails on hosts without tree-sitter.

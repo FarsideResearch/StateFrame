@@ -341,6 +341,7 @@ def test_system_git_config_readonly_or_disabled_when_absent(cap):
     assert not any(config.resolve().is_relative_to(root) for root in cap.write_roots)
 
 
+@pytest.mark.host_sandbox
 def test_sandbox_binary_resolves_without_path(monkeypatch):
     # Regression: a minimal PATH (IDE, cron, a test planting a fake PATH) must not lose the sandbox.
     import kernel_test_isolation
@@ -349,5 +350,5 @@ def test_sandbox_binary_resolves_without_path(monkeypatch):
     if expected is None:
         pytest.skip(f"{name} not installed on this host")
     monkeypatch.setenv("PATH", "/nonexistent")
-    assert kernel_test_isolation.sandbox_executable(name) == expected or \
-        os.path.realpath(kernel_test_isolation.sandbox_executable(name)) == os.path.realpath(expected)
+    resolved = kernel_test_isolation.sandbox_executable(name)
+    assert resolved == expected or os.path.realpath(resolved) == os.path.realpath(expected)
