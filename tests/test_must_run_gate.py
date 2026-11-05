@@ -58,6 +58,7 @@ EXPECTED_ENTRIES = (
     ("tests/test_hook_wiring_parity.py::test_no_hooks_resume_rebuilt_requests_match_release", "requires:parity_baseline"),
     ("tests/test_http_gzip.py::test_default_profile_cli_run_sends_large_request_without_gzip", "requires:host_sandbox"),
     ("tests/test_no_mcp_release_comparison.py::test_no_mcp_requests_match_immediate_base", "requires:parity_baseline"),
+    ("tests/test_strict_provider_mock_gate.py::test_strict_provider_six_sends_seal_provider_bytes", "requires:host_sandbox"),
     ("tests/test_powerups_digest.py::test_unreadable_entry_fails_closed", "requires:filesystem_modes"),
     ("tests/test_pid_liveness.py::test_checkpoint_sweep_uses_zombie_aware_liveness", "all"),
     ("tests/test_pid_liveness.py::test_env_seed_sweep_routes_through_pid_alive", "all"),
@@ -199,6 +200,8 @@ _PLATFORM_REASONS = {
 
 
 EXPECTED_ASSERTIONS = {
+    "tests/test_strict_provider_mock_gate.py::test_strict_provider_six_sends_seal_provider_bytes":
+        "assert len(script.requests) >= 6, output",
     "tests/acceptance/test_provider_queue_wait.py::test_first_queued_send_submits_once_and_run_succeeds":
         'assert summary["succeeded"] is True',
     "tests/acceptance/test_routes_host.py::test_public_cli_routes_first_plan_send_to_second_endpoint":

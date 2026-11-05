@@ -66,13 +66,18 @@ class RequestMeasurement:
         )
         if wire is None:
             wire = json.dumps(body).encode()
+            wire_body = body
         elif not isinstance(wire, bytes):
             raise TypeError("prepared request wire must be bytes")
+        else:
+            wire_body = json.loads(wire)
+            if not isinstance(wire_body, dict):
+                raise TypeError("prepared request wire must encode an object")
         output = body.get("max_tokens")
         if type(output) is not int or output <= 0:
             output = ENDPOINT_OUTPUT_BUDGET_TOKENS
         return cls(
-            digest(wire), len(wire), digest(prompt_projection(body).encode()),
+            digest(wire), len(wire), digest(prompt_projection(wire_body).encode()),
             PROJECTION_VERSION, tokenizer_identity, request_id, logical_request_id,
             None if method == "verified_byte_bound" else tokens,
             tokens if method == "verified_byte_bound" else None, method,

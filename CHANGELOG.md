@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.4.23 (2026-11-05)
+
+- Fixed: runs on hosted endpoints that are not llama.cpp (for example DeepInfra and other OpenAI-compatible providers) could stop after two to four requests with "measurement body/projection/provider identity changed". StateFrame removed its internal fields from the request after measuring it, so the pre-send check saw a different request. The request is now cleaned before it is measured, so the measured bytes are the sent bytes; the check is as strict as before. Affected: 0.3.37 through 0.4.22. llama.cpp endpoints were not affected and their requests are unchanged.
+- Tests: a mock hosted OpenAI-compatible endpoint now runs a multi-request check on every release.
+
 ## 0.4.22 (2026-11-05)
 
 - Tests: the auth-identity tests are now hermetic (env via monkeypatch, per-test cache reset, module-identity check, realpath comparisons) so they pass under isolated gate runners.

@@ -337,8 +337,11 @@ def build_qualified_request(capture, runtime, body, *, endpoint, key, deadline=N
     budget = dict(getattr(candidate, "request_budget_final_wire", None) or {})
     budget["max_request_bytes"] = candidate._frame_candidate_inputs["byte_ceiling"]
     candidate.request_budget_final_wire = budget
-    budget = reconcile_frozen_budget(candidate, context, body,
-                                    frozen_inputs=snapshot_revalidation_inputs(candidate, context, body))
+    # Keep classification metadata on the candidate for allocation readers, but
+    # prove capacity and bind the seal against the exact provider wire copy.
+    wire_body = _finalize_provider_request_body(capture, body, provider_capabilities)
+    budget = reconcile_frozen_budget(candidate, context, wire_body,
+                                    frozen_inputs=snapshot_revalidation_inputs(candidate, context, wire_body))
     if budget.get("final_validation_failures"):
         raise RequestSealError("candidate failed final budget/source/menu proof: " +
                                ",".join(budget["final_validation_failures"]))
@@ -346,9 +349,7 @@ def build_qualified_request(capture, runtime, body, *, endpoint, key, deadline=N
         byte_ceiling=budget["max_request_bytes"], token_ceiling=budget["max_prompt_tokens"],
         measurement_identity=budget["measure_method"],
     )
-    # Final candidate and tool-surface producers run after the early fit pass.
-    # Re-apply the provider dialect at the actual serialization boundary.
-    body = _finalize_provider_request_body(capture, body, provider_capabilities)
+    body = wire_body
     wire = json.dumps(body).encode()
     candidate._assert_wire_string_hygiene(wire)
     visibility, visibility_receipt = qualify_visibility(
