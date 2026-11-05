@@ -83,11 +83,22 @@ def test_live_pid_with_different_identity_remains_mismatch(
     else:
         identity = process_signals._process_identity(live_child.pid)
         different_identity = replace(identity, kernel_identity="linux:old-boot:1")
+        original_kill = process_signals.os.kill
+        original_killpg = process_signals.os.killpg
+
+        def refuse_signal(pid, signal_number):
+            if signal_number != 0:
+                pytest.fail("a mismatched identity must not be signalled")
+            return original_kill(pid, signal_number)
+
+        def refuse_group_signal(pgid, signal_number):
+            if signal_number != 0:
+                pytest.fail("a mismatched identity must not be signalled")
+            return original_killpg(pgid, signal_number)
+
         with monkeypatch.context() as patch:
-            patch.setattr(process_signals.os, "kill",
-                          lambda *_args: pytest.fail("a mismatched identity must not be signalled"))
-            patch.setattr(process_signals.os, "killpg",
-                          lambda *_args: pytest.fail("a mismatched identity must not be signalled"))
+            patch.setattr(process_signals.os, "kill", refuse_signal)
+            patch.setattr(process_signals.os, "killpg", refuse_group_signal)
             with pytest.raises(RuntimeError, match="no longer matches its recorded identity"):
                 process_signals.signal_verified(live_child.pid, different_identity, signal.SIGTERM)
 
