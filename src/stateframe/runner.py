@@ -364,6 +364,7 @@ def run_test_cmd(command: str, cwd: Path, timeout_s: float = 900,
 # A cold interpreter importing pytest inside a fresh sandbox can take tens of seconds on a loaded
 # machine (measured: 10 s was exceeded in a busy Linux container); stay bounded but tolerant.
 STARTUP_PROBE_SECONDS = 60
+_STARTUP_DIAGNOSTIC_MARKER = "\nstartup supervisor diagnostics:\n"
 
 
 def _startup_probe_seconds() -> float:
@@ -397,25 +398,50 @@ def _startup_probe(python: str, code: str, *, label: str) -> bytes:
         try:
             with tempfile.TemporaryDirectory(prefix="stateframe-startup-") as directory:
                 result = kernel_safe_probe.run_probe([python, "-I", "-B", "-c", code], Path(directory),
-                                                     timeout=wall)
+                                                     timeout=wall, diagnostics_on_failure=True)
         except (OSError, ExecSessionError, ValueError) as error:
-            raise RunError(f"{label} startup probe could not run safely: {error}") from error
+            raise RunError(f"{label} startup probe could not run safely: {error}"
+                           + _startup_probe_error_diagnostics(str(error))) from error
         if not result.timed_out:
             break
     else:
         raise RunError(f"{label} startup probe timed out under load: it did not finish within "
                        f"{walls[0]} s and then {walls[1]} s. The interpreter may be fine and the "
-                       "host overloaded; retry when the machine is less busy")
+                       "host overloaded; retry when the machine is less busy"
+                       + _startup_probe_diagnostic_suffix(result.output))
     if result.output_truncated:
-        raise RunError(f"{label} startup probe exceeded its 65536 byte output limit")
+        raise RunError(f"{label} startup probe exceeded its 65536 byte output limit"
+                       + _startup_probe_diagnostic_suffix(result.output))
     if result.exit_code != 0:
-        detail = result.output.decode("utf-8", "replace").strip()[-1000:]
+        detail = _startup_probe_error_detail(result.output)
         failure = ("cannot import pytest" if "pytest" in code else "could not start")
         install = "install pytest in that environment; " if "pytest" in code else ""
         raise RunError(f"{label} {failure} in the isolated startup probe; the interpreter is broken "
                        f"or incomplete (exit {result.exit_code}, not a timeout); {install}"
                        f"sandbox restrictions must permit interpreter startup: {detail or 'no diagnostic output'}")
     return result.output
+
+
+def _startup_probe_diagnostic_suffix(output: bytes) -> str:
+    text = output.decode("utf-8", "replace")
+    _prefix, marker, diagnostics = text.rpartition(_STARTUP_DIAGNOSTIC_MARKER)
+    return marker + diagnostics if marker else ""
+
+
+def _startup_probe_error_diagnostics(error: str) -> str:
+    if _STARTUP_DIAGNOSTIC_MARKER in error:
+        return ""
+    return _STARTUP_DIAGNOSTIC_MARKER + "supervisor status unknown\nsupervisor.log absent"
+
+
+def _startup_probe_error_detail(output: bytes) -> str:
+    text = output.decode("utf-8", "replace")
+    prefix, marker, diagnostics = text.rpartition(_STARTUP_DIAGNOSTIC_MARKER)
+    if not marker:
+        return text.strip()[-1000:]
+    observed = prefix.strip()[-1000:]
+    detail = _STARTUP_DIAGNOSTIC_MARKER.lstrip("\n") + diagnostics
+    return f"{observed}\n{detail}" if observed else detail
 
 
 def _check_python(python: str, *, require_pytest: bool = True) -> str:

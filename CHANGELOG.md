@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Fixed: a startup probe failure now reports the execution supervisor's exit status, when proven, and the tail of its log, instead of losing them with the probe's temporary directory.
+
 ## 0.4.30 (2026-11-05)
 
 - Security: when a server redirects a request to a different scheme, host, or port, StateFrame removes authentication, API key, and cookie headers before following it. This protects users of servers that require credentials.

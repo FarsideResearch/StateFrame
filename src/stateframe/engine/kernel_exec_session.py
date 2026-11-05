@@ -11,6 +11,7 @@ import os
 from pathlib import Path
 import platform
 import socket
+import stat
 import subprocess
 import sys
 import tempfile
@@ -89,6 +90,44 @@ class ExecResult:
 
 def _cleanup(value: dict) -> CleanupReport:
     return CleanupReport(value["ok"], value["killed"], tuple(value["survivors"]), value["detail"])
+
+
+def _supervisor_diagnostics(process: subprocess.Popen | None, log_path: Path | None) -> str:
+    if process is None:
+        status = "supervisor status unknown"
+    else:
+        try:
+            exit_code = process.poll()
+        except OSError:
+            exit_code = None
+        status = (f"supervisor exit status: {exit_code}" if exit_code is not None
+                  else "supervisor status unknown")
+
+    log_diagnostic = "supervisor.log absent"
+    if log_path is not None and hasattr(os, "O_NOFOLLOW"):
+        flags = (os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+                 | getattr(os, "O_NONBLOCK", 0))
+        try:
+            descriptor = os.open(log_path, flags)
+            try:
+                if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+                    return f"{status}\n{log_diagnostic}"
+                end = os.lseek(descriptor, 0, os.SEEK_END)
+                os.lseek(descriptor, max(0, end - 8192), os.SEEK_SET)
+                tail = bytearray()
+                while len(tail) < 8192:
+                    chunk = os.read(descriptor, 8192 - len(tail))
+                    if not chunk:
+                        break
+                    tail.extend(chunk)
+                log_diagnostic = "supervisor.log tail (up to 8192 bytes):\n" + tail.decode(
+                    "utf-8", "replace")
+            finally:
+                os.close(descriptor)
+        except OSError:
+            # Missing, linked, non-regular, or unreadable logs are not followed or trusted.
+            log_diagnostic = "supervisor.log absent"
+    return f"{status}\n{log_diagnostic}"
 
 
 def _grace(value: float) -> float:
@@ -209,6 +248,10 @@ class ExecSession:
         if self._process is not None or self._initial_capability is not None:
             raise ExecSessionError("execution session authority is already configured")
         self._initial_capability = capability
+
+    def startup_diagnostics(self) -> str:
+        """Describe only supervisor state proved by its retained process and private log."""
+        return _supervisor_diagnostics(self._process, self._directory / "supervisor.log")
 
     def _start(self, cap: ExecCapability) -> None:
         if self._closed:
