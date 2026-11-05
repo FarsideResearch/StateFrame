@@ -42,9 +42,10 @@ CLEAN_METER_COUNTDOWN_COPIES_012E0B5 = (2, 2, 2, 1, 1, 2)
 # Compact request specimen with the current StateFrame field and a near-match decoy.
 _COUNTDOWN_MASK_CONTROL_BODY = (
     b'{"model":"allocation-replay-model","messages":[{"role":"user",'
-    b'"content":"[StateFrame]\\nsandbox_seconds_remaining=120.0 '
-    b'(about 2 minutes left, ~4 turns at your pace)\\n'
-    b'sandbox_seconds_remaining=120 (about 2 minutes left, ~4 turns at your pace)"}],'
+    b'"content":"[StateFrame]\\n{\\"state\\":{},\\"meter\\":\\"'
+    b'sandbox_seconds_remaining=120.0 '
+    b'(about 2 minutes left, ~4 turns at your pace) '
+    b'sandbox_seconds_remaining=120 (about 2 minutes left, ~4 turns at your pace)\\"}"}],'
     b'"tools":[]}'
 )
 
@@ -102,6 +103,15 @@ def test_wire_id_mask_preserves_non_id_non_countdown_byte_changes():
     changed_model = bytearray(changed_id)
     changed_model[_model_value_start(changed_id)] ^= 1
     assert _masked_wire_sha256(bytes(changed_model)) != _masked_wire_sha256(original)
+
+
+def test_mask_rejects_non_json_after_state_frame_marker():
+    body = (
+        b'{"model":"allocation-replay-model","messages":[{"role":"user",'
+        b'"content":"[StateFrame]\\nnot-json"}],"tools":[]}'
+    )
+    with pytest.raises(ValueError, match=r"invalid JSON after embedded \[StateFrame\] marker"):
+        _masked_wire_sha256(body)
 
 
 def test_countdown_mask_matches_one_active_frame_occurrence():
@@ -406,11 +416,29 @@ def test_permanent_tokenizer_outage_replay_submits_with_bounded_probes(tmp_path)
 
 
 def _capture_clean_meter_request_bodies(tmp_path):
-    outcome = corpus._run_case(tmp_path, "clean-meter-22file-r1")
-    assert outcome.engine_result == "SUBMITTED", outcome.evidence[-6000:]
+    # Stop at the needed request count instead of replaying all 41 tape turns.
+    # Each clean-meter request costs ~71 s of engine-side prep on Linux (measured on e62db60:
+    # 34 sends in 2422 s; journal attribution by crew-08: public_test_verdict_fact_normalized,
+    # code_bookmark_activation_decision, continuation_transition), so the full replay ran past
+    # the engine deadline before submitting. Current capture compares requests 1-6.
+    outcome = corpus._run_case(
+        tmp_path,
+        "clean-meter-22file-r1",
+        stop_after_provider_requests=6,
+    )
+    assert outcome.engine_result == "RUN_INCOMPLETE", (
+        f"capture stop result={outcome.engine_result!r}; exit={outcome.returncode}; "
+        f"requests={outcome.endpoint_requests}\n{outcome.evidence[-6000:]}"
+    )
+    assert outcome.returncode == 1, outcome.summary
+    assert outcome.summary is not None
+    assert outcome.summary.get("runtime_outcome") == "incomplete"
     assert '"kind":"token_counting_unavailable"' not in outcome.engine_log
-    assert outcome.endpoint_requests >= 6
+    assert outcome.endpoint_requests == 6
     assert len(outcome.request_hashes) >= 6
+    capture_marker = tmp_path / "run" / "capture-limit-reached"
+    assert capture_marker.is_file(), "request-capped wrapper did not record its stop marker"
+    assert capture_marker.read_text(encoding="ascii") == "6"
     request_bodies = tuple(
         (tmp_path / "run" / "wire" / f"{index:04d}.request.json").read_bytes()
         for index in range(1, 7)

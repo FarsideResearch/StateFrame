@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.3.40 (2026-11-04)
+
+- Tests: the clean-meter reprobe capture stops after the six requests it compares (it used to hit the engine deadline on Linux), and the masker tests use realistic `[StateFrame]` payloads plus a control that a non-JSON payload still raises.
+
 ## 0.3.39 (2026-11-04)
 
 - Checkpoint `state.pkl` files now use zlib level 1, about 4x smaller on a long run. Stored bytes are verified before bounded decompression and the raw state digest is checked afterward. As before, a checkpoint written by a different StateFrame release is refused by name rather than restored; finish or restart a run across an upgrade.
