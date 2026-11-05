@@ -112,7 +112,7 @@ class FrozenRequestCounter:
 
 
 def final_request_tokens(body: Mapping[str, object], meter: object,
-                         capture: object) -> tuple[int, str]:
+                         capture: object, *, wire_bytes: int | None = None) -> tuple[int, str]:
     """Count the final body with the allocation's frozen measurement method.
 
     A changed exact-counted body is tokenized when possible. If tokenize has
@@ -120,7 +120,25 @@ def final_request_tokens(body: Mapping[str, object], meter: object,
     The independent byte envelope bounds serialized growth. If tokenize
     recovers, the proof also checks its exact count for a real undercount; the
     conservative fallback rejection bound remains diagnostic during an outage.
+    ``wire_bytes`` carries the already-serialized transport body's byte length
+    through the meter without changing its token or frozen-counter authority.
     """
+    if wire_bytes is not None and (type(wire_bytes) is not int or wire_bytes < 0):
+        raise ValueError("prepared request byte count must be a non-negative integer")
+    request_meter_type = None
+    if wire_bytes is not None:
+        from kernel_request_diet import RequestTokenMeter
+
+        request_meter_type = RequestTokenMeter
+
+    def measure_body() -> tuple[int, str]:
+        instance_methods = getattr(meter, "__dict__", {})
+        if (request_meter_type is not None and type(meter) is request_meter_type
+                and "measure" not in instance_methods
+                and "_measure_with_wire_bytes" not in instance_methods):
+            return meter._measure_with_wire_bytes(body, wire_bytes)
+        return meter.measure(body)
+
     frozen = getattr(capture, "_frame_candidate_counter", None)
     if not isinstance(frozen, FrozenRequestCounter):
         from kernel_request_measurement import RequestMeasurement
@@ -133,7 +151,7 @@ def final_request_tokens(body: Mapping[str, object], meter: object,
                 and carried.method == meter.measure_method
                 and carried.prompt_tokens is not None):
             return carried.prompt_tokens, carried.method
-        return meter.measure(body)
+        return measure_body()
     request_id = str(getattr(capture, "request_id", ""))
     if (frozen.tokenizer_identity != meter.tokenizer_identity(body)
             or frozen.request_id != request_id
@@ -142,7 +160,7 @@ def final_request_tokens(body: Mapping[str, object], meter: object,
     if frozen.method == "verified_byte_bound":
         # This is an oversize rejection sentinel, not an allocation count.
         # Freeze the real method only after trimming makes the body measurable.
-        tokens, method = meter.measure(body)
+        tokens, method = measure_body()
         if method == "calibrated_bytes":
             tokens = calibrated_estimate(body, meter)
         elif method == "tokenize":
@@ -154,7 +172,7 @@ def final_request_tokens(body: Mapping[str, object], meter: object,
     if identity(body) == frozen.body_digest:
         return frozen.tokens, frozen.method
     if frozen.method == "tokenize":
-        tokens, method = meter.measure(body)
+        tokens, method = measure_body()
         if method in {"tokenize", "verified_byte_bound"}:
             if method == "tokenize":
                 _remember_exact_pair(body, meter, tokens)
@@ -625,6 +643,7 @@ def finalize_frame_candidate(
     """Fit a detached candidate; return a proposal without wire authorization."""
     from kernel_request_budget import (
         ENDPOINT_PROMPT_TOKEN_BUDGET,
+        ENDPOINT_VERIFIED_BYTES_PER_TOKEN,
         FREE_STAGE,
         HARD_MAX_REQUEST_BYTES,
         _graceful_trim_optional_messages,
@@ -632,6 +651,7 @@ def finalize_frame_candidate(
         _request_token_meter,
         _wire_bytes,
     )
+    from kernel_request_diet import RequestTokenMeter
     from kernel_request_source_window import (
         verify_final_source_delivery,
         source_delivery_satisfied,
@@ -655,12 +675,13 @@ def finalize_frame_candidate(
         _evictfix_enabled() and frame_counter is token_estimate and measured_frame_budget
     )
 
-    def frame_tokens(value: Mapping[str, object]) -> int:
-        return (fitted_request_tokens(value) if use_meter_for_frame
+    def frame_tokens(value: Mapping[str, object], *, wire_bytes: int | None = None) -> int:
+        return (fitted_request_tokens(value, wire_bytes=wire_bytes) if use_meter_for_frame
                 else frame_counter(value))
 
-    def fitted_request_tokens(value: Mapping[str, object]) -> int:
-        return final_request_tokens(value, meter, capture)[0]
+    def fitted_request_tokens(value: Mapping[str, object], *,
+                              wire_bytes: int | None = None) -> int:
+        return final_request_tokens(value, meter, capture, wire_bytes=wire_bytes)[0]
 
     def verified_envelope(method: str) -> bool:
         # A caller-supplied frame counter cannot change the meter's wire proof.
@@ -945,31 +966,91 @@ def finalize_frame_candidate(
     )
     from kernel_stateframe_capacity import within_protected_capacity
 
+    prepared_source_candidates: dict[int, tuple[Mapping[str, object], int | None]] = {}
+
+    def prepare_source_candidate(trial: Mapping[str, object]) -> bool:
+        if not ((bookmark_reconciliation or product_windows)
+                and isinstance(trial.get("messages"), list)):
+            return True
+        # The selected source windows and the typed visibility claim are one
+        # measured proposal. Reconcile before admission, never after.
+        from kernel_reread_result_truth import refresh_messages
+        from kernel_stateframe_framefit5 import FrameFit5Error
+        try:
+            refresh_messages(
+                trial["messages"],
+                required_deferred_paths=tuple(plan.get("deferred_paths", ())),
+            )
+            from kernel_frame_source_snapshot import _prune_redundant_source_metadata
+            _prune_redundant_source_metadata(trial["messages"])
+        except (FrameFit5Error, TypeError, ValueError):
+            return False
+        return True
+
+    def source_candidate_nonfit(trial: Mapping[str, object]) -> bool:
+        if (type(meter) is not RequestTokenMeter
+                or "measure" in getattr(meter, "__dict__", {})
+                or "_measure_with_wire_bytes" in getattr(meter, "__dict__", {})):
+            # Custom meter hooks keep the exhaustive measurement path.
+            return False
+        if not prepare_source_candidate(trial):
+            prepared_source_candidates[id(trial)] = (trial, None)
+            return False  # Let the normal callback keep its established failure path.
+        serialized_bytes = _wire_bytes(trial)
+        availability = getattr(meter, "_availability", None)
+        reprobe_due = getattr(meter, "_reprobe_due", None)
+        is_reprobe_due = callable(reprobe_due) and reprobe_due()
+        if availability == "unavailable" and not is_reprobe_due:
+            method = "calibrated_bytes"
+        elif availability in {"available", "unknown"} or is_reprobe_due:
+            method = "tokenize"
+        else:
+            prepared_source_candidates[id(trial)] = (trial, serialized_bytes)
+            return False
+        byte_limit = request_byte_limit(method)
+        if getattr(capture, "_release_prefix_boundary", None) is not None:
+            byte_limit = min(byte_limit, HARD_MAX_REQUEST_BYTES)
+        # The 2.46 offline ratio contributes an explicit byte ceiling, so it
+        # can reject bytes beyond that ceiling. It never proves token fit.
+        if serialized_bytes > byte_limit:
+            return True
+        if (method in {"tokenize", "verified_byte_bound"}
+                and serialized_bytes > token_limit * ENDPOINT_VERIFIED_BYTES_PER_TOKEN):
+            # Every proposal outside the verified 16-byte/token envelope is
+            # non-fitting by the same lower bound used by RequestTokenMeter.
+            # Skipping only these proven failures preserves exhaustive order,
+            # including for non-monotone tokenizer counts within the envelope.
+            return True
+        prepared_source_candidates[id(trial)] = (trial, serialized_bytes)
+        return False
+
     def source_windows_fit(trial: Mapping[str, object]) -> bool:
-        if (bookmark_reconciliation or product_windows) and isinstance(trial.get("messages"), list):
-            # The selected source windows and the typed visibility claim are
-            # one measured proposal. Reconcile before admission, never after.
-            from kernel_reread_result_truth import refresh_messages
-            from kernel_stateframe_framefit5 import FrameFit5Error
-            try:
-                refresh_messages(
-                    trial["messages"],
-                    required_deferred_paths=tuple(plan.get("deferred_paths", ())),
-                )
-                from kernel_frame_source_snapshot import _prune_redundant_source_metadata
-                _prune_redundant_source_metadata(trial["messages"])
-            except (FrameFit5Error, TypeError, ValueError):
+        prepared = prepared_source_candidates.pop(id(trial), None)
+        if prepared is not None and prepared[0] is trial:
+            if prepared[1] is None:
+                return False
+            serialized_bytes = prepared[1]
+        else:
+            if not prepare_source_candidate(trial):
                 return False  # Optional source advice cannot reject the base.
-        _count, trial_method = meter.measure(trial)
+            serialized_bytes = _wire_bytes(trial)
+        measure_with_wire = getattr(meter, "_measure_with_wire_bytes", None)
+        instance_methods = getattr(meter, "__dict__", {})
+        if (callable(measure_with_wire) and type(meter) is RequestTokenMeter
+                and "measure" not in instance_methods
+                and "_measure_with_wire_bytes" not in instance_methods):
+            _count, trial_method = measure_with_wire(trial, serialized_bytes)
+        else:
+            _count, trial_method = meter.measure(trial)
         byte_limit_for_windows = request_byte_limit(trial_method)
         # A bound release prefix must stay within its standard wire cap;
         # standalone exact-tokenized proposals may use the verified bound.
         if getattr(capture, "_release_prefix_boundary", None) is not None:
             byte_limit_for_windows = min(byte_limit_for_windows, HARD_MAX_REQUEST_BYTES)
         return (
-            _wire_bytes(trial) <= byte_limit_for_windows
-            and fitted_request_tokens(trial) <= token_limit
-            and frame_tokens(trial) <= runtime.frame_ceiling
+            serialized_bytes <= byte_limit_for_windows
+            and fitted_request_tokens(trial, wire_bytes=serialized_bytes) <= token_limit
+            and frame_tokens(trial, wire_bytes=serialized_bytes) <= runtime.frame_ceiling
             and within_protected_capacity(
                 trial, protected, exact_tokenizer=verified_envelope(trial_method),
             )
@@ -1025,6 +1106,7 @@ def finalize_frame_candidate(
             deferred_source_paths=tuple(plan.get("deferred_paths", ())),
             editable_paths=editable_product_paths,
             fits=source_windows_fit,
+            candidate_nonfit=source_candidate_nonfit,
         )
         contents = {message.get("content") for message in full_reads["messages"]
                     if isinstance(message, Mapping) and isinstance(message.get("content"), str)}
@@ -1094,6 +1176,7 @@ def finalize_frame_candidate(
                 deferred_source_paths=tuple(plan.get("deferred_paths", ())),
                 editable_paths=editable_product_paths,
                 fits=source_windows_fit,
+                candidate_nonfit=source_candidate_nonfit,
             )
             if without_excess_reads != candidate:
                 candidate = without_excess_reads
@@ -1118,6 +1201,7 @@ def finalize_frame_candidate(
                     deferred_source_paths=tuple(plan.get("deferred_paths", ())),
                     editable_paths=editable_product_paths,
                     fits=source_windows_fit,
+                    candidate_nonfit=source_candidate_nonfit,
                 )
                 continue
         current = tuple(plan.get("deferred_paths", ()))
@@ -1232,6 +1316,7 @@ def finalize_frame_candidate(
                 deferred_source_paths=tuple(plan.get("deferred_paths", ())),
                 editable_paths=editable_product_paths,
                 fits=source_windows_fit,
+                candidate_nonfit=source_candidate_nonfit,
             )
             receipt = verify_final_source_delivery(
                 plan, candidate["messages"], payload=json.dumps(candidate).encode(),

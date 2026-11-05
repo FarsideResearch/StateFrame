@@ -166,6 +166,8 @@ def test_explicit_different_origin_tokenizer_does_not_receive_generation_key(mon
 
 
 def test_same_origin_redirect_strips_key_before_cross_origin_tokenizer(monkeypatch, fallback_events):
+    import ssl
+
     external_authorization = []
 
     class ExternalHandler(BaseHTTPRequestHandler):
@@ -211,13 +213,44 @@ def test_same_origin_redirect_strips_key_before_cross_origin_tokenizer(monkeypat
     thread.start()
     redirect_base = f"http://127.0.0.1:{redirect_server.server_port}"
     try:
-        count, method = _measure_with_request_key(
-            redirect_base + "/tokenize", redirect_base + "/v1/chat/completions", _KEY, monkeypatch,
+        contexts = 0
+        original_factory = ssl._create_default_https_context
+
+        def counted_context(*args, **kwargs):
+            nonlocal contexts
+            contexts += 1
+            return original_factory(*args, **kwargs)
+
+        monkeypatch.setattr(ssl, "_create_default_https_context", counted_context)
+        generation_endpoint = redirect_base + "/v1/chat/completions"
+        meter = RequestTokenMeter(
+            endpoint="https://context.example/tokenize",
+            template_overhead_tokens=0,
+            auth_key=_KEY,
+            generation_endpoint=generation_endpoint,
         )
-        assert count > 0
-        assert method == "tokenize"
-        assert redirect_authorization == [f"Bearer {_KEY}"]
-        assert external_authorization == [None]
+        cached_context = meter._get_http_ssl_context()
+        previous_opener = None
+        for content in ("first tokenizer request", "second tokenizer request"):
+            opener = meter._get_http_opener()
+            assert opener is not None and opener is not previous_opener
+            previous_opener = opener
+            https_handler = next(
+                handler for handler in opener.handlers
+                if isinstance(handler, kernel_request_diet._TokenizeHTTPSHandler)
+            )
+            assert https_handler._context_provider() is cached_context
+            assert kernel_request_diet._http_tokenize(
+                content,
+                redirect_base + "/tokenize",
+                auth_key=_KEY,
+                generation_endpoint=generation_endpoint,
+                opener=opener,
+            ) == [1]
+
+        assert contexts == 1
+        assert redirect_authorization == [f"Bearer {_KEY}", f"Bearer {_KEY}"]
+        assert external_authorization == [None, None]
         assert not fallback_events
     finally:
         redirect_server.shutdown()

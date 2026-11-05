@@ -11,17 +11,24 @@ import hashlib
 import json
 
 PROJECTION_VERSION = "provider-prompt-json/1"
+PROMPT_FIELDS = (
+    "messages", "tools", "functions", "tool_choice", "function_call",
+    "response_format", "chat_template", "chat_template_kwargs",
+    "add_generation_prompt", "continue_final_message", "parallel_tool_calls",
+    "reasoning_effort", "reasoning_mode", "reasoning_budget_tokens",
+)
+
+
+def prompt_projection_body(body: Mapping[str, object]) -> dict[str, object]:
+    """Return the exact body fields included in tokenizer projection."""
+    return {key: body[key] for key in PROMPT_FIELDS if key in body}
 
 
 def prompt_projection(body: Mapping[str, object]) -> str:
     # JSON preserves roles, message partitions, tools, call IDs/arguments and
     # provider template options. Output allocation and sampling are not prompt
     # text; their changes still require fresh body-bound admission evidence.
-    fields = ("messages", "tools", "functions", "tool_choice", "function_call",
-              "response_format", "chat_template", "chat_template_kwargs",
-              "add_generation_prompt", "continue_final_message", "parallel_tool_calls",
-              "reasoning_effort", "reasoning_mode", "reasoning_budget_tokens")
-    return json.dumps({key: body[key] for key in fields if key in body},
+    return json.dumps(prompt_projection_body(body),
                       sort_keys=True, separators=(",", ":"), ensure_ascii=False)
 
 
@@ -52,12 +59,15 @@ class RequestMeasurement:
     def bind(cls, body: Mapping[str, object], *, tokenizer_identity: str,
              request_id: str, logical_request_id: str, tokens: int, method: str,
              template_overhead_tokens: int, max_prompt_tokens: int,
-             max_request_bytes: int) -> RequestMeasurement:
+             max_request_bytes: int, wire: bytes | None = None) -> RequestMeasurement:
         from kernel_request_budget import (
             ENDPOINT_OUTPUT_BUDGET_TOKENS, ENDPOINT_THINKING_BUDGET_TOKENS,
             ENDPOINT_SAFETY_HEADROOM_TOKENS,
         )
-        wire = json.dumps(body).encode()
+        if wire is None:
+            wire = json.dumps(body).encode()
+        elif not isinstance(wire, bytes):
+            raise TypeError("prepared request wire must be bytes")
         output = body.get("max_tokens")
         if type(output) is not int or output <= 0:
             output = ENDPOINT_OUTPUT_BUDGET_TOKENS

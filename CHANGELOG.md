@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Faster request preparation with identical requests.
+
 ## 0.4.11 (2026-11-05)
 
 - Tests: the release gate's macOS sandbox probe runs `/bin/sh` instead of a non-portable executable path, so the portable-executables check passes again.

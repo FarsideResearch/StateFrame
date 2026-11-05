@@ -246,9 +246,10 @@ HOST_GLOBALS = frozenset(
 DROP_ATTRS = {
     ("kernel_stateframe_runtime", "StateFrameRuntime"): frozenset({"_model_router_projection_cache"}),
     # Tokenizer auth is rebound from the new child process on every meter lookup;
-    # neither generation credentials nor endpoint details belong in checkpoints.
+    # generation credentials and derived SSL state do not belong in checkpoints.
     ("kernel_request_diet", "RequestTokenMeter"): frozenset({
-        "_tokenizer_auth_key", "_generation_endpoint",
+        "_tokenizer_auth_key", "_generation_endpoint", "_http_opener",
+        "_http_ssl_context", "_http_ssl_context_lock",
     }),
 }
 _OWN_MODULE = __name__
@@ -940,6 +941,10 @@ def _journal_key(obj) -> str:
 
 def _journal_state(obj) -> dict:
     state = _lease_state(obj)
+    # Repeated-cursor snapshots are derived cache data; do not duplicate them
+    # beside the authoritative journal records in a checkpoint.
+    state.pop("_records_since_cache", None)
+    state.pop("_records_since_cache_bytes", None)
     path = getattr(obj, "path", None)
     if state.get("_record_cache_start", 0):
         # This is a bounded suffix, not the line-zero append-only list expected
@@ -1045,7 +1050,10 @@ def _rebuild_journal(obj, state):
     obj.__dict__.update(state)
     obj._fd = None
     obj._pid = os.getpid()
+    from collections import OrderedDict
     from kernel_continuation_journal import MEMBOUND_ENV, RECORD_CACHE_LIMIT
+    obj._records_since_cache = OrderedDict()
+    obj._records_since_cache_bytes = 0
     obj._record_cache_limit = (None if os.environ.get(MEMBOUND_ENV, "bounded").lower() == "legacy"
                                else RECORD_CACHE_LIMIT)
     obj._record_cache_start = getattr(obj, "_record_cache_start", 0)
