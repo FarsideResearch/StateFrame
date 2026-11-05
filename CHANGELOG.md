@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Tests: the hook-wiring parity checks compare the provider_dialect journal event and the provider_capabilities spec key against whatever baseline release they pick, so they pass on a released tip as well as on a branch. Test-only; no runtime change.
+
 ## 0.3.37 (2026-11-04)
 
 ### Hosted OpenAI-compatible endpoints
