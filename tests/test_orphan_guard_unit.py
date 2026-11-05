@@ -109,6 +109,163 @@ def test_ended_registered_live_launch_is_a_leak_stopped_by_bound_handle(tmp_path
         guard.close()
 
 
+def test_live_registered_launch_remains_a_leak_when_bound_signal_fails(tmp_path):
+    script = tmp_path / "registered_helper.py"
+    script.write_text("import time\ntime.sleep(30)\n", encoding="utf-8")
+    handles = []
+
+    class _SignalFailureHandle(_LiveHandle):
+        def send_signal(self, signum: int) -> None:
+            self.signals.append(signum)
+            raise PermissionError(errno.EPERM, "signal denied")
+
+    def handle_factory(process: subprocess.Popen[bytes], *, platform: str):
+        handle = _SignalFailureHandle(process.pid)
+        handles.append(handle)
+        return handle
+
+    guard = orphan_guard.OrphanGuard(tmp_path, handle_factory=handle_factory)
+    scope = guard.scope("signal-failure")
+    launch = scope.launch(
+        [sys.executable, str(script)], cwd=tmp_path, stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    scope.end()
+    try:
+        report = guard.check()
+
+        assert [outcome.kind for outcome in report.outcomes] == [
+            "leak", "cleanup unverified"]
+        assert report.outcomes[0].pid == launch.pid
+        assert "signal denied" in report.outcomes[1].detail
+        assert report.unit_outcomes[0].kind == "cleanup unverified"
+        assert handles[0].signals == [signal.SIGTERM]
+    finally:
+        _stop_helper(launch.process)
+        guard.close()
+
+
+@pytest.mark.parametrize(
+    ("event", "expected_kind"),
+    [
+        (orphan_guard.select.POLLIN, "confirmed exit"),
+        (orphan_guard.select.POLLHUP, "confirmed exit"),
+        (orphan_guard.select.POLLERR, "cleanup unverified"),
+        (orphan_guard.select.POLLNVAL, "cleanup unverified"),
+    ],
+)
+def test_pidfd_poll_only_confirms_exit_for_pollin_or_pollhup(
+        tmp_path, monkeypatch, event, expected_kind):
+    pid = 7341
+
+    class _ReadyPoller:
+        def poll(self, _timeout_ms):
+            return [(23, event)]
+
+    handle = object.__new__(orphan_guard._PidfdHandle)
+    handle.pid = pid
+    handle._fd = 23
+    handle.identity = ("linux-pidfd", pid, 23)
+    handle._poller = _ReadyPoller()
+    monkeypatch.setattr(orphan_guard.os, "close", lambda _fd: None)
+
+    guard = orphan_guard.OrphanGuard(tmp_path)
+    scope = guard.scope("pidfd-poll")
+    scope.register_adopted(
+        pid, bound_handle=handle, attributed=True,
+        parent_transition=(123, 456), parent_exit_confirmed=True,
+        tmp_path_use=True)
+    scope.end()
+    try:
+        report = guard.check()
+
+        assert [outcome.kind for outcome in report.outcomes] == [expected_kind]
+        assert report.unit_outcomes[0].kind == expected_kind
+        if expected_kind == "cleanup unverified":
+            assert "poll" in report.outcomes[0].detail.lower()
+        assert report.failed is (expected_kind != "confirmed exit")
+    finally:
+        guard.close()
+
+
+def test_open_scope_adopted_candidate_remains_pending_until_scope_ends(tmp_path):
+    guard = orphan_guard.OrphanGuard(tmp_path)
+    scope = guard.scope("pending-adopted")
+    handle = _LiveHandle(7342)
+    adopted = scope.register_adopted(
+        7342, bound_handle=handle, attributed=True,
+        parent_transition=(123, 456), parent_exit_confirmed=True,
+        tmp_path_use=True)
+    try:
+        before_scope_end = guard.check()
+
+        assert before_scope_end.outcomes == ()
+        assert before_scope_end.unit_outcomes == ()
+        assert not adopted.checked
+        assert handle.signals == []
+
+        scope.end()
+        after_scope_end = guard.check()
+
+        assert [outcome.kind for outcome in after_scope_end.outcomes] == [
+            "leak", "confirmed exit"]
+        assert adopted.checked
+        assert handle.signals == [signal.SIGTERM]
+    finally:
+        guard.close()
+
+
+def test_close_reaps_registered_child_and_closes_owned_pipes(tmp_path):
+    handles = []
+
+    def handle_factory(process: subprocess.Popen[bytes], *, platform: str):
+        handle = _LiveHandle(process.pid)
+        handles.append(handle)
+        return handle
+
+    guard = orphan_guard.OrphanGuard(tmp_path, handle_factory=handle_factory)
+    scope = guard.scope("close-reaps-child")
+    launch = scope.launch(
+        [sys.executable, "-c", "pass"], cwd=tmp_path,
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    streams = (launch.process.stdin, launch.process.stdout, launch.process.stderr)
+    try:
+        guard.close()
+
+        assert launch.process.returncode is not None
+        assert all(stream is not None and stream.closed for stream in streams)
+        assert handles[0].closed
+    finally:
+        if launch.process.poll() is None:
+            _stop_helper(launch.process)
+
+
+def test_close_bounds_wait_for_live_registered_child_and_still_closes_pipes(
+        tmp_path, monkeypatch):
+    handles = []
+
+    def handle_factory(process: subprocess.Popen[bytes], *, platform: str):
+        handle = _LiveHandle(process.pid)
+        handles.append(handle)
+        return handle
+
+    monkeypatch.setattr(orphan_guard, "_CLOSE_REAP_TIMEOUT_SECONDS", 0.05)
+    guard = orphan_guard.OrphanGuard(tmp_path, handle_factory=handle_factory)
+    scope = guard.scope("close-bounds-live-child")
+    launch = scope.launch(
+        [sys.executable, "-c", "import time; time.sleep(30)"], cwd=tmp_path,
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    streams = (launch.process.stdin, launch.process.stdout, launch.process.stderr)
+    try:
+        with pytest.raises(orphan_guard.OrphanGuardError, match="reap"):
+            guard.close()
+
+        assert launch.process.poll() is None
+        assert all(stream is not None and stream.closed for stream in streams)
+        assert handles[0].signals == []
+    finally:
+        _stop_helper(launch.process)
+
+
 def test_pidfd_handle_accepts_signal_enum_and_passes_integer_to_bound_syscall(monkeypatch):
     calls: list[tuple[int, int]] = []
     handle = object.__new__(orphan_guard._PidfdHandle)

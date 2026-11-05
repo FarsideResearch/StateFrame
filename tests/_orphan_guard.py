@@ -23,7 +23,10 @@ _TOKEN_ENV = "SF_TEST_TOKEN"
 _TERM_GRACE_SECONDS = 0.35
 _KILL_GRACE_SECONDS = 0.65
 _CHECK_DEADLINE_SECONDS = 8.0
-_PIDFD_EVENTS = select.POLLIN | select.POLLHUP | select.POLLERR
+_PIDFD_EXIT_EVENTS = select.POLLIN | select.POLLHUP
+_PIDFD_ERROR_EVENTS = select.POLLERR | select.POLLNVAL
+_PIDFD_EVENTS = _PIDFD_EXIT_EVENTS | _PIDFD_ERROR_EVENTS
+_CLOSE_REAP_TIMEOUT_SECONDS = 1.0
 _PROC_PIDT_BSDINFOWITHUNIQID = 18
 
 OutcomeKind = Literal["leak", "cleanup unverified", "confirmed exit"]
@@ -270,7 +273,22 @@ class _PidfdHandle:
         timeout_ms = _timeout_milliseconds(timeout)
         if self._fd < 0:
             raise OrphanGuardError("retained Linux pidfd is closed")
-        return bool(self._poller.poll(timeout_ms))
+        events = self._poller.poll(timeout_ms)
+        if not events:
+            return False
+        event_mask = 0
+        for ready_fd, mask in events:
+            if ready_fd != self._fd:
+                raise OrphanGuardError(
+                    f"Linux pidfd poll returned unexpected descriptor {ready_fd}")
+            event_mask |= mask
+        if event_mask & _PIDFD_ERROR_EVENTS:
+            raise OrphanGuardError(
+                f"Linux pidfd poll reported cleanup-unverified event mask 0x{event_mask:x}")
+        if event_mask & ~_PIDFD_EXIT_EVENTS:
+            raise OrphanGuardError(
+                f"Linux pidfd poll reported unrecognized event mask 0x{event_mask:x}")
+        return bool(event_mask & _PIDFD_EXIT_EVENTS)
 
     def close(self) -> None:
         if self._fd >= 0:
@@ -482,7 +500,7 @@ class OrphanGuard:
                         lambda scope=scope, launch=launch: self._check_launch(
                             scope, launch, deadline))
             for adopted in scope.adopted:
-                if not adopted.checked:
+                if scope.ended and not adopted.checked:
                     self._check_unit(
                         scope, adopted,
                         lambda scope=scope, adopted=adopted: self._check_adopted(
@@ -562,6 +580,7 @@ class OrphanGuard:
 
     def _cleanup_live(self, pid: int, handle: BoundHandle, identity: object,
                       deadline: float, leak_detail: str) -> None:
+        self._outcomes.append(Outcome("leak", pid, leak_detail))
         if not self._has_time(deadline):
             self._unverified(pid, "check deadline expired before SIGTERM")
             return
@@ -573,7 +592,6 @@ class OrphanGuard:
         except Exception as error:
             self._signal_error(pid, handle, identity, "SIGTERM", error)
             return
-        self._outcomes.append(Outcome("leak", pid, leak_detail))
         if self._wait_confirmed_exit(pid, handle, identity, _TERM_GRACE_SECONDS, deadline):
             return
         if not self._has_time(deadline):
@@ -649,6 +667,35 @@ class OrphanGuard:
             return
         self._closed = True
         errors: list[str] = []
+        deadline = time.monotonic() + _CLOSE_REAP_TIMEOUT_SECONDS
+        launches = [launch for scope in self._scopes for launch in scope.launches]
+        for launch in launches:
+            process = launch.process
+            try:
+                if process.returncode is None:
+                    remaining = deadline - time.monotonic()
+                    if remaining > 0:
+                        process.wait(timeout=remaining)
+                    elif process.poll() is None:
+                        errors.append(
+                            f"could not reap registered child {launch.pid} before close deadline")
+            except subprocess.TimeoutExpired:
+                errors.append(
+                    f"could not reap registered child {launch.pid} before close deadline")
+            except Exception as error:
+                errors.append(
+                    f"could not reap registered child {launch.pid}: {_error_text(error)}")
+        for launch in launches:
+            for stream_name in ("stdin", "stdout", "stderr"):
+                stream = getattr(launch.process, stream_name)
+                if stream is None:
+                    continue
+                try:
+                    stream.close()
+                except Exception as error:
+                    errors.append(
+                        f"could not close registered child {launch.pid} {stream_name} pipe: "
+                        f"{_error_text(error)}")
         closed: set[int] = set()
         for handle in self._handles:
             if id(handle) in closed:
@@ -659,7 +706,7 @@ class OrphanGuard:
             except Exception as error:
                 errors.append(_error_text(error))
         if errors:
-            raise OrphanGuardError("could not close all retained process handles: " + "; ".join(errors))
+            raise OrphanGuardError("could not close all retained process resources: " + "; ".join(errors))
 
 
 def _validate_pid(pid: int) -> None:
