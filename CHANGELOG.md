@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.4.19 (2026-11-05)
+
+- Docs: KNOWN_LIMITATIONS now warns that in-place runs and exported patches can change the line endings (CRLF, CR-only, mixed) or byte-order mark of text files in the edit scope that the model did not edit, and says how to check for and undo it. A fix is in progress.
+
 ## 0.4.18 (2026-11-05)
 
 - Tests: must-run mode now requires the group-alive Linux supervisor, owner-pipe and liveness tests to execute, so a bwrap probe skip fails the gate.
