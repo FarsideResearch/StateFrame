@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- A run no longer stops when a model reply or a file begins with StateFrame's state marker; such text is kept as data.
 - Fixed: A test selector refused before dispatch now returns its refusal to the model and lets the run continue, instead of stopping with CONTINUATION_BLOCKED.
 
 ## 0.4.39 (2026-11-10)

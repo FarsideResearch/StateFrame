@@ -1854,6 +1854,16 @@ def state_message(state: Mapping[str, object]) -> dict[str, str]:
     return {"role": "user", "content": serialize_stateframe_payload(visible)}
 
 
+def escape_state_marker_data(message: Mapping[str, object]) -> dict:
+    """Copy external content for the wire without changing its source or tool arguments."""
+    item = copy.deepcopy(dict(message))
+    content = str(item.get("content") or "")
+    if content.startswith(STATE_HEADER):
+        # The visible escape is \[StateFrame]. Only the host state starts [StateFrame].
+        item["content"] = "\\" + content
+    return item
+
+
 def _append_verbatim_turns(
     messages: list[dict],
     turns: Sequence[Sequence[Mapping[str, object]]],
@@ -1887,7 +1897,7 @@ def compose_messages(*, prefix: Sequence[Mapping[str, object]], path: str, worki
     messages: list[dict] = []
     for message in prefix:
         content = str(message.get("content") or "")
-        if content.startswith((STATE_HEADER, HANDOFF_HEADER, CLAUSE_HEADER,
+        if content.startswith((HANDOFF_HEADER, CLAUSE_HEADER,
                                _reasoning_anchor_header(),
                                _reasoning_ledger_header(),
                                 "[Working source:", "[Paged source:", "[Current source:", "CURRENT_SOURCE ",
@@ -1926,13 +1936,8 @@ def compose_messages(*, prefix: Sequence[Mapping[str, object]], path: str, worki
             messages.extend(copy.deepcopy(dict(item)) for item in pair if isinstance(item, Mapping))
     ordered = order_f4_messages(messages)
     composed = _append_verbatim_turns(ordered, verbatim_turns)
-    for message in composed:
-        if message is not host_state:
-            content = str(message.get("content") or "")
-            if content.startswith(STATE_HEADER):
-                # An assistant or tool may quote the header. Only the host owns this delimiter.
-                message["content"] = "\\" + content
-    return [dict(message) for message in composed]
+    return [dict(message) if message is host_state else escape_state_marker_data(message)
+            for message in composed]
 
 
 def latest_complete_tool_exchange(
