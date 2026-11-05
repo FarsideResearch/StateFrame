@@ -530,8 +530,11 @@ def fit_protected_frame(body: dict[str, object], *,
         # A malformed proof must fail even when explicit rows would otherwise
         # let this candidate take the no-pressure fast path.
         validated_coverage = index.covered_ids(digest)
+    has_coverage_proofs = False
+    if index is not None:
+        has_coverage_proofs = bool(index.proofs)
     needs_coverage = bool(
-        index and index.proofs
+        has_coverage_proofs
         and _expected_ids(context) - (ledger_ids(ledger) | validated_coverage)
     )
     has_receipts = any(row.get("range_delivery") == "same_request" for row in ledger["reads"])

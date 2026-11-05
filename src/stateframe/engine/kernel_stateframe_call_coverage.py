@@ -10,6 +10,9 @@ import copy
 import hashlib
 import json
 from collections.abc import Mapping
+from contextlib import nullcontext
+from dataclasses import dataclass
+import threading
 import uuid
 import weakref
 
@@ -42,43 +45,118 @@ def _frontier(previous: list[str], added: list[str]) -> list[str]:
     return result
 
 
-class CoverageIndex:
-    """One index per journal owner, shared across detached action contexts."""
+@dataclass(frozen=True, slots=True)
+class _CoverageSnapshot:
+    """One complete, immutable view of the journal-owned coverage prefix."""
 
-    def __init__(self, journal: object):
-        self.journal = journal
-        run_id = getattr(journal, "run_id", None)
-        journal_path = getattr(journal, "path", None)
-        self.context_handle = (
-            _sha(["coverage-index", run_id, str(journal_path)])
-            if isinstance(run_id, str) and run_id and journal_path is not None
-            else uuid.uuid4().hex
-        )
-        _CONTEXT_INDEXES[self.context_handle] = self
-        self.sequence = 0
-        self.ids: list[str] = []
-        self.members: set[str] = set()
-        self.chains: list[str] = [_sha([])]
-        self.frontier: list[str] = []
-        self.proofs: set[str] = set()
+    sequence: int
+    ids: tuple[str, ...]
+    members: frozenset[str]
+    chains: tuple[str, ...]
+    frontier: tuple[str, ...]
+    proofs: frozenset[str]
+
+
+def _journal_guard(journal: object):
+    """Serialize binding with journal replay when the journal exposes a lock."""
+    ownership = getattr(journal, "ownership", None)
+    if callable(ownership):
+        return ownership()
+    lock = getattr(journal, "_lock", None)
+    return lock if hasattr(lock, "__enter__") else nullcontext()
+
+
+class CoverageIndex:
+    """One index per journal owner, shared across detached action contexts.
+
+    Multi-field consistency requires reading ``snapshot``. Legacy per-field
+    reads (sequence, ids, members, chains, frontier, proofs) are individually
+    consistent, but are not jointly consistent.
+    """
+
+    def __init__(self, journal: object, *, _register: bool = True):
+        self._lock = threading.RLock()
+        with self._lock:
+            self.journal = journal
+            run_id = getattr(journal, "run_id", None)
+            journal_path = getattr(journal, "path", None)
+            self.context_handle = (
+                _sha(["coverage-index", run_id, str(journal_path)])
+                if isinstance(run_id, str) and run_id and journal_path is not None
+                else uuid.uuid4().hex
+            )
+            self.sequence = 0
+            self.ids: list[str] = []
+            self.members: set[str] = set()
+            self.chains: list[str] = [_sha([])]
+            self.frontier: list[str] = []
+            self.proofs: set[str] = set()
+        if _register:
+            self._publish_context_index()
+
+    @property
+    def snapshot(self) -> _CoverageSnapshot:
+        """Build a consistent immutable view on demand."""
+        with self._lock:
+            return _CoverageSnapshot(
+                sequence=self.sequence,
+                ids=tuple(self.ids),
+                members=frozenset(self.members),
+                chains=tuple(self.chains),
+                frontier=tuple(self.frontier),
+                proofs=frozenset(self.proofs),
+            )
+
+    @property
+    def _snapshot(self) -> _CoverageSnapshot | None:
+        """Expose snapshots only for the journal's published index."""
+        if getattr(self.journal, "_framefit_call_coverage_index", None) is not self:
+            return None
+        return self.snapshot
+
+    def _publish_context_index(self) -> None:
+        """Register only after the index is fully initialized and journal-bound."""
+        with _CONTEXT_INDEX_LOCK:
+            _CONTEXT_INDEXES[self.context_handle] = self
+
+    def _replace_state_from(self, staged: CoverageIndex) -> None:
+        """Atomically adopt private replay state without copying its containers."""
+        if not isinstance(staged, CoverageIndex) or staged.journal is not self.journal:
+            _error("call coverage snapshot belongs to a different journal")
+        with self._lock:
+            self.sequence = staged.sequence
+            self.ids = staged.ids
+            self.members = staged.members
+            self.chains = staged.chains
+            self.frontier = staged.frontier
+            self.proofs = staged.proofs
 
     def __deepcopy__(self, memo: dict) -> CoverageIndex:
         # Host authority is not model state, and the journal owns locks/leases.
         return self
 
     def sync(self) -> None:
-        cursor = self.journal.receipt_cursor()
-        if cursor.sequence < self.sequence:
-            _error("call coverage journal cursor moved backwards")
-        borrow_records = getattr(self.journal, "_borrow_records_since", None)
-        records = (borrow_records(self.sequence) if callable(borrow_records)
-                   else self.journal.cached_records_since(self.sequence))
-        for record in records:
-            if record["sequence"] != self.sequence + 1:
-                _error("call coverage journal sequence gap")
-            if record.get("kind") == EVENT:
-                self._accept(record.get("coverage_proof"))
-            self.sequence = record["sequence"]
+        while True:
+            with self._lock:
+                previous_sequence = self.sequence
+            cursor = self.journal.receipt_cursor()
+            if cursor.sequence < previous_sequence:
+                _error("call coverage journal cursor moved backwards")
+            borrow_records = getattr(self.journal, "_borrow_records_since", None)
+            records = (borrow_records(previous_sequence) if callable(borrow_records)
+                       else self.journal.cached_records_since(previous_sequence))
+            with self._lock:
+                if self.sequence != previous_sequence:
+                    continue
+                for record in records:
+                    sequence = record["sequence"]
+                    if sequence != self.sequence + 1:
+                        _error("call coverage journal sequence gap")
+                    if record.get("kind") == EVENT:
+                        self._accept(record.get("coverage_proof"), sequence=sequence)
+                    else:
+                        self._advance_sequence(sequence)
+                return
 
     def _validate_proof(self, proof: object) -> tuple[list[str], list[str], list[str], dict[str, object]]:
         if not isinstance(proof, dict) or set(proof) != {
@@ -113,33 +191,47 @@ class CoverageIndex:
         validate_read_ranges({"action_ledger": {"reads": [], "history_digest": digest}}, [])
         return added, chains, frontier, digest
 
-    def _accept(self, proof: object) -> None:
-        added, chains, frontier, digest = self._validate_proof(proof)
-        self.ids.extend(added)
-        self.members.update(added)
-        self.chains.extend(chains)
-        self.frontier = frontier
-        self.proofs.add(_sha(digest))
+    def _accept(self, proof: object, *, sequence: int | None = None) -> None:
+        with self._lock:
+            added, chains, frontier, digest = self._validate_proof(proof)
+            if sequence is not None and (
+                    type(sequence) is not int or sequence != self.sequence + 1):
+                _error("call coverage journal sequence gap")
+            self.ids.extend(added)
+            self.members.update(added)
+            self.chains.extend(chains)
+            self.frontier = frontier
+            self.proofs.add(_sha(digest))
+            if sequence is not None:
+                self.sequence = sequence
+
+    def _advance_sequence(self, sequence: int) -> None:
+        with self._lock:
+            if type(sequence) is not int or sequence != self.sequence + 1:
+                _error("call coverage journal sequence gap")
+            self.sequence = sequence
 
     def covered_ids(self, digest: Mapping[str, object]) -> set[str]:
         self.sync()
-        if _sha(digest) not in self.proofs:
-            _error("call coverage digest has no matching host proof")
-        count = digest["call_count"]
-        result = set(self.ids[:count])
-        if (len(result) != count or self.chains[count] != digest["call_ids_sha256"]
-                or not result.issubset(self.members)):
-            _error("call coverage host inventory count mismatch")
-        return result
+        with self._lock:
+            if _sha(digest) not in self.proofs:
+                _error("call coverage digest has no matching host proof")
+            count = digest["call_count"]
+            result = set(self.ids[:count])
+            if (len(result) != count or self.chains[count] != digest["call_ids_sha256"]
+                    or not result.issubset(self.members)):
+                _error("call coverage host inventory count mismatch")
+            return result
 
     def commit(self, proof: dict[str, object]) -> None:
         self.sync()
-        if _sha(proof["digest"]) in self.proofs:
-            return
-        if (proof["previous_count"] != len(self.ids)
-                or proof["previous_chain"] != self.chains[-1]):
-            _error("call coverage index changed during detached fitting")
-        self._validate_proof(proof)
+        with self._lock:
+            if _sha(proof["digest"]) in self.proofs:
+                return
+            if (proof["previous_count"] != len(self.ids)
+                    or proof["previous_chain"] != self.chains[-1]):
+                _error("call coverage index changed during detached fitting")
+            self._validate_proof(proof)
         # Durability precedes frame publication. A failed append leaves the
         # detached candidate unadopted and never authorizes its wire proof.
         self.journal.emit(EVENT, coverage_contract=CONTRACT, coverage_proof=proof)
@@ -147,6 +239,7 @@ class CoverageIndex:
 
 
 _CONTEXT_INDEXES: weakref.WeakValueDictionary = weakref.WeakValueDictionary()
+_CONTEXT_INDEX_LOCK = threading.RLock()
 
 
 def bind_index(context: dict[str, object], journal: object) -> dict[str, object]:
@@ -154,11 +247,19 @@ def bind_index(context: dict[str, object], journal: object) -> dict[str, object]
     if all(callable(getattr(journal, name, None))
            for name in ("cached_records_since", "receipt_cursor", "emit")):
         index = getattr(journal, "_framefit_call_coverage_index", None)
-        if index is None:
-            index = CoverageIndex(journal)
-            setattr(journal, "_framefit_call_coverage_index", index)
-        if not isinstance(index, CoverageIndex) or index.journal is not journal:
-            _error("call coverage index belongs to a different journal")
+        already_bound = (isinstance(index, CoverageIndex) and index.journal is journal
+                         and _CONTEXT_INDEXES.get(index.context_handle) is index)
+        if not already_bound:
+            with _journal_guard(journal):
+                index = getattr(journal, "_framefit_call_coverage_index", None)
+                if index is None:
+                    index = CoverageIndex(journal, _register=False)
+                if not isinstance(index, CoverageIndex) or index.journal is not journal:
+                    _error("call coverage index belongs to a different journal")
+                with index._lock:
+                    if getattr(journal, "_framefit_call_coverage_index", None) is None:
+                        setattr(journal, "_framefit_call_coverage_index", index)
+                    index._publish_context_index()
         context[CONTEXT_KEY] = index.context_handle
         history = context.get("journal_receipt_history")
         if (isinstance(history, dict)
@@ -177,6 +278,8 @@ def context_index(context: object) -> CoverageIndex | None:
     handle = context.get(CONTEXT_KEY) if isinstance(context, Mapping) else None
     if isinstance(handle, CoverageIndex):
         return handle
+    # Writers publish fully initialized objects under the GIL-protected registry
+    # lock; WeakValueDictionary.get() is safe for these lock-free reads.
     index = _CONTEXT_INDEXES.get(handle) if isinstance(handle, str) else None
     return index if isinstance(index, CoverageIndex) else None
 
@@ -199,11 +302,12 @@ class CoverageSession:
         # Coverage is cumulative across committed projections, even when a
         # later request rebuilds rows or restores detail for a previously folded
         # ID. Row hashes still describe that candidate's exact C2 fold sequence.
-        self.ids = set(index.members)
-        self.chain = index.chains[-1]
-        self.frontier = list(index.frontier)
-        self.previous_count = len(index.ids)
-        self.previous_chain = self.chain
+        with index._lock:
+            self.ids = set(index.members)
+            self.chain = index.chains[-1]
+            self.frontier = list(index.frontier)
+            self.previous_count = len(index.ids)
+            self.previous_chain = self.chain
         self.added: list[str] = []
         self.digest: dict[str, object] | None = None
 
