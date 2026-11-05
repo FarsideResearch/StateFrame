@@ -1,7 +1,7 @@
 """Pytest support for reporting registered child processes left alive by a test."""
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 import ctypes
 import errno
 import math
@@ -24,6 +24,7 @@ _TERM_GRACE_SECONDS = 0.35
 _KILL_GRACE_SECONDS = 0.65
 _CHECK_DEADLINE_SECONDS = 8.0
 _PIDFD_EVENTS = select.POLLIN | select.POLLHUP | select.POLLERR
+_PROC_PIDT_BSDINFOWITHUNIQID = 18
 
 OutcomeKind = Literal["leak", "cleanup unverified", "confirmed exit"]
 
@@ -64,6 +65,10 @@ class Outcome:
 class Report:
     outcomes: tuple[Outcome, ...]
     failed: bool
+    # One final disposition per registered unit in an ended scope. `outcomes`
+    # remains the event log, where a detected leak and its confirmed cleanup
+    # are intentionally separate events.
+    unit_outcomes: tuple[Outcome, ...] = ()
 
 
 @dataclass
@@ -73,6 +78,7 @@ class _Launch:
     bound_handle: BoundHandle
     identity: object
     checked: bool = False
+    outcome: Outcome | None = None
 
 
 @dataclass
@@ -85,6 +91,7 @@ class _Adopted:
     parent_exit_confirmed: bool
     tmp_path_use: bool
     checked: bool = False
+    outcome: Outcome | None = None
 
 
 @dataclass
@@ -198,16 +205,21 @@ def _read_macos_identity(pid: int) -> _MacProcessIdentity | None:
         raise OrphanGuardError("macOS proc_pidinfo is unavailable for audit-token identity")
     proc_pidinfo.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_uint64,
                              ctypes.c_void_p, ctypes.c_int]
+    proc_pidinfo.restype = ctypes.c_int
     info = _BSDInfoWithUnique()
     ctypes.set_errno(0)
-    count = proc_pidinfo(pid, 18, 0, ctypes.byref(info), ctypes.sizeof(info))
+    expected_size = ctypes.sizeof(info)
+    count = proc_pidinfo(pid, _PROC_PIDT_BSDINFOWITHUNIQID, 0,
+                         ctypes.byref(info), expected_size)
     if count == 0:
         error_number = ctypes.get_errno()
         if error_number in (errno.ESRCH, errno.ENOENT):
             return None
         raise OSError(error_number, "cannot read macOS audit-token process identity", pid)
-    if count != ctypes.sizeof(info):
-        raise OrphanGuardError("macOS process identity and PID version were not read together")
+    if count != expected_size:
+        raise OrphanGuardError(
+            f"macOS proc_pidinfo returned {count} bytes; expected {expected_size} "
+            "for combined process identity")
     if info.bsd.pid != pid or info.unique.idversion <= 0:
         raise OrphanGuardError("macOS process identity has no valid PID version")
     return _MacProcessIdentity(
@@ -270,26 +282,49 @@ class _PidfdHandle:
 class _MacAuditTokenHandle:
     """A Darwin process generation with strict audit-token-only signal authority."""
 
-    def __init__(self, pid: int) -> None:
+    def __init__(self, pid: int, *, process: subprocess.Popen[bytes] | None = None) -> None:
+        if process is not None and process.pid != pid:
+            raise ValueError("macOS bound process pid does not match its captured identity")
         identity = _read_macos_identity(pid)
         if identity is None:
             raise ProcessLookupError(f"process {pid} exited before audit-token registration")
         self.pid = pid
+        self._process = process
         self._identity = identity
         self.identity = ("darwin-audit-token", identity)
         self._closed = False
 
+    def _read_current_identity(self) -> _MacProcessIdentity | None:
+        current = _read_macos_identity(self.pid)
+        if current is not None and current == self._identity:
+            return current
+        if self._process is None:
+            if current is None:
+                raise OrphanGuardError(
+                    "macOS process identity is unavailable without a waitable child handle")
+            return current
+        if self._process.poll() is None:
+            reason = "not found" if current is None else "does not match the captured generation"
+            raise OrphanGuardError(
+                f"macOS process identity {reason} while registered child remains alive")
+        return None
+
     def is_current(self) -> bool:
         if self._closed:
             raise OrphanGuardError("retained macOS audit-token identity is closed")
-        current = _read_macos_identity(self.pid)
+        current = self._read_current_identity()
         return current is not None and current == self._identity
 
     def is_alive(self) -> bool:
         if self._closed:
             raise OrphanGuardError("retained macOS audit-token identity is closed")
-        current = _read_macos_identity(self.pid)
-        return current is not None and current == self._identity and not current.zombie
+        current = self._read_current_identity()
+        if current is None or current != self._identity:
+            return False
+        if current.zombie and self._process is not None and self._process.poll() is None:
+            raise OrphanGuardError(
+                "macOS process is marked zombie but registered child exit is not wait-confirmed")
+        return not current.zombie
 
     def send_signal(self, signum: int) -> None:
         signum = _positive_signal(signum, "audit-token")
@@ -317,6 +352,12 @@ class _MacAuditTokenHandle:
     def wait_exit(self, timeout: float) -> bool:
         if not math.isfinite(timeout) or timeout < 0:
             raise ValueError("exit wait timeout must be finite and nonnegative")
+        if self._process is not None:
+            try:
+                self._process.wait(timeout=timeout)
+            except subprocess.TimeoutExpired:
+                return False
+            return True
         deadline = time.monotonic() + timeout
         while True:
             if not self.is_alive():
@@ -369,7 +410,7 @@ def _system_handle_factory(process: subprocess.Popen[bytes], *, platform: str) -
     if platform.startswith("linux"):
         return _PidfdHandle(process.pid)
     if platform == "darwin":
-        return _MacAuditTokenHandle(process.pid)
+        return _MacAuditTokenHandle(process.pid, process=process)
     raise OrphanGuardError(f"bound process signaling is unsupported on {platform}")
 
 
@@ -436,14 +477,48 @@ class OrphanGuard:
         for scope in self._scopes:
             for launch in scope.launches:
                 if scope.ended and not launch.checked:
-                    launch.checked = True
-                    self._check_launch(scope, launch, deadline)
+                    self._check_unit(
+                        scope, launch,
+                        lambda scope=scope, launch=launch: self._check_launch(
+                            scope, launch, deadline))
             for adopted in scope.adopted:
                 if not adopted.checked:
-                    adopted.checked = True
-                    self._check_adopted(scope, adopted, deadline)
+                    self._check_unit(
+                        scope, adopted,
+                        lambda scope=scope, adopted=adopted: self._check_adopted(
+                            scope, adopted, deadline))
         failed = any(outcome.kind != "confirmed exit" for outcome in self._outcomes)
-        return Report(tuple(self._outcomes), failed)
+        unit_outcomes = tuple(
+            unit.outcome
+            for scope in self._scopes if scope.ended
+            for unit in (*scope.launches, *scope.adopted)
+            if unit.checked and unit.outcome is not None)
+        return Report(tuple(self._outcomes), failed, unit_outcomes)
+
+    def _check_unit(self, scope: _Scope, unit: _Launch | _Adopted,
+                    check: Callable[[], None]) -> None:
+        """Record one canonical disposition even when an adapter check fails."""
+        if unit.checked:
+            return
+        unit.checked = True
+        first_outcome = len(self._outcomes)
+        try:
+            check()
+        except Exception as error:
+            self._unverified(
+                unit.pid,
+                f"registered process in scope {scope.name!r} could not be checked: "
+                f"{_error_text(error)}")
+        events = self._outcomes[first_outcome:]
+        if not events:
+            self._unverified(
+                unit.pid,
+                f"registered process in scope {scope.name!r} produced no check outcome")
+            events = self._outcomes[first_outcome:]
+        unverified = next((event for event in reversed(events)
+                           if event.kind == "cleanup unverified"), None)
+        leak = next((event for event in events if event.kind == "leak"), None)
+        unit.outcome = unverified or leak or events[-1]
 
     def _check_launch(self, scope: _Scope, launch: _Launch, deadline: float) -> None:
         current, alive, detail = _probe(launch.bound_handle, launch.identity)

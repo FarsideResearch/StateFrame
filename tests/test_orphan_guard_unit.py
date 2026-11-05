@@ -151,10 +151,204 @@ def test_macos_bound_handle_probes_the_captured_process_generation(monkeypatch):
 
     observed[pid] = replace(captured, zombie=True)
     assert not handle.is_alive()
-
     observed[pid] = replace(captured, start_usec=201, zombie=False)
     assert not handle.is_current()
     assert not handle.is_alive()
+
+
+def test_macos_identity_capture_uses_complete_combined_proc_pidinfo_record(monkeypatch):
+    class _ProcPidInfo:
+        argtypes: object = None
+        restype: object = None
+
+        def __call__(self, pid, flavor, arg, buffer, buffer_size):
+            assert flavor == orphan_guard._PROC_PIDT_BSDINFOWITHUNIQID
+            assert arg == 0
+            assert buffer_size == orphan_guard.ctypes.sizeof(
+                orphan_guard._BSDInfoWithUnique)
+            info = orphan_guard.ctypes.cast(
+                buffer, orphan_guard.ctypes.POINTER(orphan_guard._BSDInfoWithUnique)).contents
+            info.bsd.pid = pid
+            info.bsd.uid = 501
+            info.bsd.start_sec = 100
+            info.bsd.start_usec = 200
+            info.bsd.status = 2
+            info.unique.idversion = 9
+            return buffer_size
+
+    class _Libproc:
+        def __init__(self):
+            self.proc_pidinfo = _ProcPidInfo()
+
+    monkeypatch.setattr(orphan_guard.ctypes, "CDLL", lambda *args, **kwargs: _Libproc())
+
+    identity = orphan_guard._read_macos_identity(7346)
+
+    assert identity == orphan_guard._MacProcessIdentity(
+        pid=7346, uid=501, start_sec=100, start_usec=200,
+        pid_version=9, zombie=False)
+
+
+def test_macos_bound_handle_confirms_exit_through_registered_child_wait(monkeypatch):
+    pid = 7347
+    identity = orphan_guard._MacProcessIdentity(
+        pid=pid, uid=501, start_sec=100, start_usec=200,
+        pid_version=10, zombie=False)
+    monkeypatch.setattr(orphan_guard, "_read_macos_identity", lambda requested: identity)
+
+    class _WaitableProcess:
+        def __init__(self):
+            self.pid = pid
+            self.waits: list[float] = []
+
+        def wait(self, timeout: float) -> int:
+            self.waits.append(timeout)
+            return -int(signal.SIGTERM)
+
+    process = _WaitableProcess()
+    handle = orphan_guard._MacAuditTokenHandle(pid, process=process)
+
+    assert handle.wait_exit(0.25)
+    assert process.waits == [0.25]
+
+
+def test_macos_zombie_status_needs_waitable_child_exit_confirmation(monkeypatch):
+    pid = 7349
+    identity = orphan_guard._MacProcessIdentity(
+        pid=pid, uid=501, start_sec=100, start_usec=200,
+        pid_version=12, zombie=True)
+    monkeypatch.setattr(orphan_guard, "_read_macos_identity", lambda requested: identity)
+
+    class _LiveChild:
+        def __init__(self):
+            self.pid = pid
+
+        def poll(self) -> None:
+            return None
+
+    handle = orphan_guard._MacAuditTokenHandle(pid, process=_LiveChild())
+
+    with pytest.raises(orphan_guard.OrphanGuardError, match="zombie.*wait-confirmed"):
+        handle.is_alive()
+
+
+def test_macos_esrch_for_live_registered_child_is_cleanup_unverified(tmp_path, monkeypatch):
+    class _ProcPidInfo:
+        argtypes: object = None
+        restype: object = None
+        calls = 0
+
+        def __call__(self, pid, _flavor, _arg, buffer, buffer_size):
+            self.calls += 1
+            if self.calls > 1:
+                orphan_guard.ctypes.set_errno(errno.ESRCH)
+                return 0
+            info = orphan_guard.ctypes.cast(
+                buffer, orphan_guard.ctypes.POINTER(orphan_guard._BSDInfoWithUnique)).contents
+            info.bsd.pid = pid
+            info.bsd.uid = 501
+            info.bsd.start_sec = 100
+            info.bsd.start_usec = 200
+            info.bsd.status = 2
+            info.unique.idversion = 9
+            return buffer_size
+
+    class _Libproc:
+        def __init__(self):
+            self.proc_pidinfo = _ProcPidInfo()
+
+    libproc = _Libproc()
+    monkeypatch.setattr(orphan_guard.ctypes, "CDLL", lambda *args, **kwargs: libproc)
+    guard = orphan_guard.OrphanGuard(tmp_path, platform="darwin")
+    scope = guard.scope("macos-esrch-live-child")
+    launch = scope.launch(
+        [sys.executable, "-c", "import time; time.sleep(30)"], cwd=tmp_path,
+        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    scope.end()
+    try:
+        report = guard.check()
+
+        assert [outcome.kind for outcome in report.outcomes] == ["cleanup unverified"]
+        assert len(report.unit_outcomes) == 1
+        assert report.unit_outcomes[0].kind == "cleanup unverified"
+        assert report.unit_outcomes[0].pid == launch.pid
+        assert launch.process.poll() is None
+        assert libproc.proc_pidinfo.calls == 2
+    finally:
+        _stop_helper(launch.process)
+        guard.close()
+
+
+def test_macos_missing_identity_without_waitable_child_is_unverified(tmp_path, monkeypatch):
+    pid = 7348
+    captured = orphan_guard._MacProcessIdentity(
+        pid=pid, uid=501, start_sec=100, start_usec=200,
+        pid_version=11, zombie=False)
+    observed = iter((captured, None))
+    monkeypatch.setattr(
+        orphan_guard, "_read_macos_identity", lambda requested: next(observed))
+    guard = orphan_guard.OrphanGuard(tmp_path, platform="darwin")
+    scope = guard.scope("macos-adopted-missing-identity")
+    handle = orphan_guard._MacAuditTokenHandle(pid)
+    scope.register_adopted(
+        pid, bound_handle=handle, attributed=True,
+        parent_transition=(123, 456), parent_exit_confirmed=True, tmp_path_use=True)
+    scope.end()
+    try:
+        report = guard.check()
+
+        assert [outcome.kind for outcome in report.outcomes] == ["cleanup unverified"]
+        assert len(report.unit_outcomes) == 1
+        assert report.unit_outcomes[0].kind == "cleanup unverified"
+        assert report.unit_outcomes[0].pid == pid
+    finally:
+        guard.close()
+
+
+def test_ended_registered_units_have_one_canonical_outcome_each(tmp_path):
+    script = tmp_path / "registered_helper.py"
+    script.write_text("import time\ntime.sleep(30)\n", encoding="utf-8")
+    handles: list[_LiveHandle] = []
+
+    class _UninspectableHandle(_LiveHandle):
+        def is_current(self) -> bool:
+            raise OSError("identity probe failed")
+
+    def handle_factory(process: subprocess.Popen[bytes], *, platform: str):
+        handle = (_UninspectableHandle(process.pid) if not handles else
+                  _LiveHandle(process.pid))
+        handles.append(handle)
+        return handle
+
+    guard = orphan_guard.OrphanGuard(tmp_path, handle_factory=handle_factory)
+    launches = []
+    adopted_pid = 98765
+    adopted_handle = _LiveHandle(adopted_pid)
+    try:
+        for index in range(2):
+            scope = guard.scope(f"registered-unit-{index}")
+            launches.append(scope.launch(
+                [sys.executable, str(script)], cwd=tmp_path,
+                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL))
+            if index == 1:
+                scope.register_adopted(
+                    adopted_pid, bound_handle=adopted_handle, attributed=True,
+                    parent_transition=(123, 456), parent_exit_confirmed=True,
+                    tmp_path_use=True)
+            scope.end()
+
+        report = guard.check()
+        assert len(report.unit_outcomes) == len(launches) + 1
+        assert {outcome.pid for outcome in report.unit_outcomes} == (
+            {launch.pid for launch in launches} | {adopted_pid})
+        assert {outcome.kind for outcome in report.unit_outcomes} == {
+            "cleanup unverified", "leak"}
+        assert guard.check().unit_outcomes == report.unit_outcomes
+    finally:
+        for launch in launches:
+            _stop_helper(launch.process)
+        guard.close()
 
 
 @pytest.mark.parametrize(
