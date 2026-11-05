@@ -11,6 +11,7 @@ from __future__ import annotations
 import kernel_frame_routes as _frame_routes
 
 import copy
+import hashlib
 import json
 import math
 import os
@@ -22,13 +23,13 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-import hashlib
 from collections import OrderedDict
 from collections.abc import Callable, Mapping, Sequence
 
 from kernel_context import token_estimate
 from kernel_measurement import profiled_function_span
 from kernel_endpoint_size import ENDPOINT_SIZE
+from kernel_request_auth_identity import auth_binding_for_key as _auth_binding_for_key
 
 
 SCHEMA = "stateframe-request-diet/1"
@@ -90,7 +91,6 @@ _TOKENIZER_UNAVAILABLE_REASONS = frozenset({
 # pressure walk can exceed 64 distinct bodies, then revisit them on another
 # budget pass. Keep the complete walk without retaining prompt text.
 _EXACT_TOKEN_COUNT_CACHE_ENTRIES = 512
-
 
 def resolve_tokenize_url(
         runtime: object | None = None,
@@ -645,8 +645,11 @@ class RequestTokenMeter:
 
     def tokenizer_identity(self, body: Mapping[str, object], *, endpoint: str | None = None) -> str:
         from kernel_request_measurement import PROJECTION_VERSION, digest
+        auth_binding = _auth_binding_for_key(self._tokenizer_auth_key)
         contract = {
             "endpoint": endpoint or self.endpoint, "model": body.get("model"),
+            "generation_endpoint": self._generation_endpoint,
+            "generation_auth_binding": auth_binding,
             "template": body.get("chat_template"),
             "template_options": body.get("chat_template_kwargs"),
             "projection": PROJECTION_VERSION,

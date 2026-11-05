@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.4.20 (2026-11-05)
+
+- Carried request token measurements are now invalidated when the auth binding or the generation endpoint changes, so a count measured for one provider or credential is never reused for another; unchanged bindings still reuse counts.
+  The binding is an HMAC-SHA256 with a per-install secret (~/.stateframe/identity.key, 0600), never the raw key or its hash.
+
 ## 0.4.19 (2026-11-05)
 
 - Docs: KNOWN_LIMITATIONS now warns that in-place runs and exported patches can change the line endings (CRLF, CR-only, mixed) or byte-order mark of text files in the edit scope that the model did not edit, and says how to check for and undo it. A fix is in progress.

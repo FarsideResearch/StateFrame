@@ -226,6 +226,12 @@ DROP_GLOBALS = {
         "lazy import holder of checkpoint helper classes; re-created on first use",
     ("mc_repo_intel_vendor.lsp_resolve", "_PROJECTS"):
         "jedi project cache holding a live jedi subprocess; rebuilt on demand from the files",
+    ("kernel_request_auth_identity", "_AUTH_BINDING_SECRET_CACHE"):
+        "installation keys are reloaded from StateFrame home after restore",
+    ("kernel_request_auth_identity", "_AUTH_BINDING_FALLBACK_SECRET"):
+        "fallback binding salt is process-local and regenerated after restore",
+    ("kernel_request_auth_identity", "_AUTH_BINDING_SECRET_LOCK"):
+        "process-local lock protecting auth binding secret cache",
 }
 # Host configuration the product child sets on the engine before work() runs. The new process's
 # host sets them again (possibly to new values: a raised --max-turns), and KEY is a credential that
