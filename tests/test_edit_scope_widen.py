@@ -27,6 +27,7 @@ from kernel_scope_widen_guard import admitted, write as guarded_write
 
 from _journal import measurement_events
 from acceptance._support import FIXTURES, Endpoint, PYTHON, environment, read_requests, run_case
+from tools.immediate_baseline import baseline_checkout  # noqa: F401 (pytest fixture)
 
 PRICING = "from app.rates import rate\n\ndef total(a, p):\n    return a * rate(p)\n"
 BROKEN_RATES = "def rate(p):\n    return 1 - p / 10\n"
@@ -559,11 +560,10 @@ def test_engine_child_lookup_requests_untruncated_ps_arguments(monkeypatch):
 
 
 @pytest.mark.host_sandbox
-def test_switch_off_request_bytes_match_base_release(tmp_path, tmp_path_factory):
+def test_switch_off_request_bytes_match_base_release(tmp_path, baseline_checkout):
     from test_hook_wiring_parity import _assert_only_wire_ids_moved, _run_checkout, _write_launchers
-    from tools.pinned_tree import pinned_tree
     current = Path(__file__).resolve().parents[1]
-    baseline = pinned_tree("0b057d3", tmp_path_factory)
+    baseline = baseline_checkout
     assert (baseline / "src/stateframe/runner.py").is_file()
     repo = tmp_path / "repo"
     shutil.copytree(current / "examples/discount_bug", repo)
