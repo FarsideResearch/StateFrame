@@ -671,3 +671,189 @@ def test_list_token_validation_accepts_only_nonnegative_exact_ints():
         meter = RequestTokenMeter(tokenizer=lambda _text, values=invalid: values)
         with pytest.raises(ValueError, match="invalid injected tokenizer response"):
             meter._count_tokens_uncached("invalid")
+
+
+def test_finalize_frame_candidate_has_bounded_copies_and_body_serializations(
+        monkeypatch, tmp_path):
+    import copy as copy_module
+    import kernel_code_bookmarks as bookmarks
+    import kernel_completion_owner as completion_owner
+    import kernel_execution_reply_budget as reply_budget
+    import kernel_frame_allocation_capture as allocation_capture
+    import kernel_frame_optional_allocation as optional_allocation
+    import kernel_stateframe_capacity as capacity
+    import kernel_stateframe_framefit5 as framefit5
+    import kernel_step_contract as step_contract
+    import kernel_request_source_window as source_window
+
+    monkeypatch.setenv("STATEFRAME_CODE_BOOKMARKS", "off")
+    monkeypatch.setenv("STATEFRAME_FINAL_CACHE_LAYOUT", "off")
+    bookmark = {
+        "path": "pkg/example.py", "symbol": "target", "revision": "sha256:rev",
+        "rank": 1, "start_line": 1, "end_line": 1,
+    }
+    state = {
+        "framefit5": {
+            "mode": framefit5.PRODUCT_MODE,
+            "action_ledger": {},
+            "code_bookmarks": [bookmark],
+            "read_facts": [{
+                "path": bookmark["path"], "current_revision": bookmark["revision"],
+                "body_delivery": "present",
+            }],
+        },
+    }
+    task = {"role": "user", "content": "Keep the request stable."}
+    body = {
+        "messages": [task, {
+            "role": "user", "content": framefit5._serialize_state_message({"state": state}),
+        }],
+        "tools": [],
+    }
+    plan = {"units": [], "paths": [], "deferred_paths": []}
+    runtime = SimpleNamespace(
+        frame_ceiling=8192, owner=SimpleNamespace(root=tmp_path), _code_bookmark_carry=(),
+    )
+    capture = SimpleNamespace(
+        request_id="perf-finalize-copy-budget", _framefit5_semantic_messages=[task],
+        _framefit5_task_message=task, _request_source_closure_override=plan,
+    )
+    meter = RequestTokenMeter(tokenizer=lambda _text: [1], template_overhead_tokens=0)
+    meter.bind_request(capture.request_id, capture.request_id)
+
+    import kernel_request_budget as request_budget
+    import kernel_frame_source_snapshot as source_snapshot
+
+    monkeypatch.setattr(request_budget, "_request_token_meter", lambda *_a, **_kw: meter)
+    monkeypatch.setattr(request_budget, "_lean_request_limits",
+                        lambda *_a, **_kw: (1_000_000, 100_000))
+    monkeypatch.setattr(request_budget, "_graceful_trim_optional_messages",
+                        lambda *_a, **_kw: None)
+    monkeypatch.setattr(completion_owner, "_current_tool_admission",
+                        lambda *_a, **_kw: (False, None))
+    monkeypatch.setattr(reply_budget, "fit_execution_replies", lambda *_a, **_kw: None)
+    monkeypatch.setattr(reply_budget, "project_execution_delivery",
+                        lambda semantic, *_a, **_kw: semantic)
+    monkeypatch.setattr(capacity, "fit_protected_frame",
+                        lambda *_a, **_kw: {"changed": False})
+    monkeypatch.setattr(capacity, "fit_protected_source_overhead", lambda *_a, **_kw: None)
+    monkeypatch.setattr(capacity, "within_protected_capacity", lambda *_a, **_kw: True)
+    monkeypatch.setattr(optional_allocation, "snapshot_optional_inputs",
+                        lambda *_a, **_kw: ({}, {}))
+    monkeypatch.setattr(framefit5, "_workspace_root", lambda *_a: tmp_path)
+    monkeypatch.setattr(source_snapshot, "recent_editable_read_windows", lambda *_a: [])
+    monkeypatch.setattr(source_snapshot, "public_check_source_windows", lambda *_a: [])
+    monkeypatch.setattr(source_snapshot, "editable_product_windows", lambda *_a: ([], []))
+    monkeypatch.setattr(source_snapshot, "frame_source_snapshot", lambda *_a: {})
+    monkeypatch.setattr(bookmarks, "resolve", lambda _root, row: {"revision": row["revision"]})
+    monkeypatch.setattr(bookmarks, "windows", lambda *_a: [])
+    monkeypatch.setattr(bookmarks, "enabled", lambda: False)
+    monkeypatch.setattr(source_window, "verify_final_source_delivery",
+                        lambda *_a, **_kw: {"status": "COMPLETE", "paths": {}})
+    monkeypatch.setattr(source_window, "source_delivery_satisfied", lambda _receipt: True)
+    monkeypatch.setattr(step_contract, "reconcile_final_source_access",
+                        lambda *_a, **_kw: False)
+
+    deepcopy_calls = 0
+    deepcopy_depth = 0
+    candidate = None
+    original_deepcopy = copy_module.deepcopy
+
+    def counted_deepcopy(value, memo=None):
+        nonlocal deepcopy_calls, deepcopy_depth, candidate
+        if deepcopy_depth == 0:
+            deepcopy_calls += 1
+        deepcopy_depth += 1
+        try:
+            cloned = (original_deepcopy(value) if memo is None
+                      else original_deepcopy(value, memo))
+        finally:
+            deepcopy_depth -= 1
+        if value is body:
+            candidate = cloned
+        return cloned
+
+    candidate_serializations = 0
+    original_dumps = json.dumps
+
+    def counted_dumps(value, *args, **kwargs):
+        nonlocal candidate_serializations
+        if value is candidate:
+            candidate_serializations += 1
+        return original_dumps(value, *args, **kwargs)
+
+    monkeypatch.setattr(copy_module, "deepcopy", counted_deepcopy)
+    monkeypatch.setattr(json, "dumps", counted_dumps)
+    result = allocation_capture.finalize_frame_candidate(
+        runtime, capture, body, frame_counter=lambda _value: 1,
+    )
+
+    assert result is candidate
+    assert capture._code_bookmark_transition[0] is True
+    assert capture._code_bookmark_transition[1][0]["path"] == bookmark["path"]
+    # Four top-level clones remain: caller-body isolation, incoming-plan
+    # isolation, the independently retained receipt, and the published closure
+    # snapshot. Bookmark/source snapshots and inactive optional inputs are shared.
+    # The unchanged body is serialized exactly eight times: meter wire size,
+    # measured-pair chars, frozen chars+digest, one source-proof payload,
+    # one frozen identity check, and final carried chars+digest. Reuse of the
+    # prepared source-proof wire covers all later size checks and measurement bind.
+    # Candidate counts are exact on this fixture; the combined assertion also
+    # exposes both pass-1 baseline values in the planted control run.
+    assert (deepcopy_calls, candidate_serializations) == (4, 8)
+
+
+def test_source_plan_snapshot_detaches_metadata_and_shares_text_snapshot():
+    import kernel_frame_allocation_capture as allocation_capture
+
+    source_contents = {"pkg/example.py": "VALUE = 1\n"}
+    plan = {
+        "deferred_paths": ["pkg/example.py"],
+        "units": [{"path": "pkg/example.py", "start_line": 1, "end_line": 1}],
+        "source_contents": source_contents,
+    }
+
+    snapshot = allocation_capture._copy_source_plan_snapshot(plan)
+
+    assert snapshot is not plan
+    assert snapshot["deferred_paths"] is not plan["deferred_paths"]
+    assert snapshot["units"] is not plan["units"]
+    assert snapshot["source_contents"] is source_contents
+    snapshot["deferred_paths"].append("pkg/other.py")
+    assert plan["deferred_paths"] == ["pkg/example.py"]
+
+
+def test_route_probe_snapshot_isolates_only_delivery_mutation_maps():
+    import kernel_frame_allocation_capture as allocation_capture
+
+    delivery = {"pkg/previous.py": {"status": "COMPLETE"}}
+    coverage = {
+        "delivered_span": {"status": "PARTIAL", "delivered": 0},
+        "acquired_span": {"status": "UNKNOWN", "acquired": 0},
+        "unchanged": {"value": 1},
+    }
+    plan = {
+        "units": [{"path": "pkg/example.py", "start_line": 1, "end_line": 1}],
+        "source_contents": {"pkg/example.py": "VALUE = 1\n"},
+        "delivery": delivery,
+        "coverage": coverage,
+    }
+
+    route_plan = allocation_capture._copy_source_delivery_route_plan(plan)
+
+    assert route_plan is not plan
+    assert route_plan["units"] is plan["units"]
+    assert route_plan["source_contents"] is plan["source_contents"]
+    assert route_plan["delivery"] is not delivery
+    assert route_plan["delivery"]["pkg/previous.py"] is delivery["pkg/previous.py"]
+    assert route_plan["coverage"] is not coverage
+    assert route_plan["coverage"]["delivered_span"] is not coverage["delivered_span"]
+    assert route_plan["coverage"]["acquired_span"] is not coverage["acquired_span"]
+    assert route_plan["coverage"]["unchanged"] is coverage["unchanged"]
+
+    route_plan["delivery"]["pkg/example.py"] = {"status": "PARTIAL"}
+    route_plan["coverage"]["delivered_span"]["delivered"] = 1
+    route_plan["coverage"]["acquired_span"]["acquired"] = 1
+    assert "pkg/example.py" not in delivery
+    assert coverage["delivered_span"]["delivered"] == 0
+    assert coverage["acquired_span"]["acquired"] == 0
