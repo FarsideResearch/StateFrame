@@ -765,6 +765,7 @@ class ContinuationJournal(AuditJournal):
         self._subscribers: dict[str, Callable[[dict], None]] = {}
         self._subscriber_kinds: dict[str, frozenset[str] | None] = {}
         self._subscriber_cursors: dict[str, int] = {}
+        self._subscriber_cursor_kinds: dict[str, frozenset[str] | None] = {}
         self._publication_stats = {
             "replayed": 0, "published": 0, "filtered": 0, "deep_copies": 0,
         }
@@ -962,21 +963,89 @@ class ContinuationJournal(AuditJournal):
 
     def subscribe(self, name: str, observer: Callable[[dict], None], *,
                   kinds: Sequence[str] | None = None) -> None:
-        """Replay then attach atomically; only one projection per named slot."""
+        """Validate replay, commit each completed delivery, then attach the observer."""
         with self.ownership():
             if self._notifying or not name or name in self._subscribers or not callable(observer):
                 raise JournalError("invalid or already attached projection")
             selected = None if kinds is None else frozenset(str(kind) for kind in kinds)
             if selected is not None and not all(selected):
                 raise JournalError("subscriber kinds must be non-empty strings")
-            for record in self.records():
-                self._subscriber_cursors[name] = int(record["sequence"])
-                if selected is None or record.get("kind") in selected:
-                    self._publication_stats["replayed"] += 1
-                    self._publication_stats["deep_copies"] += 1
-                    self._notify_isolated(name, observer, record)
-            self._subscribers[name] = observer
-            self._subscriber_kinds[name] = selected
+            legacy_mode = self._record_cache_limit is None
+            if legacy_mode:
+                # Legacy cached_records() exposes the live dictionaries. Use the
+                # append-maintained index so each durable row is parsed once,
+                # including a committed prefix on retry, without a separate scan.
+                self._ensure_record_index()
+                final_cursor = self._sequence
+            else:
+                final_cursor = 0
+                for record in self.records(rebuild=False):
+                    final_cursor = int(record["sequence"])
+            # Bounded mode validates the full stream before delivery. Legacy mode
+            # validates it during indexed delivery; both paths stream in bounded
+            # windows without retaining a second set of rows.
+            self.assert_owner()
+            if (final_cursor != self._sequence
+                    or len(self._record_offsets) != final_cursor
+                    or len(self._record_hashes) != final_cursor
+                    or (final_cursor and self._record_hashes[-1] != self._head)):
+                raise JournalError("validated replay range does not match durable head")
+            previous_kinds = self._subscriber_cursor_kinds.get(name)
+            if (name in self._subscriber_cursors
+                    and (name not in self._subscriber_cursor_kinds
+                         or previous_kinds != selected)):
+                # A cursor skips every earlier row, including rows excluded by
+                # the filter from a failed attempt. A changed filter starts over.
+                self._subscriber_cursors[name] = 0
+            resume_cursor = self._subscriber_cursors.get(name, 0)
+            if (type(resume_cursor) is not int
+                    or resume_cursor < 0 or resume_cursor > final_cursor):
+                raise JournalError("subscriber cursor is outside validated replay range")
+
+            # Bind any partial cursor to the filter that produced it. Re-entrant
+            # reads may see the committed prefix; a BaseException leaves its row
+            # uncommitted and makes it the next row for a same-filter retry.
+            self._subscriber_cursor_kinds[name] = selected
+            self._notifying = True
+            try:
+                page_size = self._record_cache_limit or RECORD_CACHE_LIMIT
+                page_size = max(1, page_size)
+                first_cursor = 0 if legacy_mode else resume_cursor
+                for page_start in range(first_cursor, final_cursor, page_size):
+                    page_stop = min(final_cursor, page_start + page_size)
+                    # Filter before observer isolation; _notify_isolated makes
+                    # the sole delivered-row copy.
+                    records = (
+                        self._indexed_records(page_start + 1, page_stop)
+                        if legacy_mode
+                        else self._record_range(page_start, page_stop, detached=False)
+                    )
+                    for record in records:
+                        sequence = int(record["sequence"])
+                        # Legacy retries validate their committed prefix, but do
+                        # not filter, deliver, or copy those already committed rows.
+                        if legacy_mode and sequence <= resume_cursor:
+                            continue
+                        if selected is not None and record.get("kind") not in selected:
+                            continue
+                        self.assert_owner()
+                        # Match live fanout: ordinary observer exceptions are
+                        # isolated and reported, while BaseException still escapes.
+                        self._notify_isolated(name, observer, record)
+                        # Cursor and counters form one committed row transition. The
+                        # callback above can re-enter journal reads before this point.
+                        self._subscriber_cursors[name] = sequence
+                        self._publication_stats["replayed"] += 1
+                        self._publication_stats["deep_copies"] += 1
+                self.assert_owner()
+                if final_cursor:
+                    # Preserve filtered cursor gaps at successful handoff, as live
+                    # publication advances the cursor for every durable row.
+                    self._subscriber_cursors[name] = final_cursor
+                self._subscribers[name] = observer
+                self._subscriber_kinds[name] = selected
+            finally:
+                self._notifying = False
         self._report_observer_failures()
 
     def subscriber_cursor(self, name: str) -> int:
@@ -1603,14 +1672,21 @@ class ContinuationJournal(AuditJournal):
                         if first_record is None:
                             first_record = resolved
                             if projection is not None:
-                                from kernel_stateframe_call_coverage import CoverageIndex, _CONTEXT_INDEXES
+                                from kernel_stateframe_call_coverage import CoverageIndex, _sha
 
                                 projection.run_id = resolved["run_id"]
                                 projection.task_id = resolved["task_id"]
-                                coverage_index = CoverageIndex(projection)
-                                existing = getattr(self, "_framefit_call_coverage_index", None)
-                                if existing is not None:
-                                    _CONTEXT_INDEXES[existing.context_handle] = existing
+                                # CoverageIndex.__init__ registers the instance in
+                                # the shared context registry. Keep replay state
+                                # detached until the full scan passes assert_owner.
+                                coverage_index = object.__new__(CoverageIndex)
+                                coverage_index.journal = projection
+                                coverage_index.sequence = 0
+                                coverage_index.ids = []
+                                coverage_index.members = set()
+                                coverage_index.chains = [_sha([])]
+                                coverage_index.frontier = []
+                                coverage_index.proofs = set()
                         if projection is not None:
                             from kernel_stateframe_call_coverage import EVENT
 
@@ -1677,13 +1753,24 @@ class ContinuationJournal(AuditJournal):
                         if coverage_index is not None:
                             # Preserve existing contexts referencing the live index.
                             existing = getattr(self, "_framefit_call_coverage_index", None)
+                            coverage_index.journal = self
                             if existing is not None:
+                                if (not isinstance(existing, type(coverage_index))
+                                        or existing.journal is not self):
+                                    raise JournalError(
+                                        "call coverage index belongs to a different journal")
+                                # Base CoverageIndex has no state-replacement
+                                # helper; update only after the scan's owner check.
                                 existing.__dict__.update(coverage_index.__dict__)
                                 coverage_index = existing
-                            coverage_index.journal = self
+                            else:
+                                # The base constructor is the registration path.
+                                # It runs only after the scan and owner check pass.
+                                staged_coverage_index = coverage_index
+                                coverage_index = type(staged_coverage_index)(self)
+                                coverage_index.__dict__.update(
+                                    staged_coverage_index.__dict__)
                             self._framefit_call_coverage_index = coverage_index
-                            from kernel_stateframe_call_coverage import _CONTEXT_INDEXES
-                            _CONTEXT_INDEXES[coverage_index.context_handle] = coverage_index
                         if self._framefit_receipt_history is not None:
                             from kernel_framefit_receipt_history import coverage_session_for
                             coverage = coverage_session_for(self, None)
