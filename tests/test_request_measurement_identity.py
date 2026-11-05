@@ -5,6 +5,7 @@ import json
 import multiprocessing
 import os
 import pickle
+import signal
 import stat
 import sys
 from pathlib import Path
@@ -14,6 +15,7 @@ import kernel_checkpoint
 import kernel_request_auth_identity
 import kernel_request_diet
 import pytest
+from fixtures.process_signals import signal_multiprocessing_owned
 from kernel_frame_allocation_capture import final_request_tokens
 from kernel_request_diet import RequestTokenMeter
 
@@ -224,6 +226,7 @@ def test_different_installs_journal_different_identity_for_same_key(
 
 
 def _spawn_auth_binding_worker(state_home: str, barrier, results) -> None:
+    os.setpgrp()
     if os.environ.get("STATEFRAME_HOME") != state_home:
         raise RuntimeError("spawned worker did not inherit the isolated StateFrame home")
     barrier.wait(timeout=30)
@@ -263,7 +266,11 @@ def test_concurrent_first_use_publishes_one_private_key(tmp_path, monkeypatch):
     finally:
         for process in processes:
             if process.is_alive():
-                process.terminate()
+                try:
+                    signal_multiprocessing_owned(process, signal.SIGTERM)
+                except ProcessLookupError:
+                    if process.is_alive():
+                        raise
             process.join(timeout=5)
         results.close()
         results.join_thread()
