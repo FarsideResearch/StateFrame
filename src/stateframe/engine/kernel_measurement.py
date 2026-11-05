@@ -1776,12 +1776,25 @@ def profiled_journal_span(name: str):
             kind = args[0] if args else kwargs.get("kind")
             boundary = getattr(journal, "_host_span_event_boundary", None)
             if callable(boundary) and isinstance(kind, str):
-                boundary("before", kind)
-            with turn_timing_step(name):
-                with profile_host_span(journal, name, request_id=kwargs.get("request_id")):
-                    result = function(journal, *args, **kwargs)
-            if callable(boundary) and isinstance(kind, str):
-                boundary("after", kind)
+                boundary("before", kind, kwargs)
+            result = None
+            succeeded = False
+            try:
+                with turn_timing_step(name):
+                    with profile_host_span(journal, name, request_id=kwargs.get("request_id")):
+                        result = function(journal, *args, **kwargs)
+                succeeded = True
+            finally:
+                if callable(boundary) and isinstance(kind, str):
+                    if succeeded:
+                        boundary("after", kind, result)
+                    elif kind == "request_submitted":
+                        # A failed submission still ends the previous request's
+                        # profiling window and clears its pause state.
+                        try:
+                            boundary("after", kind, None)
+                        except BaseException:
+                            pass
             timing = _turn_timing_recorder(journal)
             if kind == "response_received" and timing is not None:
                 timing.note_response(result)
