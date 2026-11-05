@@ -11,7 +11,7 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 _RETIRED_PARITY_BASELINES = {
     "test_hook_wiring_parity.py": "immediate base release",
-    "test_final_cache_layout_host.py": "e19c325",
+    "test_final_cache_layout_host.py": "immediate base release",
     "test_edit_scope_widen.py": "0b057d3",
 }
 # Keep fixture-repository files below tests/e2e out of collection without hiding its top-level tests.

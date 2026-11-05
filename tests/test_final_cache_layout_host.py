@@ -16,7 +16,7 @@ from kernel_cache_layout_view import CacheLayoutError, FINAL_LAYOUT_NAME, semant
 from kernel_stateframe_page_log import _payload_has_authority_keys
 from _journal import measurement_events
 from stateframe.scripted_endpoint import Script, serve
-from tools.pinned_tree import pinned_tree
+from tools.immediate_baseline import baseline_checkout  # noqa: F401  (pytest fixture)
 
 ROOT = Path(__file__).resolve().parents[1]
 pytestmark = pytest.mark.host_sandbox
@@ -62,14 +62,10 @@ def _parity_launchers(tmp_path):
     ("tiny_site", "Build the small static shop site described in the README."),
     ("brief_to_report", "Write the report the brief asks for."),
 ])
-def test_switch_off_bytes_match_base_release(tmp_path, tmp_path_factory, example, task):
-    baseline = pinned_tree("e19c325", tmp_path_factory)
-    released = subprocess.run(
-        ["git", "show", "e19c325:src/stateframe/engine/ENGINE_SOURCE.json"],
-        cwd=ROOT, capture_output=True, check=True).stdout
-    engine_record = baseline / "src/stateframe/engine/ENGINE_SOURCE.json"
-    assert engine_record.is_file()
-    assert engine_record.read_bytes() == released
+def test_switch_off_bytes_match_base_release(tmp_path, baseline_checkout, example, task):
+    # Immediate base release (SF_TEST_BASELINE_IMMEDIATE, else the merge base); see tools/immediate_baseline.py.
+    baseline = baseline_checkout
+    assert (baseline / "src/stateframe/engine/ENGINE_SOURCE.json").is_file()
     repo = tmp_path / "repo"
     shutil.copytree(ROOT / "examples" / example, repo)
     launcher, wrapper = _parity_launchers(tmp_path)
@@ -79,7 +75,7 @@ def test_switch_off_bytes_match_base_release(tmp_path, tmp_path_factory, example
         server = serve(script)
         run = tmp_path / "run"
         environment = {**os.environ, "PYTHONPATH": str(checkout / "src")}
-        # On by default since this release; the base release predates the switch, so pin it off.
+        # Pinned off on both sides: switch-off bytes must match the immediate base release.
         environment["STATEFRAME_FINAL_CACHE_LAYOUT"] = "off"
         environment["STATEFRAME_PAGE_LOG"] = "off"
         try:
