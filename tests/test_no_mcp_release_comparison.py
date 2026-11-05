@@ -31,9 +31,11 @@ def _check_mac_sandbox(data: bytes) -> None:
         pytest.skip(reason)
 
 
-def _capture_checked(*args, **kwargs) -> bytes:
+def _capture_checked(*args, stable_tool_head: str | None,
+                     final_cache_layout: str | None, **kwargs) -> bytes:
     try:
-        result = capture(*args, **kwargs)
+        result = capture(*args, stable_tool_head=stable_tool_head,
+                         final_cache_layout=final_cache_layout, **kwargs)
     except RuntimeError as error:
         _check_mac_sandbox(str(error).encode("utf-8", errors="replace"))
         raise
