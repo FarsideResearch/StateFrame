@@ -126,6 +126,51 @@ def _serialized_chars(body: Mapping[str, object]) -> int:
     return len(json.dumps(body, sort_keys=True, ensure_ascii=False))
 
 
+def _copy_source_plan_snapshot(plan: Mapping[str, object]) -> dict[str, object]:
+    """Detach mutable source-plan metadata while sharing its read-only text map."""
+    metadata = {key: value for key, value in plan.items() if key != "source_contents"}
+    copied = copy.deepcopy(metadata)
+    source_contents = plan.get("source_contents")
+    if "source_contents" in plan:
+        # Proof and layout consumers only read path→text snapshots. Sharing this
+        # map avoids recursively copying large file bodies at each finalize seam.
+        if (isinstance(source_contents, dict)
+                and all(isinstance(path, str) and isinstance(text, str)
+                        for path, text in source_contents.items())):
+            copied["source_contents"] = source_contents
+        else:
+            copied["source_contents"] = copy.deepcopy(source_contents)
+    return copied
+
+
+def _prepared_measurement_wire(meter: object, wire: bytes | None) -> dict[str, bytes]:
+    if wire is None:
+        return {}
+    from kernel_request_diet import RequestTokenMeter
+
+    if (type(meter) is RequestTokenMeter
+            and "bind_measurement" not in getattr(meter, "__dict__", {})):
+        return {"wire": wire}
+    return {}
+
+
+def _copy_source_delivery_route_plan(plan: Mapping[str, object]) -> dict[str, object]:
+    """Isolate the maps mutated by route probing without cloning source text."""
+    route_plan = dict(plan)
+    delivery = plan.get("delivery")
+    if isinstance(delivery, dict):
+        route_plan["delivery"] = dict(delivery)
+    coverage = plan.get("coverage")
+    if isinstance(coverage, dict):
+        route_coverage = dict(coverage)
+        for span_name in ("delivered_span", "acquired_span"):
+            span = coverage.get(span_name)
+            if isinstance(span, dict):
+                route_coverage[span_name] = dict(span)
+        route_plan["coverage"] = route_coverage
+    return route_plan
+
+
 @dataclass(frozen=True, slots=True)
 class FrozenRequestCounter:
     """The allocation's count and ratio remain authoritative for this request."""
@@ -231,17 +276,26 @@ def carry_final_request_tokens(body: Mapping[str, object], capture: object,
 
 def rebind_final_layout_trim(body: Mapping[str, object], meter: object,
                              capture: object, *, byte_limit: int,
-                             token_limit: int) -> tuple[int, str]:
+                             token_limit: int, wire: bytes | None = None) -> tuple[int, str]:
     """Make a trimmed canonical body the frozen base for layout and proof."""
-    tokens, method = final_request_tokens(body, meter, capture)
+    tokens, method = final_request_tokens(
+        body, meter, capture, wire_bytes=(len(wire) if wire is not None else None),
+    )
     carry_final_request_tokens(body, capture, tokens)
     capture._frame_candidate_measurement = meter.bind_measurement(
         body, tokens=tokens, method=method, request_id=str(capture.request_id),
-        max_request_bytes=byte_limit, max_prompt_tokens=token_limit)
+        max_request_bytes=byte_limit, max_prompt_tokens=token_limit,
+        **_prepared_measurement_wire(meter, wire))
     capture._frame_candidate_inputs["measurement_identity"] = method
     capture._frame_candidate_fallback_fit = method == "calibrated_bytes"
-    capture._frame_candidate_rejection_bound = (
-        meter.measure(body)[0] if method == "calibrated_bytes" else None)
+    if method == "calibrated_bytes":
+        rejection_measurement = (
+            _measure_source_candidate(meter, body, len(wire))
+            if wire is not None else meter.measure(body)
+        )
+        capture._frame_candidate_rejection_bound = rejection_measurement[0]
+    else:
+        capture._frame_candidate_rejection_bound = None
     return tokens, method
 
 
@@ -926,7 +980,9 @@ def finalize_frame_candidate(
             from kernel_stateframe_framefit5 import _serialize_state_message
             frame["code_bookmarks"] = bookmarks
             state_message["content"] = _serialize_state_message(payload)
-    collected_bookmarks = copy.deepcopy(bookmarks)
+    # The collected rows came from this parsed state or the collector and are
+    # only read below; fitter trials rewrite serialized messages, not these rows.
+    collected_bookmarks = bookmarks
     from kernel_frame_source_snapshot import (
         editable_product_windows, fit_recent_read_windows, public_check_source_windows,
         recent_editable_read_windows,
@@ -961,7 +1017,7 @@ def finalize_frame_candidate(
         plan = getattr(runtime, "_request_source_closure", None)
     if not isinstance(plan, Mapping):
         raise FrameRequestAllocationError("final allocation lacks source obligations")
-    plan = copy.deepcopy(dict(plan))
+    plan = _copy_source_plan_snapshot(plan)
     from kernel_frame_source_snapshot import frame_source_snapshot
     sources = frame_source_snapshot(runtime, plan)
     from kernel_completion_owner import _current_tool_admission
@@ -1137,16 +1193,18 @@ def finalize_frame_candidate(
                    for window in recent_windows)
 
     seen: set[tuple[tuple[str, ...], str]] = set()
+    candidate_wire = b""
     # Each selected path may first defer its omitted closure units and later
     # lose its retained read pages under pressure. The initial candidate may
     # also contain retained pages before any path is deferred.
     for _attempt in range(2 * len(plan.get("units", ())) + 3):
+        candidate_wire = json.dumps(candidate).encode()
         receipt = verify_final_source_delivery(
             plan,
             candidate["messages"],
             # Existing omission reconciliation requires proof over exact wire
             # bytes, including COMPLETE paths alongside deferred closures.
-            payload=json.dumps(candidate).encode(),
+            payload=candidate_wire,
             sources=sources,
         )
         if not source_delivery_satisfied(receipt):
@@ -1164,16 +1222,18 @@ def finalize_frame_candidate(
         if reconcile_final_source_access(candidate["messages"], receipt):
             # The StateFrame is part of the measured and source-proven body.
             # Rebind both receipts after the truthful source-access rewrite.
+            candidate_wire = json.dumps(candidate).encode()
             receipt = verify_final_source_delivery(
-                plan, candidate["messages"],
-                payload=json.dumps(candidate).encode(), sources=sources,
+                plan, candidate["messages"], payload=candidate_wire, sources=sources,
             )
             if not source_delivery_satisfied(receipt):
                 raise source_refusal(plan, receipt, sources)
-        tokens, method = final_request_tokens(candidate, meter, capture)
+        request_bytes = len(candidate_wire)
+        tokens, method = final_request_tokens(
+            candidate, meter, capture, wire_bytes=request_bytes,
+        )
         byte_limit = request_byte_limit(method)
-        request_bytes = _wire_bytes(candidate)
-        frame_token_count = frame_tokens(candidate)
+        frame_token_count = frame_tokens(candidate, wire_bytes=request_bytes)
         from kernel_stateframe_capacity import (
             protected_bytes, protected_limit,
         )
@@ -1232,13 +1292,13 @@ def finalize_frame_candidate(
             # copies remain on the draft. Spend those host copies only after
             # the complete wire fails to fit; the newest exchange stays pinned
             # and the rebuilt candidate is source-proved on the next pass.
-            without_deferred_copies = copy.deepcopy(candidate)
+            # The candidate is our owned body clone. This helper only replaces
+            # its messages list; with no removals the resulting list is identical.
             removed = _remove_deferred_source_excerpts(
-                without_deferred_copies["messages"], current,
+                candidate["messages"], current,
                 preserve_stateframe=True, protected_messages=protected,
             )
             if removed:
-                candidate = without_deferred_copies
                 assemble_selection()
                 byte_limit = trim_optional_candidate()
                 continue
@@ -1256,7 +1316,10 @@ def finalize_frame_candidate(
                 # route after omission, on a detached plan; never interpret a
                 # missing COMPLETE route as proof that the source is mandatory.
                 from kernel_request_evidence_closure import record_source_delivery
-                route_plan = copy.deepcopy(plan)
+                # record_source_delivery writes delivery rows and two coverage
+                # summaries. Isolate only those mutable maps; units, revisions,
+                # authority and source text are read-only in this route probe.
+                route_plan = _copy_source_delivery_route_plan(plan)
                 route = record_source_delivery(route_plan, path, ()).get("retrieval_route")
                 if not _executable_deferred_read_route(
                     path,
@@ -1340,8 +1403,9 @@ def finalize_frame_candidate(
                 fits=source_windows_fit,
                 candidate_nonfit=source_candidate_nonfit,
             )
+            candidate_wire = json.dumps(candidate).encode()
             receipt = verify_final_source_delivery(
-                plan, candidate["messages"], payload=json.dumps(candidate).encode(),
+                plan, candidate["messages"], payload=candidate_wire,
                 sources=sources,
             )
             if source_delivery_satisfied(receipt):
@@ -1365,39 +1429,54 @@ def finalize_frame_candidate(
             byte_limit = trim_optional_candidate()
         else:
             raise source_refusal(plan, receipt, sources)
-        tokens, method = final_request_tokens(candidate, meter, capture)
+        tokens, method = final_request_tokens(
+            candidate, meter, capture, wire_bytes=len(candidate_wire),
+        )
         byte_limit = request_byte_limit(method)
-    # Carry the same source input through allocation and replacement snapshots.
-    plan["source_contents"] = copy.deepcopy(sources)
-    # The last read-window pass can rewrite the candidate after the main fit.
-    # Refit that exact body before freezing its count for later projections.
-    tokens, method = final_request_tokens(candidate, meter, capture)
+    # This per-finalize source snapshot is shared by the plan and later readers;
+    # those consumers inspect its path→text entries without mutating them.
+    plan["source_contents"] = sources
+    # A late read-window pass refreshes tokens and candidate_wire itself. Without
+    # that pass, reuse the count from the successful main-loop candidate.
     byte_limit = request_byte_limit(method)
-    if (tokens > token_limit or _wire_bytes(candidate) > byte_limit):
+    request_bytes = len(candidate_wire)
+    if (tokens > token_limit or request_bytes > byte_limit):
         byte_limit = trim_optional_candidate()
+        candidate_wire = json.dumps(candidate).encode()
         receipt = verify_final_source_delivery(
-            plan, candidate["messages"], payload=json.dumps(candidate).encode(), sources=sources)
+            plan, candidate["messages"], payload=candidate_wire, sources=sources)
         if not source_delivery_satisfied(receipt):
             raise source_refusal(plan, receipt, sources)
-        tokens, method = final_request_tokens(candidate, meter, capture)
+        request_bytes = len(candidate_wire)
+        tokens, method = final_request_tokens(
+            candidate, meter, capture, wire_bytes=request_bytes,
+        )
         byte_limit = request_byte_limit(method)
-    if tokens > token_limit or _wire_bytes(candidate) > byte_limit:
+    else:
+        request_bytes = len(candidate_wire)
+    if tokens > token_limit or request_bytes > byte_limit:
         raise FrameFit5ImpossibleMinimum({
-            "request_bytes": _wire_bytes(candidate), "prompt_tokens": tokens,
+            "request_bytes": request_bytes, "prompt_tokens": tokens,
             "measure_method": method, "max_request_bytes": byte_limit,
             "max_prompt_tokens": token_limit,
         })
     # Bind the fitted body while retaining the method and ratio captured before
     # trimming. Later tokenizer availability cannot change this allocation.
     carry_final_request_tokens(candidate, capture, tokens)
-    tokens, method = final_request_tokens(candidate, meter, capture)
     capture._frame_candidate_measurement = meter.bind_measurement(
         candidate, tokens=tokens, method=method, request_id=str(capture.request_id),
         max_request_bytes=byte_limit, max_prompt_tokens=token_limit,
+        **_prepared_measurement_wire(meter, candidate_wire),
     )
+    # `plan` is already detached from its caller and remains the allocator's
+    # private mutable snapshot; the layout trim callback updates this same plan.
     capture._frame_candidate_inputs = {
-        "source_plan": copy.deepcopy(plan), "receipt": copy.deepcopy(receipt),
-        "sources": copy.deepcopy(sources), "optional_inputs": copy.deepcopy(optional),
+        "source_plan": plan,
+        "receipt": copy.deepcopy(receipt),
+        "sources": sources,
+        # The snapshot helper returns fresh inputs when no allocation is active;
+        # an active allocation's inputs remain separately detached from it.
+        "optional_inputs": copy.deepcopy(optional) if active is not None else optional,
         "byte_ceiling": byte_limit, "token_ceiling": token_limit,
         "measurement_identity": method,
     }
@@ -1428,14 +1507,15 @@ def finalize_frame_candidate(
                 token_limit = base_token_limit
                 layout_byte_ceiling = None
             from kernel_request_source_window import verify_final_source_delivery, source_delivery_satisfied
+            trimmed_wire = json.dumps(candidate).encode()
             trimmed_receipt = verify_final_source_delivery(
-                plan, candidate["messages"], payload=json.dumps(candidate).encode(), sources=sources)
+                plan, candidate["messages"], payload=trimmed_wire, sources=sources)
             if not source_delivery_satisfied(trimmed_receipt):
                 return False
             rebind_final_layout_trim(
                 candidate, meter, capture, byte_limit=request_byte_limit(frozen_method()),
-                token_limit=base_token_limit)
-            capture._frame_candidate_inputs["source_plan"] = copy.deepcopy(plan)
+                token_limit=base_token_limit, wire=trimmed_wire)
+            # source_plan already points at this owned plan and reflects the trim.
             capture._frame_candidate_inputs["receipt"] = copy.deepcopy(trimmed_receipt)
             capture.request_source_final_delivery = trimmed_receipt
             return True
@@ -1443,9 +1523,10 @@ def finalize_frame_candidate(
         capture._frame_candidate_inputs["_final_layout_trim"] = trim_for_final_layout
     capture._frame_candidate_fallback_fit = method == "calibrated_bytes"
     capture._frame_candidate_rejection_bound = (
-        meter.measure(candidate)[0] if method == "calibrated_bytes" else None
+        _measure_source_candidate(meter, candidate, request_bytes)[0]
+        if method == "calibrated_bytes" else None
     )
-    capture._request_source_closure_override = copy.deepcopy(plan)
+    capture._request_source_closure_override = _copy_source_plan_snapshot(plan)
     capture.request_source_final_delivery = receipt
     capture.request_budget_exceeded = False
     final_state = next(
@@ -1522,7 +1603,7 @@ def finalize_frame_candidate(
              collected_count=collected_bookmark_count,
              final_count=len(final_bookmarks) if isinstance(final_bookmarks, list) else 0,
              dispatch=False)
-    capture._code_bookmark_transition = (
-        active, copy.deepcopy(visible_bookmarks) if active else []
-    )
+    # Each row is a parsed snapshot from serialized candidate state or the
+    # immutable collected bookmark list; neither source is mutated afterward.
+    capture._code_bookmark_transition = (active, visible_bookmarks if active else [])
     return candidate
