@@ -357,6 +357,18 @@ def _readline_fd(fd: int, deadline: float, label: str) -> bytes:
             pytest.fail(f"setup: oversized readiness record for {label}", pytrace=False)
 
 
+def test_readline_fd_bounds_partial_readiness_records():
+    read_fd, write_fd = os.pipe()
+    try:
+        os.write(write_fd, b"rea")
+        deadline = time.monotonic() + 0.05
+        with pytest.raises(pytest.fail.Exception, match="timed out waiting for readiness"):
+            _readline_fd(read_fd, deadline, "readiness")
+    finally:
+        os.close(read_fd)
+        os.close(write_fd)
+
+
 def _read_json_fd(fd: int, deadline: float, label: str) -> dict[str, object]:
     try:
         value = json.loads(_readline_fd(fd, deadline, label))
@@ -1324,20 +1336,20 @@ def test_pytest_hook_ordering_and_registered_leak_share_inner_session(pytester, 
     """Fixture ordering passes while the same registered hook rejects a separate leak."""
     result = _run_inner(pytester, monkeypatch, r'''import atexit
 import os
-import select
 import signal
 import subprocess
 import sys
+import time
 import pytest
+from test_orphan_guard_acceptance import _readline_fd
 
 HELPER = "import os,signal; os.write(1,b'ready\\n'); signal.pause()"
 
 def wait_ready(process):
     if process.stdout is None:
         pytest.fail("setup: helper has no readiness stream", pytrace=False)
-    if not select.select([process.stdout], [], [], 20.0)[0]:
-        pytest.fail("setup: helper readiness timed out", pytrace=False)
-    if process.stdout.readline() != b"ready\n":
+    line = _readline_fd(process.stdout.fileno(), time.monotonic() + 20.0, "helper readiness")
+    if line != b"ready":
         pytest.fail("setup: helper sent invalid readiness", pytrace=False)
 
 def cleanup(process):
@@ -1393,11 +1405,12 @@ def test_pytest_hook_fails_inner_run_for_unverified_process(pytester, monkeypatc
     """The real teardown hook reports missing adoption evidence and fails the inner test."""
     result = _run_inner(pytester, monkeypatch, r'''import atexit
 import os
-import select
 import signal
 import subprocess
 import sys
+import time
 import pytest
+from test_orphan_guard_acceptance import _readline_fd
 
 HELPER = "import os,signal,sys; fd=os.open(sys.argv[1],os.O_CREAT|os.O_RDWR,0o600); os.write(1,b'ready\\n'); signal.pause()"
 
@@ -1415,9 +1428,8 @@ class Handle:
 def wait_ready(process):
     if process.stdout is None:
         pytest.fail("setup: helper has no readiness stream", pytrace=False)
-    if not select.select([process.stdout], [], [], 20.0)[0]:
-        pytest.fail("setup: helper readiness timed out", pytrace=False)
-    if process.stdout.readline() != b"ready\n":
+    line = _readline_fd(process.stdout.fileno(), time.monotonic() + 20.0, "helper readiness")
+    if line != b"ready":
         pytest.fail("setup: helper sent invalid readiness", pytrace=False)
 
 def cleanup(process):

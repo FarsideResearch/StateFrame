@@ -28,6 +28,7 @@ _PROVISIONS = frozenset({
     "filesystem_modes",
     "host_sandbox",
     "parity_baseline",
+    "pid_namespace",
     "sandbox_exec",
     "serial_lane",
     "unknown_uid_bwrap",
@@ -538,6 +539,53 @@ def _host_sandbox_problem() -> str | None:
     return f"host sandbox is unsupported on {sys.platform}"
 
 
+def _pid_namespace_problem() -> str | None:
+    if not sys.platform.startswith("linux"):
+        return "PID namespaces are only available on Linux"
+
+    executable = _sandbox_executable("bwrap")
+    if executable is not None:
+        tool = "bwrap"
+        command_prefix = [
+            executable, "--die-with-parent", "--unshare-user", "--uid", "0", "--gid", "0",
+            "--unshare-pid",
+        ]
+    else:
+        executable = _sandbox_executable("unshare")
+        if executable is None:
+            return "neither bwrap nor unshare is available for the PID namespace probe"
+        tool = "unshare"
+        command_prefix = [
+            executable, "--user", "--map-root-user", "--pid", "--fork", "--mount-proc", "--",
+        ]
+
+    try:
+        with tempfile.TemporaryDirectory(prefix="sf-must-run-pidns-") as directory:
+            if tool == "bwrap":
+                command_prefix.extend([
+                    "--ro-bind", "/", "/", "--bind", directory, directory,
+                    "--proc", "/proc", "--dev", "/dev", "--chdir", directory, "--",
+                ])
+            command = [*command_prefix, sys.executable, "-c", "import os; print(os.getpid())"]
+            result = subprocess.run(
+                command, cwd=directory, stdin=subprocess.DEVNULL, capture_output=True,
+                text=True, errors="replace", timeout=3.0, check=False,
+            )
+    except subprocess.TimeoutExpired:
+        return f"{tool} PID namespace probe timed out after 3 seconds"
+    except OSError as error:
+        return f"could not run {tool} PID namespace probe: {error}"
+
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout).strip().splitlines()
+        suffix = f": {detail[0][:180]}" if detail else ""
+        return f"{tool} exited {result.returncode}{suffix}"
+    child_pid = result.stdout.strip()
+    if child_pid != "1":
+        return f"{tool} did not create a PID namespace (child pid was {child_pid or 'empty'})"
+    return None
+
+
 def _filesystem_modes_problem() -> str | None:
     try:
         with tempfile.TemporaryDirectory(prefix="sf-must-run-mode-") as directory:
@@ -667,6 +715,8 @@ def _provision_problem(name: str, root: Path, manifest: GateManifest,
         return _sandbox_exec_problem()
     if name == "host_sandbox":
         return _host_sandbox_problem()
+    if name == "pid_namespace":
+        return _pid_namespace_problem()
     if name == "parity_baseline":
         return _baseline_problem(root, manifest)
     if name == "filesystem_modes":

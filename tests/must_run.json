@@ -28,6 +28,7 @@
       "conditional_provisions": [
         "bwrap",
         "filesystem_modes",
+        "pid_namespace",
         "serial_lane",
         "unknown_uid_bwrap"
       ]
@@ -1282,12 +1283,15 @@
         }
       },
       "prerequisites": [
-        "host_sandbox"
+        "host_sandbox",
+        "pid_namespace"
       ],
-      "optional_prerequisites": [],
+      "optional_prerequisites": [
+        "pid_namespace"
+      ],
       "baseline": null,
       "witness_schema": "assertion_match",
-      "witness_assertion": "assert int(value[\"ppid\"]) == 1"
+      "witness_assertion": "assert events[\"guard_report\"].get(\"outcomes\") == []"
     },
     {
       "scenario_id": "test_process_signal_liveness_test_exiting_empty_cmdline_is_gone_before_launch_identity_mismatch",
