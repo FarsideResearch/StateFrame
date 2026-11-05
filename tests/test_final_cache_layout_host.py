@@ -98,8 +98,8 @@ def test_switch_off_bytes_match_base_release(tmp_path, baseline_checkout, exampl
     # like it; every other byte must still match the base release.
     from tools.compare_no_mcp_requests import (
         DERIVED_RESULT_FIELDS, MOVED_ID_FIELDS, planted_body_change_is_caught,
-        request_id_handle_mismatches, unbacked_result_hash_changes, wire_id_drift)
-    problems, kinds = wire_id_drift(outputs[0], outputs[1])
+        release_wire_id_drift, request_id_handle_mismatches, unbacked_result_hash_changes)
+    problems, kinds = release_wire_id_drift(outputs[0], outputs[1])
     assert not problems, problems
     assert set(kinds) <= MOVED_ID_FIELDS | DERIVED_RESULT_FIELDS, kinds
     assert unbacked_result_hash_changes(tmp_path / "baseline_run", tmp_path / "run") == []

@@ -9,6 +9,7 @@ parity is about hooks, not tool lists or cache layout.
 
 from __future__ import annotations
 
+import copy
 import json
 import os
 import signal
@@ -29,6 +30,7 @@ from fixtures.process_signals import record_identity, signal_run_owned, signal_r
 from tools.compare_no_mcp_requests import (
     DERIVED_RESULT_FIELDS, MOVED_ID_FIELDS, changed_id_chars, id_length_deltas,
     planted_body_change_is_caught, request_id_handle_mismatches,
+    release_request_schema_alignment, release_wire_id_drift,
     unbacked_result_hash_changes, wire_id_drift)
 from tools.immediate_baseline import baseline_checkout
 
@@ -219,13 +221,40 @@ def _assert_diet_payloads_match_release(baseline_payloads, current_payloads,
     char counts in the payload may move only for such a request, in the same direction and
     by no more than that change; with no ID-length change they must be equal.
     """
-    deltas, problems = id_length_deltas(list(baseline_requests), list(current_requests))
+    aligned_requests = release_request_schema_alignment(
+        list(baseline_requests), list(current_requests))
+    deltas, problems = id_length_deltas(aligned_requests, list(current_requests))
     assert not problems, problems
     changed = changed_id_chars(list(baseline_requests), list(current_requests))
     assert len(baseline_payloads) == len(current_payloads)
     for index, (old, new) in enumerate(zip(baseline_payloads, current_payloads)):
         delta = deltas[index] if index < len(deltas) else 0
         chars = changed[index] if index < len(changed) else 0
+        old = copy.deepcopy(old)
+        if index < len(aligned_requests):
+            schema_bytes = len(aligned_requests[index]) - len(baseline_requests[index])
+            if schema_bytes:
+                from kernel_context import token_estimate
+
+                old_tools = json.loads(baseline_requests[index])["tools"]
+                new_tools = json.loads(current_requests[index])["tools"]
+                schema_tokens = token_estimate(new_tools) - token_estimate(old_tools)
+                for field in ("request_bytes_before", "request_bytes_after"):
+                    old[field] += schema_bytes
+                old_sections = {row["section"]: row for row in old["sections"]}
+                new_sections = {row["section"]: row for row in new["sections"]}
+                for field in ("before_bytes", "after_bytes"):
+                    old_sections["schemas"][field] += schema_bytes
+                    assert old_sections["schemas"][field] == new_sections["schemas"][field]
+                for field in ("before_tokens", "after_tokens"):
+                    old_sections["schemas"][field] += schema_tokens
+                    assert old_sections["schemas"][field] == new_sections["schemas"][field]
+                for field in ("request_tokens_before", "request_tokens_after"):
+                    observed = new[field] - old[field]
+                    # Whole-request proxy rounding can differ by one token after
+                    # the exact schema-section delta; ID changes retain their bound.
+                    assert abs(observed - schema_tokens) <= chars + 1
+                    old[field] = new[field]
         problems = _size_count_problems(old, new, delta, f"payload[{index}]", chars)
         assert not problems, problems
     encode = lambda rows: json.dumps(_without_size_counts(rows), sort_keys=True).encode()  # noqa: E731
@@ -234,11 +263,53 @@ def _assert_diet_payloads_match_release(baseline_payloads, current_payloads,
     assert set(kinds) <= MOVED_ID_FIELDS, kinds
 
 
+def test_release_diet_counts_allow_only_verified_schema_effects():
+    from kernel_context import token_estimate
+    from tools.compare_no_mcp_requests import _OLD_BATCH_STR_REPLACE, _SCALAR_STR_REPLACE
+
+    def request(tool):
+        return json.dumps({"tools": [tool], "messages": [{"role": "user", "content": "task"}]},
+                          separators=(",", ":")).encode()
+
+    baseline_request = request(_OLD_BATCH_STR_REPLACE)
+    current_request = request(_SCALAR_STR_REPLACE)
+    byte_change = len(current_request) - len(baseline_request)
+    token_change = token_estimate([_SCALAR_STR_REPLACE]) - token_estimate([_OLD_BATCH_STR_REPLACE])
+    baseline = {"kind": "request_diet_applied", "request_bytes_before": 1000,
+                "request_bytes_after": 1000, "request_tokens_before": 300,
+                "request_tokens_after": 300, "sections": [
+                    {"section": "schemas", "before_bytes": 500, "after_bytes": 500,
+                     "before_tokens": 125, "after_tokens": 125},
+                    {"section": "task", "before_bytes": 50, "after_bytes": 50,
+                     "before_tokens": 13, "after_tokens": 13}]}
+    current = copy.deepcopy(baseline)
+    for field in ("request_bytes_before", "request_bytes_after"):
+        current[field] += byte_change
+    for field in ("request_tokens_before", "request_tokens_after"):
+        current[field] += token_change + 1  # Whole-request proxy rounding.
+    for field in ("before_bytes", "after_bytes"):
+        current["sections"][0][field] += byte_change
+    for field in ("before_tokens", "after_tokens"):
+        current["sections"][0][field] += token_change
+    _assert_diet_payloads_match_release([baseline], [current],
+                                        [baseline_request], [current_request])
+    wrong_section = copy.deepcopy(current)
+    wrong_section["sections"][1]["after_bytes"] += 1
+    with pytest.raises(AssertionError):
+        _assert_diet_payloads_match_release([baseline], [wrong_section],
+                                            [baseline_request], [current_request])
+    wrong_token_count = copy.deepcopy(current)
+    wrong_token_count["request_tokens_after"] += 2
+    with pytest.raises(AssertionError):
+        _assert_diet_payloads_match_release([baseline], [wrong_token_count],
+                                            [baseline_request], [current_request])
+
+
 def _assert_only_wire_ids_moved(baseline_requests, current_requests, current_run=None,
                                 baseline_run=None):
     """The receipt-determinism change (11-03) moved request_id and the receipt IDs that are
     derived like it. Everything else must still be byte-identical to the base release."""
-    problems, kinds = wire_id_drift(list(baseline_requests), list(current_requests))
+    problems, kinds = release_wire_id_drift(list(baseline_requests), list(current_requests))
     assert not problems, problems
     assert set(kinds) <= MOVED_ID_FIELDS | DERIVED_RESULT_FIELDS, kinds
     # The comparison itself still fails on any other one-byte change.
