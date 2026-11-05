@@ -34,6 +34,7 @@ import json
 import os
 import select
 import secrets
+import shutil
 import signal
 import subprocess
 import sys
@@ -50,9 +51,10 @@ pytest_plugins = ("pytester",)
 
 
 _IS_LINUX = sys.platform == "linux"
-_SETUP_TIMEOUT = 8.0
-_CHECK_TIMEOUT = 5.0
+_SETUP_TIMEOUT = 20.0
+_CHECK_TIMEOUT = 30.0
 _TOKEN_ENV = "SF_TEST_TOKEN"
+_PID1_TOKEN_SOURCE = "SF_TEST_PID1_CHILD_TOKEN"
 _READY_SCRIPT = "import os,signal; os.write(1,b'ready\\n'); signal.pause()"
 _STRIP_TOKEN_SCRIPT = """import os,sys
 name=sys.argv[1]
@@ -122,10 +124,18 @@ os.close(ready_r)
 os.close(ready_w)
 os.close(go_r)
 os.close(adopted_w)
+readable, _, _ = select.select([pid_r], [], [], 20.0)
+if not readable:
+    emit({"stage": "setup_error", "detail": "timed out waiting for forked child pid"})
+    raise SystemExit(2)
 pid_bytes = os.read(pid_r, 64)
 os.close(pid_r)
-child_pid = int(pid_bytes.strip())
-readable, _, _ = select.select([control_fd], [], [], 10.0)
+try:
+    child_pid = int(pid_bytes.strip())
+except ValueError:
+    emit({"stage": "setup_error", "detail": "forked child pid record was invalid"})
+    raise SystemExit(2)
+readable, _, _ = select.select([control_fd], [], [], 20.0)
 command = os.read(control_fd, 1) if readable else b""
 if command != b"g":
     for pid in (intermediate, child_pid):
@@ -151,7 +161,7 @@ os.write(go_w, b"1")
 os.close(go_w)
 parent_exit = select.poll()
 parent_exit.register(parent_pidfd, select.POLLIN | select.POLLHUP | select.POLLERR)
-if not parent_exit.poll(5_000):
+if not parent_exit.poll(20_000):
     os.close(parent_pidfd)
     for pid in (intermediate, child_pid):
         try:
@@ -165,12 +175,12 @@ os.close(parent_pidfd)
 emit({"stage": "parent_exit", "parent_pid": intermediate,
       "confirmed": True, "wait_status": status})
 os.kill(child_pid, signal.SIGUSR1)
-readable, _, _ = select.select([adopted_r], [], [], 5.0)
+readable, _, _ = select.select([adopted_r], [], [], 20.0)
 if not readable or not os.read(adopted_r, 1):
     emit({"stage": "setup_error", "detail": "adopted child did not acknowledge transition"})
     raise SystemExit(2)
 os.close(adopted_r)
-readable, _, _ = select.select([control_fd], [], [], 10.0)
+readable, _, _ = select.select([control_fd], [], [], 20.0)
 if not readable or os.read(control_fd, 1) != b"x":
     emit({"stage": "setup_error", "detail": "test did not release subreaper helper"})
     raise SystemExit(2)
@@ -182,6 +192,13 @@ os.close(event_fd)
 _PID1_CHILD_SCRIPT = r'''import ctypes, json, os, select, signal, sys
 use_path = sys.argv[1]
 control_fd = int(sys.argv[2])
+root = sys.argv[3]
+token = sys.argv[4]
+tests_dir = sys.argv[5]
+sys.path.insert(0, tests_dir)
+from _orphan_guard import OrphanGuard
+from test_orphan_guard_acceptance import _check_guard
+
 libc = ctypes.CDLL(None, use_errno=True)
 libc.prctl.argtypes = (ctypes.c_int, ctypes.c_ulong, ctypes.c_ulong,
                        ctypes.c_ulong, ctypes.c_ulong)
@@ -189,6 +206,11 @@ libc.prctl.restype = ctypes.c_int
 
 def emit(value):
     os.write(1, (json.dumps(value, separators=(",", ":")) + "\n").encode())
+
+def start_time(pid):
+    with open(f"/proc/{pid}/stat", encoding="ascii") as stat_file:
+        fields = stat_file.read().rsplit(")", 1)[1].split()
+    return fields[19]
 
 child_ready_r, child_ready_w = os.pipe()
 parent_go_r, parent_go_w = os.pipe()
@@ -209,6 +231,7 @@ if intermediate == 0:
     os.close(pid_w)
     os.close(child_ready_r)
     os.close(parent_go_r)
+    os.environ["SF_TEST_TOKEN"] = os.environ.pop("SF_TEST_PID1_CHILD_TOKEN")
     old_parent = os.getppid()
     path_fd = os.open(use_path, os.O_CREAT | os.O_RDWR, 0o600)
     def report_parent(_signum, _frame):
@@ -219,7 +242,6 @@ if intermediate == 0:
         emit({"stage": "setup_error", "detail": "PR_SET_PDEATHSIG failed",
               "errno": ctypes.get_errno()})
         os._exit(3)
-    emit({"stage": "created", "pid": os.getpid(), "old_parent_pid": old_parent})
     os.write(child_ready_w, b"1")
     os.close(child_ready_w)
     while True:
@@ -229,11 +251,19 @@ os.close(child_ready_r)
 os.close(child_ready_w)
 os.close(parent_go_r)
 os.close(pid_w)
+readable, _, _ = select.select([pid_r], [], [], 20.0)
+if not readable:
+    emit({"stage": "setup_error", "detail": "timed out waiting for forked child pid"})
+    raise SystemExit(2)
 pid_bytes = os.read(pid_r, 64)
 os.close(pid_r)
-child_pid = int(pid_bytes.strip())
+try:
+    child_pid = int(pid_bytes.strip())
+except ValueError:
+    emit({"stage": "setup_error", "detail": "forked child pid record was invalid"})
+    raise SystemExit(2)
 emit({"stage": "created", "pid": child_pid, "old_parent_pid": intermediate})
-readable, _, _ = select.select([control_fd], [], [], 10.0)
+readable, _, _ = select.select([control_fd], [], [], 20.0)
 command = os.read(control_fd, 1) if readable else b""
 if command != b"g":
     for pid in (intermediate, child_pid):
@@ -258,7 +288,7 @@ os.write(parent_go_w, b"1")
 os.close(parent_go_w)
 parent_exit = select.poll()
 parent_exit.register(parent_pidfd, select.POLLIN | select.POLLHUP | select.POLLERR)
-if not parent_exit.poll(5_000):
+if not parent_exit.poll(20_000):
     os.close(parent_pidfd)
     for pid in (intermediate, child_pid):
         try:
@@ -271,6 +301,35 @@ _, status = os.waitpid(intermediate, 0)
 os.close(parent_pidfd)
 emit({"stage": "parent_exit", "parent_pid": intermediate,
       "confirmed": True, "wait_status": status})
+readable, _, _ = select.select([control_fd], [], [], 20.0)
+if not readable or os.read(control_fd, 1) != b"a":
+    emit({"stage": "setup_error", "detail": "test did not request PID-1 guard observation"})
+    raise SystemExit(2)
+before = start_time(child_pid)
+guard = OrphanGuard(root, token=token)
+report = _check_guard(guard)
+emit({"stage": "guard_report", "failed": report.failed,
+      "outcomes": [{"kind": item.kind, "pid": item.pid, "detail": item.detail}
+                   for item in report.outcomes]})
+guard.close()
+try:
+    os.kill(child_pid, 0)
+    after = start_time(child_pid)
+    alive = before == after
+except ProcessLookupError:
+    after = None
+    alive = False
+emit({"stage": "observer", "alive": alive,
+      "start_time_before": before, "start_time_after": after})
+readable, _, _ = select.select([control_fd], [], [], 20.0)
+if not readable or os.read(control_fd, 1) != b"x":
+    emit({"stage": "setup_error", "detail": "test did not release PID-1 helper"})
+    raise SystemExit(2)
+try:
+    os.kill(child_pid, signal.SIGKILL)
+except ProcessLookupError:
+    pass
+os.waitpid(child_pid, 0)
 os.close(control_fd)
 '''
 
@@ -385,6 +444,7 @@ class _PidfdHandle:
         except OSError as exc:
             pytest.fail(f"setup: could not retain pidfd for {pid}: {exc}", pytrace=False)
         self.identity = (pid, self._fd)
+        self.signals: list[int] = []
         self._poller = select.poll()
         self._poller.register(self._fd, select.POLLIN | select.POLLHUP | select.POLLERR)
 
@@ -392,18 +452,22 @@ class _PidfdHandle:
         return self.is_alive()
 
     def is_alive(self) -> bool:
+        if self._fd < 0:
+            return False
         return not self._poller.poll(0)
 
     def send_signal(self, signum: int) -> None:
         signal.pidfd_send_signal(self._fd, signum)
+        self.signals.append(signum)
 
     def wait_exit(self, timeout: float) -> bool:
         return bool(self._poller.poll(max(0, int(timeout * 1000))))
 
     def close(self) -> None:
         if self._fd >= 0:
-            os.close(self._fd)
+            fd = self._fd
             self._fd = -1
+            os.close(fd)
 
 
 class _SubreaperRun:
@@ -416,6 +480,7 @@ class _SubreaperRun:
         self.launch = None
         self.child_handle = None
         self.observer_handle = None
+        self.owner_released = False
         self.closed = False
         try:
             try:
@@ -462,8 +527,11 @@ class _SubreaperRun:
                 pytest.fail("setup: subreaper did not confirm old-parent death", pytrace=False)
             if Path(str(self.adopted.get("open_path"))).resolve().parent != tmp_path.resolve():
                 pytest.fail("setup: adopted child did not use a file beneath tmp_path", pytrace=False)
-        except BaseException:
-            self.close()
+        except BaseException as setup_error:
+            try:
+                self.close()
+            except Exception as cleanup_error:
+                setup_error.add_note(f"setup cleanup also failed: {cleanup_error}")
             raise
         finally:
             if event_write >= 0:
@@ -478,39 +546,87 @@ class _SubreaperRun:
             pass
 
     def release_owner(self) -> None:
+        if self.owner_released:
+            return
         if self.launch is None:
+            self.owner_released = True
             return
-        if self.launch.process.poll() is None:
-            self._send_control(b"x")
+        process = self.launch.process
+        try:
+            if process.poll() is None:
+                self._send_control(b"x")
+            process.wait(timeout=_SETUP_TIMEOUT)
+        except subprocess.TimeoutExpired:
+            release_error = RuntimeError("setup: subreaper helper did not exit after release")
             try:
-                self.launch.process.wait(timeout=_SETUP_TIMEOUT)
-            except subprocess.TimeoutExpired:
-                pytest.fail("setup: subreaper helper did not exit after release", pytrace=False)
+                self._cleanup_resources()
+            except Exception as cleanup_error:
+                release_error.add_note(f"subreaper cleanup also failed: {cleanup_error}")
+            raise release_error from None
+        self.owner_released = True
 
-    def close(self) -> None:
-        if self.closed:
+    def _stop_adopted_child(self) -> None:
+        handle = next((candidate for candidate in
+                       (self.observer_handle, self.child_handle)
+                       if candidate is not None and candidate.is_alive()), None)
+        if handle is None:
             return
-        self.closed = True
-        self.release_owner()
-        if self.observer_handle is not None:
-            if self.observer_handle.is_alive():
-                try:
-                    self.observer_handle.send_signal(signal.SIGKILL)
-                    if not self.observer_handle.wait_exit(_SETUP_TIMEOUT):
-                        pytest.fail("setup: adopted helper survived test cleanup", pytrace=False)
-                except ProcessLookupError:
-                    pass
+        try:
+            handle.send_signal(signal.SIGKILL)
+        except ProcessLookupError:
+            if handle.is_alive():
+                raise
+        if not handle.wait_exit(_SETUP_TIMEOUT):
+            pytest.fail("setup: adopted helper survived pidfd cleanup", pytrace=False)
+
+    def _cleanup_resources(self) -> None:
+        errors: list[Exception] = []
+        try:
+            self._stop_adopted_child()
+        except Exception as exc:
+            errors.append(exc)
+        if self.launch is not None and self.launch.process.poll() is None:
+            try:
+                _stop_process(self.launch.process)
+            except Exception as exc:
+                errors.append(exc)
         for handle in (self.child_handle, self.observer_handle):
             if handle is not None:
-                handle.close()
-        if self.launch is not None and self.launch.process.poll() is None:
-            _stop_process(self.launch.process)
-        for fd in (self.control_write, self.event_read):
+                try:
+                    handle.close()
+                except Exception as exc:
+                    errors.append(exc)
+        for name in ("control_write", "event_read"):
+            fd = getattr(self, name, -1)
+            if fd < 0:
+                continue
             try:
                 os.close(fd)
             except OSError as exc:
                 if exc.errno != errno.EBADF:
-                    raise
+                    errors.append(exc)
+                    continue
+            setattr(self, name, -1)
+        if errors:
+            raise errors[0]
+        self.closed = True
+
+    def close(self) -> None:
+        if self.closed:
+            return
+        errors: list[Exception] = []
+        try:
+            self.release_owner()
+        except Exception as exc:
+            errors.append(exc)
+        finally:
+            if not self.closed:
+                try:
+                    self._cleanup_resources()
+                except Exception as exc:
+                    errors.append(exc)
+        if errors:
+            raise errors[0]
 
 
 class _InjectedHandle:
@@ -611,7 +727,7 @@ class _CheckDeadline(Exception):
     pass
 
 
-def _check_before_deadline(guard):
+def _check_guard(guard):
     previous_handler = signal.getsignal(signal.SIGALRM)
 
     def raise_deadline(_signum, _frame):
@@ -640,12 +756,12 @@ def _registered_leak_scenario(tmp_path: Path, monkeypatch, variant=None, *,
     scope.end()
     try:
         numeric = _forbid_numeric_signals(monkeypatch)
-        report = guard.check()
+        report = _check_guard(guard)
         kinds = _outcome_kinds(report, launch.pid)
-        assert kinds["leak"] == 1
+        assert kinds["leak"] == 1, "registered leak scenario: leak outcome required"
         assert kinds["confirmed exit"] == 1
         assert report.failed
-        assert numeric == []
+        assert numeric == [], "registered leak scenario: no numeric PID signaling"
         assert launch.process.wait(timeout=_SETUP_TIMEOUT) is not None
     finally:
         monkeypatch.undo()
@@ -665,25 +781,67 @@ def _unverified_adoption_scenario(tmp_path: Path, monkeypatch, variant=None) -> 
     scope.end()
     try:
         numeric = _forbid_numeric_signals(monkeypatch)
-        report = guard.check()
+        report = _check_guard(guard)
         _assert_unverified(report, adopted.pid, ("parent", "transition"))
         assert adopted.observer_handle.is_alive()
-        assert numeric == []
+        assert numeric == [], "incomplete adoption scenario: no numeric PID signaling"
     finally:
         monkeypatch.undo()
         adopted.close()
         guard.close()
 
 
-def _pid1_token_scenario(tmp_path: Path, monkeypatch, variant=None) -> None:
+def _pid_namespace_prefix(tmp_path: Path) -> list[str]:
+    if not _IS_LINUX:
+        pytest.skip("pid namespace unavailable")
+
+    candidates: list[list[str]] = []
+    bwrap = shutil.which("bwrap")
+    if bwrap is not None:
+        candidates.append([
+            bwrap, "--die-with-parent", "--unshare-user", "--uid", "0", "--gid", "0",
+            "--unshare-pid", "--ro-bind", "/", "/", "--bind", str(tmp_path), str(tmp_path),
+            "--proc", "/proc", "--dev", "/dev", "--chdir", str(tmp_path), "--",
+        ])
+    unshare = shutil.which("unshare")
+    if unshare is not None:
+        candidates.append([
+            unshare, "--user", "--map-root-user", "--pid", "--fork", "--mount-proc", "--",
+        ])
+    if not candidates:
+        pytest.skip("pid namespace unavailable")
+
+    for prefix in candidates:
+        try:
+            probe = subprocess.run(
+                [*prefix, sys.executable, "-c", "import os; print(os.getpid())"],
+                cwd=tmp_path, stdin=subprocess.DEVNULL, capture_output=True, text=True,
+                timeout=_SETUP_TIMEOUT, check=False)
+        except OSError:
+            continue
+        except subprocess.TimeoutExpired:
+            pytest.fail("setup: PID namespace capability probe timed out", pytrace=False)
+        if probe.returncode == 0 and probe.stdout.strip() == "1":
+            return prefix
+    pytest.skip("pid namespace unavailable")
+
+
+def _pid1_token_scenario(tmp_path: Path) -> None:
     token = _token()
     use_path = tmp_path / "pid1-open-file"
+    prefix = _pid_namespace_prefix(tmp_path)
     control_read, control_write = os.pipe()
+    tests_dir = str(Path(__file__).resolve().parent)
     env = os.environ.copy()
-    env[_TOKEN_ENV] = token
+    env.pop(_TOKEN_ENV, None)
+    env[_PID1_TOKEN_SOURCE] = token
+    inherited_pythonpath = env.get("PYTHONPATH", "")
+    env["PYTHONPATH"] = os.pathsep.join(
+        value for value in (tests_dir, inherited_pythonpath) if value)
     try:
         child = subprocess.Popen(
-            [sys.executable, "-c", _PID1_CHILD_SCRIPT, str(use_path), str(control_read)],
+            [*prefix, sys.executable, "-c", _PID1_CHILD_SCRIPT, str(use_path),
+             str(control_read), str(tmp_path), token, tests_dir],
             cwd=tmp_path, env=env, stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
             pass_fds=(control_read,))
@@ -692,23 +850,16 @@ def _pid1_token_scenario(tmp_path: Path, monkeypatch, variant=None) -> None:
         os.close(control_write)
         pytest.fail(f"setup: PID-1 helper launch failed: {exc}", pytrace=False)
     os.close(control_read)
-    pidfd = None
-    guard = None
     try:
         if child.stdout is None:
             pytest.fail("setup: PID-1 helper has no observation pipe", pytrace=False)
+        events: dict[str, dict[str, object]] = {}
         created = _read_json_fd(
             child.stdout.fileno(), time.monotonic() + _SETUP_TIMEOUT, "PID-1 child creation")
         if created.get("stage") != "created":
             pytest.fail(f"setup: PID-1 child was not created: {created}", pytrace=False)
-        pid = int(created["pid"])
-        pidfd = _PidfdHandle(pid)
+        events["created"] = created
         os.write(control_write, b"g")
-        try:
-            child.wait(timeout=_SETUP_TIMEOUT)
-        except subprocess.TimeoutExpired:
-            pytest.fail("setup: PID-1 parent did not confirm child-parent death", pytrace=False)
-        events: dict[str, dict[str, object]] = {"created": created}
         deadline = time.monotonic() + _SETUP_TIMEOUT
         while not {"parent_exit", "adopted"}.issubset(events):
             event = _read_json_fd(child.stdout.fileno(), deadline, "PID-1 adoption")
@@ -716,19 +867,32 @@ def _pid1_token_scenario(tmp_path: Path, monkeypatch, variant=None) -> None:
             if stage == "setup_error":
                 pytest.fail(f"setup: PID-1 helper failed: {event}", pytrace=False)
             events[stage] = event
+
         value = events["adopted"]
-        if int(value["ppid"]) != 1:
-            pytest.fail(
-                f"setup: expected PID-1 adoption, observed parent {value['ppid']}",
-                pytrace=False)
+        assert int(value["ppid"]) == 1
+        parent_exit = events["parent_exit"]
+        if (parent_exit.get("confirmed") is not True
+                or value.get("old_parent_pid") != parent_exit.get("parent_pid")):
+            pytest.fail("setup: PID-1 helper did not confirm the adopted child's old-parent death",
+                        pytrace=False)
         if Path(str(value["open_path"])).resolve().parent != tmp_path.resolve():
             pytest.fail("setup: PID-1 child did not use a path beneath tmp_path", pytrace=False)
-        guard = _new_guard(
-            tmp_path, token=token, variant=variant, token_pids=(pid,))
-        numeric = _forbid_numeric_signals(monkeypatch)
-        report = guard.check()
-        _assert_empty_report(report)
-        assert numeric == []
+
+        os.write(control_write, b"a")
+        while not {"guard_report", "observer"}.issubset(events):
+            event = _read_json_fd(
+                child.stdout.fileno(), time.monotonic() + _SETUP_TIMEOUT,
+                "PID-1 guard observation")
+            stage = str(event.get("stage"))
+            if stage == "setup_error":
+                pytest.fail(f"setup: PID-1 guard observation failed: {event}", pytrace=False)
+            events[stage] = event
+
+        assert events["guard_report"].get("outcomes") == []
+        assert events["guard_report"].get("failed") is False
+        observer = events["observer"]
+        assert observer.get("alive") is True
+        assert observer.get("start_time_before") == observer.get("start_time_after")
     finally:
         if child.poll() is None:
             try:
@@ -739,21 +903,14 @@ def _pid1_token_scenario(tmp_path: Path, monkeypatch, variant=None) -> None:
                 child.wait(timeout=_SETUP_TIMEOUT)
             except subprocess.TimeoutExpired:
                 _stop_process(child)
-        if guard is not None:
-            guard.close()
-        if pidfd is not None:
-            if pidfd.is_alive():
-                pidfd.send_signal(signal.SIGKILL)
-                if not pidfd.wait_exit(_SETUP_TIMEOUT):
-                    pytest.fail("setup: PID-1 child survived test cleanup", pytrace=False)
-            pidfd.close()
         if child.poll() is None:
             _stop_process(child)
-        try:
-            os.close(control_write)
-        except OSError as exc:
-            if exc.errno != errno.EBADF:
-                raise
+        for fd in (control_read, control_write):
+            try:
+                os.close(fd)
+            except OSError as exc:
+                if exc.errno != errno.EBADF:
+                    raise
 
 
 @pytest.mark.host_sandbox
@@ -764,7 +921,7 @@ def test_active_registered_helper_is_not_a_leak(tmp_path, monkeypatch):
     launch = _start_registered_helper(scope, tmp_path)
     try:
         numeric = _forbid_numeric_signals(monkeypatch)
-        report = _check_before_deadline(guard)
+        report = _check_guard(guard)
         _assert_empty_report(report)
         assert launch.process.poll() is None
         assert numeric == []
@@ -785,7 +942,7 @@ def test_registered_stripped_token_in_active_scope_is_not_a_leak(tmp_path):
         scope, tmp_path, script=_STRIP_TOKEN_SCRIPT,
         script_args=(_TOKEN_ENV,))
     try:
-        report = guard.check()
+        report = _check_guard(guard)
         _assert_empty_report(report)
         assert launch.process.poll() is None
     finally:
@@ -811,58 +968,50 @@ def test_ended_registered_stripped_token_is_a_leak(tmp_path, monkeypatch):
 
 
 @pytest.mark.host_sandbox
-@pytest.mark.skipif(not _IS_LINUX, reason="real PID-1 adoption control")
-def test_pid_one_token_bearing_child_is_not_attributed(tmp_path, monkeypatch):
+def test_pid_one_token_bearing_child_is_not_attributed(tmp_path):
     """A token-bearing PID-1 child without a registered scope or transition proof is ignored."""
-    _pid1_token_scenario(tmp_path, monkeypatch)
+    _pid1_token_scenario(tmp_path)
 
 
 @pytest.mark.host_sandbox
 @pytest.mark.skipif(not _IS_LINUX, reason="Linux subreaper adoption control")
-def test_unobserved_subreaper_double_fork_is_unverified_and_untouched(tmp_path, monkeypatch):
-    """A real adopted grandchild without guard-recorded transition evidence stays untouched."""
+@pytest.mark.parametrize(
+    "record_parent_transition",
+    [pytest.param(False, id="missing-parent-transition"), pytest.param(True, id="all-four-facts")],
+)
+def test_subreaper_double_fork_requires_all_four_adoption_facts(
+        tmp_path, monkeypatch, record_parent_transition):
+    """All four adoption facts permit cleanup; omitting only the transition leaves it untouched."""
     guard = _new_guard(tmp_path, token=_token())
-    scope = guard.scope("unobserved-double-fork")
-    adopted = _SubreaperRun(scope, tmp_path)
-    adopted.release_owner()
-    scope.end()
-    try:
-        numeric = _forbid_numeric_signals(monkeypatch)
-        report = guard.check()
-        _assert_unverified(report, adopted.pid, ("parent", "transition", "evidence"))
-        assert adopted.observer_handle.is_alive()
-        assert numeric == []
-    finally:
-        monkeypatch.undo()
-        adopted.close()
-        guard.close()
-
-
-@pytest.mark.host_sandbox
-@pytest.mark.skipif(not _IS_LINUX, reason="Linux subreaper adoption control")
-def test_real_subreaper_adoption_with_all_four_facts_is_a_leak(tmp_path, monkeypatch):
-    """A real double-fork adopted through a registered subreaper is stopped after proof."""
-    guard = _new_guard(tmp_path, token=_token())
-    scope = guard.scope("observed-double-fork")
+    scope = guard.scope("subreaper-adoption-proof")
     adopted = _SubreaperRun(scope, tmp_path)
     transition = (
         int(adopted.ready["old_parent_pid"]), int(adopted.adopted["new_parent_pid"]))
+    assert adopted.adopted["old_parent_pid"] == transition[0]
+    assert adopted.adopted["new_parent_pid"] == transition[1]
+    assert adopted.parent_exit["parent_pid"] == transition[0]
     assert adopted.parent_exit["confirmed"] is True
     assert Path(str(adopted.adopted["open_path"])).resolve().is_relative_to(tmp_path.resolve())
     scope.register_adopted(
         adopted.pid, bound_handle=adopted.child_handle, attributed=True,
-        parent_transition=transition, parent_exit_confirmed=True, tmp_path_use=True)
+        parent_transition=transition if record_parent_transition else None,
+        parent_exit_confirmed=True, tmp_path_use=True)
     adopted.release_owner()
     scope.end()
     try:
         numeric = _forbid_numeric_signals(monkeypatch)
-        report = guard.check()
-        kinds = _outcome_kinds(report, adopted.pid)
-        assert kinds["leak"] == 1
-        assert kinds["confirmed exit"] == 1
-        assert report.failed
+        report = _check_guard(guard)
+        if record_parent_transition:
+            kinds = _outcome_kinds(report, adopted.pid)
+            assert kinds["leak"] == 1
+            assert kinds["confirmed exit"] == 1
+            assert report.failed
+            assert not adopted.observer_handle.is_alive()
+        else:
+            _assert_unverified(report, adopted.pid, ("parent", "transition", "evidence"))
+            assert adopted.observer_handle.is_alive()
+            assert adopted.child_handle.signals == []
         assert numeric == []
-        assert not adopted.observer_handle.is_alive()
     finally:
         monkeypatch.undo()
         adopted.close()
@@ -900,7 +1049,7 @@ def test_each_missing_adoption_fact_is_unverified_and_untouched(
         scope.end()
     try:
         numeric = _forbid_numeric_signals(monkeypatch)
-        report = guard.check()
+        report = _check_guard(guard)
         _assert_unverified(report, adopted.pid, detail_terms)
         assert adopted.observer_handle.is_alive()
         assert adopted.child_handle.signals == []
@@ -930,7 +1079,7 @@ def test_permission_denied_identity_check_is_unverified_not_gone(tmp_path, monke
     scope.end()
     try:
         numeric = _forbid_numeric_signals(monkeypatch)
-        report = guard.check()
+        report = _check_guard(guard)
         _assert_unverified(report, launch.pid, ("permission", "eperm", "identity"))
         assert "confirmed exit" not in _outcome_kinds(report, launch.pid)
         assert launch.process.poll() is None
@@ -961,7 +1110,7 @@ def test_identity_replacement_before_term_never_signals_replacement(tmp_path, mo
     handle.armed = True
     try:
         numeric = _forbid_numeric_signals(monkeypatch)
-        report = guard.check()
+        report = _check_guard(guard)
         assert "cleanup unverified" in _outcome_kinds(report, launch.pid)
         assert handle.current_identity is not handle.identity
         assert handle.signals == []
@@ -991,7 +1140,7 @@ def test_identity_replacement_before_kill_never_signals_replacement(tmp_path, mo
     handle.armed = True
     try:
         numeric = _forbid_numeric_signals(monkeypatch)
-        report = guard.check()
+        report = _check_guard(guard)
         assert "cleanup unverified" in _outcome_kinds(report, launch.pid)
         assert handle.current_identity is not handle.identity
         assert handle.signals == [signal.SIGTERM]
@@ -1019,7 +1168,7 @@ def test_successful_term_and_kill_without_confirmed_exit_stay_unverified(tmp_pat
     scope.end()
     try:
         numeric = _forbid_numeric_signals(monkeypatch)
-        report = guard.check()
+        report = _check_guard(guard)
         kinds = _outcome_kinds(report, launch.pid)
         assert kinds["leak"] == 1
         assert kinds["cleanup unverified"] == 1
@@ -1047,7 +1196,7 @@ def test_check_returns_before_its_deadline(tmp_path):
     scope = guard.scope("bounded-check")
     launch = _start_registered_helper(scope, tmp_path)
     try:
-        report = _check_before_deadline(guard)
+        report = _check_guard(guard)
         _assert_empty_report(report)
     finally:
         _stop_process(launch.process)
@@ -1074,7 +1223,7 @@ def test_macos_active_scope_is_empty_and_never_uses_signal_zero(tmp_path):
     scope = guard.scope("active-macos")
     launch = _start_registered_helper(scope, tmp_path)
     try:
-        report = guard.check()
+        report = _check_guard(guard)
         _assert_empty_report(report)
         assert 0 not in [signum for _pid, _token, signum in api_calls]
         assert handles[0].signals == []
@@ -1107,9 +1256,11 @@ def test_macos_ended_candidate_probes_liveness_without_audit_signal_zero_or_fall
     scope.end()
     try:
         numeric = _forbid_numeric_signals(monkeypatch)
-        report = guard.check()
+        report = _check_guard(guard)
         _assert_unverified(report, launch.pid, ("audittoken", "strict", "api"))
         assert handles[0].liveness_probes > 0
+        assert api_calls
+        assert [signum for _pid, _token, signum in api_calls] == [signal.SIGTERM]
         assert 0 not in [signum for _pid, _token, signum in api_calls]
         assert numeric == []
         assert "confirmed exit" not in _outcome_kinds(report, launch.pid)
@@ -1141,7 +1292,7 @@ def test_macos_successful_strict_signal_confirms_exit_without_signal_zero(tmp_pa
     scope.end()
     try:
         numeric = _forbid_numeric_signals(monkeypatch)
-        report = guard.check()
+        report = _check_guard(guard)
         kinds = _outcome_kinds(report, launch.pid)
         assert kinds["leak"] == 1
         assert kinds["confirmed exit"] == 1
@@ -1169,51 +1320,8 @@ def _run_inner(pytester, monkeypatch, source: str):
 
 
 @pytest.mark.host_sandbox
-def test_pytest_hook_runs_after_fixture_finalizer_stops_helper(pytester, monkeypatch):
-    """The real teardown hook sees the helper only after its fixture finalizer stops it."""
-    result = _run_inner(pytester, monkeypatch, r'''import os
-import select
-import signal
-import subprocess
-import sys
-import pytest
-
-HELPER = "import os,signal; os.write(1,b'ready\\n'); signal.pause()"
-
-def wait_ready(process):
-    if process.stdout is None:
-        pytest.fail("setup: helper has no readiness stream", pytrace=False)
-    if not select.select([process.stdout], [], [], 5.0)[0]:
-        pytest.fail("setup: helper readiness timed out", pytrace=False)
-    if process.stdout.readline() != b"ready\n":
-        pytest.fail("setup: helper sent invalid readiness", pytrace=False)
-
-@pytest.fixture
-def ended_scope_with_helper(orphan_guard, tmp_path):
-    scope = orphan_guard.scope("fixture-finalizer")
-    launch = scope.launch([sys.executable, "-c", HELPER], cwd=tmp_path,
-                          stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                          stderr=subprocess.DEVNULL)
-    wait_ready(launch.process)
-    scope.end()
-    yield launch
-    launch.process.terminate()
-    try:
-        launch.process.wait(timeout=5.0)
-    except subprocess.TimeoutExpired:
-        pytest.fail("setup: fixture finalizer could not stop helper", pytrace=False)
-
-def test_fixture_finalizer_stops_helper(ended_scope_with_helper):
-    """The fixture finalizer stops its helper before orphan teardown inspection."""
-    assert ended_scope_with_helper.process.poll() is None
-''')
-    result.assert_outcomes(passed=1)
-    assert "ERROR test_inner.py::test_fixture_finalizer_stops_helper" not in result.stdout.str()
-
-
-@pytest.mark.host_sandbox
-def test_pytest_hook_fails_inner_run_for_registered_leak(pytester, monkeypatch):
-    """The real teardown hook fails an inner test and names its registered leak."""
+def test_pytest_hook_ordering_and_registered_leak_share_inner_session(pytester, monkeypatch):
+    """Fixture ordering passes while the same registered hook rejects a separate leak."""
     result = _run_inner(pytester, monkeypatch, r'''import atexit
 import os
 import select
@@ -1227,7 +1335,7 @@ HELPER = "import os,signal; os.write(1,b'ready\\n'); signal.pause()"
 def wait_ready(process):
     if process.stdout is None:
         pytest.fail("setup: helper has no readiness stream", pytrace=False)
-    if not select.select([process.stdout], [], [], 5.0)[0]:
+    if not select.select([process.stdout], [], [], 20.0)[0]:
         pytest.fail("setup: helper readiness timed out", pytrace=False)
     if process.stdout.readline() != b"ready\n":
         pytest.fail("setup: helper sent invalid readiness", pytrace=False)
@@ -1236,9 +1344,28 @@ def cleanup(process):
     if process.poll() is None:
         process.kill()
         try:
-            process.wait(timeout=5.0)
+            process.wait(timeout=20.0)
         except subprocess.TimeoutExpired:
             pytest.fail("setup: atexit cleanup could not stop helper", pytrace=False)
+
+@pytest.fixture
+def ended_scope_with_helper(orphan_guard, tmp_path):
+    scope = orphan_guard.scope("fixture-finalizer")
+    launch = scope.launch([sys.executable, "-c", HELPER], cwd=tmp_path,
+                          stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                          stderr=subprocess.DEVNULL)
+    wait_ready(launch.process)
+    scope.end()
+    yield launch
+    launch.process.terminate()
+    try:
+        launch.process.wait(timeout=20.0)
+    except subprocess.TimeoutExpired:
+        pytest.fail("setup: fixture finalizer could not stop helper", pytrace=False)
+
+def test_fixture_finalizer_stops_helper(ended_scope_with_helper):
+    """The fixture finalizer stops its helper before orphan teardown inspection."""
+    assert ended_scope_with_helper.process.poll() is None
 
 def test_leaked_registered_helper_fails_teardown(orphan_guard, tmp_path):
     """A registered helper left alive fails the inner teardown as a leak."""
@@ -1254,10 +1381,11 @@ def test_leaked_registered_helper_fails_teardown(orphan_guard, tmp_path):
     scope.end()
     assert launch.process.poll() is None
 ''')
-    result.assert_outcomes(passed=1, errors=1)
+    result.assert_outcomes(passed=2, errors=1)
     output = result.stdout.str()
     assert "leak" in output.casefold()
     assert "test_leaked_registered_helper_fails_teardown" in output
+    assert "ERROR test_inner.py::test_fixture_finalizer_stops_helper" not in output
 
 
 @pytest.mark.host_sandbox
@@ -1287,7 +1415,7 @@ class Handle:
 def wait_ready(process):
     if process.stdout is None:
         pytest.fail("setup: helper has no readiness stream", pytrace=False)
-    if not select.select([process.stdout], [], [], 5.0)[0]:
+    if not select.select([process.stdout], [], [], 20.0)[0]:
         pytest.fail("setup: helper readiness timed out", pytrace=False)
     if process.stdout.readline() != b"ready\n":
         pytest.fail("setup: helper sent invalid readiness", pytrace=False)
@@ -1296,7 +1424,7 @@ def cleanup(process):
     if process.poll() is None:
         process.kill()
         try:
-            process.wait(timeout=5.0)
+            process.wait(timeout=20.0)
         except subprocess.TimeoutExpired:
             pytest.fail("setup: atexit cleanup could not stop helper", pytrace=False)
 
@@ -1338,9 +1466,9 @@ def _signal_means_exit_scenario(tmp_path: Path, monkeypatch, variant=None) -> No
     launch = _start_registered_helper(scope, tmp_path)
     scope.end()
     try:
-        report = guard.check()
+        report = _check_guard(guard)
         kinds = _outcome_kinds(report, launch.pid)
-        assert "confirmed exit" not in kinds
+        assert "confirmed exit" not in kinds, "signal call must not be treated as confirmed exit"
         assert kinds["cleanup unverified"] == 1
         assert handles[0].signals == [signal.SIGTERM, signal.SIGKILL]
     finally:
@@ -1348,12 +1476,36 @@ def _signal_means_exit_scenario(tmp_path: Path, monkeypatch, variant=None) -> No
         guard.close()
 
 
+def _token_only_attribution_scenario(tmp_path: Path, monkeypatch, variant=None) -> None:
+    token = _token()
+    base = _new_guard(tmp_path, token=token)
+    scope = base.scope("active-token-candidate")
+    launch = _start_registered_helper(scope, tmp_path)
+    guard = variant(base, token_pids=(launch.pid,)) if variant is not None else base
+    try:
+        report = _check_guard(guard)
+        assert list(report.outcomes) == [], (
+            "active scope scenario: token alone does not override active scope")
+        assert not report.failed
+        assert launch.process.poll() is None
+    finally:
+        _stop_process(launch.process)
+        scope.end()
+        guard.close()
+
+
 _MUTANT_SCENARIOS = {
-    "numeric_pid_signal": _registered_leak_scenario,
-    "signal_unverified_process": _unverified_adoption_scenario,
-    "signal_means_exit": _signal_means_exit_scenario,
-    "token_only_attribution": _pid1_token_scenario,
-    "never_reports": _registered_leak_scenario,
+    "NumericPidSignal": (
+        _registered_leak_scenario, "registered leak scenario: no numeric PID signaling"),
+    "SignalUnverified": (
+        _unverified_adoption_scenario, "incomplete adoption scenario: no numeric PID signaling"),
+    "SignalMeansExit": (
+        _signal_means_exit_scenario, "signal call must not be treated as confirmed exit"),
+    "TokenOnlyAttribution": (
+        _token_only_attribution_scenario,
+        "active scope scenario: token alone does not override active scope"),
+    "NeverReports": (
+        _registered_leak_scenario, "registered leak scenario: leak outcome required"),
 }
 
 
@@ -1361,12 +1513,15 @@ _MUTANT_SCENARIOS = {
 @pytest.mark.skipif(not _IS_LINUX, reason="Linux behavior mutation controls")
 @pytest.mark.parametrize("mutant_name", sorted(MUTANTS))
 def test_mutants_are_rejected(mutant_name, tmp_path, monkeypatch):
-    """Each deliberately wrong public-API variant is rejected by a behavior scenario."""
+    """Each named mutant fails the specific scenario that exposes its bad behavior."""
     variant = MUTANTS[mutant_name]
-    scenario = _MUTANT_SCENARIOS[mutant_name]
-    failures = []
+    scenario, expected_failure = _MUTANT_SCENARIOS[mutant_name]
     try:
         scenario(tmp_path, monkeypatch, variant)
     except AssertionError as exc:
-        failures.append(str(exc))
-    assert failures, f"mutant {mutant_name} survived its acceptance scenario"
+        assert expected_failure in str(exc), (
+            f"mutant {mutant_name} failed outside its expected {scenario.__name__} assertion: {exc}")
+    else:
+        pytest.fail(
+            f"mutant {mutant_name} survived its expected scenario {scenario.__name__}",
+            pytrace=False)

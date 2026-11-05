@@ -1268,6 +1268,28 @@
       "witness_assertion": "assert liveness.linux_zombie(os.getpid(), tmp_path) is False"
     },
     {
+      "scenario_id": "test_orphan_guard_acceptance_test_pid_one_token_bearing_child_is_not_attributed",
+      "nodeid": "tests/test_orphan_guard_acceptance.py::test_pid_one_token_bearing_child_is_not_attributed",
+      "item_nodeids": [
+        "tests/test_orphan_guard_acceptance.py::test_pid_one_token_bearing_child_is_not_attributed"
+      ],
+      "jobs": {
+        "linux": "RUN",
+        "darwin": {
+          "disposition": "NA_PLATFORM",
+          "platform": "linux",
+          "reason": "requires Linux PID namespace"
+        }
+      },
+      "prerequisites": [
+        "host_sandbox"
+      ],
+      "optional_prerequisites": [],
+      "baseline": null,
+      "witness_schema": "assertion_match",
+      "witness_assertion": "assert int(value[\"ppid\"]) == 1"
+    },
+    {
       "scenario_id": "test_process_signal_liveness_test_exiting_empty_cmdline_is_gone_before_launch_identity_mismatch",
       "nodeid": "tests/test_process_signal_liveness.py::test_exiting_empty_cmdline_is_gone_before_launch_identity_mismatch",
       "item_nodeids": [

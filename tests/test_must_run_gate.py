@@ -78,6 +78,7 @@ EXPECTED_ENTRIES = (
     ("tests/test_pid_liveness.py::test_permission_denied_group_probe_stays_alive", "all"),
     ("tests/test_pid_liveness.py::test_state_is_read_after_the_last_paren_of_the_command_name", "all"),
     ("tests/test_pid_liveness.py::test_unreadable_stat_is_not_provably_a_zombie", "all"),
+    ("tests/test_orphan_guard_acceptance.py::test_pid_one_token_bearing_child_is_not_attributed", "linux_requires:host_sandbox"),
     ("tests/test_process_signal_liveness.py::test_exiting_empty_cmdline_is_gone_before_launch_identity_mismatch", "linux_requires:host_sandbox"),
     ("tests/test_process_signal_liveness.py::test_live_pid_with_different_identity_remains_mismatch", "requires:host_sandbox"),
     ("tests/test_process_signal_liveness.py::test_live_pid_with_same_identity_passes", "requires:host_sandbox"),
@@ -190,6 +191,8 @@ _PLATFORM_REASONS = {
     "tests/test_exec_launch.py::test_macos_launcher_requires_memory_supervision": "macOS only",
     "tests/test_process_signal_liveness.py::test_exiting_empty_cmdline_is_gone_before_launch_identity_mismatch":
         "Linux exiting-process cmdline evidence",
+    "tests/test_orphan_guard_acceptance.py::test_pid_one_token_bearing_child_is_not_attributed":
+        "requires Linux PID namespace",
     "tests/test_process_signal_liveness.py::test_linux_binding_refuses_without_pidfd": "Linux pidfd signal authority",
     "tests/test_process_signal_liveness.py::test_retained_signal_binding_uses_pidfd": "Linux pidfd signal authority",
     "tests/test_uv_venv_sandbox.py::test_isolated_command_builds_with_missing_home_and_unknown_uid": "requires Linux bwrap behavior",
@@ -296,6 +299,8 @@ EXPECTED_ASSERTIONS = {
         "assert liveness.linux_zombie(os.getpid(), proc) is True",
     "tests/test_pid_liveness.py::test_unreadable_stat_is_not_provably_a_zombie":
         "assert liveness.linux_zombie(os.getpid(), tmp_path) is False",
+    "tests/test_orphan_guard_acceptance.py::test_pid_one_token_bearing_child_is_not_attributed":
+        'assert int(value["ppid"]) == 1',
     "tests/test_process_signal_liveness.py::test_exiting_empty_cmdline_is_gone_before_launch_identity_mismatch":
         'assert str(error.value) == f"process {live_child.pid} is no longer running"',
     "tests/test_process_signal_liveness.py::test_live_pid_with_different_identity_remains_mismatch":

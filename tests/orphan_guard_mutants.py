@@ -1,4 +1,8 @@
-"""Small behavior mutations for the orphan-guard acceptance contract."""
+"""Behavior mutants for the orphan-guard acceptance contract.
+
+The planted ``control_b_numeric_kill`` maps to ``NumericPidSignal``; the
+planted ``control_b_untouched`` maps to ``SignalUnverified``.
+"""
 from __future__ import annotations
 
 import os
@@ -97,9 +101,9 @@ class NeverReports(_GuardWrapper):
 
 
 MUTANTS = {
-    "numeric_pid_signal": NumericPidSignal,
-    "signal_unverified_process": SignalUnverified,
-    "signal_means_exit": SignalMeansExit,
-    "token_only_attribution": TokenOnlyAttribution,
-    "never_reports": NeverReports,
+    "NumericPidSignal": NumericPidSignal,
+    "SignalUnverified": SignalUnverified,
+    "SignalMeansExit": SignalMeansExit,
+    "TokenOnlyAttribution": TokenOnlyAttribution,
+    "NeverReports": NeverReports,
 }
