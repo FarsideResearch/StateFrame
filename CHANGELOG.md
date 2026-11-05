@@ -1,8 +1,8 @@
 # Changelog
 
-## Unreleased
+## 0.4.12 (2026-11-05)
 
-- Faster request preparation with identical requests.
+- Engine: request preparation is restructured (fitting trials run in isolation, and the meter keeps its state on byte-pruned trials). Requests are byte-identical to 0.4.11. This is the first half of a speed change; its measured effect is reported with the second half.
 
 ## 0.4.11 (2026-11-05)
 
