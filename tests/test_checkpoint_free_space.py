@@ -73,12 +73,13 @@ def test_low_disk_skips_capture_once_per_episode_and_recovers(monkeypatch, tmp_p
     assert saves == [(4, False)]
 
 
-def test_previous_state_size_sets_floor(monkeypatch, tmp_path):
+def test_previous_stored_state_size_sets_floor(monkeypatch, tmp_path):
     run_dir, saves, step = _setup(monkeypatch, tmp_path)
     root = run_dir / "checkpoints"
     saved = root / "0001-prior"
     saved.mkdir(parents=True)
-    (saved / "checkpoint.json").write_text("{}")
+    (saved / "checkpoint.json").write_text(json.dumps({
+        "state_codec": "zlib1", "state_bytes": 2 << 30, "state_stored_bytes": 500 << 20}))
     with (saved / "state.pkl").open("wb") as stream:
         stream.truncate(500 << 20)
     (root / "LATEST").write_text(saved.name + "\n")

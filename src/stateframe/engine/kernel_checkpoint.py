@@ -51,6 +51,10 @@ KEEP_ENV = "STATEFRAME_CHECKPOINT_KEEP"
 MIN_FREE_ENV = "STATEFRAME_CHECKPOINT_MIN_FREE_BYTES"
 STATE_FILE = "state.pkl"
 META_FILE = "checkpoint.json"
+STATE_CODEC = "zlib1"
+# The largest previously measured raw state was about 460 MiB; this 2 GiB ceiling is over 4x
+# that size while bounding output from any checkpoint before it can be handed to pickle.
+MAX_STATE_BYTES = 2 << 30
 # Run-dir entries never copied into a checkpoint (inputs, history, or the checkpoints themselves).
 # Hook bundles are pinned read-only inputs. Hook records, delivery history and scratch are live
 # per-attempt data; the hook tape keeps the logical-run history across attempts. None may be
@@ -274,6 +278,57 @@ def _signature(meta: dict, state_sha256: str) -> str:
     body = {key: value for key, value in meta.items() if key != "signature"}
     message = json.dumps(body, sort_keys=True, separators=(",", ":")).encode() + b"\0" + state_sha256.encode()
     return hmac.new(_SIGNING_KEY[0], message, hashlib.sha256).hexdigest()
+
+
+def _verify_stored_state(blob: bytes, meta: dict):
+    """Verify encoded bytes before any compressed state is passed to zlib."""
+    codec = meta.get("state_codec")  # absent means the original raw state.pkl format
+    if codec == STATE_CODEC:
+        size = meta.get("state_stored_bytes")
+        digest = meta.get("state_stored_sha256")
+        if type(size) is not int or size < 0 or not isinstance(digest, str):
+            raise CheckpointError("checkpoint stored state metadata is invalid")
+        if len(blob) != size or hashlib.sha256(blob).hexdigest() != digest:
+            raise CheckpointError("checkpoint state checksum mismatch")
+    return codec
+
+
+def _decode_verified_state(blob: bytes, meta: dict, codec) -> bytes:
+    """Decode one state representation with bounded output, then verify the raw pickle digest."""
+    size = meta.get("state_bytes")
+    digest = meta.get("state_sha256")
+    if type(size) is not int or size < 0 or not isinstance(digest, str):
+        raise CheckpointError("checkpoint state metadata is invalid")
+
+    if codec is None:
+        raw = blob
+    elif codec == STATE_CODEC:
+        cap = min(size, MAX_STATE_BYTES)
+        if size > MAX_STATE_BYTES:
+            raise CheckpointError(f"checkpoint state exceeds the {MAX_STATE_BYTES}-byte limit")
+        decoder = zlib.decompressobj()
+        try:
+            raw = decoder.decompress(blob, cap + 1)
+        except zlib.error:
+            raise CheckpointError("checkpoint state decompression failed") from None
+        if len(raw) > cap or decoder.unconsumed_tail:
+            raise CheckpointError("checkpoint state exceeds its declared or absolute size limit")
+        if not decoder.eof:
+            raise CheckpointError("checkpoint state compressed stream is truncated")
+        if decoder.unused_data:
+            raise CheckpointError("checkpoint state compressed stream has trailing data")
+    else:
+        raise CheckpointError(f"unknown checkpoint state codec {codec!r}")
+
+    if len(raw) != size or hashlib.sha256(raw).hexdigest() != digest:
+        raise CheckpointError("checkpoint state checksum mismatch")
+    return raw
+
+
+def decode_state(blob: bytes, meta: dict) -> bytes:
+    """Validate stored state bytes and return the verified raw pickle for resume preflight."""
+    codec = _verify_stored_state(blob, meta)
+    return _decode_verified_state(blob, meta, codec)
 
 
 def _private_dir(path: Path) -> None:
@@ -1399,9 +1454,10 @@ def _failure_detail(error: BaseException) -> str:
 
 
 class _StateWriter:
-    """Forward pickle writes while retaining only the secret-boundary overlap."""
+    """Compress pickle writes while retaining raw and stored digests plus the secret overlap."""
 
-    __slots__ = ("stream", "digest", "count", "tail", "overlap")
+    __slots__ = ("stream", "digest", "count", "tail", "overlap", "compressor",
+                 "stored_digest", "stored_count")
 
     def __init__(self, stream):
         self.stream = stream
@@ -1409,18 +1465,33 @@ class _StateWriter:
         self.count = 0
         self.tail = b""
         self.overlap = max((len(secret) for secret in _SECRETS), default=0) - 1
+        self.compressor = zlib.compressobj(level=1)
+        self.stored_digest = hashlib.sha256()
+        self.stored_count = 0
 
-    def write(self, chunk: bytes) -> int:
-        window = self.tail + chunk
-        if any(secret in window for secret in _SECRETS):
-            raise CheckpointError("a registered secret would be written into the checkpoint")
+    def _write_stored(self, chunk: bytes) -> None:
+        if not chunk:
+            return
         written = self.stream.write(chunk)
         if written != len(chunk):
             raise OSError("short checkpoint state write")
+        self.stored_digest.update(chunk)
+        self.stored_count += written
+
+    def write(self, chunk: bytes) -> int:
+        if len(chunk) > MAX_STATE_BYTES - self.count:
+            raise CheckpointError(f"checkpoint raw state exceeds the {MAX_STATE_BYTES}-byte limit")
+        window = self.tail + chunk
+        if any(secret in window for secret in _SECRETS):
+            raise CheckpointError("a registered secret would be written into the checkpoint")
         self.digest.update(chunk)
-        self.count += written
+        self.count += len(chunk)
+        self._write_stored(self.compressor.compress(chunk))
         self.tail = window[-self.overlap:] if self.overlap > 0 else b""
-        return written
+        return len(chunk)
+
+    def finish(self) -> None:
+        self._write_stored(self.compressor.flush())
 
 
 def _locate(value, ctx, path, depth, out, seen):
@@ -2055,8 +2126,11 @@ def _save_into(payload, ctx, step, run_dir, root, final, tmp, clocks, started, c
                 stream.truncate(0)
                 writer = _StateWriter(stream)
                 index = dump(writer)
+            writer.finish()
             stream.flush()
         meta.update(state_bytes=writer.count, state_sha256=writer.digest.hexdigest(),
+                    state_codec=STATE_CODEC, state_stored_sha256=writer.stored_digest.hexdigest(),
+                    state_stored_bytes=writer.stored_count,
                     chunk_index=index,
                      chunks=sorted({row[0] for rows in index.values() for row in rows}
                                    | {row[0] for rows in file_chunks.values() for row in rows}))
@@ -2091,7 +2165,7 @@ def _rss_mb() -> float | None:
 
 
 def _minimum_free_bytes(run_dir: Path) -> int:
-    """Reserve space for another state image; the process peak is a conservative first estimate."""
+    """Reserve space for another stored state image; process peak is the first-save estimate."""
     raw = os.environ.get(MIN_FREE_ENV, "").strip()
     if raw:
         try:
@@ -2104,14 +2178,14 @@ def _minimum_free_bytes(run_dir: Path) -> int:
     previous = latest(run_dir)
     if previous is not None:
         try:
-            estimate = (previous / STATE_FILE).stat().st_size
+            stored_state_bytes = (previous / STATE_FILE).stat().st_size
         except OSError:
-            estimate = 0
+            stored_state_bytes = 0
     else:
-        estimate = 0
-    if not estimate:
-        estimate = int((_rss_mb() or 0) * (1 << 20))
-    return max(1 << 30, 3 * estimate)
+        stored_state_bytes = 0
+    if not stored_state_bytes:
+        stored_state_bytes = int((_rss_mb() or 0) * (1 << 20))
+    return max(1 << 30, 3 * stored_state_bytes)
 
 
 def _low_disk_space(run_dir: Path) -> tuple[int, int] | None:
@@ -2412,9 +2486,8 @@ def latest(run_dir: Path) -> Path | None:
     return target if (target / META_FILE).is_file() else None
 
 
-def authenticate(checkpoint: Path) -> dict:
-    """Is this checkpoint provably ours? Ownership/permissions, checksum and HMAC signature,
-    checked before any byte of the pickle is loaded."""
+def _authenticate_state(checkpoint: Path) -> tuple[dict, bytes]:
+    """Verify ownership, encoded bytes, signature and raw state before returning pickle bytes."""
     for path in (checkpoint.parent, checkpoint, checkpoint / META_FILE, checkpoint / STATE_FILE):
         if not _owned_private(path):
             raise CheckpointError(f"checkpoint path {path.name} is not this user's private file")
@@ -2428,12 +2501,18 @@ def authenticate(checkpoint: Path) -> dict:
         blob = (checkpoint / STATE_FILE).read_bytes()
     except OSError:
         raise CheckpointError("checkpoint state missing") from None
-    if len(blob) != meta.get("state_bytes") or hashlib.sha256(blob).hexdigest() != meta.get("state_sha256"):
-        raise CheckpointError("checkpoint state checksum mismatch")
+    codec = _verify_stored_state(blob, meta)
+    # The legacy format has no separate stored digest, so its raw checksum is checked here as before.
+    raw = _decode_verified_state(blob, meta, codec) if codec is None else None
     import hmac
-    if not isinstance(meta.get("signature"), str) or not hmac.compare_digest(
-            meta["signature"], _signature(meta, hashlib.sha256(blob).hexdigest())):
+    state_sha256 = meta.get("state_sha256")
+    signature = meta.get("signature")
+    if not isinstance(state_sha256, str) or not isinstance(signature, str) or not hmac.compare_digest(
+            signature, _signature(meta, state_sha256)):
         raise CheckpointError("checkpoint signature does not verify")
+    if raw is None:
+        raw = _decode_verified_state(blob, meta, codec)
+    del blob
     try:
         manifest_bytes = (checkpoint / MANIFEST_FILE).read_bytes()
     except OSError:
@@ -2455,6 +2534,12 @@ def authenticate(checkpoint: Path) -> dict:
                 expected = meta.get("pool_sha256", {}).get(f"{relative}/{name}")
                 if expected is not None and _pool_identity(store / name)[1] != expected:
                     raise CheckpointError(f"pooled file {relative}/{name} checksum mismatch")
+    return meta, raw
+
+
+def authenticate(checkpoint: Path) -> dict:
+    """Is this checkpoint provably ours? Verify both state representations before unpickling."""
+    meta, _raw = _authenticate_state(checkpoint)
     return meta
 
 
@@ -2503,9 +2588,9 @@ def _prune_pool(root: Path, run_dir: Path) -> None:
                 os.unlink(entry.path)
 
 
-def validate(checkpoint: Path) -> dict:
-    """authenticate() plus compatibility with this process (Python, engine and host files)."""
-    meta = authenticate(checkpoint)
+def _validate(checkpoint: Path) -> tuple[dict, bytes]:
+    """Authenticate the state and check compatibility before any run files are restored."""
+    meta, raw = _authenticate_state(checkpoint)
     if list(sys.version_info[:3]) != meta.get("python"):
         raise CheckpointError("checkpoint was written by another Python version")
     if meta.get("engine_files_sha256") != engine_fingerprint():
@@ -2517,6 +2602,12 @@ def validate(checkpoint: Path) -> dict:
         chunk = checkpoint.parent / CACHE_DIR / name
         if not chunk.is_file() or not _owned_private(chunk):
             raise CheckpointError(f"journal cache chunk {name} missing or not private")
+    return meta, raw
+
+
+def validate(checkpoint: Path) -> dict:
+    """Authenticate plus compatibility with this process (Python, engine and host files)."""
+    meta, _raw = _validate(checkpoint)
     return meta
 
 
@@ -2582,7 +2673,7 @@ _ABSENT = object()
 
 def restore(frame, checkpoint: Path, run_dir: Path) -> dict:
     t0 = time.perf_counter()
-    meta = validate(checkpoint)
+    meta, whole = _validate(checkpoint)
     t1 = time.perf_counter()
     _restore_files(checkpoint, run_dir, meta)
     t2 = time.perf_counter()
@@ -2592,7 +2683,7 @@ def restore(frame, checkpoint: Path, run_dir: Path) -> dict:
     _SAVE.update(load_root=checkpoint.parent, load_run_dir=run_dir,
                  load_index=meta.get("chunk_index", {}) or {})
     try:
-        payload = _Unpickler(io.BytesIO((checkpoint / STATE_FILE).read_bytes()), ctx).load()
+        payload = _Unpickler(io.BytesIO(whole), ctx).load()
     finally:
         _SAVE.clear()
     for name, state in payload["modules"].items():

@@ -3,6 +3,7 @@
 import json
 from pathlib import Path
 import sys
+import zlib
 
 import pytest
 
@@ -25,12 +26,33 @@ def test_checkpoint_requires_durable_state_and_save_event(tmp_path):
     assert checkpoint_state(tmp_path) is None
     journal.write_text(json.dumps({"event": "checkpoint_saved", "step": 15}) + "\n")
     assert checkpoint_state(tmp_path)["state_bytes"] == 5
+    assert checkpoint_state(tmp_path)["stored_state_bytes"] == 5
     (folder / "state.pkl").write_bytes(b"short")
     (folder / "checkpoint.json").write_text(
         json.dumps({"step": 15, "sends": 4, "state_bytes": 6})
     )
     with pytest.raises(RuntimeError, match="state size"):
         checkpoint_state(tmp_path)
+
+
+def test_checkpoint_probe_distinguishes_raw_and_stored_sizes_for_zlib_state(tmp_path):
+    root = tmp_path / "checkpoints"
+    folder = root / "0015"
+    folder.mkdir(parents=True)
+    (root / "LATEST").write_text("0015")
+    raw = b"checkpoint state" * 1024
+    stored = zlib.compress(raw, level=1)
+    (folder / "state.pkl").write_bytes(stored)
+    (folder / "checkpoint.json").write_text(json.dumps({
+        "step": 15, "sends": 4, "state_bytes": len(raw), "state_codec": "zlib1",
+        "state_stored_bytes": len(stored),
+    }))
+    (root / "events.jsonl").write_text(json.dumps({"event": "checkpoint_saved", "step": 15}) + "\n")
+
+    state = checkpoint_state(tmp_path)
+
+    assert state["state_bytes"] == len(raw)
+    assert state["stored_state_bytes"] == len(stored)
 
 
 def test_pending_request_ignores_completed_and_incomplete_wire(tmp_path):
