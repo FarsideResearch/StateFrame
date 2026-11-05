@@ -609,30 +609,29 @@ class OrphanGuard:
 
     def _cleanup_live(self, pid: int, handle: BoundHandle, identity: object,
                       deadline: float, leak_detail: str) -> None:
-        # Keep live-after-scope evidence even when the strict signal API is absent.
+        # Record proven live-after-scope evidence before signaling; strict API absence replaces it.
+        leak_index = len(self._outcomes)
+        self._outcomes.append(Outcome("leak", pid, leak_detail))
         if not self._has_time(deadline):
-            self._outcomes.append(Outcome("leak", pid, leak_detail))
             self._unverified(pid, "check deadline expired before SIGTERM")
             return
         try:
             if not _same_bound_identity(handle, identity):
-                self._outcomes.append(Outcome("leak", pid, leak_detail))
                 self._unverified(pid, "bound identity changed before SIGTERM; process left untouched")
                 return
             handle.send_signal(signal.SIGTERM)
         except Exception as error:
             if self.platform == "darwin" and _strict_signal_api_unavailable(error):
+                del self._outcomes[leak_index]
                 self._unverified(
                     pid,
                     "registered process alive after scope end; "
                     f"{leak_detail}; strict macOS audit-token API unavailable: "
                     f"{_error_text(error)}")
                 return
-            self._outcomes.append(Outcome("leak", pid, leak_detail))
             probe = _probe(handle, identity)
             self._signal_error(pid, handle, identity, "SIGTERM", error, probe=probe)
             return
-        self._outcomes.append(Outcome("leak", pid, leak_detail))
         if self._wait_confirmed_exit(pid, handle, identity, _TERM_GRACE_SECONDS, deadline):
             return
         if not self._has_time(deadline):
@@ -684,7 +683,9 @@ class OrphanGuard:
                       *, probe: tuple[bool, bool, str] | None = None) -> None:
         current, alive, detail = probe if probe is not None else _probe(handle, identity)
         if detail:
-            self._unverified(pid, f"{phase} failed: {_error_text(error)}; liveness unknown: {detail}")
+            self._unverified(
+                pid,
+                f"{phase} failed: {_signal_error_text(error)}; liveness unknown: {detail}")
             return
         if not alive:
             self._confirmed_exit(pid, f"process exit observed after {phase} failure through retained handle")
@@ -692,7 +693,7 @@ class OrphanGuard:
         if not current:
             self._unverified(pid, f"{phase} failed after bound identity changed")
             return
-        self._unverified(pid, f"{phase} failed through bound handle: {_error_text(error)}")
+        self._unverified(pid, f"{phase} failed through bound handle: {_signal_error_text(error)}")
 
     def _confirmed_exit(self, pid: int, detail: str) -> None:
         self._outcomes.append(Outcome("confirmed exit", pid, detail))
@@ -827,6 +828,15 @@ def _timeout_milliseconds(timeout: float) -> int:
 def _error_text(error: Exception) -> str:
     message = str(error).strip()
     return f"{type(error).__name__}: {message}" if message else type(error).__name__
+
+
+def _signal_error_text(error: Exception) -> str:
+    message = _error_text(error)
+    if isinstance(error, OSError):
+        error_name = errno.errorcode.get(error.errno)
+        if error_name:
+            return f"{error_name}: {message}"
+    return message
 
 
 def _strict_signal_api_unavailable(error: Exception) -> bool:
