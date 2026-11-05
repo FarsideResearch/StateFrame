@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.4.10 (2026-11-05)
 
 - Tests: the clean-meter reprobe check no longer pins countdown copy counts for requests 3-6, which vary with census timing; requests 1-2 are compared against the base release instead.
 
