@@ -247,9 +247,11 @@ HOST_GLOBALS = frozenset(
     ("kernel_tool_tape", "_active_tape"),
     ("kernel_tool_tape", "_replay_active"),
 })
-# Instance attributes that are caches keyed by id() of live objects: after a restore those ids
-# name nothing (or, by reuse, the wrong object), so they are dropped and rebuilt.
+# Derived or runtime-only instance attributes do not belong in restored task state.
 DROP_ATTRS = {
+    ("kernel_continuation_journal", "ContinuationJournal"): frozenset({
+        "_warm_host_span_pause_counts", "_warm_host_span_resume_counts",
+    }),
     ("kernel_stateframe_runtime", "StateFrameRuntime"): frozenset({"_model_router_projection_cache"}),
     # Tokenizer auth is rebound from the new child process on every meter lookup;
     # generation credentials and derived SSL state do not belong in checkpoints.
@@ -947,6 +949,8 @@ def _journal_key(obj) -> str:
 
 def _journal_state(obj) -> dict:
     state = _lease_state(obj)
+    for name in DROP_ATTRS.get((type(obj).__module__, type(obj).__qualname__), ()):
+        state.pop(name, None)
     # Repeated-cursor snapshots are derived cache data; do not duplicate them
     # beside the authoritative journal records in a checkpoint.
     state.pop("_records_since_cache", None)
@@ -1056,6 +1060,8 @@ def _rebuild_journal(obj, state):
     obj.__dict__.update(state)
     obj._fd = None
     obj._pid = os.getpid()
+    obj._warm_host_span_pause_counts = {}
+    obj._warm_host_span_resume_counts = {}
     from collections import OrderedDict
     from kernel_continuation_journal import MEMBOUND_ENV, RECORD_CACHE_LIMIT
     obj._records_since_cache = OrderedDict()
@@ -1214,7 +1220,7 @@ class _Pickler(pickle.Pickler):
             # generic guarded-container path would serialize their weak state.
             return obj.__reduce_ex__(5)
         dropped = DROP_ATTRS.get(owner_key)
-        if dropped is not None:
+        if dropped is not None and owner_key not in LEASE_TYPES:
             return _runtime_state(obj, dropped)
         chunked = CHUNKED_TYPES.get(owner_key)
         if chunked is not None:

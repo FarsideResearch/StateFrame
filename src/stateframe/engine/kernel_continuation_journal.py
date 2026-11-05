@@ -774,6 +774,8 @@ class ContinuationJournal(AuditJournal):
         self._cold_start_span_closed = False
         self._host_event_spans: dict[str, list[object]] = {}
         self._host_event_span_seen: set[str] = set()
+        self._warm_host_span_pause_counts: dict[tuple[str, str], int] = {}
+        self._warm_host_span_resume_counts: dict[str, int] = {}
         self._receipt_refs: list[tuple[int, str]] = []
         self._receipt_ref_set: set[str] = set()
         self._response_request_ids: set[str] = set()
@@ -829,11 +831,17 @@ class ContinuationJournal(AuditJournal):
             )
 
     def _start_host_event_span(
-            self, name: str, parent_name: str | None, *, repeatable: bool = False) -> None:
+            self, name: str, parent_name: str | None, *, repeatable: bool = False,
+            warm: bool = False) -> None:
         if not repeatable and name in self._host_event_span_seen:
             return
         if not repeatable:
             self._host_event_span_seen.add(name)
+        if warm and self._warm_host_span_pause_counts:
+            self._warm_host_span_resume_counts[name] = (
+                self._warm_host_span_resume_counts.get(name, 0) + 1
+            )
+            return
         parent_span = (
             self.host_spans.find_active_ancestor(parent_name)
             if parent_name is not None else None
@@ -849,6 +857,12 @@ class ContinuationJournal(AuditJournal):
     def _finish_host_event_span(self, name: str) -> None:
         handles = self._host_event_spans.get(name)
         if not handles:
+            if self._warm_host_span_pause_counts:
+                pending = self._warm_host_span_resume_counts.get(name, 0)
+                if pending <= 1:
+                    self._warm_host_span_resume_counts.pop(name, None)
+                else:
+                    self._warm_host_span_resume_counts[name] = pending - 1
             return
         self.host_spans.finish_span(handles.pop())
         if not handles:
@@ -866,8 +880,72 @@ class ContinuationJournal(AuditJournal):
         for name, _start_kind, _end_kind, _parent_name in _WARM_HOST_EVENT_SPAN_PAIRS:
             while self._host_event_spans.get(name):
                 self._finish_host_event_span(name)
+        self._warm_host_span_resume_counts.clear()
+        self._warm_host_span_pause_counts.clear()
 
-    def _host_span_event_boundary(self, edge: str, kind: str) -> None:
+    def _pause_warm_host_event_spans(self, identity: tuple[str, str]) -> None:
+        was_paused = bool(self._warm_host_span_pause_counts)
+        self._warm_host_span_pause_counts[identity] = (
+            self._warm_host_span_pause_counts.get(identity, 0) + 1
+        )
+        if was_paused:
+            return
+        for name, _start_kind, _end_kind, _parent_name in _WARM_HOST_EVENT_SPAN_PAIRS:
+            while self._host_event_spans.get(name):
+                self._finish_host_event_span(name)
+                self._warm_host_span_resume_counts[name] = (
+                    self._warm_host_span_resume_counts.get(name, 0) + 1
+                )
+
+    def _resume_warm_host_event_spans(self, identity: tuple[str, str] | None) -> None:
+        if identity is None:
+            return
+        pause_count = self._warm_host_span_pause_counts.get(identity, 0)
+        if pause_count == 0:
+            return
+        if pause_count == 1:
+            self._warm_host_span_pause_counts.pop(identity, None)
+        else:
+            self._warm_host_span_pause_counts[identity] = pause_count - 1
+        if self._warm_host_span_pause_counts:
+            return
+        pending = self._warm_host_span_resume_counts
+        self._warm_host_span_resume_counts = {}
+        for name, _start_kind, _end_kind, parent_name in _WARM_HOST_EVENT_SPAN_PAIRS:
+            for _ in range(pending.get(name, 0)):
+                self._start_host_event_span(
+                    name, parent_name, repeatable=True, warm=True,
+                )
+
+    @staticmethod
+    def _warm_host_span_dispatch_identity(
+            edge: str, kind: str, event: object) -> tuple[str, str] | None:
+        if not isinstance(event, Mapping):
+            return None
+        if kind == "step_dispatch_binding" and edge == "after":
+            effect_id = event.get("continuation_effect_id")
+            if isinstance(effect_id, str) and effect_id:
+                return ("effect", effect_id)
+            dispatch_id = event.get("event_id")
+            return ("dispatch", dispatch_id) if isinstance(dispatch_id, str) and dispatch_id else None
+        if kind == "action_outcome_closed" and edge == "before":
+            record = event.get("record")
+            if not isinstance(record, Mapping):
+                return None
+            effect_id = record.get("continuation_effect_id")
+            if isinstance(effect_id, str) and effect_id:
+                return ("effect", effect_id)
+            dispatch_id = record.get("continuation_dispatch_ref")
+            return ("dispatch", dispatch_id) if isinstance(dispatch_id, str) and dispatch_id else None
+        return None
+
+    def _latest_unpaired_warm_host_span_dispatch(self) -> tuple[str, str] | None:
+        for identity in reversed(self._warm_host_span_pause_counts):
+            if identity[0] == "dispatch":
+                return identity
+        return None
+
+    def _host_span_event_boundary(self, edge: str, kind: str, event: object = None) -> None:
         """Trace selected startup and warm-request gaps at their journal boundaries."""
         if not host_span_profiles_enabled():
             return
@@ -883,9 +961,18 @@ class ContinuationJournal(AuditJournal):
             if edge == "after" and kind == "request_submitted":
                 self._finish_cold_start_host_spans()
             return
+        if edge == "after" and kind == "step_dispatch_binding":
+            identity = self._warm_host_span_dispatch_identity(edge, kind, event)
+            if identity is not None:
+                self._pause_warm_host_event_spans(identity)
+        elif edge == "before" and kind == "action_outcome_closed":
+            identity = self._warm_host_span_dispatch_identity(edge, kind, event)
+            if identity is None:
+                identity = self._latest_unpaired_warm_host_span_dispatch()
+            self._resume_warm_host_event_spans(identity)
         for name, start_kind, end_kind, parent_name in _WARM_HOST_EVENT_SPAN_PAIRS:
             if edge == "after" and kind == start_kind:
-                self._start_host_event_span(name, parent_name, repeatable=True)
+                self._start_host_event_span(name, parent_name, repeatable=True, warm=True)
             elif edge == "before" and kind == end_kind:
                 self._finish_host_event_span(name)
         if edge == "after" and kind == "request_submitted":

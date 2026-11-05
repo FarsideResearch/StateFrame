@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Warm event gap profiling now pairs dispatch pauses with matching closures and clears interrupted pause state at request submission or restore. This is profiling only and does not change runtime behavior.
+
 ## 0.4.27 (2026-11-05)
 
 - Tests: an orphan guard fails a test that leaves a registered process alive after its scope ends, or that leaves cleanup unverifiable. Signal enums are accepted by retained pidfd and macOS audit-token handles, macOS identity probes clear stale errno, and guard failures are written to the pytest teardown report.
