@@ -34,7 +34,7 @@ from tools.pinned_tree import pinned_tree
 
 
 def _assert_journal_kinds_match_release(baseline_kinds, current_kinds):
-    """Allow provider dialect and, for older baselines only, one done-facts event."""
+    """Allow one extra of each event only when that kind is absent from the baseline."""
     trimmed = list(current_kinds)
     done_kind = "done_facts_finalized"
     baseline_done = baseline_kinds.count(done_kind)
@@ -44,9 +44,13 @@ def _assert_journal_kinds_match_release(baseline_kinds, current_kinds):
     if current_done > baseline_done:
         del trimmed[len(trimmed) - 1 - trimmed[::-1].index(done_kind)]
     dialect_kind = "provider_dialect"
-    assert trimmed.count(dialect_kind) == baseline_kinds.count(dialect_kind) + 1, (
-        dialect_kind, baseline_kinds.count(dialect_kind), trimmed.count(dialect_kind))
-    del trimmed[len(trimmed) - 1 - trimmed[::-1].index(dialect_kind)]
+    baseline_dialect = baseline_kinds.count(dialect_kind)
+    current_dialect = trimmed.count(dialect_kind)
+    assert current_dialect == baseline_dialect or (
+        baseline_dialect == 0 and current_dialect == 1
+    ), (dialect_kind, baseline_dialect, current_dialect)
+    if current_dialect > baseline_dialect:
+        del trimmed[len(trimmed) - 1 - trimmed[::-1].index(dialect_kind)]
     assert trimmed == baseline_kinds
 
 
@@ -55,6 +59,8 @@ def test_journal_kind_parity_rejects_unexpected_extra_kind():
     allowed = ["run_started", "provider_dialect", "request_sent",
                "prompt_cache_accounting", "done_facts_finalized", "run_done"]
     _assert_journal_kinds_match_release(baseline, allowed)
+    _assert_journal_kinds_match_release(
+        [*baseline[:1], "provider_dialect", *baseline[1:]], allowed)
     _assert_journal_kinds_match_release(baseline, [kind for kind in allowed
                                                    if kind != "done_facts_finalized"])
     baseline_with_done = [*baseline[:-1], "done_facts_finalized", baseline[-1]]
@@ -65,6 +71,16 @@ def test_journal_kind_parity_rejects_unexpected_extra_kind():
     with pytest.raises(AssertionError):
         _assert_journal_kinds_match_release(baseline_with_done,
                                             [kind for kind in allowed if kind != "done_facts_finalized"])
+    baseline_with_dialect = [*baseline[:1], "provider_dialect", *baseline[1:]]
+    with pytest.raises(AssertionError):
+        _assert_journal_kinds_match_release(baseline_with_dialect,
+                                            [*allowed, "provider_dialect"])
+    with pytest.raises(AssertionError):
+        _assert_journal_kinds_match_release(
+            baseline_with_dialect,
+            [kind for kind in allowed if kind != "provider_dialect"])
+    with pytest.raises(AssertionError):
+        _assert_journal_kinds_match_release(baseline, [*allowed, "provider_dialect"])
     with pytest.raises(AssertionError):
         _assert_journal_kinds_match_release(baseline, [*allowed, "unexpected_kind"])
     with pytest.raises(AssertionError):
@@ -78,14 +94,25 @@ def test_journal_kind_parity_rejects_unexpected_extra_kind():
 
 def _assert_spec_keys_match_release(baseline_keys, current_keys):
     # The fixture proves llama.cpp via /props, so the candidate records that proof in spec.json.
-    assert "provider_capabilities" not in baseline_keys
-    assert current_keys == baseline_keys | RUNNER_SPEC_FIELDS | {"provider_capabilities"}
+    expected = baseline_keys | RUNNER_SPEC_FIELDS
+    if "provider_capabilities" not in baseline_keys:
+        expected.add("provider_capabilities")
+    assert current_keys == expected
 
 
 def test_spec_key_parity_rejects_unexpected_extra_key():
     baseline = {"schema", "chat_url"}
     allowed = baseline | RUNNER_SPEC_FIELDS | {"provider_capabilities"}
     _assert_spec_keys_match_release(baseline, allowed)
+    baseline_with_capabilities = baseline | {"provider_capabilities"}
+    _assert_spec_keys_match_release(
+        baseline_with_capabilities, baseline_with_capabilities | RUNNER_SPEC_FIELDS)
+    with pytest.raises(AssertionError):
+        _assert_spec_keys_match_release(
+            baseline_with_capabilities,
+            (baseline_with_capabilities | RUNNER_SPEC_FIELDS) - {"provider_capabilities"})
+    with pytest.raises(AssertionError):
+        _assert_spec_keys_match_release(baseline, baseline | RUNNER_SPEC_FIELDS)
     with pytest.raises(AssertionError):
         _assert_spec_keys_match_release(baseline, allowed | {"unexpected_spec_key"})
 
