@@ -253,6 +253,10 @@ class ExecSession:
         """Describe only supervisor state proved by its retained process and private log."""
         return _supervisor_diagnostics(self._process, self._directory / "supervisor.log")
 
+    def _supervisor_error(self, message: str) -> ExecSessionError:
+        return ExecSessionError(
+            f"{message}\nstartup supervisor diagnostics:\n{self.startup_diagnostics()}")
+
     def _start(self, cap: ExecCapability) -> None:
         if self._closed:
             raise ExecSessionError("execution session is closed")
@@ -351,12 +355,13 @@ class ExecSession:
                         except socket.timeout as error:
                             load, cpus = _host_load()
                             seconds = self._control.gettimeout()
-                            raise ExecSessionError(
+                            raise self._supervisor_error(
                                 f"execution supervisor did not answer within {seconds:g} s "
                                 f"(host load {load:g} on {cpus} CPUs); retry when the machine is less busy "
                                 "or raise STATEFRAME_EXEC_RPC_SECONDS") from error
                         if not part:
-                            raise ExecSessionError(f"execution supervisor exited; inspect {self._directory / 'supervisor.log'}")
+                            raise self._supervisor_error(
+                                f"execution supervisor exited; inspect {self._directory / 'supervisor.log'}")
                         self._receive.extend(part)
                         if len(self._receive) > 6 << 20:
                             raise ExecSessionError("execution supervisor response exceeds bound")
@@ -371,7 +376,8 @@ class ExecSession:
                         raise ExecSessionError(value["error"])
                     return value
             except OSError as error:
-                raise ExecSessionError(f"execution supervisor communication failed: {error}") from error
+                raise self._supervisor_error(
+                    f"execution supervisor communication failed: {error}") from error
 
     def _spawn(self, argv, cap, *, cwd=None, stdin=None) -> JobHandle:
         if isinstance(argv, (str, bytes)):

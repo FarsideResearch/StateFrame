@@ -23,8 +23,7 @@ class ProbeCleanupError(BaseException):
 def run_probe(argv: Sequence[str], workspace: Path, *, timeout: float = 10,
               stdin: bytes | None = None, read_roots: Sequence[Path] = (),
               write_roots: Sequence[Path] = (),
-              env: Mapping[str, str] | None = None,
-              diagnostics_on_failure: bool = False) -> ExecResult:
+              env: Mapping[str, str] | None = None) -> ExecResult:
     """Execute repository-controlled code read-only, offline, with scratch HOME."""
     executable = Path(argv[0]).absolute()
     with tempfile.TemporaryDirectory(prefix="stateframe-probe-") as directory:
@@ -67,35 +66,11 @@ def run_probe(argv: Sequence[str], workspace: Path, *, timeout: float = 10,
             message = "automatic probe cleanup failed: " + str(cleanup_error)
             if primary_error is not None:
                 message += "\nprimary error: " + str(primary_error)
-            if diagnostics_on_failure:
-                message += "\nstartup supervisor diagnostics:\n" + _session_diagnostics(session)
             raise ProbeCleanupError(message) from cleanup_error
 
         if primary_error is not None:
-            if diagnostics_on_failure:
-                _append_startup_diagnostics(primary_error, _session_diagnostics(session))
             raise primary_error.with_traceback(primary_traceback)
 
         if result is None:
             raise RuntimeError("execution session returned no probe result")
-        if diagnostics_on_failure and (result.timed_out or result.exit_code != 0
-                                       or result.output_truncated):
-            diagnostic = _session_diagnostics(session)
-            result = replace(
-                result,
-                output=(result.output + b"\nstartup supervisor diagnostics:\n"
-                        + diagnostic.encode("utf-8")),
-            )
         return result
-
-
-def _session_diagnostics(session: ExecSession) -> str:
-    reporter = getattr(session, "startup_diagnostics", None)
-    if callable(reporter):
-        return reporter()
-    # Test and embedding boundaries without a retained supervisor cannot prove more.
-    return "supervisor status unknown\nsupervisor.log absent"
-
-
-def _append_startup_diagnostics(error: BaseException, diagnostic: str) -> None:
-    error.args = (f"{error}\nstartup supervisor diagnostics:\n{diagnostic}",)

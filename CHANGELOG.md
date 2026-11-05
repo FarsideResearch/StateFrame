@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- Fixed: a startup probe failure now reports the execution supervisor's exit status, when proven, and the tail of its log, instead of losing them with the probe's temporary directory.
+- Fixed: supervisor exit and communication failures now carry any proven exit status and a bounded log tail through startup probes and import smoke before temporary cleanup. Ordinary probe results and startup failure messages remain unchanged.
 
 ## 0.4.30 (2026-11-05)
 
