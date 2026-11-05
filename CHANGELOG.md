@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.4.0 (2026-11-04)
 
 - Post-fit recovery keeps the final cache layout trim callback out of the saved allocation inputs, so a recovered request can be captured again without passing an unsupported callback.
 - The final cache layout is on by default and also applies with estimated token counts, including hosted APIs and vLLM. Resume rebuilds each send in the order recorded in its wire bytes, even when the current meter differs. The projection moves `[Source coverage]` out of the stable prefix and fits projected token and byte sizes to the measured ceilings, trimming optional source content once when needed. If the projected request still cannot fit, it is sent in plain order with a `final_cache_layout_failed_open` event. Measured live (Qwen3.6-35B-A3B on llama.cpp, one server slot, layout on vs off in the same build): the cached share of the prompt after the first request rose from 22.8% to 28.0% on a 22-file task (3 runs per arm) and from 23.2% to 32.1% on a smaller task (2 runs per arm); prompt tokens the server had to process again fell 7% and 11% per request, and prompt processing time per request fell 7-9%. Outcomes did not change: the smaller task submitted with its tests passing in every run of both arms, and the 22-file task reached the same 40-minute limit in both. `STATEFRAME_FINAL_CACHE_LAYOUT=off` restores the previous request order and bytes. A custom profile that turns on the page log keeps the page log. See [Running](docs/guide/running.md#prompt-cache-current-authority-last).
