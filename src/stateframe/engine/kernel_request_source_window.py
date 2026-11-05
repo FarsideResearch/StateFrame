@@ -1466,6 +1466,7 @@ def _verify_allocated_carriers(
         messages: Sequence[Mapping[str, object]],
         carriers: Sequence[object],
 ) -> None:
+    from kernel_stateframe_f4 import escape_state_marker_data
     from kernel_stateframe_framefit5 import FrameFit5Error
 
     for carrier in carriers:
@@ -1473,11 +1474,12 @@ def _verify_allocated_carriers(
             raise FrameFit5Error("frame-only source allocation contains an invalid carrier")
         location = carrier.get("location")
         message = carrier.get("message")
+        expected = escape_state_marker_data(message) if isinstance(message, Mapping) else None
         if (type(location) is not int or not isinstance(message, Mapping)
-                or location >= len(messages) or messages[location] != message):
+                or location >= len(messages) or messages[location] != expected):
             raise FrameFit5Error("frame-only source carrier moved after allocation")
         matches = [
-            index for index, candidate in enumerate(messages) if candidate == message
+            index for index, candidate in enumerate(messages) if candidate == expected
         ]
         if matches != [location]:
             raise FrameFit5Error("frame-only allocated source carrier is duplicated")
@@ -1488,6 +1490,7 @@ def _validate_frame_request_allocation_placement(
         allocation: FrameRequestAllocation,
 ) -> None:
     from kernel_stateframe_envelope import STATE_HEADER
+    from kernel_stateframe_f4 import escape_state_marker_data
     from kernel_stateframe_framefit5 import FrameFit5Error, _is_volatile_tail_message
 
     try:
@@ -1513,7 +1516,7 @@ def _validate_frame_request_allocation_placement(
     )
     state_index = first_non_system + 1
     if (first_non_system >= len(messages)
-            or messages[first_non_system] != task
+            or messages[first_non_system] != escape_state_marker_data(task)
             or state_index >= len(messages)
             or not str(messages[state_index].get("content") or "").startswith(
                 STATE_HEADER + "\n",
@@ -1530,21 +1533,24 @@ def _validate_frame_request_allocation_placement(
     expected_prefix = _allocated_prefix_snapshot(layout, prefix_start, suffix_start)
     for location, message in expected_prefix.items():
         if (type(location) is not int or not isinstance(message, Mapping)
-                or location >= len(messages) or messages[location] != message):
+                or location >= len(messages)
+                or messages[location] != escape_state_marker_data(message)):
             raise FrameFit5Error("frame-only allocated fact/source carrier moved")
 
     suffix_end = suffix_start + len(suffix)
     if (suffix_end != exchange_start
-            or messages[suffix_start:suffix_end] != suffix):
+            or messages[suffix_start:suffix_end]
+            != [escape_state_marker_data(message) for message in suffix]):
         raise FrameFit5Error("frame-only newest-user suffix moved after allocation")
     exchange_end = exchange_start + len(exchange)
-    if messages[exchange_start:exchange_end] != exchange:
+    wire_exchange = [escape_state_marker_data(message) for message in exchange]
+    if messages[exchange_start:exchange_end] != wire_exchange:
         raise FrameFit5Error("frame-only newest tool exchange moved after allocation")
     action_messages = [
         message for message in messages
         if message.get("role") in {"assistant", "tool"}
     ]
-    if action_messages != exchange:
+    if action_messages != wire_exchange:
         raise FrameFit5Error("frame-only source allocation changed the newest action exchange")
     _verify_allocated_carriers(messages, carriers)
     if (exchange_end != len(messages) - 1

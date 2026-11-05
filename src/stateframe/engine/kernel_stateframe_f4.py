@@ -1849,16 +1849,25 @@ def frame_bytes(messages: Sequence[Mapping[str, object]]) -> bytes:
 MODEL_VISIBLE_STATE_KEYS = ("schema", "revision", "state")
 
 
-def state_message(state: Mapping[str, object]) -> dict[str, str]:
+def state_message(state: Mapping[str, object]) -> dict[str, object]:
     visible = {key: state[key] for key in MODEL_VISIBLE_STATE_KEYS if key in state}
-    return {"role": "user", "content": serialize_stateframe_payload(visible)}
+    message = {"role": "user", "content": serialize_stateframe_payload(visible)}
+    if isinstance(visible.get("state"), Mapping) and "framefit5" in visible["state"]:
+        # Internal provenance for the FrameFit5 source transcript, removed at composition.
+        message["_stateframe_host_state"] = True
+    return message
 
 
-def escape_state_marker_data(message: Mapping[str, object]) -> dict:
-    """Copy external content for the wire without changing its source or tool arguments."""
+def escape_state_marker_data(
+        message: Mapping[str, object], *, host_state: bool = False,
+        preserve_host_provenance: bool = False,
+) -> dict:
+    """Copy and escape wire text; retain provenance only for F5's intermediate F4 view."""
     item = copy.deepcopy(dict(message))
+    if not preserve_host_provenance:
+        item.pop("_stateframe_host_state", None)
     content = str(item.get("content") or "")
-    if content.startswith(STATE_HEADER):
+    if not host_state and content.startswith(STATE_HEADER):
         # The visible escape is \[StateFrame]. Only the host state starts [StateFrame].
         item["content"] = "\\" + content
     return item
@@ -1936,7 +1945,11 @@ def compose_messages(*, prefix: Sequence[Mapping[str, object]], path: str, worki
             messages.extend(copy.deepcopy(dict(item)) for item in pair if isinstance(item, Mapping))
     ordered = order_f4_messages(messages)
     composed = _append_verbatim_turns(ordered, verbatim_turns)
-    return [dict(message) if message is host_state else escape_state_marker_data(message)
+    return [escape_state_marker_data(
+        message, host_state=message is host_state,
+        preserve_host_provenance=(message is host_state
+                                  and message.get("_stateframe_host_state") is True),
+    )
             for message in composed]
 
 
