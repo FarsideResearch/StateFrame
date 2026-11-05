@@ -4,6 +4,7 @@ from __future__ import annotations
 import base64
 from collections.abc import Sequence
 from dataclasses import dataclass
+import errno
 import json
 import math
 import os
@@ -27,6 +28,40 @@ else:
     from kernel_exec_tracker import capture_launch_identity, kill_launch_unit, recorded_launch_identity
     from kernel_test_isolation import sandbox_executable
     from sf_launch import _current_cgroup
+
+
+_OWNER_PIPE_WRITES: set[int] = set()
+
+
+def _close_owner_pipe_writers_after_fork() -> None:
+    """Prevent forked engine helpers from extending execution-session lifetime."""
+    descriptors = tuple(_OWNER_PIPE_WRITES)
+    _OWNER_PIPE_WRITES.clear()
+    for descriptor in descriptors:
+        try:
+            os.close(descriptor)
+        except OSError as error:
+            if error.errno != errno.EBADF:
+                # A child that cannot close this end must not survive holding EOF open.
+                os._exit(127)
+
+
+def close_owner_pipe_writers_after_fork() -> None:
+    """Explicitly close registered owner ends in known fork-child paths."""
+    _close_owner_pipe_writers_after_fork()
+
+
+os.register_at_fork(after_in_child=_close_owner_pipe_writers_after_fork)
+
+
+def _owner_pipe() -> tuple[int, int]:
+    """Create close-on-exec descriptors on platforms with and without pipe2."""
+    if hasattr(os, "pipe2"):
+        return os.pipe2(os.O_CLOEXEC)
+    read_fd, write_fd = os.pipe()
+    os.set_inheritable(read_fd, False)
+    os.set_inheritable(write_fd, False)
+    return read_fd, write_fd
 
 
 class ExecSessionError(RuntimeError):
@@ -158,6 +193,7 @@ class ExecSession:
             prefix="exec-" + uuid.uuid4().hex + "-", dir=self.run_dir))
         self._process = None
         self._control = None
+        self._owner_write_fd: int | None = None
         self._receive = bytearray()
         self._next_rid = 0
         self._log = None
@@ -188,49 +224,72 @@ class ExecSession:
         if sys.platform.startswith("linux") and os.getuid() == 0:
             raise ExecSessionError("Linux execution requires a non-root host UID")
         self._sandboxed = cap.sandboxed
-        command = [sys.executable, "-I", str(Path(__file__).with_name("kernel_exec_supervisor.py")),
-                   str(self._directory), self.backend, "host"]
+        bwrap_executable = None
         if cap.sandboxed and self.backend == "bwrap":
-            executable = sandbox_executable("bwrap")
-            if executable is None:
+            bwrap_executable = sandbox_executable("bwrap")
+            if bwrap_executable is None:
                 raise ExecSessionError("execution capability requires bwrap; no unsandboxed fallback")
             network = "full" if cap.network == "full" else "loopback"
-            command[-1] = network
             self._write_envelope = (*cap.write_roots, cap.workspace, self.run_dir)
-            # Only the trusted supervisor sees this read-only host tree. Every
-            # target gets a fresh mount/user namespace with capability-only binds.
-            wrapper = [executable, "--unshare-all", "--die-with-parent", "--new-session", "--as-pid-1",
-                        "--ro-bind", "/", "/", "--proc", "/proc", "--dev", "/dev",
-                        "--bind", str(self.run_dir), str(self.run_dir)]
-            cgroup = _current_cgroup()
-            try:
-                pids_delegated = cgroup is not None and "pids" in (cgroup / "cgroup.subtree_control").read_text().split()
-            except OSError:
-                pids_delegated = False
-            if pids_delegated and os.access(cgroup, os.W_OK):
-                # Only the trusted supervisor can write this delegated subtree.
-                # The nested command's mount envelope does not include it.
-                wrapper += ["--bind", str(cgroup), "/sys/fs/cgroup"]
-            if network == "full":
-                wrapper += ["--share-net"]
-            for root in sorted(set(self._write_envelope), key=lambda p: (len(p.parts), str(p))):
-                wrapper += ["--bind", str(root), str(root)]
-            command = [*wrapper, "--", *command]
+        else:
+            network = "host"
         parent, child = socket.socketpair()
         self._log = (self._directory / "supervisor.log").open("xb", buffering=0)
+        owner_read_fd = owner_write_fd = None
         try:
+            owner_read_fd, owner_write_fd = _owner_pipe()
+            self._owner_write_fd = owner_write_fd
+            _OWNER_PIPE_WRITES.add(owner_write_fd)
+            command = [sys.executable, "-I", str(Path(__file__).with_name("kernel_exec_supervisor.py")),
+                       str(self._directory), self.backend, network, str(owner_read_fd)]
+            if bwrap_executable is not None:
+                # bwrap closes unlisted descriptors during setup. --sync-fd keeps this
+                # owner channel through its monitor; --as-pid-1 passes it to the command.
+                wrapper = [bwrap_executable, "--unshare-all", "--die-with-parent", "--new-session",
+                           "--as-pid-1", "--sync-fd", str(owner_read_fd),
+                           "--ro-bind", "/", "/", "--proc", "/proc", "--dev", "/dev",
+                           "--bind", str(self.run_dir), str(self.run_dir)]
+                cgroup = _current_cgroup()
+                try:
+                    pids_delegated = (cgroup is not None
+                                      and "pids" in (cgroup / "cgroup.subtree_control").read_text().split())
+                except OSError:
+                    pids_delegated = False
+                if pids_delegated and os.access(cgroup, os.W_OK):
+                    # Only the trusted supervisor can write this delegated subtree.
+                    # The nested command's mount envelope does not include it.
+                    wrapper += ["--bind", str(cgroup), "/sys/fs/cgroup"]
+                if network == "full":
+                    wrapper += ["--share-net"]
+                for root in sorted(set(self._write_envelope), key=lambda p: (len(p.parts), str(p))):
+                    wrapper += ["--bind", str(root), str(root)]
+                command = [*wrapper, "--", *command]
             self._process = subprocess.Popen(command, stdin=child, stdout=subprocess.DEVNULL,
                                              stderr=self._log, env={"PATH": "/usr/bin:/bin", "LC_ALL": "C"},
-                                             close_fds=True, start_new_session=True)
+                                             close_fds=True, start_new_session=True,
+                                             pass_fds=(owner_read_fd,))
             capture_launch_identity(self._process, session_leader=True)
-        except OSError as error:
+        except BaseException as error:  # noqa: BLE001 - release every owner fd on launch failure
             parent.close()
             self._log.close()
-            raise ExecSessionError(f"cannot launch execution supervisor: {error}") from error
+            self._close_owner_write_end()
+            if isinstance(error, OSError):
+                raise ExecSessionError(f"cannot launch execution supervisor: {error}") from error
+            raise
         finally:
             child.close()
+            if owner_read_fd is not None:
+                os.close(owner_read_fd)
         parent.settimeout(rpc_timeout_seconds())
         self._control = parent
+
+    def _close_owner_write_end(self) -> None:
+        descriptor = self._owner_write_fd
+        self._owner_write_fd = None
+        if descriptor is None:
+            return
+        _OWNER_PIPE_WRITES.discard(descriptor)
+        os.close(descriptor)
 
     def _rpc(self, request: dict) -> dict:
         with self._lock:
@@ -346,6 +405,7 @@ class ExecSession:
                 self._rpc({"op": "close", "grace": 0})
         finally:
             self._closed = True
+            self._close_owner_write_end()
             if self._control is not None:
                 self._control.close()
             if self._process is not None:

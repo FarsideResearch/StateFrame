@@ -20,6 +20,9 @@ TESTS = Path(__file__).resolve().parent
 # These exercise process signalling, containment or a non-run helper, not a StateFrame run.
 PRIMITIVE_TESTS = {
     "test_launch_unit_kill.py",
+    "test_orphan_guard.py",  # plants and stops detached processes, never a StateFrame run
+    "test_orphan_guard_portability.py",  # plants and stops a detached launcher, never a StateFrame run
+    "test_process_signal_liveness.py",  # probes its process-signal fixture helpers, never a StateFrame run
     "test_exec_tracker.py",
     "test_launch_identity_signals.py",
     "test_cleanup_containment.py",
@@ -32,6 +35,7 @@ PRIMITIVE_TESTS = {
     "test_checkpoint_live_probe.py",
     "test_checkpoint_kill_barrier.py",
     "test_exec_session.py",
+    "test_exec_supervisor_parent_death.py",  # launches the supervisor primitive directly, not a StateFrame run
     "test_frame_routes_engine.py",
     "test_powerups_python_in_sandbox.py",
     "test_check_sandbox_nproc.py",
@@ -95,7 +99,8 @@ def _unbarriered_signals(root: Path) -> dict[str, list[tuple[int, str]]]:
     for path in root.rglob("*.py"):
         relative = path.relative_to(root)
         # The monitor owns and reaps its engine process group after the leader exits; run-kill decisions stay in tests.
-        if relative.as_posix() in {"fixtures/process_signals.py", "engine_run.py"} or (
+        # The orphan guard only stops launchd-adopted leftovers, after their run has ended.
+        if relative.as_posix() in {"fixtures/process_signals.py", "engine_run.py", "_orphan_guard.py"} or (
                 relative.parts[0] != "acceptance" and path.name in PRIMITIVE_TESTS):
             continue
         found = _raw_run_signals(path.read_text(encoding="utf-8"), relative)

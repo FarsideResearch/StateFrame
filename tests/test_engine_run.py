@@ -187,7 +187,8 @@ def test_signal_run_owned_signals_only_monitored_runner(monkeypatch, tmp_path):
     signalled = []
 
     def record_signal(pid, signal_number):
-        signalled.append((pid, signal_number))
+        if signal_number != 0:
+            signalled.append((pid, signal_number))
         return original_kill(pid, signal_number)
 
     monkeypatch.setattr(os, "kill", record_signal)
@@ -199,6 +200,7 @@ def test_signal_run_owned_signals_only_monitored_runner(monkeypatch, tmp_path):
                          require_checkpoint_saved=False)
         process.communicate(timeout=5)
 
+    # Signal 0 is the fixture's liveness probe; it does not deliver a signal.
     assert signalled == [(process.pid, signal.SIGKILL)]
     assert process.returncode == -signal.SIGKILL
 

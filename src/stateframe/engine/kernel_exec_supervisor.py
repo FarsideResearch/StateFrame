@@ -137,20 +137,29 @@ class ManagedProcess:
 
 
 class Supervisor:
-    def __init__(self, control, directory, backend, namespace_network):
+    def __init__(self, control, directory, backend, namespace_network, owner_fd):
         self.control = control
         self.directory = directory
         self.backend = backend
         self.namespace_network = namespace_network
+        self.owner_fd = owner_fd
         self.table = ProcessTable()
         self.jobs: dict[str, ManagedProcess] = {}
         self.next_id = 0
         self.closing = False
         self.selector = selectors.DefaultSelector()
         self.control.setblocking(False)
-        self.selector.register(control, selectors.EVENT_READ)
+        self.selector.register(control, selectors.EVENT_READ, "control")
+        os.set_blocking(owner_fd, False)
+        self.selector.register(owner_fd, selectors.EVENT_READ, "owner")
         self.incoming = bytearray()
         self.outgoing = bytearray()
+
+    def _begin_close(self):
+        self.closing = True
+        self.outgoing.clear()
+        for job in self.jobs.values():
+            job.stop(0.1)
 
     def start(self, request):
         if any(job.cleanup is not None and not job.cleanup["ok"] for job in self.jobs.values()):
@@ -291,7 +300,19 @@ class Supervisor:
                 if self.closing and all(j.cleanup is not None for j in self.jobs.values()) and not self.outgoing:
                     break
                 events = self.selector.select(0.02)
-                for _, mask in events:
+                for key, mask in events:
+                    if key.data == "owner" and mask & selectors.EVENT_READ:
+                        # Only the engine owns the write end. Any event is EOF or a
+                        # protocol violation, and both must fail closed for the session.
+                        try:
+                            os.read(self.owner_fd, 1)
+                        except BlockingIOError:
+                            continue
+                        self.selector.unregister(self.owner_fd)
+                        os.close(self.owner_fd)
+                        self.owner_fd = -1
+                        self._begin_close()
+                        continue
                     if mask & selectors.EVENT_READ:
                         try:
                             chunk = self.control.recv(65536)
@@ -300,10 +321,7 @@ class Supervisor:
                         if not chunk:
                             connected = False
                             self.selector.unregister(self.control)
-                            self.outgoing.clear()
-                            self.closing = True
-                            for job in self.jobs.values():
-                                job.stop(0.1)
+                            self._begin_close()
                             continue
                         self.incoming.extend(chunk)
                         self._queue_replies()
@@ -314,10 +332,7 @@ class Supervisor:
                         except (BrokenPipeError, ConnectionResetError):
                             connected = False
                             self.selector.unregister(self.control)
-                            self.outgoing.clear()
-                            self.closing = True
-                            for job in self.jobs.values():
-                                job.stop(0.1)
+                            self._begin_close()
                 if connected:
                     self.selector.modify(self.control, selectors.EVENT_READ |
                                          (selectors.EVENT_WRITE if self.outgoing else 0))
@@ -336,18 +351,21 @@ class Supervisor:
                 job.remove_cgroup()
             self.selector.close()
             self.control.close()
+            if self.owner_fd >= 0:
+                os.close(self.owner_fd)
 
 
 def main():
     directory = Path(sys.argv[1])
     backend, network = sys.argv[2:4]
+    owner_fd = int(sys.argv[4])
     if network == "loopback":
         # Bubblewrap configures private lo before dropping its setup privileges.
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
             flags = fcntl.ioctl(sock.fileno(), 0x8913, struct.pack("16sh", b"lo", 0))
             if not struct.unpack_from("h", flags, 16)[0] & 1:
                 raise RuntimeError("persistent execution namespace has no loopback interface")
-    Supervisor(socket.socket(fileno=0), directory, backend, network).serve()
+    Supervisor(socket.socket(fileno=0), directory, backend, network, owner_fd).serve()
 
 
 if __name__ == "__main__":
