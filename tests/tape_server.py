@@ -48,6 +48,10 @@ class TapeServer:
             raise ValueError("turn delay must be a finite number between 0 and 5 seconds")
         self._turn_delay_seconds = float(turn_delay_seconds)
         self._model = str(script.get("model") or "allocation-replay-model")
+        props_available = script.get("props_available", True)
+        if type(props_available) is not bool:
+            raise ValueError("props_available must be a boolean")
+        self._props_available = props_available
         self._divisor = float(script.get("tokenize_divisor", 1.245))
         if self._divisor <= 0:
             raise ValueError("tokenize_divisor must be positive")
@@ -147,6 +151,9 @@ class TapeServer:
                 if path.endswith("/models"):
                     self._send_json(200, {"object": "list", "data": [{"id": tape._model, "object": "model"}]})
                 elif path.endswith("/props"):
+                    if not tape._props_available:
+                        self._send_json(404, {"error": {"message": "not found"}})
+                        return
                     # Match the llama.cpp identification shape used by scripted_endpoint.
                     if tape._props_delay_s:
                         time.sleep(tape._props_delay_s)

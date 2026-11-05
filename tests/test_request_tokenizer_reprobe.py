@@ -266,28 +266,58 @@ def test_slow_capability_probe_obeys_request_deadline_without_caching(monkeypatc
     assert endpoint.tokenize_request_count == 0
 
 
-def test_cached_llama_cpp_proof_survives_a_later_probe_miss(monkeypatch):
+def test_props_proof_survives_a_later_probe_miss_and_slot_probe(monkeypatch):
     script = {
         "model": "allocation-replay-model",
         "turns": [{"message": {"role": "assistant", "content": "done"}}],
     }
+    cache = {}
+    monkeypatch.setattr(provider_dialect, "RUN_CAPABILITY_CACHE", cache)
+    real_probe = provider_dialect.bounded_json_probe
+    probe_misses_enabled = False
+    missed_paths = []
+
+    def probe_with_later_misses(origin, key, path, **kwargs):
+        if probe_misses_enabled:
+            missed_paths.append(path)
+            return None
+        return real_probe(origin, key, path, **kwargs)
+
+    monkeypatch.setattr(provider_dialect, "bounded_json_probe", probe_with_later_misses)
+
     with TapeServer(script) as endpoint:
         origin = provider_dialect.origin_of(endpoint.url)
-        cache = {
-            origin: provider_dialect.ProviderCapabilities(
-                dialect=provider_dialect.LLAMA_CPP, reason="proven by host preflight",
-            ),
-        }
-        monkeypatch.setattr(provider_dialect, "RUN_CAPABILITY_CACHE", cache)
-        monkeypatch.setattr(provider_dialect, "bounded_json_probe", lambda *_args, **_kwargs: None)
+        first_tokens = request_diet._http_tokenize(
+            "props capability", f"{endpoint.url}/tokenize", deadline=monotonic() + 1.0,
+        )
+        props_proof = cache[origin]
+        assert props_proof.dialect == provider_dialect.LLAMA_CPP
+        assert props_proof.reason == "proven by /props"
+        assert props_proof.props_status == 200
+        assert props_proof.slots is False
+        assert props_proof.slots_status is None
 
-        tokens = request_diet._http_tokenize(
-            "cached capability", f"{endpoint.url}/tokenize", deadline=monotonic() + 1.0,
+        probe_misses_enabled = True
+        slot_miss = provider_dialect.capabilities_for(endpoint.url, "", require_slots=True)
+        second_tokens = request_diet._http_tokenize(
+            "cached props capability after slot miss",
+            f"{endpoint.url}/tokenize", deadline=monotonic() + 1.0,
         )
 
-    assert tokens
-    assert endpoint.tokenize_request_count == 1
-    assert cache[origin].dialect == provider_dialect.LLAMA_CPP
+        assert slot_miss.dialect == provider_dialect.LLAMA_CPP
+        assert slot_miss.slots is False
+        assert missed_paths == ["/slots"]
+        assert first_tokens and second_tokens
+        assert endpoint.tokenize_request_count == 2
+
+        monkeypatch.setattr(provider_dialect, "bounded_json_probe", real_probe)
+        slot_proof = provider_dialect.capabilities_for(endpoint.url, "", require_slots=True)
+
+    assert slot_proof.dialect == provider_dialect.LLAMA_CPP
+    assert slot_proof.slots is True
+    assert slot_proof.slot_ids == frozenset(range(8))
+    assert slot_proof.slots_status == 200
+    assert cache[origin] == slot_proof
 
 
 def test_late_tokenize_success_within_request_budget_is_not_a_failure(monkeypatch):
@@ -477,6 +507,9 @@ def _capture_clean_meter_request_bodies(tmp_path):
     outcome = corpus._run_case(
         tmp_path,
         "clean-meter-22file-r1",
+        # The 012e0b5 wire oracle predates TapeServer's /props response. Keep this
+        # capture on that fixture contract so only request-body bytes are compared.
+        props_available=False,
         stop_after_provider_requests=6,
         final_cache_layout="off",
     )
