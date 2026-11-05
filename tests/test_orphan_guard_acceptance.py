@@ -56,7 +56,7 @@ _CHECK_TIMEOUT = 30.0
 _TOKEN_ENV = "SF_TEST_TOKEN"
 _PID1_TOKEN_SOURCE = "SF_TEST_PID1_CHILD_TOKEN"
 _READY_SCRIPT = "import os,signal; os.write(1,b'ready\\n'); signal.pause()"
-_STRIP_TOKEN_SCRIPT = """import os,sys
+_STRIP_TOKEN_SCRIPT = r"""import os,sys
 name=sys.argv[1]
 clean={key:value for key,value in os.environ.items() if key != name}
 target="import os,signal; os.write(1,b'ready\\n'); signal.pause()"

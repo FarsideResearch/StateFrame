@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import errno
+import os
 import signal
 import subprocess
 import sys
@@ -12,6 +13,21 @@ from types import SimpleNamespace
 import pytest
 
 import _orphan_guard as orphan_guard
+from test_orphan_guard_acceptance import _STRIP_TOKEN_SCRIPT
+
+
+def test_stripped_token_helper_target_compiles(monkeypatch):
+    executed_argv: list[list[str]] = []
+
+    def capture_execve(_executable, argv, _environment):
+        executed_argv.append(argv)
+
+    monkeypatch.setattr(os, "execve", capture_execve)
+    monkeypatch.setattr(sys, "argv", ["stripped-token-helper", "SF_TEST_TOKEN"])
+    exec(_STRIP_TOKEN_SCRIPT, {})
+
+    assert len(executed_argv) == 1
+    compile(executed_argv[0][-1], "<stripped-token-target>", "exec")
 
 
 class _LiveHandle:
