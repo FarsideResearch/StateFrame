@@ -11,6 +11,7 @@
 ## 0.3.38 (2026-11-04)
 
 - Tests: the hook-wiring parity checks compare the provider_dialect journal event and the provider_capabilities spec key against whatever baseline release they pick, so they pass on a released tip as well as on a branch. Test-only; no runtime change.
+
 ## Unreleased
 
 - Post-fit recovery keeps the final cache layout trim callback out of the saved allocation inputs, so a recovered request can be captured again without passing an unsupported callback.
