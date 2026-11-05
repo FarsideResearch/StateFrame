@@ -505,8 +505,7 @@ class OrphanGuard:
                         lambda scope=scope, launch=launch: self._check_launch(
                             scope, launch, deadline))
             for adopted in scope.adopted:
-                if (not adopted.checked
-                        and (scope.ended or _adopted_owner_exited(scope, adopted))):
+                if not adopted.checked and scope.ended:
                     self._check_unit(
                         scope, adopted,
                         lambda scope=scope, adopted=adopted: self._check_adopted(
@@ -586,26 +585,19 @@ class OrphanGuard:
 
     def _cleanup_live(self, pid: int, handle: BoundHandle, identity: object,
                       deadline: float, leak_detail: str) -> None:
+        # The caller already proved this registered candidate current and alive.
+        # Cleanup attempts cannot erase that observed leak classification.
+        self._outcomes.append(Outcome("leak", pid, leak_detail))
         if not self._has_time(deadline):
             self._unverified(pid, "check deadline expired before SIGTERM")
             return
-        leak: Outcome | None = None
         try:
             if not _same_bound_identity(handle, identity):
                 self._unverified(pid, "bound identity changed before SIGTERM; process left untouched")
                 return
-            leak = Outcome("leak", pid, leak_detail)
-            # Preserve the observed-live event before signaling can change
-            # liveness. If a bound-signal error leaves the candidate live or
-            # its identity unverifiable, only cleanup-unverified is reportable.
-            self._outcomes.append(leak)
             handle.send_signal(signal.SIGTERM)
         except Exception as error:
             probe = _probe(handle, identity)
-            _, alive, detail = probe
-            if detail or alive:
-                if leak is not None and self._outcomes and self._outcomes[-1] is leak:
-                    self._outcomes.pop()
             self._signal_error(pid, handle, identity, "SIGTERM", error, probe=probe)
             return
         if self._wait_confirmed_exit(pid, handle, identity, _TERM_GRACE_SECONDS, deadline):
@@ -708,6 +700,12 @@ class OrphanGuard:
                 if stream is None:
                     continue
                 try:
+                    # Popen's buffered stdin.close() flushes first. Close the
+                    # raw pipe endpoint to discard pending input before closing
+                    # its wrapper, so teardown never waits for a child to read.
+                    raw_stream = getattr(stream, "raw", None)
+                    if raw_stream is not None:
+                        raw_stream.close()
                     stream.close()
                 except Exception as error:
                     errors.append(
@@ -783,18 +781,6 @@ def _missing_adoption_facts(scope: _Scope, adopted: _Adopted) -> list[str]:
     if not adopted.tmp_path_use:
         missing.append("cwd/open-file use beneath tmp_path is not observed")
     return missing
-
-
-def _adopted_owner_exited(scope: _Scope, adopted: _Adopted) -> bool:
-    """Treat an exited registered adoption owner as a final scope check."""
-    transition = adopted.parent_transition
-    if (not isinstance(transition, tuple) or len(transition) != 2
-            or any(type(pid) is not int or pid <= 0 for pid in transition)
-            or transition[0] == transition[1]):
-        return False
-    owner_pid = transition[1]
-    return any(launch.pid == owner_pid and launch.process.poll() is not None
-               for launch in scope.launches)
 
 
 def _timeout_milliseconds(timeout: float) -> int:

@@ -6,6 +6,8 @@ import os
 import signal
 import subprocess
 import sys
+import threading
+import time
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -135,12 +137,33 @@ def test_live_registered_launch_remains_a_leak_when_bound_signal_fails(tmp_path)
     try:
         report = guard.check()
 
-        assert [outcome.kind for outcome in report.outcomes] == ["cleanup unverified"]
-        assert report.outcomes[0].pid == launch.pid
-        assert "signal denied" in report.outcomes[0].detail
+        assert [outcome.kind for outcome in report.outcomes] == [
+            "leak", "cleanup unverified"]
+        assert all(outcome.pid == launch.pid for outcome in report.outcomes)
+        assert "remained alive" in report.outcomes[0].detail
+        assert "signal denied" in report.outcomes[1].detail
         assert report.unit_outcomes[0].kind == "cleanup unverified"
         assert handles[0].signals == [signal.SIGTERM]
         assert signal_observations == [("leak",)]
+    finally:
+        _stop_helper(launch.process)
+        guard.close()
+
+
+def test_live_registered_launch_remains_a_leak_when_check_deadline_expires(tmp_path, monkeypatch):
+    guard, scope, launch, handle = _launch_helper(tmp_path)
+    scope.end()
+    monkeypatch.setattr(orphan_guard, "_CHECK_DEADLINE_SECONDS", 0.0)
+    try:
+        report = guard.check()
+
+        assert [outcome.kind for outcome in report.outcomes] == [
+            "leak", "cleanup unverified"]
+        assert all(outcome.pid == launch.pid for outcome in report.outcomes)
+        assert "remained alive" in report.outcomes[0].detail
+        assert "deadline expired before SIGTERM" in report.outcomes[1].detail
+        assert report.unit_outcomes[0].kind == "cleanup unverified"
+        assert handle.signals == []
     finally:
         _stop_helper(launch.process)
         guard.close()
@@ -235,7 +258,7 @@ def test_teardown_reports_missing_scope_end_for_open_adopted_candidate(tmp_path)
     assert item.stash == {}
 
 
-def test_exited_registered_adoption_owner_makes_open_scope_check_final(tmp_path):
+def test_exited_registered_adoption_owner_does_not_end_scope(tmp_path):
     handles: list[_LiveHandle] = []
 
     def handle_factory(process: subprocess.Popen[bytes], *, platform: str) -> _LiveHandle:
@@ -255,13 +278,23 @@ def test_exited_registered_adoption_owner_makes_open_scope_check_final(tmp_path)
         parent_transition=(123, owner.pid), parent_exit_confirmed=True,
         tmp_path_use=True)
     try:
-        report = guard.check()
+        before_scope_end = guard.check()
 
-        assert [outcome.kind for outcome in report.outcomes] == ["cleanup unverified"]
-        assert "owning scope end is not observed" in report.outcomes[0].detail
-        assert adopted.checked
+        assert before_scope_end.outcomes == ()
+        assert before_scope_end.unit_outcomes == ()
+        assert not adopted.checked
         assert handle.alive
         assert handle.signals == []
+
+        scope.end()
+        after_scope_end = guard.check()
+
+        adopted_outcomes = [
+            outcome for outcome in after_scope_end.outcomes if outcome.pid == adopted.pid]
+        assert [outcome.kind for outcome in adopted_outcomes] == [
+            "leak", "confirmed exit"]
+        assert adopted.checked
+        assert handle.signals == [signal.SIGTERM]
     finally:
         guard.close()
 
@@ -315,6 +348,59 @@ def test_close_bounds_wait_for_live_registered_child_and_still_closes_pipes(
         assert all(stream is not None and stream.closed for stream in streams)
         assert handles[0].signals == []
     finally:
+        _stop_helper(launch.process)
+
+
+def test_close_discards_buffered_stdin_without_exceeding_teardown_deadline(
+        tmp_path, monkeypatch):
+    handles = []
+
+    def handle_factory(process: subprocess.Popen[bytes], *, platform: str):
+        handle = _LiveHandle(process.pid)
+        handles.append(handle)
+        return handle
+
+    monkeypatch.setattr(orphan_guard, "_CLOSE_REAP_TIMEOUT_SECONDS", 0.05)
+    guard = orphan_guard.OrphanGuard(tmp_path, handle_factory=handle_factory)
+    scope = guard.scope("close-bounds-buffered-stdin")
+    launch = scope.launch(
+        [sys.executable, "-c", "import time; time.sleep(30)"], cwd=tmp_path,
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    stdin = launch.process.stdin
+    assert stdin is not None
+    stdin.write(b"buffered input" * 256)
+    stdin_fd = stdin.fileno()
+    os.set_blocking(stdin_fd, False)
+    try:
+        while True:
+            try:
+                os.write(stdin_fd, b"pipe fill" * 512)
+            except BlockingIOError:
+                break
+    finally:
+        os.set_blocking(stdin_fd, True)
+
+    def kill_non_reader() -> None:
+        try:
+            if launch.process.poll() is None:
+                launch.process.kill()
+        except ProcessLookupError:
+            pass
+
+    safety_kill = threading.Timer(0.35, kill_non_reader)
+    safety_kill.daemon = True
+    safety_kill.start()
+    started = time.monotonic()
+    try:
+        with pytest.raises(orphan_guard.OrphanGuardError, match="reap"):
+            guard.close()
+
+        elapsed = time.monotonic() - started
+        assert elapsed < 0.2
+        assert stdin.closed
+        assert handles[0].closed
+    finally:
+        safety_kill.cancel()
         _stop_helper(launch.process)
 
 
