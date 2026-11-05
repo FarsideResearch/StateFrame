@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Tests: three tests that failed on clean main now pass. The tokenize proxy test expects the 0.4.4 /slots skip. The edit-scope widen switch-off parity check compares against the previous release instead of 0.3.8, whose bytes changed intentionally in 0.4.5. The concurrent identity-key test stops its workers through the checkpoint kill barrier's signal helper.
+
 ## 0.4.23 (2026-11-05)
 
 - Fixed: runs on hosted endpoints that are not llama.cpp (for example DeepInfra and other OpenAI-compatible providers) could stop after two to four requests with "measurement body/projection/provider identity changed". StateFrame removed its internal fields from the request after measuring it, so the pre-send check saw a different request. The request is now cleaned before it is measured, so the measured bytes are the sent bytes; the check is as strict as before. Affected: 0.3.37 through 0.4.22. llama.cpp endpoints were not affected and their requests are unchanged.
