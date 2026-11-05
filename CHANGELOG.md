@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.4.12 (2026-11-05)
+
+- Engine: request preparation is restructured (fitting trials run in isolation, and the meter keeps its state on byte-pruned trials). Requests are byte-identical to 0.4.11. This is the first half of a speed change; its measured effect is reported with the second half.
+
 ## 0.4.11 (2026-11-05)
 
 - Tests: the release gate's macOS sandbox probe runs `/bin/sh` instead of a non-portable executable path, so the portable-executables check passes again.

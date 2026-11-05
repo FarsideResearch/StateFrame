@@ -24,6 +24,7 @@ _SOURCE_PREFIXES = (
     "[Retained source:", "[Repair source:", "[Paged source:",
     "[Request budget source window]", "[Model source window]", "CURRENT_SOURCE ",
 )
+_COUNTDOWN_MARKER = "sandbox_seconds_remaining="
 
 
 def render_time_slot(limits: object, seconds: object) -> str:
@@ -62,24 +63,59 @@ def render_time_slot(limits: object, seconds: object) -> str:
 
 def canonical_time_text(text: str) -> str:
     """Project a limits line onto the one slot used for measurement."""
-    if "sandbox_seconds_remaining=" not in text or text.startswith(_SOURCE_PREFIXES):
+    if _COUNTDOWN_MARKER not in text or text.startswith(_SOURCE_PREFIXES):
         return text
     projected = _TIME_FIELD.sub(
         lambda match: match[1] + CANONICAL_TIME_SLOT + match[2], text)
     return text if projected == text else projected
 
 
-def canonical_countdown(value: object) -> object:
+def contains_countdown_marker(value: object) -> bool:
+    """Find the marker with string substring checks before projecting containers."""
+    if isinstance(value, str):
+        return _COUNTDOWN_MARKER in value
+    if isinstance(value, Mapping):
+        return any(contains_countdown_marker(item) for item in value.values())
+    if isinstance(value, (list, tuple)):
+        return any(contains_countdown_marker(item) for item in value)
+    return False
+
+
+def canonical_countdown(value: object, *, marker_verified: bool = False) -> object:
     """Replace only the host limits TIME field for sizing, leaving wire data intact."""
+    if not marker_verified and not contains_countdown_marker(value):
+        return value
+    return _canonical_countdown(value)
+
+
+def _canonical_countdown(value: object) -> object:
     if isinstance(value, str):
         return canonical_time_text(value)
     if isinstance(value, Mapping):
-        projected = {key: canonical_countdown(item) for key, item in value.items()}
-        return value if all(projected[key] is item for key, item in value.items()) else projected
+        projected = None
+        for key, item in value.items():
+            replacement = _canonical_countdown(item)
+            if replacement is not item:
+                if projected is None:
+                    projected = dict(value)
+                projected[key] = replacement
+        return value if projected is None else projected
     if isinstance(value, list):
-        projected = [canonical_countdown(item) for item in value]
-        return value if all(new is old for new, old in zip(projected, value)) else projected
+        projected = None
+        for index, item in enumerate(value):
+            replacement = _canonical_countdown(item)
+            if replacement is not item:
+                if projected is None:
+                    projected = list(value)
+                projected[index] = replacement
+        return value if projected is None else projected
     if isinstance(value, tuple):
-        projected = tuple(canonical_countdown(item) for item in value)
-        return value if all(new is old for new, old in zip(projected, value)) else projected
+        projected = None
+        replacements = []
+        for item in value:
+            replacement = _canonical_countdown(item)
+            replacements.append(replacement)
+            if replacement is not item:
+                projected = replacements
+        return value if projected is None else tuple(replacements)
     return value

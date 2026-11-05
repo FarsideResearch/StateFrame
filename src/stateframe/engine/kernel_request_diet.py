@@ -15,7 +15,9 @@ import json
 import math
 import os
 import re
+import ssl
 import sys
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -183,11 +185,36 @@ def tokenize_route_label(endpoint: object) -> str | None:
     return f"{parsed.scheme}://{parsed.hostname}" + (f":{port}" if port else "")
 
 
+def _has_prompt_countdown_marker(projection: Mapping[str, object]) -> bool:
+    from kernel_countdown_slot import contains_countdown_marker
+
+    messages = projection.get("messages")
+    if isinstance(messages, (list, tuple)):
+        # The live countdown is normally in the first system message. Check it
+        # first so a positive result needs only one full canonicalization walk.
+        if messages and contains_countdown_marker(messages[0]):
+            return True
+        if any(contains_countdown_marker(message) for message in messages[1:]):
+            return True
+        return any(
+            contains_countdown_marker(value)
+            for key, value in projection.items() if key != "messages"
+        )
+    return contains_countdown_marker(projection)
+
+
 def _tokenization_content(body: Mapping[str, object]) -> str:
-    from kernel_request_measurement import prompt_projection
+    from kernel_request_measurement import prompt_projection_body
     from kernel_countdown_slot import canonical_countdown
+
+    projection = prompt_projection_body(body)
+    if not _has_prompt_countdown_marker(projection):
+        return json.dumps(projection, sort_keys=True, separators=(",", ":"),
+                          ensure_ascii=False)
     # Measure the reserved slot; the separate body digest still binds live wire bytes.
-    return prompt_projection(canonical_countdown(body))
+    canonical = canonical_countdown(projection, marker_verified=True)
+    return json.dumps(canonical, sort_keys=True,
+                      separators=(",", ":"), ensure_ascii=False)
 
 
 def _url_origin(url: object) -> tuple[str, str, int | None] | None:
@@ -260,10 +287,63 @@ def tokenizer_contract(runtime: object | None, capture: object | None) -> str:
     return json.dumps(contract, sort_keys=True, separators=(",", ":"))
 
 
+class _TokenizeRedirects(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        route_allow_remote = getattr(req, "_stateframe_route_allow_remote", None)
+        generation_origin = getattr(req, "_stateframe_generation_origin", None)
+        if route_allow_remote is not None:
+            from kernel_frame_routes import require_local
+            require_local(newurl, allow_remote=route_allow_remote)
+        redirected = super().redirect_request(req, fp, code, msg, headers, newurl)
+        if redirected is not None:
+            redirected._stateframe_route_allow_remote = route_allow_remote
+            redirected._stateframe_generation_origin = generation_origin
+            if (generation_origin is not None
+                    and _url_origin(newurl) != generation_origin):
+                redirected.remove_header("Authorization")
+        return redirected
+
+
+class _TokenizeHTTPSHandler(urllib.request.HTTPSHandler):
+    """Use the meter's shared context without sharing redirect policy."""
+
+    def __init__(self, context_provider: Callable[[], ssl.SSLContext] | None) -> None:
+        # Avoid HTTPSHandler.__init__'s implicit default context for HTTP runs.
+        urllib.request.AbstractHTTPHandler.__init__(self)
+        self._context_provider = context_provider
+        self._context: ssl.SSLContext | None = None
+        self._context_lock = threading.Lock()
+        self._check_hostname = None
+
+    def https_open(self, req):
+        if self._context is None:
+            with self._context_lock:
+                if self._context is None:
+                    self._context = (
+                        self._context_provider()
+                        if self._context_provider is not None
+                        else ssl._create_default_https_context()
+                    )
+        # Delegate connection kwargs to urllib so supported Python versions
+        # retain their native HTTPSConnection signature and hostname policy.
+        return super().https_open(req)
+
+
+def _build_tokenize_opener(
+        context_provider: Callable[[], ssl.SSLContext] | None = None,
+) -> urllib.request.OpenerDirector:
+    """Build a fresh opener; only its TLS context may be shared across calls."""
+    return urllib.request.build_opener(
+        urllib.request.ProxyHandler({}), _TokenizeRedirects(),
+        _TokenizeHTTPSHandler(context_provider),
+    )
+
+
 def _http_tokenize(content: str, url: str, *, deadline: float | None = None,
                    route_allow_remote: bool | None = None,
                    auth_key: str | None = None,
-                   generation_endpoint: str | None = None) -> Sequence[int]:
+                   generation_endpoint: str | None = None,
+                   opener: urllib.request.OpenerDirector | None = None) -> Sequence[int]:
     if route_allow_remote is not None:
         from kernel_frame_routes import require_local
         require_local(url, allow_remote=route_allow_remote)
@@ -301,6 +381,8 @@ def _http_tokenize(content: str, url: str, *, deadline: float | None = None,
     if auth_key and generation_origin is not None and tokenizer_origin == generation_origin:
         headers["Authorization"] = "Bearer " + auth_key
     request = urllib.request.Request(url, data=payload, headers=headers, method="POST")
+    request._stateframe_route_allow_remote = route_allow_remote
+    request._stateframe_generation_origin = generation_origin
     # Budget the actual UTF-8 JSON payload, including escaping. Three times
     # SPEED's upper measured relay cost covers the b1598 134 KB load case.
     timeout = min(TOKENIZE_REQUEST_TIMEOUT_CAP_SECONDS, max(
@@ -314,30 +396,56 @@ def _http_tokenize(content: str, url: str, *, deadline: float | None = None,
         if remaining <= 0:
             raise TimeoutError("tokenizer request deadline expired")
         timeout = min(timeout, remaining)
-    class TokenizeRedirects(urllib.request.HTTPRedirectHandler):
-        def redirect_request(self, req, fp, code, msg, headers, newurl):
-            if route_allow_remote is not None:
-                require_local(newurl, allow_remote=route_allow_remote)
-            redirected = super().redirect_request(req, fp, code, msg, headers, newurl)
-            if (redirected is not None and generation_origin is not None
-                    and _url_origin(newurl) != generation_origin):
-                redirected.remove_header("Authorization")
-            return redirected
-
-    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), TokenizeRedirects())
+    opener = opener or _build_tokenize_opener()
     with opener.open(request, timeout=timeout) as response:
         raw = response.read(_MAX_TOKENIZE_RESPONSE_BYTES + 1)
     if len(raw) > _MAX_TOKENIZE_RESPONSE_BYTES:
         raise ValueError("oversized tokenizer response")
     decoded = json.loads(raw)
     tokens = decoded.get("tokens") if isinstance(decoded, Mapping) else None
-    if not isinstance(tokens, list) or any(type(token) is not int or token < 0 for token in tokens):
+    if not isinstance(tokens, list) or not _valid_token_ids(tokens):
         raise ValueError("invalid llama.cpp tokenizer response")
     return tokens
 
 
+def _valid_token_ids(tokens: Sequence[object]) -> bool:
+    """Validate ordinary token lists with C-level builtins; retain sequence semantics."""
+    if type(tokens) is list:
+        if tokens and set(map(type, tokens)) != {int}:
+            return False
+        return not tokens or min(tokens) >= 0
+    return not any(type(token) is not int or token < 0 for token in tokens)
+
+
 class RequestTokenMeter:
     """Run-level cache/calibration with bounded recovery after tokenizer outages."""
+
+    @property
+    def endpoint(self) -> str | None:
+        return self._endpoint
+
+    @endpoint.setter
+    def endpoint(self, endpoint: str | None) -> None:
+        self._endpoint = endpoint
+
+    def _get_http_opener(self) -> urllib.request.OpenerDirector | None:
+        if self.endpoint is None or self._tokenizer is not None or self._disabled:
+            return None
+        return _build_tokenize_opener(self._get_http_ssl_context)
+
+    def _get_http_ssl_context(self) -> ssl.SSLContext:
+        # Trust roots are snapshotted on first HTTPS use for this meter; process
+        # CA changes take effect when a new meter is created.
+        context = getattr(self, "_http_ssl_context", None)
+        if context is not None:
+            return context
+        lock = self.__dict__.setdefault("_http_ssl_context_lock", threading.Lock())
+        with lock:
+            context = getattr(self, "_http_ssl_context", None)
+            if context is None:
+                context = ssl._create_default_https_context()
+                self._http_ssl_context = context
+        return context
 
     def __init__(
             self, tokenizer: Callable[[str], object] | None = None,
@@ -357,6 +465,8 @@ class RequestTokenMeter:
         self._generation_endpoint: str | None = None
         self.bind_tokenizer_auth(auth_key, generation_endpoint)
         self._disabled = disabled
+        self._http_ssl_context: ssl.SSLContext | None = None
+        self._http_ssl_context_lock = threading.Lock()
         endpoint = (endpoint if route_allow_remote is not None
                     else resolve_tokenize_url(endpoint=endpoint) if endpoint else None)
         self.endpoint = endpoint
@@ -557,13 +667,15 @@ class RequestTokenMeter:
         self._namespace = namespace
 
     def bind_measurement(self, body: Mapping[str, object], *, tokens: int, method: str,
-                         request_id: str, max_request_bytes: int, max_prompt_tokens: int):
+                         request_id: str, max_request_bytes: int, max_prompt_tokens: int,
+                         wire: bytes | None = None):
         from kernel_request_measurement import RequestMeasurement
         return RequestMeasurement.bind(
             body, tokenizer_identity=self.tokenizer_identity(body),
             request_id=request_id, logical_request_id=self._request_id or request_id,
             tokens=tokens, method=method, template_overhead_tokens=self.template_overhead_tokens,
             max_request_bytes=max_request_bytes, max_prompt_tokens=max_prompt_tokens,
+            wire=wire,
         )
 
     def _count_tokens(self, content: str) -> int:
@@ -589,13 +701,14 @@ class RequestTokenMeter:
             result = _http_tokenize(content, self.endpoint, deadline=self._deadline,
                                     route_allow_remote=self.route_allow_remote,
                                     auth_key=self._tokenizer_auth_key,
-                                    generation_endpoint=self._generation_endpoint)
+                                    generation_endpoint=self._generation_endpoint,
+                                    opener=self._get_http_opener())
         else:
             raise OSError("tokenizer endpoint unavailable")
         if type(result) is int:
             count = result
         elif isinstance(result, Sequence) and not isinstance(result, (str, bytes, bytearray)):
-            if any(type(token) is not int or token < 0 for token in result):
+            if not _valid_token_ids(result):
                 raise ValueError("invalid injected tokenizer response")
             count = len(result)
         else:

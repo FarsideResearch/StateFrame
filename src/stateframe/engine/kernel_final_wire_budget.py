@@ -324,6 +324,7 @@ def reconcile_frozen_budget(capture, runtime, body, *, frozen_inputs=None):
     measurement = meter.bind_measurement(
         body, tokens=tokens, method=method, request_id=request_id,
         max_request_bytes=byte_limit, max_prompt_tokens=token_limit,
+        wire=wire,
     )
     capture._request_measurement = measurement
     receipt.update({**meter.journal_fields(method), **measurement.receipt_fields()})
@@ -375,7 +376,7 @@ def reconcile_frozen_budget(capture, runtime, body, *, frozen_inputs=None):
                    else _source_delivery_sources(capture, runtime))
         # Receipt recomputation must not rewrite the snapshotted source authority.
         receipt["source_delivery"] = verify_final_source_delivery(
-            copy.deepcopy(plan), body["messages"], sources=sources, payload=json.dumps(body).encode())
+            copy.deepcopy(plan), body["messages"], sources=sources, payload=wire)
         if not source_delivery_satisfied(receipt["source_delivery"]):
             failures.append("source_delivery_unqualified")
     receipt["status"] = "HOST_BLOCKED" if failures else "READY"

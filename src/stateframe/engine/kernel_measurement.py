@@ -324,7 +324,20 @@ def _request_boundary_contract_error(error: BaseException) -> bool:
     return False
 
 
+@functools.lru_cache(maxsize=8192, typed=True)
+def _canonical_immutable_bytes(value: object) -> bytes:
+    return json.dumps(value, sort_keys=True, separators=(",", ":"),
+                      ensure_ascii=False, allow_nan=False).encode()
+
+
 def canonical_bytes(value: object) -> bytes:
+    # Repeated journal labels and small scalar fields dominate calls. Cache only
+    # exact immutable builtins and bound retained text so large source strings
+    # never stay alive because of this optimization.
+    if (type(value) in {type(None), bool}
+            or type(value) is int and value.bit_length() <= 256
+            or type(value) is str and len(value) <= 256):
+        return _canonical_immutable_bytes(value)
     return json.dumps(value, sort_keys=True, separators=(",", ":"),
                       ensure_ascii=False, allow_nan=False).encode()
 
@@ -534,14 +547,31 @@ def _write_journal_blob(journal_path: str | os.PathLike[str], blob_hash: str,
         cache[blob_hash] = size
 
 
+def _normalize_small_journal_value(value: object) -> object:
+    """Preserve tuple normalization and reserved-key checks without sizing children."""
+    if isinstance(value, Mapping):
+        if "$blob" in value:
+            raise ValueError("journal payload uses the reserved blob-reference key")
+        return {key: _normalize_small_journal_value(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_normalize_small_journal_value(item) for item in value]
+    return value
+
+
 def _externalize_journal_value(value: object, journal_path: str | os.PathLike[str],
                                cache: dict[str, int] | None,
                                threshold_bytes: int) -> object:
     if isinstance(value, Mapping) and "$blob" in value:
         raise ValueError("journal payload uses the reserved blob-reference key")
     original = canonical_bytes(value)
-    if len(original) > threshold_bytes and len(original) > _JOURNAL_BLOB_MAX_BYTES:
+    original_size = len(original)
+    if original_size > threshold_bytes and original_size > _JOURNAL_BLOB_MAX_BYTES:
         raise ValueError("journal payload exceeds the supported blob size")
+    # A JSON subtree cannot serialize larger than its containing value. When
+    # this value is below threshold, recurse only to retain the established
+    # tuple-to-list normalization and reserved-key validation.
+    if original_size <= threshold_bytes:
+        return _normalize_small_journal_value(value)
     if isinstance(value, Mapping):
         normalized: object = {
             key: _externalize_journal_value(item, journal_path, cache, threshold_bytes)
@@ -554,12 +584,10 @@ def _externalize_journal_value(value: object, journal_path: str | os.PathLike[st
         ]
     else:
         normalized = value
-    stored = canonical_bytes(normalized)
-    if len(original) <= threshold_bytes:
-        return normalized
+    stored = original if normalized is value else canonical_bytes(normalized)
     blob_hash = hashlib.sha256(original).hexdigest()
     _write_journal_blob(journal_path, blob_hash, original, stored, cache)
-    return {"$blob": blob_hash, "bytes": len(original)}
+    return {"$blob": blob_hash, "bytes": original_size}
 
 
 def externalize_journal_fields(fields: Mapping[str, object],

@@ -7,7 +7,7 @@ import ast
 import hashlib
 import json
 import re
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from pathlib import Path
 
 from kernel_frame_optional_allocation import FrameAllocationReplanNeeded
@@ -709,8 +709,14 @@ def fit_recent_read_windows(body: Mapping[str, object], windows: Sequence[Mappin
                             newest_user_suffix: Sequence[Mapping[str, object]] = (),
                             deferred_source_paths: Sequence[str] = (),
                             editable_paths: Sequence[str] = (),
-                            fits: object) -> dict[str, object]:
-    """Fit source messages against the caller's measured complete-wire budget."""
+                            fits: object,
+                            candidate_nonfit: Callable[[Mapping[str, object]], bool] | None = None
+                            ) -> dict[str, object]:
+    """Fit source messages against the caller's measured complete-wire budget.
+
+    A prefilter may skip only proposals proven not to fit; all remaining
+    proposals retain the exhaustive order, without assuming token monotonicity.
+    """
     from kernel_code_bookmarks import enabled as bookmarks_enabled
     from kernel_request_source_window import parse_model_source_window, parse_window
     from kernel_stateframe_framefit5 import _is_volatile_tail_message
@@ -753,6 +759,8 @@ def fit_recent_read_windows(body: Mapping[str, object], windows: Sequence[Mappin
     def candidate(reads: Sequence[Mapping[str, object]], checks: Sequence[tuple[str, int]],
                   *, release_deferred: bool = False,
                   with_coverage: bool = True) -> dict[str, object]:
+        # Fit callbacks receive a mutable request mapping. Detach nested values
+        # per trial so mutations cannot leak into the base or another proposal.
         trial = copy.deepcopy(base)
         rows = trial["messages"]
         selected = []
@@ -879,6 +887,8 @@ def fit_recent_read_windows(body: Mapping[str, object], windows: Sequence[Mappin
             proposal = [*upgraded, dict(whole)]
             trial = candidate(proposal, checks, release_deferred=release_deferred,
                               with_coverage=with_coverage)
+            if candidate_nonfit is not None and candidate_nonfit(trial):
+                continue
             if fits(trial):
                 upgraded = proposal
                 result = trial
@@ -897,6 +907,8 @@ def fit_recent_read_windows(body: Mapping[str, object], windows: Sequence[Mappin
                             selection, checks, release_deferred=release_deferred,
                             with_coverage=with_coverage,
                         )
+                        if candidate_nonfit is not None and candidate_nonfit(trial):
+                            continue
                         if fits(trial):
                             return upgrade(selection, checks, release_deferred,
                                            with_coverage, trial)
@@ -908,6 +920,8 @@ def fit_recent_read_windows(body: Mapping[str, object], windows: Sequence[Mappin
                 for selection in proposals:
                     trial = candidate(selection, (), release_deferred=release_deferred,
                                       with_coverage=with_coverage)
+                    if candidate_nonfit is not None and candidate_nonfit(trial):
+                        continue
                     if fits(trial):
                         return upgrade(selection, (), release_deferred,
                                        with_coverage, trial)

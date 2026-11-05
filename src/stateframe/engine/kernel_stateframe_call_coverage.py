@@ -70,7 +70,10 @@ class CoverageIndex:
         cursor = self.journal.receipt_cursor()
         if cursor.sequence < self.sequence:
             _error("call coverage journal cursor moved backwards")
-        for record in self.journal.cached_records_since(self.sequence):
+        borrow_records = getattr(self.journal, "_borrow_records_since", None)
+        records = (borrow_records(self.sequence) if callable(borrow_records)
+                   else self.journal.cached_records_since(self.sequence))
+        for record in records:
             if record["sequence"] != self.sequence + 1:
                 _error("call coverage journal sequence gap")
             if record.get("kind") == EVENT:

@@ -41,6 +41,8 @@ MAX_RECORD_BYTES = 16 * 1024 * 1024
 MEMBOUND_ENV = "SF_LAB_RECORD_CACHE"
 RECORD_CACHE_LIMIT = 2048
 RECORD_CACHE_BYTE_LIMIT = 512 * 1024
+RECORD_SUFFIX_CACHE_LIMIT = 16
+RECORD_SUFFIX_CACHE_BYTE_LIMIT = 1024 * 1024
 MAX_FRAMEFIT_RECEIPT_RECORDS = 1024
 MAX_FRAMEFIT_RECEIPT_FIELD_CHARS = 1024
 FRAMEFIT5_JOURNAL_ORIGIN_ENV = "STATEFRAME_FRAMEFIT5_JOURNAL_ORIGIN"
@@ -736,6 +738,10 @@ class ContinuationJournal(AuditJournal):
         self._record_cache_start = 0
         self._record_cache_bytes = 0
         self._record_cache_sizes: list[int] = []
+        # Repeated continuation cursors reuse bounded detached suffix snapshots.
+        # New appends extend these lists in place alongside the durable index.
+        self._records_since_cache: OrderedDict[int, tuple[int, list[dict], int]] = OrderedDict()
+        self._records_since_cache_bytes = 0
         # One compact pointer and one digest per durable line. Old cursors and
         # heads can be resolved without hydrating the preceding journal.
         self._record_offsets: list[int] = []
@@ -1217,7 +1223,7 @@ class ContinuationJournal(AuditJournal):
         if coverage is None:
             coverage = (history.coverage_session(self) if history is not None
                         else coverage_session_for(self, None))
-        for record in self.cached_records_since(self._framefit_receipt_cursor):
+        for record in self._borrow_records_since(self._framefit_receipt_cursor):
             if record["sequence"] <= self._framefit_receipt_cursor:
                 continue
             self._advance_framefit_receipt(record, coverage=coverage)
@@ -1637,6 +1643,7 @@ class ContinuationJournal(AuditJournal):
                 self._record_cache_sizes = [size for _row, size in validated]
                 self._record_cache_start = cache_start
                 self._record_cache_bytes = cache_bytes
+                self._clear_records_since_cache()
                 if self._sequence == 0 and first_record is not None:
                     # A resumed writer has no in-memory head until first replay.
                     # Bind the verified run identity before receipt replay: the
@@ -1783,7 +1790,7 @@ class ContinuationJournal(AuditJournal):
             raise JournalError("indexed journal blob did not resolve to an object")
         return resolved
 
-    def _record_range(self, start: int, stop: int) -> Iterator[dict]:
+    def _record_range(self, start: int, stop: int, *, detached: bool = True) -> Iterator[dict]:
         """Zero-based half-open range: stream evicted prefix, detach cached suffix."""
         index = start
         while index < stop:
@@ -1799,8 +1806,57 @@ class ContinuationJournal(AuditJournal):
                 yield from self._indexed_records(index + 1, disk_stop)
                 index = disk_stop
             else:
-                yield copy.deepcopy(self._record_cache[index - cache_start])
+                record = self._record_cache[index - cache_start]
+                yield copy.deepcopy(record) if detached else record
                 index += 1
+
+    def _clear_records_since_cache(self) -> None:
+        self._records_since_cache.clear()
+        self._records_since_cache_bytes = 0
+
+    def _trim_records_since_cache(self) -> None:
+        while (len(self._records_since_cache) > RECORD_SUFFIX_CACHE_LIMIT
+               or self._records_since_cache_bytes > RECORD_SUFFIX_CACHE_BYTE_LIMIT):
+            _cursor, (_end, _rows, size) = self._records_since_cache.popitem(last=False)
+            self._records_since_cache_bytes -= size
+
+    def _extend_records_since_cache(
+            self, sequence: int, record: dict, record_bytes: int,
+    ) -> None:
+        if not self._records_since_cache:
+            return
+        previous_sequence = sequence - 1
+        for cursor, (end, rows, size) in tuple(self._records_since_cache.items()):
+            if end != previous_sequence or size + record_bytes > RECORD_SUFFIX_CACHE_BYTE_LIMIT:
+                self._records_since_cache_bytes -= size
+                del self._records_since_cache[cursor]
+                continue
+            rows.append(record)
+            self._records_since_cache[cursor] = (sequence, rows, size + record_bytes)
+            self._records_since_cache_bytes += record_bytes
+        self._trim_records_since_cache()
+
+    def _remember_records_since(self, sequence: int, rows: tuple[dict, ...]) -> None:
+        cache_start = self._record_cache_start
+        cache_end = cache_start + len(self._record_cache)
+        if (not rows or len(rows) > RECORD_CACHE_LIMIT
+                or sequence < cache_start or cache_end != self._sequence
+                or sequence - cache_start + len(rows) != len(self._record_cache)):
+            return
+        first_size = sequence - cache_start
+        sizes = self._record_cache_sizes[first_size:]
+        if len(sizes) != len(rows):
+            return
+        size = sum(sizes)
+        if size > RECORD_SUFFIX_CACHE_BYTE_LIMIT:
+            return
+        detached = [copy.deepcopy(row) for row in rows]
+        previous = self._records_since_cache.pop(sequence, None)
+        if previous is not None:
+            self._records_since_cache_bytes -= previous[2]
+        self._records_since_cache[sequence] = (self._sequence, detached, size)
+        self._records_since_cache_bytes += size
+        self._trim_records_since_cache()
 
     def _reset_framefit_receipt_projection(self) -> None:
         self._framefit_receipt_records = []
@@ -1855,7 +1911,30 @@ class ContinuationJournal(AuditJournal):
                     for _record in self.records():
                         pass
                 return tuple(self._record_cache[sequence:])
-            return tuple(self._record_range(sequence, self._sequence))
+            if sequence >= self._sequence:
+                return ()
+            cached = self._records_since_cache.get(sequence)
+            if cached is not None and cached[0] == self._sequence:
+                self._records_since_cache.move_to_end(sequence)
+                return tuple(copy.deepcopy(row) for row in cached[1])
+            rows = tuple(self._record_range(sequence, self._sequence))
+            self._remember_records_since(sequence, rows)
+            return rows
+
+    def _borrow_records_since(self, sequence: int) -> tuple[dict, ...]:
+        """Return host-owned read-only rows for reducers that never mutate records."""
+        if type(sequence) is not int or sequence < 0:
+            raise ValueError("sequence must be a non-negative integer")
+        with self._lock:
+            self.assert_owner()
+            if self._record_cache_limit is None:
+                if len(self._record_cache) != self._sequence:
+                    for _record in self.records():
+                        pass
+                return tuple(self._record_cache[sequence:])
+            if sequence >= self._sequence:
+                return ()
+            return tuple(self._record_range(sequence, self._sequence, detached=False))
 
     def record_by_event_id(self, reference: object) -> dict | None:
         """Resolve one durable event without replaying its predecessors."""
@@ -1958,10 +2037,14 @@ class ContinuationJournal(AuditJournal):
                     # record_hash is added after the initial canonical encoding.
                     record_bytes = len(encoded_record) + len(canonical_bytes({
                         "record_hash": record["record_hash"]})) - 1
-                    self._record_cache.append(copy.deepcopy(record))
+                    cached_record = copy.deepcopy(record)
+                    self._record_cache.append(cached_record)
                     self._record_cache_sizes.append(record_bytes)
                     self._record_cache_bytes += record_bytes
                     self._trim_record_cache()
+                    self._extend_records_since_cache(
+                        record["sequence"], cached_record, record_bytes,
+                    )
                 else:
                     # This should only be reachable after an interrupted
                     # validation pass; force the next indexed read to rebuild.
@@ -1969,6 +2052,7 @@ class ContinuationJournal(AuditJournal):
                     self._record_cache_start = record["sequence"]
                     self._record_cache_bytes = 0
                     self._record_cache_sizes = []
+                    self._clear_records_since_cache()
                 # FRAMEFIT5 consumes the validated cache via its existing cursor
                 # API when requested; unrelated events need no receipt work.
                 self._index_receipt_record(record)
