@@ -426,7 +426,9 @@ class ParentMeter:
         with journal.ownership():
             if digest(journal.manifest.get("parent_budget")) != digest(expected):
                 raise ValueError("parent allocation differs from current configuration")
-            for record in journal.records():
+
+            def fold_record(record: dict) -> None:
+                nonlocal identity, attached
                 kind = record["kind"]
                 if kind == "run_started" and (
                         digest(record.get("manifest")) != digest(journal.manifest)
@@ -436,7 +438,7 @@ class ParentMeter:
                 if kind == "attempt_terminated":
                     raise ValueError("terminated attempt cannot recover execution budget")
                 if kind not in {"parent_budget", "parent_attached"}:
-                    continue
+                    return
                 body = record if kind == "parent_budget" else record.get("budget")
                 if not isinstance(body, dict):
                     raise ValueError("invalid parent accounting record")
@@ -453,7 +455,7 @@ class ParentMeter:
                                 and body.get("provider_limits") != parent.provider_limits)):
                         raise ValueError("parent snapshot disagrees with durable charges")
                     attached = True
-                    continue
+                    return
                 category = body.get("category")
                 if not isinstance(category, str) or category not in parent._COUNTER_KINDS:
                     raise ValueError("invalid parent budget category")
@@ -511,6 +513,13 @@ class ParentMeter:
                             str(body.get("reason", "")),
                             parent.provider_limits["inner"], parent.provider_limits["outer"],
                             bool(body.get("optional", False)))
+
+            for record in journal.records():
+                try:
+                    fold_record(record)
+                except ValueError:
+                    journal.assert_owner()
+                    raise
             if identity is None or not attached:
                 raise ValueError("missing original parent attachment")
         parent.parent_id = identity

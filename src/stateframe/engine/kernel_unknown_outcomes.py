@@ -176,9 +176,14 @@ class ExternalEffectAdapter:
         self._replay()
 
     def _replay(self) -> None:
-        for record in self.journal.records():
+        def assert_journal_owner() -> None:
+            assert_owner = getattr(self.journal, "assert_owner", None)
+            if callable(assert_owner):
+                assert_owner()
+
+        def fold_record(record: Mapping[str, object]) -> None:
             if not isinstance(record, Mapping):
-                continue
+                return
             kind = record.get("kind")
             if kind == INTENT_EVENT:
                 self._replay_intent(record)
@@ -224,6 +229,13 @@ class ExternalEffectAdapter:
                 receipt_ref = _recorded_receipt(record)
                 if receipt_ref is not None:
                     intent["receipt_ref"] = receipt_ref
+
+        for record in self.journal.records():
+            try:
+                fold_record(record)
+            except ValueError:
+                assert_journal_owner()
+                raise
         records = list(self.journal.records())
         for intent in self._intents.values():
             if intent["dispatch_started"] or intent["status"] not in {PRESENT, ABSENT}:
@@ -243,6 +255,7 @@ class ExternalEffectAdapter:
                 for record in records
             )
             if not reconciled:
+                assert_journal_owner()
                 raise ValueError("external effect outcome has no preceding dispatch")
 
     def _replay_intent(self, record: Mapping[str, object]) -> None:
