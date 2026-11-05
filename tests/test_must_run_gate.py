@@ -8,6 +8,9 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from types import SimpleNamespace
+
+import must_run_plugin
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -78,6 +81,7 @@ EXPECTED_ENTRIES = (
     ("tests/test_pid_liveness.py::test_permission_denied_group_probe_stays_alive", "all"),
     ("tests/test_pid_liveness.py::test_state_is_read_after_the_last_paren_of_the_command_name", "all"),
     ("tests/test_pid_liveness.py::test_unreadable_stat_is_not_provably_a_zombie", "all"),
+    ("tests/test_orphan_guard_acceptance.py::test_pid_one_token_bearing_child_is_not_attributed", "linux_requires:host_sandbox,pid_namespace"),
     ("tests/test_process_signal_liveness.py::test_exiting_empty_cmdline_is_gone_before_launch_identity_mismatch", "linux_requires:host_sandbox"),
     ("tests/test_process_signal_liveness.py::test_live_pid_with_different_identity_remains_mismatch", "requires:host_sandbox"),
     ("tests/test_process_signal_liveness.py::test_live_pid_with_same_identity_passes", "requires:host_sandbox"),
@@ -106,7 +110,7 @@ EXPECTED_JOBS = (
     ("darwin", "darwin", True, REQUIRED_PROVISIONS,
      ("bwrap", "filesystem_modes", "sandbox_exec", "serial_lane", "uv_sandbox")),
     ("linux", "linux", True, REQUIRED_PROVISIONS,
-     ("bwrap", "filesystem_modes", "serial_lane", "unknown_uid_bwrap")),
+     ("bwrap", "filesystem_modes", "pid_namespace", "serial_lane", "unknown_uid_bwrap")),
 )
 EXPECTED_BASELINES = (
     ("immediate", {"source": "SF_GATE_BASE"}),
@@ -190,6 +194,8 @@ _PLATFORM_REASONS = {
     "tests/test_exec_launch.py::test_macos_launcher_requires_memory_supervision": "macOS only",
     "tests/test_process_signal_liveness.py::test_exiting_empty_cmdline_is_gone_before_launch_identity_mismatch":
         "Linux exiting-process cmdline evidence",
+    "tests/test_orphan_guard_acceptance.py::test_pid_one_token_bearing_child_is_not_attributed":
+        "requires Linux PID namespace",
     "tests/test_process_signal_liveness.py::test_linux_binding_refuses_without_pidfd": "Linux pidfd signal authority",
     "tests/test_process_signal_liveness.py::test_retained_signal_binding_uses_pidfd": "Linux pidfd signal authority",
     "tests/test_uv_venv_sandbox.py::test_isolated_command_builds_with_missing_home_and_unknown_uid": "requires Linux bwrap behavior",
@@ -296,6 +302,8 @@ EXPECTED_ASSERTIONS = {
         "assert liveness.linux_zombie(os.getpid(), proc) is True",
     "tests/test_pid_liveness.py::test_unreadable_stat_is_not_provably_a_zombie":
         "assert liveness.linux_zombie(os.getpid(), tmp_path) is False",
+    "tests/test_orphan_guard_acceptance.py::test_pid_one_token_bearing_child_is_not_attributed":
+        'assert events["guard_report"].get("outcomes") == []',
     "tests/test_process_signal_liveness.py::test_exiting_empty_cmdline_is_gone_before_launch_identity_mismatch":
         'assert str(error.value) == f"process {live_child.pid} is no longer running"',
     "tests/test_process_signal_liveness.py::test_live_pid_with_different_identity_remains_mismatch":
@@ -393,12 +401,15 @@ def _expected_cell(nodeid: str, scope: str) -> dict[str, object]:
         "serial_lane": ["host_sandbox", "serial_lane"],
         "filesystem_modes": ["filesystem_modes"],
         "bwrap": ["bwrap"],
+        "host_sandbox,pid_namespace": ["host_sandbox", "pid_namespace"],
         "unknown_uid_bwrap": ["bwrap", "unknown_uid_bwrap"],
         "uv_sandbox": ["uv_sandbox"],
     }.get(base_scope, [])
     optional = [
         name for name in prerequisites
-        if name in {"filesystem_modes", "bwrap", "serial_lane", "unknown_uid_bwrap", "uv_sandbox"}
+        if name in {
+            "filesystem_modes", "bwrap", "pid_namespace", "serial_lane", "unknown_uid_bwrap", "uv_sandbox"
+        }
     ]
     baseline = None
     if (nodeid.startswith("tests/test_hook_wiring_parity.py::")
@@ -785,6 +796,30 @@ def test_must_run_manifest_matches_reviewed_inventory():
         f"scanned={len(actual_optional)} violated={optional_violated}"
     )
     assert expected_optional and len(expected_optional) == len(actual_optional) and optional_violated == 0
+
+
+def test_pid_namespace_provision_probe_reports_unavailable_when_command_fails(monkeypatch):
+    monkeypatch.setattr(
+        must_run_plugin, "sys", SimpleNamespace(platform="linux", executable=sys.executable))
+    monkeypatch.setattr(
+        must_run_plugin, "_sandbox_executable",
+        lambda name: "/usr/bin/unshare" if name == "unshare" else None,
+    )
+    calls = []
+
+    def failed_command(command, **kwargs):
+        calls.append((command, kwargs))
+        return subprocess.CompletedProcess(command, 1, "", "Operation not permitted")
+
+    monkeypatch.setattr(must_run_plugin.subprocess, "run", failed_command)
+    problem = must_run_plugin._provision_problem(
+        "pid_namespace", ROOT, must_run_plugin.GateManifest({}, {}, (), ()), None)
+
+    assert problem == "unshare exited 1: Operation not permitted"
+    assert len(calls) == 1
+    command, options = calls[0]
+    assert "--pid" in command and "--fork" in command
+    assert options["timeout"] == 3.0
 
 
 def test_planted_controls_reject_unqualified_runs(tmp_path):

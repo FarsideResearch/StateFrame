@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.4.27 (2026-11-05)
+
+- Tests: an orphan guard fails a test that leaves a registered process alive after its scope ends, or that leaves cleanup unverifiable. Signal enums are accepted by retained pidfd and macOS audit-token handles, macOS identity probes clear stale errno, and guard failures are written to the pytest teardown report.
+- Tests: adopted-process checks now report a missing scope end without consuming the candidate. Missing macOS audit-token signaling is one unverified result with live-after-scope evidence; failed signaling through an available API keeps both leak and unverified outcomes.
+
 ## 0.4.26 (2026-11-05)
 
 - Fixed: if another process changed a run's journal while it was being replayed, StateFrame could act on rows read after the change: a subscriber could receive them, a partly rebuilt call-coverage index could become visible, and a meter or external-effect replay could report a row error instead of the lost journal. Replay now validates the journal before delivering rows, checks that it still owns the journal before each delivery, and publishes a rebuilt coverage index only after the whole scan passes; a lost journal is reported as such. Observer errors are still recorded and replay continues, as before.

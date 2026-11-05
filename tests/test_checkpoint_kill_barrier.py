@@ -22,6 +22,9 @@ PRIMITIVE_TESTS = {
     "test_launch_unit_kill.py",
     "test_orphan_guard.py",  # plants and stops detached processes, never a StateFrame run
     "test_orphan_guard_portability.py",  # plants and stops a detached launcher, never a StateFrame run
+    "orphan_guard_mutants.py",  # contains deliberately incorrect process-signal mutants, never a StateFrame run
+    "test_orphan_guard_acceptance.py",  # stops its own test helpers, never a StateFrame run
+    "test_orphan_guard_unit.py",  # exercises the orphan-guard primitive, never a StateFrame run
     "test_process_signal_liveness.py",  # probes its process-signal fixture helpers, never a StateFrame run
     "test_exec_tracker.py",
     "test_launch_identity_signals.py",
@@ -123,6 +126,21 @@ def test_engine_run_primitive_exemption_is_path_exact(tmp_path: Path) -> None:
 
     assert _unbarriered_signals(tmp_path) == {
         "acceptance/engine_run.py": [(2, "os.killpg(123, 9)")],
+    }
+
+
+def test_orphan_guard_primitive_exemptions_are_path_exact(tmp_path: Path) -> None:
+    source = "import os\nos.killpg(123, 9)\n"
+    acceptance = tmp_path / "acceptance"
+    acceptance.mkdir()
+    names = ("orphan_guard_mutants.py", "test_orphan_guard_acceptance.py",
+             "test_orphan_guard_unit.py")
+    for name in names:
+        (tmp_path / name).write_text(source, encoding="utf-8")
+        (acceptance / name).write_text(source, encoding="utf-8")
+
+    assert _unbarriered_signals(tmp_path) == {
+        f"acceptance/{name}": [(2, "os.killpg(123, 9)")] for name in names
     }
 
 
