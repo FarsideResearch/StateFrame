@@ -2217,53 +2217,14 @@ def atomic_apply(root: str | Path, arguments: Mapping[str, object], *,
 
 
 def augment_str_replace_tool(tools: Sequence[dict]) -> list[dict]:
-    """Extend the existing ``str_replace`` schema without adding a new tool.
+    """Keep the model-facing ``str_replace`` tool scalar in every profile.
 
-    The scalar branch is copied byte-for-byte in shape; the batch branch is an
-    opt-in union.  When capability is off the original list object is returned
-    unchanged so the v21 surface remains byte-identical.
+    Batch edits cannot publish per-file write receipts, so they remain
+    unavailable through this tool.
     """
     if not atomic_enabled():
         return list(tools)
-    result = copy.deepcopy(list(tools))
-    from kernel_revision_bound_edit import site_ref_property
-    batch = {
-        "type": "object", "properties": {
-            "edits": {"type": "array", "items": {"type": "object", "properties": {
-                "path": {"type": "string"}, "old": {"type": "string"},
-                "new": {"type": "string"}, "expected_revision": {"type": "string"},
-                "target_ref": site_ref_property(),
-                "site_ref": site_ref_property(),
-                "destination_ref": site_ref_property(),
-                "op": {"type": "string", "enum": ["replace", "insert_before", "move"]},
-                "order": {"type": "integer"},
-            }, "oneOf": [
-                {"required": ["path", "old", "new"]},
-                {"required": ["target_ref", "op", "new"]},
-                {"required": ["target_ref", "destination_ref", "op"]},
-            ], "additionalProperties": False}},
-            "change_set": {"type": "string"}, "stage_revision": {"type": "string"},
-            "base_revision": {"type": "string"},
-            "authority_ref": {"type": "string"},
-            "inventory_ref": {"type": "string"},
-            "check_refs": {"type": "array", "items": {"type": "string"}},
-            "publish": {"type": "boolean"},
-        }, "required": ["edits"], "additionalProperties": False,
-    }
-    for tool in result:
-        function = tool.get("function") if isinstance(tool, Mapping) else None
-        if not isinstance(function, dict) or function.get("name") != "str_replace":
-            continue
-        parameters = function.get("parameters")
-        if not isinstance(parameters, Mapping):
-            continue
-        scalar = copy.deepcopy(dict(parameters))
-        function["description"] = str(function.get("description", "")) + (
-            " Batch form accepts ordered edits and publishes one parent receipt; "
-            "publish=false retains a staged generation.")
-        function["parameters"] = {"oneOf": [scalar, batch]}
-        break
-    return result
+    return copy.deepcopy(list(tools))
 
 
 def apply_readiness_to_decision(runtime: object, decision: object) -> object:
