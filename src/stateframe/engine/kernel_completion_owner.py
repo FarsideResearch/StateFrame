@@ -8328,14 +8328,25 @@ def seal_terminal_disposition(runtime: object,
         or existing.get("certification") != expected_certification
     )
     result_facts = gate_result.get("done_facts")
-    result_facts_ref = (
-        str(result_facts.get("evidence_digest"))
-        if isinstance(result_facts, Mapping) and result_facts.get("evidence_digest")
-        else ""
+    evidence_digest = (
+        result_facts.get("evidence_digest") if isinstance(result_facts, Mapping) else None
     )
-    if (isinstance(existing, Mapping) and result_facts_ref
-            and existing.get("done_facts_ref") != result_facts_ref):
-        receipt_state_changed = True
+    result_facts_ref = evidence_digest.strip() if isinstance(evidence_digest, str) else ""
+    if isinstance(existing, Mapping) and existing.get("acceptance") == "ACCEPTED":
+        last_check_result = (
+            result_facts.get("last_check_result")
+            if isinstance(result_facts, Mapping) else None
+        )
+        current_facts_match = (
+            bool(result_facts_ref)
+            and existing.get("done_facts_ref") == result_facts_ref
+            and isinstance(result_facts, Mapping)
+            and result_facts.get("accepted") is True
+            and isinstance(last_check_result, Mapping)
+            and last_check_result.get("current") is True
+        )
+        if not current_facts_match:
+            receipt_state_changed = True
     if (not isinstance(existing, Mapping)
             or (current_gate_identity and existing_gate_identity != current_gate_identity)
             or receipt_state_changed):

@@ -172,7 +172,12 @@ def _stop_reason(result: Mapping[str, object], terminal: str, *, accepted: bool)
 def _facts_accept(facts: Mapping[str, object] | None) -> bool | None:
     if facts is None or "accepted" not in facts:
         return None
-    return facts.get("accepted") is True
+    value = facts.get("accepted")
+    if value is True:
+        return True
+    if value is False:
+        return False
+    return None
 
 
 def _facts_current(facts: Mapping[str, object] | None) -> bool | None:
@@ -180,7 +185,11 @@ def _facts_current(facts: Mapping[str, object] | None) -> bool | None:
         return None
     check = facts.get("last_check_result")
     if isinstance(check, Mapping) and "current" in check:
-        return check.get("current") is True
+        value = check.get("current")
+        if value is True:
+            return True
+        if value is False:
+            return False
     return None
 
 
@@ -244,6 +253,9 @@ def mint(runtime: object, result: Mapping[str, object]) -> dict[str, object]:
         shared_done_decision = cached_decision(runtime)
     except (ImportError, AttributeError, TypeError, ValueError):
         shared_done_decision = None
+        authority_unavailable = True
+    else:
+        authority_unavailable = False
     if shared_done_decision is not None:
         result = apply_terminal_result(runtime, result, shared_done_decision)
     terminal = str(result.get("result", result.get("outcome", ""))).upper()
@@ -255,6 +267,20 @@ def mint(runtime: object, result: Mapping[str, object]) -> dict[str, object]:
             (facts or {}).get("unresolved_gating_items", result.get("unresolved_gating_items", ()))
         ) if _text(item)
     )
+    if authority_unavailable:
+        unresolved = tuple(dict.fromkeys((*unresolved, "DONE_READINESS_AUTHORITY_UNAVAILABLE")))
+    if facts_current is not True:
+        current_code = (
+            "DONE_FACTS_NOT_CURRENT" if facts_current is False
+            else "DONE_FACTS_CURRENTNESS_UNKNOWN"
+        )
+        unresolved = tuple(dict.fromkeys((*unresolved, current_code)))
+    if facts_accept is not True:
+        acceptance_code = (
+            "DONE_FACTS_REJECTED" if facts_accept is False
+            else "DONE_FACTS_ACCEPTANCE_UNKNOWN"
+        )
+        unresolved = tuple(dict.fromkeys((*unresolved, acceptance_code)))
     pass_gates = None
     vector_fn = getattr(runtime, "pass_gates_vector", None)
     if callable(vector_fn):
@@ -271,8 +297,8 @@ def mint(runtime: object, result: Mapping[str, object]) -> dict[str, object]:
         except (AttributeError, OSError, RuntimeError, TypeError, ValueError):
             unresolved = tuple(dict.fromkeys((*unresolved, "PASS_GATES_VECTOR_UNAVAILABLE")))
     explicitly_accepted = result.get("accepted") is True
-    current_ok = facts_current is not False
-    facts_ok = facts_accept is not False
+    current_ok = facts_current is True
+    facts_ok = facts_accept is True
     verified = (
         explicitly_accepted
         and current_ok
@@ -287,7 +313,10 @@ def mint(runtime: object, result: Mapping[str, object]) -> dict[str, object]:
     else:
         repair = ENVIRONMENT_BLOCKED if terminal in _ENVIRONMENT_RESULTS else UNRESOLVED
         certification = UNCERTIFIED
-        reason = _text(result.get("completion_owner_reason")) or terminal.lower() or "terminal_unresolved"
+        reason = (
+            "done_readiness_authority_unavailable" if authority_unavailable
+            else _text(result.get("completion_owner_reason")) or terminal.lower() or "terminal_unresolved"
+        )
     trusted_refs = _trusted_refs(result, facts)
     stop_reason = _stop_reason(result, terminal, accepted=verified)
     last_stage = _last_stage(runtime, result)

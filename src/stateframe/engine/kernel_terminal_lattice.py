@@ -9,7 +9,7 @@ import hashlib
 import json
 import os
 import re
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 
 
 MODE_ENV = "STATEFRAME_TERMINAL_LATTICE"
@@ -132,6 +132,13 @@ _STATUS_KEYS = (
     "result", "outcome", "result_class", "status", "terminal_status",
     "stop_cause", "stop_reason", "system_outcome",
 )
+_UNPROVEN_ACCEPTANCE_IDS = frozenset({
+    "DONE_READINESS_AUTHORITY_UNAVAILABLE",
+    "DONE_FACTS_NOT_CURRENT",
+    "DONE_FACTS_CURRENTNESS_UNKNOWN",
+    "DONE_FACTS_REJECTED",
+    "DONE_FACTS_ACCEPTANCE_UNKNOWN",
+})
 _TOKEN_RE = re.compile(r"[^A-Za-z0-9_.:-]+")
 
 
@@ -384,6 +391,17 @@ def _digest_receipt(receipt: Mapping[str, object]) -> str:
     return "sha256:" + hashlib.sha256(encoded).hexdigest()
 
 
+def _has_unproven_acceptance(value: Mapping[str, object]) -> bool:
+    """Do not carry prior acceptance over explicit freshness or authority gaps."""
+    for source in _sources(value):
+        unresolved = source.get("unresolved_ids")
+        if (isinstance(unresolved, Sequence)
+                and not isinstance(unresolved, (str, bytes, bytearray))
+                and any(_text(item) in _UNPROVEN_ACCEPTANCE_IDS for item in unresolved)):
+            return True
+    return False
+
+
 def _join_fields(
     candidate: Mapping[str, object],
     previous: Mapping[str, object],
@@ -395,7 +413,7 @@ def _join_fields(
     if current["accepted"] is True:
         joined["accepted"] = True
         joined["acceptance"] = "ACCEPTED"
-    elif previous.get("accepted") is True:
+    elif previous.get("accepted") is True and not _has_unproven_acceptance(candidate):
         if current["accepted"] is False:
             refusals.append(("ACCEPTED", "UNACCEPTED"))
         joined["accepted"] = True
@@ -519,6 +537,7 @@ def _join_terminal_impl(
         _emit_refusal(runtime, old, new, writer)
 
     final_facts = _facts(joined)
+    acceptance_unproven = _has_unproven_acceptance(joined)
     final_digest = _text(final_facts.get("artifact_digest"))
     observed_digests = list(prior_digests)
     if final_digest:
@@ -528,7 +547,9 @@ def _join_terminal_impl(
     state_receipt = receipt_output or prior_receipt
     state = {
         "accepted": (
-            True if prior.get("accepted") is True or final_facts["accepted"] is True
+            True if final_facts["accepted"] is True
+            else False if acceptance_unproven
+            else True if prior.get("accepted") is True
             else final_facts["accepted"]
         ),
         "delivery": (
