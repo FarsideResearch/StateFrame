@@ -134,7 +134,7 @@ def test_launcher_file_limit(tmp_path):
 
 def test_macos_launcher_requires_memory_supervision(tmp_path):
     if sys.platform != "darwin":
-        return
+        pytest.skip("macOS only")
     spec = {"argv": [TRUE], "cwd": str(tmp_path), "env": {}, "limits": asdict(ExecLimits())}
     result = subprocess.run([sys.executable, "-I", str(LAUNCH), json.dumps(spec)],
                             capture_output=True, timeout=5)

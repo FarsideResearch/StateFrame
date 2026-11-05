@@ -20,10 +20,7 @@ from ._support import Endpoint, PYTHON, ROOT, copy_repo, environment, read_measu
 from engine_run import EngineProcess, run_monitored, start_monitored
 
 
-pytestmark = [pytest.mark.host_sandbox,
-              pytest.mark.skipif(not (Path(__file__).resolve().parents[2] / "src" / "stateframe" /
-                                      "engine" / "kernel_frame_routes.py").is_file(),
-                                 reason="routing engine lane not installed")]
+pytestmark = pytest.mark.host_sandbox
 
 
 def _kill_run(process: EngineProcess, run_dir: Path, *,

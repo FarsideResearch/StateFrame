@@ -23,7 +23,7 @@ DARWIN_DENIAL = ("sandbox-exec: execvp() of '.venv/bin/python' failed: "
                  "Operation not permitted")
 
 # The command builders only need a real bwrap path; skip where the host has none.
-BWRAP = shutil.which("bwrap")
+BWRAP = isolation.sandbox_executable("bwrap")
 needs_bwrap = pytest.mark.skipif(BWRAP is None, reason="bwrap is not installed")
 
 
@@ -85,7 +85,9 @@ def test_darwin_profile_never_admits_a_link_to_a_data_file(monkeypatch, tmp_path
     assert f'(subpath "{secret}")' not in command[2]
 
 
+@pytest.mark.host_sandbox
 @needs_bwrap
+@pytest.mark.skipif(platform.system() != "Linux", reason="requires Linux bwrap behavior")
 def test_linux_binds_the_uv_install_and_its_link_hop(monkeypatch, tmp_path):
     project, link_dir, real = _uv_layout(tmp_path)
     monkeypatch.setattr(isolation, "backend", lambda: BWRAP)
@@ -126,7 +128,9 @@ def test_program_read_roots_survive_missing_home_and_unknown_uid(monkeypatch, tm
     assert str(program.parents[1]) in isolation._program_read_roots(program)
 
 
+@pytest.mark.host_sandbox
 @needs_bwrap
+@pytest.mark.skipif(platform.system() != "Linux", reason="requires Linux bwrap behavior")
 def test_isolated_command_builds_with_missing_home_and_unknown_uid(monkeypatch, tmp_path):
     monkeypatch.delenv("HOME", raising=False)
 
@@ -144,6 +148,7 @@ def test_isolated_command_builds_with_missing_home_and_unknown_uid(monkeypatch, 
     assert child_env["HOME"] == str(tmp_path / ".test-tmp")
 
 
+@pytest.mark.host_sandbox
 @needs_bwrap
 @pytest.mark.skipif(platform.system() != "Linux", reason="requires Linux uid/passwd behavior")
 def test_linux_check_command_with_home_removed_under_unknown_uid(tmp_path):
@@ -222,6 +227,7 @@ def _uv_python() -> Path | None:
     return store
 
 
+@pytest.mark.host_sandbox
 @pytest.mark.skipif(_uv_python() is None, reason="needs macOS with uv and a uv-managed Python")
 def test_live_uv_venv_runs_under_the_check_sandbox(tmp_path):
     project = tmp_path / "project"

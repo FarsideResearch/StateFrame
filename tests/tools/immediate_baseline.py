@@ -59,6 +59,9 @@ def baseline_checkout(tmp_path_factory):
             pytest.fail("SF_TEST_BASELINE_IMMEDIATE is set but empty", pytrace=False)
         baseline = Path(explicit).expanduser().resolve()
     else:
+        # Must-run gates provision the baseline explicitly; a derived one could silently be the wrong tree.
+        if os.environ.get("SF_GATE_MUST_RUN", "").strip().lower() in {"1", "true", "yes", "on"}:
+            pytest.fail("SF_TEST_BASELINE_IMMEDIATE is required for must-run parity tests", pytrace=False)
         baseline = pinned_tree(_immediate_base_release(), tmp_path_factory)
     if not (baseline / "src/stateframe/runner.py").is_file():
         pytest.fail(f"immediate base checkout has no src/stateframe/runner.py: {baseline}", pytrace=False)

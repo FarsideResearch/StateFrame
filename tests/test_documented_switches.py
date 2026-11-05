@@ -91,10 +91,11 @@ def test_stable_wire_headroom_is_documented_and_forwarded(monkeypatch):
     assert runner.resolve_opt_in_switches()[name] == "16000"
 
 
-@pytest.mark.parametrize("name", sorted(runner.OPT_IN_SWITCHES))
+@pytest.mark.parametrize(
+    "name", sorted(set(runner.OPT_IN_SWITCHES) - runner.HOST_ONLY_SWITCHES)
+)
 def test_shell_setting_reaches_the_engine_spec(monkeypatch, name):
-    if name not in runner.engine_switches():
-        pytest.skip(f"{name} is not read by this engine")
+    assert name in runner.engine_switches()
     for other in runner.OPT_IN_SWITCHES:
         monkeypatch.delenv(other, raising=False)
     # Numeric settings have no choice list; any in-range number exercises the path.

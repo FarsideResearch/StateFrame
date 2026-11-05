@@ -261,15 +261,16 @@ def _write_launchers(launcher: Path, wrapper: Path) -> None:
         "import secrets, subprocess, sys\n"
         "from stateframe import cli\n"
         "wrapper, trace, *args = sys.argv[1:]\n"
-        "original_hex = secrets.token_hex\n"
-        "used = False\n"
-        "def fixed_hex(size=None):\n"
-        "    global used\n"
-        "    if size == 16 and not used:\n"
-        "        used = True\n"
-        "        return 'a' * 32\n"
-        "    return original_hex(size)\n"
-        "secrets.token_hex = fixed_hex\n"
+        "if args and args[0] == 'run':\n"
+        "    original_hex = secrets.token_hex\n"
+        "    used = False\n"
+        "    def fixed_hex(size=None):\n"
+        "        global used\n"
+        "        if size == 16 and not used:\n"
+        "            used = True\n"
+        "            return 'a' * 32\n"
+        "        return original_hex(size)\n"
+        "    secrets.token_hex = fixed_hex\n"
         "original_popen = subprocess.Popen\n"
         "def traced_popen(command, *positional, **keywords):\n"
         "    if len(command) >= 4 and str(command[2]).endswith('_child.py'):\n"
@@ -376,7 +377,7 @@ def _run_checkout(
         server.server_close()
 
 
-def test_no_hooks_raw_requests_and_journal_match_release(tmp_path, baseline_checkout):
+def test_no_hooks_raw_requests_and_journal_match_release(tmp_path, baseline_checkout, must_run_witness):
     assert (baseline_checkout / "src/stateframe/runner.py").is_file()
     repo = tmp_path / "repo"
     source = CURRENT / "examples/discount_bug"
@@ -415,9 +416,15 @@ def test_no_hooks_raw_requests_and_journal_match_release(tmp_path, baseline_chec
     assert not any(
         (run / name).exists() for name in ("hooks", "hook-bundle", "hook-tape.jsonl")
     )
+    must_run_witness.record_parity(
+        baseline_trace=baseline[4],
+        candidate_trace=current[4],
+        expected_trace_prefixes=("stateframe",),
+        comparison_completed=True,
+    )
 
 
-def test_no_hooks_regular_stateframe_file_matches_release(tmp_path, baseline_checkout):
+def test_no_hooks_regular_stateframe_file_matches_release(tmp_path, baseline_checkout, must_run_witness):
     repo = tmp_path / "repo"
     import shutil
 
@@ -440,6 +447,12 @@ def test_no_hooks_regular_stateframe_file_matches_release(tmp_path, baseline_che
     _assert_spec_keys_match_release(baseline[3], current[3])
     _assert_proven_fixture_capabilities(run)
     _assert_diet_payloads_match_release(baseline[5], current[5], baseline[0], current[0])
+    must_run_witness.record_parity(
+        baseline_trace=baseline[4],
+        candidate_trace=current[4],
+        expected_trace_prefixes=("stateframe",),
+        comparison_completed=True,
+    )
 
 
 def test_no_hooks_real_shaped_llama_keeps_automatic_pin_and_release_bytes(
@@ -473,7 +486,8 @@ def test_no_hooks_real_shaped_llama_keeps_automatic_pin_and_release_bytes(
 
 def _resume_checkout(checkout: Path, repo: Path, run: Path, launcher: Path,
                      wrapper: Path, trace: Path, *,
-                     stable_tool_head: str | None, final_cache_layout: str | None) -> tuple[list[bytes], list[bytes]]:
+                     stable_tool_head: str | None,
+                     final_cache_layout: str | None) -> tuple[list[bytes], list[bytes], list[str]]:
     python = tree_python(checkout / "src",
                          run.parent / f"{run.name}-{checkout.name}-python")
     assert_tree_imports(python, checkout / "src", run.parent)
@@ -532,14 +546,25 @@ def _resume_checkout(checkout: Path, repo: Path, run: Path, launcher: Path,
                             deadline=time.monotonic() + 120, what="hook wiring parity")
         script.release.set()
         process.communicate(timeout=90)
-        resumed = subprocess.run([python, "-m", "stateframe", "resume", str(run),
-                                  "--endpoint", endpoint], env=environment, capture_output=True,
-                                 text=True, timeout=240)
+        resumed_trace = trace.with_name(f"{trace.stem}-resume.json")
+        resumed = subprocess.run(
+            [python, str(launcher), str(wrapper), str(resumed_trace), "resume", str(run),
+             "--endpoint", endpoint],
+            env=environment,
+            capture_output=True,
+            text=True,
+            timeout=240,
+        )
         assert resumed.returncode == 0, resumed.stdout + resumed.stderr
         script.assert_consumed()
         rebuilt = [path.read_bytes() for path in sorted((run / "wire").glob("*.request.json"))]
         assert rebuilt[:2] == original
-        return original, rebuilt
+        assert resumed_trace.is_file(), "resume did not launch a traced engine child"
+        trace_modules = json.loads(resumed_trace.read_text(encoding="utf-8"))
+        assert isinstance(trace_modules, list) and all(isinstance(item, str) for item in trace_modules), (
+            "resumed child did not write a valid module trace"
+        )
+        return original, rebuilt, trace_modules
     finally:
         script.release.set()
         if process is not None and process.poll() is None:
@@ -551,7 +576,7 @@ def _resume_checkout(checkout: Path, repo: Path, run: Path, launcher: Path,
         server.server_close()
 
 
-def test_no_hooks_resume_rebuilt_requests_match_release(tmp_path, baseline_checkout):
+def test_no_hooks_resume_rebuilt_requests_match_release(tmp_path, baseline_checkout, must_run_witness):
     import shutil
 
     repo = tmp_path / "repo"
@@ -569,3 +594,9 @@ def test_no_hooks_resume_rebuilt_requests_match_release(tmp_path, baseline_check
     # version stays byte-exact (asserted in _resume_checkout), across versions only IDs move.
     _assert_only_wire_ids_moved(baseline[0], current[0])
     _assert_only_wire_ids_moved(baseline[1], current[1], run, tmp_path / "baseline_run")
+    must_run_witness.record_parity(
+        baseline_trace=baseline[2],
+        candidate_trace=current[2],
+        expected_trace_prefixes=("stateframe",),
+        comparison_completed=True,
+    )

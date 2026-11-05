@@ -753,7 +753,7 @@ def test_delivery_projection_is_private_and_links_decisions(tmp_path, monkeypatc
 @pytest.mark.host_sandbox
 @pytest.mark.parametrize("binary,argument", [
     ("/usr/bin/make", "-v"), ("/usr/bin/git", "--version"),
-])
+], ids=["make", "git"])
 def test_macos_developer_commands_run_as_hooks_in_real_sandbox(tmp_path, binary, argument):
     if not Path(binary).is_file():
         pytest.skip(f"{binary} is absent")

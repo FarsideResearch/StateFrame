@@ -214,8 +214,9 @@ def test_unreadable_entry_fails_closed(tmp_path):
     try:
         if os.access(root / "sub", os.R_OK):
             pytest.skip("running with privileges that ignore directory modes")
-        with pytest.raises(powerups.PowerupError, match="unreadable"):
+        with pytest.raises(powerups.PowerupError, match="unreadable") as error:
             tree_digest(root)
+        assert "unreadable" in str(error.value)
     finally:
         os.chmod(root / "sub", 0o755)
 

@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 from tools.compare_no_mcp_requests import (
-    capture, mask_wire_ids, result_hashes, unbacked_result_hash_changes, write_launcher)
+    capture, mask_wire_ids, result_hashes, unbacked_result_hash_changes)
 from acceptance._support import assert_tree_imports, tree_python
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -33,31 +33,59 @@ def _materialize_baseline(destination: Path) -> str:
     return tree
 
 
+def _write_traced_launcher(path: Path, trace_path: Path) -> None:
+    """Record imported modules after each pinned-tree CLI process exits."""
+    path.write_text(
+        "import json, runpy, secrets, sys\n"
+        "_sequence = 0\n"
+        "def fixed_hex(size=32):\n"
+        "    global _sequence\n"
+        "    _sequence += 1\n"
+        "    return format(_sequence, 'x').zfill(size * 2)[-size * 2:]\n"
+        "secrets.token_hex = fixed_hex\n"
+        f"_trace_path = {str(trace_path)!r}\n"
+        "try:\n"
+        "    runpy.run_module('stateframe', run_name='__main__')\n"
+        "finally:\n"
+        "    with open(_trace_path, 'w', encoding='utf-8') as target:\n"
+        "        json.dump(sorted(sys.modules), target)\n",
+        encoding="utf-8",
+    )
+
+
 @pytest.mark.host_sandbox
-def test_no_mcp_requests_match_release_0_2_3(tmp_path):
+def test_no_mcp_requests_match_release_0_2_3(tmp_path, must_run_witness):
     baseline = tmp_path / "baseline"
     tree = _materialize_baseline(baseline)
     repo = tmp_path / "repo"
     shutil.copytree(ROOT / "examples/discount_bug", repo)
-    launcher = tmp_path / "fixed_seed_run.py"
-    write_launcher(launcher)
+    baseline_trace = tmp_path / "baseline-modules.json"
+    current_trace = tmp_path / "candidate-modules.json"
+    default_trace = tmp_path / "default-modules.json"
+    baseline_launcher = tmp_path / "baseline-run.py"
+    current_launcher = tmp_path / "candidate-run.py"
+    default_launcher = tmp_path / "default-run.py"
+    _write_traced_launcher(baseline_launcher, baseline_trace)
+    _write_traced_launcher(current_launcher, current_trace)
+    _write_traced_launcher(default_launcher, default_trace)
     run_dir = tmp_path / "run"
     script = ROOT / "examples/discount_bug.script.json"
     baseline_python = tree_python(baseline / "src", tmp_path / "baseline-python")
     assert_tree_imports(baseline_python, baseline / "src", tmp_path)
-    previous = capture(baseline, baseline_python, launcher, script, repo, run_dir, stable_tool_head=None, final_cache_layout=None,
+    previous = capture(baseline, baseline_python, baseline_launcher, script, repo, run_dir, stable_tool_head=None,
+                       final_cache_layout=None,
                        source_on_pythonpath=False, test_python=sys.executable)
     run_dir.rename(tmp_path / "baseline-run")
     current_python = tree_python(ROOT / "src", tmp_path / "current-python")
     assert_tree_imports(current_python, ROOT / "src", tmp_path)
     # The default now treats unittest as a generic check and permits test edits.
     # Leave the stable tool head unset here to exercise the new default; pin it off only for byte comparison.
-    default = capture(ROOT, current_python, launcher, script, repo, run_dir,
+    default = capture(ROOT, current_python, default_launcher, script, repo, run_dir,
                       stable_tool_head=None, final_cache_layout=None, source_on_pythonpath=False,
                       test_python=sys.executable)
     assert default
     run_dir.rename(tmp_path / "default-run")
-    current = capture(ROOT, current_python, launcher, script, repo, run_dir,
+    current = capture(ROOT, current_python, current_launcher, script, repo, run_dir,
                       legacy_mode=True, stable_tool_head="off", final_cache_layout="off", source_on_pythonpath=False,
                       test_python=sys.executable)
     # A masked result_sha256 must not hide a content change. Each hash that differs
@@ -75,6 +103,12 @@ def test_no_mcp_requests_match_release_0_2_3(tmp_path):
     current_sha = hashlib.sha256(current).hexdigest()
     assert previous == current, (f"0.2.3 commit {BASELINE_COMMIT} tree {tree}: "
                                 f"sha256={previous_sha}; candidate sha256={current_sha}")
+    must_run_witness.record_parity(
+        baseline_trace=json.loads(baseline_trace.read_text(encoding="utf-8")),
+        candidate_trace=json.loads(current_trace.read_text(encoding="utf-8")),
+        expected_trace_prefixes=("stateframe",),
+        comparison_completed=True,
+    )
 
 
 def test_wire_id_drift_names_moved_fields_and_rejects_other_changes(tmp_path):

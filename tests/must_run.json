@@ -1,0 +1,1093 @@
+{
+  "schema": 3,
+  "jobs": [
+    {
+      "id": "darwin",
+      "platform": "darwin",
+      "required": true,
+      "required_provisions": [
+        "host_sandbox",
+        "parity_baseline"
+      ],
+      "conditional_provisions": [
+        "bwrap",
+        "filesystem_modes",
+        "sandbox_exec",
+        "serial_lane",
+        "uv_sandbox"
+      ]
+    },
+    {
+      "id": "linux",
+      "platform": "linux",
+      "required": true,
+      "required_provisions": [
+        "host_sandbox",
+        "parity_baseline"
+      ],
+      "conditional_provisions": [
+        "bwrap",
+        "filesystem_modes",
+        "serial_lane",
+        "unknown_uid_bwrap"
+      ]
+    }
+  ],
+  "baselines": {
+    "immediate": {
+      "source": "SF_GATE_BASE"
+    },
+    "release_0_2_3": {
+      "commit": "33c6c511611cc249b90b47930905a8e60648c05c",
+      "tree_digest": "59bef5821e45d506309bbb5efb5ed3fb59e52279"
+    }
+  },
+  "cells": [
+    {
+      "scenario_id": "acceptance_test_provider_queue_wait_test_first_queued_send_submits_once_and_run_succeeds",
+      "nodeid": "tests/acceptance/test_provider_queue_wait.py::test_first_queued_send_submits_once_and_run_succeeds",
+      "item_nodeids": [
+        "tests/acceptance/test_provider_queue_wait.py::test_first_queued_send_submits_once_and_run_succeeds"
+      ],
+      "jobs": {
+        "linux": "RUN",
+        "darwin": "RUN"
+      },
+      "prerequisites": [
+        "host_sandbox"
+      ],
+      "optional_prerequisites": [],
+      "baseline": null,
+      "witness_schema": "assertion_match",
+      "witness_assertion": "assert summary[\"succeeded\"] is True"
+    },
+    {
+      "scenario_id": "acceptance_test_routes_host_test_public_cli_routes_first_plan_send_to_second_endpoint",
+      "nodeid": "tests/acceptance/test_routes_host.py::test_public_cli_routes_first_plan_send_to_second_endpoint",
+      "item_nodeids": [
+        "tests/acceptance/test_routes_host.py::test_public_cli_routes_first_plan_send_to_second_endpoint"
+      ],
+      "jobs": {
+        "linux": "RUN",
+        "darwin": "RUN"
+      },
+      "prerequisites": [
+        "host_sandbox"
+      ],
+      "optional_prerequisites": [],
+      "baseline": null,
+      "witness_schema": "assertion_match",
+      "witness_assertion": "assert first[\"model\"] == \"cheap\""
+    },
+    {
+      "scenario_id": "e2e_test_request_tokenizer_auth_cli_test_public_cli_uses_bound_key_for_every_tokenizer_measurement",
+      "nodeid": "tests/e2e/test_request_tokenizer_auth_cli.py::test_public_cli_uses_bound_key_for_every_tokenizer_measurement",
+      "item_nodeids": [
+        "tests/e2e/test_request_tokenizer_auth_cli.py::test_public_cli_uses_bound_key_for_every_tokenizer_measurement"
+      ],
+      "jobs": {
+        "linux": "RUN",
+        "darwin": "RUN"
+      },
+      "prerequisites": [
+        "host_sandbox"
+      ],
+      "optional_prerequisites": [],
+      "baseline": null,
+      "witness_schema": "assertion_match",
+      "witness_assertion": "assert script.tokenize_authorized and all(script.tokenize_authorized)"
+    },
+    {
+      "scenario_id": "e2e_test_request_tokenizer_auth_cli_test_public_cli_wrong_key_reports_unauthorized_tokenizer_fallback",
+      "nodeid": "tests/e2e/test_request_tokenizer_auth_cli.py::test_public_cli_wrong_key_reports_unauthorized_tokenizer_fallback",
+      "item_nodeids": [
+        "tests/e2e/test_request_tokenizer_auth_cli.py::test_public_cli_wrong_key_reports_unauthorized_tokenizer_fallback"
+      ],
+      "jobs": {
+        "linux": "RUN",
+        "darwin": "RUN"
+      },
+      "prerequisites": [
+        "host_sandbox"
+      ],
+      "optional_prerequisites": [],
+      "baseline": null,
+      "witness_schema": "assertion_match",
+      "witness_assertion": "assert script.tokenize_authorized and not any(script.tokenize_authorized)"
+    },
+    {
+      "scenario_id": "test_allocation_replay_corpus_test_recorded_allocation_refusal_reaches_submitted",
+      "nodeid": "tests/test_allocation_replay_corpus.py::test_recorded_allocation_refusal_reaches_submitted",
+      "item_nodeids": [
+        "tests/test_allocation_replay_corpus.py::test_recorded_allocation_refusal_reaches_submitted[clean-meter-22file-r1]",
+        "tests/test_allocation_replay_corpus.py::test_recorded_allocation_refusal_reaches_submitted[econ-flat-r1-off]",
+        "tests/test_allocation_replay_corpus.py::test_recorded_allocation_refusal_reaches_submitted[econ-flat-r1-p1]",
+        "tests/test_allocation_replay_corpus.py::test_recorded_allocation_refusal_reaches_submitted[econ-flat-r1-p2]",
+        "tests/test_allocation_replay_corpus.py::test_recorded_allocation_refusal_reaches_submitted[econ-flat-r2-p1]",
+        "tests/test_allocation_replay_corpus.py::test_recorded_allocation_refusal_reaches_submitted[econ-flat-r2-p2]",
+        "tests/test_allocation_replay_corpus.py::test_recorded_allocation_refusal_reaches_submitted[econ-flat-sub-1]",
+        "tests/test_allocation_replay_corpus.py::test_recorded_allocation_refusal_reaches_submitted[econ-rel10-full-r1-off]",
+        "tests/test_allocation_replay_corpus.py::test_recorded_allocation_refusal_reaches_submitted[econ-rel10-full-r1-p1]",
+        "tests/test_allocation_replay_corpus.py::test_recorded_allocation_refusal_reaches_submitted[econ-rel10-full-r1-p2]",
+        "tests/test_allocation_replay_corpus.py::test_recorded_allocation_refusal_reaches_submitted[econ-rel10-full-sub-6]",
+        "tests/test_allocation_replay_corpus.py::test_recorded_allocation_refusal_reaches_submitted[econ-relb8-full-r1-off]",
+        "tests/test_allocation_replay_corpus.py::test_recorded_allocation_refusal_reaches_submitted[econ-relb8-full-r1-p1]",
+        "tests/test_allocation_replay_corpus.py::test_recorded_allocation_refusal_reaches_submitted[econ-relb8-full-r1-p2]",
+        "tests/test_allocation_replay_corpus.py::test_recorded_allocation_refusal_reaches_submitted[econ-relb8-full-sub-1]",
+        "tests/test_allocation_replay_corpus.py::test_recorded_allocation_refusal_reaches_submitted[factory-a-econ-feature-r1]",
+        "tests/test_allocation_replay_corpus.py::test_recorded_allocation_refusal_reaches_submitted[factory-a-econ-feature-r3]",
+        "tests/test_allocation_replay_corpus.py::test_recorded_allocation_refusal_reaches_submitted[factory-a-econ-flat-r1]",
+        "tests/test_allocation_replay_corpus.py::test_recorded_allocation_refusal_reaches_submitted[factory-a-econ-flat-r2]",
+        "tests/test_allocation_replay_corpus.py::test_recorded_allocation_refusal_reaches_submitted[factory-a-econ-flat-r3]",
+        "tests/test_allocation_replay_corpus.py::test_recorded_allocation_refusal_reaches_submitted[factory-b-econ-feature-r1]",
+        "tests/test_allocation_replay_corpus.py::test_recorded_allocation_refusal_reaches_submitted[factory-b-econ-feature-r2]",
+        "tests/test_allocation_replay_corpus.py::test_recorded_allocation_refusal_reaches_submitted[factory-b-econ-flat-r1]",
+        "tests/test_allocation_replay_corpus.py::test_recorded_allocation_refusal_reaches_submitted[factory-b-econ-flat-r2]",
+        "tests/test_allocation_replay_corpus.py::test_recorded_allocation_refusal_reaches_submitted[factory-b-econ-flat-r3]",
+        "tests/test_allocation_replay_corpus.py::test_recorded_allocation_refusal_reaches_submitted[legacy-b8-off]",
+        "tests/test_allocation_replay_corpus.py::test_recorded_allocation_refusal_reaches_submitted[legacy-b8-p1]",
+        "tests/test_allocation_replay_corpus.py::test_recorded_allocation_refusal_reaches_submitted[legacy-b8-p2]",
+        "tests/test_allocation_replay_corpus.py::test_recorded_allocation_refusal_reaches_submitted[legacy-guard22]",
+        "tests/test_allocation_replay_corpus.py::test_recorded_allocation_refusal_reaches_submitted[legacy-v037-slot0]",
+        "tests/test_allocation_replay_corpus.py::test_recorded_allocation_refusal_reaches_submitted[presend-full]",
+        "tests/test_allocation_replay_corpus.py::test_recorded_allocation_refusal_reaches_submitted[presend-p3-nosvc]",
+        "tests/test_allocation_replay_corpus.py::test_recorded_allocation_refusal_reaches_submitted[presend-p4-nosvc]",
+        "tests/test_allocation_replay_corpus.py::test_recorded_allocation_refusal_reaches_submitted[presend-p4-svc]",
+        "tests/test_allocation_replay_corpus.py::test_recorded_allocation_refusal_reaches_submitted[presend-p5-nosvc]"
+      ],
+      "jobs": {
+        "linux": "RUN",
+        "darwin": "RUN"
+      },
+      "prerequisites": [
+        "host_sandbox",
+        "serial_lane"
+      ],
+      "optional_prerequisites": [
+        "serial_lane"
+      ],
+      "baseline": null,
+      "witness_schema": "assertion_match",
+      "witness_assertion": "assert violation is None"
+    },
+    {
+      "scenario_id": "test_allocation_replay_corpus_test_planted_broken_deferral_is_reported_as_a_corpus_violation",
+      "nodeid": "tests/test_allocation_replay_corpus.py::test_planted_broken_deferral_is_reported_as_a_corpus_violation",
+      "item_nodeids": [
+        "tests/test_allocation_replay_corpus.py::test_planted_broken_deferral_is_reported_as_a_corpus_violation"
+      ],
+      "jobs": {
+        "linux": "RUN",
+        "darwin": "RUN"
+      },
+      "prerequisites": [
+        "host_sandbox",
+        "serial_lane"
+      ],
+      "optional_prerequisites": [
+        "serial_lane"
+      ],
+      "baseline": null,
+      "witness_schema": "assertion_match",
+      "witness_assertion": "assert any(error in outcome.evidence for error in ALLOCATION_ERRORS)"
+    },
+    {
+      "scenario_id": "test_check_sandbox_probe_test_probe_accepts_venv_python_without_host_selection",
+      "nodeid": "tests/test_check_sandbox_probe.py::test_probe_accepts_venv_python_without_host_selection",
+      "item_nodeids": [
+        "tests/test_check_sandbox_probe.py::test_probe_accepts_venv_python_without_host_selection"
+      ],
+      "jobs": {
+        "linux": "RUN",
+        "darwin": "RUN"
+      },
+      "prerequisites": [
+        "host_sandbox"
+      ],
+      "optional_prerequisites": [],
+      "baseline": null,
+      "witness_schema": "assertion_match",
+      "witness_assertion": "assert isolation.check_sandbox_exec_denial(str(python)) is None"
+    },
+    {
+      "scenario_id": "test_check_sandbox_probe_test_isolated_command_default_keeps_selected_interpreter_and_environment",
+      "nodeid": "tests/test_check_sandbox_probe.py::test_isolated_command_default_keeps_selected_interpreter_and_environment",
+      "item_nodeids": [
+        "tests/test_check_sandbox_probe.py::test_isolated_command_default_keeps_selected_interpreter_and_environment"
+      ],
+      "jobs": {
+        "linux": "RUN",
+        "darwin": "RUN"
+      },
+      "prerequisites": [
+        "host_sandbox"
+      ],
+      "optional_prerequisites": [],
+      "baseline": null,
+      "witness_schema": "assertion_match",
+      "witness_assertion": "assert default_env[\"HOME\"] == str(tmp_path / \".test-tmp\")"
+    },
+    {
+      "scenario_id": "test_documented_switches_test_shell_setting_reaches_the_engine_spec_stateframe_cache_layout",
+      "nodeid": "tests/test_documented_switches.py::test_shell_setting_reaches_the_engine_spec[STATEFRAME_CACHE_LAYOUT]",
+      "item_nodeids": [
+        "tests/test_documented_switches.py::test_shell_setting_reaches_the_engine_spec[STATEFRAME_CACHE_LAYOUT]"
+      ],
+      "jobs": {
+        "linux": "RUN",
+        "darwin": "RUN"
+      },
+      "prerequisites": [],
+      "optional_prerequisites": [],
+      "baseline": null,
+      "witness_schema": "assertion_match",
+      "witness_assertion": "assert runner.resolve_opt_in_switches()[name] == value"
+    },
+    {
+      "scenario_id": "test_documented_switches_test_shell_setting_reaches_the_engine_spec_stateframe_edit_scope_widen",
+      "nodeid": "tests/test_documented_switches.py::test_shell_setting_reaches_the_engine_spec[STATEFRAME_EDIT_SCOPE_WIDEN]",
+      "item_nodeids": [
+        "tests/test_documented_switches.py::test_shell_setting_reaches_the_engine_spec[STATEFRAME_EDIT_SCOPE_WIDEN]"
+      ],
+      "jobs": {
+        "linux": "RUN",
+        "darwin": "RUN"
+      },
+      "prerequisites": [],
+      "optional_prerequisites": [],
+      "baseline": null,
+      "witness_schema": "assertion_match",
+      "witness_assertion": "assert runner.resolve_opt_in_switches()[name] == value"
+    },
+    {
+      "scenario_id": "test_documented_switches_test_shell_setting_reaches_the_engine_spec_stateframe_env_seed_max_gb",
+      "nodeid": "tests/test_documented_switches.py::test_shell_setting_reaches_the_engine_spec[STATEFRAME_ENV_SEED_MAX_GB]",
+      "item_nodeids": [
+        "tests/test_documented_switches.py::test_shell_setting_reaches_the_engine_spec[STATEFRAME_ENV_SEED_MAX_GB]"
+      ],
+      "jobs": {
+        "linux": "RUN",
+        "darwin": "RUN"
+      },
+      "prerequisites": [],
+      "optional_prerequisites": [],
+      "baseline": null,
+      "witness_schema": "assertion_match",
+      "witness_assertion": "assert runner.resolve_opt_in_switches()[name] == value"
+    },
+    {
+      "scenario_id": "test_documented_switches_test_shell_setting_reaches_the_engine_spec_stateframe_evictfix",
+      "nodeid": "tests/test_documented_switches.py::test_shell_setting_reaches_the_engine_spec[STATEFRAME_EVICTFIX]",
+      "item_nodeids": [
+        "tests/test_documented_switches.py::test_shell_setting_reaches_the_engine_spec[STATEFRAME_EVICTFIX]"
+      ],
+      "jobs": {
+        "linux": "RUN",
+        "darwin": "RUN"
+      },
+      "prerequisites": [],
+      "optional_prerequisites": [],
+      "baseline": null,
+      "witness_schema": "assertion_match",
+      "witness_assertion": "assert runner.resolve_opt_in_switches()[name] == value"
+    },
+    {
+      "scenario_id": "test_documented_switches_test_shell_setting_reaches_the_engine_spec_stateframe_final_cache_layout",
+      "nodeid": "tests/test_documented_switches.py::test_shell_setting_reaches_the_engine_spec[STATEFRAME_FINAL_CACHE_LAYOUT]",
+      "item_nodeids": [
+        "tests/test_documented_switches.py::test_shell_setting_reaches_the_engine_spec[STATEFRAME_FINAL_CACHE_LAYOUT]"
+      ],
+      "jobs": {
+        "linux": "RUN",
+        "darwin": "RUN"
+      },
+      "prerequisites": [],
+      "optional_prerequisites": [],
+      "baseline": null,
+      "witness_schema": "assertion_match",
+      "witness_assertion": "assert runner.resolve_opt_in_switches()[name] == value"
+    },
+    {
+      "scenario_id": "test_documented_switches_test_shell_setting_reaches_the_engine_spec_stateframe_fl_checkpoint_capture",
+      "nodeid": "tests/test_documented_switches.py::test_shell_setting_reaches_the_engine_spec[STATEFRAME_FL_CHECKPOINT_CAPTURE]",
+      "item_nodeids": [
+        "tests/test_documented_switches.py::test_shell_setting_reaches_the_engine_spec[STATEFRAME_FL_CHECKPOINT_CAPTURE]"
+      ],
+      "jobs": {
+        "linux": "RUN",
+        "darwin": "RUN"
+      },
+      "prerequisites": [],
+      "optional_prerequisites": [],
+      "baseline": null,
+      "witness_schema": "assertion_match",
+      "witness_assertion": "assert runner.resolve_opt_in_switches()[name] == value"
+    },
+    {
+      "scenario_id": "test_documented_switches_test_shell_setting_reaches_the_engine_spec_stateframe_git_commit",
+      "nodeid": "tests/test_documented_switches.py::test_shell_setting_reaches_the_engine_spec[STATEFRAME_GIT_COMMIT]",
+      "item_nodeids": [
+        "tests/test_documented_switches.py::test_shell_setting_reaches_the_engine_spec[STATEFRAME_GIT_COMMIT]"
+      ],
+      "jobs": {
+        "linux": "RUN",
+        "darwin": "RUN"
+      },
+      "prerequisites": [],
+      "optional_prerequisites": [],
+      "baseline": null,
+      "witness_schema": "assertion_match",
+      "witness_assertion": "assert runner.resolve_opt_in_switches()[name] == value"
+    },
+    {
+      "scenario_id": "test_documented_switches_test_shell_setting_reaches_the_engine_spec_stateframe_micrograph",
+      "nodeid": "tests/test_documented_switches.py::test_shell_setting_reaches_the_engine_spec[STATEFRAME_MICROGRAPH]",
+      "item_nodeids": [
+        "tests/test_documented_switches.py::test_shell_setting_reaches_the_engine_spec[STATEFRAME_MICROGRAPH]"
+      ],
+      "jobs": {
+        "linux": "RUN",
+        "darwin": "RUN"
+      },
+      "prerequisites": [],
+      "optional_prerequisites": [],
+      "baseline": null,
+      "witness_schema": "assertion_match",
+      "witness_assertion": "assert runner.resolve_opt_in_switches()[name] == value"
+    },
+    {
+      "scenario_id": "test_documented_switches_test_shell_setting_reaches_the_engine_spec_stateframe_queue_wait_max_s",
+      "nodeid": "tests/test_documented_switches.py::test_shell_setting_reaches_the_engine_spec[STATEFRAME_QUEUE_WAIT_MAX_S]",
+      "item_nodeids": [
+        "tests/test_documented_switches.py::test_shell_setting_reaches_the_engine_spec[STATEFRAME_QUEUE_WAIT_MAX_S]"
+      ],
+      "jobs": {
+        "linux": "RUN",
+        "darwin": "RUN"
+      },
+      "prerequisites": [],
+      "optional_prerequisites": [],
+      "baseline": null,
+      "witness_schema": "assertion_match",
+      "witness_assertion": "assert runner.resolve_opt_in_switches()[name] == value"
+    },
+    {
+      "scenario_id": "test_documented_switches_test_shell_setting_reaches_the_engine_spec_stateframe_requirement_recheck",
+      "nodeid": "tests/test_documented_switches.py::test_shell_setting_reaches_the_engine_spec[STATEFRAME_REQUIREMENT_RECHECK]",
+      "item_nodeids": [
+        "tests/test_documented_switches.py::test_shell_setting_reaches_the_engine_spec[STATEFRAME_REQUIREMENT_RECHECK]"
+      ],
+      "jobs": {
+        "linux": "RUN",
+        "darwin": "RUN"
+      },
+      "prerequisites": [],
+      "optional_prerequisites": [],
+      "baseline": null,
+      "witness_schema": "assertion_match",
+      "witness_assertion": "assert runner.resolve_opt_in_switches()[name] == value"
+    },
+    {
+      "scenario_id": "test_documented_switches_test_shell_setting_reaches_the_engine_spec_stateframe_send_stall_s",
+      "nodeid": "tests/test_documented_switches.py::test_shell_setting_reaches_the_engine_spec[STATEFRAME_SEND_STALL_S]",
+      "item_nodeids": [
+        "tests/test_documented_switches.py::test_shell_setting_reaches_the_engine_spec[STATEFRAME_SEND_STALL_S]"
+      ],
+      "jobs": {
+        "linux": "RUN",
+        "darwin": "RUN"
+      },
+      "prerequisites": [],
+      "optional_prerequisites": [],
+      "baseline": null,
+      "witness_schema": "assertion_match",
+      "witness_assertion": "assert runner.resolve_opt_in_switches()[name] == value"
+    },
+    {
+      "scenario_id": "test_documented_switches_test_shell_setting_reaches_the_engine_spec_stateframe_shell_state",
+      "nodeid": "tests/test_documented_switches.py::test_shell_setting_reaches_the_engine_spec[STATEFRAME_SHELL_STATE]",
+      "item_nodeids": [
+        "tests/test_documented_switches.py::test_shell_setting_reaches_the_engine_spec[STATEFRAME_SHELL_STATE]"
+      ],
+      "jobs": {
+        "linux": "RUN",
+        "darwin": "RUN"
+      },
+      "prerequisites": [],
+      "optional_prerequisites": [],
+      "baseline": null,
+      "witness_schema": "assertion_match",
+      "witness_assertion": "assert runner.resolve_opt_in_switches()[name] == value"
+    },
+    {
+      "scenario_id": "test_documented_switches_test_shell_setting_reaches_the_engine_spec_stateframe_stable_tool_head",
+      "nodeid": "tests/test_documented_switches.py::test_shell_setting_reaches_the_engine_spec[STATEFRAME_STABLE_TOOL_HEAD]",
+      "item_nodeids": [
+        "tests/test_documented_switches.py::test_shell_setting_reaches_the_engine_spec[STATEFRAME_STABLE_TOOL_HEAD]"
+      ],
+      "jobs": {
+        "linux": "RUN",
+        "darwin": "RUN"
+      },
+      "prerequisites": [],
+      "optional_prerequisites": [],
+      "baseline": null,
+      "witness_schema": "assertion_match",
+      "witness_assertion": "assert runner.resolve_opt_in_switches()[name] == value"
+    },
+    {
+      "scenario_id": "test_exec_capability_test_sandbox_binary_resolves_without_path",
+      "nodeid": "tests/test_exec_capability.py::test_sandbox_binary_resolves_without_path",
+      "item_nodeids": [
+        "tests/test_exec_capability.py::test_sandbox_binary_resolves_without_path"
+      ],
+      "jobs": {
+        "linux": "RUN",
+        "darwin": "RUN"
+      },
+      "prerequisites": [
+        "host_sandbox"
+      ],
+      "optional_prerequisites": [],
+      "baseline": null,
+      "witness_schema": "assertion_match",
+      "witness_assertion": "assert resolved == expected or os.path.realpath(resolved) == os.path.realpath(expected)"
+    },
+    {
+      "scenario_id": "test_exec_launch_test_macos_launcher_requires_memory_supervision",
+      "nodeid": "tests/test_exec_launch.py::test_macos_launcher_requires_memory_supervision",
+      "item_nodeids": [
+        "tests/test_exec_launch.py::test_macos_launcher_requires_memory_supervision"
+      ],
+      "jobs": {
+        "linux": {
+          "disposition": "NA_PLATFORM",
+          "platform": "darwin",
+          "reason": "macOS only"
+        },
+        "darwin": "RUN"
+      },
+      "prerequisites": [],
+      "optional_prerequisites": [],
+      "baseline": null,
+      "witness_schema": "assertion_match",
+      "witness_assertion": "assert result.returncode == 125"
+    },
+    {
+      "scenario_id": "test_hook_wiring_parity_test_no_hooks_raw_requests_and_journal_match_release",
+      "nodeid": "tests/test_hook_wiring_parity.py::test_no_hooks_raw_requests_and_journal_match_release",
+      "item_nodeids": [
+        "tests/test_hook_wiring_parity.py::test_no_hooks_raw_requests_and_journal_match_release"
+      ],
+      "jobs": {
+        "linux": "RUN",
+        "darwin": "RUN"
+      },
+      "prerequisites": [
+        "parity_baseline"
+      ],
+      "optional_prerequisites": [],
+      "baseline": "immediate",
+      "witness_schema": "parity_trace",
+      "witness_assertion": null
+    },
+    {
+      "scenario_id": "test_hook_wiring_parity_test_no_hooks_regular_stateframe_file_matches_release",
+      "nodeid": "tests/test_hook_wiring_parity.py::test_no_hooks_regular_stateframe_file_matches_release",
+      "item_nodeids": [
+        "tests/test_hook_wiring_parity.py::test_no_hooks_regular_stateframe_file_matches_release"
+      ],
+      "jobs": {
+        "linux": "RUN",
+        "darwin": "RUN"
+      },
+      "prerequisites": [
+        "parity_baseline"
+      ],
+      "optional_prerequisites": [],
+      "baseline": "immediate",
+      "witness_schema": "parity_trace",
+      "witness_assertion": null
+    },
+    {
+      "scenario_id": "test_hook_wiring_parity_test_no_hooks_resume_rebuilt_requests_match_release",
+      "nodeid": "tests/test_hook_wiring_parity.py::test_no_hooks_resume_rebuilt_requests_match_release",
+      "item_nodeids": [
+        "tests/test_hook_wiring_parity.py::test_no_hooks_resume_rebuilt_requests_match_release"
+      ],
+      "jobs": {
+        "linux": "RUN",
+        "darwin": "RUN"
+      },
+      "prerequisites": [
+        "parity_baseline"
+      ],
+      "optional_prerequisites": [],
+      "baseline": "immediate",
+      "witness_schema": "parity_trace",
+      "witness_assertion": null
+    },
+    {
+      "scenario_id": "test_http_gzip_test_default_profile_cli_run_sends_large_request_without_gzip",
+      "nodeid": "tests/test_http_gzip.py::test_default_profile_cli_run_sends_large_request_without_gzip",
+      "item_nodeids": [
+        "tests/test_http_gzip.py::test_default_profile_cli_run_sends_large_request_without_gzip"
+      ],
+      "jobs": {
+        "linux": "RUN",
+        "darwin": "RUN"
+      },
+      "prerequisites": [
+        "host_sandbox"
+      ],
+      "optional_prerequisites": [],
+      "baseline": null,
+      "witness_schema": "assertion_match",
+      "witness_assertion": "assert all(encoding is None for encoding, _ in seen)"
+    },
+    {
+      "scenario_id": "test_no_mcp_release_comparison_test_no_mcp_requests_match_release_0_2_3",
+      "nodeid": "tests/test_no_mcp_release_comparison.py::test_no_mcp_requests_match_release_0_2_3",
+      "item_nodeids": [
+        "tests/test_no_mcp_release_comparison.py::test_no_mcp_requests_match_release_0_2_3"
+      ],
+      "jobs": {
+        "linux": "RUN",
+        "darwin": "RUN"
+      },
+      "prerequisites": [
+        "parity_baseline"
+      ],
+      "optional_prerequisites": [],
+      "baseline": "release_0_2_3",
+      "witness_schema": "parity_trace",
+      "witness_assertion": null
+    },
+    {
+      "scenario_id": "test_powerups_digest_test_unreadable_entry_fails_closed",
+      "nodeid": "tests/test_powerups_digest.py::test_unreadable_entry_fails_closed",
+      "item_nodeids": [
+        "tests/test_powerups_digest.py::test_unreadable_entry_fails_closed"
+      ],
+      "jobs": {
+        "linux": "RUN",
+        "darwin": "RUN"
+      },
+      "prerequisites": [
+        "filesystem_modes"
+      ],
+      "optional_prerequisites": [
+        "filesystem_modes"
+      ],
+      "baseline": null,
+      "witness_schema": "assertion_match",
+      "witness_assertion": "assert \"unreadable\" in str(error.value)"
+    },
+    {
+      "scenario_id": "test_protected_collection_e2e_test_model_create_collection_file_is_refused_tests_init",
+      "nodeid": "tests/test_protected_collection_e2e.py::test_model_create_collection_file_is_refused[tests_init]",
+      "item_nodeids": [
+        "tests/test_protected_collection_e2e.py::test_model_create_collection_file_is_refused[tests_init]"
+      ],
+      "jobs": {
+        "linux": "RUN",
+        "darwin": "RUN"
+      },
+      "prerequisites": [
+        "host_sandbox"
+      ],
+      "optional_prerequisites": [],
+      "baseline": null,
+      "witness_schema": "assertion_match",
+      "witness_assertion": "assert \"REFUSED PROTECTED_TEST\" in requests"
+    },
+    {
+      "scenario_id": "test_protected_collection_e2e_test_model_create_collection_file_is_refused_tests_conftest",
+      "nodeid": "tests/test_protected_collection_e2e.py::test_model_create_collection_file_is_refused[tests_conftest]",
+      "item_nodeids": [
+        "tests/test_protected_collection_e2e.py::test_model_create_collection_file_is_refused[tests_conftest]"
+      ],
+      "jobs": {
+        "linux": "RUN",
+        "darwin": "RUN"
+      },
+      "prerequisites": [
+        "host_sandbox"
+      ],
+      "optional_prerequisites": [],
+      "baseline": null,
+      "witness_schema": "assertion_match",
+      "witness_assertion": "assert \"REFUSED PROTECTED_TEST\" in requests"
+    },
+    {
+      "scenario_id": "test_protected_collection_e2e_test_model_create_collection_file_is_refused_root_conftest",
+      "nodeid": "tests/test_protected_collection_e2e.py::test_model_create_collection_file_is_refused[root_conftest]",
+      "item_nodeids": [
+        "tests/test_protected_collection_e2e.py::test_model_create_collection_file_is_refused[root_conftest]"
+      ],
+      "jobs": {
+        "linux": "RUN",
+        "darwin": "RUN"
+      },
+      "prerequisites": [
+        "host_sandbox"
+      ],
+      "optional_prerequisites": [],
+      "baseline": null,
+      "witness_schema": "assertion_match",
+      "witness_assertion": "assert \"REFUSED PROTECTED_TEST\" in requests"
+    },
+    {
+      "scenario_id": "test_protected_collection_e2e_test_product_create_allowed_under_protection",
+      "nodeid": "tests/test_protected_collection_e2e.py::test_product_create_allowed_under_protection",
+      "item_nodeids": [
+        "tests/test_protected_collection_e2e.py::test_product_create_allowed_under_protection"
+      ],
+      "jobs": {
+        "linux": "RUN",
+        "darwin": "RUN"
+      },
+      "prerequisites": [
+        "host_sandbox"
+      ],
+      "optional_prerequisites": [],
+      "baseline": null,
+      "witness_schema": "assertion_match",
+      "witness_assertion": "assert (run / \"workspace/pkg/new_module.py\").read_text() == \"VALUE = 2 \""
+    },
+    {
+      "scenario_id": "test_protected_collection_e2e_test_off_keeps_collection_create_allowed",
+      "nodeid": "tests/test_protected_collection_e2e.py::test_off_keeps_collection_create_allowed",
+      "item_nodeids": [
+        "tests/test_protected_collection_e2e.py::test_off_keeps_collection_create_allowed"
+      ],
+      "jobs": {
+        "linux": "RUN",
+        "darwin": "RUN"
+      },
+      "prerequisites": [
+        "host_sandbox"
+      ],
+      "optional_prerequisites": [],
+      "baseline": null,
+      "witness_schema": "assertion_match",
+      "witness_assertion": "assert \"REFUSED PROTECTED_TEST\" not in requests"
+    },
+    {
+      "scenario_id": "test_protected_collection_e2e_test_shell_collection_create_is_restored_and_refused",
+      "nodeid": "tests/test_protected_collection_e2e.py::test_shell_collection_create_is_restored_and_refused",
+      "item_nodeids": [
+        "tests/test_protected_collection_e2e.py::test_shell_collection_create_is_restored_and_refused"
+      ],
+      "jobs": {
+        "linux": "RUN",
+        "darwin": "RUN"
+      },
+      "prerequisites": [
+        "host_sandbox"
+      ],
+      "optional_prerequisites": [],
+      "baseline": null,
+      "witness_schema": "assertion_match",
+      "witness_assertion": "assert \"restored (not allowed): tests/conftest.py\" in requests"
+    },
+    {
+      "scenario_id": "test_uv_venv_sandbox_test_isolated_command_builds_with_missing_home_and_unknown_uid",
+      "nodeid": "tests/test_uv_venv_sandbox.py::test_isolated_command_builds_with_missing_home_and_unknown_uid",
+      "item_nodeids": [
+        "tests/test_uv_venv_sandbox.py::test_isolated_command_builds_with_missing_home_and_unknown_uid"
+      ],
+      "jobs": {
+        "linux": "RUN",
+        "darwin": {
+          "disposition": "NA_PLATFORM",
+          "platform": "linux",
+          "reason": "requires Linux bwrap behavior"
+        }
+      },
+      "prerequisites": [
+        "bwrap"
+      ],
+      "optional_prerequisites": [
+        "bwrap"
+      ],
+      "baseline": null,
+      "witness_schema": "assertion_match",
+      "witness_assertion": "assert child_env[\"HOME\"] == str(tmp_path / \".test-tmp\")"
+    },
+    {
+      "scenario_id": "test_uv_venv_sandbox_test_linux_binds_the_uv_install_and_its_link_hop",
+      "nodeid": "tests/test_uv_venv_sandbox.py::test_linux_binds_the_uv_install_and_its_link_hop",
+      "item_nodeids": [
+        "tests/test_uv_venv_sandbox.py::test_linux_binds_the_uv_install_and_its_link_hop"
+      ],
+      "jobs": {
+        "linux": "RUN",
+        "darwin": {
+          "disposition": "NA_PLATFORM",
+          "platform": "linux",
+          "reason": "requires Linux bwrap behavior"
+        }
+      },
+      "prerequisites": [
+        "bwrap"
+      ],
+      "optional_prerequisites": [
+        "bwrap"
+      ],
+      "baseline": null,
+      "witness_schema": "assertion_match",
+      "witness_assertion": "assert [\"--ro-bind\", str(real), str(link_dir)] in binds"
+    },
+    {
+      "scenario_id": "test_uv_venv_sandbox_test_linux_check_command_with_home_removed_under_unknown_uid",
+      "nodeid": "tests/test_uv_venv_sandbox.py::test_linux_check_command_with_home_removed_under_unknown_uid",
+      "item_nodeids": [
+        "tests/test_uv_venv_sandbox.py::test_linux_check_command_with_home_removed_under_unknown_uid"
+      ],
+      "jobs": {
+        "linux": "RUN",
+        "darwin": {
+          "disposition": "NA_PLATFORM",
+          "platform": "linux",
+          "reason": "requires Linux uid/passwd behavior"
+        }
+      },
+      "prerequisites": [
+        "bwrap",
+        "unknown_uid_bwrap"
+      ],
+      "optional_prerequisites": [
+        "bwrap",
+        "unknown_uid_bwrap"
+      ],
+      "baseline": null,
+      "witness_schema": "assertion_match",
+      "witness_assertion": "assert result.returncode == 0"
+    },
+    {
+      "scenario_id": "test_uv_venv_sandbox_test_live_uv_venv_runs_under_the_check_sandbox",
+      "nodeid": "tests/test_uv_venv_sandbox.py::test_live_uv_venv_runs_under_the_check_sandbox",
+      "item_nodeids": [
+        "tests/test_uv_venv_sandbox.py::test_live_uv_venv_runs_under_the_check_sandbox"
+      ],
+      "jobs": {
+        "linux": {
+          "disposition": "NA_PLATFORM",
+          "platform": "darwin",
+          "reason": "needs macOS with uv and a uv-managed Python"
+        },
+        "darwin": "RUN"
+      },
+      "prerequisites": [
+        "uv_sandbox"
+      ],
+      "optional_prerequisites": [
+        "uv_sandbox"
+      ],
+      "baseline": null,
+      "witness_schema": "assertion_match",
+      "witness_assertion": "assert (result.returncode, result.stdout.strip()) == (0, \"ok\")"
+    },
+    {
+      "scenario_id": "test_must_run_gate_test_must_run_manifest_matches_reviewed_inventory",
+      "nodeid": "tests/test_must_run_gate.py::test_must_run_manifest_matches_reviewed_inventory",
+      "item_nodeids": [
+        "tests/test_must_run_gate.py::test_must_run_manifest_matches_reviewed_inventory"
+      ],
+      "jobs": {
+        "linux": "RUN",
+        "darwin": "RUN"
+      },
+      "prerequisites": [],
+      "optional_prerequisites": [],
+      "baseline": null,
+      "witness_schema": "assertion_match",
+      "witness_assertion": "assert expected_cells and len(expected_cells) == len(actual_cells) and cell_violated == 0"
+    },
+    {
+      "scenario_id": "test_must_run_gate_test_planted_controls_reject_unqualified_runs",
+      "nodeid": "tests/test_must_run_gate.py::test_planted_controls_reject_unqualified_runs",
+      "item_nodeids": [
+        "tests/test_must_run_gate.py::test_planted_controls_reject_unqualified_runs"
+      ],
+      "jobs": {
+        "linux": "RUN",
+        "darwin": "RUN"
+      },
+      "prerequisites": [],
+      "optional_prerequisites": [],
+      "baseline": null,
+      "witness_schema": "assertion_match",
+      "witness_assertion": "assert expected_control_count == detected and expected_control_count - detected == 0"
+    },
+    {
+      "scenario_id": "test_must_run_gate_test_optional_dependency_present_absent_and_touch_controls",
+      "nodeid": "tests/test_must_run_gate.py::test_optional_dependency_present_absent_and_touch_controls",
+      "item_nodeids": [
+        "tests/test_must_run_gate.py::test_optional_dependency_present_absent_and_touch_controls"
+      ],
+      "jobs": {
+        "linux": "RUN",
+        "darwin": "RUN"
+      },
+      "prerequisites": [],
+      "optional_prerequisites": [],
+      "baseline": null,
+      "witness_schema": "assertion_match",
+      "witness_assertion": "assert expected_control_count == detected and expected_control_count - detected == 0"
+    },
+    {
+      "scenario_id": "test_must_run_gate_test_aggregator_rejects_missing_and_stale_job_evidence",
+      "nodeid": "tests/test_must_run_gate.py::test_aggregator_rejects_missing_and_stale_job_evidence",
+      "item_nodeids": [
+        "tests/test_must_run_gate.py::test_aggregator_rejects_missing_and_stale_job_evidence"
+      ],
+      "jobs": {
+        "linux": "RUN",
+        "darwin": "RUN"
+      },
+      "prerequisites": [],
+      "optional_prerequisites": [],
+      "baseline": null,
+      "witness_schema": "assertion_match",
+      "witness_assertion": "assert detected_controls == expected_control_count and expected_control_count - detected_controls == 0"
+    }
+  ],
+  "optional_dependencies": [
+    {
+      "module": "src/stateframe/engine/kernel_shell_tool.py",
+      "extra": "host-command:jq",
+      "tool": "jq",
+      "tests": [
+        "tests/acceptance/test_additional_edges.py::test_u13_data_work_with_jq"
+      ],
+      "absence_reasons": [
+        "jq is not installed"
+      ]
+    },
+    {
+      "module": "src/stateframe/outer_checks.py",
+      "extra": "host-command:node",
+      "tool": "node",
+      "tests": [
+        "tests/acceptance/test_generic_checks.py::test_node_test_runner_fixes_bug"
+      ],
+      "absence_reasons": [
+        "node is not installed"
+      ]
+    },
+    {
+      "module": "src/stateframe/outer_checks.py",
+      "extra": "host-command:npm",
+      "tool": "npm",
+      "tests": [
+        "tests/acceptance/test_generic_checks.py::test_npm_script_without_tests_reports_check_command"
+      ],
+      "absence_reasons": [
+        "npm is not installed"
+      ]
+    },
+    {
+      "module": "src/stateframe/outer_checks.py",
+      "extra": "host-command:go",
+      "tool": "go",
+      "tests": [
+        "tests/acceptance/test_generic_checks.py::test_go_test_runner_fixes_bug"
+      ],
+      "absence_reasons": [
+        "go is not installed"
+      ]
+    },
+    {
+      "module": "src/stateframe/outer_checks.py",
+      "extra": "host-command:node+npm",
+      "tool": "node,npm",
+      "tests": [
+        "tests/acceptance/test_generic_checks.py::test_no_tests_package_build_is_verified_by_build_only"
+      ],
+      "absence_reasons": [
+        "node and npm are required for package build discovery"
+      ]
+    },
+    {
+      "module": "src/stateframe/outer_checks.py",
+      "extra": "host-command:npm",
+      "tool": "npm",
+      "tests": [
+        "tests/acceptance/test_generic_checks.py::test_build_printing_test_count_keeps_build_result"
+      ],
+      "absence_reasons": [
+        "npm is required for package build discovery"
+      ]
+    },
+    {
+      "module": "src/stateframe/engine/kernel_exec_session.py",
+      "extra": "host-command:node",
+      "tool": "node",
+      "tests": [
+        "tests/acceptance/test_shell_workflows.py::test_u3_node_runner_when_installed"
+      ],
+      "absence_reasons": [
+        "node is not installed"
+      ]
+    },
+    {
+      "module": "src/stateframe/engine/kernel_bounded_http.py",
+      "extra": "host-command:openssl",
+      "tool": "openssl",
+      "tests": [
+        "tests/test_bounded_http_https.py::*"
+      ],
+      "absence_reasons": [
+        "openssl CLI is required for local HTTPS certificate tests"
+      ]
+    },
+    {
+      "module": "src/stateframe/engine/kernel_test_isolation.py",
+      "extra": "host-sandbox",
+      "tool": "platform_sandbox",
+      "tests": [
+        "tests/test_exec_capability.py::test_sandbox_binary_resolves_without_path"
+      ],
+      "absence_reasons": [
+        "not installed on this host"
+      ]
+    },
+    {
+      "module": "src/stateframe/engine/kernel_git_commit.py",
+      "extra": "host-command:git",
+      "tool": "git",
+      "tests": [
+        "tests/test_git_commit_tool.py::test_export_writes_a_series_per_branch_that_git_am_applies"
+      ],
+      "absence_reasons": [
+        "git is not installed"
+      ]
+    },
+    {
+      "module": "src/stateframe/engine/kernel_hook_exec.py",
+      "extra": "host-command:make",
+      "tool": "/usr/bin/make",
+      "tests": [
+        "tests/test_hook_exec.py::test_macos_developer_commands_run_as_hooks_in_real_sandbox[make]"
+      ],
+      "absence_reasons": [
+        "is absent"
+      ]
+    },
+    {
+      "module": "src/stateframe/engine/kernel_hook_exec.py",
+      "extra": "host-command:git",
+      "tool": "/usr/bin/git",
+      "tests": [
+        "tests/test_hook_exec.py::test_macos_developer_commands_run_as_hooks_in_real_sandbox[git]"
+      ],
+      "absence_reasons": [
+        "is absent"
+      ]
+    },
+    {
+      "module": "src/stateframe/test_runners.py",
+      "extra": "host-command:node",
+      "tool": "node",
+      "tests": [
+        "tests/test_test_verification_authority.py::TestVerificationAuthority::test_real_node_test_has_positive_receipt"
+      ],
+      "absence_reasons": [
+        "node is not installed"
+      ]
+    },
+    {
+      "module": "src/stateframe/engine/kernel_test_isolation.py",
+      "extra": "host-sandbox:bwrap",
+      "tool": "bwrap",
+      "tests": [
+        "tests/test_uv_venv_sandbox.py::test_linux_binds_the_uv_install_and_its_link_hop",
+        "tests/test_uv_venv_sandbox.py::test_isolated_command_builds_with_missing_home_and_unknown_uid",
+        "tests/test_uv_venv_sandbox.py::test_linux_check_command_with_home_removed_under_unknown_uid"
+      ],
+      "absence_reasons": [
+        "bwrap is not installed"
+      ]
+    },
+    {
+      "module": "src/stateframe/engine/kernel_test_isolation.py",
+      "extra": "host-sandbox:unknown-uid",
+      "tool": "unknown_uid_bwrap",
+      "tests": [
+        "tests/test_uv_venv_sandbox.py::test_linux_check_command_with_home_removed_under_unknown_uid"
+      ],
+      "absence_reasons": [
+        "creating an unknown uid would require root",
+        "current non-root uid has a passwd entry"
+      ]
+    },
+    {
+      "module": "src/stateframe/engine/kernel_test_isolation.py",
+      "extra": "host-sandbox:uv_sandbox",
+      "tool": "uv_sandbox",
+      "tests": [
+        "tests/test_uv_venv_sandbox.py::test_live_uv_venv_runs_under_the_check_sandbox"
+      ],
+      "absence_reasons": [
+        "needs macOS with uv and a uv-managed Python"
+      ]
+    },
+    {
+      "module": "src/stateframe/powerup_manifest.py",
+      "extra": "host-capability:filesystem-modes",
+      "tool": "filesystem_modes",
+      "tests": [
+        "tests/test_powerups_digest.py::test_unreadable_entry_fails_closed"
+      ],
+      "absence_reasons": [
+        "running with privileges that ignore directory modes"
+      ]
+    },
+    {
+      "module": "src/stateframe/engine/mc_repo_intel_vendor/",
+      "extra": "repomap",
+      "tool": "python:tree_sitter,python:tree_sitter_python,python:tree_sitter_typescript,python:tree_sitter_go",
+      "tests": [
+        "tests/test_repo_map_ast.py::test_ast_path_is_taken_for_python_typescript_and_go",
+        "tests/test_repo_map_ast.py::test_ast_repo_map_renders_parser_signatures",
+        "tests/test_repo_map_ast.py::test_ast_and_fallback_differ_only_where_expected",
+        "tests/test_repo_map_ast.py::test_each_mode_is_deterministic[ast]",
+        "tests/test_repo_map_ast.py::test_repo_map_lists_go_files",
+        "tests/test_repo_map_ast.py::test_ast_repo_map_lists_other_supported_languages",
+        "tests/test_repo_map_ast.py::test_repo_map_header_does_not_claim_tree_sitter_when_every_parse_failed",
+        "tests/test_repo_map_ast.py::test_repo_map_header_counts_one_failed_parser",
+        "tests/test_repo_map_ast.py::test_ast_repo_map_keeps_async",
+        "tests/test_repo_map_ast.py::test_mixed_map_reports_actual_fallback_count",
+        "tests/test_repo_map_ast.py::test_orientation_journals_the_modes_actually_used",
+        "tests/test_repo_map_ast.py::test_pure_python_and_js_repo_map_is_unchanged[ast]"
+      ],
+      "absence_reasons": [
+        "repo map AST needs the repomap extra (requirements-repomap.txt)"
+      ]
+    },
+    {
+      "module": "src/stateframe/ts_grammars.py",
+      "extra": "repomap",
+      "tool": "python:tree_sitter,python:tree_sitter_python,python:tree_sitter_typescript,python:tree_sitter_go",
+      "tests": [
+        "tests/test_repo_map_ast.py::test_ast_path_is_taken_for_python_typescript_and_go",
+        "tests/test_repo_map_ast.py::test_ast_repo_map_renders_parser_signatures",
+        "tests/test_repo_map_ast.py::test_ast_and_fallback_differ_only_where_expected",
+        "tests/test_repo_map_ast.py::test_each_mode_is_deterministic[ast]",
+        "tests/test_repo_map_ast.py::test_repo_map_lists_go_files",
+        "tests/test_repo_map_ast.py::test_ast_repo_map_lists_other_supported_languages",
+        "tests/test_repo_map_ast.py::test_repo_map_header_does_not_claim_tree_sitter_when_every_parse_failed",
+        "tests/test_repo_map_ast.py::test_repo_map_header_counts_one_failed_parser",
+        "tests/test_repo_map_ast.py::test_ast_repo_map_keeps_async",
+        "tests/test_repo_map_ast.py::test_mixed_map_reports_actual_fallback_count",
+        "tests/test_repo_map_ast.py::test_orientation_journals_the_modes_actually_used",
+        "tests/test_repo_map_ast.py::test_pure_python_and_js_repo_map_is_unchanged[ast]"
+      ],
+      "absence_reasons": [
+        "repo map AST needs the repomap extra (requirements-repomap.txt)"
+      ]
+    }
+  ]
+}
