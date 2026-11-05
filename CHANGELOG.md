@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.4.2 (2026-11-04)
 
 - Tests: the strict-endpoint end-to-end test and the plain-loop dialect test read measurement journals through the shared reader, so they also see sealed `events.jsonl.xz` journals; the journal-reader guard passes on main again. Test-only; no product change.
 
