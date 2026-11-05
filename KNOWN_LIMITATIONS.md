@@ -1,5 +1,11 @@
 # Known limitations
 
+## Line endings in files the model did not edit (fix in progress)
+
+When a run edits files in place, text files in the edit scope that the model did not change can still be rewritten: Windows (CRLF) line endings, old Mac (CR-only) line endings, mixed line endings and a leading byte-order mark can come back changed. The same changes appear in exported patches, so applying a patch with `git am` carries them too. Files with plain LF line endings and no byte-order mark are not affected.
+
+Until the fix ships: after a run, review `git diff` (or the exported patch) before committing, and restore any file you did not expect to change with `git checkout -- <file>`. Runs that do not edit in place leave your repository untouched, but their patches have the same issue.
+
 ## Linux checks that run Go or Node
 
 Linux: checks that run Go or Node programs fail under StateFrame's check memory limit. The limit caps virtual address space (`RLIMIT_AS`), and those runtimes reserve far more address space than they use, so they exit at startup. macOS ignores that limit and is not affected. This has been true since at least 0.3.30 and is fixed in the next release.
