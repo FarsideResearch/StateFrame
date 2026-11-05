@@ -31,7 +31,6 @@ _CLEAN_METER_COUNTDOWN = re.compile(
     rb"(?:, ~(?:\d+|999\+|----) turns at your pace)?\)"
 )
 _CLEAN_METER_COUNTDOWN_MASK = b"sandbox_seconds_remaining=<masked>"
-CLEAN_METER_COUNTDOWN_COPIES_012E0B5 = (2, 2, 2, 1, 1, 2)
 
 # Compact request specimen with the current StateFrame field and a near-match decoy.
 _COUNTDOWN_MASK_CONTROL_BODY = (
@@ -640,13 +639,29 @@ def test_healthy_measurement_preserves_baseline_request_bytes(tmp_path, baseline
         request_limit=2,
         source_root=baseline_tree / "src",
     )
-    baseline_masked_hashes, _ = _clean_meter_fingerprints(baseline_bodies)
+    baseline_masked_hashes, baseline_copy_counts = _clean_meter_fingerprints(baseline_bodies)
 
     request_bodies = _capture_clean_meter_request_bodies(tmp_path)
     computed_masked_hashes, countdown_copy_counts = _clean_meter_fingerprints(request_bodies)
-    assert countdown_copy_counts == CLEAN_METER_COUNTDOWN_COPIES_012E0B5, (
-        f"whole-request countdown-copy counts for requests 1-6: {countdown_copy_counts!r}"
+    # REQUESTS 3-6 ARE NOT COMPARED HERE ON PURPOSE. Whole-request countdown copies depend on
+    # that turn's frame layout, and requests 3+ sit in the callsite-census timing region (see
+    # below), which varies by host: the release image gives (2, 2, 2, 1, 1, 2) and a host
+    # Python 3.14 venv gave (2, 2, 2, 2, 2, 2) for the same code. So only requests 1-2 are
+    # compared, against the base release in this environment. Every request, 1-6, still has
+    # exactly one active-frame countdown (checked in _clean_meter_fingerprints).
+    assert countdown_copy_counts[:2] == baseline_copy_counts[:2], (
+        f"whole-request countdown-copy counts for requests 1-2: current={countdown_copy_counts!r}; "
+        f"baseline={baseline_copy_counts!r}"
     )
+    # Planted control: one extra standalone limits line in request 0001 must change its count.
+    extra_line = re.search(
+        rb"\[CONTINUATION LIMITS \| stateframe-continuation-limits/1\][^\\\n]*", request_bodies[0])
+    assert extra_line is not None
+    planted_body = request_bodies[0].replace(
+        b'"messages": [', b'"messages": [{"role": "user", "content": "' + extra_line[0] + b'"}, ', 1)
+    planted_count = len(_CLEAN_METER_COUNTDOWN.findall(planted_body))
+    assert planted_count == countdown_copy_counts[0] + 1
+    assert (planted_count, *countdown_copy_counts[1:2]) != baseline_copy_counts[:2]
 
     # Prove the whole-body normalizer still notices a byte outside IDs and countdowns.
     changed_body = bytearray(request_bodies[0])
