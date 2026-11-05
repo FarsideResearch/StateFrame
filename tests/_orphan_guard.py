@@ -102,6 +102,7 @@ class _Scope:
     guard: OrphanGuard
     name: str
     ended: bool = False
+    end_observed: bool = False
     launches: list[_Launch] = field(default_factory=list)
     adopted: list[_Adopted] = field(default_factory=list)
 
@@ -129,6 +130,7 @@ class _Scope:
 
     def end(self) -> None:
         self.ended = True
+        self.end_observed = True
 
     def register_adopted(
         self,
@@ -486,7 +488,10 @@ class OrphanGuard:
     def _end_open_scopes(self) -> None:
         """Close any scopes still active once pytest has finished fixture finalizers."""
         for scope in self._scopes:
-            scope.end()
+            if not scope.ended:
+                # Teardown closes the bookkeeping window, but is not evidence
+                # that the owner explicitly ended the scope.
+                scope.ended = True
 
     def check(self) -> Report:
         if self._closed:
@@ -500,7 +505,8 @@ class OrphanGuard:
                         lambda scope=scope, launch=launch: self._check_launch(
                             scope, launch, deadline))
             for adopted in scope.adopted:
-                if scope.ended and not adopted.checked:
+                if (not adopted.checked
+                        and (scope.ended or _adopted_owner_exited(scope, adopted))):
                     self._check_unit(
                         scope, adopted,
                         lambda scope=scope, adopted=adopted: self._check_adopted(
@@ -580,17 +586,27 @@ class OrphanGuard:
 
     def _cleanup_live(self, pid: int, handle: BoundHandle, identity: object,
                       deadline: float, leak_detail: str) -> None:
-        self._outcomes.append(Outcome("leak", pid, leak_detail))
         if not self._has_time(deadline):
             self._unverified(pid, "check deadline expired before SIGTERM")
             return
+        leak: Outcome | None = None
         try:
             if not _same_bound_identity(handle, identity):
                 self._unverified(pid, "bound identity changed before SIGTERM; process left untouched")
                 return
+            leak = Outcome("leak", pid, leak_detail)
+            # Preserve the observed-live event before signaling can change
+            # liveness. If a bound-signal error leaves the candidate live or
+            # its identity unverifiable, only cleanup-unverified is reportable.
+            self._outcomes.append(leak)
             handle.send_signal(signal.SIGTERM)
         except Exception as error:
-            self._signal_error(pid, handle, identity, "SIGTERM", error)
+            probe = _probe(handle, identity)
+            _, alive, detail = probe
+            if detail or alive:
+                if leak is not None and self._outcomes and self._outcomes[-1] is leak:
+                    self._outcomes.pop()
+            self._signal_error(pid, handle, identity, "SIGTERM", error, probe=probe)
             return
         if self._wait_confirmed_exit(pid, handle, identity, _TERM_GRACE_SECONDS, deadline):
             return
@@ -639,8 +655,9 @@ class OrphanGuard:
         return False
 
     def _signal_error(self, pid: int, handle: BoundHandle, identity: object,
-                      phase: str, error: Exception) -> None:
-        current, alive, detail = _probe(handle, identity)
+                      phase: str, error: Exception,
+                      *, probe: tuple[bool, bool, str] | None = None) -> None:
+        current, alive, detail = probe if probe is not None else _probe(handle, identity)
         if detail:
             self._unverified(pid, f"{phase} failed: {_error_text(error)}; liveness unknown: {detail}")
             return
@@ -754,7 +771,7 @@ def _missing_adoption_facts(scope: _Scope, adopted: _Adopted) -> list[str]:
     missing = []
     if not adopted.attributed:
         missing.append("attribution to a registered scope is missing")
-    if not scope.ended:
+    if not scope.end_observed:
         missing.append("owning scope end is not observed")
     transition = adopted.parent_transition
     if (not isinstance(transition, tuple) or len(transition) != 2
@@ -766,6 +783,18 @@ def _missing_adoption_facts(scope: _Scope, adopted: _Adopted) -> list[str]:
     if not adopted.tmp_path_use:
         missing.append("cwd/open-file use beneath tmp_path is not observed")
     return missing
+
+
+def _adopted_owner_exited(scope: _Scope, adopted: _Adopted) -> bool:
+    """Treat an exited registered adoption owner as a final scope check."""
+    transition = adopted.parent_transition
+    if (not isinstance(transition, tuple) or len(transition) != 2
+            or any(type(pid) is not int or pid <= 0 for pid in transition)
+            or transition[0] == transition[1]):
+        return False
+    owner_pid = transition[1]
+    return any(launch.pid == owner_pid and launch.process.poll() is not None
+               for launch in scope.launches)
 
 
 def _timeout_milliseconds(timeout: float) -> int:

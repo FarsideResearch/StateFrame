@@ -113,9 +113,11 @@ def test_live_registered_launch_remains_a_leak_when_bound_signal_fails(tmp_path)
     script = tmp_path / "registered_helper.py"
     script.write_text("import time\ntime.sleep(30)\n", encoding="utf-8")
     handles = []
+    signal_observations = []
 
     class _SignalFailureHandle(_LiveHandle):
         def send_signal(self, signum: int) -> None:
+            signal_observations.append(tuple(outcome.kind for outcome in guard._outcomes))
             self.signals.append(signum)
             raise PermissionError(errno.EPERM, "signal denied")
 
@@ -133,12 +135,12 @@ def test_live_registered_launch_remains_a_leak_when_bound_signal_fails(tmp_path)
     try:
         report = guard.check()
 
-        assert [outcome.kind for outcome in report.outcomes] == [
-            "leak", "cleanup unverified"]
+        assert [outcome.kind for outcome in report.outcomes] == ["cleanup unverified"]
         assert report.outcomes[0].pid == launch.pid
-        assert "signal denied" in report.outcomes[1].detail
+        assert "signal denied" in report.outcomes[0].detail
         assert report.unit_outcomes[0].kind == "cleanup unverified"
         assert handles[0].signals == [signal.SIGTERM]
+        assert signal_observations == [("leak",)]
     finally:
         _stop_helper(launch.process)
         guard.close()
@@ -210,6 +212,56 @@ def test_open_scope_adopted_candidate_remains_pending_until_scope_ends(tmp_path)
             "leak", "confirmed exit"]
         assert adopted.checked
         assert handle.signals == [signal.SIGTERM]
+    finally:
+        guard.close()
+
+
+def test_teardown_reports_missing_scope_end_for_open_adopted_candidate(tmp_path):
+    guard = orphan_guard.OrphanGuard(tmp_path)
+    scope = guard.scope("teardown-missing-scope-end")
+    handle = _LiveHandle(7349)
+    scope.register_adopted(
+        7349, bound_handle=handle, attributed=True,
+        parent_transition=(123, 456), parent_exit_confirmed=True,
+        tmp_path_use=True)
+    item = SimpleNamespace(stash={orphan_guard._GUARD_KEY: guard})
+
+    failures = orphan_guard._finish_guard(item)
+
+    assert len(failures) == 1
+    assert "cleanup unverified" in failures[0]
+    assert "owning scope end is not observed" in failures[0]
+    assert handle.signals == []
+    assert item.stash == {}
+
+
+def test_exited_registered_adoption_owner_makes_open_scope_check_final(tmp_path):
+    handles: list[_LiveHandle] = []
+
+    def handle_factory(process: subprocess.Popen[bytes], *, platform: str) -> _LiveHandle:
+        handle = _LiveHandle(process.pid)
+        handles.append(handle)
+        return handle
+
+    guard = orphan_guard.OrphanGuard(tmp_path, handle_factory=handle_factory)
+    scope = guard.scope("exited-adoption-owner")
+    owner = scope.launch(
+        [sys.executable, "-c", "pass"], cwd=tmp_path,
+        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    owner.process.wait(timeout=5.0)
+    handle = _LiveHandle(7350)
+    adopted = scope.register_adopted(
+        7350, bound_handle=handle, attributed=True,
+        parent_transition=(123, owner.pid), parent_exit_confirmed=True,
+        tmp_path_use=True)
+    try:
+        report = guard.check()
+
+        assert [outcome.kind for outcome in report.outcomes] == ["cleanup unverified"]
+        assert "owning scope end is not observed" in report.outcomes[0].detail
+        assert adopted.checked
+        assert handle.alive
+        assert handle.signals == []
     finally:
         guard.close()
 
