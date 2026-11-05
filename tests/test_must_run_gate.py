@@ -731,7 +731,7 @@ def test_planted_controls_reject_unqualified_runs(tmp_path):
          "platform-not-applicable test call did not skip"),
         ("passing", _QUALIFYING_REQUIRED_SOURCE, {}, 0, "qualified=1"),
         ("ordinary_skip", "import pytest\ndef test_required():\n    pytest.skip('ordinary')\n",
-         {"mode": "0"}, 0, "mode=off"),
+         {"mode": "0"}, 0, "1 skipped"),
     )
     detected = 0
     for name, source, options, expected_status, evidence in controls:

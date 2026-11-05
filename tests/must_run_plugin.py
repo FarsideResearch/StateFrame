@@ -857,13 +857,17 @@ def pytest_configure(config: pytest.Config) -> None:
     global _ACTIVE_STATE
     root = Path(str(config.rootpath)).resolve()
     try:
-        manifest, digest = _read_manifest(root)
-    except GateInputError as error:
-        raise pytest.UsageError(str(error)) from error
-    try:
         must_run = _must_run_enabled()
     except pytest.UsageError:
         raise
+    if must_run:
+        try:
+            manifest, digest = _read_manifest(root)
+        except GateInputError as error:
+            raise pytest.UsageError(str(error)) from error
+    else:
+        manifest = GateManifest({}, {}, (), ())
+        digest = ""
     state = _setup_state(config, root, manifest, digest, must_run)
     config.stash[_STATE_KEY] = state
     _ACTIVE_STATE = state
@@ -1533,14 +1537,7 @@ def _session_evidence(session: pytest.Session, state: GateState) -> None:
 @pytest.hookimpl(trylast=True)
 def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
     state = session.config.stash[_STATE_KEY]
-    if state.is_worker:
-        return
-    if not state.must_run:
-        state.summary = (
-            "GUARD must_run: expected=0 applicable=0 scanned=0 violated=0 not_applicable=0 required=0 "
-            "collected=0 qualified=0 platform_na=0 optional_na=0 optional_skipped=0 "
-            "optional_touched_violations=0 mode=off"
-        )
+    if state.is_worker or not state.must_run:
         return
     _session_evidence(session, state)
     state.summary = _run_summary(state)
@@ -1561,11 +1558,9 @@ def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
 def pytest_terminal_summary(terminalreporter, exitstatus: int, config: pytest.Config) -> None:
     del exitstatus
     state = config.stash[_STATE_KEY]
-    if state.is_worker:
+    if state.is_worker or not state.must_run:
         return
     terminalreporter.write_line(state.summary)
-    if not state.must_run:
-        return
     for key, reasons in sorted(state.violations.items()):
         terminalreporter.write_line(f"GUARD must_run violation: {key}: {'; '.join(reasons)}")
     for cell in state.cell_evidence:
