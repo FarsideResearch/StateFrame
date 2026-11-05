@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Tests: an orphan guard fails a test that leaves a registered process alive after its scope ends, or that leaves cleanup unverifiable; it signals only through a retained pidfd or macOS audit token.
+
 ## 0.4.26 (2026-11-05)
 
 - Fixed: if another process changed a run's journal while it was being replayed, StateFrame could act on rows read after the change: a subscriber could receive them, a partly rebuilt call-coverage index could become visible, and a meter or external-effect replay could report a row error instead of the lost journal. Replay now validates the journal before delivering rows, checks that it still owns the journal before each delivery, and publishes a rebuilt coverage index only after the whole scan passes; a lost journal is reported as such. Observer errors are still recorded and replay continues, as before.
