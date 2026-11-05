@@ -696,7 +696,22 @@ class _RoutedRedirects(urllib.request.HTTPRedirectHandler):
 
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         _require_routed_local(newurl, self.allow_remote)
-        return super().redirect_request(req, fp, code, msg, headers, newurl)
+        redirected = super().redirect_request(req, fp, code, msg, headers, newurl)
+        if redirected is None:
+            return None
+        from kernel_redirect_policy import (
+            REDIRECT_CREDENTIAL_ORIGIN_ATTRIBUTE,
+            REDIRECT_SECRET_HEADERS,
+            scope_redirect_credentials,
+        )
+
+        credential_origin = getattr(req, REDIRECT_CREDENTIAL_ORIGIN_ATTRIBUTE, req.full_url)
+        scope_redirect_credentials(
+            redirected,
+            credential_origin=credential_origin,
+            secret_headers=REDIRECT_SECRET_HEADERS,
+        )
+        return redirected
 
 
 def request_bytes(wire: bytes, endpoint: str, key: str, *,
@@ -873,13 +888,15 @@ class _AbortiveConnectionMixin:
         self._active_socket: socket.socket | None = None
         self._sending_output = False
         self._header_sent = False
+        self._tracking_request = False
+        self._tracking_body = False
         super().__init__(*args, **kwargs)
         tracker.register(self)
 
     def connect(self) -> None:
         if self._tracker.aborted:
             raise ConnectionError("HTTP request was aborted")
-        if self._tracker.report_body_sent:
+        if self._tracking_request:
             remaining = self._tracker.request_deadline - time.monotonic()
             if remaining <= 0:
                 raise RequestBodyDeadlineTimeout()
@@ -887,11 +904,11 @@ class _AbortiveConnectionMixin:
         try:
             super().connect()
         except TimeoutError as error:
-            if (self._tracker.report_body_sent
+            if (self._tracking_request
                     and time.monotonic() >= self._tracker.request_deadline):
                 raise RequestBodyDeadlineTimeout() from error
             raise
-        if (self._tracker.report_body_sent
+        if (self._tracking_request
                 and time.monotonic() >= self._tracker.request_deadline):
             raise RequestBodyDeadlineTimeout()
         active_socket = self.sock
@@ -908,24 +925,31 @@ class _AbortiveConnectionMixin:
             raise ConnectionError("HTTP request was aborted")
 
     def _send_output(self, message_body=None, encode_chunked=False):
-        if self._tracker.report_body_sent:
-            if time.monotonic() >= self._tracker.request_deadline:
-                raise RequestBodyDeadlineTimeout()
+        # The request deadline covers every redirect hop; body markers apply only to uploads.
+        track_request = self._tracker.report_body_sent
+        track_body = track_request and message_body is not None
+        if track_request and time.monotonic() >= self._tracker.request_deadline:
+            raise RequestBodyDeadlineTimeout()
+        if track_body:
             self._tracker.body_attempt += 1
             attempt = self._tracker.body_attempt
             self._body_sent_at = None
             sys.stderr.write(json.dumps({"body_attempt": attempt,
                                          "body_fully_sent": False}) + "\n")
             sys.stderr.flush()
+        self._tracking_request = track_request
+        self._tracking_body = track_body
         self._sending_output = True
         self._header_sent = False
         try:
             result = super()._send_output(message_body, encode_chunked=encode_chunked)
         finally:
             self._sending_output = False
+            self._tracking_request = False
+            self._tracking_body = False
         # Flushed before waiting for a response, so the parent can distinguish
         # provider queue time from an unfinished upload at the request deadline.
-        if self._tracker.report_body_sent:
+        if track_body:
             completed_at = self._body_sent_at
             if completed_at is None or completed_at >= self._tracker.request_deadline:
                 raise RequestBodyDeadlineTimeout()
@@ -937,19 +961,19 @@ class _AbortiveConnectionMixin:
 
     def send(self, data):
         if not self._sending_output or not self._header_sent:
-            if (self._tracker.report_body_sent and self._sending_output
+            if (self._tracking_request and self._sending_output
                     and time.monotonic() >= self._tracker.request_deadline):
                 raise RequestBodyDeadlineTimeout()
-            if self._tracker.report_body_sent and self._sending_output and self.sock is not None:
+            if self._tracking_request and self._sending_output and self.sock is not None:
                 self.sock.settimeout(max(0.001, self._tracker.request_deadline - time.monotonic()))
             try:
                 result = super().send(data)
             except TimeoutError as error:
-                if (self._tracker.report_body_sent and self._sending_output
+                if (self._tracking_request and self._sending_output
                         and time.monotonic() >= self._tracker.request_deadline):
                     raise RequestBodyDeadlineTimeout() from error
                 raise
-            if (self._tracker.report_body_sent and self._sending_output
+            if (self._tracking_request and self._sending_output
                     and time.monotonic() >= self._tracker.request_deadline):
                 raise RequestBodyDeadlineTimeout()
             if self._sending_output:
@@ -966,12 +990,12 @@ class _AbortiveConnectionMixin:
             raise ConnectionError("HTTP socket closed before request body")
         while sent < total:
             now = time.monotonic()
-            if self._tracker.report_body_sent and now >= self._tracker.request_deadline:
+            if self._tracking_body and now >= self._tracker.request_deadline:
                 raise RequestBodyDeadlineTimeout()
             stalled = now - last_progress
             remaining = min(self._tracker.send_stall_seconds - stalled,
                             self._tracker.hard_deadline - now)
-            if self._tracker.report_body_sent:
+            if self._tracking_body:
                 remaining = min(remaining, self._tracker.request_deadline - now)
             if stalled >= self._tracker.send_stall_seconds:
                 raise SendStallTimeout(sent, total, stalled)
@@ -986,7 +1010,7 @@ class _AbortiveConnectionMixin:
                 raise ConnectionError("HTTP socket closed during request body send")
             sent += moved
             last_progress = time.monotonic()
-        if self._tracker.report_body_sent:
+        if self._tracking_body:
             self._body_sent_at = last_progress
             if last_progress >= self._tracker.request_deadline:
                 raise RequestBodyDeadlineTimeout()
@@ -1275,6 +1299,10 @@ if __name__ == "__main__":
         raise SystemExit(0)
     if sys.argv[1:] != ["--http-child"]:
         raise SystemExit("HTTP child invocation required")
+    # Isolated mode omits this script's directory; routed redirects load a sibling policy module.
+    child_module_dir = str(Path(__file__).resolve().parent)
+    if child_module_dir not in sys.path:
+        sys.path.insert(0, child_module_dir)
     try:
         _child()
     except Exception as error:

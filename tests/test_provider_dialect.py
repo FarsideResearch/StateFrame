@@ -208,6 +208,7 @@ def test_probe_timeout_selects_openai_strict(monkeypatch):
     assert result.reason == "openai-strict because /props was unreachable and /slots was unproven"
 
 
+@pytest.mark.host_sandbox
 def test_scripted_endpoint_emulates_llama_props_and_optional_slots():
     import json
     import urllib.request
@@ -231,6 +232,7 @@ def test_scripted_endpoint_emulates_llama_props_and_optional_slots():
     assert slots == [{"id": 0, "n_ctx": 65536, "is_processing": False}]
 
 
+@pytest.mark.host_sandbox
 def test_recorded_tape_server_emulates_llama_props_and_slots():
     from tests.tape_server import TapeServer
 
@@ -244,6 +246,7 @@ def test_recorded_tape_server_emulates_llama_props_and_slots():
 
 
 @pytest.mark.parametrize("example", ["discount_bug", "tiny_site", "brief_to_report"])
+@pytest.mark.host_sandbox
 def test_bundled_identity_scripts_prove_llama_without_slots_or_cache_pin(example):
     from stateframe import runner
     from stateframe.endpoint import Endpoint
@@ -282,6 +285,7 @@ def test_bundled_identity_scripts_prove_llama_without_slots_or_cache_pin(example
     assert messages == ["cache: server does not expose slots; not pinned"]
 
 
+@pytest.mark.host_sandbox
 def test_strict_endpoint_refuses_native_tokenize_before_post():
     from stateframe.scripted_endpoint import Script, serve
 
@@ -300,6 +304,7 @@ def test_strict_endpoint_refuses_native_tokenize_before_post():
         server.server_close()
 
 
+@pytest.mark.host_sandbox
 def test_strict_tokenizer_uses_existing_safe_meter_fallback():
     from stateframe.scripted_endpoint import Script, serve
 
@@ -321,6 +326,7 @@ def test_strict_tokenizer_uses_existing_safe_meter_fallback():
         server.server_close()
 
 
+@pytest.mark.host_sandbox
 def test_template_conformance_refuses_strict_endpoint_before_native_post(monkeypatch):
     from stateframe.scripted_endpoint import Script, serve
 
