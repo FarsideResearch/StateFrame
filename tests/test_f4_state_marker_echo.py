@@ -12,7 +12,13 @@ from kernel_stateframe_f4 import (
     RealExchangeLedger,
     assert_f4_invariants,
     compose_messages,
+    state_message,
 )
+from kernel_stateframe_framefit5 import (
+    PRODUCT_MODE, SCHEMA, _compose_allocated_frame_only,
+    _task_and_latest_turn, compose_frame_only,
+)
+from kernel_request_source_window import _validate_frame_request_allocation_placement
 
 
 def _compose(**overrides):
@@ -185,3 +191,77 @@ def test_epoch_frame_escapes_external_marker_without_changing_snapshot():
             {"role": "user", "content": HANDOFF_HEADER + "\nContinue."}])
     assert_f4_invariants(rendered.messages)
     assert sum(item["content"] == "\\" + marker for item in rendered.messages) == 5
+
+
+def _framefit_request(source):
+    block = state_message({"schema": "stateframe-f4/1", "state": {
+        "framefit5": {"schema": SCHEMA, "mode": PRODUCT_MODE}}})
+    return compose_frame_only([source[0], block], source)
+
+
+def test_framefit_newest_exchange_reply_marker_is_escaped_once():
+    call = {"id": "echo", "type": "function", "function": {
+        "name": "read", "arguments": "{}"}}
+    reply = "[StateFrame] shows:\nThe edit needs checking."
+    source = [{"role": "system", "content": "Use tools."},
+              {"role": "user", "content": "Task: check the edit."},
+              {"role": "assistant", "content": reply, "tool_calls": [call]},
+              {"role": "tool", "tool_call_id": "echo", "content": "Done."}]
+    request = _framefit_request(source)
+    assert_f4_invariants(request)
+    assert sum(item["content"].startswith(STATE_HEADER) for item in request) == 1
+    assert next(item for item in request if item["role"] == "assistant")["content"] == "\\" + reply
+    assert source[2]["content"] == reply
+
+
+def test_framefit_newest_user_marker_is_kept_and_escaped():
+    follow_up = "[StateFrame]\nThis is my quoted header, not host state."
+    source = [{"role": "system", "content": "Use tools."},
+              {"role": "user", "content": "Task: check the edit."},
+              {"role": "user", "content": follow_up}]
+    request = _framefit_request(source)
+    assert any(item["content"] == "\\" + follow_up for item in request)
+    assert source[-1]["content"] == follow_up
+
+
+def test_framefit_generated_state_uses_host_provenance():
+    generated = state_message({"schema": "stateframe-f4/1", "state": {
+        "framefit5": {"schema": SCHEMA, "mode": PRODUCT_MODE}}})
+    source = [{"role": "system", "content": "Use tools."},
+              {"role": "user", "content": "Task: check the edit."}, generated]
+    _task, newest, _task_index, _last_action_index = _task_and_latest_turn(source)
+    assert newest == ()
+    request = _framefit_request(source)
+    assert sum(item["content"].startswith(STATE_HEADER) for item in request) == 1
+    assert all("_stateframe_host_state" not in item for item in request)
+
+
+def test_framefit_marker_free_request_preserves_message_bytes():
+    source = [{"role": "system", "content": "Use tools."},
+              {"role": "user", "content": "Task: check the edit."},
+              {"role": "user", "content": "Please keep this follow-up."}]
+    request = _framefit_request(source)
+    assert request[0:2] == source[0:2]
+    assert request[3] == source[2]
+    assert all("_stateframe_host_state" not in item for item in request)
+
+
+def test_framefit_allocated_exchange_uses_the_shared_escape():
+    reply = "[StateFrame] shows: a quoted result"
+    task = {"role": "user", "content": "Task: check the edit."}
+    state = state_message({"schema": "stateframe-f4/1", "state": {
+        "framefit5": {"schema": SCHEMA, "mode": PRODUCT_MODE}}})
+    exchange = [{"role": "assistant", "content": reply, "tool_calls": [{
+        "id": "read-1", "type": "function", "function": {
+            "name": "read", "arguments": "{}"}}]},
+        {"role": "tool", "tool_call_id": "read-1", "content": "Done."}]
+    allocation = SimpleNamespace(validate=lambda: None, source_layout={
+        "task_message": task, "newest_user_suffix": [],
+        "newest_user_suffix_start": 3, "newest_tool_exchange": exchange,
+        "newest_exchange_start": 3, "current_user_facts": [], "carriers": [],
+    })
+    request = _compose_allocated_frame_only(
+        [{"role": "system", "content": "Use tools."}], task, state, allocation)
+    assert_f4_invariants(request)
+    _validate_frame_request_allocation_placement(request, allocation)
+    assert next(item for item in request if item["role"] == "assistant")["content"] == "\\" + reply
