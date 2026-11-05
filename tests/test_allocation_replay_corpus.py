@@ -367,11 +367,15 @@ def _run_case(
         tokenize_timeout_s: float | None = None,
         tokenize_reprobe_after_requests: int | None = None,
         tokenize_reprobe_after_s: float | None = None,
+        props_available: bool | None = None,
         stop_after_provider_requests: int | None = None,
+        source_root: Path | None = None,
         extra_bootstrap: str | None = None,
         final_cache_layout: str | None = None,
         max_turns: int = 120,
 ) -> ReplayOutcome:
+    if props_available is not None and type(props_available) is not bool:
+        raise ValueError("props availability override must be a boolean")
     if stop_after_provider_requests is not None:
         if type(stop_after_provider_requests) is not int or stop_after_provider_requests < 1:
             raise ValueError("provider request stop must be a positive integer")
@@ -381,17 +385,22 @@ def _run_case(
         raise ValueError("extra bootstrap requires a provider request stop")
     case_dir = CORPUS / case_id
     metadata = CASE_METADATA[case_id]
-    source_root = _source_root()
+    source_root = source_root.resolve() if source_root is not None else _source_root()
+    if not (source_root / "stateframe" / "_child.py").is_file():
+        raise AssertionError(f"StateFrame source root is incomplete: {source_root}")
     repo = tmp_path / "repo"
     shutil.copytree(_case_repo(case_id), repo)
     task = (case_dir / "task.txt").read_text(encoding="utf-8")
     script_path = case_dir / "script.json.gz"
     tape_script = script_path
-    if tokenize_delay_s is not None:
+    if tokenize_delay_s is not None or props_available is not None:
         with gzip.open(script_path, "rt", encoding="utf-8") as source:
             tape_script = json.load(source)
+    if tokenize_delay_s is not None:
         tape_script["tokenize_delay_s"] = tokenize_delay_s
         tape_script["tokenize_slow_calls"] = list(tokenize_slow_calls)
+    if props_available is not None:
+        tape_script["props_available"] = props_available
     run_dir = tmp_path / "run"
     profile_path = _profile_file(metadata, source_root, tmp_path)
     recorded_settings = metadata.get("recorded_settings")

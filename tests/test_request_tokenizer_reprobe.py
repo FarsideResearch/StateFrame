@@ -7,6 +7,7 @@ import os
 import re
 import subprocess
 import sys
+from pathlib import Path
 from time import monotonic
 
 import pytest
@@ -18,6 +19,7 @@ import kernel_request_diet as request_diet
 from kernel_shell_tool import SHELL_SCHEMA
 from tests import test_allocation_replay_corpus as corpus
 from tests.tape_server import TapeServer
+from tools.immediate_baseline import baseline_checkout  # noqa: F401 (pytest fixture)
 from tools.compare_no_mcp_requests import mask_wire_ids
 
 
@@ -29,15 +31,6 @@ _CLEAN_METER_COUNTDOWN = re.compile(
     rb"(?:, ~(?:\d+|999\+|----) turns at your pace)?\)"
 )
 _CLEAN_METER_COUNTDOWN_MASK = b"sandbox_seconds_remaining=<masked>"
-# An external STATEFRAME_REPLAY_SOURCE records a different environment_revision, so it cannot derive these.
-# Countdown masked because it is wall-clock; only requests 1-2 have stable masked bytes.
-# Derived with tests/tools/derive_clean_meter_pins.py on an untouched 012e0b5 worktree (2 runs) and on the v0.3.31 RC
-# (2 runs); all four agree. Wire-visible IDs (moved by deterministic IDs) and the countdown are masked, so these hashes
-# prove every other request-1/2 byte is unchanged since 012e0b5.
-CLEAN_METER_MASKED_HASHES_012E0B5 = (
-    "64e811d7331b461bb7af6c571ef7eb757707670616db8e87171117cae0a2cb4e",
-    "adbfc0415994d9ec3aa377abbc723541f622bd01992a4a535921859ba5f9ffb3",
-)
 CLEAN_METER_COUNTDOWN_COPIES_012E0B5 = (2, 2, 2, 1, 1, 2)
 
 # Compact request specimen with the current StateFrame field and a near-match decoy.
@@ -556,7 +549,9 @@ def test_permanent_tokenizer_outage_replay_submits_with_bounded_probes(tmp_path)
     assert outcome.delayed_tokenize_calls == tuple(range(1, outcome.tokenize_request_count + 1))
 
 
-def _capture_clean_meter_request_bodies(tmp_path):
+def _capture_clean_meter_request_bodies(
+        tmp_path: Path, *, request_limit: int = 6, source_root: Path | None = None,
+) -> tuple[bytes, ...]:
     # v0.4.0 changes default request order; the 0.3.30 byte oracle uses plain order.
     # Stop at the needed request count instead of replaying all 41 tape turns.
     # Each clean-meter request costs ~71 s of engine-side prep on Linux (measured on e62db60:
@@ -566,7 +561,13 @@ def _capture_clean_meter_request_bodies(tmp_path):
     outcome = corpus._run_case(
         tmp_path,
         "clean-meter-22file-r1",
-        stop_after_provider_requests=6,
+        props_available=False,
+        stop_after_provider_requests=request_limit,
+        source_root=source_root,
+        extra_bootstrap=(
+            f"import os\nos.environ[{provider_dialect.PROVIDER_OVERRIDE_ENV!r}] = "
+            f"{provider_dialect.LLAMA_CPP!r}"
+        ),
         final_cache_layout="off",
     )
     assert outcome.engine_result == "RUN_INCOMPLETE", (
@@ -577,14 +578,14 @@ def _capture_clean_meter_request_bodies(tmp_path):
     assert outcome.summary is not None
     assert outcome.summary.get("runtime_outcome") == "incomplete"
     assert '"kind":"token_counting_unavailable"' not in outcome.engine_log
-    assert outcome.endpoint_requests == 6
-    assert len(outcome.request_hashes) >= 6
+    assert outcome.endpoint_requests == request_limit
+    assert len(outcome.request_hashes) >= request_limit
     capture_marker = tmp_path / "run" / "capture-limit-reached"
     assert capture_marker.is_file(), "request-capped wrapper did not record its stop marker"
-    assert capture_marker.read_text(encoding="ascii") == "6"
+    assert capture_marker.read_text(encoding="ascii") == str(request_limit)
     request_bodies = tuple(
         (tmp_path / "run" / "wire" / f"{index:04d}.request.json").read_bytes()
-        for index in range(1, 7)
+        for index in range(1, request_limit + 1)
     )
     return request_bodies
 
@@ -605,7 +606,7 @@ def _clean_meter_fingerprints(request_bodies):
 
 
 @pytest.mark.host_sandbox
-def test_healthy_measurement_preserves_baseline_request_bytes(tmp_path):
+def test_healthy_measurement_preserves_baseline_request_bytes(tmp_path, baseline_checkout):
     body = _body("wire identity")
     expected = (
         b'{"model":"allocation-replay-model","messages":[{"role":"user",'
@@ -629,6 +630,18 @@ def test_healthy_measurement_preserves_baseline_request_bytes(tmp_path):
     assert json.dumps(body, ensure_ascii=False, separators=(",", ":")).encode("utf-8") == expected
     assert "tokenize_reprobe_status" not in meter.journal_fields("tokenize")
 
+    # Compare against the immediate base release in this same environment (shared discovery:
+    # SF_TEST_BASELINE_IMMEDIATE, else the merge base / nearest ancestor release), never a pin.
+    baseline_tree = baseline_checkout
+    baseline_capture_root = tmp_path / "baseline-capture"
+    baseline_capture_root.mkdir()
+    baseline_bodies = _capture_clean_meter_request_bodies(
+        baseline_capture_root,
+        request_limit=2,
+        source_root=baseline_tree / "src",
+    )
+    baseline_masked_hashes, _ = _clean_meter_fingerprints(baseline_bodies)
+
     request_bodies = _capture_clean_meter_request_bodies(tmp_path)
     computed_masked_hashes, countdown_copy_counts = _clean_meter_fingerprints(request_bodies)
     assert countdown_copy_counts == CLEAN_METER_COUNTDOWN_COPIES_012E0B5, (
@@ -641,11 +654,21 @@ def test_healthy_measurement_preserves_baseline_request_bytes(tmp_path):
     changed_body[flip_at] ^= 1
     assert _masked_wire_sha256(bytes(changed_body)) != computed_masked_hashes[0]
 
-    # Pin requests 1-2 only: a callsite census at step 12 fires depending on run timing
+    # Compare requests 1-2 only: a callsite census at step 12 fires depending on run timing
     # and changes request 3+ bytes (a determinism leak). Owner: sf-test-runners.
     # Finding: sf-work/lanes/findings/census_timing_1104.md.
     # Full masked identity is checked by ident_pair.sh.
-    assert computed_masked_hashes[:2] == CLEAN_METER_MASKED_HASHES_012E0B5, (
-        f"masked request SHA-256s for requests 1-2: {computed_masked_hashes[:2]!r}; "
+    assert computed_masked_hashes[:2] == baseline_masked_hashes, (
+        f"masked request SHA-256s differ from the immediate base {baseline_tree} "
+        "for requests 1-2: "
+        f"current={computed_masked_hashes[:2]!r}; baseline={baseline_masked_hashes!r}; "
         f"whole-request countdown-copy counts={countdown_copy_counts!r}"
+    )
+
+    changed_current_hashes = (
+        _masked_wire_sha256(bytes(changed_body)),
+        *computed_masked_hashes[1:2],
+    )
+    assert changed_current_hashes != baseline_masked_hashes, (
+        "baseline-relative masked comparison accepted a one-byte change in current request 0001"
     )
