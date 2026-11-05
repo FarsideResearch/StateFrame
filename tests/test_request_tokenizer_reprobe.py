@@ -346,6 +346,14 @@ def test_cold_props_proof_leaves_time_for_late_tokenize_and_is_cached(monkeypatc
     monkeypatch.delenv(provider_dialect.PROVIDER_OVERRIDE_ENV, raising=False)
     cache = {}
     monkeypatch.setattr(provider_dialect, "RUN_CAPABILITY_CACHE", cache)
+    probe_paths = []
+    real_probe = provider_dialect.bounded_json_probe
+
+    def record_probe(origin, key, path, **kwargs):
+        probe_paths.append(path)
+        return real_probe(origin, key, path, **kwargs)
+
+    monkeypatch.setattr(provider_dialect, "bounded_json_probe", record_probe)
     script = {
         "model": "allocation-replay-model",
         "turns": [{"message": {"role": "assistant", "content": "done"}}],
@@ -356,11 +364,14 @@ def test_cold_props_proof_leaves_time_for_late_tokenize_and_is_cached(monkeypatc
         meter = request_diet.RequestTokenMeter(
             endpoint=f"{endpoint.url}/tokenize", template_overhead_tokens=0,
         )
-        meter.bind_request("request-1", "request-1", deadline=monotonic() + 0.2)
+        # The cold /props probe starts a Python child: allow its full 2s cap
+        # under loaded CI, then 2s for POST scheduling and its 30ms response.
+        meter.bind_request("request-1", "request-1", deadline=monotonic() + 4.0)
         _count, method = meter.measure(_body("cold props proof and late tokenize"))
 
     assert method == "tokenize"
     assert endpoint.tokenize_request_count == 1
+    assert probe_paths == ["/props"]
     assert cache[provider_dialect.origin_of(endpoint.url)].reason == "proven by /props"
 
 
