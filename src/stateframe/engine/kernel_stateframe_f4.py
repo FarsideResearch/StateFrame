@@ -18,6 +18,7 @@ from pathlib import PurePosixPath
 from kernel_context import token_estimate
 from kernel_stateframe_envelope import STATE_HEADER, serialize_stateframe_payload
 from kernel_evictfix_mode import enabled as evictfix_enabled
+from kernel_stateframe_marker import escape_state_marker_data
 
 
 MODE_ENV = "STATEFRAME_F4"
@@ -1856,21 +1857,6 @@ def state_message(state: Mapping[str, object]) -> dict[str, object]:
         # Internal provenance for the FrameFit5 source transcript, removed at composition.
         message["_stateframe_host_state"] = True
     return message
-
-
-def escape_state_marker_data(
-        message: Mapping[str, object], *, host_state: bool = False,
-        preserve_host_provenance: bool = False,
-) -> dict:
-    """Copy and escape wire text; retain provenance only for F5's intermediate F4 view."""
-    item = copy.deepcopy(dict(message))
-    if not preserve_host_provenance:
-        item.pop("_stateframe_host_state", None)
-    content = str(item.get("content") or "")
-    if not host_state and content.startswith(STATE_HEADER):
-        # The visible escape is \[StateFrame]. Only the host state starts [StateFrame].
-        item["content"] = "\\" + content
-    return item
 
 
 def _append_verbatim_turns(

@@ -29,6 +29,7 @@ import time
 
 from kernel_plain_contracts import PlainContractError, validate_pairing
 from kernel_shell_tool import SHELL_SCHEMA
+from kernel_stateframe_marker import escape_state_marker_data
 from kernel_tool_reply import Outcome, record_and_strip_receipts, tool_reply
 
 OUT_CAP = 12000  # chars of any single tool result returned to the model
@@ -170,7 +171,11 @@ def build_body(messages: list, limits: Limits) -> dict:
     for tool in tools:
         if tool["function"]["name"] == "shell":
             tool["function"]["parameters"]["properties"].pop("background", None)
-    body = {"model": limits.model, "messages": messages, "tools": tools, "temperature": limits.temperature,
+    # Compose from raw history into a fresh wire view so a replay never escapes an escaped copy.
+    wire_messages = [escape_state_marker_data(
+        message, host_state=message.get("_stateframe_host_state") is True,
+    ) for message in messages]
+    body = {"model": limits.model, "messages": wire_messages, "tools": tools, "temperature": limits.temperature,
             "max_tokens": limits.max_tokens, **dict(limits.sampler)}
     if limits.reasoning_budget:
         body["reasoning_budget_tokens"] = limits.reasoning_budget
