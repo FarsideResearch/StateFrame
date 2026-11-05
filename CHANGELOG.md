@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.4.28 (2026-11-05)
 
 - Warm event gap profiling now pairs dispatch pauses with matching closures and clears interrupted pause state at request submission or restore. This is profiling only and does not change runtime behavior.
 
