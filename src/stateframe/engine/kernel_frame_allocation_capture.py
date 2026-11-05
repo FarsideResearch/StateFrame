@@ -63,6 +63,44 @@ def measured_request_tokens(body: Mapping[str, object], meter: object) -> int:
     return tokens
 
 
+def _measure_source_candidate(
+        meter: object, candidate: Mapping[str, object], serialized_bytes: int,
+) -> tuple[int, str]:
+    """Use the prepared wire size without bypassing meter state transitions."""
+    from kernel_request_diet import RequestTokenMeter
+
+    measure_with_wire = getattr(meter, "_measure_with_wire_bytes", None)
+    instance_methods = getattr(meter, "__dict__", {})
+    if (callable(measure_with_wire) and type(meter) is RequestTokenMeter
+            and "measure" not in instance_methods
+            and "_measure_with_wire_bytes" not in instance_methods):
+        return measure_with_wire(candidate, serialized_bytes)
+    return meter.measure(candidate)
+
+
+def _source_candidate_nonfit(
+        meter: object, candidate: Mapping[str, object], serialized_bytes: int,
+        request_byte_limit: Callable[[str], int], *,
+        hard_max_request_bytes: int, clip_to_hard_limit: bool,
+) -> tuple[bool, tuple[int, str] | None]:
+    """Skip proven nonfits only after their normal meter transition has run."""
+    from kernel_request_diet import RequestTokenMeter
+
+    instance_methods = getattr(meter, "__dict__", {})
+    if (type(meter) is not RequestTokenMeter
+            or "measure" in instance_methods
+            or "_measure_with_wire_bytes" in instance_methods):
+        return False, None
+
+    # Every proposal follows the ordinary meter path before byte-cap rejection;
+    # this preserves deadline, calibration, outage, and re-probe updates.
+    measurement = _measure_source_candidate(meter, candidate, serialized_bytes)
+    byte_limit = request_byte_limit(measurement[1])
+    if clip_to_hard_limit:
+        byte_limit = min(byte_limit, hard_max_request_bytes)
+    return serialized_bytes > byte_limit, measurement
+
+
 def _remember_exact_pair(body: Mapping[str, object], meter: object, tokens: int) -> None:
     overhead = getattr(meter, "template_overhead_tokens", 0)
     overhead = overhead if type(overhead) is int and overhead >= 0 else 0
@@ -643,7 +681,6 @@ def finalize_frame_candidate(
     """Fit a detached candidate; return a proposal without wire authorization."""
     from kernel_request_budget import (
         ENDPOINT_PROMPT_TOKEN_BUDGET,
-        ENDPOINT_VERIFIED_BYTES_PER_TOKEN,
         FREE_STAGE,
         HARD_MAX_REQUEST_BYTES,
         _graceful_trim_optional_messages,
@@ -966,7 +1003,9 @@ def finalize_frame_candidate(
     )
     from kernel_stateframe_capacity import within_protected_capacity
 
-    prepared_source_candidates: dict[int, tuple[Mapping[str, object], int | None]] = {}
+    prepared_source_candidates: dict[
+        int, tuple[Mapping[str, object], int | None, tuple[int, str] | None]
+    ] = {}
 
     def prepare_source_candidate(trial: Mapping[str, object]) -> bool:
         if not ((bookmark_reconciliation or product_windows)
@@ -987,6 +1026,12 @@ def finalize_frame_candidate(
             return False
         return True
 
+    def source_trial_byte_limit(method: str) -> int:
+        limit = request_byte_limit(method)
+        if getattr(capture, "_release_prefix_boundary", None) is not None:
+            limit = min(limit, HARD_MAX_REQUEST_BYTES)
+        return limit
+
     def source_candidate_nonfit(trial: Mapping[str, object]) -> bool:
         if (type(meter) is not RequestTokenMeter
                 or "measure" in getattr(meter, "__dict__", {})
@@ -994,34 +1039,17 @@ def finalize_frame_candidate(
             # Custom meter hooks keep the exhaustive measurement path.
             return False
         if not prepare_source_candidate(trial):
-            prepared_source_candidates[id(trial)] = (trial, None)
+            prepared_source_candidates[id(trial)] = (trial, None, None)
             return False  # Let the normal callback keep its established failure path.
         serialized_bytes = _wire_bytes(trial)
-        availability = getattr(meter, "_availability", None)
-        reprobe_due = getattr(meter, "_reprobe_due", None)
-        is_reprobe_due = callable(reprobe_due) and reprobe_due()
-        if availability == "unavailable" and not is_reprobe_due:
-            method = "calibrated_bytes"
-        elif availability in {"available", "unknown"} or is_reprobe_due:
-            method = "tokenize"
-        else:
-            prepared_source_candidates[id(trial)] = (trial, serialized_bytes)
-            return False
-        byte_limit = request_byte_limit(method)
-        if getattr(capture, "_release_prefix_boundary", None) is not None:
-            byte_limit = min(byte_limit, HARD_MAX_REQUEST_BYTES)
-        # The 2.46 offline ratio contributes an explicit byte ceiling, so it
-        # can reject bytes beyond that ceiling. It never proves token fit.
-        if serialized_bytes > byte_limit:
+        nonfit, measurement = _source_candidate_nonfit(
+            meter, trial, serialized_bytes, request_byte_limit,
+            hard_max_request_bytes=HARD_MAX_REQUEST_BYTES,
+            clip_to_hard_limit=(getattr(capture, "_release_prefix_boundary", None) is not None),
+        )
+        if nonfit:
             return True
-        if (method in {"tokenize", "verified_byte_bound"}
-                and serialized_bytes > token_limit * ENDPOINT_VERIFIED_BYTES_PER_TOKEN):
-            # Every proposal outside the verified 16-byte/token envelope is
-            # non-fitting by the same lower bound used by RequestTokenMeter.
-            # Skipping only these proven failures preserves exhaustive order,
-            # including for non-monotone tokenizer counts within the envelope.
-            return True
-        prepared_source_candidates[id(trial)] = (trial, serialized_bytes)
+        prepared_source_candidates[id(trial)] = (trial, serialized_bytes, measurement)
         return False
 
     def source_windows_fit(trial: Mapping[str, object]) -> bool:
@@ -1030,23 +1058,17 @@ def finalize_frame_candidate(
             if prepared[1] is None:
                 return False
             serialized_bytes = prepared[1]
+            measured = prepared[2]
         else:
             if not prepare_source_candidate(trial):
                 return False  # Optional source advice cannot reject the base.
             serialized_bytes = _wire_bytes(trial)
-        measure_with_wire = getattr(meter, "_measure_with_wire_bytes", None)
-        instance_methods = getattr(meter, "__dict__", {})
-        if (callable(measure_with_wire) and type(meter) is RequestTokenMeter
-                and "measure" not in instance_methods
-                and "_measure_with_wire_bytes" not in instance_methods):
-            _count, trial_method = measure_with_wire(trial, serialized_bytes)
-        else:
-            _count, trial_method = meter.measure(trial)
-        byte_limit_for_windows = request_byte_limit(trial_method)
-        # A bound release prefix must stay within its standard wire cap;
-        # standalone exact-tokenized proposals may use the verified bound.
-        if getattr(capture, "_release_prefix_boundary", None) is not None:
-            byte_limit_for_windows = min(byte_limit_for_windows, HARD_MAX_REQUEST_BYTES)
+            measured = None
+        _count, trial_method = (
+            measured if measured is not None
+            else _measure_source_candidate(meter, trial, serialized_bytes)
+        )
+        byte_limit_for_windows = source_trial_byte_limit(trial_method)
         return (
             serialized_bytes <= byte_limit_for_windows
             and fitted_request_tokens(trial, wire_bytes=serialized_bytes) <= token_limit

@@ -434,6 +434,8 @@ class RequestTokenMeter:
         return _build_tokenize_opener(self._get_http_ssl_context)
 
     def _get_http_ssl_context(self) -> ssl.SSLContext:
+        # Trust roots are snapshotted on first HTTPS use for this meter; process
+        # CA changes take effect when a new meter is created.
         context = getattr(self, "_http_ssl_context", None)
         if context is not None:
             return context

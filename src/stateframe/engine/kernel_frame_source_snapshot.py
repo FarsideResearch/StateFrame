@@ -759,14 +759,10 @@ def fit_recent_read_windows(body: Mapping[str, object], windows: Sequence[Mappin
     def candidate(reads: Sequence[Mapping[str, object]], checks: Sequence[tuple[str, int]],
                   *, release_deferred: bool = False,
                   with_coverage: bool = True) -> dict[str, object]:
-        # ``base`` is detached once from the caller. Trial construction only
-        # edits message membership and each row's ``content`` field (including
-        # the source-truth refresh in the production fit callback), so share
-        # all other detached values and copy message dictionaries per trial.
-        trial = dict(base)
-        rows = [dict(message) if isinstance(message, Mapping) else message
-                for message in base["messages"]]
-        trial["messages"] = rows
+        # Fit callbacks receive a mutable request mapping. Detach nested values
+        # per trial so mutations cannot leak into the base or another proposal.
+        trial = copy.deepcopy(base)
+        rows = trial["messages"]
         selected = []
         for row in reads:
             metadata = parse_model_source_window(row.get("content"))

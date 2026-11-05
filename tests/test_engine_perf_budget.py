@@ -16,7 +16,9 @@ from kernel_measurement import canonical_bytes, externalize_journal_fields
 from kernel_continuation_journal import ContinuationJournal
 import kernel_request_diet as request_diet
 from kernel_request_diet import RequestTokenMeter
-from kernel_frame_allocation_capture import FrozenRequestCounter, final_request_tokens
+from kernel_frame_allocation_capture import (
+    FrozenRequestCounter, _source_candidate_nonfit, final_request_tokens,
+)
 from kernel_final_wire_budget import reconcile_frozen_budget
 from kernel_request_measurement import RequestMeasurement, prompt_projection
 from types import SimpleNamespace
@@ -53,9 +55,10 @@ def _fit_kwargs(candidate_nonfit=None):
     return kwargs
 
 
-def test_candidate_trial_deepcopies_are_one_detached_snapshot(monkeypatch):
+def test_candidate_trials_detach_each_request_from_the_base(monkeypatch):
     monkeypatch.setattr(kernel_code_bookmarks, "enabled", lambda: True)
     calls = 0
+    fit_calls = 0
     original = source_snapshot.copy.deepcopy
 
     def counted_deepcopy(value, memo=None):
@@ -65,11 +68,17 @@ def test_candidate_trial_deepcopies_are_one_detached_snapshot(monkeypatch):
 
     monkeypatch.setattr(source_snapshot.copy, "deepcopy", counted_deepcopy)
     body = _body()
-    fit_recent_read_windows(body, _windows(), **_fit_kwargs())
+    def reject(_candidate):
+        nonlocal fit_calls
+        fit_calls += 1
+        return False
 
-    # One detached base is required to preserve return isolation. Candidate
-    # trials must copy only their mutable message rows, not the full frame.
-    assert calls == 1
+    fit_recent_read_windows(body, _windows(), fits=reject)
+
+    # The detached base preserves return isolation; each mutable callback input
+    # needs its own recursively detached request as well.
+    assert fit_calls > 1
+    assert calls >= fit_calls + 1
 
 
 def test_tokenize_calls_per_22_source_fit_use_only_proven_byte_rejections(monkeypatch):
@@ -362,23 +371,37 @@ def test_byte_pruned_fitting_matches_exhaustive_nonmonotone_selection(
         row["rank"] = 1 if index == 0 else index + 2
     token_budget = 400
 
+    def reference_token_count(candidate):
+        # An exhaustive reference tokenizer consumes at most 16 wire bytes per
+        # token, with a message-shape penalty that can make larger proposals
+        # cheaper. It computes a count independently of the pruning predicate.
+        wire = json.dumps(candidate).encode()
+        count = 0
+        offset = 0
+        while offset < len(wire):
+            count += 1
+            offset += min(16, 1 + wire[offset] % 16)
+        messages = candidate.get("messages", ())
+        if len(messages) % 2 == 0:
+            count += 500 if adversarial else 160
+        return count
+
+    smaller = _body()
+    smaller["messages"].append({"role": "user", "content": "probe"})
+    larger = _body()
+    larger["messages"].extend([
+        {"role": "user", "content": "probe"},
+        {"role": "user", "content": "probe"},
+    ])
+    assert len(json.dumps(larger).encode()) > len(json.dumps(smaller).encode())
+    assert reference_token_count(larger) < reference_token_count(smaller)
+
     def make_exact_fits():
         measured = []
 
         def exact_fits(candidate):
             measured.append(candidate)
-            wire_size = len(json.dumps(candidate).encode())
-            # Any answer on the far side of the verified lower bound is a proven
-            # rejection. Within the bound, counts deliberately wobble with content
-            # so a monotonic-search shortcut would select different source bytes.
-            if wire_size > token_budget * 16:
-                return False
-            prompt = prompt_projection(candidate)
-            digest = hashlib.sha256(prompt.encode()).digest()
-            count = (wire_size // 16) + (digest[0] % 420)
-            if adversarial:
-                count = (wire_size // 16) + (0 if wire_size % 2 else 500)
-            return count <= token_budget
+            return reference_token_count(candidate) <= token_budget
 
         return exact_fits, measured
 
@@ -407,18 +430,91 @@ def test_byte_pruned_fitting_matches_exhaustive_nonmonotone_selection(
 def test_candidate_trials_do_not_alias_body_or_each_other(monkeypatch):
     monkeypatch.setattr(kernel_code_bookmarks, "enabled", lambda: True)
     body = _body()
+    body["messages"][0]["metadata"] = {"labels": ["source"]}
+    body["messages"][0]["tool_calls"] = [{"function": {"name": "original_call"}}]
+    body["tools"] = [{"function": {"name": "original_tool"}}]
+    original = json.loads(json.dumps(body))
     observed = []
 
     def mutating_fit(candidate):
-        observed.append(candidate["messages"][0]["content"])
+        observed.append((
+            candidate["messages"][0]["metadata"]["labels"][0],
+            candidate["messages"][0]["tool_calls"][0]["function"]["name"],
+            candidate["tools"][0]["function"]["name"],
+        ))
+        candidate["messages"][0]["metadata"]["labels"][0] = "mutated metadata"
+        candidate["messages"][0]["tool_calls"][0]["function"]["name"] = "mutated call"
+        candidate["tools"][0]["function"]["name"] = "mutated tool"
         candidate["messages"][0]["content"] = "changed inside fit callback"
         candidate["messages"].append({"role": "user", "content": "trial only"})
         return False
 
     fit_recent_read_windows(body, _windows(2), fits=mutating_fit)
     assert len(observed) > 1
-    assert set(observed) == {"task"}
-    assert body == _body()
+    assert set(observed) == {("source", "original_call", "original_tool")}
+    assert body == original
+
+
+def test_nonfit_meter_transition_matches_exhaustive_fallback_and_keeps_deadline(monkeypatch):
+    monkeypatch.setattr(request_diet, "TOKENIZE_REPROBE_AFTER_REQUESTS", 2)
+
+    def unavailable(_text):
+        raise TimeoutError("scripted tokenizer outage")
+
+    prefiltered_meter = RequestTokenMeter(tokenizer=unavailable, template_overhead_tokens=0)
+    exhaustive_meter = RequestTokenMeter(tokenizer=unavailable, template_overhead_tokens=0)
+    for meter in (prefiltered_meter, exhaustive_meter):
+        meter.begin_request("initial-outage")
+        assert meter.measure(_body())[1] == "calibrated_bytes"
+        meter.begin_request("fallback-wait-1")
+        meter.begin_request("fallback-trials")
+        assert meter._reprobe_due()
+
+    trials = [
+        {"messages": [{"role": "user", "content": f"trial {index}"}], "tools": []}
+        for index in range(4)
+    ]
+    for trial in trials:
+        serialized_bytes = request_diet._wire_bytes(trial)
+        nonfit, measured = _source_candidate_nonfit(
+            prefiltered_meter, trial, serialized_bytes, lambda _method: 1,
+            hard_max_request_bytes=100, clip_to_hard_limit=False,
+        )
+        assert nonfit is True
+        assert measured is not None and measured[1] == "calibrated_bytes"
+        assert exhaustive_meter.measure(trial)[1] == "calibrated_bytes"
+
+    stable_journal_keys = {
+        "tokenize_availability", "tokenize_failure_reason", "tokenize_attempts",
+        "tokenizer_calls", "tokenize_consecutive_failures", "fallback_bytes_per_token",
+        "fallback_safety_margin", "fallback_calibration_samples", "fallback_rejection_bound",
+        "tokenize_reprobe_status", "tokenize_reprobe_attempts",
+    }
+
+    def meter_state(meter):
+        fields = meter.journal_fields("calibrated_bytes")
+        return (
+            tuple(sorted((key, fields.get(key)) for key in stable_journal_keys)),
+            meter._fallback_pending,
+            meter._fallback_reported,
+            meter._reprobe_active,
+            meter._reprobe_requests_since_attempt,
+            frozenset(meter._reprobe_ready_requests),
+            frozenset(meter._reprobe_attempted_requests),
+            meter._last_tokenizer_error,
+        )
+
+    assert meter_state(prefiltered_meter) == meter_state(exhaustive_meter)
+
+    deadline_meter = RequestTokenMeter(tokenizer=lambda _text: [1], template_overhead_tokens=0)
+    deadline_meter.bind_request(
+        "expired", "expired", deadline=request_diet.time.monotonic() - 1,
+    )
+    with pytest.raises(TimeoutError, match="tokenizer request deadline expired"):
+        _source_candidate_nonfit(
+            deadline_meter, _body(), request_diet._wire_bytes(_body()),
+            lambda _method: 1, hard_max_request_bytes=100, clip_to_hard_limit=False,
+        )
 
 
 def test_canonical_bytes_cache_is_immutable_only_and_mapping_changes_invalidate(monkeypatch):
