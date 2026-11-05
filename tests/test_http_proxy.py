@@ -10,6 +10,7 @@ from pathlib import Path
 
 import pytest
 
+import kernel_provider_dialect as dialect
 from stateframe import _child
 from stateframe.engine import kernel_bounded_http
 from stateframe.engine.kernel_plain_http import AbortiveHTTPTransport
@@ -112,11 +113,19 @@ def test_bounded_http_ignores_proxy(monkeypatch, servers):
 def test_tokenize_ignores_proxy(monkeypatch, servers):
     target_url, target_requests, proxy_url, proxy_requests = servers
     _set_proxy(monkeypatch, proxy_url)
+    monkeypatch.delenv("STATEFRAME_PROVIDER", raising=False)
+    monkeypatch.setattr(dialect, "RUN_CAPABILITY_CACHE", {})
     assert _http_tokenize("hello", target_url + "/tokenize") == [1, 2]
-    assert [path for path, _body, _headers in target_requests] == ["/props", "/slots", "/tokenize"]
+    # 0.4.4 (837044f): tokenization skips the optional /slots lookup once /props proves llama.cpp.
+    assert [path for path, _body, _headers in target_requests] == ["/props", "/tokenize"]
     assert target_requests[0][1] is None
-    assert json.loads(target_requests[2][1]) == {
+    assert json.loads(target_requests[1][1]) == {
         "content": "hello", "add_special": False, "parse_special": True}
+    capabilities = dialect.capabilities_for(target_url + "/v1/chat/completions", "")
+    assert capabilities.slots
+    assert capabilities.slot_ids == frozenset({0})
+    assert [path for path, _body, _headers in target_requests] == [
+        "/props", "/tokenize", "/slots"]
     assert proxy_requests == []
 
 

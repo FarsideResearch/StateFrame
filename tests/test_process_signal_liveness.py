@@ -3,6 +3,8 @@ from __future__ import annotations
 
 from dataclasses import replace
 from datetime import datetime
+from multiprocessing.process import BaseProcess
+import os
 import signal
 import subprocess
 import sys
@@ -36,6 +38,20 @@ def _plant_proc_state(monkeypatch, tmp_path: Path, pid: int, state: str) -> None
         "__kwdefaults__",
         {"platform": "linux", "proc": proc_root},
     )
+
+
+class _MultiprocessingHandle(BaseProcess):
+    def __init__(self, pid: int, *, alive: bool = True) -> None:
+        super().__init__()
+        self._test_pid = pid
+        self._test_alive = alive
+
+    @property
+    def pid(self) -> int:
+        return self._test_pid
+
+    def is_alive(self) -> bool:
+        return self._test_alive
 
 
 @pytest.fixture
@@ -175,3 +191,49 @@ def test_nonempty_cmdline_mismatch_remains_a_runtime_error(
         process_signals.record_identity(
             live_child.pid, launched_after=0, command_fragment="not-the-child-command")
     assert "does not match its launch identity" in str(error.value)
+
+
+def test_multiprocessing_signal_uses_verified_live_child(live_child):
+    process = _MultiprocessingHandle(live_child.pid)
+    process_signals.signal_multiprocessing_owned(process, signal.SIGTERM)
+
+    assert live_child.wait(timeout=5) == -signal.SIGTERM
+
+
+def test_multiprocessing_signal_refuses_unstarted_process():
+    process = _MultiprocessingHandle(0, alive=False)
+
+    with pytest.raises(ProcessLookupError, match="no longer running"):
+        process_signals.signal_multiprocessing_owned(process, signal.SIGTERM)
+
+
+def test_multiprocessing_signal_refuses_self(monkeypatch):
+    process = _MultiprocessingHandle(os.getpid())
+    sent = []
+
+    with monkeypatch.context() as patch:
+        patch.setattr(process_signals.os, "kill", lambda pid, sig: sent.append((pid, sig)))
+        with pytest.raises(ValueError, match="invalid or self process id"):
+            process_signals.signal_multiprocessing_owned(process, signal.SIGTERM)
+
+    assert sent == []
+
+
+def test_multiprocessing_signal_refuses_runner_process_group(monkeypatch, live_child):
+    process = _MultiprocessingHandle(live_child.pid)
+    child_group = os.getpgid(live_child.pid)
+    sent = []
+    original_kill = process_signals.os.kill
+
+    def record_signal(pid, signal_number):
+        if signal_number == 0:
+            return original_kill(pid, signal_number)
+        sent.append((pid, signal_number))
+
+    with monkeypatch.context() as patch:
+        patch.setattr(process_signals.os, "getpgrp", lambda: child_group)
+        patch.setattr(process_signals.os, "kill", record_signal)
+        with pytest.raises(ValueError, match="runner's process group"):
+            process_signals.signal_multiprocessing_owned(process, signal.SIGTERM)
+
+    assert sent == []

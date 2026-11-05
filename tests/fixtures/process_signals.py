@@ -6,6 +6,7 @@ from datetime import datetime
 import ctypes
 import errno
 import json
+from multiprocessing.process import BaseProcess
 import os
 from pathlib import Path
 import re
@@ -250,6 +251,20 @@ def signal_owned(popen: subprocess.Popen[object] | EngineProcess,
         os.killpg(pgid, sig)
     else:
         popen.send_signal(sig)
+
+
+def signal_multiprocessing_owned(process: BaseProcess,
+                                 sig: signal.Signals | int) -> None:
+    """Signal a held multiprocessing child after verifying its pid and process group."""
+    if not isinstance(process, BaseProcess):
+        raise TypeError("a multiprocessing process handle is required")
+    if not process.is_alive():
+        raise ProcessLookupError("owned multiprocessing process is no longer running")
+    pid = process.pid
+    _safe_target(pid)
+    if not process.is_alive():
+        raise ProcessLookupError("owned multiprocessing process is no longer running")
+    os.kill(pid, sig)
 
 
 def signal_verified(pid: int, recorded_identity: ProcessIdentity,
