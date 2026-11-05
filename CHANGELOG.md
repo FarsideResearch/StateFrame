@@ -1,7 +1,5 @@
 # Changelog
 
-## Unreleased
-
 ## 0.4.8 (2026-11-05)
 
 - Tests: release checks now fail when a required test is missing, skipped, or passes without proving the behavior it exists to check. Optional extras are tracked present and absent, and parity tests must run against an explicitly provided immediate base release.
