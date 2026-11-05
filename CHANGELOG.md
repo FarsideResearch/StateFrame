@@ -15,6 +15,7 @@
 - Fixed: A test selector refused before dispatch now returns its refusal to the model and lets the run continue, instead of stopping with CONTINUATION_BLOCKED.
 
 - StateFrame no longer probes a local database port for namespace evidence.
+- Removed internal benchmarking scripts from the package.
 
 ## 0.4.39 (2026-11-10)
 
