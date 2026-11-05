@@ -59,7 +59,7 @@ def live_child():
 def test_zombie_pid_is_gone(monkeypatch, tmp_path, live_child, identity_check):
     _plant_proc_state(monkeypatch, tmp_path, live_child.pid, "Z")
 
-    with pytest.raises(ProcessLookupError, match=f"process {live_child.pid} is no longer running"):
+    with pytest.raises(ProcessLookupError, match=f"process {live_child.pid} is no longer running") as error:
         if identity_check == "record":
             # The launch window would fail for a live, mismatched process. Zombie state wins.
             process_signals.record_identity(
@@ -69,6 +69,7 @@ def test_zombie_pid_is_gone(monkeypatch, tmp_path, live_child, identity_check):
             )
         else:
             process_signals._process_identity(live_child.pid)
+    assert str(error.value) == f"process {live_child.pid} is no longer running"
 
 
 @pytest.mark.parametrize("identity_check", ["record", "signal"])
@@ -77,9 +78,10 @@ def test_live_pid_with_different_identity_remains_mismatch(
     _plant_proc_state(monkeypatch, tmp_path, live_child.pid, "S")
 
     if identity_check == "record":
-        with pytest.raises(RuntimeError, match="does not match its launch identity"):
+        with pytest.raises(RuntimeError, match="does not match its launch identity") as error:
             process_signals.record_identity(
                 live_child.pid, launched_after=0, command_fragment="not-the-child-command")
+        expected_fragment = "does not match its launch identity"
     else:
         identity = process_signals._process_identity(live_child.pid)
         different_identity = replace(identity, kernel_identity="linux:old-boot:1")
@@ -99,8 +101,10 @@ def test_live_pid_with_different_identity_remains_mismatch(
         with monkeypatch.context() as patch:
             patch.setattr(process_signals.os, "kill", refuse_signal)
             patch.setattr(process_signals.os, "killpg", refuse_group_signal)
-            with pytest.raises(RuntimeError, match="no longer matches its recorded identity"):
+            with pytest.raises(RuntimeError, match="no longer matches its recorded identity") as error:
                 process_signals.signal_verified(live_child.pid, different_identity, signal.SIGTERM)
+        expected_fragment = "no longer matches its recorded identity"
+    assert expected_fragment in str(error.value)
 
 
 def test_live_pid_with_same_identity_passes(monkeypatch, tmp_path, live_child):
@@ -141,8 +145,9 @@ def test_linux_binding_refuses_without_pidfd(monkeypatch, live_child):
         raise PermissionError("pidfd denied by test")
 
     monkeypatch.setattr(process_signals.os, "pidfd_open", denied)
-    with pytest.raises(PermissionError, match="pidfd denied by test"):
+    with pytest.raises(PermissionError, match="pidfd denied by test") as error:
         process_signals.retain_signal_binding(identity)
+    assert str(error.value) == "pidfd denied by test"
 
 
 @pytest.mark.skipif(sys.platform != "linux", reason="Linux exiting-process cmdline evidence")
@@ -156,15 +161,17 @@ def test_exiting_empty_cmdline_is_gone_before_launch_identity_mismatch(
         ["ps"], 0, stdout=f"{started} python -c import time; time.sleep(30)\n", stderr="")
     monkeypatch.setattr(process_signals.subprocess, "run", lambda *_args, **_kwargs: result)
 
-    with pytest.raises(ProcessLookupError, match=f"process {live_child.pid} is no longer running"):
+    with pytest.raises(ProcessLookupError, match=f"process {live_child.pid} is no longer running") as error:
         process_signals.record_identity(
             live_child.pid, launched_after=launched_at - 1, command_fragment="time.sleep(30)")
+    assert str(error.value) == f"process {live_child.pid} is no longer running"
 
 
 def test_nonempty_cmdline_mismatch_remains_a_runtime_error(
         monkeypatch, tmp_path, live_child):
     _plant_proc_state(monkeypatch, tmp_path, live_child.pid, "R")
 
-    with pytest.raises(RuntimeError, match="does not match its launch identity"):
+    with pytest.raises(RuntimeError, match="does not match its launch identity") as error:
         process_signals.record_identity(
             live_child.pid, launched_after=0, command_fragment="not-the-child-command")
+    assert "does not match its launch identity" in str(error.value)

@@ -7,6 +7,7 @@
 ## 0.4.16 (2026-11-05)
 
 - Tests: the owner-pipe forked-holder test binds the supervisor identity before the owner closes its lifetime pipe, removing a Linux race.
+- Tests: must-run mode now requires the group-alive Linux supervisor, owner-pipe and liveness tests to execute, so a bwrap probe skip fails the gate.
 
 ## 0.4.15 (2026-11-05)
 
