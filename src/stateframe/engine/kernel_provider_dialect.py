@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 import threading
+import time
 import urllib.parse
 from collections.abc import Mapping, MutableMapping
 from dataclasses import dataclass
@@ -165,6 +166,8 @@ def capabilities_for(
     endpoint: str,
     key: str,
     *,
+    deadline: float | None = None,
+    require_slots: bool = True,
     cache: MutableMapping[str, ProviderCapabilities] | None = None,
     environ: Mapping[str, str] | None = None,
 ) -> ProviderCapabilities:
@@ -177,20 +180,42 @@ def capabilities_for(
     if not origin:
         return ProviderCapabilities()
     selected_cache = RUN_CAPABILITY_CACHE if cache is None else cache
+    if origin in selected_cache:
+        return selected_cache[origin]
     with _ORIGIN_LOCKS_GUARD:
         origin_lock = _ORIGIN_LOCKS.setdefault(origin, threading.Lock())
-    with origin_lock:
+    if deadline is None:
+        origin_lock.acquire()
+    else:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0 or not origin_lock.acquire(timeout=remaining):
+            raise TimeoutError("tokenizer request deadline expired")
+    try:
         if origin in selected_cache:
             return selected_cache[origin]
 
         source = os.environ if environ is None else environ
         override = str(source.get(PROVIDER_OVERRIDE_ENV, "")).strip().casefold() == LLAMA_CPP
-        props = bounded_json_probe(origin, key, "/props")
+
+        def probe(path: str) -> tuple[tuple[int, object] | None, bool]:
+            if deadline is None:
+                return bounded_json_probe(origin, key, path), False
+            if deadline <= time.monotonic():
+                return None, True
+            result = bounded_json_probe(origin, key, path, deadline=deadline)
+            return result, result is None and time.monotonic() >= deadline
+
+        props, props_cut_short = probe("/props")
         props_status = props[0] if props is not None else None
         props_is_llama = props is not None and props[0] == 200 and _llama_props(props[1])
 
+        slots_probe_skipped = not require_slots and (override or props_is_llama)
+        if slots_probe_skipped:
+            slots_result, slots_cut_short = None, False
+        else:
+            slots_result, slots_cut_short = probe("/slots")
         slots, slot_ids, slots_status = _slots_proof(
-            bounded_json_probe(origin, key, "/slots"),
+            slots_result,
             require_llama_shape=not (override or props_is_llama),
         )
 
@@ -232,8 +257,11 @@ def capabilities_for(
             props_status=props_status,
             slots_status=slots_status,
         )
-        selected_cache[origin] = result
+        if not (props_cut_short or slots_cut_short or slots_probe_skipped):
+            selected_cache[origin] = result
         return result
+    finally:
+        origin_lock.release()
 
 
 def require_feature(

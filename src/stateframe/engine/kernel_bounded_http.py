@@ -308,12 +308,17 @@ def _provider_probe_json_response(origin: tuple[str, str, int | None], path: str
 
 
 def bounded_json_probe(endpoint: str, key: str, path: str, *,
-                       timeout: float = 2.0) -> tuple[int, object] | None:
+                       timeout: float = 2.0,
+                       deadline: float | None = None) -> tuple[int, object] | None:
     """Probe the request origin in the existing killable child with a hard deadline."""
     origin = _provider_probe_origin(endpoint)
     if origin is None or path not in {"/props", "/slots"}:
         return None
     stop_at = time.monotonic() + timeout
+    if deadline is not None:
+        stop_at = min(stop_at, deadline)
+    if stop_at <= time.monotonic():
+        return None
     try:
         process = subprocess.Popen(
             [sys.executable, "-I", "-B", str(Path(__file__).resolve()), "--probe-child"],

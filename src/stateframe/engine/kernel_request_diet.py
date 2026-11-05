@@ -272,10 +272,16 @@ def _http_tokenize(content: str, url: str, *, deadline: float | None = None,
         from kernel_provider_dialect import capabilities_for, require_feature
     except ImportError:
         from .kernel_provider_dialect import capabilities_for, require_feature
+    if deadline is not None and time.monotonic() >= deadline:
+        raise TimeoutError("tokenizer request deadline expired")
     tokenizer_origin = _url_origin(url)
     generation_origin = _url_origin(generation_endpoint)
     probe_key = auth_key if tokenizer_origin is not None and tokenizer_origin == generation_origin else ""
-    capabilities = capabilities_for(url, probe_key or "")
+    capabilities = capabilities_for(
+        url, probe_key or "", deadline=deadline, require_slots=False,
+    )
+    if deadline is not None and time.monotonic() >= deadline:
+        raise TimeoutError("tokenizer request deadline expired")
     require_feature(capabilities, "request tokenization")
 
     payload = json.dumps({
