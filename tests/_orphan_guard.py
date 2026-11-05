@@ -36,6 +36,10 @@ class OrphanGuardError(RuntimeError):
     """The guard cannot safely establish process ownership or cleanup state."""
 
 
+class StrictSignalUnavailable(OrphanGuardError):
+    """The platform lacks the identity-bound signal API required for cleanup."""
+
+
 class BoundHandle(Protocol):
     pid: int
     identity: object
@@ -95,6 +99,7 @@ class _Adopted:
     tmp_path_use: bool
     checked: bool = False
     outcome: Outcome | None = None
+    pre_end_reported: bool = False  # reporting the missing end never consumes the candidate
 
 
 @dataclass
@@ -355,10 +360,12 @@ class _MacAuditTokenHandle:
         try:
             libproc = ctypes.CDLL("/usr/lib/libproc.dylib", use_errno=True)
         except OSError as error:
-            raise OrphanGuardError("strict macOS audit-token API unavailable: libproc load failed") from error
+            raise StrictSignalUnavailable(
+                "strict macOS audit-token API unavailable: libproc load failed") from error
         proc_signal = getattr(libproc, "proc_signal_with_audittoken", None)
         if proc_signal is None:
-            raise OrphanGuardError("strict macOS audit-token API unavailable: signal symbol missing")
+            raise StrictSignalUnavailable(
+                "strict macOS audit-token API unavailable: signal symbol missing")
         audit_token = (ctypes.c_uint32 * 8)(*self._identity.audit_token)
         proc_signal.argtypes = [ctypes.c_void_p, ctypes.c_int]
         result = proc_signal(ctypes.byref(audit_token), signum)
@@ -366,7 +373,8 @@ class _MacAuditTokenHandle:
             raise ProcessLookupError(f"process {self.pid} exited before audit-token signal")
         if result != 0:
             if result in (errno.ENOSYS, getattr(errno, "ENOTSUP", errno.ENOSYS)):
-                raise OrphanGuardError(f"strict macOS audit-token API unavailable: errno {result}")
+                raise StrictSignalUnavailable(
+                    f"strict macOS audit-token API unavailable: errno {result}")
             raise OSError(result, "strict audit-token signal failed", self.pid)
 
     def wait_exit(self, timeout: float) -> bool:
@@ -505,11 +513,27 @@ class OrphanGuard:
                         lambda scope=scope, launch=launch: self._check_launch(
                             scope, launch, deadline))
             for adopted in scope.adopted:
-                if not adopted.checked and scope.ended:
-                    self._check_unit(
-                        scope, adopted,
-                        lambda scope=scope, adopted=adopted: self._check_adopted(
-                            scope, adopted, deadline))
+                if adopted.checked:
+                    continue
+                if not scope.ended:
+                    if not adopted.pre_end_reported:
+                        missing = _missing_adoption_facts(scope, adopted)
+                        if "owning scope end is not observed" not in missing:
+                            missing.append("owning scope end is not observed")
+                        outcome = Outcome(
+                            "cleanup unverified", adopted.pid,
+                            "adopted candidate cleanup unverified: " + "; ".join(missing))
+                        self._outcomes.append(outcome)
+                        adopted.outcome = outcome
+                        adopted.pre_end_reported = True
+                    continue
+                if not scope.end_observed and adopted.pre_end_reported:
+                    adopted.checked = True
+                    continue
+                self._check_unit(
+                    scope, adopted,
+                    lambda scope=scope, adopted=adopted: self._check_adopted(
+                        scope, adopted, deadline))
         failed = any(outcome.kind != "confirmed exit" for outcome in self._outcomes)
         unit_outcomes = tuple(
             unit.outcome
@@ -585,21 +609,30 @@ class OrphanGuard:
 
     def _cleanup_live(self, pid: int, handle: BoundHandle, identity: object,
                       deadline: float, leak_detail: str) -> None:
-        # The caller already proved this registered candidate current and alive.
-        # Cleanup attempts cannot erase that observed leak classification.
-        self._outcomes.append(Outcome("leak", pid, leak_detail))
+        # Keep live-after-scope evidence even when the strict signal API is absent.
         if not self._has_time(deadline):
+            self._outcomes.append(Outcome("leak", pid, leak_detail))
             self._unverified(pid, "check deadline expired before SIGTERM")
             return
         try:
             if not _same_bound_identity(handle, identity):
+                self._outcomes.append(Outcome("leak", pid, leak_detail))
                 self._unverified(pid, "bound identity changed before SIGTERM; process left untouched")
                 return
             handle.send_signal(signal.SIGTERM)
         except Exception as error:
+            if self.platform == "darwin" and _strict_signal_api_unavailable(error):
+                self._unverified(
+                    pid,
+                    "registered process alive after scope end; "
+                    f"{leak_detail}; strict macOS audit-token API unavailable: "
+                    f"{_error_text(error)}")
+                return
+            self._outcomes.append(Outcome("leak", pid, leak_detail))
             probe = _probe(handle, identity)
             self._signal_error(pid, handle, identity, "SIGTERM", error, probe=probe)
             return
+        self._outcomes.append(Outcome("leak", pid, leak_detail))
         if self._wait_confirmed_exit(pid, handle, identity, _TERM_GRACE_SECONDS, deadline):
             return
         if not self._has_time(deadline):
@@ -794,6 +827,15 @@ def _timeout_milliseconds(timeout: float) -> int:
 def _error_text(error: Exception) -> str:
     message = str(error).strip()
     return f"{type(error).__name__}: {message}" if message else type(error).__name__
+
+
+def _strict_signal_api_unavailable(error: Exception) -> bool:
+    if isinstance(error, StrictSignalUnavailable):
+        return True
+    unavailable_errnos = {errno.ENOSYS}
+    if hasattr(errno, "ENOTSUP"):
+        unavailable_errnos.add(errno.ENOTSUP)
+    return isinstance(error, OSError) and error.errno in unavailable_errnos
 
 
 _GUARD_KEY = pytest.StashKey[OrphanGuard]()

@@ -223,16 +223,26 @@ def test_open_scope_adopted_candidate_remains_pending_until_scope_ends(tmp_path)
     try:
         before_scope_end = guard.check()
 
-        assert before_scope_end.outcomes == ()
+        pending = [outcome for outcome in before_scope_end.outcomes if outcome.pid == adopted.pid]
+        assert [outcome.kind for outcome in pending] == ["cleanup unverified"]
+        assert "scope" in pending[0].detail.lower()
+        assert "end" in pending[0].detail.lower()
+        assert before_scope_end.failed
         assert before_scope_end.unit_outcomes == ()
+        assert not adopted.checked
+        assert handle.signals == []
+
+        repeated_check = guard.check()
+        assert [outcome.kind for outcome in repeated_check.outcomes if outcome.pid == adopted.pid] == [
+            "cleanup unverified"]
         assert not adopted.checked
         assert handle.signals == []
 
         scope.end()
         after_scope_end = guard.check()
 
-        assert [outcome.kind for outcome in after_scope_end.outcomes] == [
-            "leak", "confirmed exit"]
+        assert [outcome.kind for outcome in after_scope_end.outcomes if outcome.pid == adopted.pid] == [
+            "cleanup unverified", "leak", "confirmed exit"]
         assert adopted.checked
         assert handle.signals == [signal.SIGTERM]
     finally:
@@ -280,7 +290,11 @@ def test_exited_registered_adoption_owner_does_not_end_scope(tmp_path):
     try:
         before_scope_end = guard.check()
 
-        assert before_scope_end.outcomes == ()
+        adopted_outcomes = [
+            outcome for outcome in before_scope_end.outcomes if outcome.pid == adopted.pid]
+        assert [outcome.kind for outcome in adopted_outcomes] == ["cleanup unverified"]
+        assert "scope" in adopted_outcomes[0].detail.lower()
+        assert "end" in adopted_outcomes[0].detail.lower()
         assert before_scope_end.unit_outcomes == ()
         assert not adopted.checked
         assert handle.alive
@@ -292,7 +306,7 @@ def test_exited_registered_adoption_owner_does_not_end_scope(tmp_path):
         adopted_outcomes = [
             outcome for outcome in after_scope_end.outcomes if outcome.pid == adopted.pid]
         assert [outcome.kind for outcome in adopted_outcomes] == [
-            "leak", "confirmed exit"]
+            "cleanup unverified", "leak", "confirmed exit"]
         assert adopted.checked
         assert handle.signals == [signal.SIGTERM]
     finally:
@@ -505,6 +519,93 @@ def test_macos_bound_handle_confirms_exit_through_registered_child_wait(monkeypa
 
     assert handle.wait_exit(0.25)
     assert process.waits == [0.25]
+
+
+def _macos_launch_with_signal_result(tmp_path, monkeypatch, signal_result):
+    identities: dict[int, orphan_guard._MacProcessIdentity] = {}
+    signal_calls: list[int] = []
+
+    def read_identity(pid: int):
+        return identities.get(pid)
+
+    class _SignalApi:
+        argtypes: object = None
+        restype: object = None
+
+        def __call__(self, _audit_token, signum: int) -> int:
+            signal_calls.append(signum)
+            return signal_result
+
+    class _Libproc:
+        def __init__(self):
+            if signal_result is not None:
+                self.proc_signal_with_audittoken = _SignalApi()
+
+    libproc = _Libproc()
+    monkeypatch.setattr(orphan_guard, "_read_macos_identity", read_identity)
+    monkeypatch.setattr(orphan_guard.ctypes, "CDLL", lambda *args, **kwargs: libproc)
+
+    def handle_factory(process: subprocess.Popen[bytes], *, platform: str):
+        identity = orphan_guard._MacProcessIdentity(
+            pid=process.pid, uid=501, start_sec=100, start_usec=200,
+            pid_version=9, zombie=False)
+        identities[process.pid] = identity
+        return orphan_guard._MacAuditTokenHandle(process.pid, process=process)
+
+    guard = orphan_guard.OrphanGuard(
+        tmp_path, platform="darwin", handle_factory=handle_factory)
+    scope = guard.scope("macos-signal-capability")
+    launch = scope.launch(
+        [sys.executable, "-c", "import time; time.sleep(30)"], cwd=tmp_path,
+        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    scope.end()
+    return guard, launch, signal_calls
+
+
+@pytest.mark.parametrize(
+    ("signal_result", "expected_calls"),
+    [(None, []), (errno.ENOSYS, [signal.SIGTERM])],
+    ids=["symbol-missing", "enosys"],
+)
+def test_macos_missing_strict_signal_api_merges_live_leak_evidence(
+        tmp_path, monkeypatch, signal_result, expected_calls):
+    guard, launch, signal_calls = _macos_launch_with_signal_result(
+        tmp_path, monkeypatch, signal_result)
+    try:
+        report = guard.check()
+
+        outcomes = [outcome for outcome in report.outcomes if outcome.pid == launch.pid]
+        assert [outcome.kind for outcome in outcomes] == ["cleanup unverified"]
+        detail = outcomes[0].detail.lower()
+        assert "registered process alive after scope end" in detail
+        assert "strict" in detail
+        assert "audit-token" in detail
+        assert "api unavailable" in detail
+        assert report.failed
+        assert launch.process.poll() is None
+        assert signal_calls == expected_calls
+    finally:
+        _stop_helper(launch.process)
+        guard.close()
+
+
+def test_macos_available_strict_signal_failure_preserves_leak_and_unverified(
+        tmp_path, monkeypatch):
+    guard, launch, signal_calls = _macos_launch_with_signal_result(
+        tmp_path, monkeypatch, errno.EPERM)
+    try:
+        report = guard.check()
+
+        outcomes = [outcome for outcome in report.outcomes if outcome.pid == launch.pid]
+        assert [outcome.kind for outcome in outcomes] == ["leak", "cleanup unverified"]
+        assert "remained alive" in outcomes[0].detail
+        assert "eperm" in outcomes[1].detail.lower()
+        assert report.failed
+        assert launch.process.poll() is None
+        assert signal_calls == [signal.SIGTERM]
+    finally:
+        _stop_helper(launch.process)
+        guard.close()
 
 
 def test_macos_zombie_status_needs_waitable_child_exit_confirmation(monkeypatch):
