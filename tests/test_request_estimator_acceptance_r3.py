@@ -142,7 +142,6 @@ def test_F8_carried_measurement_cannot_cross_generation_endpoint() -> None:
     assert final == fresh, f"stale carried count={final}, new route count={fresh}"
 
 
-@pytest.mark.xfail(strict=True, reason="fail-today on shipped main: carried RequestMeasurement identity omits auth/generation endpoint (REVIEW3 item 4); flips when that fix lands")
 def test_F9_carried_measurement_identity_includes_auth() -> None:
     """REVIEW3 item 4, “Cache identity”: carried measurements must be bound to auth identity."""
     value = _sized(4096)
