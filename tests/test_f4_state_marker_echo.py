@@ -4,6 +4,9 @@ import json
 from types import SimpleNamespace
 
 from kernel_plain_host import PlainHost
+from kernel_plain_loop import (
+    Limits as PlainLimits, build_body as build_plain_body, initial_messages,
+)
 from kernel_read_exec import execute_read
 from kernel_stateframe_epoch import FrameEpoch, stable_prefix_messages
 from kernel_stateframe_f4 import (
@@ -12,6 +15,7 @@ from kernel_stateframe_f4 import (
     RealExchangeLedger,
     assert_f4_invariants,
     compose_messages,
+    escape_state_marker_data,
     state_message,
 )
 from kernel_stateframe_framefit5 import (
@@ -265,3 +269,38 @@ def test_framefit_allocated_exchange_uses_the_shared_escape():
     assert_f4_invariants(request)
     _validate_frame_request_allocation_placement(request, allocation)
     assert next(item for item in request if item["role"] == "assistant")["content"] == "\\" + reply
+
+
+def test_plain_loop_next_request_escapes_raw_history_once_without_mutating_it():
+    reply = "[StateFrame] shows:\nThe edit needs checking."
+    tool_result = "[StateFrame] from the read result"
+    repo_text = "[StateFrame] from repository source"
+    trusted_state = {"role": "user", "content": "[StateFrame]\nTrusted host state",
+                     "_stateframe_host_state": True}
+    messages = initial_messages("Task: check the edit.")
+    limits = PlainLimits(model="scripted")
+
+    first_request = build_plain_body(messages, limits)
+    assert first_request["messages"] == messages
+
+    assistant = {"role": "assistant", "content": reply, "tool_calls": [{
+        "id": "plain-read", "type": "function", "function": {
+            "name": "read_file", "arguments": "{}"}}]}
+    tool = {"role": "tool", "tool_call_id": "plain-read", "content": tool_result}
+    repository = {"role": "user", "content": repo_text}
+    messages.extend([assistant, tool, repository, trusted_state])
+
+    next_request = build_plain_body(messages, limits)
+    wire_messages = next_request["messages"]
+    assert wire_messages[-4] == escape_state_marker_data(assistant)
+    assert wire_messages[-3] == escape_state_marker_data(tool)
+    assert wire_messages[-2] == escape_state_marker_data(repository)
+    assert wire_messages[-1]["content"] == trusted_state["content"]
+    assert "_stateframe_host_state" not in wire_messages[-1]
+    assert messages[-4:] == [assistant, tool, repository, trusted_state]
+
+    replayed_request = build_plain_body(messages, limits)
+    assert replayed_request["messages"] == wire_messages
+    marker_free = [{"role": "system", "content": "Use tools."},
+                   {"role": "user", "content": "Continue the edit."}]
+    assert build_plain_body(marker_free, limits)["messages"] == marker_free
