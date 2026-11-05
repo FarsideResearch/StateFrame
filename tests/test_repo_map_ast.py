@@ -358,7 +358,7 @@ def test_orientation_journals_the_modes_actually_used(fixture_repo):
                     ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "fixture"]):
         subprocess.run(["git", "-C", str(fixture_repo), *command], check=True, capture_output=True)
     # A private map cache, so a map cached by an earlier run cannot answer for this build.
-    env = {**os.environ, "LEAN_CTX_HOME": str(fixture_repo.parent / "lean-ctx")}
+    env = {**os.environ, "STATEFRAME_HOME": str(fixture_repo.parent / "stateframe-home")}
     result = subprocess.run([sys.executable, "-I", "-c", RECEIPT, str(SRC), str(fixture_repo)],
                             capture_output=True, text=True, timeout=120, check=False, env=env)
     assert result.returncode == 0, result.stderr
@@ -389,7 +389,7 @@ STALE_CACHE = textwrap.dedent('''\
 
 
 def test_map_cached_by_an_older_build_is_not_served(fixture_repo):
-    env = {**os.environ, "LEAN_CTX_HOME": str(fixture_repo.parent / "lean-ctx")}
+    env = {**os.environ, "STATEFRAME_HOME": str(fixture_repo.parent / "stateframe-home")}
     result = subprocess.run([sys.executable, "-I", "-c", STALE_CACHE, str(SRC), str(fixture_repo)],
                             capture_output=True, text=True, timeout=120, check=False, env=env)
     assert result.returncode == 0, result.stderr

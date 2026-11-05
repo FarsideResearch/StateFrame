@@ -4,8 +4,9 @@ Generates per-file function/class/export signatures suitable for injection into
 the model's system prompt prefix (~50-80 tokens per file). Injecting this as a stable
 prefix enables prompt caching on all subsequent orchestrator calls for the same repo.
 
-Caches maps by (repo_url, commit_sha) to a file in LEAN_CTX_HOME/repo_map_cache/.
-Regenerates automatically when commit_sha changes (new commits = new cache key).
+When STATEFRAME_HOME explicitly enables disk caching, maps are
+keyed by repository root, a digest of map-relevant source files, repo_url, and
+commit_sha. No shared cache location is selected by default.
 
 Supports tree-sitter-language-pack (preferred) and tree-sitter-languages (legacy)
 with a plain text fallback when neither is available.
@@ -14,8 +15,8 @@ with a plain text fallback when neither is available.
 import hashlib
 import logging
 import os
+import tempfile
 from pathlib import Path
-from typing import Optional
 
 from .ts_dispatch import outline_source
 
@@ -165,9 +166,10 @@ def _fallback_extract_sigs(source: str, ext: str) -> list[str]:
         if ext == ".py":
             if any(stripped.startswith(k) for k in PY_STARTS):
                 sigs.append(stripped[:_MAX_SIG_CHARS])
-        elif ext in (".ts", ".tsx", ".js", ".jsx"):
-            if any(stripped.startswith(k) for k in TS_STARTS):
-                sigs.append(stripped[:_MAX_SIG_CHARS])
+        elif ext in (".ts", ".tsx", ".js", ".jsx") and any(
+            stripped.startswith(k) for k in TS_STARTS
+        ):
+            sigs.append(stripped[:_MAX_SIG_CHARS])
         if len(sigs) >= _MAX_SIGS_PER_FILE:
             break
     return sigs
@@ -177,7 +179,7 @@ _SCAN_EXTS = (".py", ".ts", ".tsx", ".js", ".jsx")
 _TEXT_SCAN = "text-scan fallback"
 
 
-def _outline_sigs(source: str, rel_path: str) -> tuple[list[str], str, Optional[str]]:
+def _outline_sigs(source: str, rel_path: str) -> tuple[list[str], str, str | None]:
     """Signatures for languages outside py/ts/js from the source outline, the mode it used, and why it degraded.
 
     ``ts_dispatch.outline_source`` parses with tree-sitter when a grammar is installed and falls back to its
@@ -200,7 +202,7 @@ def _outline_sigs(source: str, rel_path: str) -> tuple[list[str], str, Optional[
     return sigs[:_MAX_SIGS_PER_FILE], mode, failure
 
 
-def _file_entry_with_mode(file_path: Path, repo_root: Path) -> tuple[Optional[str], str, Optional[str]]:
+def _file_entry_with_mode(file_path: Path, repo_root: Path) -> tuple[str | None, str, str | None]:
     """Return a bounded entry, the mode that produced it, and the parser-failure reason (None if none).
 
     Python/TS/JS/Vue files keep their original rules exactly (files under 10 bytes and files with no
@@ -223,7 +225,7 @@ def _file_entry_with_mode(file_path: Path, repo_root: Path) -> tuple[Optional[st
     rel_path = str(file_path.relative_to(repo_root))
     sigs: list[str] = []
     mode = _TEXT_SCAN
-    failure: Optional[str] = None
+    failure: str | None = None
 
     if not scanned:
         try:
@@ -258,7 +260,7 @@ def _file_entry_with_mode(file_path: Path, repo_root: Path) -> tuple[Optional[st
     return entry[:_MAX_FILE_ENTRY_CHARS], mode, failure
 
 
-def _file_entry(file_path: Path, repo_root: Path) -> Optional[str]:
+def _file_entry(file_path: Path, repo_root: Path) -> str | None:
     """Generate a compact signature entry for one file. Returns None if skipped."""
     return _file_entry_with_mode(file_path, repo_root)[0]
 
@@ -332,9 +334,13 @@ def _generate_repo_map(workspace_dir: str) -> str:
 
 # ── Cache ─────────────────────────────────────────────────────────────────────
 
-def _get_cache_dir() -> Path:
-    lean_ctx_home = os.getenv("LEAN_CTX_HOME", "/workspace/.lean-ctx")
-    cache_dir = Path(lean_ctx_home) / "repo_map_cache"
+def _get_cache_dir() -> Path | None:
+    cache_home = os.getenv("STATEFRAME_HOME")
+    if not cache_home:
+        return None
+    from kernel_safe_paths import safe_expanduser
+
+    cache_dir = safe_expanduser(Path(cache_home)) / "repo_map_cache"
     try:
         cache_dir.mkdir(parents=True, exist_ok=True)
     except OSError:
@@ -342,22 +348,71 @@ def _get_cache_dir() -> Path:
     return cache_dir
 
 
-# Bump when map content rules change, so maps cached by an older build are not reused.
-_CACHE_FORMAT = "repo-map/2"
+# Bump when map content rules or cache identity change, so unsafe old entries are never reused.
+_CACHE_FORMAT = "repo-map/3"
 
 
-def _make_cache_key(repo_url: str, commit_sha: str) -> str:
-    """Cache key is hash of repo_url + commit_sha. Empty commit_sha → never cache."""
-    if not commit_sha:
+def _cache_snapshot_digest(workspace_dir: str) -> str:
+    """Hash paths and contents of supported, non-excluded files that can affect a map."""
+    from kernel_tree_digest import file_entry, tree_digest, unreadable_entry
+
+    root = Path(workspace_dir)
+    # One framed entry per record (see kernel_tree_digest.tree_digest): the root, then each file as
+    # file / oversized / unreadable, so no variant can be confused with another's payload.
+    entries: list[list[object]] = [["root", str(root.resolve())]]
+
+    for file_path in sorted(root.rglob("*")):
+        if not file_path.is_file():
+            continue
+        try:
+            parts = file_path.relative_to(root).parts
+        except ValueError:
+            continue
+        if any(part in _SKIP_DIRS or part.endswith(".egg-info") for part in parts):
+            continue
+        if file_path.suffix.lower() not in _LANG_MAP:
+            continue
+
+        relative = file_path.relative_to(root).as_posix()
+        try:
+            size = file_path.stat().st_size
+            if size > _MAX_FILE_READ_BYTES:
+                # Oversized files are omitted from the map; size still detects a transition below the cap.
+                entries.append(["oversized", relative, size])
+                continue
+            content = file_path.read_bytes()
+        except OSError:
+            entries.append(unreadable_entry(relative))
+            continue
+        entries.append(file_entry(relative, content))
+
+    return tree_digest("repo-map-cache-snapshot/1", entries)
+
+
+def _make_cache_key(
+    repo_url: str,
+    commit_sha: str,
+    workspace_dir: str | None = None,
+    snapshot_digest: str | None = None,
+) -> str:
+    """Hash repository identity and snapshot. Empty commit_sha → never cache."""
+    if not commit_sha or workspace_dir is None:
         return ""
-    raw = f"{_CACHE_FORMAT}:{repo_url}:{commit_sha}"
-    return hashlib.sha256(raw.encode()).hexdigest()[:20]
+    resolved_root = str(Path(workspace_dir).resolve())
+    snapshot = snapshot_digest or _cache_snapshot_digest(workspace_dir)
+    fields = (_CACHE_FORMAT, repo_url, commit_sha, resolved_root, snapshot)
+    digest = hashlib.sha256()
+    for field in fields:
+        encoded = os.fsencode(field)
+        digest.update(len(encoded).to_bytes(8, "big"))
+        digest.update(encoded)
+    return digest.hexdigest()[:32]
 
 
-def _load_cached_map(cache_key: str) -> Optional[str]:
-    if not cache_key:
+def _load_cached_map(cache_key: str, cache_dir: Path | None = None) -> str | None:
+    if not cache_key or cache_dir is None:
         return None
-    cache_file = _get_cache_dir() / f"{cache_key}.txt"
+    cache_file = cache_dir / f"{cache_key}.txt"
     if not cache_file.exists():
         return None
     try:
@@ -366,21 +421,27 @@ def _load_cached_map(cache_key: str) -> Optional[str]:
         return None
 
 
-def _save_cached_map(cache_key: str, repo_map: str) -> None:
+def _save_cached_map(cache_key: str, repo_map: str, cache_dir: Path | None = None) -> None:
     """Write cache atomically via temp-file + rename to prevent partial reads."""
-    if not cache_key:
+    if not cache_key or cache_dir is None:
         return
-    cache_file = _get_cache_dir() / f"{cache_key}.txt"
-    tmp_file = cache_file.with_suffix(".tmp")
+    cache_file = cache_dir / f"{cache_key}.txt"
+    tmp_file: Path | None = None
     try:
-        tmp_file.write_text(repo_map, encoding="utf-8")
+        # One private temp file per writer: concurrent writers of the same key never share
+        # an open file, so the rename publishes only a fully written map.
+        fd, tmp_name = tempfile.mkstemp(prefix=f".{cache_key}.", suffix=".tmp", dir=cache_dir)
+        tmp_file = Path(tmp_name)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(repo_map)
         tmp_file.replace(cache_file)  # atomic on POSIX; best-effort on Windows
     except OSError as exc:
         logger.warning("repo_map: failed to write cache file %s: %s", cache_file, exc)
-        try:
-            tmp_file.unlink(missing_ok=True)
-        except OSError:
-            pass
+        if tmp_file is not None:
+            try:
+                tmp_file.unlink(missing_ok=True)
+            except OSError:
+                pass
 
 
 # ── Public API ────────────────────────────────────────────────────────────────
@@ -389,28 +450,37 @@ def build_repo_map_with_stats(
     workspace_dir: str,
     repo_url: str = "",
     commit_sha: str = "",
+    *,
+    use_cache: bool = True,
 ) -> tuple[str, dict]:
     """Build the repo map and report the modes actually used (see ``_generate_repo_map_with_stats``).
 
     A cache hit returns ``{"source": "cache"}`` as its stats: the counts belong to the build that wrote it.
+    Caching is skipped when disabled, when commit_sha is empty, or when no explicit cache home is configured.
     Never raises: returns ("", stats) on any failure."""
     if not workspace_dir:
         return "", {"source": "none"}
 
-    cache_key = _make_cache_key(repo_url, commit_sha)
-    cached = _load_cached_map(cache_key)
+    cache_dir = _get_cache_dir() if use_cache and commit_sha else None
+    cache_key = ""
+    if cache_dir is not None:
+        try:
+            cache_key = _make_cache_key(repo_url, commit_sha, workspace_dir=workspace_dir)
+        except (OSError, RuntimeError) as exc:
+            logger.debug("repo_map: cache identity unavailable: %s", type(exc).__name__)
+    cached = _load_cached_map(cache_key, cache_dir)
     if cached:
         logger.debug("repo_map: cache hit (key=%s)", cache_key)
         return cached, {"source": "cache"}
 
     try:
         repo_map, stats = _generate_repo_map_with_stats(workspace_dir)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - repo-map generation remains fail-open at intake.
         logger.warning("repo_map: generation failed: %s", exc)
         return "", {"source": "error", "error": type(exc).__name__}
 
     if repo_map and cache_key:
-        _save_cached_map(cache_key, repo_map)
+        _save_cached_map(cache_key, repo_map, cache_dir)
 
     char_count = len(repo_map)
     approx_tokens = char_count // 4
@@ -425,18 +495,24 @@ def build_repo_map(
     workspace_dir: str,
     repo_url: str = "",
     commit_sha: str = "",
+    *,
+    use_cache: bool = True,
 ) -> str:
     """Build and return a compact text repo map for the workspace.
 
-    Checks cache first (keyed on repo_url + commit_sha). Regenerates if cache
-    misses or commit_sha is empty. Never raises — returns "" on any failure.
+    Uses a root-and-content keyed cache only when explicitly enabled and a
+    STATEFRAME_HOME is configured. Never raises — returns ""
+    on any failure.
     """
-    return build_repo_map_with_stats(workspace_dir, repo_url, commit_sha)[0]
+    return build_repo_map_with_stats(
+        workspace_dir, repo_url, commit_sha, use_cache=use_cache,
+    )[0]
 
 
 def get_current_commit_sha(workspace_dir: str) -> str:
     """Get HEAD commit SHA for cache key computation. Returns '' on any failure."""
     from pathlib import Path
+
     from kernel_git_view import legacy_git_query
     result = legacy_git_query(Path(workspace_dir), ["rev-parse", "HEAD"])
     return result.strip()[:40] if result else ""

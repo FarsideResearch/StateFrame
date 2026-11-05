@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.4.29 (2026-11-05)
+
+- Privacy fix: repo maps can no longer leak between projects. In environments with a writable `/workspace` directory (some containers and devcontainers), two projects at the same git commit could reuse each other's cached repo map (file names and signatures, not contents). The standalone cache is now written only under `STATEFRAME_HOME` and is keyed by the project root and its contents. Default macOS and Linux setups were not affected.
+
 ## 0.4.28 (2026-11-05)
 
 - Warm event gap profiling now pairs dispatch pauses with matching closures and clears interrupted pause state at request submission or restore. This is profiling only and does not change runtime behavior.
