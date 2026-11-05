@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- Tests: an orphan guard fails a test that leaves a registered process alive after its scope ends, or that leaves cleanup unverifiable; it signals only through a retained pidfd or macOS audit token.
+- Tests: an orphan guard fails a test that leaves a registered process alive after its scope ends, or that leaves cleanup unverifiable. Signal enums are accepted by retained pidfd and macOS audit-token handles, macOS identity probes clear stale errno, and guard failures are written to the pytest teardown report.
 
 ## 0.4.26 (2026-11-05)
 

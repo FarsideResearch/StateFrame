@@ -47,6 +47,12 @@ class HandleFactory(Protocol):
     def __call__(self, process: subprocess.Popen[bytes], *, platform: str) -> BoundHandle: ...
 
 
+class _TestReport(Protocol):
+    outcome: str
+    longrepr: object | None
+    sections: list[tuple[str, str]]
+
+
 @dataclass(frozen=True)
 class Outcome:
     kind: OutcomeKind
@@ -193,6 +199,7 @@ def _read_macos_identity(pid: int) -> _MacProcessIdentity | None:
     proc_pidinfo.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_uint64,
                              ctypes.c_void_p, ctypes.c_int]
     info = _BSDInfoWithUnique()
+    ctypes.set_errno(0)
     count = proc_pidinfo(pid, 18, 0, ctypes.byref(info), ctypes.sizeof(info))
     if count == 0:
         error_number = ctypes.get_errno()
@@ -206,6 +213,12 @@ def _read_macos_identity(pid: int) -> _MacProcessIdentity | None:
     return _MacProcessIdentity(
         pid, info.bsd.uid, info.bsd.start_sec, info.bsd.start_usec,
         info.unique.idversion, info.bsd.status == 5)
+
+
+def _positive_signal(signum: int, handle_name: str) -> int:
+    if not isinstance(signum, int) or isinstance(signum, bool) or signum <= 0:
+        raise ValueError(f"{handle_name} process signals must be positive")
+    return int(signum)
 
 
 class _PidfdHandle:
@@ -236,8 +249,7 @@ class _PidfdHandle:
         return not self.wait_exit(0.0)
 
     def send_signal(self, signum: int) -> None:
-        if type(signum) is not int or signum <= 0:
-            raise ValueError("bound process signals must be positive")
+        signum = _positive_signal(signum, "bound")
         if self._fd < 0:
             raise OrphanGuardError("retained Linux pidfd is closed")
         signal.pidfd_send_signal(self._fd, signum)
@@ -280,8 +292,7 @@ class _MacAuditTokenHandle:
         return current is not None and current == self._identity and not current.zombie
 
     def send_signal(self, signum: int) -> None:
-        if type(signum) is not int or signum <= 0:
-            raise ValueError("audit-token process signals must be positive")
+        signum = _positive_signal(signum, "audit-token")
         if self._closed:
             raise OrphanGuardError("retained macOS audit-token identity is closed")
         if not self.is_current():
@@ -338,8 +349,7 @@ class _UnavailableHandle:
         return self._process.poll() is None
 
     def send_signal(self, signum: int) -> None:
-        if type(signum) is not int or signum <= 0:
-            raise ValueError("bound process signals must be positive")
+        _positive_signal(signum, "bound")
         raise OrphanGuardError(f"bound signaling unavailable: {_error_text(self._error)}")
 
     def wait_exit(self, timeout: float) -> bool:
@@ -652,20 +662,10 @@ def _error_text(error: Exception) -> str:
 _GUARD_KEY = pytest.StashKey[OrphanGuard]()
 
 
-@pytest.fixture
-def orphan_guard(tmp_path: Path, request: pytest.FixtureRequest) -> OrphanGuard:
-    guard = OrphanGuard(tmp_path)
-    request.node.stash[_GUARD_KEY] = guard
-    return guard
-
-
-@pytest.hookimpl(hookwrapper=True, tryfirst=True)
-def pytest_runtest_teardown(item: pytest.Item, nextitem: pytest.Item | None):
-    """Inspect registrations after pytest has completed every fixture finalizer."""
-    yield
+def _finish_guard(item: pytest.Item) -> list[str]:
     guard = item.stash.get(_GUARD_KEY, None)
     if guard is None:
-        return
+        return []
     failures: list[str] = []
     try:
         guard._end_open_scopes()
@@ -682,5 +682,32 @@ def pytest_runtest_teardown(item: pytest.Item, nextitem: pytest.Item | None):
         except Exception as error:
             failures.append("guard close failed: " + _error_text(error))
         del item.stash[_GUARD_KEY]
+    return failures
+
+
+def _apply_teardown_failures(report: _TestReport, failures: Sequence[str]) -> None:
+    if not failures:
+        return
+    message = "orphan guard: " + "\n".join(failures)
+    if report.outcome == "failed":
+        report.sections.append(("orphan guard", message))
+        return
+    report.outcome = "failed"
+    report.longrepr = message
+
+
+@pytest.fixture
+def orphan_guard(tmp_path: Path, request: pytest.FixtureRequest) -> OrphanGuard:
+    guard = OrphanGuard(tmp_path)
+    request.node.stash[_GUARD_KEY] = guard
+    return guard
+
+
+@pytest.hookimpl(hookwrapper=True, trylast=True)
+def pytest_runtest_makereport(item: pytest.Item, call: pytest.CallInfo[object]):
+    """Fail the generated teardown report after fixture finalizers and guard cleanup."""
+    failures = _finish_guard(item) if call.when == "teardown" else []
+    outcome = yield
     if failures:
-        pytest.fail("orphan guard: " + "\n".join(failures), pytrace=False)
+        report = outcome.get_result()
+        _apply_teardown_failures(report, failures)
