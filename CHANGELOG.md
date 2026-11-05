@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.3.38 (2026-11-04)
 
 - Tests: the hook-wiring parity checks compare the provider_dialect journal event and the provider_capabilities spec key against whatever baseline release they pick, so they pass on a released tip as well as on a branch. Test-only; no runtime change.
 
