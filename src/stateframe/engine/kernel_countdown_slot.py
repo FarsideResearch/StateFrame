@@ -10,8 +10,13 @@ from collections.abc import Mapping
 CANONICAL_TIME_SLOT = "99999.9 (about 999+ minutes left, ~999+ turns at your pace)"
 # Live numeric renderings use ASCII and this exact UTF-8 width.
 TIME_SLOT_WIDTH = len(CANONICAL_TIME_SLOT)
+# The limits line appears at a line start (the plain-text frame, or a hook panel line prefixed
+# "| ") and as the value of the [StateFrame] JSON field "continuation_limits" in a message's
+# content. Anywhere else, e.g. a source window that quotes it, is file content and stays
+# untouched. Callers pass parsed request bodies, never serialized wire bytes.
 _TIME_FIELD = re.compile(
-    r"(?m)^(\[CONTINUATION LIMITS \| stateframe-continuation-limits/1\][^\n]*?"
+    r'(?m)(?:^|(?<="continuation_limits":"))'
+    r"((?:\| )?\[CONTINUATION LIMITS \| stateframe-continuation-limits/1\][^\n]*?"
     r"sandbox_seconds_remaining=)[0-9][^;\n]*(;)"
 )
 _SOURCE_PREFIXES = (
