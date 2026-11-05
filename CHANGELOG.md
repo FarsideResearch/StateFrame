@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- Fixed: a request could resolve a call-coverage index that another thread had not finished binding to its journal; binding now completes before the index is published, and rebinding an already bound index takes no locks. Reading a coverage index's `snapshot` gives one consistent view of all its fields; reading fields one at a time is consistent per field but not across fields.
+- Fixed: a request could resolve a call-coverage index that another thread had not finished binding to its journal; binding now completes before the index is published, and rebinding an already bound index takes no locks. A coverage snapshot gives one immutable, consistent view of every field. The older fields expose live containers that concurrent writers can change while callers hold or iterate them; use a snapshot for a stable or multi-field view.
 
 ## 0.4.32 (2026-11-05)
 

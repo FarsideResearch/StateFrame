@@ -69,9 +69,10 @@ def _journal_guard(journal: object):
 class CoverageIndex:
     """One index per journal owner, shared across detached action contexts.
 
-    Multi-field consistency requires reading ``snapshot``. Legacy per-field
-    reads (sequence, ids, members, chains, frontier, proofs) are individually
-    consistent, but are not jointly consistent.
+    ``snapshot`` returns one immutable, consistent view of all fields. The
+    legacy attributes expose live state: their mutable containers can change
+    while a caller holds or iterates them. Callers needing a stable or
+    multi-field view must use ``snapshot``.
     """
 
     def __init__(self, journal: object, *, _register: bool = True):

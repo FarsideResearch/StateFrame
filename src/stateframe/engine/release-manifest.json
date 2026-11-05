@@ -571,7 +571,7 @@
   "kernel_starter_conflicts.py": "b416e6700abb328f35fce61f2a4f711671703d683f7bb2c69054d3b4418cb0e9",
   "kernel_state_owner_inventory.py": "1df5c50bec4826ddeae7c34e191432dfce49d388e7315408463bdb0b8db52413",
   "kernel_stateframe_action_ledger.py": "bd6b9f6631121df743274bdb313a56b7f109b9798c44493ec8ac0603e7ff4bbf",
-  "kernel_stateframe_call_coverage.py": "12461a37f4a0049ee090facfeb5e5739cb6136e01c6c270a5be7822dc39cd696",
+  "kernel_stateframe_call_coverage.py": "d92e5e722ff42b783df3097c8ec65830c33cd99484cff758ffaf3a5cb3387cf6",
   "kernel_stateframe_capacity.py": "c71f7b0351033a79458f6a13655885b580aa6501c60c6722863e21cdede07954",
   "kernel_stateframe_dedup.py": "0b68051bd441f021db2f5f249c4911e98417c5037c81dc600231a63deb890200",
   "kernel_stateframe_envelope.py": "51f6369438a809b544bf6e5b9b554115d47a8e3a2a03a45d0dc5a1ad9364bac1",
