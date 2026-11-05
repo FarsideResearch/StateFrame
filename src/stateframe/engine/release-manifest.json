@@ -176,7 +176,7 @@
   "kernel_control_plane_receipts.py": "debdb4b06e03e13d49d29c816d6fa689caa03305674a879e8302e4fe2828760b",
   "kernel_convergence_observer.py": "c35cd02a9647ab9c3c8a4d2ce3f9c455177cac50f7b28f6bf07ab38a5dd9b4cf",
   "kernel_coordinated_change_ledger.py": "a1a817bb293a00d375cab9ee95ec9a1fa223c6785e19d891f3bc3332a238da39",
-  "kernel_countdown_slot.py": "fa85a01399c898f0eac452603278a8b78087215e4e492a2884be326a117bdcb0",
+  "kernel_countdown_slot.py": "2b2848913648e3603f75f364471862ae9954d15bf8726777839167626776059d",
   "kernel_counterexample_visibility.py": "0ed5dcd80283ac68ff9d19680e0bf647a4d110b7b468c54cb944cb92e9ff98de",
   "kernel_coverage_reminders.py": "d1a89b0934ebdad0bdc097cc79fbcf0ab0a66028e4157331478e1c6aacefbd13",
   "kernel_crosssession.py": "0b91310c1d862e02d4a74f53fd09eade0f64e9d48b3a47cac8c4917e941c0ddd",

@@ -170,12 +170,32 @@ def test_structural_host_environment_identity_never_reaches_model(
     assert _structural_wire_ids(first) == _structural_wire_ids(second)
     def canonical(body: bytes) -> object:
         return kernel_countdown_slot.canonical_countdown(json.loads(body))
-    assert tuple(map(canonical, first)) == tuple(map(canonical, second))
+    canonical_first = tuple(map(canonical, first))
+    canonical_second = tuple(map(canonical, second))
+    assert canonical_first == canonical_second
+
+    def countdown_slots(body: object) -> list[str]:
+        return re.findall(
+            r"sandbox_seconds_remaining=([^;]+);",
+            json.dumps(body, sort_keys=True, ensure_ascii=False),
+        )
+
+    for capture_name, capture in (
+        ("environment-a", canonical_first),
+        ("environment-b", canonical_second),
+        ("environment-planted", tuple(map(canonical, planted))),
+    ):
+        for body in capture:
+            assert all(
+                slot == kernel_countdown_slot.CANONICAL_TIME_SLOT
+                for slot in countdown_slots(body)
+            ), f"{capture_name} request retained a live countdown slot"
 
     assert planted_revision == second_revision
     assert len(planted) == len(first)
     _structural_wire_ids(planted)
-    assert tuple(map(canonical, planted)) != tuple(map(canonical, first)), (
+    canonical_planted = tuple(map(canonical, planted))
+    assert canonical_planted != canonical_first, (
         "planted environment leak did not change provider requests")
 
 

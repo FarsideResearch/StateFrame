@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from types import SimpleNamespace
@@ -11,6 +12,8 @@ import pytest
 import kernel_callsite_census as census
 import kernel_countdown_slot as countdown
 import kernel_request_source_window as source_window
+import kernel_stateframe_envelope as stateframe_envelope
+import kernel_stateframe_runtime as stateframe_runtime
 import kernel_wire_stability as wire_stability
 from kernel_context import token_estimate
 from kernel_read_fixes import ContinuationLimits, ResponseBudget
@@ -91,6 +94,236 @@ def test_canonical_projection_leaves_non_numeric_limits_unchanged() -> None:
         "sandbox_seconds_remaining=pending; next_action_admission=allowed"
     )
     assert countdown.canonical_countdown(line) is line
+
+
+def _limits_and_embedded_stateframes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> tuple[str, str, str, str]:
+    budget = ResponseBudget(limit=10, mode="response", responses_used=1)
+    budget._time_left_clock_start = 0.0
+    budget._time_left_decisions_at_start = 0
+    seconds_remaining = 60.0
+    budget._sandbox_seconds_remaining = lambda now=None: seconds_remaining
+
+    limits: list[str] = []
+    frames: list[str] = []
+    for now, seconds in ((60.0, 60.0), (40.0, 120.0)):
+        seconds_remaining = seconds
+        monkeypatch.setattr(countdown.time, "monotonic", lambda now=now: now)
+        rendered_limits = budget.render_continuation_limits()
+        payload = {
+            "schema": "stateframe-f4/1",
+            "state": {
+                "framefit5": {
+                    "mode": "FRAME_ONLY",
+                    "owner_protocol": {
+                        "schema": "stateframe-framefit5-owner/1",
+                        "route": "ACTION",
+                        "admitted_actions": ["read"],
+                        "menu_source": "request_action_contract",
+                        "continuation_limits": rendered_limits,
+                    },
+                },
+            },
+        }
+        limits.append(rendered_limits)
+        frames.append(stateframe_envelope.serialize_stateframe_payload(payload))
+
+    return limits[0], limits[1], frames[0], frames[1]
+
+
+def test_embedded_stateframe_countdown_canonicalizes_only_the_time_slot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    first_limits, second_limits, first_frame, second_frame = (
+        _limits_and_embedded_stateframes(monkeypatch)
+    )
+    first_slot = first_limits.split("sandbox_seconds_remaining=", 1)[1].split(";", 1)[0]
+    second_slot = second_limits.split("sandbox_seconds_remaining=", 1)[1].split(";", 1)[0]
+    assert first_slot == "00060.0 (about 0001 minutes left, ~0001 turns at your pace)"
+    assert second_slot == "00120.0 (about 0002 minutes left, ~0003 turns at your pace)"
+    assert first_limits.replace(first_slot, second_slot, 1) == second_limits
+    assert first_frame.replace(first_limits, second_limits, 1) == second_frame
+
+    expected_frame = first_frame.replace(
+        first_limits,
+        first_limits.replace(first_slot, countdown.CANONICAL_TIME_SLOT, 1),
+        1,
+    )
+    first_request = {"messages": [{"role": "user", "content": first_frame}], "tools": []}
+    second_request = {"messages": [{"role": "user", "content": second_frame}], "tools": []}
+    assert countdown.canonical_time_text(first_frame) == expected_frame
+    assert countdown.CANONICAL_TIME_SLOT in countdown.canonical_time_text(first_frame)
+    canonical_payload = json.loads(expected_frame.split("\n", 1)[1])
+    assert (
+        canonical_payload["state"]["framefit5"]["owner_protocol"]["continuation_limits"]
+        == first_limits.replace(first_slot, countdown.CANONICAL_TIME_SLOT, 1)
+    )
+    assert countdown.canonical_time_text(first_frame) == countdown.canonical_time_text(second_frame)
+    assert countdown.canonical_countdown(first_request) == countdown.canonical_countdown(second_request)
+
+
+def test_embedded_stateframe_controls_remain_distinct_and_source_stays_untouched(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    first_limits, second_limits, first_frame, second_frame = (
+        _limits_and_embedded_stateframes(monkeypatch)
+    )
+
+    changed_budget_field = second_limits.replace(
+        "model_decisions_remaining=9;", "model_decisions_remaining=8;", 1,
+    )
+    budget_control = second_frame.replace(second_limits, changed_budget_field, 1)
+    assert countdown.canonical_time_text(first_frame) != countdown.canonical_time_text(budget_control)
+    assert countdown.canonical_countdown(first_frame) != countdown.canonical_countdown(budget_control)
+
+    changed_json_field = {
+        "schema": "stateframe-f4/1",
+        "state": {
+            "framefit5": {
+                "mode": "FRAME_ONLY",
+                "owner_protocol": {
+                    "schema": "stateframe-framefit5-owner/1",
+                    "route": "EDIT",
+                    "admitted_actions": ["read"],
+                    "menu_source": "request_action_contract",
+                    "continuation_limits": second_limits,
+                },
+            },
+        },
+    }
+    other_field_frame = stateframe_envelope.serialize_stateframe_payload(changed_json_field)
+    assert countdown.canonical_time_text(first_frame) != countdown.canonical_time_text(other_field_frame)
+    assert countdown.canonical_countdown(first_frame) != countdown.canonical_countdown(other_field_frame)
+
+    source_window_text = f"[Current source: pkg/quoted_limits.py]\n{first_limits}"
+    source_bytes = source_window_text.encode("utf-8")
+    assert countdown.canonical_time_text(source_window_text).encode("utf-8") == source_bytes
+    assert countdown.canonical_countdown(source_window_text).encode("utf-8") == source_bytes
+
+
+def test_embedded_countdown_pair_exposes_old_line_start_regex_bug(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, _, first_frame, second_frame = _limits_and_embedded_stateframes(monkeypatch)
+    old_time_field = re.compile(
+        r"(?m)^(\[CONTINUATION LIMITS \| stateframe-continuation-limits/1\][^\n]*?"
+        r"sandbox_seconds_remaining=)[0-9][^;\n]*(;)"
+    )
+    monkeypatch.setattr(countdown, "_TIME_FIELD", old_time_field)
+    assert countdown.canonical_time_text(first_frame) == first_frame
+    assert countdown.canonical_time_text(second_frame) == second_frame
+    assert countdown.canonical_countdown(first_frame) != countdown.canonical_countdown(second_frame)
+
+
+def test_real_stateframe_framefit5_countdown_and_standalone_limits_are_canonicalized() -> None:
+    budget = ResponseBudget(limit=10)
+    budget._sandbox_seconds_remaining = lambda now=None: 2411.8
+    limits = budget.render_continuation_limits()
+    frame = stateframe_runtime._model_frame_facts({
+        "framefit5": {
+            "owner_protocol": {
+                "schema": "stateframe-framefit5-owner/1",
+                "continuation_limits": limits,
+            },
+        },
+    })
+    request_text = frame + "\n" + limits
+
+    live_slots = re.findall(r"sandbox_seconds_remaining=([^;\n]+);", request_text)
+    assert len(live_slots) == 2
+    assert all(slot.startswith("02411.8 ") for slot in live_slots)
+    projected = countdown.canonical_countdown(request_text)
+    assert isinstance(projected, str)
+    projected_slots = re.findall(r"sandbox_seconds_remaining=([^;\n]+);", projected)
+    assert projected_slots == [countdown.CANONICAL_TIME_SLOT] * len(live_slots)
+
+
+def test_hook_panel_prefix_normalizes_only_the_exact_pipe_space_form() -> None:
+    budget = ResponseBudget(limit=10)
+    budget._sandbox_seconds_remaining = lambda now=None: 2411.8
+    limits = budget.render_continuation_limits()
+    live_slot = limits.split("sandbox_seconds_remaining=", 1)[1].split(";", 1)[0]
+
+    normalized_panel_line = countdown.canonical_countdown(f"| {limits}")
+    assert isinstance(normalized_panel_line, str)
+    assert re.findall(
+        r"sandbox_seconds_remaining=([^;\n]+);", normalized_panel_line,
+    ) == [countdown.CANONICAL_TIME_SLOT]
+    assert live_slot not in normalized_panel_line
+    assert normalized_panel_line == "| " + limits.replace(live_slot, countdown.CANONICAL_TIME_SLOT)
+    for prefix in ("|| ", "x | "):
+        panel_line = prefix + limits
+        assert countdown.canonical_countdown(panel_line) == panel_line
+
+
+def test_embedded_countdown_token_cache_uses_canonical_projection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def render(seconds: float) -> tuple[str, str]:
+        budget = ResponseBudget(limit=10)
+        budget._sandbox_seconds_remaining = lambda now=None: seconds
+        limits = budget.render_continuation_limits()
+        frame = stateframe_runtime._model_frame_facts({
+            "framefit5": {
+                "owner_protocol": {
+                    "schema": "stateframe-framefit5-owner/1",
+                    "continuation_limits": limits,
+                },
+            },
+        })
+        return limits, frame
+
+    first_limits, first_frame = render(2411.8)
+    second_limits, second_frame = render(2300.0)
+    first_slot = first_limits.split("sandbox_seconds_remaining=", 1)[1].split(";", 1)[0]
+    second_slot = second_limits.split("sandbox_seconds_remaining=", 1)[1].split(";", 1)[0]
+    assert first_limits.replace(first_slot, second_slot, 1) == second_limits
+    assert first_frame.replace(first_limits, second_limits, 1) == second_frame
+
+    def body(frame: str) -> dict[str, object]:
+        return {"messages": [{"role": "user", "content": frame}], "tools": []}
+
+    first_body = body(first_frame)
+    second_body = body(second_frame)
+    changed_field_limits = second_limits.replace(
+        "model_decisions_remaining=10;", "model_decisions_remaining=9;", 1,
+    )
+    assert changed_field_limits != second_limits
+    changed_field_frame = second_frame.replace(second_limits, changed_field_limits, 1)
+    changed_field_body = body(changed_field_frame)
+    assert first_body != second_body
+    assert second_body != changed_field_body
+
+    seen: list[str] = []
+
+    def tokenizer(content: str) -> list[int]:
+        seen.append(content)
+        return [1] * len(content)
+
+    meter = RequestTokenMeter(tokenizer=tokenizer)
+    assert meter.measure(first_body)[1] == "tokenize"
+    assert meter.measure(second_body)[1] == "tokenize"
+    assert len(seen) == 1
+    assert meter.measure(changed_field_body)[1] == "tokenize"
+    assert len(seen) == 2
+
+    old_time_field = re.compile(
+        r"(?m)^(\[CONTINUATION LIMITS \| stateframe-continuation-limits/1\][^\n]*?"
+        r"sandbox_seconds_remaining=)[0-9][^;\n]*(;)"
+    )
+    monkeypatch.setattr(countdown, "_TIME_FIELD", old_time_field)
+    old_seen: list[str] = []
+
+    def old_tokenizer(content: str) -> list[int]:
+        old_seen.append(content)
+        return [1] * len(content)
+
+    old_meter = RequestTokenMeter(tokenizer=old_tokenizer)
+    assert old_meter.measure(first_body)[1] == "tokenize"
+    assert old_meter.measure(second_body)[1] == "tokenize"
+    assert len(old_seen) == 2
+    assert old_seen[0] != old_seen[1]
 
 
 @pytest.mark.parametrize("ledger_type", [ResponseBudget, ContinuationLimits])
