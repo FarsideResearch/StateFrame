@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.4.16 (2026-11-05)
 
 - Tests: the owner-pipe forked-holder test binds the supervisor identity before the owner closes its lifetime pipe, removing a Linux race.
 
