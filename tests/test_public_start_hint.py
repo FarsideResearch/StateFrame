@@ -5,7 +5,6 @@ from types import SimpleNamespace
 import json
 import os
 import shutil
-import subprocess
 import sys
 
 import pytest
@@ -14,6 +13,7 @@ from stateframe.task_row import TaskRowError, _public_hint, build_row
 from stateframe.workcopy import create
 from acceptance._support import assert_tree_imports, tree_python
 from engine_run import run_monitored
+from tools.immediate_baseline import baseline_checkout  # noqa: F401  (pytest fixture)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -192,48 +192,71 @@ def test_tests_only_repo_can_submit_declared_output(tmp_path, protection):
 
 
 @pytest.mark.host_sandbox
-def test_existing_discount_requests_match_untouched_0_2_8(tmp_path):
-    _assert_discount_requests_match_0_2_8(tmp_path)
-
-
-@pytest.mark.host_sandbox
-def test_0_2_8_parity_ignores_a_powerup_enabled_in_the_inherited_home(tmp_path, monkeypatch):
-    # Planted: the home this process hands to subprocesses has a powerup enabled, as when an earlier test left one in
-    # the session home. The current tree would apply it and 0.2.8 cannot, so each capture must get its own home.
-    # The planted home is private: the real session home is shared by every xdist worker of a gated run.
+def test_discount_request_capture_ignores_an_inherited_powerup(tmp_path, monkeypatch):
+    # 0.2.8 is no longer a valid full-wire snapshot for today's request protocol. Preserve the narrower
+    # harness invariant: current-tree captures must not inherit user powerups from their parent process.
     from stateframe import powerups
-
-    monkeypatch.setenv("STATEFRAME_HOME", str(tmp_path / "polluted-home"))
-    installed = powerups.install(ROOT / "examples/powerups/py-format")
-    powerups.enable(installed.name, mode="on")
-    _assert_discount_requests_match_0_2_8(tmp_path)
-
-
-def _assert_discount_requests_match_0_2_8(tmp_path):
     from tools.compare_no_mcp_requests import capture, mask_wire_ids, write_launcher
 
-    archive = subprocess.run(
-        ["git", "-C", str(ROOT), "archive", "--format=tar", "f848c2e"],
-        capture_output=True, check=True,
-    ).stdout
-    baseline = tmp_path / "baseline"
-    baseline.mkdir()
-    subprocess.run(["tar", "-xf", "-", "-C", str(baseline)], input=archive, check=True)
     repo = tmp_path / "repo"
     shutil.copytree(ROOT / "examples/discount_bug", repo)
     launcher = tmp_path / "launcher.py"
     write_launcher(launcher)
     run_dir = tmp_path / "run"
     script = ROOT / "examples/discount_bug.script.json"
-    baseline_python = tree_python(baseline / "src", tmp_path / "baseline-python")
-    assert_tree_imports(baseline_python, baseline / "src", tmp_path)
-    before = capture(baseline, baseline_python, launcher, script, repo, run_dir, stable_tool_head=None, final_cache_layout=None,
-                     source_on_pythonpath=False, test_python=sys.executable)
-    run_dir.rename(tmp_path / "baseline-run")
     current_python = tree_python(ROOT / "src", tmp_path / "current-python")
     assert_tree_imports(current_python, ROOT / "src", tmp_path)
-    # 0.3.13 turned the stable tool head on by default; switched off, request bytes stay those of 0.2.8.
-    after = capture(ROOT, current_python, launcher, script, repo, run_dir, stable_tool_head="off", final_cache_layout="off",
-                    source_on_pythonpath=False, test_python=sys.executable)
-    # Wire IDs changed derivation on purpose (receipt determinism, 11-03); see mask_wire_ids.
-    assert mask_wire_ids(before) == mask_wire_ids(after)
+
+    def capture_current():
+        return capture(ROOT, current_python, launcher, script, repo, run_dir, stable_tool_head="off", final_cache_layout="off",
+                       source_on_pythonpath=False, test_python=sys.executable)
+
+    monkeypatch.setenv("STATEFRAME_HOME", str(tmp_path / "clean-home"))
+    clean = capture_current()
+    run_dir.rename(tmp_path / "clean-run")
+
+    monkeypatch.setenv("STATEFRAME_HOME", str(tmp_path / "polluted-home"))
+    installed = powerups.install(ROOT / "examples/powerups/py-format")
+    powerups.enable(installed.name, mode="on")
+    polluted = capture_current()
+
+    # A deliberately broken capture() that inherits STATEFRAME_HOME changes the current-tree request here.
+    assert mask_wire_ids(clean) == mask_wire_ids(polluted)
+
+
+@pytest.mark.host_sandbox
+@pytest.mark.parametrize("inherit_powerup", (False, True), ids=("clean-home", "inherited-powerup"))
+def test_discount_requests_match_immediate_release(
+        tmp_path, monkeypatch, baseline_checkout, inherit_powerup):
+    from stateframe import powerups
+    from tools.compare_no_mcp_requests import capture, mask_wire_ids, write_launcher
+
+    repo = tmp_path / "repo"
+    shutil.copytree(ROOT / "examples/discount_bug", repo)
+    launcher = tmp_path / "launcher.py"
+    write_launcher(launcher)
+    run_dir = tmp_path / "run"
+    script = ROOT / "examples/discount_bug.script.json"
+    baseline_python = tree_python(baseline_checkout / "src", tmp_path / "baseline-python")
+    assert_tree_imports(baseline_python, baseline_checkout / "src", tmp_path)
+    current_python = tree_python(ROOT / "src", tmp_path / "current-python")
+    assert_tree_imports(current_python, ROOT / "src", tmp_path)
+
+    if inherit_powerup:
+        monkeypatch.setenv("STATEFRAME_HOME", str(tmp_path / "polluted-home"))
+        installed = powerups.install(ROOT / "examples/powerups/py-format")
+        powerups.enable(installed.name, mode="on")
+    else:
+        monkeypatch.setenv("STATEFRAME_HOME", str(tmp_path / "clean-home"))
+
+    baseline = capture(
+        baseline_checkout, baseline_python, launcher, script, repo, run_dir,
+        stable_tool_head="off", final_cache_layout="off", source_on_pythonpath=False, test_python=sys.executable,
+    )
+    run_dir.rename(tmp_path / "baseline-run")
+    current = capture(
+        ROOT, current_python, launcher, script, repo, run_dir,
+        stable_tool_head="off", final_cache_layout="off", source_on_pythonpath=False, test_python=sys.executable,
+    )
+
+    assert mask_wire_ids(baseline) == mask_wire_ids(current)

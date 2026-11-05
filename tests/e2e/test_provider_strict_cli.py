@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import os
-import subprocess
 import sys
 from http.server import ThreadingHTTPServer
 from pathlib import Path
@@ -12,6 +11,7 @@ from threading import Thread
 
 import pytest
 
+from engine_run import run_monitored
 from stateframe.scripted_endpoint import Script, make_handler, serve
 
 
@@ -46,7 +46,7 @@ def test_shipped_profile_cli_completes_two_turns_on_strict_openai_mock(
     if reasoning_effort is not None:
         environment["REACT_REASONING_EFFORT"] = reasoning_effort
     try:
-        process = subprocess.run(
+        process = run_monitored(
             [
                 sys.executable, "-m", "stateframe", "run",
                 "--repo", str(repo),
@@ -61,7 +61,8 @@ def test_shipped_profile_cli_completes_two_turns_on_strict_openai_mock(
             env=environment,
             capture_output=True,
             text=True,
-            timeout=300,
+            expected_seconds=240,
+            run_dir=run_dir,
             check=False,
         )
         output = process.stdout + process.stderr
@@ -156,7 +157,7 @@ def test_slots_proof_honors_automatic_pin_when_props_is_missing(tmp_path):
         "PYTHONDONTWRITEBYTECODE": "1",
     })
     try:
-        process = subprocess.run(
+        process = run_monitored(
             [
                 sys.executable, "-m", "stateframe", "run",
                 "--repo", str(repo),
@@ -171,7 +172,8 @@ def test_slots_proof_honors_automatic_pin_when_props_is_missing(tmp_path):
             env=environment,
             capture_output=True,
             text=True,
-            timeout=300,
+            expected_seconds=240,
+            run_dir=run_dir,
             check=False,
         )
         output = process.stdout + process.stderr
@@ -222,7 +224,7 @@ def test_explicit_cli_slot_still_exits_two_without_slot_proof(tmp_path):
         "PYTHONDONTWRITEBYTECODE": "1",
     })
     try:
-        process = subprocess.run(
+        process = run_monitored(
             [
                 sys.executable, "-m", "stateframe", "run",
                 "--repo", str(repo),
@@ -238,7 +240,8 @@ def test_explicit_cli_slot_still_exits_two_without_slot_proof(tmp_path):
             env=environment,
             capture_output=True,
             text=True,
-            timeout=300,
+            expected_seconds=240,
+            run_dir=run_dir,
             check=False,
         )
     finally:
@@ -287,7 +290,7 @@ def test_operator_override_is_visible_when_props_is_unavailable(tmp_path):
         "STATEFRAME_PROVIDER": "llama.cpp",
     })
     try:
-        process = subprocess.run(
+        process = run_monitored(
             [
                 sys.executable, "-m", "stateframe", "run",
                 "--repo", str(repo),
@@ -302,7 +305,8 @@ def test_operator_override_is_visible_when_props_is_unavailable(tmp_path):
             env=environment,
             capture_output=True,
             text=True,
-            timeout=300,
+            expected_seconds=240,
+            run_dir=run_dir,
             check=False,
         )
         output = process.stdout + process.stderr
