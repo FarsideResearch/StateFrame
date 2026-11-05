@@ -173,6 +173,8 @@ The final cache layout, on by default since 0.4.0, raised the cached share after
 - Without `LLAMA_CPP_TOKENIZE_URL`, tokens are counted on the model server. If that server is remote, each count is a network round trip and adds noticeable time per turn. Co-locate a tokenizer (QUICKSTART.md).
 - The engine counts tokens through a `/tokenize` endpoint (llama.cpp servers have one; other servers are untested; set `LLAMA_CPP_TOKENIZE_URL` to use a separate llama.cpp tokenizer). With a server that has none (for example Ollama or hosted APIs) and no separate tokenizer, the engine falls back to a conservative estimate, and a run can then stop before its first request because even the minimum frame looks too big (`ERR:FrameFit5ImpossibleMinimum`).
 - If the tokenizer stops answering mid-run, the engine falls back to an estimate that can undercount, so a request can exceed the server's context slot and be rejected. Keep the tokenizer up for the whole run.
+- The byte-count fallback used when an endpoint offers no exact tokenizer deliberately overestimates prompt size (about 39% on average in our measurements), so hosted runs without exact tokenization fit less content than they could.
+- On those same endpoints, very dense content such as long runs of numbers, base64 data, or dense code can be underestimated, which can push a request past the model's context limit. When that happens the server rejects the request and the run stops as incomplete; it is not retried yet. If your work involves such files, use an endpoint that offers /tokenize, or keep those files out of the model's view.
 
 ## Endpoint locality
 
