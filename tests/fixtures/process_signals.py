@@ -336,9 +336,9 @@ def signal_run_owned(run_dir: Path, popen: subprocess.Popen[object] | EngineProc
         if isinstance(popen, EngineProcess):
             if popen.returncode is not None or popen.process_group_id != popen.pid:
                 raise ProcessLookupError("owned run process is no longer running")
-            # The monitor holds the Popen handle for this exact child. Let it serialize
-            # signal delivery with reaping instead of adding a signal-zero PID probe.
-            popen.send_signal(sig)
+            if _safe_target(popen.pid) != popen.process_group_id:
+                raise RuntimeError("owned process is no longer in its monitored process group")
+            os.kill(popen.pid, sig)
             return
         if not isinstance(popen, subprocess.Popen) or popen.poll() is not None:
             raise ProcessLookupError("owned run process is no longer running")
