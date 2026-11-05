@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.4.18 (2026-11-05)
 
 - Tests: must-run mode now requires the group-alive Linux supervisor, owner-pipe and liveness tests to execute, so a bwrap probe skip fails the gate.
 
