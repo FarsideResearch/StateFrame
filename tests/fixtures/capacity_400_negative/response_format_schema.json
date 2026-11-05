@@ -1,0 +1,9 @@
+{
+  "note": "The words 'maximum context length' describe an invalid response_format schema keyword, not provider context exhaustion. This HTTP 400 must remain a contract error without a capacity retry.",
+  "body": {
+    "error": {
+      "message": "Invalid response_format property: maximum context length is not a valid schema keyword",
+      "type": "invalid_request_error"
+    }
+  }
+}

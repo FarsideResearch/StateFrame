@@ -69,11 +69,19 @@ def validate_allocation_authority(
         raise FrameAllocationReplanNeeded("allocation workspace authorization changed")
     frame_source_snapshot(runtime, plan)
     capacity = allocation.capacity
+    retry_limits = getattr(getattr(runtime, "_active_capture", None),
+                           "_capacity_retry_limits", None)
+    expected_token_ceiling = (
+        min(ENDPOINT_PROMPT_TOKEN_BUDGET, retry_limits.max_prompt_tokens)
+        if retry_limits is not None else ENDPOINT_PROMPT_TOKEN_BUDGET
+    )
     if (
         runtime.frame_ceiling != capacity["frame_ceiling"]
-        or capacity["token_ceiling"] != ENDPOINT_PROMPT_TOKEN_BUDGET
+        or capacity["token_ceiling"] != expected_token_ceiling
         or capacity.get("host_byte_ceiling", HARD_MAX_REQUEST_BYTES)
         != HARD_MAX_REQUEST_BYTES
+        or (retry_limits is not None
+            and capacity["byte_ceiling"] > retry_limits.max_request_bytes)
     ):
         raise FrameAllocationReplanNeeded("allocation capacity authority changed")
     if tools is not None and identity(tools) != capacity["tool_schema_digest"]:

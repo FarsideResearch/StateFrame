@@ -1,0 +1,11 @@
+{
+  "source": "https://github.com/NousResearch/hermes-agent/issues/65631 (DeepInfra live gateway error_message JSON, July 2026; recorded in an HTTP 200 SSE error chunk, so use as an HTTP 400 body here is a transport inference)",
+  "body": {
+    "error": {
+      "message": "This model's maximum context length is 163840 tokens. However, you requested 65536 output tokens and your prompt contains at least 98305 input tokens, for a total of at least 163841 tokens. Please reduce the length of the input prompt or the number of requested output tokens. (parameter=input_tokens, value=98305)",
+      "type": "BadRequestError",
+      "param": "input_tokens",
+      "code": 400
+    }
+  }
+}

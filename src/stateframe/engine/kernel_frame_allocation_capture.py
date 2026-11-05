@@ -818,12 +818,18 @@ def finalize_frame_candidate(
         and active.capacity.get("measurement_identity") != "tokenize"
         else HARD_MAX_REQUEST_BYTES
     )
+    capacity_retry_limits = getattr(capture, "_capacity_retry_limits", None)
+    if capacity_retry_limits is not None:
+        estimated_byte_limit = min(
+            estimated_byte_limit, capacity_retry_limits.max_request_bytes)
     layout_byte_ceiling = None
     token_limit = (
         active.capacity["token_ceiling"]
         if active is not None
         else ENDPOINT_PROMPT_TOKEN_BUDGET
     )
+    if capacity_retry_limits is not None:
+        token_limit = min(token_limit, capacity_retry_limits.max_prompt_tokens)
     existing_counter = getattr(capture, "_frame_candidate_counter", None)
     if isinstance(existing_counter, FrozenRequestCounter):
         # A later body rewrite can trigger a second fit. Keep the first fit's
@@ -849,6 +855,8 @@ def finalize_frame_candidate(
             limit = _lean_request_limits(candidate, FREE_STAGE, exact_tokenizer=True)[0]
         else:
             limit = estimated_byte_limit
+        if capacity_retry_limits is not None:
+            limit = min(limit, capacity_retry_limits.max_request_bytes)
         return min(limit, layout_byte_ceiling) if layout_byte_ceiling is not None else limit
 
     def effective_tokens() -> int:

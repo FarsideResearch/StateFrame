@@ -1,0 +1,10 @@
+{
+  "source": "https://github.com/anthropics/claude-code/issues/57296 (recorded Anthropic HTTP 400 body, 2026; replayed through the OpenAI-compatible local endpoint)",
+  "body": {
+    "type": "error",
+    "error": {
+      "type": "invalid_request_error",
+      "message": "prompt is too long: 209375 tokens > 200000 maximum"
+    }
+  }
+}

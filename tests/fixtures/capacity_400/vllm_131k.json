@@ -1,0 +1,10 @@
+{
+  "source": "same as vllm.json, limit raised to a real vLLM size per release-manager decision 11-05",
+  "body": {
+    "error": {
+      "message": "This model's maximum context length is 131072 tokens. However, you requested 122946 tokens (112946 in the messages, 10000 in the completion). Please reduce the length of the messages or completion.",
+      "type": "BadRequestError",
+      "code": 400
+    }
+  }
+}

@@ -1,0 +1,10 @@
+{
+  "source": "https://github.com/ggml-org/llama.cpp/issues/16104 (recorded non-streaming HTTP 400 body, server commit 4b8560a)",
+  "body": {
+    "error": {
+      "code": 400,
+      "message": "the request exceeds the available context size. try increasing the context size or enable context shift",
+      "type": "invalid_request_error"
+    }
+  }
+}

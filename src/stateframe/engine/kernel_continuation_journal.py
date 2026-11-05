@@ -696,6 +696,7 @@ class ContinuationJournal(AuditJournal):
         run_dir = parent / run_id
         run_dir.mkdir(mode=0o700)
         self._initialize(run_dir / "events.jsonl")
+        self._capacity_context_limits: dict[str, int] = {}
         try:
             self._open(create=True)
             self.run_id, self.task_id = run_id, task_id

@@ -756,6 +756,12 @@ def _ttft_retry_delay_seconds(retry_index: int) -> float:
     ]
 
 
+def _wait_for_transport_retry(delay: float) -> None:
+    """Avoid even a zero-duration sleep for an immediate capacity retry."""
+    if delay > 0:
+        time.sleep(delay)
+
+
 def _legacy_request_timeouts() -> tuple[float, float]:
     """Return the historical socket and wall limits for the surrounding run."""
     raw = os.environ.get('REACT_REQUEST_TIMEOUT_S')
@@ -2048,6 +2054,7 @@ class AuditJournal:
         self.path.parent.mkdir(parents=True, exist_ok=False)
         self._sequence = 0
         self._lock = threading.RLock()
+        self._capacity_context_limits: dict[str, int] = {}
         self._blob_cache: dict[str, int] = {}
         self._closed_action_records: dict[str, dict[str, object]] = {}
         self._frame_journal_index = None
@@ -2292,9 +2299,11 @@ class HarnessTransportError(ConnectionError):
                  http_status: int | None, relay_error: str | None,
                  transport_class: str | None = None,
                  server_error: str | None = None,
-                 attempt_reasons: Sequence[Mapping[str, object]] = ()) -> None:
+                 attempt_reasons: Sequence[Mapping[str, object]] = (),
+                 capacity_detail: str | None = None) -> None:
         status = f" HTTP {http_status}" if http_status is not None else ""
-        super().__init__(f"transport failed after {attempts} attempt(s): {error_type}{status}")
+        detail = f"; {capacity_detail}" if capacity_detail is not None else ""
+        super().__init__(f"transport failed after {attempts} attempt(s): {error_type}{status}{detail}")
         self.attempts = attempts
         self.error_type = error_type
         self.http_status = http_status
@@ -2619,6 +2628,7 @@ class RequestCapture:
             if claimed and active_profile.step is None and type(step) is int:
                 active_profile.step = step
         self._send_generation = 0
+        self._capacity_retry_count = 0
         self.model_router_call_purpose = (
             str(call_purpose) if call_purpose not in (None, "") else None)
         self.model_router_child_purpose = self.model_router_call_purpose
@@ -3205,6 +3215,7 @@ class RequestCapture:
         ttft_retry_budget_deadline: float | None = None
         ttft_retry_deadline: float | None = None
         ttft_retry_deadline_reason: str | None = None
+        capacity_retry_used = self._capacity_retry_count > 0
 
         first_submission_event_id: str | None = None
         certificate = build_run_certificate(
@@ -3216,6 +3227,7 @@ class RequestCapture:
             profile=reasoning_profile(manifest=getattr(self.journal, "manifest", None)),
         )
         frozen_request_id = self.request_id
+        first_wire = wire
         frozen_wire_digest = "sha256:" + hashlib.sha256(wire).hexdigest()
         frozen_request_digest = certificate.request_body_digest
         frozen_contract_digest = (
@@ -3448,7 +3460,7 @@ class RequestCapture:
             if permit is not None:
                 submission_fields["provider_permit"] = permit.mapping()
                 submission_fields["provider_permit_id"] = permit.permit_id
-            if attempt == 0:
+            if attempt == 0 or wire != first_wire:
                 submission_fields.update({"payload": body, "payload_utf8": wire.decode()})
             else:
                 submission_fields.update({
@@ -3878,11 +3890,20 @@ class RequestCapture:
             except Exception as exc:
                 elapsed_ns = time.perf_counter_ns() - started
                 error_type, http_status, relay_error = _transport_metadata(exc)
-                from kernel_bounded_http import transport_class as _classify_transport
+                from kernel_bounded_http import (
+                    capacity_400_reason, transport_class as _classify_transport,
+                )
                 server_error_body = _server_error_from(exc, key)
                 transport_class = _classify_transport(http_status, server_error_body, error_type)
                 matched_reason = _llama_format_failure_reason(
                     http_status, server_error_body)
+                capacity_reason = capacity_400_reason(http_status, server_error_body)
+                if capacity_reason is not None:
+                    matched_reason = capacity_reason
+                    from kernel_capacity_retry import learn_context_limit, reported_context_limit
+                    learn_context_limit(
+                        self.journal, endpoint, str(body.get("model") or ""), key,
+                        reported_context_limit(server_error_body))
                 model_format_failure = matched_reason == LLAMA_FORMAT_FAILURE_REASON
                 if model_format_failure:
                     transport_class = "model_format"
@@ -3980,7 +4001,60 @@ class RequestCapture:
                     None if retry_deadline is None
                     else retry_deadline - time.monotonic()
                 )
-                retry_scheduled = bool(
+                capacity_retry_body: dict[str, object] | None = None
+                capacity_retry_wire: bytes | None = None
+                capacity_retry_limits = None
+                capacity_retry_refit_error: str | None = None
+                if (capacity_reason is not None and not capacity_retry_used
+                        and (transport_attempt_limit is None
+                             or attempt + 1 < transport_attempt_limit)
+                        and not response_already_received
+                        and (remaining_after is None or remaining_after > 0)):
+                    from kernel_capacity_retry import (
+                        reported_context_limit, reseal_capacity_retry, retry_limits,
+                    )
+                    measurement = getattr(self, "_request_measurement", None)
+                    original_body = getattr(self, "_capacity_retry_original_body", None)
+                    prompt_tokens = getattr(measurement, "prompt_tokens", None)
+                    if isinstance(original_body, dict) and type(prompt_tokens) is int:
+                        try:
+                            capacity_retry_limits = retry_limits(
+                                len(wire), prompt_tokens,
+                                reported_context_limit(server_error_body),
+                                measurement.output_tokens,
+                            )
+                            (capacity_retry_body, capacity_retry_wire,
+                             capacity_retry_limits) = reseal_capacity_retry(
+                                self, original_body, endpoint, key, deadline,
+                                capacity_retry_limits,
+                            )
+                        except Exception as refit_error:
+                            # The rejected request remains the terminal transport
+                            # evidence when its protected minimum cannot shrink.
+                            capacity_retry_refit_error = type(refit_error).__name__
+                            detail = getattr(refit_error, "detail", None)
+                            from kernel_request_seal import RequestSealError
+                            self.journal.emit(
+                                "capacity_retry_refit_failed",
+                                producer="kernel_measurement", fact_owner="HOST",
+                                request_id=self.request_id, step=self.step,
+                                error_type=capacity_retry_refit_error,
+                                **({"reason": str(refit_error)[:120]}
+                                   if isinstance(refit_error, RequestSealError) else {}),
+                                **({name: detail[name] for name in (
+                                    "request_bytes", "prompt_tokens", "max_request_bytes",
+                                    "max_prompt_tokens", "protected_request_bytes",
+                                ) if type(detail.get(name)) is int}
+                                   if isinstance(detail, Mapping) else {}),
+                                dispatch=False,
+                            )
+                capacity_retry_scheduled = bool(
+                    capacity_retry_wire is not None
+                    and (deadline is None or time.monotonic() < deadline)
+                )
+                if capacity_retry_scheduled:
+                    delay = 0.0
+                retry_scheduled = capacity_retry_scheduled or bool(
                     transient and has_attempt
                     and not response_already_received
                     and (remaining_after is None or remaining_after > delay)
@@ -4016,6 +4090,10 @@ class RequestCapture:
                     retry_blocked_reason = "model_format_outcome"
                 elif response_already_received:
                     retry_blocked_reason = "response_already_received"
+                elif capacity_reason is not None and capacity_retry_used:
+                    retry_blocked_reason = "capacity_retry_exhausted"
+                elif capacity_reason is not None and capacity_retry_refit_error is not None:
+                    retry_blocked_reason = "capacity_refit_failed:" + capacity_retry_refit_error
                 elif not transient:
                     retry_blocked_reason = (
                         "ambiguous_submission" if submission_state == "unknown"
@@ -4050,10 +4128,12 @@ class RequestCapture:
                     server_error_body=server_error_body,
                     request_bytes=len(wire),
                     outcome=terminal_outcome if not retry_scheduled else None,
-                    retryable=transient, retry_scheduled=retry_scheduled,
+                    retryable=transient or capacity_retry_scheduled,
+                    retry_scheduled=retry_scheduled,
                     retry_blocked_reason=retry_blocked_reason,
                     transport_attempt=attempt + 1, retry_index=attempt,
-                    retry_budget=("ttft" if ttft_retry else "ordinary_transport"),
+                    retry_budget=("capacity" if capacity_retry_scheduled else
+                                  "ttft" if ttft_retry else "ordinary_transport"),
                     ordinary_attempt_count=ordinary_attempt_count,
                     ordinary_attempt_limit=ordinary_attempt_limit,
                     ttft_retry_index=ttft_retry_index,
@@ -4071,6 +4151,34 @@ class RequestCapture:
                     **host_fact_fields)
                 self.transport_errors.append(error)
                 if retry_scheduled:
+                    if capacity_retry_scheduled:
+                        assert capacity_retry_wire is not None
+                        assert capacity_retry_body is not None
+                        assert capacity_retry_limits is not None
+                        after_tokens = self._request_measurement.prompt_tokens
+                        before_output_tokens = measurement.output_tokens
+                        after_output_tokens = self._request_measurement.output_tokens
+                        self.journal.emit(
+                            "capacity_retry", producer="kernel_measurement",
+                            fact_owner="HOST", request_id=self.request_id,
+                            step=self.step, transport_attempt=attempt + 1,
+                            next_transport_attempt=attempt + 2,
+                            reason=capacity_reason, http_status=http_status,
+                            provider_limit_tokens=capacity_retry_limits.provider_limit_tokens,
+                            before_bytes=len(wire), after_bytes=len(capacity_retry_wire),
+                            shrink_bytes=len(wire) - len(capacity_retry_wire),
+                            before_prompt_tokens=prompt_tokens,
+                            after_prompt_tokens=after_tokens,
+                            before_output_tokens=before_output_tokens,
+                            after_output_tokens=after_output_tokens,
+                            shrink_tokens=(prompt_tokens + before_output_tokens
+                                           - after_tokens - after_output_tokens),
+                            target_max_request_bytes=capacity_retry_limits.max_request_bytes,
+                            target_max_prompt_tokens=capacity_retry_limits.max_prompt_tokens,
+                            retry_scheduled=True, dispatch=False,
+                        )
+                        self._capacity_retry_count += 1
+                        capacity_retry_used = True
                     if ttft_retry:
                         ttft_retry_count += 1
                     self.journal.emit(
@@ -4088,7 +4196,8 @@ class RequestCapture:
                         retry_delay_seconds=delay,
                         request_bytes=len(wire),
                         payload_hash="sha256:" + hashlib.sha256(wire).hexdigest(),
-                        retry_budget=("ttft" if ttft_retry else "ordinary_transport"),
+                        retry_budget=("capacity" if capacity_retry_scheduled else
+                                      "ttft" if ttft_retry else "ordinary_transport"),
                         ordinary_attempt_count=ordinary_attempt_count,
                         ordinary_attempt_limit=ordinary_attempt_limit,
                         ttft_retry_index=ttft_retry_index,
@@ -4100,7 +4209,20 @@ class RequestCapture:
                         retry_scheduled=True,
                         dispatch=False,
                     )
-                    time.sleep(delay)
+                    if capacity_retry_scheduled:
+                        _wait_for_transport_retry(delay)
+                    else:
+                        time.sleep(delay)
+                    if capacity_retry_scheduled:
+                        body, wire = capacity_retry_body, capacity_retry_wire
+                        certificate = build_run_certificate(
+                            run_id=str(getattr(self.journal, "run_id", UNKNOWN)),
+                            body=body, wire=wire,
+                            manifest=getattr(self.journal, "manifest", None),
+                            backend_identity=backend_identity,
+                            profile=reasoning_profile(
+                                manifest=getattr(self.journal, "manifest", None)),
+                        )
                     attempt += 1
                     continue
                 if model_format_failure:
@@ -4108,12 +4230,26 @@ class RequestCapture:
                         server_error_body or b"",
                         "llama.cpp returned a model-format failure",
                         transport_attempt_id=sent["event_id"])
+                capacity_detail = None
+                if capacity_reason is not None and (
+                        capacity_retry_refit_error is not None or capacity_retry_used):
+                    from kernel_capacity_retry import reported_context_limit
+                    limit = reported_context_limit(server_error_body)
+                    capacity_detail = (
+                        "the provider rejected the request as too long for its context window"
+                        + (f" (maximum context length is {limit} tokens)"
+                           if limit is not None else "")
+                        + ("; a valid smaller request could not be prepared, so no retry was sent"
+                           if capacity_retry_refit_error is not None else
+                           "; the one capacity retry was also rejected")
+                    )
                 raise _transport_error_class(relay_error)(
                     attempts=attempt + 1, error_type=error_type,
                     http_status=http_status, relay_error=relay_error,
                     transport_class=transport_class,
                     server_error=server_error_body,
-                    attempt_reasons=attempt_reasons) from exc
+                    attempt_reasons=attempt_reasons,
+                    capacity_detail=capacity_detail) from exc
             try:
                 response = json.loads(raw_response)
             except (json.JSONDecodeError, UnicodeDecodeError, TypeError) as exc:
@@ -5225,6 +5361,9 @@ class RequestCapture:
                                   endpoint_host=urllib.parse.urlsplit(endpoint).hostname,
                                   model=route.model, overridden_fields=route.overridden_fields,
                                   escalated_from=route.escalated_from, dispatch=False)
+        if self.qualified_request is None and side_call_contract is None:
+            from kernel_capacity_retry import apply_learned_limit
+            apply_learned_limit(self, body, endpoint, key)
         from kernel_provider_dialect import (
             RUN_CAPABILITY_CACHE, ProviderCapabilityError, capabilities_for,
             mark_dialect_journaled, origin_of,
@@ -5412,7 +5551,14 @@ class RequestCapture:
                 from kernel_frame_optional_allocation import validate_optional_dependencies
                 from kernel_stateframe_framefit5 import _workspace_root
                 validate_optional_dependencies(proposal.optional_heads, root=_workspace_root(wire_truth_runtime))
+            if (self._capacity_retry_count and self.qualified_request is not None
+                    and body == getattr(self, "_capacity_retry_original_body", None)):
+                body = copy.deepcopy(self._capacity_retry_input_body)
             preparation = PreparationInput.capture(self, wire_truth_runtime, body)
+            if self.qualified_request is None:
+                # Preserve the builder input, not the fitted wire, for a single
+                # provider-rejected capacity refit of this logical request.
+                self._capacity_retry_original_body = copy.deepcopy(body)
             try:
                 record = build_qualified_request(
                     self, wire_truth_runtime, body, endpoint=endpoint, key=key, deadline=deadline,
