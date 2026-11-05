@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Engine: model-facing ids (unified stop snapshot, check_execution_ref, continuation intention ids) no longer change when only the installed package set changes; certificates, receipts and journal bindings still record it, so a package change still invalidates them.
+
 ## 0.4.4 (2026-11-04)
 
 - Tokenizer capability probes now share the request deadline, and a probe cut short by that deadline can be retried on a later request. Tokenization skips the optional `/slots` lookup after `/props` proves llama.cpp.

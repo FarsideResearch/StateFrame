@@ -18,6 +18,9 @@ DECLARED_PATH_DONE_GATE_ENV = "STATEFRAME_DECLARED_PATH_DONE_GATE"
 POLICY_VERSION = "stateframe-unified-stop/2"
 DECISION_EVENT = "unified_stop_decision"
 RENDER_HEADER = "[Unified stop authority]"
+# Host package and tool-cache identity belongs in audit bindings, not the model-facing
+# snapshot ID. Keep all other binding fields so candidate/authority changes still rekey it.
+NON_WIRE_ENVIRONMENT_BINDING_KEYS = frozenset({"environment", "environment_revision"})
 
 SATISFIED = "SATISFIED"
 VIOLATED = "VIOLATED"
@@ -399,7 +402,11 @@ def _binding(runtime: object) -> object:
 
 
 def snapshot_id(runtime: object, clauses: Sequence[ClauseAssessment]) -> str:
-    payload = {"binding": _binding(runtime),
+    binding = _binding(runtime)
+    if isinstance(binding, Mapping):
+        binding = {key: value for key, value in binding.items()
+                   if key not in NON_WIRE_ENVIRONMENT_BINDING_KEYS}
+    payload = {"binding": binding,
                "clauses": [[row.clause_id, row.state] for row in clauses]}
     return "unified:" + hashlib.sha256(json.dumps(
         payload, sort_keys=True, ensure_ascii=False, default=str).encode()).hexdigest()[:24]
