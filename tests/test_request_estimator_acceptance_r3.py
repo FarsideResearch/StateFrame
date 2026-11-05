@@ -79,7 +79,6 @@ def _hosted_counterexample(kind: str) -> dict[str, object]:
     return value
 
 
-@pytest.mark.xfail(strict=True, reason="fail-today on shipped main: hosted cold byte estimate undercounts dense content (REVIEW3 item 1, sha 70cc9ba2); flips when the density-aware cold floor lands")
 @pytest.mark.parametrize("kind", ["long_numbers", "base64", "code", "tool_schema_heavy"])
 def test_F5_hosted_estimate_covers_real_qwen_prompt(kind: str) -> None:
     """REVIEW3 item 1, “Undercount”: estimated tokens must cover the rendered prompt."""
