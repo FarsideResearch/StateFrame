@@ -4,12 +4,20 @@ from __future__ import annotations
 import errno
 import os
 import re
+import signal
 import socket
 import sys
+import time
 from types import SimpleNamespace
 
 import pytest
 
+from fixtures.process_signals import (
+    close_signal_binding,
+    record_identity,
+    retain_signal_binding,
+    signal_bound,
+)
 from stateframe import runner
 from stateframe.engine import kernel_exec_session, kernel_safe_probe
 from stateframe.engine.kernel_exec_session import ExecSession, ExecSessionError
@@ -24,23 +32,38 @@ def _retained_process_status_pattern():
     return r"supervisor exit status: -?\d+"
 
 
+def _supervisor_command_fragment() -> str:
+    if sys.platform.startswith("linux"):
+        return "bwrap"
+    return "kernel_exec_supervisor.py"
+
+
 @pytest.mark.host_sandbox
 def test_supervisor_death_before_start_keeps_exit_status_log_tail_and_base_error(
         monkeypatch, tmp_path):
     marker = "planted supervisor log tail"
+    command_fragment = _supervisor_command_fragment()
 
     class DiedBeforeStartSession(ExecSession):
         def _rpc(self, request):
             if request.get("op") == "start" and not getattr(self, "_death_planted", False):
                 self._death_planted = True
                 if self._process.poll() is None:
-                    self._process.kill()
+                    identity = record_identity(
+                        self._process.pid, launched_after=launched_after,
+                        command_fragment=command_fragment)
+                    binding = retain_signal_binding(identity)
+                    try:
+                        signal_bound(binding, signal.SIGKILL)
+                    finally:
+                        close_signal_binding(binding)
                 self._process.wait(timeout=5)
                 self._log.write((marker + "\n").encode())
             return super()._rpc(request)
 
     monkeypatch.setattr(kernel_safe_probe, "ExecSession", DiedBeforeStartSession)
 
+    launched_after = time.time()
     with pytest.raises(ProbeCleanupError) as caught:
         runner._startup_probe(sys.executable, "pass", label="engine interpreter test")
 
@@ -256,13 +279,21 @@ def test_rpc_failure_keeps_exact_leading_message_and_appends_diagnostics(
 @pytest.mark.host_sandbox
 def test_import_smoke_supervisor_death_includes_diagnostics(monkeypatch, tmp_path):
     marker = "planted import smoke supervisor log tail"
+    command_fragment = _supervisor_command_fragment()
 
     class DiedBeforeStartSession(SmokeExecSession):
         def _rpc(self, request):
             if request.get("op") == "start" and not getattr(self, "_death_planted", False):
                 self._death_planted = True
                 if self._process.poll() is None:
-                    self._process.kill()
+                    identity = record_identity(
+                        self._process.pid, launched_after=launched_after,
+                        command_fragment=command_fragment)
+                    binding = retain_signal_binding(identity)
+                    try:
+                        signal_bound(binding, signal.SIGKILL)
+                    finally:
+                        close_signal_binding(binding)
                 self._process.wait(timeout=5)
                 self._log.write((marker + "\n").encode())
             return super()._rpc(request)
@@ -271,6 +302,7 @@ def test_import_smoke_supervisor_death_includes_diagnostics(monkeypatch, tmp_pat
     monkeypatch.setenv("STATEFRAME_TEST_PYTHON", sys.executable)
     (tmp_path / "smoke.py").write_text("VALUE = 1\n", encoding="utf-8")
 
+    launched_after = time.time()
     with pytest.raises(ImportSmokeCleanupError) as caught:
         _execute_smoke(tmp_path, ("smoke.py",), (str(tmp_path),), 3)
 
