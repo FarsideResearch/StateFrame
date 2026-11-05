@@ -409,6 +409,7 @@ def test_owner_pipe_eof_stops_job_while_forked_child_holds_control_socket(setup,
     home = cap.write_roots[-1]
     heartbeat = home / "job-heartbeat"
     owner_ready = run / "owner-ready.json"
+    identities_bound = run / "identities-bound"
     pipe_closed = run / "owner-pipe-closed"
     holder_confirm = run / "confirm-socket-held"
     socket_held = run / "socket-held"
@@ -439,6 +440,7 @@ holder_confirm = Path({str(holder_confirm)!r})
 socket_held = Path({str(socket_held)!r})
 release_holder = Path({str(release_holder)!r})
 holder_ready = Path({str(holder_ready)!r})
+identities_bound = Path({str(identities_bound)!r})
 pipe_closed = Path({str(pipe_closed)!r})
 cap = capability_from_dict(json.loads({json.dumps(child_cap.as_dict())!r}))
 session = ExecSession(run_dir)
@@ -468,6 +470,12 @@ Path({str(owner_ready)!r}).write_text(json.dumps({{
     "supervisor": session._process.pid,
 }}), encoding="utf-8")
 if {linux_bwrap!r}:
+    # EOF can reap the supervisor before the parent records its signal identity.
+    deadline = time.monotonic() + 10
+    while not identities_bound.is_file() and time.monotonic() < deadline:
+        time.sleep(.02)
+    if not identities_bound.is_file():
+        raise RuntimeError("test did not bind process identities before owner-pipe EOF")
     session._close_owner_write_end()
     pipe_closed.write_text("closed", encoding="ascii")
 time.sleep(60)
@@ -506,6 +514,10 @@ time.sleep(60)
         supervisor_binding = retain_signal_binding(supervisor_signal_identity)
 
         if linux_bwrap:
+            identities_bound.write_text("bound", encoding="ascii")
+            deadline = time.monotonic() + 5
+            while not pipe_closed.is_file() and time.monotonic() < deadline:
+                time.sleep(.02)
             assert pipe_closed.is_file(), "owner did not close its lifetime-pipe writer"
             assert process.poll() is None, "owner must remain alive to isolate the pipe signal"
         else:

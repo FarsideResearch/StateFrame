@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Tests: the owner-pipe forked-holder test binds the supervisor identity before the owner closes its lifetime pipe, removing a Linux race.
+
 ## 0.4.15 (2026-11-05)
 
 - Fixed: execution supervisors use an owner-lifetime pipe, so engine death stops jobs even through launch wrappers and while a forked checkpoint writer still holds the control socket; a wrapper exiting on its own leaves its live session running. Forked checkpoint writers and helper children close their inherited owner-write end.
