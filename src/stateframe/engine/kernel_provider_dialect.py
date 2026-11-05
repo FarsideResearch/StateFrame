@@ -226,7 +226,8 @@ def capabilities_for(
             props_status = props[0] if props is not None else None
             props_is_llama = props is not None and props[0] == 200 and _llama_props(props[1])
 
-        slots_probe_skipped = not require_slots and (override or props_is_llama)
+        # Dialect proof for tokenization needs /props, never slot discovery.
+        slots_probe_skipped = not require_slots
         if slots_probe_skipped:
             slots_result, slots_cut_short = None, False
         else:

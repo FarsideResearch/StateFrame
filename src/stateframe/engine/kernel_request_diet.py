@@ -277,10 +277,20 @@ def _http_tokenize(content: str, url: str, *, deadline: float | None = None,
     tokenizer_origin = _url_origin(url)
     generation_origin = _url_origin(generation_endpoint)
     probe_key = auth_key if tokenizer_origin is not None and tokenizer_origin == generation_origin else ""
+    # A cold dialect lookup uses a killable /props child. Give it at most half
+    # the remaining request budget so a successful probe leaves time for POST.
+    probe_deadline = None
+    if deadline is not None:
+        now = time.monotonic()
+        probe_deadline = now + (deadline - now) / 2
     capabilities = capabilities_for(
-        url, probe_key or "", deadline=deadline, require_slots=False,
+        url, probe_key or "", deadline=probe_deadline, require_slots=False,
     )
     if deadline is not None and time.monotonic() >= deadline:
+        raise TimeoutError("tokenizer request deadline expired")
+    if (probe_deadline is not None and time.monotonic() >= probe_deadline
+            and capabilities.props_status is None and capabilities.slots_status is None
+            and not capabilities.continuation):
         raise TimeoutError("tokenizer request deadline expired")
     require_feature(capabilities, "request tokenization")
 
