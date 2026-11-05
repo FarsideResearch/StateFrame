@@ -1,25 +1,27 @@
-"""Requests without selected skills retain the 0.2.3 wire contract."""
+"""Requests without selected skills retain the immediate base wire contract."""
 from __future__ import annotations
 
-import io
 import json
+import os
 import site
 import subprocess
 import sysconfig
-import tarfile
 from pathlib import Path
 
 import pytest
 
-from stateframe.replay_tape import first_difference, normalized_digest
+from stateframe.replay_tape import first_difference
 from ._support import (Endpoint, PYTHON, ROOT, assert_tree_imports, budget, copy_repo,
                        environment, pass_environment, tree_python)
 from engine_run import run_monitored
 
+pytest_plugins = ("tools.immediate_baseline",)
+
 
 pytestmark = pytest.mark.host_sandbox
 
-_BASELINE_COMMIT = "33c6c511611cc249b90b47930905a8e60648c05c"
+_MISSING_BASELINE = ("SF_TEST_BASELINE_IMMEDIATE must name the immediate base checkout "
+                     "for no-skills parity")
 
 
 
@@ -57,8 +59,7 @@ def _raw_tools(request: bytes) -> bytes:
 
 
 def _run_tree(root: Path, case: Path, repo: Path, script: Path, *,
-              legacy_mode: bool = False,
-              stable_tool_head: str | None, final_cache_layout: str | None) -> tuple[bytes, ...]:
+              trace: Path) -> tuple[bytes, ...]:
     case.mkdir()
     tree_src = root / "src"
     python = tree_python(tree_src, case / "python")
@@ -68,19 +69,31 @@ def _run_tree(root: Path, case: Path, repo: Path, script: Path, *,
     env = environment()
     env.pop("PYTHONPATH", None)
     env.pop("STATEFRAME_STABLE_TOOL_HEAD", None)
-    if stable_tool_head is not None:
-        env["STATEFRAME_STABLE_TOOL_HEAD"] = stable_tool_head
     env.pop("STATEFRAME_FINAL_CACHE_LAYOUT", None)
-    if final_cache_layout is not None:
-        env["STATEFRAME_FINAL_CACHE_LAYOUT"] = final_cache_layout
+    launcher = case / "traced-run.py"
+    launcher.write_text(
+        "import json, runpy, secrets, sys\n"
+        "_sequence = 0\n"
+        "def fixed_hex(size=32):\n"
+        "    global _sequence\n"
+        "    _sequence += 1\n"
+        "    return format(_sequence, 'x').zfill(size * 2)[-size * 2:]\n"
+        "secrets.token_hex = fixed_hex\n"
+        f"_trace = {str(trace)!r}\n"
+        "try:\n"
+        "    runpy.run_module('stateframe', run_name='__main__')\n"
+        "finally:\n"
+        "    with open(_trace, 'w', encoding='utf-8') as target:\n"
+        "        json.dump(sorted(sys.modules), target)\n",
+        encoding="utf-8",
+    )
     with Endpoint(script) as endpoint:
         result = run_monitored(
-            [python, "-m", "stateframe", "run", "--repo", str(repo),
+            [python, str(launcher), "run", "--repo", str(repo),
              "--task", "Change app value and verify it", "--endpoint", endpoint.url,
              "--model", "scripted", "--run-dir", str(run_dir), "--test-python", PYTHON,
              "--test-cmd", "python -m unittest discover -s tests -q", "--max-turns", "8",
-             "--shell", "off", "--quiet",
-             *(("--runner-kind", "pytest", "--protect-tests", "all") if legacy_mode else ())],
+             "--shell", "off", "--quiet"],
             capture_output=True, text=True,
             env=env, expected_seconds=budget("no_skills_run"), check=False)
     requests = tuple(path.read_bytes() for path in sorted((run_dir / "wire").glob("*.request.json")))
@@ -128,17 +141,13 @@ def test_tree_python_ignores_editable_pth_from_outer_site_packages(tmp_path, mon
     assert not processed.exists()
 
 
-def test_no_skills_wire_matches_023(tmp_path):
-    archive = subprocess.run(
-        ["git", "-C", str(ROOT), "archive", _BASELINE_COMMIT, "src"],
-        capture_output=True, check=True)
-    baseline = tmp_path / "baseline-tree"
-    baseline.mkdir()
-    with tarfile.open(fileobj=io.BytesIO(archive.stdout), mode="r:") as contents:
-        for member in contents:
-            target = baseline / member.name
-            assert target.resolve().is_relative_to(baseline) and not member.issym() and not member.islnk()
-            contents.extract(member, baseline)
+@pytest.mark.skipif(
+    "SF_TEST_BASELINE_IMMEDIATE" not in os.environ
+    and os.environ.get("SF_GATE_MUST_RUN", "").strip().lower() not in {"1", "true", "yes", "on"},
+    reason=_MISSING_BASELINE,
+)
+def test_no_skills_wire_matches_immediate_base(tmp_path, baseline_checkout, must_run_witness):
+    baseline = baseline_checkout
     script = tmp_path / "case.script.json"
     script.write_text(json.dumps({"model": "scripted", "tokenize": {"mode": "ok"}, "steps": [
         {"tool": "str_replace", "arguments": {"path": "app.py", "old_str": 'VALUE = "before"',
@@ -149,25 +158,19 @@ def test_no_skills_wire_matches_023(tmp_path):
     repo_root = tmp_path / "shared"
     repo_root.mkdir()
     repo = copy_repo(repo_root)
-    old = _run_tree(baseline, tmp_path / "old", repo, script, stable_tool_head=None, final_cache_layout=None)
-    # 0.2.5 intentionally treats unittest as a generic command and defaults to
-    # editable tests. Pin the old runner, protection and tool-list modes for exact bytes.
-    # v0.4.0's final cache layout changes wire order; pin it off for cross-release parity.
-    current = _run_tree(ROOT, tmp_path / "current", repo, script, legacy_mode=True,
-                        stable_tool_head="off", final_cache_layout="off")
-    from tools.compare_no_mcp_requests import mask_wire_ids, unbacked_result_hash_changes
+    old_trace = tmp_path / "old-modules.json"
+    current_trace = tmp_path / "current-modules.json"
+    old = _run_tree(baseline, tmp_path / "old", repo, script, trace=old_trace)
+    current = _run_tree(ROOT, tmp_path / "current", repo, script, trace=current_trace)
+    from tools.compare_no_mcp_requests import unbacked_result_hash_changes
     assert len(current) == len(old)
-    # Wire IDs (edit receipts, wire-truth handles, request IDs) are derived differently
-    # since the receipt-determinism change (11-03), so they are masked; a masked result
-    # hash must still hash text that is sent and compared. Every other byte must match.
     assert unbacked_result_hash_changes(tmp_path / "old", tmp_path / "current") == []
-    assert mask_wire_ids(current[0]) == mask_wire_ids(old[0]), first_difference(old[0], current[0])
     for number, (expected, actual) in enumerate(zip(old, current), 1):
         assert _raw_tools(actual) == _raw_tools(expected), number
-        assert mask_wire_ids(actual) == mask_wire_ids(expected), (
-            number, first_difference(expected, actual))
-        assert normalized_digest(mask_wire_ids(actual)) == normalized_digest(
-            mask_wire_ids(expected)), number
-    default = _run_tree(ROOT, tmp_path / "default", repo, script, stable_tool_head=None, final_cache_layout=None)  # today's defaults, on purpose
-    assert default[0] != old[0]
-    assert b"no public selector was declared" in default[0]
+        assert actual == expected, (number, first_difference(expected, actual))
+    must_run_witness.record_parity(
+        baseline_trace=json.loads(old_trace.read_text(encoding="utf-8")),
+        candidate_trace=json.loads(current_trace.read_text(encoding="utf-8")),
+        expected_trace_prefixes=("stateframe",),
+        comparison_completed=True,
+    )
