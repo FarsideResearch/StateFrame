@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- Keep `str_replace` scalar in every profile because batch edits skip per-file write receipts; add a menu-wide schema-to-step-contract guard.
+- `str_replace` no longer advertises an `edits` field its step contract always refused (one known case of a model trying it); requests are 28 bytes smaller and the opt-in batch form is removed. A new guard checks that every tool schema offered to the model is accepted by its step contract.
 
 ## 0.4.34 (2026-11-05)
 
