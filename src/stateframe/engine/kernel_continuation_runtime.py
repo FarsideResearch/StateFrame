@@ -247,6 +247,20 @@ def _wire_effect_ordinal(journal: object, *, request_id: object, step: object,
     )
 
 
+def _wire_dependencies(binding: object) -> dict[str, str]:
+    """Dependency versions for a model-facing intention ID, without host environment identity.
+
+    The intention record keeps the full binding_versions() (a package change still makes it
+    stale); only the ID drops the environment, like wire_identity_content() does for refs.
+    """
+    from kernel_wire_identity import WIRE_ENV_IDENTITY_FIELDS
+
+    if isinstance(binding, dict):
+        binding = {key: value for key, value in binding.items()
+                   if key not in WIRE_ENV_IDENTITY_FIELDS}
+    return binding_versions(binding)
+
+
 def _wire_intention_id(journal: object, *, step: object, content: object,
                        ordinal: object = 1) -> str:
     """Identify a continuation intention by its run, turn, and semantic contents."""
@@ -911,7 +925,7 @@ class LiveContinuation:
             step = getattr(owner, "current_step", 0)
             root_id = _wire_intention_id(self.journal, step=step, content={
                 "role": "root", "objective": objective,
-                "pending_decision": pending_decision, "dependencies": dependencies,
+                "pending_decision": pending_decision, "dependencies": _wire_dependencies(current),
                 "turns": self.runtime.step_limit, "acceptance": acceptance,
             }, ordinal=1)
             self.engine.apply(
@@ -1445,7 +1459,7 @@ class LiveContinuation:
                 self.journal, step=self.runtime.owner.current_step, content={
                     "role": "source_detour", "parent_id": parent,
                     "objective": objective, "pending_decision": pending_decision,
-                    "dependencies": dependencies, "turns": turns,
+                    "dependencies": _wire_dependencies(current), "turns": turns,
                     "acceptance": acceptance,
                     "request_id": self.runtime.current_request_id,
                 },

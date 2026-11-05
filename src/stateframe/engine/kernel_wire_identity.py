@@ -142,10 +142,27 @@ _WIRE_IDENTITY_METADATA_KEYS = frozenset({
 })
 
 
+# Host environment identity (installed packages, tool cache) is audit-only: it stays in
+# receipts and journal bindings but never enters a model-facing identity.
+WIRE_ENV_IDENTITY_FIELDS = frozenset({"environment", "environment_revision"})
+# Digests computed over a binding that still holds the environment. The binding itself is
+# already in the content (scrubbed above), so these derived copies are dropped too.
+# The certificate itself keeps the environment on purpose: installed packages can change
+# test outcomes, so a package change must invalidate it. Only model-facing ids skip it.
+_WIRE_ENV_DERIVED_FIELDS = {"observation_certificate": frozenset({"binding"})}
+
+
 # "<32-hex journal run id>:<sequence>" is a journal position under any key name
 # (continuation_dispatch_ref, ...). Positions shift whenever an observer adds
 # events, so they never enter a wire identity.
 _JOURNAL_POSITION = re.compile(r"[0-9a-f]{32}:[0-9]+")
+
+
+def _without_env_derived(key: str, item: object) -> object:
+    derived = _WIRE_ENV_DERIVED_FIELDS.get(key)
+    if derived and isinstance(item, Mapping):
+        return {name: field for name, field in item.items() if str(name) not in derived}
+    return item
 
 
 def wire_identity_content(value: object) -> object:
@@ -154,9 +171,10 @@ def wire_identity_content(value: object) -> object:
         return "<journal-position>"
     if isinstance(value, Mapping):
         return {
-            str(key): wire_identity_content(item)
+            str(key): wire_identity_content(_without_env_derived(str(key), item))
             for key, item in sorted(value.items(), key=lambda pair: str(pair[0]))
             if str(key) not in _WIRE_IDENTITY_METADATA_KEYS
+            and str(key) not in WIRE_ENV_IDENTITY_FIELDS
         }
     if isinstance(value, (list, tuple)):
         return [wire_identity_content(item) for item in value]

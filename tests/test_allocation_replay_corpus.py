@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 import re
 import shutil
+import subprocess
 import sys
 import time
 from dataclasses import dataclass
@@ -279,7 +280,9 @@ def _short_tokenize_timeout_engine_python(
     return wrapper
 
 
-def _request_capped_engine_python(tmp_path: Path, request_limit: int) -> Path:
+def _request_capped_engine_python(
+        tmp_path: Path, request_limit: int, *, extra_bootstrap: str | None = None,
+) -> Path:
     """Build a launcher that ends a replay after N fully recorded provider sends."""
     if type(request_limit) is not int or request_limit < 1:
         raise ValueError("request capture limit must be a positive integer")
@@ -291,6 +294,7 @@ def _request_capped_engine_python(tmp_path: Path, request_limit: int) -> Path:
         "run = Path(sys.argv[2]).resolve()",
         "sys.path.insert(0, str(child.parent.parent))",
         "import stateframe._child as host",
+        "sys.path.insert(0, str(child.parent / 'engine'))",
         "original_install_checked_ask = host.install_checked_ask",
         "def install_checked_ask_with_capture_limit(engine, *args, **kwargs):",
         "    original_install_checked_ask(engine, *args, **kwargs)",
@@ -313,6 +317,7 @@ def _request_capped_engine_python(tmp_path: Path, request_limit: int) -> Path:
         "        return response",
         "    RequestCapture.send = capture_limited_send",
         "host.install_checked_ask = install_checked_ask_with_capture_limit",
+        *(extra_bootstrap.splitlines() if extra_bootstrap is not None else ()),
         "raise SystemExit(host.main([str(child), str(run)]))",
     ))
     compile(bootstrap, str(wrapper), "exec")
@@ -336,6 +341,25 @@ def test_request_capped_engine_python_bootstrap_is_valid(tmp_path):
     assert wrapper.read_text(encoding="utf-8").startswith(f"#!{sys.executable}\n")
 
 
+def test_request_capped_engine_python_runs_extra_bootstrap_before_main(tmp_path):
+    marker = tmp_path / "bootstrap-ran"
+    wrapper = _request_capped_engine_python(
+        tmp_path, 3,
+        extra_bootstrap=(
+            "import kernel_shell_tool\n"
+            f"Path({str(marker)!r}).write_text('ready', encoding='ascii')\n"
+            "host.main = lambda argv: 0"
+        ),
+    )
+    child = _source_root() / "stateframe" / "_child.py"
+    result = subprocess.run(
+        [str(wrapper), "-B", str(child), str(tmp_path / "unused-run")],
+        capture_output=True, text=True, timeout=15, check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert marker.read_text(encoding="ascii") == "ready"
+
+
 def _run_case(
         tmp_path: Path, case_id: str, *, break_deferral: bool = False,
         tokenize_delay_s: float | None = None,
@@ -344,6 +368,7 @@ def _run_case(
         tokenize_reprobe_after_requests: int | None = None,
         tokenize_reprobe_after_s: float | None = None,
         stop_after_provider_requests: int | None = None,
+        extra_bootstrap: str | None = None,
         final_cache_layout: str | None = None,
         max_turns: int = 120,
 ) -> ReplayOutcome:
@@ -352,6 +377,8 @@ def _run_case(
             raise ValueError("provider request stop must be a positive integer")
         if break_deferral or tokenize_timeout_s is not None:
             raise ValueError("provider request stop cannot be combined with another engine wrapper")
+    elif extra_bootstrap is not None:
+        raise ValueError("extra bootstrap requires a provider request stop")
     case_dir = CORPUS / case_id
     metadata = CASE_METADATA[case_id]
     source_root = _source_root()
@@ -377,7 +404,13 @@ def _run_case(
 
     environment = {key: value for key, value in os.environ.items()
                    if not key.startswith("STATEFRAME_")}
-    environment["STATEFRAME_HOME"] = isolated_stateframe_home()
+    if extra_bootstrap is None:
+        environment["STATEFRAME_HOME"] = isolated_stateframe_home()
+    else:
+        # Structural parallel captures must not share mutable host cache state.
+        stateframe_home = tmp_path / "stateframe-home"
+        stateframe_home.mkdir()
+        environment["STATEFRAME_HOME"] = str(stateframe_home)
     environment["PYTHONPATH"] = os.pathsep.join((str(source_root), str(source_root / "stateframe" / "engine")))
     environment["PYTHONDONTWRITEBYTECODE"] = "1"
     environment["PYTHONHASHSEED"] = "0"
@@ -408,7 +441,10 @@ def _run_case(
             )))
         elif stop_after_provider_requests is not None:
             command.extend(("--python", str(
-                _request_capped_engine_python(tmp_path, stop_after_provider_requests)
+                _request_capped_engine_python(
+                    tmp_path, stop_after_provider_requests,
+                    extra_bootstrap=extra_bootstrap,
+                )
             )))
         try:
             process = run_monitored(
