@@ -36,13 +36,27 @@
   "baselines": {
     "immediate": {
       "source": "SF_GATE_BASE"
-    },
-    "release_0_2_3": {
-      "commit": "33c6c511611cc249b90b47930905a8e60648c05c",
-      "tree_digest": "59bef5821e45d506309bbb5efb5ed3fb59e52279"
     }
   },
   "cells": [
+    {
+      "scenario_id": "acceptance_test_no_skills_wire_compat_test_no_skills_wire_matches_immediate_base",
+      "nodeid": "tests/acceptance/test_no_skills_wire_compat.py::test_no_skills_wire_matches_immediate_base",
+      "item_nodeids": [
+        "tests/acceptance/test_no_skills_wire_compat.py::test_no_skills_wire_matches_immediate_base"
+      ],
+      "jobs": {
+        "linux": "RUN",
+        "darwin": "RUN"
+      },
+      "prerequisites": [
+        "parity_baseline"
+      ],
+      "optional_prerequisites": [],
+      "baseline": "immediate",
+      "witness_schema": "parity_trace",
+      "witness_assertion": null
+    },
     {
       "scenario_id": "acceptance_test_provider_queue_wait_test_first_queued_send_submits_once_and_run_succeeds",
       "nodeid": "tests/acceptance/test_provider_queue_wait.py::test_first_queued_send_submits_once_and_run_succeeds",
@@ -546,10 +560,10 @@
       "witness_assertion": "assert all(encoding is None for encoding, _ in seen)"
     },
     {
-      "scenario_id": "test_no_mcp_release_comparison_test_no_mcp_requests_match_release_0_2_3",
-      "nodeid": "tests/test_no_mcp_release_comparison.py::test_no_mcp_requests_match_release_0_2_3",
+      "scenario_id": "test_no_mcp_release_comparison_test_no_mcp_requests_match_immediate_base",
+      "nodeid": "tests/test_no_mcp_release_comparison.py::test_no_mcp_requests_match_immediate_base",
       "item_nodeids": [
-        "tests/test_no_mcp_release_comparison.py::test_no_mcp_requests_match_release_0_2_3"
+        "tests/test_no_mcp_release_comparison.py::test_no_mcp_requests_match_immediate_base"
       ],
       "jobs": {
         "linux": "RUN",
@@ -559,7 +573,7 @@
         "parity_baseline"
       ],
       "optional_prerequisites": [],
-      "baseline": "release_0_2_3",
+      "baseline": "immediate",
       "witness_schema": "parity_trace",
       "witness_assertion": null
     },

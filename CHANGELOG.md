@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Tests: the no-MCP and no-skills parity checks compare against the previous release instead of 0.2.3, whose bytes changed intentionally in 0.4.5.
+
 ## 0.4.20 (2026-11-05)
 
 - Carried request token measurements are now invalidated when the auth binding or the generation endpoint changes, so a count measured for one provider or credential is never reused for another; unchanged bindings still reuse counts.

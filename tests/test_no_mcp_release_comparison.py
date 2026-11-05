@@ -1,36 +1,48 @@
-"""Compare no-MCP request bytes with the pinned 0.2.3 source tree."""
+"""Compare no-MCP request bytes with the immediate base release."""
 import hashlib
 import json
+import os
 import shutil
-import subprocess
 import sys
 from pathlib import Path
 
 import pytest
 from tools.compare_no_mcp_requests import (
-    capture, mask_wire_ids, result_hashes, unbacked_result_hash_changes)
+    capture, result_hashes, unbacked_result_hash_changes)
 from acceptance._support import assert_tree_imports, tree_python
 
+pytest_plugins = ("tools.immediate_baseline",)
+
 ROOT = Path(__file__).resolve().parents[1]
-BASELINE_COMMIT = "33c6c511611cc249b90b47930905a8e60648c05c"
-BASELINE_TREE = "59bef5821e45d506309bbb5efb5ed3fb59e52279"
+_MISSING_BASELINE = ("SF_TEST_BASELINE_IMMEDIATE must name the immediate base checkout "
+                     "for no-MCP parity")
 
 
-def _materialize_baseline(destination: Path) -> str:
-    if shutil.which("git") is None:
-        pytest.skip("git is unavailable, so the pinned 0.2.3 tree cannot be materialized")
-    present = subprocess.run(["git", "-C", str(ROOT), "cat-file", "-e",
-                              f"{BASELINE_COMMIT}^{{commit}}"], capture_output=True, check=False)
-    if present.returncode != 0:
-        pytest.skip("pinned 0.2.3 commit 33c6c51 is unavailable in this repository's git objects")
-    tree = subprocess.run(["git", "-C", str(ROOT), "rev-parse", f"{BASELINE_COMMIT}^{{tree}}"],
-                          capture_output=True, text=True, check=True).stdout.strip()
-    assert tree == BASELINE_TREE, f"pinned 0.2.3 commit has unexpected tree {tree}"
-    archive = subprocess.run(["git", "-C", str(ROOT), "archive", "--format=tar",
-                              BASELINE_COMMIT], capture_output=True, check=True).stdout
-    destination.mkdir()
-    subprocess.run(["tar", "-xf", "-", "-C", str(destination)], input=archive, check=True)
-    return tree
+def _nested_sandbox_refusal(data: bytes) -> bool:
+    return ((b"sandbox-exec" in data and b"Operation not permitted" in data)
+            or b"sandbox_apply" in data)
+
+
+def _check_mac_sandbox(data: bytes) -> None:
+    if sys.platform == "darwin" and _nested_sandbox_refusal(data):
+        reason = "INFRA: nested sandbox-exec refused"
+        if os.environ.get("SF_GATE_MUST_RUN", "").strip().lower() in {"1", "true", "yes", "on"}:
+            pytest.fail(reason, pytrace=False)
+        pytest.skip(reason)
+
+
+def _capture_checked(*args, **kwargs) -> bytes:
+    try:
+        result = capture(*args, **kwargs)
+    except RuntimeError as error:
+        _check_mac_sandbox(str(error).encode("utf-8", errors="replace"))
+        raise
+    _check_mac_sandbox(result)
+    run_dir = args[5]
+    summary = run_dir / "summary.json"
+    if summary.exists():
+        _check_mac_sandbox(summary.read_bytes())
+    return result
 
 
 def _write_traced_launcher(path: Path, trace_path: Path) -> None:
@@ -53,56 +65,63 @@ def _write_traced_launcher(path: Path, trace_path: Path) -> None:
     )
 
 
+def test_nested_sandbox_refusal_is_infrastructure_not_parity(monkeypatch):
+    monkeypatch.setattr(sys, "platform", "darwin")
+    refusal = b"sandbox-exec: Operation not permitted"
+    assert _nested_sandbox_refusal(refusal)
+    assert _nested_sandbox_refusal(b"sandbox_apply failed")
+    assert not _nested_sandbox_refusal(b"request byte mismatch")
+    with pytest.raises(pytest.skip.Exception, match="INFRA: nested sandbox-exec refused"):
+        _check_mac_sandbox(refusal)
+    monkeypatch.setenv("SF_GATE_MUST_RUN", "1")
+    with pytest.raises(pytest.fail.Exception, match="INFRA: nested sandbox-exec refused"):
+        _check_mac_sandbox(refusal)
+
+
 @pytest.mark.host_sandbox
-def test_no_mcp_requests_match_release_0_2_3(tmp_path, must_run_witness):
-    baseline = tmp_path / "baseline"
-    tree = _materialize_baseline(baseline)
+@pytest.mark.skipif(
+    "SF_TEST_BASELINE_IMMEDIATE" not in os.environ
+    and os.environ.get("SF_GATE_MUST_RUN", "").strip().lower() not in {"1", "true", "yes", "on"},
+    reason=_MISSING_BASELINE,
+)
+def test_no_mcp_requests_match_immediate_base(tmp_path, baseline_checkout, must_run_witness):
+    """A Mac host that refuses nested sandbox-exec cannot complete this capture.
+
+    The shared capture helper runs the product's check sandbox. Classify that host
+    refusal as infrastructure so it cannot be mistaken for changed request bytes.
+    """
+    baseline = baseline_checkout
     repo = tmp_path / "repo"
     shutil.copytree(ROOT / "examples/discount_bug", repo)
     baseline_trace = tmp_path / "baseline-modules.json"
     current_trace = tmp_path / "candidate-modules.json"
-    default_trace = tmp_path / "default-modules.json"
     baseline_launcher = tmp_path / "baseline-run.py"
     current_launcher = tmp_path / "candidate-run.py"
-    default_launcher = tmp_path / "default-run.py"
     _write_traced_launcher(baseline_launcher, baseline_trace)
     _write_traced_launcher(current_launcher, current_trace)
-    _write_traced_launcher(default_launcher, default_trace)
     run_dir = tmp_path / "run"
     script = ROOT / "examples/discount_bug.script.json"
     baseline_python = tree_python(baseline / "src", tmp_path / "baseline-python")
     assert_tree_imports(baseline_python, baseline / "src", tmp_path)
-    previous = capture(baseline, baseline_python, baseline_launcher, script, repo, run_dir, stable_tool_head=None,
-                       final_cache_layout=None,
-                       source_on_pythonpath=False, test_python=sys.executable)
+    previous = _capture_checked(baseline, baseline_python, baseline_launcher, script, repo, run_dir,
+                                stable_tool_head=None, final_cache_layout=None,
+                                source_on_pythonpath=False, test_python=sys.executable)
     run_dir.rename(tmp_path / "baseline-run")
     current_python = tree_python(ROOT / "src", tmp_path / "current-python")
     assert_tree_imports(current_python, ROOT / "src", tmp_path)
-    # The default now treats unittest as a generic check and permits test edits.
-    # Leave the stable tool head unset here to exercise the new default; pin it off only for byte comparison.
-    default = capture(ROOT, current_python, default_launcher, script, repo, run_dir,
-                      stable_tool_head=None, final_cache_layout=None, source_on_pythonpath=False,
-                      test_python=sys.executable)
-    assert default
-    run_dir.rename(tmp_path / "default-run")
-    current = capture(ROOT, current_python, current_launcher, script, repo, run_dir,
-                      legacy_mode=True, stable_tool_head="off", final_cache_layout="off", source_on_pythonpath=False,
-                      test_python=sys.executable)
-    # A masked result_sha256 must not hide a content change. Each hash that differs
-    # between the releases has to hash a tool message sent in the same run, and those
-    # messages are compared below after wire-ID masking, so the text behind every
-    # masked hash is still checked byte for byte.
+    current = _capture_checked(ROOT, current_python, current_launcher, script, repo, run_dir,
+                               stable_tool_head=None, final_cache_layout=None,
+                               source_on_pythonpath=False, test_python=sys.executable)
+    # A result_sha256 must be backed by a tool message in the same run.
     assert result_hashes(run_dir)[0], "no result_sha256 found; the hash check below would be vacuous"
     assert unbacked_result_hash_changes(tmp_path / "baseline-run", run_dir) == []
-    # Wire IDs changed derivation on purpose (receipt determinism, 11-03); see mask_wire_ids.
-    previous, current = mask_wire_ids(previous), mask_wire_ids(current)
-    # Kept next to the run directories so a failure can be diffed directly.
-    (tmp_path / "baseline-masked.bin").write_bytes(previous)
-    (tmp_path / "candidate-masked.bin").write_bytes(current)
+    # Fixed seeds make the complete request stream, including wire IDs, comparable.
+    (tmp_path / "baseline-requests.bin").write_bytes(previous)
+    (tmp_path / "candidate-requests.bin").write_bytes(current)
     previous_sha = hashlib.sha256(previous).hexdigest()
     current_sha = hashlib.sha256(current).hexdigest()
-    assert previous == current, (f"0.2.3 commit {BASELINE_COMMIT} tree {tree}: "
-                                f"sha256={previous_sha}; candidate sha256={current_sha}")
+    assert previous == current, (f"immediate base sha256={previous_sha}; "
+                                f"candidate sha256={current_sha}")
     must_run_witness.record_parity(
         baseline_trace=json.loads(baseline_trace.read_text(encoding="utf-8")),
         candidate_trace=json.loads(current_trace.read_text(encoding="utf-8")),

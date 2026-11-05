@@ -23,6 +23,7 @@ RELEASE_COMMIT = "33c6c511611cc249b90b47930905a8e60648c05c"
 RELEASE_TREE = "59bef5821e45d506309bbb5efb5ed3fb59e52279"
 
 EXPECTED_ENTRIES = (
+    ("tests/acceptance/test_no_skills_wire_compat.py::test_no_skills_wire_matches_immediate_base", "requires:parity_baseline"),
     ("tests/acceptance/test_provider_queue_wait.py::test_first_queued_send_submits_once_and_run_succeeds", "requires:host_sandbox"),
     ("tests/acceptance/test_routes_host.py::test_public_cli_routes_first_plan_send_to_second_endpoint", "requires:host_sandbox"),
     ("tests/e2e/test_request_tokenizer_auth_cli.py::test_public_cli_uses_bound_key_for_every_tokenizer_measurement", "requires:host_sandbox"),
@@ -56,7 +57,7 @@ EXPECTED_ENTRIES = (
     ("tests/test_hook_wiring_parity.py::test_no_hooks_regular_stateframe_file_matches_release", "requires:parity_baseline"),
     ("tests/test_hook_wiring_parity.py::test_no_hooks_resume_rebuilt_requests_match_release", "requires:parity_baseline"),
     ("tests/test_http_gzip.py::test_default_profile_cli_run_sends_large_request_without_gzip", "requires:host_sandbox"),
-    ("tests/test_no_mcp_release_comparison.py::test_no_mcp_requests_match_release_0_2_3", "requires:parity_baseline"),
+    ("tests/test_no_mcp_release_comparison.py::test_no_mcp_requests_match_immediate_base", "requires:parity_baseline"),
     ("tests/test_powerups_digest.py::test_unreadable_entry_fails_closed", "requires:filesystem_modes"),
     ("tests/test_pid_liveness.py::test_checkpoint_sweep_uses_zombie_aware_liveness", "all"),
     ("tests/test_pid_liveness.py::test_env_seed_sweep_routes_through_pid_alive", "all"),
@@ -106,10 +107,8 @@ EXPECTED_JOBS = (
     ("linux", "linux", True, REQUIRED_PROVISIONS,
      ("bwrap", "filesystem_modes", "serial_lane", "unknown_uid_bwrap")),
 )
-# The 0.2.3 pin is for an explicit cross-version comparison; immediate parity follows SF_GATE_BASE.
 EXPECTED_BASELINES = (
     ("immediate", {"source": "SF_GATE_BASE"}),
-    ("release_0_2_3", {"commit": RELEASE_COMMIT, "tree_digest": RELEASE_TREE}),
 )
 EXPECTED_OPTIONAL_DEPENDENCIES = (
     ("src/stateframe/engine/kernel_shell_tool.py", "host-command:jq", "jq",
@@ -399,10 +398,12 @@ def _expected_cell(nodeid: str, scope: str) -> dict[str, object]:
         if name in {"filesystem_modes", "bwrap", "serial_lane", "unknown_uid_bwrap", "uv_sandbox"}
     ]
     baseline = None
-    if nodeid.startswith("tests/test_hook_wiring_parity.py::"):
+    if (nodeid.startswith("tests/test_hook_wiring_parity.py::")
+            or nodeid in {
+                "tests/test_no_mcp_release_comparison.py::test_no_mcp_requests_match_immediate_base",
+                "tests/acceptance/test_no_skills_wire_compat.py::test_no_skills_wire_matches_immediate_base",
+            }):
         baseline = "immediate"
-    elif nodeid == "tests/test_no_mcp_release_comparison.py::test_no_mcp_requests_match_release_0_2_3":
-        baseline = "release_0_2_3"
     item_nodeids = [nodeid]
     if nodeid in PARAMETERIZED_ITEM_SUFFIXES:
         item_nodeids = [f"{nodeid}[{suffix}]" for suffix in PARAMETERIZED_ITEM_SUFFIXES[nodeid]]
