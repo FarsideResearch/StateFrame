@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.4.14 (2026-11-05)
 
 - Runs with stale, missing, or unknown check evidence now stay unverified, even when an earlier completion receipt was accepted. This affects users whose final check cannot be confirmed as current and accepted.
 
