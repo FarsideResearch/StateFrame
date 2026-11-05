@@ -15,7 +15,7 @@ import pytest
 from stateframe.engine import kernel_bounded_http
 from stateframe.engine.kernel_plain_host import _PlainHTTPProvider, encode_request_body
 from stateframe import _child
-from stateframe.replay_tape import build as build_replay_tape
+from stateframe.replay_tape import Replayer, build as build_replay_tape
 from stateframe.scripted_endpoint import Script, make_handler
 from engine_run import run_monitored
 
@@ -210,15 +210,12 @@ def test_wire_recorder_captures_both_physical_attempts(monkeypatch, tmp_path, tr
 
     monkeypatch.setenv("STATEFRAME_HTTP_GZIP", "on")
     endpoint, seen, _ = transport_server
-    original = child_http.request_bytes
     monkeypatch.setattr(_child, "HOST_STATE", dict(_child.HOST_STATE))
-    try:
-        _child.install_wire_recorder(tmp_path, endpoint)
-        assert child_http.request_bytes(
-            WIRE, endpoint, "", deadline=time.monotonic() + 10,
-            socket_timeout=5) == b'{"ok":true}'
-    finally:
-        child_http.request_bytes = original
+    monkeypatch.setattr(child_http, "request_bytes", child_http.request_bytes)
+    _child.install_wire_recorder(tmp_path, endpoint)
+    assert child_http.request_bytes(
+        WIRE, endpoint, "", deadline=time.monotonic() + 10,
+        socket_timeout=5) == b'{"ok":true}'
     record = json.loads((tmp_path / "sends.jsonl").read_text())
     assert [attempt["content_encoding"] for attempt in record["transport_attempts"]] == ["gzip", None]
     assert [attempt["http_status"] for attempt in record["transport_attempts"]] == [415, 200]
@@ -236,15 +233,12 @@ def test_wire_recorder_keeps_refused_resend_evidence_on_failure(monkeypatch, tmp
     monkeypatch.setenv("STATEFRAME_HTTP_GZIP", "on")
     endpoint, seen, settings = transport_server
     settings["reject_identity"] = True
-    original = child_http.request_bytes
     monkeypatch.setattr(_child, "HOST_STATE", dict(_child.HOST_STATE))
-    try:
-        _child.install_wire_recorder(tmp_path, endpoint)
-        with pytest.raises(child_http.BoundedTransportError) as failure:
-            child_http.request_bytes(
-                WIRE, endpoint, "", deadline=time.monotonic() + 10, socket_timeout=5)
-    finally:
-        child_http.request_bytes = original
+    monkeypatch.setattr(child_http, "request_bytes", child_http.request_bytes)
+    _child.install_wire_recorder(tmp_path, endpoint)
+    with pytest.raises(child_http.BoundedTransportError) as failure:
+        child_http.request_bytes(
+            WIRE, endpoint, "", deadline=time.monotonic() + 10, socket_timeout=5)
     assert failure.value.http_status == 415
     assert [entry[0] for entry in seen] == ["gzip", None]
     record = json.loads((tmp_path / "sends.jsonl").read_text())
@@ -263,15 +257,12 @@ def test_wire_recorder_keeps_resend_when_server_closes_without_response(
     monkeypatch.setenv("STATEFRAME_HTTP_GZIP", "on")
     endpoint, seen, settings = transport_server
     settings["close_on_identity"] = True
-    original = child_http.request_bytes
     monkeypatch.setattr(_child, "HOST_STATE", dict(_child.HOST_STATE))
-    try:
-        _child.install_wire_recorder(tmp_path, endpoint)
-        with pytest.raises(child_http.BoundedTransportError) as failure:
-            child_http.request_bytes(
-                WIRE, endpoint, "", deadline=time.monotonic() + 10, socket_timeout=5)
-    finally:
-        child_http.request_bytes = original
+    monkeypatch.setattr(child_http, "request_bytes", child_http.request_bytes)
+    _child.install_wire_recorder(tmp_path, endpoint)
+    with pytest.raises(child_http.BoundedTransportError) as failure:
+        child_http.request_bytes(
+            WIRE, endpoint, "", deadline=time.monotonic() + 10, socket_timeout=5)
 
     assert [entry[0] for entry in seen] == ["gzip", None]
     assert gzip.decompress(seen[0][1]) == seen[1][1] == WIRE
@@ -292,20 +283,52 @@ def test_wire_recorder_keeps_resend_when_server_closes_without_response(
 
 @pytest.mark.host_sandbox
 def test_wire_recorder_normal_record_keeps_022_shape(monkeypatch, tmp_path, transport_server):
+    from types import SimpleNamespace
+
     import kernel_bounded_http as child_http
+    from kernel_measurement import ACTIVE_REQUEST
 
     monkeypatch.setenv("STATEFRAME_HTTP_GZIP", "off")
     endpoint, _, _ = transport_server
     original = child_http.request_bytes
     monkeypatch.setattr(_child, "HOST_STATE", dict(_child.HOST_STATE))
+    monkeypatch.setattr(child_http, "request_bytes", original)
+    token = ACTIVE_REQUEST.set(SimpleNamespace(
+        _final_cache_layout_record={"final_layout": "plain", "stable_wire": "off"}))
     try:
         _child.install_wire_recorder(tmp_path, endpoint)
         assert child_http.request_bytes(
             WIRE, endpoint, "", deadline=time.monotonic() + 10,
             socket_timeout=5) == b'{"ok":true}'
     finally:
-        child_http.request_bytes = original
+        ACTIVE_REQUEST.reset(token)
     line = (tmp_path / "sends.jsonl").read_text()
+    record = json.loads(line)
+    _assert_normal_send_keeps_022_shape(line)
+    assert "final_layout" not in record
+    assert "final_layout_reason" not in record
+    assert "stable_wire" not in record
+    assert "stable_wire_reason" not in record
+
+    import kernel_cache_layout_candidate as candidate
+
+    monkeypatch.setattr(candidate, "_REPLAY_LAYOUT_DECISION_PROVIDER", None, raising=False)
+    monkeypatch.setattr(candidate, "_REPLAY_STABLE_WIRE_DECISION_PROVIDER", None, raising=False)
+    monkeypatch.setattr(child_http, "request_bytes", original)
+    replay_wire = tmp_path / "replay-wire"
+    replay_wire.mkdir()
+    (replay_wire / "0001.request.json").write_bytes(
+        (tmp_path / "wire/0001.request.json").read_bytes())
+    (replay_wire / "0001.response.json").write_text(
+        json.dumps({"choices": [{"message": {"role": "assistant", "content": "ok"}}]}))
+    tape = build_replay_tape(replay_wire, tmp_path / "sends.jsonl")
+    resume_run = tmp_path / "resume-run"
+    resume_run.mkdir()
+    _child.install_wire_recorder(resume_run, endpoint, Replayer(tape))
+    assert candidate.replay_final_layout_decision() == "plain"
+
+
+def _assert_normal_send_keeps_022_shape(line: str) -> None:
     record = json.loads(line)
     expected = {"send": 1, "request_bytes": len(WIRE),
                 "request_sha256": hashlib.sha256(WIRE).hexdigest(),
@@ -313,6 +336,46 @@ def test_wire_recorder_normal_record_keeps_022_shape(monkeypatch, tmp_path, tran
                 "prompt_tokens": None, "completion_tokens": None,
                 "cached_tokens": None, "actions": []}
     assert line == json.dumps(expected) + "\n"
+
+
+def test_022_send_shape_pin_rejects_planted_plain_layout_key():
+    record = {"send": 1, "request_bytes": len(WIRE),
+              "request_sha256": hashlib.sha256(WIRE).hexdigest(),
+              "messages": 1, "seconds": 0.25,
+              "prompt_tokens": None, "completion_tokens": None,
+              "cached_tokens": None, "actions": []}
+    _assert_normal_send_keeps_022_shape(json.dumps(record) + "\n")
+    planted = {**record, "final_layout": "plain"}
+    with pytest.raises(AssertionError):
+        _assert_normal_send_keeps_022_shape(json.dumps(planted) + "\n")
+    planted_stable_wire = {**record, "stable_wire": "off"}
+    with pytest.raises(AssertionError):
+        _assert_normal_send_keeps_022_shape(json.dumps(planted_stable_wire) + "\n")
+
+
+@pytest.mark.host_sandbox
+def test_wire_recorder_keeps_failed_open_layout_reason(monkeypatch, tmp_path, transport_server):
+    from types import SimpleNamespace
+
+    import kernel_bounded_http as child_http
+    from kernel_measurement import ACTIVE_REQUEST
+
+    monkeypatch.setenv("STATEFRAME_HTTP_GZIP", "off")
+    endpoint, _, _ = transport_server
+    monkeypatch.setattr(_child, "HOST_STATE", dict(_child.HOST_STATE))
+    monkeypatch.setattr(child_http, "request_bytes", child_http.request_bytes)
+    token = ACTIVE_REQUEST.set(SimpleNamespace(_final_cache_layout_record={
+        "final_layout": "failed_open", "final_layout_reason": "exceeds_measured_envelope"}))
+    try:
+        _child.install_wire_recorder(tmp_path, endpoint)
+        assert child_http.request_bytes(
+            WIRE, endpoint, "", deadline=time.monotonic() + 10,
+            socket_timeout=5) == b'{"ok":true}'
+    finally:
+        ACTIVE_REQUEST.reset(token)
+    record = json.loads((tmp_path / "sends.jsonl").read_text())
+    assert record["final_layout"] == "failed_open"
+    assert record["final_layout_reason"] == "exceeds_measured_envelope"
 
 
 @pytest.mark.host_sandbox

@@ -190,6 +190,55 @@ def install_wire_recorder(run: Path, chat_url: str, replayer: Replayer | None = 
     """
     import kernel_bounded_http
 
+    if replayer is not None:
+        # Replay is the only path that needs these engine imports. The recorded
+        # request bytes decide the old order; current meter and switch do not.
+        from kernel_cache_layout_candidate import (
+            install_replay_layout_decision_provider,
+            install_replay_stable_wire_decision_provider,
+        )
+        from kernel_cache_layout_view import FINAL_LAYOUT_NAME
+        from kernel_stateframe_final_message import AUTHORITY_OVERLAY_HEADER
+        from kernel_stable_wire import is_stable_wire_projection
+
+        def replay_layout_decision() -> str | None:
+            recorded = replayer.request_for_layout_decision()
+            if recorded is None:
+                return None
+            try:
+                request = json.loads(recorded)
+            except (ValueError, RecursionError):
+                return None
+            messages = request.get("messages") if isinstance(request, dict) else None
+            final = messages[-1] if isinstance(messages, list) and messages else None
+            if not isinstance(final, dict):
+                return None
+            content = final.get("content")
+            has_overlay = isinstance(content, str) and AUTHORITY_OVERLAY_HEADER in content
+            has_layout_name = final.get("name") == FINAL_LAYOUT_NAME
+            if has_overlay and has_layout_name:
+                return "layout"
+            if not has_overlay and not has_layout_name:
+                return "plain"
+            return None
+
+        install_replay_layout_decision_provider(replay_layout_decision)
+
+        def replay_stable_wire_decision() -> str | None:
+            recorded = replayer.request_for_layout_decision()
+            if recorded is None:
+                return None
+            try:
+                request = json.loads(recorded)
+            except (ValueError, RecursionError):
+                return None
+            messages = request.get("messages") if isinstance(request, dict) else None
+            if not isinstance(messages, list):
+                return None
+            return "applied" if is_stable_wire_projection(messages) else "plain"
+
+        install_replay_stable_wire_decision_provider(replay_stable_wire_decision)
+
     wire_dir = run / "wire"
     wire_dir.mkdir(exist_ok=True)
     original = kernel_bounded_http.request_bytes
@@ -204,6 +253,31 @@ def install_wire_recorder(run: Path, chat_url: str, replayer: Replayer | None = 
             os.replace(temp, path)
         finally:
             temp.unlink(missing_ok=True)
+
+    def final_layout_record(_wire: bytes) -> dict[str, str]:
+        from kernel_measurement import ACTIVE_REQUEST
+
+        capture = ACTIVE_REQUEST.get()
+        record = getattr(capture, "_final_cache_layout_record", None)
+        record = record if isinstance(record, dict) else {}
+        result: dict[str, str] = {}
+        # The engine capture is authoritative; inferring from message markers
+        # would add metadata to legacy plain sends.
+        layout = record.get("final_layout")
+        # Omit the plain layout value to preserve the original 0.2.2 shape.
+        if isinstance(layout, str) and layout in {"applied", "failed_open"}:
+            result["final_layout"] = layout
+            reason = record.get("final_layout_reason")
+            if isinstance(reason, str) and reason:
+                result["final_layout_reason"] = reason
+
+        stable_wire = record.get("stable_wire")
+        if isinstance(stable_wire, str) and stable_wire in {"applied", "plain", "failed_open"}:
+            result["stable_wire"] = stable_wire
+            reason = record.get("stable_wire_reason")
+            if isinstance(reason, str) and reason:
+                result["stable_wire_reason"] = reason
+        return result
 
     def recorded(wire: bytes, endpoint: str, key: str, **kwargs):
         route = kwargs.pop("route_meta", None)
@@ -292,6 +366,7 @@ def install_wire_recorder(run: Path, chat_url: str, replayer: Replayer | None = 
                 with (run / "sends.jsonl").open("a") as stream:
                     stream.write(json.dumps({"send": index, "request_bytes": len(wire),
                                              "request_sha256": hashlib.sha256(wire).hexdigest(),
+                                             **final_layout_record(wire),
                                              "transport_attempts": transport_attempts,
                                              "error": type(error).__name__}) + "\n")
             emit("send_error", send=index, error=type(error).__name__,
@@ -317,6 +392,7 @@ def install_wire_recorder(run: Path, chat_url: str, replayer: Replayer | None = 
         record = {"send": index, "request_bytes": len(wire),
                   "request_sha256": hashlib.sha256(wire).hexdigest(),
                   "messages": len(messages) if isinstance(messages, list) else None,
+                  **final_layout_record(wire),
                   "seconds": round(elapsed, 3), **usage, "actions": _actions(parsed)}
         if replayed is not None:
             record.update(replayed=True, replay_position=replayer.cursor, replay_total=len(replayer.tape))

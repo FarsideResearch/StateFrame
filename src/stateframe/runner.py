@@ -497,8 +497,10 @@ OPT_IN_SWITCHES = {
     "STATEFRAME_GIT_COMMIT": ("on", "off"),  # git_commit/git_branch tools; patch series per branch after the run
     "STATEFRAME_EDIT_SCOPE_WIDEN": ("on", "off"),  # scoped runs admit an edited product file outside the scope
     "STATEFRAME_REQUIREMENT_RECHECK": ("on", "off"),  # first done answered once with the task's requirement checklist
-    "STATEFRAME_FINAL_CACHE_LAYOUT": ("on", "off"),  # cacheable final request layout: volatile authority last
+    "STATEFRAME_FINAL_CACHE_LAYOUT": ("on", "off"),  # cacheable final request layout: volatile authority last; on by default
     "STATEFRAME_PROVIDER": ("llama.cpp",),  # operator-confirmed llama.cpp dialect override
+    "STATEFRAME_STABLE_WIRE": ("on", "off"),  # append-only source windows and a split stable frame
+    "STATEFRAME_STABLE_WIRE_HEADROOM": (),  # retained, not-current source window tokens per epoch
     "STATEFRAME_QUEUE_WAIT_MAX_S": (),  # finite positive seconds; a profile may set it too
     "STATEFRAME_SEND_STALL_S": (),  # 10-600 seconds without request-body progress
     "STATEFRAME_FL_CHECKPOINT_CAPTURE": ("on", "off"),  # opt-in settled-boundary observer capture
@@ -525,6 +527,12 @@ def resolve_opt_in_switches(engine_dir: Path = ENGINE_DIR) -> dict[str, str]:
         if name == "STATEFRAME_ENV_SEED_MAX_GB":
             # The host seed builder reports an invalid ambient value and uses the default.
             chosen[name] = raw if re.fullmatch(r"(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)", raw) else "10"
+            continue
+        if name == "STATEFRAME_STABLE_WIRE_HEADROOM":
+            value = _positive_int(name, raw)
+            if name not in engine_switches(engine_dir):
+                raise RunError(f"{name} is set, but this engine does not support it; unset it to run")
+            chosen[name] = str(value)
             continue
         if name in {"STATEFRAME_QUEUE_WAIT_MAX_S", "STATEFRAME_SEND_STALL_S"}:
             try:

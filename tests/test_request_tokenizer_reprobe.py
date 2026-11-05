@@ -416,6 +416,7 @@ def test_permanent_tokenizer_outage_replay_submits_with_bounded_probes(tmp_path)
 
 
 def _capture_clean_meter_request_bodies(tmp_path):
+    # v0.4.0 changes default request order; the 0.3.30 byte oracle uses plain order.
     # Stop at the needed request count instead of replaying all 41 tape turns.
     # Each clean-meter request costs ~71 s of engine-side prep on Linux (measured on e62db60:
     # 34 sends in 2422 s; journal attribution by crew-08: public_test_verdict_fact_normalized,
@@ -425,6 +426,7 @@ def _capture_clean_meter_request_bodies(tmp_path):
         tmp_path,
         "clean-meter-22file-r1",
         stop_after_provider_requests=6,
+        final_cache_layout="off",
     )
     assert outcome.engine_result == "RUN_INCOMPLETE", (
         f"capture stop result={outcome.engine_result!r}; exit={outcome.returncode}; "

@@ -84,7 +84,12 @@ def _recover_post_fit_growth(candidate, context, body, fitted_body, fitted_count
     # A projection is optional. Restore the fully fitted canonical candidate
     # and its measurement authority, then apply the same send-time transforms.
     candidate._frame_candidate_counter = fitted_counter
-    candidate._frame_candidate_inputs = copy.deepcopy(fitted_inputs)
+    # The trim callback belongs to the optional projection, not the fitted
+    # allocation contract. A recovered candidate can be captured again.
+    candidate._frame_candidate_inputs = {
+        name: copy.deepcopy(value) for name, value in fitted_inputs.items()
+        if name != "_final_layout_trim"
+    }
     candidate.request_source_final_delivery = copy.deepcopy(fitted_delivery)
     candidate._stateframe_page_log_pending = None
     recovered = copy.deepcopy(fitted_body)
@@ -252,7 +257,13 @@ def build_qualified_request(capture, runtime, body, *, endpoint, key, deadline=N
     body = finalize_frame_candidate(context, candidate, body, frame_counter=token_estimate)
     fitted_body = copy.deepcopy(body)
     fitted_counter = candidate._frame_candidate_counter
-    fitted_inputs = copy.deepcopy(candidate._frame_candidate_inputs)
+    # Snapshot only allocation inputs. The projection consumes its trim callback
+    # below; recovery must never pass it to capture_candidate as a keyword.
+    fitted_inputs = {
+        name: copy.deepcopy(value)
+        for name, value in candidate._frame_candidate_inputs.items()
+        if name != "_final_layout_trim"
+    }
     fitted_delivery = copy.deepcopy(candidate.request_source_final_delivery)
     from kernel_cache_layout_candidate import (
         render_cache_candidate, render_final_cache_candidate, pending_publication,
@@ -270,6 +281,12 @@ def build_qualified_request(capture, runtime, body, *, endpoint, key, deadline=N
         fitted_inputs, fitted_delivery,
         meter=_request_token_meter(context, candidate), endpoint=endpoint, key=key,
     )
+    layout_record = getattr(candidate, "_final_cache_layout_record", None)
+    if isinstance(layout_record, Mapping):
+        try:
+            capture._final_cache_layout_record = dict(layout_record)
+        except (AttributeError, TypeError):
+            pass
     candidate.journal.emit("final_wire_rebudgeted", producer="kernel_final_wire_allocation",
                            request_id=candidate.request_id, step=candidate.step,
                            before=before_fit_bytes, after=len(json.dumps(body).encode()),

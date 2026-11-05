@@ -18,4 +18,6 @@ class ChangedDefault:
 
 CHANGED_DEFAULTS = {
     "STATEFRAME_STABLE_TOOL_HEAD": ChangedDefault(since="0.3.13", pin="off", keyword="stable_tool_head"),
+    # The release that turns the final cache layout on by default (set at release time).
+    "STATEFRAME_FINAL_CACHE_LAYOUT": ChangedDefault(since="next", pin="off", keyword="final_cache_layout"),
 }

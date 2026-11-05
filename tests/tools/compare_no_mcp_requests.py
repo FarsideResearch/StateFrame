@@ -27,7 +27,7 @@ sys.path.insert(0, str(ROOT / "src"))
 from stateframe.request_records import list_request_records, read_request_record  # noqa: E402
 
 
-def source_env(tree: Path, stable_tool_head: str | None, *,
+def source_env(tree: Path, stable_tool_head: str | None, final_cache_layout: str | None, *,
                source_on_pythonpath: bool = True) -> dict[str, str]:
     environment = dict(os.environ)
     if source_on_pythonpath:
@@ -38,6 +38,9 @@ def source_env(tree: Path, stable_tool_head: str | None, *,
     environment.pop("STATEFRAME_STABLE_TOOL_HEAD", None)
     if stable_tool_head is not None:
         environment["STATEFRAME_STABLE_TOOL_HEAD"] = stable_tool_head
+    environment.pop("STATEFRAME_FINAL_CACHE_LAYOUT", None)
+    if final_cache_layout is not None:
+        environment["STATEFRAME_FINAL_CACHE_LAYOUT"] = final_cache_layout
     return environment
 
 
@@ -576,11 +579,11 @@ def write_launcher(path: Path) -> None:
 
 def capture(tree: Path, python: str, launcher: Path, script: Path,
             repo: Path, run_dir: Path, *, legacy_mode: bool = False,
-            stable_tool_head: str | None,
+            stable_tool_head: str | None, final_cache_layout: str | None,
             source_on_pythonpath: bool = True,
             test_python: str | None = None) -> bytes:
-    # stable_tool_head has no default (see tools/changed_defaults.py): every caller states its arm.
-    environment = source_env(tree, stable_tool_head=stable_tool_head,
+    # Changed defaults have no default here (see tools/changed_defaults.py): every caller states its arm.
+    environment = source_env(tree, stable_tool_head=stable_tool_head, final_cache_layout=final_cache_layout,
                              source_on_pythonpath=source_on_pythonpath)
     # Each capture gets its own empty home. The current tree reads enabled powerups and user skills from
     # STATEFRAME_HOME and old releases do not, so a home inherited from the test session (where an earlier test
@@ -652,11 +655,12 @@ def main() -> int:
             pythons[label] = tree_python(tree / "src", root / f"{label}-python")
             assert_tree_imports(pythons[label], tree / "src", root)
         previous = capture(baseline, pythons["baseline"], launcher, script, repo, run_dir,
-                           stable_tool_head=None, source_on_pythonpath=False, test_python=args.python)
+                           stable_tool_head=None, final_cache_layout=None, source_on_pythonpath=False, test_python=args.python)
         run_dir.rename(root / "baseline-run")
         current = capture(candidate, pythons["candidate"], launcher, script, repo, run_dir,
                           legacy_mode=not args.current_defaults,
                           stable_tool_head=None if args.current_defaults else "off",
+                          final_cache_layout=None if args.current_defaults else "off",
                           source_on_pythonpath=False, test_python=args.python)
         for label, body in (("baseline", previous), ("candidate", current)):
             print(f"{label}: {len(body)} bytes sha256={hashlib.sha256(body).hexdigest()}")

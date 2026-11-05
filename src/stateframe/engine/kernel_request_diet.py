@@ -33,6 +33,10 @@ SCHEMA = "stateframe-request-diet/1"
 ENDPOINT_CONTEXT_TOKENS = ENDPOINT_SIZE.context_tokens
 ENDPOINT_PROMPT_TOKEN_BUDGET = ENDPOINT_SIZE.prompt_budget
 INITIAL_BYTES_PER_TOKEN = 2.46
+# Crew-01: 109 rows, 3.02-3.92 bytes/token; +2,863 minimum margin with this cap.
+MAX_CALIBRATED_BYTES_PER_TOKEN = 3.0
+# Crew-01 r2-owner send 2 undercounted 515 tokens after one sample.
+MIN_CALIBRATION_SAMPLES = 2
 # SPEED 2026-10-22: Stage6 relay RTT is 0.14-0.15 s for tiny bodies and
 # 0.68-0.77 s for 90 KB. b1569's ~211 ms and product benchmark's ~203 ms were
 # the old 0.2 s timeout firing, not successful-tokenization latency.
@@ -623,9 +627,16 @@ class RequestTokenMeter:
         return None
 
     def _fallback_ratio(self) -> tuple[float, float]:
-        if self._minimum_bytes_per_token is None:
+        if (self._minimum_bytes_per_token is None
+                or self._calibration_samples < MIN_CALIBRATION_SAMPLES):
             return INITIAL_BYTES_PER_TOKEN, 0.0
-        return self._minimum_bytes_per_token * (1.0 - FALLBACK_SAFETY_MARGIN), FALLBACK_SAFETY_MARGIN
+        return (
+            min(
+                self._minimum_bytes_per_token * (1.0 - FALLBACK_SAFETY_MARGIN),
+                MAX_CALIBRATED_BYTES_PER_TOKEN,
+            ),
+            FALLBACK_SAFETY_MARGIN,
+        )
 
     def measure(self, body: Mapping[str, object]) -> tuple[int, str]:
         return self._measure_with_wire_bytes(body, None)

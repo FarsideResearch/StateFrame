@@ -210,6 +210,24 @@ def test_changed_exact_body_uses_frozen_delta_when_tokenizer_fails(monkeypatch):
     assert meter.measure(changed)[0] > count
 
 
+def test_stable_wire_fit_and_reserve_use_frozen_count_after_tokenizer_failure(monkeypatch):
+    from kernel_stable_wire import _request_fits, _request_retry_reserve
+
+    body = _body(80000)
+    meter = RequestTokenMeter(tokenizer=lambda _text: 20000)
+    meter.bind_request("seal-r1", "seal-r1")
+    tokens, method = meter.measure(body)
+    assert method == "tokenize"
+    capture = _capture(body, meter, method=method, tokens=tokens)
+    inputs = {"token_ceiling": 33344, "byte_ceiling": 82000,
+              "measurement_identity": "tokenize"}
+    monkeypatch.setattr(meter, "_availability", "unavailable")
+    assert meter.measure(body)[0] > inputs["token_ceiling"]  # Planted live-meter control.
+    assert not _request_fits(body, meter, inputs)
+    assert _request_fits(body, meter, inputs, capture)
+    assert _request_retry_reserve(body, meter, inputs, capture) == (16, 256)
+
+
 def test_oversize_rejection_sentinel_freezes_only_after_trimming():
     oversized = _body(600000)
     meter = RequestTokenMeter(tokenizer=lambda _text: 100)
@@ -253,7 +271,7 @@ def test_opt_in_layout_uses_frozen_counter_across_flip(monkeypatch, allocation_m
     inputs = {"token_ceiling": 33344, "byte_ceiling": 82000,
               "source_plan": {}, "sources": {}, "receipt": None}
     result = render_final_cache_candidate(capture, None, body, meter=meter, inputs=inputs)
-    assert result is body  # A new projection needs a live exact count.
+    assert result is not body  # The frozen allocation admits a measured fallback projection.
     assert _proof(monkeypatch, result, meter, capture)["status"] == "READY"
     assert capture.request_budget_final_wire["measure_method"] == allocation_method
 
@@ -321,6 +339,65 @@ def test_permanent_outage_growth_is_rejected_by_layout_before_proof(monkeypatch)
     assert _proof(monkeypatch, projected, meter, capture)["status"] == "READY"
 
 
+def test_final_layout_trim_rebinds_frozen_fallback_before_proof(monkeypatch):
+    from test_final_cache_layout import _body as layout_body
+    from kernel_cache_layout_candidate import _project_final_cache_layout, render_final_cache_candidate
+    from kernel_frame_allocation_capture import (
+        calibrated_estimate, rebind_final_layout_trim,
+    )
+    from kernel_frame_optional_allocation import identity
+
+    monkeypatch.setenv("STATEFRAME_FINAL_CACHE_LAYOUT", "on")
+    monkeypatch.setattr("kernel_request_source_window.verify_final_source_delivery",
+                        lambda *_args, **_kwargs: {"status": "COMPLETE"})
+    monkeypatch.setattr("kernel_request_source_window.source_delivery_satisfied",
+                        lambda _receipt: True)
+    body = layout_body()
+    body["messages"][3]["content"] += "x" * (
+        78871 - len(json.dumps(body, sort_keys=True, ensure_ascii=False)))
+    meter = RequestTokenMeter(disabled=True)
+    meter.bind_request("seal-r1", "seal-r1")
+    tokens = calibrated_estimate(body, meter)
+    assert tokens == 33210 and meter._calibration_samples == 0
+    capture = _capture(body, meter, method="calibrated_bytes", tokens=tokens)
+    capture.journal = SimpleNamespace(emit=lambda *_args, **_kwargs: None)
+    capture.request_source_final_delivery = {"status": "COMPLETE"}
+    capture._frame_candidate_fallback_fit = False
+    capture._frame_candidate_rejection_bound = -1
+    inputs = {"token_ceiling": 33344, "byte_ceiling": 82000,
+              "source_plan": {}, "sources": {}, "receipt": {"status": "COMPLETE"},
+              "measurement_identity": "calibrated_bytes"}
+    capture._frame_candidate_inputs = inputs
+
+    # Planted control: projection without the one trim fails the final proof.
+    overgrown = _project_final_cache_layout(body)
+    assert "request_tokens_exceed_max_prompt_tokens" in _proof(
+        monkeypatch, overgrown, meter, capture)["final_validation_failures"]
+    original_digest = capture._frame_candidate_counter.body_digest
+    trimmed_digest = None
+
+    def trim(token_reserve, byte_reserve):
+        nonlocal trimmed_digest
+        assert token_reserve > 0 and byte_reserve >= 0
+        body["messages"][3]["content"] = body["messages"][3]["content"][:-1000]
+        trimmed_digest = identity(body)
+        rebind_final_layout_trim(body, meter, capture, byte_limit=82000, token_limit=33344)
+        assert capture._frame_candidate_counter.body_digest == trimmed_digest
+        assert capture._frame_candidate_fallback_fit is True
+        assert capture._frame_candidate_rejection_bound == meter.measure(body)[0]
+        assert capture._frame_candidate_measurement.method == "calibrated_bytes"
+        assert capture._frame_candidate_measurement.prompt_tokens == capture._frame_candidate_counter.tokens
+        assert capture._frame_candidate_inputs["measurement_identity"] == "calibrated_bytes"
+        return True
+
+    inputs["_final_layout_trim"] = trim
+    projected = render_final_cache_candidate(capture, None, body, meter=meter, inputs=inputs)
+    assert trimmed_digest != original_digest
+    assert projected is not body
+    assert capture._frame_candidate_counter.body_digest == identity(projected)
+    assert _proof(monkeypatch, projected, meter, capture)["status"] == "READY"
+
+
 @pytest.mark.parametrize("layout", ["off", "on"])
 def test_permanent_outage_post_fit_growth_recovers_before_submission(monkeypatch, tmp_path,
                                                                     layout):
@@ -375,6 +452,36 @@ def test_permanent_outage_post_fit_growth_recovers_before_submission(monkeypatch
     assert response["choices"][0]["message"]["content"] == "done"
     records = [json.loads(line) for line in journal.path.read_text().splitlines()]
     assert len([row for row in records if row["kind"] == "request_submitted"]) == 1
+
+
+def test_post_fit_recovery_does_not_restore_projection_trim_callback():
+    from inspect import signature
+
+    from kernel_final_wire_allocation import _recover_post_fit_growth
+    from kernel_frame_allocation_capture import capture_candidate
+
+    body = _body(0)
+    meter = RequestTokenMeter(disabled=True)
+    meter.bind_request("seal-r1", "seal-r1")
+    capture = _capture(body, meter, method="calibrated_bytes", tokens=meter.measure(body)[0])
+    capture.request_source_final_delivery = {"status": "COMPLETE"}
+    fitted_inputs = {"token_ceiling": 33344, "byte_ceiling": 82000,
+                     "receipt": {"status": "COMPLETE"},
+                     "_final_layout_trim": lambda *_args: True}
+    capture._frame_candidate_inputs = copy.deepcopy(fitted_inputs)
+    grown = copy.deepcopy(body)
+    grown["messages"][0]["content"] += "x" * 100000
+
+    # Planted control: the callback is not part of capture_candidate's contract.
+    with pytest.raises(TypeError, match="_final_layout_trim"):
+        signature(capture_candidate).bind_partial(**fitted_inputs)
+    recovered, changed = _recover_post_fit_growth(
+        capture, SimpleNamespace(), grown, body, capture._frame_candidate_counter,
+        fitted_inputs, capture.request_source_final_delivery,
+        meter=meter, endpoint=None, key="")
+    assert changed and recovered == body
+    assert "_final_layout_trim" not in capture._frame_candidate_inputs
+    signature(capture_candidate).bind_partial(**capture._frame_candidate_inputs)
 
 
 def test_late_rewrite_refits_with_the_frozen_counter(monkeypatch):

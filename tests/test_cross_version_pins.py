@@ -84,8 +84,9 @@ def test_every_cross_version_comparison_states_changed_defaults():
 def test_planted_omission_is_caught():
     planted = (
         "def test_old_vs_new(tmp_path):\n"
-        "    before = capture(baseline, python, launcher, script, repo, run_dir, stable_tool_head=None)\n"
-        "    after = capture(ROOT, python, launcher, script, repo, run_dir)\n"
+        "    before = capture(baseline, python, launcher, script, repo, run_dir, stable_tool_head=None,\n"
+        "                     final_cache_layout=None)\n"
+        "    after = capture(ROOT, python, launcher, script, repo, run_dir, stable_tool_head='off')\n"
         "    assert before == after\n"
     )
-    assert missing_pins(planted, {"capture"}) == ["line 3: capture() does not state stable_tool_head"]
+    assert missing_pins(planted, {"capture"}) == ["line 4: capture() does not state final_cache_layout"]

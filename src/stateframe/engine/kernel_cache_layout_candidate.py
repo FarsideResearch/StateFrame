@@ -5,7 +5,7 @@ Separate from the pre-existing permutation-only kernel_cache_layout APIs.
 from __future__ import annotations
 
 import copy
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import replace
 import json
 import os
@@ -16,25 +16,264 @@ from kernel_stateframe_page_log import PageLogPending, mode
 _COMMIT_LOCK = threading.RLock()
 
 FINAL_MODE_ENV = "STATEFRAME_FINAL_CACHE_LAYOUT"
+SOURCE_COVERAGE_PREFIX = "[Source coverage]"
+FINAL_LAYOUT_TOKEN_MARGIN = 16
+FINAL_LAYOUT_BYTE_MARGIN = 256
+_REPLAY_LAYOUT_DECISION_PROVIDER: Callable[[], str | None] | None = None
+_REPLAY_STABLE_WIRE_DECISION_PROVIDER: Callable[[], str | None] | None = None
+
+
+class FinalCacheLayoutProjectionError(ValueError):
+    """The default layout cannot represent this request without changing its meaning."""
 
 
 def final_layout_mode(environ=None):
     source = os.environ if environ is None else environ
-    selected = str(source.get(FINAL_MODE_ENV, "off")).strip().lower()
+    selected = str(source.get(FINAL_MODE_ENV, "on")).strip().lower()
     if selected not in {"off", "on"}:
         raise ValueError("invalid final cache layout mode")
     return selected
 
 
+def final_layout_requested(environ=None) -> bool:
+    """Whether the layout was asked for explicitly, rather than being on by default."""
+    source = os.environ if environ is None else environ
+    return bool(str(source.get(FINAL_MODE_ENV, "")).strip())
+
+
+def install_replay_layout_decision_provider(provider: Callable[[], str | None] | None) -> None:
+    """Install the next recorded wire decision inside the replay-only child path."""
+    global _REPLAY_LAYOUT_DECISION_PROVIDER
+    if provider is not None and not callable(provider):
+        raise TypeError("final layout replay decision provider must be callable")
+    _REPLAY_LAYOUT_DECISION_PROVIDER = provider
+
+
+def replay_final_layout_decision() -> str | None:
+    provider = _REPLAY_LAYOUT_DECISION_PROVIDER
+    if provider is None:
+        return None
+    decision = provider()
+    if decision not in {None, "layout", "plain"}:
+        raise ValueError("invalid recorded final layout decision")
+    return decision
+
+
+def install_replay_stable_wire_decision_provider(provider: Callable[[], str | None] | None) -> None:
+    """Install the next recorded stable-wire decision inside the replay-only child path."""
+    global _REPLAY_STABLE_WIRE_DECISION_PROVIDER
+    if provider is not None and not callable(provider):
+        raise TypeError("stable wire replay decision provider must be callable")
+    _REPLAY_STABLE_WIRE_DECISION_PROVIDER = provider
+
+
+def replay_stable_wire_decision() -> str | None:
+    provider = _REPLAY_STABLE_WIRE_DECISION_PROVIDER
+    if provider is None:
+        return None
+    decision = provider()
+    if decision not in {None, "applied", "plain"}:
+        raise ValueError("invalid recorded stable wire decision")
+    return decision
+
+
+def _record_final_layout(capture, disposition: str, reason: str | None = None) -> None:
+    if capture is None:
+        return
+    current = getattr(capture, "_final_cache_layout_record", None)
+    record = dict(current) if isinstance(current, Mapping) else {}
+    record["final_layout"] = disposition
+    record.pop("final_layout_reason", None)
+    if reason:
+        record["final_layout_reason"] = reason
+    try:
+        capture._final_cache_layout_record = record
+    except (AttributeError, TypeError):
+        return
+
+
+def _record_stable_wire(capture, disposition: str, reason: str | None = None) -> None:
+    if capture is None:
+        return
+    current = getattr(capture, "_final_cache_layout_record", None)
+    record = dict(current) if isinstance(current, Mapping) else {}
+    record["stable_wire"] = disposition
+    record.pop("stable_wire_reason", None)
+    if reason:
+        record["stable_wire_reason"] = reason
+    try:
+        capture._final_cache_layout_record = record
+    except (AttributeError, TypeError):
+        return
+
+
+def _failed_open(capture, body, reason, **fields):
+    from kernel_stateframe_page_log import _emit
+    journal = getattr(capture, "journal", None) if capture is not None else None
+    if journal is not None:
+        _emit(journal, "final_cache_layout_failed_open", request_id=getattr(capture, "request_id", None),
+              reason=reason, vital=True, **fields)
+    _record_final_layout(capture, "failed_open", reason)
+    return body
+
+
 def render_final_cache_candidate(capture, runtime, body, *, meter, inputs):
-    """Place current authority at the end of a final, fully fitted request."""
-    if final_layout_mode() == "off":
+    """Place current authority at the end of a final, fully fitted request.
+
+    On by default. When it was asked for explicitly, a request it cannot project is an error; when it
+    is only on by default, that request is sent in the normal (already fitted) layout instead, with a
+    final_cache_layout_failed_open event, so the default never ends a run that did not opt in."""
+    from kernel_stable_wire import mode as stable_wire_mode
+
+    try:
+        capture._final_cache_layout_record = {}
+    except (AttributeError, TypeError):
+        pass
+    decision = replay_final_layout_decision()
+    stable_decision = replay_stable_wire_decision()
+    stable_switch_enabled = stable_wire_mode() == "on"
+    selected_layout = final_layout_mode()
+    if stable_switch_enabled and selected_layout != "on":
+        raise ValueError(
+            "STATEFRAME_STABLE_WIRE=on requires STATEFRAME_FINAL_CACHE_LAYOUT=on"
+        )
+    stable_wire_enabled = stable_switch_enabled or stable_decision in {"applied", "plain"}
+    trim_callback = inputs.pop("_final_layout_trim", None) if isinstance(inputs, dict) else None
+    if decision == "plain":
+        _record_final_layout(capture, "plain")
+        if stable_wire_enabled or stable_decision == "plain":
+            _record_stable_wire(capture, "plain", "recorded_plain_layout")
         return body
+    if decision is None and selected_layout == "off":
+        _record_final_layout(capture, "plain")
+        if stable_wire_enabled:
+            _record_stable_wire(capture, "off")
+        return body
+    requested = final_layout_requested()
     if mode() != "off":
-        raise ValueError("final cache layout and page log cannot share one request")
+        if requested or decision == "layout":
+            raise ValueError("final cache layout and page log cannot share one request")
+        fallback = _failed_open(capture, body, "page_log_on")
+        if stable_wire_enabled:
+            _record_stable_wire(capture, "plain", "final_layout_failed_open")
+        return fallback
+    try:
+        projected = _render_final_cache_layout(
+            capture, runtime, body, meter=meter, inputs=inputs,
+            replay_decision=decision, trim_callback=trim_callback,
+            stable_wire_enabled=stable_wire_enabled,
+            stable_replay_decision=stable_decision)
+    except FinalCacheLayoutProjectionError as error:
+        if requested or decision == "layout":
+            raise
+        fallback = _failed_open(capture, body, "cannot_project", error_type=type(error).__name__)
+        if stable_wire_enabled:
+            _record_stable_wire(capture, "plain", "final_layout_failed_open")
+        return fallback
+    if projected is not body:
+        _record_final_layout(capture, "applied")
+    return projected
+
+
+def _wire_size(body) -> int:
+    return len(json.dumps(body).encode("utf-8"))
+
+
+def _final_layout_reserve(projected_tokens: int, token_ceiling: int,
+                          projected_bytes: int, byte_ceiling: int) -> tuple[int, int]:
+    return (
+        max(0, projected_tokens - token_ceiling) + FINAL_LAYOUT_TOKEN_MARGIN,
+        max(0, projected_bytes - byte_ceiling) + FINAL_LAYOUT_BYTE_MARGIN,
+    )
+
+
+def _cacheable_frame_content(original: str, cacheable: object) -> str:
+    """Remove authority fields while preserving every untouched rendered JSON span."""
+    header, separator, source = original.partition("\n")
+    if not separator or header != "[StateFrame]":
+        raise ValueError("final cache layout requires a rendered StateFrame")
+    decoder = json.JSONDecoder()
+
+    def rewrite(text: str, target: object, start: int = 0) -> tuple[str, int]:
+        source_value, end = decoder.raw_decode(text, start)
+        if source_value == target:
+            return text[start:end], end
+        if isinstance(source_value, Mapping) and isinstance(target, Mapping):
+            if not set(target).issubset(source_value):
+                raise ValueError("cacheable frame added a field during authority projection")
+            cursor = start + 1
+            leading_start = cursor
+            while cursor < end and text[cursor].isspace():
+                cursor += 1
+            leading = text[leading_start:cursor]
+            members = []
+            while cursor < end and text[cursor] != "}":
+                key_start = cursor
+                key, key_end = decoder.raw_decode(text, cursor)
+                if not isinstance(key, str):
+                    raise ValueError("StateFrame object keys must be strings")
+                cursor = key_end
+                while cursor < end and text[cursor].isspace():
+                    cursor += 1
+                if cursor >= end or text[cursor] != ":":
+                    raise ValueError("malformed rendered StateFrame object")
+                cursor += 1
+                while cursor < end and text[cursor].isspace():
+                    cursor += 1
+                value_start = cursor
+                _source_child, value_end = decoder.raw_decode(text, value_start)
+                if key in target:
+                    rewritten_child, _ = rewrite(text, target[key], value_start)
+                    members.append(text[key_start:value_start] + rewritten_child)
+                cursor = value_end
+                while cursor < end and text[cursor].isspace():
+                    cursor += 1
+                if cursor < end and text[cursor] == ",":
+                    cursor += 1
+                    while cursor < end and text[cursor].isspace():
+                        cursor += 1
+                elif cursor < end and text[cursor] == "}":
+                    break
+                else:
+                    raise ValueError("malformed rendered StateFrame object")
+            trailing_start = cursor
+            while trailing_start < end and text[trailing_start].isspace():
+                trailing_start += 1
+            trailing = text[trailing_start:end - 1]
+            return "{" + leading + ",".join(members) + trailing + "}", end
+        if isinstance(source_value, list) and isinstance(target, list) and len(source_value) == len(target):
+            cursor = start + 1
+            leading_start = cursor
+            while cursor < end and text[cursor].isspace():
+                cursor += 1
+            leading = text[leading_start:cursor]
+            values = []
+            for index, target_child in enumerate(target):
+                rewritten_child, cursor = rewrite(text, target_child, cursor)
+                values.append(rewritten_child)
+                while cursor < end and text[cursor].isspace():
+                    cursor += 1
+                if index + 1 < len(target):
+                    if cursor >= end or text[cursor] != ",":
+                        raise ValueError("malformed rendered StateFrame array")
+                    cursor += 1
+                    while cursor < end and text[cursor].isspace():
+                        cursor += 1
+            trailing_start = cursor
+            while trailing_start < end and text[trailing_start].isspace():
+                trailing_start += 1
+            trailing = text[trailing_start:end - 1]
+            return "[" + leading + ",".join(values) + trailing + "]", end
+        return json.dumps(target, ensure_ascii=False, separators=(",", ":"),
+                          allow_nan=False, sort_keys=False), end
+
+    rendered, end = rewrite(source, cacheable)
+    return header + "\n" + rendered + source[end:]
+
+
+def _project_final_cache_layout(body):
     from kernel_cache_layout_view import FINAL_LAYOUT_NAME, semantic_messages
     from kernel_greenfact import GREENFACT_TEXT
-    from kernel_request_source_window import verify_final_source_delivery, source_delivery_satisfied
     from kernel_stateframe_framefit5 import VOLATILE_TAIL_MARKER, _validated_exchange_and_volatile_tail
     from kernel_stateframe_page_log import _partition_authority, _payload_has_authority_keys
     from kernel_stateframe_final_message import AUTHORITY_OVERLAY_HEADER
@@ -45,8 +284,13 @@ def render_final_cache_candidate(capture, runtime, body, *, meter, inputs):
         raise ValueError("final cache layout requires a message array")
     _exchange, exchange_start, _tail_index = _validated_exchange_and_volatile_tail(messages)
     system_end = next((i for i, row in enumerate(messages) if row.get("role") != "system"), len(messages))
-    state_index = system_end + 1
-    if (state_index >= exchange_start or not str(messages[state_index].get("content", "")).startswith("[StateFrame]\n")):
+    frame_indexes = [index for index, row in enumerate(messages[system_end:exchange_start], start=system_end)
+                     if str(row.get("content", "")).startswith("[StateFrame]\n")]
+    if (len(frame_indexes) != 1 or system_end >= len(messages)
+            or not str(messages[system_end].get("content", "")).startswith("Task:")):
+        raise ValueError("final cache layout requires the canonical frame input")
+    state_index = frame_indexes[0]
+    if state_index <= system_end:
         raise ValueError("final cache layout requires the canonical frame input")
     payload = json.loads(messages[state_index]["content"].split("\n", 1)[1])
     cacheable, fields = _partition_authority(payload, final=True)
@@ -61,21 +305,23 @@ def render_final_cache_candidate(capture, runtime, body, *, meter, inputs):
         "[NATIVE BATCH RECEIPTS]", "[LITERAL SITE INVENTORY |",
     )
     stable = []
-    moved = []
-    for row in messages[state_index + 1:exchange_start]:
+    moved: list[tuple[int, str, dict[str, object]]] = []
+    for index, row in enumerate(messages[system_end:exchange_start], start=system_end):
+        if index == state_index:
+            continue
         content = row.get("content")
         if row.get("role") != "user" or not isinstance(content, str):
             raise ValueError("final cache layout has a non-user stable row")
-        if content.startswith(authority_prefixes):
-            if not content.startswith("[CONTINUATION LIMITS |"):
-                moved.append(content)
+        if content.startswith(authority_prefixes) or content.startswith(SOURCE_COVERAGE_PREFIX):
+            extras = {key: copy.deepcopy(value) for key, value in row.items()
+                      if key not in {"role", "content"}}
+            moved.append((index, content, extras))
         else:
-            stable.append(row)
+            stable.append(copy.deepcopy(dict(row)))
     # Preserve whole source carriers, with their path and revision attached.
     frame = messages[state_index]
     original_frame_content = frame["content"]
-    frame["content"] = "[StateFrame]\n" + json.dumps(
-        cacheable, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False)
+    frame["content"] = _cacheable_frame_content(original_frame_content, cacheable)
     final = messages[-1]
     original = final.get("content")
     if not isinstance(original, str) or not original.startswith(VOLATILE_TAIL_MARKER):
@@ -84,36 +330,175 @@ def render_final_cache_candidate(capture, runtime, body, *, meter, inputs):
     prefix = original[:-len(green)] if green else original
     if AUTHORITY_OVERLAY_HEADER in prefix or "[CONTINUATION LIMITS |" in prefix:
         raise ValueError("final cache layout has duplicate authority text")
+    final_prefix = prefix
+    moved_wire: list[dict[str, object]] = []
+    for index, content, extras in moved:
+        final_prefix += "\n\n"
+        start = len(final_prefix)
+        final_prefix += content
+        entry: dict[str, object] = {"index": index, "start": start, "end": len(final_prefix)}
+        if extras:
+            entry["extra"] = extras
+        moved_wire.append(entry)
+    overlay_fields = []
+    for field in fields:
+        value = field.get("value")
+        exact_reference = next((index for index, content, _extras in moved
+                                if isinstance(value, str) and value and content == value), None)
+        substring_references = []
+        if isinstance(value, str) and value and exact_reference is None:
+            for index, content, _extras in moved:
+                start = content.find(value)
+                if start >= 0 and content.find(value, start + len(value)) < 0:
+                    substring_references.append((index, start))
+        if exact_reference is not None:
+            overlay_fields.append({"path": field["path"], "message": exact_reference})
+        elif len(substring_references) == 1:
+            referenced, start = substring_references[0]
+            overlay_fields.append({"path": field["path"], "message": referenced,
+                                  "span": [start, start + len(value)]})
+        else:
+            overlay_fields.append(field)
     overlay = json.dumps(
-        {"schema": "stateframe-authority-overlay/1", "layout": FINAL_LAYOUT_NAME, "fields": fields},
+        {"schema": "stateframe-authority-overlay/1", "layout": FINAL_LAYOUT_NAME,
+          "fields": overlay_fields,
+          "order": {"prefix_length": len(prefix), "original_prefix_count": exchange_start,
+                    "frame_index": state_index, "moved": moved_wire}},
         ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False)
-    final["content"] = "\n\n".join((prefix.rstrip(), *moved, AUTHORITY_OVERLAY_HEADER + "\n" + overlay)) + green
+    final["content"] = final_prefix + "\n\n" + AUTHORITY_OVERLAY_HEADER + "\n" + overlay + green
     final["name"] = FINAL_LAYOUT_NAME
-    projected["messages"] = [*messages[:state_index], *stable, frame,
+    projected["messages"] = [*messages[:system_end], *stable, frame,
                              *messages[exchange_start:-1], final]
-    if semantic_messages(projected["messages"])[state_index]["content"] != original_frame_content:
+    restored = semantic_messages(projected["messages"])
+    if restored != list(body.get("messages", [])):
+        raise ValueError("final cache layout message reconstruction differs")
+    restored_frame = next((row for row in restored
+                           if str(row.get("content", "")).startswith("[StateFrame]\n")), None)
+    if not isinstance(restored_frame, Mapping) or restored_frame.get("content") != original_frame_content:
         raise ValueError("final cache layout frame reconstruction differs")
-    from kernel_frame_allocation_capture import final_request_tokens
+    return projected
+
+
+def _checked_final_cache_projection(body):
+    try:
+        return _project_final_cache_layout(body)
+    except (ValueError, TypeError, KeyError, IndexError) as error:
+        raise FinalCacheLayoutProjectionError(str(error)) from error
+
+
+def _render_final_cache_layout(capture, runtime, body, *, meter, inputs,
+                               replay_decision=None, trim_callback=None,
+                               stable_wire_enabled=False, stable_replay_decision=None):
+    from kernel_request_source_window import verify_final_source_delivery, source_delivery_satisfied
+    from kernel_frame_allocation_capture import final_request_tokens, carry_final_request_tokens
+
+    projected = _checked_final_cache_projection(body)
     tokens, method = final_request_tokens(projected, meter, capture)
-    size = len(json.dumps(projected).encode())
-    if (method != "tokenize" or getattr(meter, "measure_method", method) != "tokenize"
-            or tokens > inputs["token_ceiling"] or size > inputs["byte_ceiling"]):
-        # The input body is already fitted to this envelope; send it unprojected rather than end the run.
-        from kernel_stateframe_page_log import _emit
-        journal = getattr(capture, "journal", None)
-        if journal is not None:
-            _emit(journal, "final_cache_layout_failed_open", request_id=capture.request_id,
-                  reason="exceeds_measured_envelope", vital=True, meter=method, prompt_tokens=tokens,
-                  token_ceiling=inputs["token_ceiling"], bytes=size, byte_ceiling=inputs["byte_ceiling"])
-        return body
+    size = _wire_size(projected)
+    if not stable_wire_enabled and replay_decision != "layout" and (
+            tokens > inputs["token_ceiling"] or size > inputs["byte_ceiling"]):
+        token_reserve, byte_reserve = _final_layout_reserve(
+            tokens, inputs["token_ceiling"], size, inputs["byte_ceiling"])
+        if callable(trim_callback):
+            fitted_body = copy.deepcopy(body)
+            trimmed = trim_callback(token_reserve, byte_reserve)
+            if trimmed is False:
+                if isinstance(body, dict):
+                    body.clear()
+                    body.update(fitted_body)
+                return _failed_open(
+                    capture, body, "exceeds_measured_envelope", meter=method,
+                    prompt_tokens=tokens, token_ceiling=inputs["token_ceiling"],
+                    bytes=size, byte_ceiling=inputs["byte_ceiling"],
+                    token_reserve=token_reserve, byte_reserve=byte_reserve,
+                )
+            projected = _checked_final_cache_projection(body)
+            tokens, method = final_request_tokens(projected, meter, capture)
+            size = _wire_size(projected)
+        if tokens > inputs["token_ceiling"] or size > inputs["byte_ceiling"]:
+            return _failed_open(
+                capture, body, "exceeds_measured_envelope", meter=method,
+                prompt_tokens=tokens, token_ceiling=inputs["token_ceiling"],
+                bytes=size, byte_ceiling=inputs["byte_ceiling"],
+                token_reserve=token_reserve, byte_reserve=byte_reserve,
+            )
     receipt = verify_final_source_delivery(
         inputs["source_plan"], projected["messages"], payload=projected,
         sources=inputs["sources"])
     if not source_delivery_satisfied(receipt):
         raise ValueError("final cache layout source proof failed")
+    plain_receipt = copy.deepcopy(inputs.get("receipt"))
     inputs["receipt"] = receipt
-    capture.request_source_final_delivery = receipt
-    from kernel_frame_allocation_capture import carry_final_request_tokens
+    if capture is not None:
+        capture.request_source_final_delivery = receipt
+    if stable_wire_enabled and stable_replay_decision != "plain":
+        from kernel_stable_wire import STATE_ATTR, project_stable_wire
+        stable_state_present = hasattr(runtime, STATE_ATTR)
+        stable_state_before = copy.deepcopy(getattr(runtime, STATE_ATTR, None))
+
+        def restore_plain():
+            inputs["receipt"] = plain_receipt
+            if capture is not None:
+                capture.request_source_final_delivery = plain_receipt
+            if stable_state_present:
+                setattr(runtime, STATE_ATTR, stable_state_before)
+            elif hasattr(runtime, STATE_ATTR):
+                delattr(runtime, STATE_ATTR)
+            _record_stable_wire(capture, "plain", "final_layout_failed_open")
+
+        def stable_trim(token_reserve, byte_reserve):
+            if not callable(trim_callback):
+                return False
+            fitted_body = copy.deepcopy(body)
+            trimmed = trim_callback(token_reserve, byte_reserve)
+            if trimmed is False and isinstance(body, dict):
+                body.clear()
+                body.update(fitted_body)
+            return trimmed
+
+        result = project_stable_wire(
+            capture, runtime, projected, meter=meter, inputs=inputs,
+            trim_callback=stable_trim if callable(trim_callback) else None,
+            replay_decision=stable_replay_decision)
+        if inputs.pop("_stable_wire_retry_after_trim", False):
+            projected = _checked_final_cache_projection(body)
+            receipt = verify_final_source_delivery(
+                inputs["source_plan"], projected["messages"], payload=projected,
+                sources=inputs["sources"])
+            if not source_delivery_satisfied(receipt):
+                raise ValueError("final cache layout source proof failed")
+            plain_receipt = copy.deepcopy(inputs.get("receipt"))
+            inputs["receipt"] = receipt
+            if capture is not None:
+                capture.request_source_final_delivery = receipt
+            result = project_stable_wire(
+                capture, runtime, projected, meter=meter, inputs=inputs,
+                replay_decision=stable_replay_decision)
+        if result is projected:
+            # Stable wire failed open to the final-layout body. The layout
+            # fallback still owns any overflow in that body.
+            tokens, method = final_request_tokens(projected, meter, capture)
+            size = _wire_size(projected)
+            if tokens > inputs["token_ceiling"] or size > inputs["byte_ceiling"]:
+                restore_plain()
+                return _failed_open(
+                    capture, body, "exceeds_measured_envelope", meter=method,
+                    prompt_tokens=tokens, token_ceiling=inputs["token_ceiling"],
+                    bytes=size, byte_ceiling=inputs["byte_ceiling"],
+                )
+        result_tokens, result_method = final_request_tokens(result, meter, capture)
+        if (result_tokens > inputs["token_ceiling"]
+                or _wire_size(result) > inputs["byte_ceiling"]):
+            restore_plain()
+            return _failed_open(
+                capture, body, "exceeds_measured_envelope", meter=result_method,
+                prompt_tokens=result_tokens, token_ceiling=inputs["token_ceiling"],
+                bytes=_wire_size(result), byte_ceiling=inputs["byte_ceiling"],
+            )
+        carry_final_request_tokens(result, capture, result_tokens)
+        return result
+    if stable_wire_enabled:
+        _record_stable_wire(capture, "plain", "recorded_plain_wire")
     carry_final_request_tokens(projected, capture, tokens)
     return projected
 

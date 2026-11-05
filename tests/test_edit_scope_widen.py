@@ -571,10 +571,11 @@ def test_switch_off_request_bytes_match_base_release(tmp_path, tmp_path_factory)
     _write_launchers(launcher, wrapper)
     run = tmp_path / "run"
     base_requests = _run_checkout(baseline, repo, run, launcher, wrapper,
-                                  tmp_path / "base_modules.json", stable_tool_head="off")[0]
+                                  tmp_path / "base_modules.json", stable_tool_head="off", final_cache_layout="off")[0]
     run.rename(tmp_path / "base_run")
+    # v0.4.0's final cache layout changes wire order; pin it off for cross-release parity.
     current_requests = _run_checkout(current, repo, run, launcher, wrapper,
                                      tmp_path / "current_modules.json",
-                                     stable_tool_head="off")[0]
+                                     stable_tool_head="off", final_cache_layout="off")[0]
     # Only request_id and the receipt IDs derived like it moved (receipt determinism, 11-03).
     _assert_only_wire_ids_moved(base_requests, current_requests, run)

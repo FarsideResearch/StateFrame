@@ -275,6 +275,19 @@ ACTIVE_REQUEST: contextvars.ContextVar[RequestCapture | None] = contextvars.Cont
     "stateframe_request", default=None)
 
 
+def _request_bytes_for_capture(
+        capture: RequestCapture, wire: bytes, endpoint: str, key: str,
+        **kwargs: object) -> bytes:
+    """Expose this logical request while its physical send is recorded."""
+    from kernel_bounded_http import request_bytes
+
+    token = ACTIVE_REQUEST.set(capture)
+    try:
+        return request_bytes(wire, endpoint, key, **kwargs)
+    finally:
+        ACTIVE_REQUEST.reset(token)
+
+
 @dataclass(slots=True)
 class _BoundaryRecoveryContext:
     original_request_id: str
@@ -3803,12 +3816,12 @@ class RequestCapture:
             self._assert_wire_string_hygiene(wire)
             guard_physical_send(self, getattr(self, "_wire_truth_runtime", None), body, wire)
             try:
-                from kernel_bounded_http import request_bytes, queue_wait_max_seconds
+                from kernel_bounded_http import queue_wait_max_seconds
                 # Recovery uses the destination actually submitted, including a routed key.
                 # Keep this transient and out of the journal and model request.
                 self._provider_probe_destination = (endpoint, key)
-                raw_response = request_bytes(
-                    wire, endpoint, key, deadline=attempt_deadline,
+                raw_response = _request_bytes_for_capture(
+                    self, wire, endpoint, key, deadline=attempt_deadline,
                     socket_timeout=attempt_timeout,
                     run_deadline=(active_deadline if active_deadline is not None
                                   else attempt_started + queue_wait_max_seconds()),

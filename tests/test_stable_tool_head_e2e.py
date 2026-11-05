@@ -146,14 +146,15 @@ def test_switch_off_requests_match_the_released_baseline(
     script = ROOT / "examples/discount_bug.script.json"
     run_dir = tmp_path / "run"
 
+    # v0.4.0 turns final cache layout on by default; pin the released request order.
     expected = capture(
         baseline_checkout, sys.executable, launcher, script, repo, run_dir,
-        stable_tool_head="off",
+        stable_tool_head="off", final_cache_layout="off",
     )
     run_dir.rename(tmp_path / "baseline-run")
     actual = capture(
         ROOT, sys.executable, launcher, script, repo, run_dir,
-        stable_tool_head="off",
+        stable_tool_head="off", final_cache_layout="off",
     )
     run_dir.rename(tmp_path / "candidate-run")
 
@@ -168,6 +169,7 @@ def test_deferred_prefit_layout_off_keeps_released_request_bytes(
         tmp_path, monkeypatch, baseline_checkout):  # noqa: F811 -- injected fixture
     from tools.compare_no_mcp_requests import capture, write_launcher
 
+    # v0.4.0 turns final cache layout on by default; compare released-order bytes.
     monkeypatch.setenv("STATEFRAME_FINAL_CACHE_LAYOUT", "off")
     monkeypatch.setenv("STATEFRAME_STABLE_TOOL_HEAD", "off")
     repo = tmp_path / "repo"
@@ -178,7 +180,7 @@ def test_deferred_prefit_layout_off_keeps_released_request_bytes(
     run_dir = tmp_path / "run"
 
     released = capture(baseline_checkout, sys.executable, launcher, script, repo, run_dir,
-                       stable_tool_head="off")
+                       stable_tool_head="off", final_cache_layout="off")
     run_dir.rename(tmp_path / "released-run")
     from _journal import measurement_events
 
@@ -189,7 +191,7 @@ def test_deferred_prefit_layout_off_keeps_released_request_bytes(
 
     released_slots = budget_slots(measurement_events(tmp_path / "released-run"))
     current = capture(ROOT, sys.executable, launcher, script, repo, run_dir,
-                      stable_tool_head="off")
+                      stable_tool_head="off", final_cache_layout="off")
     assert len(_wire(run_dir)) >= 2
     events = measurement_events(run_dir)
     deferred = [row for row in events

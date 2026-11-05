@@ -344,6 +344,7 @@ def _run_case(
         tokenize_reprobe_after_requests: int | None = None,
         tokenize_reprobe_after_s: float | None = None,
         stop_after_provider_requests: int | None = None,
+        final_cache_layout: str | None = None,
         max_turns: int = 120,
 ) -> ReplayOutcome:
     if stop_after_provider_requests is not None:
@@ -380,6 +381,8 @@ def _run_case(
     environment["PYTHONPATH"] = os.pathsep.join((str(source_root), str(source_root / "stateframe" / "engine")))
     environment["PYTHONDONTWRITEBYTECODE"] = "1"
     environment["PYTHONHASHSEED"] = "0"
+    if final_cache_layout is not None:
+        environment["STATEFRAME_FINAL_CACHE_LAYOUT"] = final_cache_layout
     started = time.monotonic()
     with TapeServer(tape_script) as endpoint:
         engine_timeout, parent_timeout = _engine_and_parent_timeouts(endpoint.total_steps)

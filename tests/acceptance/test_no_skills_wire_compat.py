@@ -58,7 +58,7 @@ def _raw_tools(request: bytes) -> bytes:
 
 def _run_tree(root: Path, case: Path, repo: Path, script: Path, *,
               legacy_mode: bool = False,
-              stable_tool_head: str | None) -> tuple[bytes, ...]:
+              stable_tool_head: str | None, final_cache_layout: str | None) -> tuple[bytes, ...]:
     case.mkdir()
     tree_src = root / "src"
     python = tree_python(tree_src, case / "python")
@@ -70,6 +70,9 @@ def _run_tree(root: Path, case: Path, repo: Path, script: Path, *,
     env.pop("STATEFRAME_STABLE_TOOL_HEAD", None)
     if stable_tool_head is not None:
         env["STATEFRAME_STABLE_TOOL_HEAD"] = stable_tool_head
+    env.pop("STATEFRAME_FINAL_CACHE_LAYOUT", None)
+    if final_cache_layout is not None:
+        env["STATEFRAME_FINAL_CACHE_LAYOUT"] = final_cache_layout
     with Endpoint(script) as endpoint:
         result = run_monitored(
             [python, "-m", "stateframe", "run", "--repo", str(repo),
@@ -146,13 +149,13 @@ def test_no_skills_wire_matches_023(tmp_path):
     repo_root = tmp_path / "shared"
     repo_root.mkdir()
     repo = copy_repo(repo_root)
-    old = _run_tree(baseline, tmp_path / "old", repo, script, stable_tool_head=None)
+    old = _run_tree(baseline, tmp_path / "old", repo, script, stable_tool_head=None, final_cache_layout=None)
     # 0.2.5 intentionally treats unittest as a generic command and defaults to
     # editable tests. Pin the old runner, protection and tool-list modes for exact bytes.
+    # v0.4.0's final cache layout changes wire order; pin it off for cross-release parity.
     current = _run_tree(ROOT, tmp_path / "current", repo, script, legacy_mode=True,
-                        stable_tool_head="off")
+                        stable_tool_head="off", final_cache_layout="off")
     from tools.compare_no_mcp_requests import mask_wire_ids, unbacked_result_hash_changes
-
     assert len(current) == len(old)
     # Wire IDs (edit receipts, wire-truth handles, request IDs) are derived differently
     # since the receipt-determinism change (11-03), so they are masked; a masked result
@@ -165,6 +168,6 @@ def test_no_skills_wire_matches_023(tmp_path):
             number, first_difference(expected, actual))
         assert normalized_digest(mask_wire_ids(actual)) == normalized_digest(
             mask_wire_ids(expected)), number
-    default = _run_tree(ROOT, tmp_path / "default", repo, script, stable_tool_head=None)  # today's defaults, on purpose
+    default = _run_tree(ROOT, tmp_path / "default", repo, script, stable_tool_head=None, final_cache_layout=None)  # today's defaults, on purpose
     assert default[0] != old[0]
     assert b"no public selector was declared" in default[0]

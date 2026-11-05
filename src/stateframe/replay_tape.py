@@ -320,6 +320,24 @@ class Replayer:
         self.pending_verified: dict[str, object] | None = None
         self.route_changes = list(route_changes or [])
 
+    def request_for_layout_decision(self) -> bytes | None:
+        """Return the recorded bytes for the send currently being rebuilt, without consuming it."""
+        if self.diverged is not None:
+            return None
+        if self.active and self.cursor < len(self.tape):
+            item = self.tape[self.cursor]
+        elif self.pending is not None and not self.pending.get("orphan_route"):
+            item = self.pending
+        else:
+            return None
+        request_path = item.get("request")
+        if not isinstance(request_path, str) or not request_path:
+            return None
+        try:
+            return Path(request_path).read_bytes()
+        except OSError:
+            return None
+
     def _route_matches(self, expected: dict[str, object], actual: dict[str, object] | None) -> bool:
         if actual is None:
             return False

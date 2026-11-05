@@ -227,13 +227,13 @@ def _assert_discount_requests_match_0_2_8(tmp_path):
     script = ROOT / "examples/discount_bug.script.json"
     baseline_python = tree_python(baseline / "src", tmp_path / "baseline-python")
     assert_tree_imports(baseline_python, baseline / "src", tmp_path)
-    before = capture(baseline, baseline_python, launcher, script, repo, run_dir, stable_tool_head=None,
+    before = capture(baseline, baseline_python, launcher, script, repo, run_dir, stable_tool_head=None, final_cache_layout=None,
                      source_on_pythonpath=False, test_python=sys.executable)
     run_dir.rename(tmp_path / "baseline-run")
     current_python = tree_python(ROOT / "src", tmp_path / "current-python")
     assert_tree_imports(current_python, ROOT / "src", tmp_path)
     # 0.3.13 turned the stable tool head on by default; switched off, request bytes stay those of 0.2.8.
-    after = capture(ROOT, current_python, launcher, script, repo, run_dir, stable_tool_head="off",
+    after = capture(ROOT, current_python, launcher, script, repo, run_dir, stable_tool_head="off", final_cache_layout="off",
                     source_on_pythonpath=False, test_python=sys.executable)
     # Wire IDs changed derivation on purpose (receipt determinism, 11-03); see mask_wire_ids.
     assert mask_wire_ids(before) == mask_wire_ids(after)

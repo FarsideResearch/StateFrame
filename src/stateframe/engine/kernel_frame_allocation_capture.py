@@ -8,6 +8,7 @@ import json
 import math
 import os
 import re
+import sys
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 
@@ -170,6 +171,22 @@ def carry_final_request_tokens(body: Mapping[str, object], capture: object,
         capture._frame_candidate_counter = replace(
             frozen, tokens=tokens, chars=_serialized_chars(body),
             body_digest=identity(body))
+
+
+def rebind_final_layout_trim(body: Mapping[str, object], meter: object,
+                             capture: object, *, byte_limit: int,
+                             token_limit: int) -> tuple[int, str]:
+    """Make a trimmed canonical body the frozen base for layout and proof."""
+    tokens, method = final_request_tokens(body, meter, capture)
+    carry_final_request_tokens(body, capture, tokens)
+    capture._frame_candidate_measurement = meter.bind_measurement(
+        body, tokens=tokens, method=method, request_id=str(capture.request_id),
+        max_request_bytes=byte_limit, max_prompt_tokens=token_limit)
+    capture._frame_candidate_inputs["measurement_identity"] = method
+    capture._frame_candidate_fallback_fit = method == "calibrated_bytes"
+    capture._frame_candidate_rejection_bound = (
+        meter.measure(body)[0] if method == "calibrated_bytes" else None)
+    return tokens, method
 
 
 def _capture_carrier_roles(
@@ -689,6 +706,7 @@ def finalize_frame_candidate(
         and active.capacity.get("measurement_identity") != "tokenize"
         else HARD_MAX_REQUEST_BYTES
     )
+    layout_byte_ceiling = None
     token_limit = (
         active.capacity["token_ceiling"]
         if active is not None
@@ -716,8 +734,10 @@ def finalize_frame_candidate(
         # estimate is not a second token ceiling, nor is a previous exact
         # measurement authority to relax a later estimate.
         if method in {"tokenize", "verified_byte_bound"}:
-            return _lean_request_limits(candidate, FREE_STAGE, exact_tokenizer=True)[0]
-        return estimated_byte_limit
+            limit = _lean_request_limits(candidate, FREE_STAGE, exact_tokenizer=True)[0]
+        else:
+            limit = estimated_byte_limit
+        return min(limit, layout_byte_ceiling) if layout_byte_ceiling is not None else limit
 
     def effective_tokens() -> int:
         # Preserve the independent frame ceiling as well as endpoint capacity.
@@ -1274,6 +1294,46 @@ def finalize_frame_candidate(
         "byte_ceiling": byte_limit, "token_ceiling": token_limit,
         "measurement_identity": method,
     }
+    # The final renderer measures projection overhead and can ask this existing
+    # allocator to trim optional source content once before the wire is sealed.
+    layout_enabled = os.environ.get("STATEFRAME_FINAL_CACHE_LAYOUT", "on").strip().lower() == "on"
+    candidate_module = sys.modules.get("kernel_cache_layout_candidate")
+    replay_decision_fn = getattr(candidate_module, "replay_final_layout_decision", None)
+    replay_decision = replay_decision_fn() if callable(replay_decision_fn) else None
+    if layout_enabled and replay_decision != "plain":
+        base_token_limit = token_limit
+        base_byte_limit = byte_limit
+        trim_used = False
+
+        def trim_for_final_layout(token_reserve: int, byte_reserve: int) -> bool:
+            nonlocal token_limit, layout_byte_ceiling, trim_used
+            if trim_used:
+                raise FrameRequestAllocationError("final layout reserve requested more than once")
+            trim_used = True
+            token_limit = max(1, base_token_limit - max(0, token_reserve))
+            layout_byte_ceiling = max(1, base_byte_limit - max(0, byte_reserve))
+            try:
+                try:
+                    trim_optional_candidate()
+                except FrameFit5ImpossibleMinimum:
+                    return False
+            finally:
+                token_limit = base_token_limit
+                layout_byte_ceiling = None
+            from kernel_request_source_window import verify_final_source_delivery, source_delivery_satisfied
+            trimmed_receipt = verify_final_source_delivery(
+                plan, candidate["messages"], payload=json.dumps(candidate).encode(), sources=sources)
+            if not source_delivery_satisfied(trimmed_receipt):
+                return False
+            rebind_final_layout_trim(
+                candidate, meter, capture, byte_limit=request_byte_limit(frozen_method()),
+                token_limit=base_token_limit)
+            capture._frame_candidate_inputs["source_plan"] = copy.deepcopy(plan)
+            capture._frame_candidate_inputs["receipt"] = copy.deepcopy(trimmed_receipt)
+            capture.request_source_final_delivery = trimmed_receipt
+            return True
+
+        capture._frame_candidate_inputs["_final_layout_trim"] = trim_for_final_layout
     capture._frame_candidate_fallback_fit = method == "calibrated_bytes"
     capture._frame_candidate_rejection_bound = (
         meter.measure(candidate)[0] if method == "calibrated_bytes" else None

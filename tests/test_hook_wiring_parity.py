@@ -3,7 +3,8 @@
 SF_TEST_BASELINE_IMMEDIATE may name an explicit checkout. Otherwise use the in-tree merge base with
 origin/main when it is a strict ancestor; without that ref, use the newest ancestor release commit
 (excluding HEAD) whose subject identifies a StateFrame version or release. Both sides explicitly
-disable the stable tool head: this parity is about hooks, not tool lists.
+disable the stable tool head and v0.4.0 final cache layout, which changes wire order: this
+parity is about hooks, not tool lists or cache layout.
 """
 
 from __future__ import annotations
@@ -343,7 +344,8 @@ def _write_launchers(launcher: Path, wrapper: Path) -> None:
 
 def _run_checkout(
     checkout: Path, repo: Path, run: Path, launcher: Path, wrapper: Path, trace: Path,
-    *, stable_tool_head: str | None, slots: list[int] | None = None,
+    *, stable_tool_head: str | None, final_cache_layout: str | None,
+    slots: list[int] | None = None,
 ):
     python = tree_python(checkout / "src",
                          run.parent / f"{run.name}-{checkout.name}-python")
@@ -358,6 +360,9 @@ def _run_checkout(
     environment.pop("STATEFRAME_STABLE_TOOL_HEAD", None)
     if stable_tool_head is not None:
         environment["STATEFRAME_STABLE_TOOL_HEAD"] = stable_tool_head
+    environment.pop("STATEFRAME_FINAL_CACHE_LAYOUT", None)
+    if final_cache_layout is not None:
+        environment["STATEFRAME_FINAL_CACHE_LAYOUT"] = final_cache_layout
     try:
         _assert_parity_endpoint_shape(f"http://127.0.0.1:{server.server_port}", slots)
         command = [
@@ -434,13 +439,14 @@ def test_no_hooks_raw_requests_and_journal_match_release(tmp_path, baseline_chec
     _write_launchers(launcher, wrapper)
     run = tmp_path / "run"
     baseline = _run_checkout(
-        baseline_checkout, repo, run, launcher, wrapper, tmp_path / "baseline_modules.json", stable_tool_head="off",
+        baseline_checkout, repo, run, launcher, wrapper, tmp_path / "baseline_modules.json",
+        stable_tool_head="off", final_cache_layout="off",
     )
     run.rename(tmp_path / "baseline_run")
     _assert_unpinned_without_degradation(tmp_path / "baseline_run")
     current = _run_checkout(
         CURRENT, repo, run, launcher, wrapper, tmp_path / "current_modules.json",
-        stable_tool_head="off",
+        stable_tool_head="off", final_cache_layout="off",
     )
     _assert_unpinned_without_degradation(run)
     _assert_only_wire_ids_moved(baseline[0], current[0], run, tmp_path / "baseline_run")
@@ -473,11 +479,11 @@ def test_no_hooks_regular_stateframe_file_matches_release(tmp_path, baseline_che
     _write_launchers(launcher, wrapper)
     run = tmp_path / "run"
     baseline = _run_checkout(baseline_checkout, repo, run, launcher, wrapper, tmp_path / "baseline.json",
-                             stable_tool_head="off")
+                             stable_tool_head="off", final_cache_layout="off")
     run.rename(tmp_path / "baseline_run")
     _assert_unpinned_without_degradation(tmp_path / "baseline_run")
     current = _run_checkout(CURRENT, repo, run, launcher, wrapper, tmp_path / "current.json",
-                            stable_tool_head="off")
+                            stable_tool_head="off", final_cache_layout="off")
     _assert_unpinned_without_degradation(run)
     _assert_only_wire_ids_moved(baseline[0], current[0], run, tmp_path / "baseline_run")
     _assert_journal_kinds_match_release(baseline[1], current[1])
@@ -501,13 +507,13 @@ def test_no_hooks_real_shaped_llama_keeps_automatic_pin_and_release_bytes(
     run = tmp_path / "run"
     baseline = _run_checkout(
         baseline_checkout, repo, run, launcher, wrapper, tmp_path / "baseline.json",
-        stable_tool_head="off", slots=[65536],
+        stable_tool_head="off", final_cache_layout="off", slots=[65536],
     )
     _assert_automatic_idle_pin(run, baseline[0])
     run.rename(tmp_path / "baseline_run")
     current = _run_checkout(
         CURRENT, repo, run, launcher, wrapper, tmp_path / "current.json",
-        stable_tool_head="off", slots=[65536],
+        stable_tool_head="off", final_cache_layout="off", slots=[65536],
     )
     _assert_automatic_idle_pin(run, current[0])
     _assert_only_wire_ids_moved(baseline[0], current[0], run, tmp_path / "baseline_run")
@@ -518,7 +524,7 @@ def test_no_hooks_real_shaped_llama_keeps_automatic_pin_and_release_bytes(
 
 def _resume_checkout(checkout: Path, repo: Path, run: Path, launcher: Path,
                      wrapper: Path, trace: Path, *,
-                     stable_tool_head: str | None) -> tuple[list[bytes], list[bytes]]:
+                     stable_tool_head: str | None, final_cache_layout: str | None) -> tuple[list[bytes], list[bytes]]:
     python = tree_python(checkout / "src",
                          run.parent / f"{run.name}-{checkout.name}-python")
     assert_tree_imports(python, checkout / "src", run.parent)
@@ -554,6 +560,9 @@ def _resume_checkout(checkout: Path, repo: Path, run: Path, launcher: Path,
     environment.pop("STATEFRAME_STABLE_TOOL_HEAD", None)
     if stable_tool_head is not None:
         environment["STATEFRAME_STABLE_TOOL_HEAD"] = stable_tool_head
+    environment.pop("STATEFRAME_FINAL_CACHE_LAYOUT", None)
+    if final_cache_layout is not None:
+        environment["STATEFRAME_FINAL_CACHE_LAYOUT"] = final_cache_layout
     command = [python, str(launcher), str(wrapper), str(trace), "run",
                "--repo", str(repo), "--task", "Fix the pricing code so the tests pass.",
                "--endpoint", endpoint, "--model", "scripted", "--run-dir", str(run),
@@ -603,10 +612,10 @@ def test_no_hooks_resume_rebuilt_requests_match_release(tmp_path, baseline_check
     _write_launchers(launcher, wrapper)
     run = tmp_path / "run"
     baseline = _resume_checkout(baseline_checkout, repo, run, launcher, wrapper, tmp_path / "baseline.json",
-                                stable_tool_head="off")
+                                stable_tool_head="off", final_cache_layout="off")
     run.rename(tmp_path / "baseline_run")
     current = _resume_checkout(CURRENT, repo, run, launcher, wrapper, tmp_path / "current.json",
-                               stable_tool_head="off")
+                               stable_tool_head="off", final_cache_layout="off")
     # current/baseline are (original, rebuilt) request lists; resume parity inside one
     # version stays byte-exact (asserted in _resume_checkout), across versions only IDs move.
     _assert_only_wire_ids_moved(baseline[0], current[0])
