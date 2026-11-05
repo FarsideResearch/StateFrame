@@ -456,6 +456,8 @@ def select_checkpoint(run: Path, tape: list[dict[str, object]], wire_dir: Path) 
         return None
     pending = replay_tape.pending_request(wire_dir)
     recorded = {int(item["send"]) for item in tape}
+    from .engine import kernel_checkpoint
+
     if pending is not None and int(pending["send"]) <= max(recorded, default=0):
         pending = None  # already verified against a carried-forward recorded exchange
     candidates = []
@@ -474,20 +476,14 @@ def select_checkpoint(run: Path, tape: list[dict[str, object]], wire_dir: Path) 
             if meta.get("schema") != CHECKPOINT_SCHEMA or type(meta.get("sends")) is not int:
                 continue
             state = folder / "state.pkl"
-            if state.stat().st_size != meta.get("state_bytes"):
-                _record_checkpoint_refusal(root, folder, "checkpoint state checksum mismatch")
-                continue
-            digest = hashlib.sha256()
-            with state.open("rb") as handle:
-                for block in iter(lambda: handle.read(1 << 20), b""):
-                    digest.update(block)
-            if digest.hexdigest() != meta.get("state_sha256"):
-                _record_checkpoint_refusal(root, folder, "checkpoint state checksum mismatch")
-                continue
+            kernel_checkpoint.decode_state(state.read_bytes(), meta)
             blob_problem = _blob_integrity_problem(folder, meta)
             if blob_problem:
                 _record_checkpoint_refusal(root, folder, blob_problem)
-                continue  # the engine would refuse it (blob manifest / pool); try the next-older one
+                continue
+        except kernel_checkpoint.CheckpointError as error:
+            _record_checkpoint_refusal(root, folder, str(error))
+            continue
         except (OSError, ValueError):
             continue
         sends = meta["sends"]

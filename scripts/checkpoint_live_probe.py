@@ -84,7 +84,8 @@ def checkpoint_state(run: Path) -> dict | None:
     folder = pointer.parent / name
     meta = json.loads((folder / "checkpoint.json").read_text())
     state = folder / "state.pkl"
-    if state.stat().st_size != meta["state_bytes"]:
+    stored_state_bytes = meta.get("state_stored_bytes", meta.get("state_bytes"))
+    if type(stored_state_bytes) is not int or state.stat().st_size != stored_state_bytes:
         raise RuntimeError("checkpoint state size differs from metadata")
     try:
         from stateframe.engine.kernel_measurement import open_journal
@@ -111,6 +112,7 @@ def checkpoint_state(run: Path) -> dict | None:
         "step": meta["step"],
         "sends": meta["sends"],
         "state_bytes": meta["state_bytes"],
+        "stored_state_bytes": stored_state_bytes,
         "disk_bytes": disk_bytes(folder)[0],
         "written": True,
     }
@@ -445,7 +447,7 @@ def main() -> int:
             "kill_request": point,
             "first_rebuilt_request": index,
             "written": checkpoint["written"],
-            "written_state_bytes": checkpoint["state_bytes"],
+            "written_state_bytes": checkpoint["stored_state_bytes"],
             "checkpoint_disk_bytes": checkpoint["disk_bytes"],
             "restored": resumed["restored"],
             "verified": resumed["verified"],

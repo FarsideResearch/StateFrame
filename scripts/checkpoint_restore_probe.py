@@ -161,8 +161,9 @@ def capture(case: Path, point: int, steps: int, checkpoints: bool,
             pointer = run / "checkpoints" / "LATEST"
             folder = pointer.parent / pointer.read_text().strip()
             apparent, allocated = disk_bytes(pointer.parent)
-            checkpoint = {"step": json.loads((folder / "checkpoint.json").read_text())["step"],
-                          "state_bytes": (folder / "state.pkl").stat().st_size,
+            meta = json.loads((folder / "checkpoint.json").read_text())
+            checkpoint = {"step": meta["step"], "state_bytes": meta["state_bytes"],
+                          "state_stored_bytes": (folder / "state.pkl").stat().st_size,
                           "checkpoint_dir_apparent_bytes": disk_bytes(folder)[0],
                           "checkpoint_root_apparent_bytes": apparent,
                           "checkpoint_root_allocated_upper_bytes": allocated}
