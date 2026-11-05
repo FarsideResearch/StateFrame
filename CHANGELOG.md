@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Tests: the clean-meter reprobe check compares its first two requests against the immediate base release in the same environment instead of fixed hashes from one machine, so it no longer fails on hosts without tree-sitter.
+
 ## 0.4.6 (2026-11-05)
 
 - Tests: the late-tokenize budget test uses wide timing margins, so a loaded host cannot flip it. Test-only; no runtime change.
