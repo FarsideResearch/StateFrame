@@ -6,14 +6,27 @@ import multiprocessing
 import os
 import pickle
 import stat
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
 import kernel_checkpoint
 import kernel_request_auth_identity
+import kernel_request_diet
 import pytest
 from kernel_frame_allocation_capture import final_request_tokens
 from kernel_request_diet import RequestTokenMeter
+
+
+# Use the exact module that supplied the function imported by kernel_request_diet.
+# A checkout can expose the same source under both its engine path and package path.
+assert kernel_request_auth_identity is sys.modules[
+    kernel_request_diet._auth_binding_for_key.__module__
+]
+assert (kernel_request_auth_identity.__dict__
+        is kernel_request_diet._auth_binding_for_key.__globals__)
+assert (kernel_request_auth_identity.auth_binding_for_key
+        is kernel_request_diet._auth_binding_for_key)
 
 
 BODY = {
@@ -22,6 +35,21 @@ BODY = {
     "tools": [],
 }
 GENERATION_ENDPOINT = "https://provider.example/v1/chat/completions"
+
+
+def _clear_auth_binding_cache() -> None:
+    with kernel_request_auth_identity._AUTH_BINDING_SECRET_LOCK:
+        kernel_request_auth_identity._AUTH_BINDING_SECRET_CACHE.clear()
+        kernel_request_auth_identity._AUTH_BINDING_FALLBACK_SECRET = None
+
+
+@pytest.fixture(autouse=True)
+def _isolated_auth_binding_cache():
+    _clear_auth_binding_cache()
+    try:
+        yield
+    finally:
+        _clear_auth_binding_cache()
 
 
 def _set_isolated_home(monkeypatch, tmp_path: Path, name: str = "install") -> Path:
@@ -158,8 +186,13 @@ def test_auth_key_and_binding_secret_never_reach_run_artifacts(
         path for path in tmp_path.rglob("*")
         if path.is_file() and path != key_path
     ]
-    assert {journal, receipt, cache, checkpoint}.issubset(artifact_files)
+    artifact_realpaths = {path.resolve() for path in artifact_files}
+    assert {journal.resolve(), receipt.resolve(), cache.resolve(), checkpoint.resolve()}.issubset(
+        artifact_realpaths
+    )
     for path in artifact_files:
+        if path.resolve() == key_path.resolve():
+            continue
         data = path.read_bytes()
         for marker in markers:
             assert marker not in data, f"sensitive marker found in {path.relative_to(tmp_path)}"
@@ -191,7 +224,8 @@ def test_different_installs_journal_different_identity_for_same_key(
 
 
 def _spawn_auth_binding_worker(state_home: str, barrier, results) -> None:
-    os.environ["STATEFRAME_HOME"] = state_home
+    if os.environ.get("STATEFRAME_HOME") != state_home:
+        raise RuntimeError("spawned worker did not inherit the isolated StateFrame home")
     barrier.wait(timeout=30)
     binding = kernel_request_auth_identity.auth_binding_for_key("concurrent-first-use")
     meter = RequestTokenMeter(disabled=True)

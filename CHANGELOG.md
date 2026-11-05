@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.4.22 (2026-11-05)
+
+- Tests: the auth-identity tests are now hermetic (env via monkeypatch, per-test cache reset, module-identity check, realpath comparisons) so they pass under isolated gate runners.
+
 ## 0.4.21 (2026-11-05)
 
 - Tests: the no-MCP and no-skills parity checks compare against the previous release instead of 0.2.3, whose bytes changed intentionally in 0.4.5.
