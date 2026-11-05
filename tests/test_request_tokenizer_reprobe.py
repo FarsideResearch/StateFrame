@@ -290,13 +290,6 @@ def test_props_proof_survives_a_later_probe_miss_and_slot_probe(monkeypatch):
         first_tokens = request_diet._http_tokenize(
             "props capability", f"{endpoint.url}/tokenize", deadline=monotonic() + 1.0,
         )
-        props_proof = cache[origin]
-        assert props_proof.dialect == provider_dialect.LLAMA_CPP
-        assert props_proof.reason == "proven by /props"
-        assert props_proof.props_status == 200
-        assert props_proof.slots is False
-        assert props_proof.slots_status is None
-
         probe_misses_enabled = True
         slot_miss = provider_dialect.capabilities_for(endpoint.url, "", require_slots=True)
         second_tokens = request_diet._http_tokenize(
@@ -304,6 +297,12 @@ def test_props_proof_survives_a_later_probe_miss_and_slot_probe(monkeypatch):
             f"{endpoint.url}/tokenize", deadline=monotonic() + 1.0,
         )
 
+        props_proof = cache[origin]
+        assert props_proof.dialect == provider_dialect.LLAMA_CPP
+        assert props_proof.reason == "proven by /props"
+        assert props_proof.props_status == 200
+        assert props_proof.slots is False
+        assert props_proof.slots_status is None
         assert slot_miss.dialect == provider_dialect.LLAMA_CPP
         assert slot_miss.slots is False
         assert missed_paths == ["/slots"]
