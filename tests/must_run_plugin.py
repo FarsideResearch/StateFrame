@@ -502,7 +502,7 @@ def _sandbox_exec_problem() -> str | None:
     executable = _sandbox_executable("sandbox-exec")
     if executable is None:
         return "sandbox-exec is unavailable in PATH and standard install locations"
-    return _command_problem([executable, "-p", "(version 1) (allow default)", "/usr/bin/true"])
+    return _command_problem([executable, "-p", "(version 1) (allow default)", "/bin/sh", "-c", "exit 0"])
 
 
 def _sandbox_executable(name: str) -> str | None:
