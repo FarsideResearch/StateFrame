@@ -46,12 +46,43 @@ EXPECTED_ENTRIES = (
     ("tests/test_documented_switches.py::test_shell_setting_reaches_the_engine_spec[STATEFRAME_STABLE_TOOL_HEAD]", "all"),
     ("tests/test_exec_capability.py::test_sandbox_binary_resolves_without_path", "requires:host_sandbox"),
     ("tests/test_exec_launch.py::test_macos_launcher_requires_memory_supervision", "darwin"),
+    ("tests/test_exec_session.py::test_engine_death_stops_supervised_job", "requires:host_sandbox"),
+    ("tests/test_exec_session.py::test_owner_pipe_eof_stops_job_while_forked_child_holds_control_socket", "requires:host_sandbox"),
+    ("tests/test_exec_session_framing.py::test_session_lifetime_pipe_wrapper_argv_contract", "requires:host_sandbox"),
+    ("tests/test_exec_supervisor_parent_death.py::test_short_lived_wrapper_exits_before_init_and_owner_eof_stops_job", "requires:host_sandbox"),
+    ("tests/test_exec_supervisor_parent_death.py::test_supervisor_stays_alive_when_started_through_intermediate_process", "requires:host_sandbox"),
+    ("tests/test_exec_supervisor_parent_death.py::test_wrapper_exit_after_init_does_not_stop_live_owner_session", "requires:host_sandbox"),
     ("tests/test_hook_wiring_parity.py::test_no_hooks_raw_requests_and_journal_match_release", "requires:parity_baseline"),
     ("tests/test_hook_wiring_parity.py::test_no_hooks_regular_stateframe_file_matches_release", "requires:parity_baseline"),
     ("tests/test_hook_wiring_parity.py::test_no_hooks_resume_rebuilt_requests_match_release", "requires:parity_baseline"),
     ("tests/test_http_gzip.py::test_default_profile_cli_run_sends_large_request_without_gzip", "requires:host_sandbox"),
     ("tests/test_no_mcp_release_comparison.py::test_no_mcp_requests_match_release_0_2_3", "requires:parity_baseline"),
     ("tests/test_powerups_digest.py::test_unreadable_entry_fails_closed", "requires:filesystem_modes"),
+    ("tests/test_pid_liveness.py::test_checkpoint_sweep_uses_zombie_aware_liveness", "all"),
+    ("tests/test_pid_liveness.py::test_env_seed_sweep_routes_through_pid_alive", "all"),
+    ("tests/test_pid_liveness.py::test_exited_pid_is_dead", "all"),
+    ("tests/test_pid_liveness.py::test_group_probe_handles_errno_without_scanning_proc", "all"),
+    ("tests/test_pid_liveness.py::test_group_probe_propagates_unexpected_os_error", "all"),
+    ("tests/test_pid_liveness.py::test_linux_process_group_ignores_non_pid_proc_entries", "all"),
+    ("tests/test_pid_liveness.py::test_linux_process_group_ignores_unreadable_or_vanished_stat", "all"),
+    ("tests/test_pid_liveness.py::test_linux_process_group_with_only_zombies_counts_as_gone", "all"),
+    ("tests/test_pid_liveness.py::test_linux_process_group_with_running_member_stays_alive", "all"),
+    ("tests/test_pid_liveness.py::test_linux_process_group_uses_pgrp_after_last_comm_parenthesis", "all"),
+    ("tests/test_pid_liveness.py::test_linux_process_group_uses_third_field_after_comm", "all"),
+    ("tests/test_pid_liveness.py::test_linux_process_group_without_visible_members_counts_as_gone", "all"),
+    ("tests/test_pid_liveness.py::test_linux_running_owner_stays_alive", "all"),
+    ("tests/test_pid_liveness.py::test_linux_zombie_owner_counts_as_dead", "all"),
+    ("tests/test_pid_liveness.py::test_missing_group_is_gone_even_if_proc_contains_a_live_member", "all"),
+    ("tests/test_pid_liveness.py::test_permission_denied_group_probe_stays_alive", "all"),
+    ("tests/test_pid_liveness.py::test_state_is_read_after_the_last_paren_of_the_command_name", "all"),
+    ("tests/test_pid_liveness.py::test_unreadable_stat_is_not_provably_a_zombie", "all"),
+    ("tests/test_process_signal_liveness.py::test_exiting_empty_cmdline_is_gone_before_launch_identity_mismatch", "linux_requires:host_sandbox"),
+    ("tests/test_process_signal_liveness.py::test_live_pid_with_different_identity_remains_mismatch", "requires:host_sandbox"),
+    ("tests/test_process_signal_liveness.py::test_live_pid_with_same_identity_passes", "requires:host_sandbox"),
+    ("tests/test_process_signal_liveness.py::test_linux_binding_refuses_without_pidfd", "linux_requires:host_sandbox"),
+    ("tests/test_process_signal_liveness.py::test_nonempty_cmdline_mismatch_remains_a_runtime_error", "requires:host_sandbox"),
+    ("tests/test_process_signal_liveness.py::test_retained_signal_binding_uses_pidfd", "linux_requires:host_sandbox"),
+    ("tests/test_process_signal_liveness.py::test_zombie_pid_is_gone", "requires:host_sandbox"),
     ("tests/test_protected_collection_e2e.py::test_model_create_collection_file_is_refused[tests_init]", "requires:host_sandbox"),
     ("tests/test_protected_collection_e2e.py::test_model_create_collection_file_is_refused[tests_conftest]", "requires:host_sandbox"),
     ("tests/test_protected_collection_e2e.py::test_model_create_collection_file_is_refused[root_conftest]", "requires:host_sandbox"),
@@ -157,6 +188,10 @@ EXPECTED_OPTIONAL_DEPENDENCIES = (
 
 _PLATFORM_REASONS = {
     "tests/test_exec_launch.py::test_macos_launcher_requires_memory_supervision": "macOS only",
+    "tests/test_process_signal_liveness.py::test_exiting_empty_cmdline_is_gone_before_launch_identity_mismatch":
+        "Linux exiting-process cmdline evidence",
+    "tests/test_process_signal_liveness.py::test_linux_binding_refuses_without_pidfd": "Linux pidfd signal authority",
+    "tests/test_process_signal_liveness.py::test_retained_signal_binding_uses_pidfd": "Linux pidfd signal authority",
     "tests/test_uv_venv_sandbox.py::test_isolated_command_builds_with_missing_home_and_unknown_uid": "requires Linux bwrap behavior",
     "tests/test_uv_venv_sandbox.py::test_linux_binds_the_uv_install_and_its_link_hop": "requires Linux bwrap behavior",
     "tests/test_uv_venv_sandbox.py::test_linux_check_command_with_home_removed_under_unknown_uid": "requires Linux uid/passwd behavior",
@@ -211,6 +246,68 @@ EXPECTED_ASSERTIONS = {
         "assert resolved == expected or os.path.realpath(resolved) == os.path.realpath(expected)",
     "tests/test_exec_launch.py::test_macos_launcher_requires_memory_supervision":
         "assert result.returncode == 125",
+    "tests/test_exec_session.py::test_engine_death_stops_supervised_job":
+        'assert not current_unrelated.zombie, "unrelated fork child should remain alive through owner exit"',
+    "tests/test_exec_session.py::test_owner_pipe_eof_stops_job_while_forked_child_holds_control_socket":
+        "assert _wait_for_stable_file(heartbeat)",
+    "tests/test_exec_session_framing.py::test_session_lifetime_pipe_wrapper_argv_contract":
+        'assert len(kwargs["pass_fds"]) == 1',
+    "tests/test_exec_supervisor_parent_death.py::test_short_lived_wrapper_exits_before_init_and_owner_eof_stops_job":
+        "assert wrapper.wait(timeout=5) == 0",
+    "tests/test_exec_supervisor_parent_death.py::test_supervisor_stays_alive_when_started_through_intermediate_process":
+        'assert _read_reply(control, replies) == {"jobs": {}, "rid": 1}',
+    "tests/test_exec_supervisor_parent_death.py::test_wrapper_exit_after_init_does_not_stop_live_owner_session":
+        'assert status["finished"] is False',
+    "tests/test_pid_liveness.py::test_checkpoint_sweep_uses_zombie_aware_liveness":
+        "assert kernel_checkpoint._pid_alive(os.getpid()) is False",
+    "tests/test_pid_liveness.py::test_env_seed_sweep_routes_through_pid_alive":
+        'assert "pid_alive(pid)" in source',
+    "tests/test_pid_liveness.py::test_exited_pid_is_dead":
+        "assert liveness.pid_alive(child.pid) is False",
+    "tests/test_pid_liveness.py::test_group_probe_handles_errno_without_scanning_proc":
+        'assert liveness.group_alive(73, platform="linux", proc=tmp_path / "missing") is expected',
+    "tests/test_pid_liveness.py::test_group_probe_propagates_unexpected_os_error":
+        "assert error.value.errno == errno.EINVAL",
+    "tests/test_pid_liveness.py::test_linux_process_group_ignores_non_pid_proc_entries":
+        'assert liveness.group_alive(73, platform="linux", proc=proc) is False',
+    "tests/test_pid_liveness.py::test_linux_process_group_ignores_unreadable_or_vanished_stat":
+        'assert liveness.group_alive(73, platform="linux", proc=proc) is False',
+    "tests/test_pid_liveness.py::test_linux_process_group_with_only_zombies_counts_as_gone":
+        'assert liveness.group_alive(73, platform="linux", proc=proc) is False',
+    "tests/test_pid_liveness.py::test_linux_process_group_with_running_member_stays_alive":
+        'assert liveness.group_alive(73, platform="linux", proc=proc) is True',
+    "tests/test_pid_liveness.py::test_linux_process_group_uses_pgrp_after_last_comm_parenthesis":
+        'assert liveness.group_alive(73, platform="linux", proc=proc) is True',
+    "tests/test_pid_liveness.py::test_linux_process_group_uses_third_field_after_comm":
+        'assert liveness.group_alive(73, platform="linux", proc=proc) is False',
+    "tests/test_pid_liveness.py::test_linux_process_group_without_visible_members_counts_as_gone":
+        'assert liveness.group_alive(73, platform="linux", proc=proc) is False',
+    "tests/test_pid_liveness.py::test_linux_running_owner_stays_alive":
+        'assert liveness.pid_alive(os.getpid(), platform="linux", proc=proc) is True',
+    "tests/test_pid_liveness.py::test_linux_zombie_owner_counts_as_dead":
+        'assert liveness.pid_alive(os.getpid(), platform="linux", proc=proc) is False',
+    "tests/test_pid_liveness.py::test_missing_group_is_gone_even_if_proc_contains_a_live_member":
+        'assert liveness.group_alive(73, platform="linux", proc=proc) is False',
+    "tests/test_pid_liveness.py::test_permission_denied_group_probe_stays_alive":
+        'assert liveness.group_alive(73, platform="linux", proc=proc) is True',
+    "tests/test_pid_liveness.py::test_state_is_read_after_the_last_paren_of_the_command_name":
+        "assert liveness.linux_zombie(os.getpid(), proc) is True",
+    "tests/test_pid_liveness.py::test_unreadable_stat_is_not_provably_a_zombie":
+        "assert liveness.linux_zombie(os.getpid(), tmp_path) is False",
+    "tests/test_process_signal_liveness.py::test_exiting_empty_cmdline_is_gone_before_launch_identity_mismatch":
+        'assert str(error.value) == f"process {live_child.pid} is no longer running"',
+    "tests/test_process_signal_liveness.py::test_live_pid_with_different_identity_remains_mismatch":
+        "assert expected_fragment in str(error.value)",
+    "tests/test_process_signal_liveness.py::test_live_pid_with_same_identity_passes":
+        "assert live_child.poll() is None",
+    "tests/test_process_signal_liveness.py::test_linux_binding_refuses_without_pidfd":
+        'assert str(error.value) == "pidfd denied by test"',
+    "tests/test_process_signal_liveness.py::test_nonempty_cmdline_mismatch_remains_a_runtime_error":
+        'assert "does not match its launch identity" in str(error.value)',
+    "tests/test_process_signal_liveness.py::test_retained_signal_binding_uses_pidfd":
+        "assert binding.pidfd is not None",
+    "tests/test_process_signal_liveness.py::test_zombie_pid_is_gone":
+        'assert str(error.value) == f"process {live_child.pid} is no longer running"',
     "tests/test_http_gzip.py::test_default_profile_cli_run_sends_large_request_without_gzip":
         "assert all(encoding is None for encoding, _ in seen)",
     "tests/test_powerups_digest.py::test_unreadable_entry_fails_closed":
@@ -259,6 +356,20 @@ REPLAY_CASE_IDS = (
 )
 
 
+PARAMETERIZED_ITEM_SUFFIXES = {
+    "tests/test_exec_session.py::test_engine_death_stops_supervised_job": ("False", "True"),
+    "tests/test_exec_session_framing.py::test_session_lifetime_pipe_wrapper_argv_contract":
+        ("sandbox-exec", "bwrap"),
+    "tests/test_pid_liveness.py::test_group_probe_handles_errno_without_scanning_proc":
+        ("error0-True", "error1-False"),
+    "tests/test_pid_liveness.py::test_linux_process_group_ignores_unreadable_or_vanished_stat":
+        ("PermissionError", "FileNotFoundError"),
+    "tests/test_process_signal_liveness.py::test_live_pid_with_different_identity_remains_mismatch":
+        ("record", "signal"),
+    "tests/test_process_signal_liveness.py::test_zombie_pid_is_gone": ("record", "inspect"),
+}
+
+
 def _expected_cell(nodeid: str, scope: str) -> dict[str, object]:
     linux_state: object = "RUN"
     darwin_state: object = "RUN"
@@ -293,7 +404,9 @@ def _expected_cell(nodeid: str, scope: str) -> dict[str, object]:
     elif nodeid == "tests/test_no_mcp_release_comparison.py::test_no_mcp_requests_match_release_0_2_3":
         baseline = "release_0_2_3"
     item_nodeids = [nodeid]
-    if nodeid == "tests/test_allocation_replay_corpus.py::test_recorded_allocation_refusal_reaches_submitted":
+    if nodeid in PARAMETERIZED_ITEM_SUFFIXES:
+        item_nodeids = [f"{nodeid}[{suffix}]" for suffix in PARAMETERIZED_ITEM_SUFFIXES[nodeid]]
+    elif nodeid == "tests/test_allocation_replay_corpus.py::test_recorded_allocation_refusal_reaches_submitted":
         item_nodeids = [f"{nodeid}[{case_id}]" for case_id in REPLAY_CASE_IDS]
     witness_schema = "parity_trace" if baseline else "assertion_match"
     return {

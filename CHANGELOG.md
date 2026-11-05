@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.4.18 (2026-11-05)
+
+- Tests: must-run mode now requires the group-alive Linux supervisor, owner-pipe and liveness tests to execute, so a bwrap probe skip fails the gate.
+
 ## 0.4.17 (2026-11-05)
 
 - Tests: permanent acceptance guards for any hosted byte-fallback estimator (review counterexamples F1-F10, N1-N3), with the two known fail-today cases marked as strict expected failures; KNOWN_LIMITATIONS documents the byte fallback's overestimate and the dense-content underestimate.

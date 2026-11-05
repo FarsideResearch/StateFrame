@@ -852,6 +852,546 @@
       "baseline": null,
       "witness_schema": "assertion_match",
       "witness_assertion": "assert detected_controls == expected_control_count and expected_control_count - detected_controls == 0"
+    },
+    {
+      "scenario_id": "test_exec_session_test_engine_death_stops_supervised_job",
+      "nodeid": "tests/test_exec_session.py::test_engine_death_stops_supervised_job",
+      "item_nodeids": [
+        "tests/test_exec_session.py::test_engine_death_stops_supervised_job[False]",
+        "tests/test_exec_session.py::test_engine_death_stops_supervised_job[True]"
+      ],
+      "jobs": {
+        "linux": "RUN",
+        "darwin": "RUN"
+      },
+      "prerequisites": [
+        "host_sandbox"
+      ],
+      "optional_prerequisites": [],
+      "baseline": null,
+      "witness_schema": "assertion_match",
+      "witness_assertion": "assert not current_unrelated.zombie, \"unrelated fork child should remain alive through owner exit\""
+    },
+    {
+      "scenario_id": "test_exec_session_test_owner_pipe_eof_stops_job_while_forked_child_holds_control_socket",
+      "nodeid": "tests/test_exec_session.py::test_owner_pipe_eof_stops_job_while_forked_child_holds_control_socket",
+      "item_nodeids": [
+        "tests/test_exec_session.py::test_owner_pipe_eof_stops_job_while_forked_child_holds_control_socket"
+      ],
+      "jobs": {
+        "linux": "RUN",
+        "darwin": "RUN"
+      },
+      "prerequisites": [
+        "host_sandbox"
+      ],
+      "optional_prerequisites": [],
+      "baseline": null,
+      "witness_schema": "assertion_match",
+      "witness_assertion": "assert _wait_for_stable_file(heartbeat)"
+    },
+    {
+      "scenario_id": "test_exec_session_framing_test_session_lifetime_pipe_wrapper_argv_contract",
+      "nodeid": "tests/test_exec_session_framing.py::test_session_lifetime_pipe_wrapper_argv_contract",
+      "item_nodeids": [
+        "tests/test_exec_session_framing.py::test_session_lifetime_pipe_wrapper_argv_contract[sandbox-exec]",
+        "tests/test_exec_session_framing.py::test_session_lifetime_pipe_wrapper_argv_contract[bwrap]"
+      ],
+      "jobs": {
+        "linux": "RUN",
+        "darwin": "RUN"
+      },
+      "prerequisites": [
+        "host_sandbox"
+      ],
+      "optional_prerequisites": [],
+      "baseline": null,
+      "witness_schema": "assertion_match",
+      "witness_assertion": "assert len(kwargs[\"pass_fds\"]) == 1"
+    },
+    {
+      "scenario_id": "test_exec_supervisor_parent_death_test_short_lived_wrapper_exits_before_init_and_owner_eof_stops_job",
+      "nodeid": "tests/test_exec_supervisor_parent_death.py::test_short_lived_wrapper_exits_before_init_and_owner_eof_stops_job",
+      "item_nodeids": [
+        "tests/test_exec_supervisor_parent_death.py::test_short_lived_wrapper_exits_before_init_and_owner_eof_stops_job"
+      ],
+      "jobs": {
+        "linux": "RUN",
+        "darwin": "RUN"
+      },
+      "prerequisites": [
+        "host_sandbox"
+      ],
+      "optional_prerequisites": [],
+      "baseline": null,
+      "witness_schema": "assertion_match",
+      "witness_assertion": "assert wrapper.wait(timeout=5) == 0"
+    },
+    {
+      "scenario_id": "test_exec_supervisor_parent_death_test_supervisor_stays_alive_when_started_through_intermediate_process",
+      "nodeid": "tests/test_exec_supervisor_parent_death.py::test_supervisor_stays_alive_when_started_through_intermediate_process",
+      "item_nodeids": [
+        "tests/test_exec_supervisor_parent_death.py::test_supervisor_stays_alive_when_started_through_intermediate_process"
+      ],
+      "jobs": {
+        "linux": "RUN",
+        "darwin": "RUN"
+      },
+      "prerequisites": [
+        "host_sandbox"
+      ],
+      "optional_prerequisites": [],
+      "baseline": null,
+      "witness_schema": "assertion_match",
+      "witness_assertion": "assert _read_reply(control, replies) == {\"jobs\": {}, \"rid\": 1}"
+    },
+    {
+      "scenario_id": "test_exec_supervisor_parent_death_test_wrapper_exit_after_init_does_not_stop_live_owner_session",
+      "nodeid": "tests/test_exec_supervisor_parent_death.py::test_wrapper_exit_after_init_does_not_stop_live_owner_session",
+      "item_nodeids": [
+        "tests/test_exec_supervisor_parent_death.py::test_wrapper_exit_after_init_does_not_stop_live_owner_session"
+      ],
+      "jobs": {
+        "linux": "RUN",
+        "darwin": "RUN"
+      },
+      "prerequisites": [
+        "host_sandbox"
+      ],
+      "optional_prerequisites": [],
+      "baseline": null,
+      "witness_schema": "assertion_match",
+      "witness_assertion": "assert status[\"finished\"] is False"
+    },
+    {
+      "scenario_id": "test_pid_liveness_test_checkpoint_sweep_uses_zombie_aware_liveness",
+      "nodeid": "tests/test_pid_liveness.py::test_checkpoint_sweep_uses_zombie_aware_liveness",
+      "item_nodeids": [
+        "tests/test_pid_liveness.py::test_checkpoint_sweep_uses_zombie_aware_liveness"
+      ],
+      "jobs": {
+        "linux": "RUN",
+        "darwin": "RUN"
+      },
+      "prerequisites": [],
+      "optional_prerequisites": [],
+      "baseline": null,
+      "witness_schema": "assertion_match",
+      "witness_assertion": "assert kernel_checkpoint._pid_alive(os.getpid()) is False"
+    },
+    {
+      "scenario_id": "test_pid_liveness_test_env_seed_sweep_routes_through_pid_alive",
+      "nodeid": "tests/test_pid_liveness.py::test_env_seed_sweep_routes_through_pid_alive",
+      "item_nodeids": [
+        "tests/test_pid_liveness.py::test_env_seed_sweep_routes_through_pid_alive"
+      ],
+      "jobs": {
+        "linux": "RUN",
+        "darwin": "RUN"
+      },
+      "prerequisites": [],
+      "optional_prerequisites": [],
+      "baseline": null,
+      "witness_schema": "assertion_match",
+      "witness_assertion": "assert \"pid_alive(pid)\" in source"
+    },
+    {
+      "scenario_id": "test_pid_liveness_test_exited_pid_is_dead",
+      "nodeid": "tests/test_pid_liveness.py::test_exited_pid_is_dead",
+      "item_nodeids": [
+        "tests/test_pid_liveness.py::test_exited_pid_is_dead"
+      ],
+      "jobs": {
+        "linux": "RUN",
+        "darwin": "RUN"
+      },
+      "prerequisites": [],
+      "optional_prerequisites": [],
+      "baseline": null,
+      "witness_schema": "assertion_match",
+      "witness_assertion": "assert liveness.pid_alive(child.pid) is False"
+    },
+    {
+      "scenario_id": "test_pid_liveness_test_group_probe_handles_errno_without_scanning_proc",
+      "nodeid": "tests/test_pid_liveness.py::test_group_probe_handles_errno_without_scanning_proc",
+      "item_nodeids": [
+        "tests/test_pid_liveness.py::test_group_probe_handles_errno_without_scanning_proc[error0-True]",
+        "tests/test_pid_liveness.py::test_group_probe_handles_errno_without_scanning_proc[error1-False]"
+      ],
+      "jobs": {
+        "linux": "RUN",
+        "darwin": "RUN"
+      },
+      "prerequisites": [],
+      "optional_prerequisites": [],
+      "baseline": null,
+      "witness_schema": "assertion_match",
+      "witness_assertion": "assert liveness.group_alive(73, platform=\"linux\", proc=tmp_path / \"missing\") is expected"
+    },
+    {
+      "scenario_id": "test_pid_liveness_test_group_probe_propagates_unexpected_os_error",
+      "nodeid": "tests/test_pid_liveness.py::test_group_probe_propagates_unexpected_os_error",
+      "item_nodeids": [
+        "tests/test_pid_liveness.py::test_group_probe_propagates_unexpected_os_error"
+      ],
+      "jobs": {
+        "linux": "RUN",
+        "darwin": "RUN"
+      },
+      "prerequisites": [],
+      "optional_prerequisites": [],
+      "baseline": null,
+      "witness_schema": "assertion_match",
+      "witness_assertion": "assert error.value.errno == errno.EINVAL"
+    },
+    {
+      "scenario_id": "test_pid_liveness_test_linux_process_group_ignores_non_pid_proc_entries",
+      "nodeid": "tests/test_pid_liveness.py::test_linux_process_group_ignores_non_pid_proc_entries",
+      "item_nodeids": [
+        "tests/test_pid_liveness.py::test_linux_process_group_ignores_non_pid_proc_entries"
+      ],
+      "jobs": {
+        "linux": "RUN",
+        "darwin": "RUN"
+      },
+      "prerequisites": [],
+      "optional_prerequisites": [],
+      "baseline": null,
+      "witness_schema": "assertion_match",
+      "witness_assertion": "assert liveness.group_alive(73, platform=\"linux\", proc=proc) is False"
+    },
+    {
+      "scenario_id": "test_pid_liveness_test_linux_process_group_ignores_unreadable_or_vanished_stat",
+      "nodeid": "tests/test_pid_liveness.py::test_linux_process_group_ignores_unreadable_or_vanished_stat",
+      "item_nodeids": [
+        "tests/test_pid_liveness.py::test_linux_process_group_ignores_unreadable_or_vanished_stat[PermissionError]",
+        "tests/test_pid_liveness.py::test_linux_process_group_ignores_unreadable_or_vanished_stat[FileNotFoundError]"
+      ],
+      "jobs": {
+        "linux": "RUN",
+        "darwin": "RUN"
+      },
+      "prerequisites": [],
+      "optional_prerequisites": [],
+      "baseline": null,
+      "witness_schema": "assertion_match",
+      "witness_assertion": "assert liveness.group_alive(73, platform=\"linux\", proc=proc) is False"
+    },
+    {
+      "scenario_id": "test_pid_liveness_test_linux_process_group_with_only_zombies_counts_as_gone",
+      "nodeid": "tests/test_pid_liveness.py::test_linux_process_group_with_only_zombies_counts_as_gone",
+      "item_nodeids": [
+        "tests/test_pid_liveness.py::test_linux_process_group_with_only_zombies_counts_as_gone"
+      ],
+      "jobs": {
+        "linux": "RUN",
+        "darwin": "RUN"
+      },
+      "prerequisites": [],
+      "optional_prerequisites": [],
+      "baseline": null,
+      "witness_schema": "assertion_match",
+      "witness_assertion": "assert liveness.group_alive(73, platform=\"linux\", proc=proc) is False"
+    },
+    {
+      "scenario_id": "test_pid_liveness_test_linux_process_group_with_running_member_stays_alive",
+      "nodeid": "tests/test_pid_liveness.py::test_linux_process_group_with_running_member_stays_alive",
+      "item_nodeids": [
+        "tests/test_pid_liveness.py::test_linux_process_group_with_running_member_stays_alive"
+      ],
+      "jobs": {
+        "linux": "RUN",
+        "darwin": "RUN"
+      },
+      "prerequisites": [],
+      "optional_prerequisites": [],
+      "baseline": null,
+      "witness_schema": "assertion_match",
+      "witness_assertion": "assert liveness.group_alive(73, platform=\"linux\", proc=proc) is True"
+    },
+    {
+      "scenario_id": "test_pid_liveness_test_linux_process_group_uses_pgrp_after_last_comm_parenthesis",
+      "nodeid": "tests/test_pid_liveness.py::test_linux_process_group_uses_pgrp_after_last_comm_parenthesis",
+      "item_nodeids": [
+        "tests/test_pid_liveness.py::test_linux_process_group_uses_pgrp_after_last_comm_parenthesis"
+      ],
+      "jobs": {
+        "linux": "RUN",
+        "darwin": "RUN"
+      },
+      "prerequisites": [],
+      "optional_prerequisites": [],
+      "baseline": null,
+      "witness_schema": "assertion_match",
+      "witness_assertion": "assert liveness.group_alive(73, platform=\"linux\", proc=proc) is True"
+    },
+    {
+      "scenario_id": "test_pid_liveness_test_linux_process_group_uses_third_field_after_comm",
+      "nodeid": "tests/test_pid_liveness.py::test_linux_process_group_uses_third_field_after_comm",
+      "item_nodeids": [
+        "tests/test_pid_liveness.py::test_linux_process_group_uses_third_field_after_comm"
+      ],
+      "jobs": {
+        "linux": "RUN",
+        "darwin": "RUN"
+      },
+      "prerequisites": [],
+      "optional_prerequisites": [],
+      "baseline": null,
+      "witness_schema": "assertion_match",
+      "witness_assertion": "assert liveness.group_alive(73, platform=\"linux\", proc=proc) is False"
+    },
+    {
+      "scenario_id": "test_pid_liveness_test_linux_process_group_without_visible_members_counts_as_gone",
+      "nodeid": "tests/test_pid_liveness.py::test_linux_process_group_without_visible_members_counts_as_gone",
+      "item_nodeids": [
+        "tests/test_pid_liveness.py::test_linux_process_group_without_visible_members_counts_as_gone"
+      ],
+      "jobs": {
+        "linux": "RUN",
+        "darwin": "RUN"
+      },
+      "prerequisites": [],
+      "optional_prerequisites": [],
+      "baseline": null,
+      "witness_schema": "assertion_match",
+      "witness_assertion": "assert liveness.group_alive(73, platform=\"linux\", proc=proc) is False"
+    },
+    {
+      "scenario_id": "test_pid_liveness_test_linux_running_owner_stays_alive",
+      "nodeid": "tests/test_pid_liveness.py::test_linux_running_owner_stays_alive",
+      "item_nodeids": [
+        "tests/test_pid_liveness.py::test_linux_running_owner_stays_alive"
+      ],
+      "jobs": {
+        "linux": "RUN",
+        "darwin": "RUN"
+      },
+      "prerequisites": [],
+      "optional_prerequisites": [],
+      "baseline": null,
+      "witness_schema": "assertion_match",
+      "witness_assertion": "assert liveness.pid_alive(os.getpid(), platform=\"linux\", proc=proc) is True"
+    },
+    {
+      "scenario_id": "test_pid_liveness_test_linux_zombie_owner_counts_as_dead",
+      "nodeid": "tests/test_pid_liveness.py::test_linux_zombie_owner_counts_as_dead",
+      "item_nodeids": [
+        "tests/test_pid_liveness.py::test_linux_zombie_owner_counts_as_dead"
+      ],
+      "jobs": {
+        "linux": "RUN",
+        "darwin": "RUN"
+      },
+      "prerequisites": [],
+      "optional_prerequisites": [],
+      "baseline": null,
+      "witness_schema": "assertion_match",
+      "witness_assertion": "assert liveness.pid_alive(os.getpid(), platform=\"linux\", proc=proc) is False"
+    },
+    {
+      "scenario_id": "test_pid_liveness_test_missing_group_is_gone_even_if_proc_contains_a_live_member",
+      "nodeid": "tests/test_pid_liveness.py::test_missing_group_is_gone_even_if_proc_contains_a_live_member",
+      "item_nodeids": [
+        "tests/test_pid_liveness.py::test_missing_group_is_gone_even_if_proc_contains_a_live_member"
+      ],
+      "jobs": {
+        "linux": "RUN",
+        "darwin": "RUN"
+      },
+      "prerequisites": [],
+      "optional_prerequisites": [],
+      "baseline": null,
+      "witness_schema": "assertion_match",
+      "witness_assertion": "assert liveness.group_alive(73, platform=\"linux\", proc=proc) is False"
+    },
+    {
+      "scenario_id": "test_pid_liveness_test_permission_denied_group_probe_stays_alive",
+      "nodeid": "tests/test_pid_liveness.py::test_permission_denied_group_probe_stays_alive",
+      "item_nodeids": [
+        "tests/test_pid_liveness.py::test_permission_denied_group_probe_stays_alive"
+      ],
+      "jobs": {
+        "linux": "RUN",
+        "darwin": "RUN"
+      },
+      "prerequisites": [],
+      "optional_prerequisites": [],
+      "baseline": null,
+      "witness_schema": "assertion_match",
+      "witness_assertion": "assert liveness.group_alive(73, platform=\"linux\", proc=proc) is True"
+    },
+    {
+      "scenario_id": "test_pid_liveness_test_state_is_read_after_the_last_paren_of_the_command_name",
+      "nodeid": "tests/test_pid_liveness.py::test_state_is_read_after_the_last_paren_of_the_command_name",
+      "item_nodeids": [
+        "tests/test_pid_liveness.py::test_state_is_read_after_the_last_paren_of_the_command_name"
+      ],
+      "jobs": {
+        "linux": "RUN",
+        "darwin": "RUN"
+      },
+      "prerequisites": [],
+      "optional_prerequisites": [],
+      "baseline": null,
+      "witness_schema": "assertion_match",
+      "witness_assertion": "assert liveness.linux_zombie(os.getpid(), proc) is True"
+    },
+    {
+      "scenario_id": "test_pid_liveness_test_unreadable_stat_is_not_provably_a_zombie",
+      "nodeid": "tests/test_pid_liveness.py::test_unreadable_stat_is_not_provably_a_zombie",
+      "item_nodeids": [
+        "tests/test_pid_liveness.py::test_unreadable_stat_is_not_provably_a_zombie"
+      ],
+      "jobs": {
+        "linux": "RUN",
+        "darwin": "RUN"
+      },
+      "prerequisites": [],
+      "optional_prerequisites": [],
+      "baseline": null,
+      "witness_schema": "assertion_match",
+      "witness_assertion": "assert liveness.linux_zombie(os.getpid(), tmp_path) is False"
+    },
+    {
+      "scenario_id": "test_process_signal_liveness_test_exiting_empty_cmdline_is_gone_before_launch_identity_mismatch",
+      "nodeid": "tests/test_process_signal_liveness.py::test_exiting_empty_cmdline_is_gone_before_launch_identity_mismatch",
+      "item_nodeids": [
+        "tests/test_process_signal_liveness.py::test_exiting_empty_cmdline_is_gone_before_launch_identity_mismatch"
+      ],
+      "jobs": {
+        "linux": "RUN",
+        "darwin": {
+          "disposition": "NA_PLATFORM",
+          "platform": "linux",
+          "reason": "Linux exiting-process cmdline evidence"
+        }
+      },
+      "prerequisites": [
+        "host_sandbox"
+      ],
+      "optional_prerequisites": [],
+      "baseline": null,
+      "witness_schema": "assertion_match",
+      "witness_assertion": "assert str(error.value) == f\"process {live_child.pid} is no longer running\""
+    },
+    {
+      "scenario_id": "test_process_signal_liveness_test_live_pid_with_different_identity_remains_mismatch",
+      "nodeid": "tests/test_process_signal_liveness.py::test_live_pid_with_different_identity_remains_mismatch",
+      "item_nodeids": [
+        "tests/test_process_signal_liveness.py::test_live_pid_with_different_identity_remains_mismatch[record]",
+        "tests/test_process_signal_liveness.py::test_live_pid_with_different_identity_remains_mismatch[signal]"
+      ],
+      "jobs": {
+        "linux": "RUN",
+        "darwin": "RUN"
+      },
+      "prerequisites": [
+        "host_sandbox"
+      ],
+      "optional_prerequisites": [],
+      "baseline": null,
+      "witness_schema": "assertion_match",
+      "witness_assertion": "assert expected_fragment in str(error.value)"
+    },
+    {
+      "scenario_id": "test_process_signal_liveness_test_live_pid_with_same_identity_passes",
+      "nodeid": "tests/test_process_signal_liveness.py::test_live_pid_with_same_identity_passes",
+      "item_nodeids": [
+        "tests/test_process_signal_liveness.py::test_live_pid_with_same_identity_passes"
+      ],
+      "jobs": {
+        "linux": "RUN",
+        "darwin": "RUN"
+      },
+      "prerequisites": [
+        "host_sandbox"
+      ],
+      "optional_prerequisites": [],
+      "baseline": null,
+      "witness_schema": "assertion_match",
+      "witness_assertion": "assert live_child.poll() is None"
+    },
+    {
+      "scenario_id": "test_process_signal_liveness_test_linux_binding_refuses_without_pidfd",
+      "nodeid": "tests/test_process_signal_liveness.py::test_linux_binding_refuses_without_pidfd",
+      "item_nodeids": [
+        "tests/test_process_signal_liveness.py::test_linux_binding_refuses_without_pidfd"
+      ],
+      "jobs": {
+        "linux": "RUN",
+        "darwin": {
+          "disposition": "NA_PLATFORM",
+          "platform": "linux",
+          "reason": "Linux pidfd signal authority"
+        }
+      },
+      "prerequisites": [
+        "host_sandbox"
+      ],
+      "optional_prerequisites": [],
+      "baseline": null,
+      "witness_schema": "assertion_match",
+      "witness_assertion": "assert str(error.value) == \"pidfd denied by test\""
+    },
+    {
+      "scenario_id": "test_process_signal_liveness_test_nonempty_cmdline_mismatch_remains_a_runtime_error",
+      "nodeid": "tests/test_process_signal_liveness.py::test_nonempty_cmdline_mismatch_remains_a_runtime_error",
+      "item_nodeids": [
+        "tests/test_process_signal_liveness.py::test_nonempty_cmdline_mismatch_remains_a_runtime_error"
+      ],
+      "jobs": {
+        "linux": "RUN",
+        "darwin": "RUN"
+      },
+      "prerequisites": [
+        "host_sandbox"
+      ],
+      "optional_prerequisites": [],
+      "baseline": null,
+      "witness_schema": "assertion_match",
+      "witness_assertion": "assert \"does not match its launch identity\" in str(error.value)"
+    },
+    {
+      "scenario_id": "test_process_signal_liveness_test_retained_signal_binding_uses_pidfd",
+      "nodeid": "tests/test_process_signal_liveness.py::test_retained_signal_binding_uses_pidfd",
+      "item_nodeids": [
+        "tests/test_process_signal_liveness.py::test_retained_signal_binding_uses_pidfd"
+      ],
+      "jobs": {
+        "linux": "RUN",
+        "darwin": {
+          "disposition": "NA_PLATFORM",
+          "platform": "linux",
+          "reason": "Linux pidfd signal authority"
+        }
+      },
+      "prerequisites": [
+        "host_sandbox"
+      ],
+      "optional_prerequisites": [],
+      "baseline": null,
+      "witness_schema": "assertion_match",
+      "witness_assertion": "assert binding.pidfd is not None"
+    },
+    {
+      "scenario_id": "test_process_signal_liveness_test_zombie_pid_is_gone",
+      "nodeid": "tests/test_process_signal_liveness.py::test_zombie_pid_is_gone",
+      "item_nodeids": [
+        "tests/test_process_signal_liveness.py::test_zombie_pid_is_gone[record]",
+        "tests/test_process_signal_liveness.py::test_zombie_pid_is_gone[inspect]"
+      ],
+      "jobs": {
+        "linux": "RUN",
+        "darwin": "RUN"
+      },
+      "prerequisites": [
+        "host_sandbox"
+      ],
+      "optional_prerequisites": [],
+      "baseline": null,
+      "witness_schema": "assertion_match",
+      "witness_assertion": "assert str(error.value) == f\"process {live_child.pid} is no longer running\""
     }
   ],
   "optional_dependencies": [

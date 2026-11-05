@@ -192,8 +192,9 @@ def test_group_probe_propagates_unexpected_os_error(monkeypatch):
 
     monkeypatch.setattr(liveness.os, "killpg", failed_probe)
 
-    with pytest.raises(OSError, match="invalid group probe"):
+    with pytest.raises(OSError, match="invalid group probe") as error:
         liveness.group_alive(73, platform="linux")
+    assert error.value.errno == errno.EINVAL
 
 
 def test_missing_group_is_gone_even_if_proc_contains_a_live_member(monkeypatch, tmp_path):
