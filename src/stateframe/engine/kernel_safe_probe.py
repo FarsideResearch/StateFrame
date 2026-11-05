@@ -44,33 +44,13 @@ def run_probe(argv: Sequence[str], workspace: Path, *, timeout: float = 10,
         session_dir = scratch / "session"
         session_dir.mkdir()
         session = ExecSession(session_dir)
-        primary_error: BaseException | None = None
-        primary_traceback = None
-        result = None
         try:
             result = session.run(argv, cap, stdin=stdin, cwd=workspace)
             if not result.cleanup.ok:
-                primary_error = ProbeCleanupError(
-                    "automatic probe cleanup failed: " + result.cleanup.detail)
-        except BaseException as error:
-            primary_error = error
-            primary_traceback = error.__traceback__
-
-        cleanup_error = None
-        try:
-            session.close()
-        except (ExecSessionError, OSError) as error:
-            cleanup_error = error
-
-        if cleanup_error is not None:
-            message = "automatic probe cleanup failed: " + str(cleanup_error)
-            if primary_error is not None:
-                message += "\nprimary error: " + str(primary_error)
-            raise ProbeCleanupError(message) from cleanup_error
-
-        if primary_error is not None:
-            raise primary_error.with_traceback(primary_traceback)
-
-        if result is None:
-            raise RuntimeError("execution session returned no probe result")
+                raise ProbeCleanupError("automatic probe cleanup failed: " + result.cleanup.detail)
+        finally:
+            try:
+                session.close()
+            except (ExecSessionError, OSError) as error:
+                raise ProbeCleanupError("automatic probe cleanup failed: " + str(error)) from error
         return result

@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- Fixed: supervisor exit and communication failures now carry any proven exit status and a bounded log tail through startup probes and import smoke before temporary cleanup. Ordinary probe results and startup failure messages remain unchanged.
+- Fixed: supervisor communication failures now include bounded diagnostics in startup probe and import smoke errors before temporary cleanup. Probe cleanup keeps its original try/finally contract without adding a separate primary-error line; Linux reports the retained bwrap launcher status.
 
 ## 0.4.30 (2026-11-05)
 
