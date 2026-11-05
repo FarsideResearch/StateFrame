@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.3.40 (2026-11-04)
 
 - Tests: the clean-meter reprobe capture stops after the six requests it compares (it used to hit the engine deadline on Linux), and the masker tests use realistic `[StateFrame]` payloads plus a control that a non-JSON payload still raises.
 
