@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from _journal import journal_bytes
 import kernel_provider_dialect as dialect
 import kernel_request_diet
 import kernel_template_conformance
@@ -912,7 +913,8 @@ def test_plain_loop_journals_prompt_cache_pin_degradation(tmp_path):
             },
         )
 
-    events = [json.loads(line) for line in (output / "plain" / "events.jsonl").read_text().splitlines()]
+    journal = journal_bytes(output / "plain" / "events.jsonl", decompress=True)
+    events = [json.loads(line) for line in journal.decode("utf-8").splitlines()]
     notices = [event for event in events if event.get("kind") == "provider_feature_degraded"]
     assert len(notices) == 1
     assert notices[0]["feature"] == "prompt-cache pinned slot"

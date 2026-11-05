@@ -11,6 +11,7 @@ from threading import Thread
 
 import pytest
 
+from _journal import measurement_events
 from engine_run import run_monitored
 from stateframe.scripted_endpoint import Script, make_handler, serve
 
@@ -109,12 +110,7 @@ def test_shipped_profile_cli_completes_two_turns_on_strict_openai_mock(
     )
     spec = json.loads((run_dir / "spec.json").read_text(encoding="utf-8"))
     assert spec["environment"]["STATEFRAME_PROMPT_CACHE"] == "off"
-    from stateframe.engine.kernel_journal_store import journal_paths, open_journal
-
-    journal_events = []
-    for journal_path in journal_paths(run_dir / "worker" / "measurement-runs"):
-        with open_journal(journal_path) as journal:
-            journal_events.extend(json.loads(line) for line in journal if line.strip())
+    journal_events = measurement_events(run_dir)
     notices = [event for event in journal_events if event.get("kind") == "provider_feature_degraded"]
     assert len(notices) == 1
     assert notices[0]["feature"] == "prompt-cache pinned slot"
