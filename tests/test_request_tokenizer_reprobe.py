@@ -506,9 +506,6 @@ def _capture_clean_meter_request_bodies(tmp_path):
     outcome = corpus._run_case(
         tmp_path,
         "clean-meter-22file-r1",
-        # The 012e0b5 wire oracle predates TapeServer's /props response. Keep this
-        # capture on that fixture contract so only request-body bytes are compared.
-        props_available=False,
         stop_after_provider_requests=6,
         final_cache_layout="off",
     )
