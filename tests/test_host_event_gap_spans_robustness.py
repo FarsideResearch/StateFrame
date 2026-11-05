@@ -201,10 +201,19 @@ def test_pause_state_is_dropped_and_reinitialized_by_checkpoint_restore(
         kernel_checkpoint._SCANS.update(old_scans)
 
 
-def test_checkpointed_journal_attributes_match_5416a69(tmp_path):
+_SPAN_PAUSE_FIELDS = frozenset({
+    "_warm_host_span_pause_counts", "_warm_host_span_resume_counts",
+})
+
+
+def test_checkpointed_journal_attributes_exclude_span_pause_state(tmp_path):
+    # Pin only what this change adds: the pause bookkeeping must never be checkpointed. A frozen copy of the whole
+    # field set broke on the next release that added an unrelated journal field (v0.4.26 _subscriber_cursor_kinds).
     journal = ContinuationJournal(tmp_path, "checkpoint-attributes", {"origin": "fixture"})
     try:
-        assert (set(kernel_checkpoint._journal_state(journal))
-                == _BASELINE_CHECKPOINTED_JOURNAL_FIELDS)
+        state = set(kernel_checkpoint._journal_state(journal))
+        assert _SPAN_PAUSE_FIELDS <= set(vars(journal))
+        assert not (state & _SPAN_PAUSE_FIELDS)
+        assert _BASELINE_CHECKPOINTED_JOURNAL_FIELDS - {"_subscriber_cursor_kinds"} <= state
     finally:
         journal.close()
