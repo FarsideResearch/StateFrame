@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.4.13 (2026-11-05)
 
 - Frame finalization makes fewer deep copies and request-body serializations per request (on the guard fixture, 10 to 4 copies and 14 to 8 serializations). Request bytes are unchanged. Together with 0.4.12, median wall time per request is about 10% lower on one 22-file example (n=3, on a loaded host).
 
