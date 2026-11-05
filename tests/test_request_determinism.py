@@ -87,6 +87,14 @@ RANDOM_CALL_ALLOWLIST = {
             2, "Creates host profiling/runtime IDs; provider request IDs use content_wire_id."
         ),
     },
+    "src/stateframe/engine/kernel_request_auth_identity.py": {
+        "secrets.token_bytes": (
+            2, "Creates installation HMAC secrets (identity.key and fallback); only the HMAC enters tokenizer_identity metadata, never request bytes."
+        ),
+        "secrets.token_hex": (
+            1, "Names the atomic identity.key publication temp file; never stored or sent."
+        ),
+    },
     "src/stateframe/engine/kernel_stateframe_resume.py": {
         "uuid.uuid4": (
             1, "Creates journal correlation metadata; the resumed model message uses user text only."
@@ -424,6 +432,34 @@ def test_request_path_randomness_is_reviewed():
         f"scanned={scanned_count} violated={sum(abs(v['expected'] - v['scanned']) for v in violations.values())}"
     )
     assert not violations, f"unreviewed or changed request-path random calls: {violations}"
+
+
+def test_request_path_randomness_rejects_a_new_unreviewed_secrets_call(tmp_path, monkeypatch):
+    shutil.copytree(ROOT / "src/stateframe", tmp_path / "src/stateframe",
+                    ignore=shutil.ignore_patterns("__pycache__"))
+    planted_relative = "src/stateframe/engine/kernel_unreviewed_randomness.py"
+    (tmp_path / planted_relative).write_text(
+        "import secrets\nsecrets.token_bytes(8)\n", encoding="utf-8"
+    )
+
+    original_modules = REQUEST_PATH_MODULES
+    monkeypatch.setitem(globals(), "ROOT", tmp_path)
+    monkeypatch.setitem(globals(), "REQUEST_PATH_MODULES", (*original_modules, planted_relative))
+    with pytest.raises(AssertionError, match="unreviewed or changed") as unreviewed:
+        test_request_path_randomness_is_reviewed()
+    assert planted_relative in str(unreviewed.value)
+    assert "secrets.token_bytes" in str(unreviewed.value)
+    assert "'expected': 0, 'scanned': 1" in str(unreviewed.value)
+
+    identity_relative = "src/stateframe/engine/kernel_request_auth_identity.py"
+    with (tmp_path / identity_relative).open("a", encoding="utf-8") as identity_source:
+        identity_source.write("\nsecrets.token_bytes(8)\n")
+    monkeypatch.setitem(globals(), "REQUEST_PATH_MODULES", original_modules)
+    with pytest.raises(AssertionError, match="unreviewed or changed") as changed_count:
+        test_request_path_randomness_is_reviewed()
+    assert identity_relative in str(changed_count.value)
+    assert "secrets.token_bytes" in str(changed_count.value)
+    assert "'expected': 2, 'scanned': 3" in str(changed_count.value)
 
 
 def _target_names(node: ast.AST) -> set[str]:
