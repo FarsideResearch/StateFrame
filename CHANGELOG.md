@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.4.21 (2026-11-05)
 
 - Tests: the no-MCP and no-skills parity checks compare against the previous release instead of 0.2.3, whose bytes changed intentionally in 0.4.5.
 
