@@ -21,6 +21,10 @@
 - Move the action ledger, headcarry, recorded events, open sites, and code bookmarks wholesale into `[StateFrame volatile]`; other frame values and list order stay as rendered. Changes to the stable frame bytes also start a structural epoch to preserve whole-message cache boundaries; structural changes and measured-envelope pressure re-lay current windows only. Epoch state remains transactional and checkpointed only while enabled; the switch stays off pending broader cache and completion A/B evidence.
 - See [Running](docs/guide/running.md#prompt-cache-stable-source-windows) and [Known limitations](KNOWN_LIMITATIONS.md#prompt-cache-reuse).
 
+## 0.3.38 (2026-11-04)
+
+- Tests: the hook-wiring parity checks compare the provider_dialect journal event and the provider_capabilities spec key against whatever baseline release they pick, so they pass on a released tip as well as on a branch. Test-only; no runtime change.
+
 ## 0.3.37 (2026-11-04)
 
 ### Hosted OpenAI-compatible endpoints
