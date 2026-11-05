@@ -1915,7 +1915,8 @@ def compose_messages(*, prefix: Sequence[Mapping[str, object]], path: str, worki
             messages.append({"role": "user", "content": notice})
     if ledger_block:  # [reasoning-ledger patch] one user message, only when non-empty
         messages.append({"role": "user", "content": str(ledger_block)})
-    messages.append(state_message(state))
+    host_state = state_message(state)
+    messages.append(host_state)
     messages.append({
         "role": str(handoff.get("role", "user")),
         "content": str(handoff.get("content", "")),
@@ -1923,8 +1924,15 @@ def compose_messages(*, prefix: Sequence[Mapping[str, object]], path: str, worki
     for pair in exchanges:
         if isinstance(pair, Sequence) and len(pair) == 2:
             messages.extend(copy.deepcopy(dict(item)) for item in pair if isinstance(item, Mapping))
-    ordered = [dict(message) for message in order_f4_messages(messages)]
-    return _append_verbatim_turns(ordered, verbatim_turns)
+    ordered = order_f4_messages(messages)
+    composed = _append_verbatim_turns(ordered, verbatim_turns)
+    for message in composed:
+        if message is not host_state:
+            content = str(message.get("content") or "")
+            if content.startswith(STATE_HEADER):
+                # An assistant or tool may quote the header. Only the host owns this delimiter.
+                message["content"] = "\\" + content
+    return [dict(message) for message in composed]
 
 
 def latest_complete_tool_exchange(
