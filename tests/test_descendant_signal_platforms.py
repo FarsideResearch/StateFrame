@@ -35,21 +35,30 @@ def _complete_with_signal_errors(signal_errors: dict[int, str], survivors: tuple
     return job.cleanup
 
 
-def _fake_libproc(*, starts: tuple[tuple[int, int], ...] = (ROW.start,),
-                  signal_result: int | None = None):
+def _fake_libproc(*, starts: tuple[tuple[int, int] | None, ...] = (ROW.start,),
+                  versions: tuple[int, ...] | None = None,
+                  signal_result: int | None = None,
+                  signal_calls: list[int] | None = None):
     reads = iter(starts)
+    identity_versions = iter(versions if versions is not None else (7,) * len(starts))
 
     def proc_pidinfo(pid, flavor, arg, buffer, size):
         assert (pid, flavor, arg, size) == (ROW.pid, 18, 0, ctypes.sizeof(tracker._BSDInfoWithUnique))
+        start = next(reads)
+        if start is None:
+            ctypes.set_errno(errno.ESRCH)
+            return 0
         info = ctypes.cast(buffer, ctypes.POINTER(tracker._BSDInfoWithUnique)).contents
         info.bsd.pid, info.bsd.uid, info.bsd.status = ROW.pid, tracker.os.getuid(), 2
-        info.bsd.start_sec, info.bsd.start_usec = next(reads)
-        info.unique.idversion = 7
+        info.bsd.start_sec, info.bsd.start_usec = start
+        info.unique.idversion = next(identity_versions)
         return size
 
     lib = SimpleNamespace(proc_pidinfo=proc_pidinfo)
     if signal_result is not None:
-        def proc_signal_with_audittoken(_token, _sig):
+        def proc_signal_with_audittoken(_token, sig):
+            if signal_calls is not None:
+                signal_calls.append(sig)
             return signal_result
 
         lib.proc_signal_with_audittoken = proc_signal_with_audittoken
@@ -73,6 +82,40 @@ def test_macos_kernel_signal_path_is_labelled(monkeypatch):
     monkeypatch.setattr(tracker.os, "kill", lambda *_args: pytest.fail("kernel signal must not use os.kill"))
     assert family.signal([ROW], signal.SIGKILL) == {ROW.pid}
     assert family.signal_paths == {ROW.pid: tracker.MAC_KERNEL_SIGNAL_PATH}
+
+
+@pytest.mark.parametrize(("starts", "versions", "expected"), [
+    ((ROW.start, ROW.start), (7, 7), tracker.MAC_KERNEL_SIGNAL_PATH),
+    ((ROW.start, ROW.start), (7, 8), False),
+    ((ROW.start, (101, 0)), (7, 7), False),
+    ((ROW.start, None), (7, 7), False),
+])
+def test_macos_signal_zero_rechecks_identity_without_calling_audittoken(
+        monkeypatch, starts, versions, expected):
+    monkeypatch.setattr(tracker.sys, "platform", "darwin")
+    signal_calls = []
+    monkeypatch.setattr(tracker, "_libproc", lambda: _fake_libproc(
+        starts=starts, versions=versions, signal_result=0, signal_calls=signal_calls))
+    monkeypatch.setattr(tracker.os, "kill",
+                        lambda *_args: pytest.fail("signal zero must not use numeric PID signalling"))
+
+    assert tracker.signal_mac_verified_process(ROW, 0) == expected
+    assert signal_calls == []
+
+
+def test_macos_positive_signal_einval_is_not_retried_with_os_kill(monkeypatch):
+    monkeypatch.setattr(tracker.sys, "platform", "darwin")
+    signal_calls = []
+    monkeypatch.setattr(tracker, "_libproc", lambda: _fake_libproc(
+        starts=(ROW.start, ROW.start), signal_result=errno.EINVAL, signal_calls=signal_calls))
+    monkeypatch.setattr(tracker.os, "kill",
+                        lambda *_args: pytest.fail("EINVAL must not trigger numeric PID fallback"))
+
+    with pytest.raises(OSError) as caught:
+        tracker.signal_mac_verified_process(ROW, signal.SIGTERM)
+
+    assert caught.value.errno == errno.EINVAL
+    assert signal_calls == [signal.SIGTERM]
 
 
 @pytest.mark.parametrize("unsupported", [None, errno.ENOTSUP, errno.ENOSYS])
@@ -243,6 +286,7 @@ def test_complete_bounds_appended_signal_error_detail():
     assert cleanup["detail"] == "; " + "x" * 300
 
 
+@pytest.mark.host_sandbox
 @pytest.mark.skipif(sys.platform != "darwin", reason="real macOS kernel signal")
 def test_real_macos_setsid_child_is_killed(tmp_path):
     """On 03469b8, Descendants.signal recorded "unavailable without pidfd" and never signalled this child."""
@@ -260,6 +304,7 @@ def test_real_macos_setsid_child_is_killed(tmp_path):
             child.wait()
 
 
+@pytest.mark.host_sandbox
 @pytest.mark.skipif(sys.platform != "darwin", reason="real macOS process identity")
 def test_real_macos_setsid_child_falls_back_when_kernel_symbol_is_missing(monkeypatch):
     import subprocess

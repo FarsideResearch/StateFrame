@@ -211,7 +211,7 @@ def _libproc():
 
 
 def signal_mac_verified_process(expected: ProcessIdentity, sig: signal.Signals) -> str | bool:
-    """Return the successful signal path, or False when no signal was sent."""
+    """Return the verified signal path, or False when the process is gone or changed."""
     if sys.platform != "darwin" or expected.pid <= 0 or expected.zombie:
         return False
     try:
@@ -239,12 +239,21 @@ def signal_mac_verified_process(expected: ProcessIdentity, sig: signal.Signals) 
             or info.unique.idversion == 0 or info.bsd.status == 5):
         return False
 
-    def signal_after_recheck() -> str | bool:
+    def identity_still_matches() -> bool:
         again = read_identity()
         if again is None or (again.bsd.pid != info.bsd.pid or again.bsd.uid != info.bsd.uid
                 or (again.bsd.start_sec, again.bsd.start_usec) != (info.bsd.start_sec, info.bsd.start_usec)
                 or again.bsd.status != info.bsd.status
                 or again.unique.idversion != info.unique.idversion):
+            return False
+        return True
+
+    if int(sig) == 0:
+        # proc_signal_with_audittoken rejects signal 0 with EINVAL; verify identity without calling it.
+        return MAC_KERNEL_SIGNAL_PATH if identity_still_matches() else False
+
+    def signal_after_recheck() -> str | bool:
+        if not identity_still_matches():
             return False
         try:
             os.kill(expected.pid, sig)

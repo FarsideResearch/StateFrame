@@ -12,11 +12,11 @@ SOURCE = Path(__file__).resolve().parents[1] / "src"
 REVIEWED_SIGNALS = {
     ("stateframe/_child.py", "os.killpg(os.getpgrp(), signal.SIGKILL)"):
         "The child signals its own group only when it is that group's leader.",
-    ("stateframe/engine/kernel_checkpoint.py", "os.kill(pid, 0)"):
-        "Signal zero is a liveness query and delivers no signal.",
-    ("stateframe/engine/kernel_env_seed.py", "os.kill(pid, 0)"):
-        "Signal zero is a liveness query for an orphaned seed temp dir's owner; it delivers no "
-        "signal and only ESRCH counts as dead.",
+    ("stateframe/engine/kernel_pid_liveness.py", "os.kill(pid, 0)"):
+        "Signal zero is a liveness query and delivers no signal; checkpoint and env-seed temp sweeps "
+        "share it. ESRCH or a Linux State-Z /proc entry counts as dead.",
+    ("stateframe/engine/kernel_pid_liveness.py", "os.killpg(pgid, 0)"):
+        "Signal zero probes group existence; Linux /proc distinguishes zombie-only groups from live groups.",
     ("stateframe/engine/kernel_exec_supervisor.py", "os.kill(row.pid, signal.SIGKILL)"):
         "The row is this supervisor's direct child and only its serve loop reaps it.",
     ("stateframe/engine/kernel_exec_tracker.py", "os.killpg(launch_identity.pid, sig)"):

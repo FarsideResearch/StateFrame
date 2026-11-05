@@ -1,7 +1,10 @@
 """Execution supervisor control replies stay matched after timeouts and partial reads."""
+from dataclasses import replace
 import json
+import os
 import socket
 import threading
+from types import SimpleNamespace
 
 import pytest
 
@@ -10,7 +13,6 @@ from kernel_exec_session import ExecSession, ExecSessionError
 from kernel_exec_supervisor import Supervisor
 from stateframe import runner
 from stateframe.endpoint import Endpoint
-
 
 @pytest.fixture
 def control(tmp_path):
@@ -35,6 +37,7 @@ def _reply(peer, rid, **fields):
     peer.sendall(json.dumps({"rid": rid, **fields}).encode() + b"\n")
 
 
+@pytest.mark.host_sandbox
 def test_late_reply_after_timeout_does_not_poison_next_rpc(control):
     session, peer = control
     release_first = threading.Event()
@@ -61,12 +64,14 @@ def test_late_reply_after_timeout_does_not_poison_next_rpc(control):
     assert not thread.is_alive()
 
 
+@pytest.mark.host_sandbox
 def test_two_replies_in_one_recv_are_separate(control):
     session, peer = control
     peer.sendall(b'{"rid":0,"value":"stale"}\n{"rid":1,"value":"right"}\n')
     assert session._rpc({"op": "one"})["value"] == "right"
 
 
+@pytest.mark.host_sandbox
 def test_buffered_next_reply_survives_between_calls(control):
     session, peer = control
     peer.sendall(b'{"rid":1,"value":"first"}\n{"rid":2,"value":"second"}\n')
@@ -74,6 +79,7 @@ def test_buffered_next_reply_survives_between_calls(control):
     assert session._rpc({"op": "two"})["value"] == "second"
 
 
+@pytest.mark.host_sandbox
 def test_reply_split_across_recv_chunks(control):
     session, peer = control
     original = session._control
@@ -90,12 +96,14 @@ def test_reply_split_across_recv_chunks(control):
     assert session._rpc({"op": "one"})["value"] == "split"
 
 
+@pytest.mark.host_sandbox
 def test_stale_rid_is_discarded_before_current_reply(control):
     session, peer = control
     peer.sendall(b'{"rid":-1,"value":"stale"}\n{"rid":1,"value":"right"}\n')
     assert session._rpc({"op": "one"})["value"] == "right"
 
 
+@pytest.mark.host_sandbox
 def test_matching_error_reply_raises(control):
     session, peer = control
     _reply(peer, 1, error="supervisor rejected request")
@@ -103,6 +111,7 @@ def test_matching_error_reply_raises(control):
         session._rpc({"op": "bad"})
 
 
+@pytest.mark.host_sandbox
 def test_supervisor_exit_and_socket_failure_keep_distinct_errors(control):
     session, _ = control
 
@@ -125,6 +134,7 @@ def test_supervisor_exit_and_socket_failure_keep_distinct_errors(control):
         session._rpc({"op": "two"})
 
 
+@pytest.mark.host_sandbox
 def test_receive_buffer_keeps_six_mib_bound(control):
     session, _ = control
 
@@ -185,6 +195,7 @@ def test_rpc_timeout_load_factor_is_capped(monkeypatch):
     assert kernel_exec_session.rpc_timeout_seconds() == 24
 
 
+@pytest.mark.host_sandbox
 def test_timeout_message_names_seconds_and_host_load(control, monkeypatch):
     session, _ = control
     session._control.settimeout(0.01)
@@ -229,3 +240,58 @@ def test_runner_spec_only_has_rpc_timeout_when_shell_sets_it(tmp_path, monkeypat
     _, _, spec = runner.prepare(options, printer=lambda *_: None)
     assert ("STATEFRAME_EXEC_RPC_SECONDS" in spec["environment"]) is (base is not None)
     assert spec["environment"].get("STATEFRAME_EXEC_RPC_SECONDS") == base
+
+
+@pytest.mark.host_sandbox
+@pytest.mark.parametrize("backend", ["sandbox-exec", "bwrap"])
+def test_session_lifetime_pipe_wrapper_argv_contract(tmp_path, monkeypatch, backend):
+    """Check argv and inherited-fd declarations; a separate control exercises live EOF behavior."""
+    from kernel_exec_capability import shell_capability
+
+    workspace = tmp_path / "workspace"
+    run_env = tmp_path / "env"
+    scratch_home = tmp_path / "home"
+    workspace.mkdir()
+    run_env.mkdir()
+    scratch_home.mkdir()
+    capability = shell_capability(workspace=workspace, run_env_dir=run_env,
+                                  scratch_home=scratch_home, network="none", writable=False)
+    capability = replace(capability, sandboxed=backend == "bwrap")
+    launched = {}
+
+    def fake_popen(command, **kwargs):
+        launched["command"] = command
+        launched["kwargs"] = kwargs
+        launched["pass_fds_inheritable"] = tuple(
+            os.get_inheritable(descriptor) for descriptor in kwargs.get("pass_fds", ()))
+        return SimpleNamespace(pid=43210)
+
+    monkeypatch.setattr(kernel_exec_session.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(kernel_exec_session, "capture_launch_identity", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(kernel_exec_session, "_current_cgroup", lambda: None)
+    monkeypatch.setattr(kernel_exec_session, "sandbox_executable", lambda _name: "/usr/bin/bwrap")
+    monkeypatch.setattr(kernel_exec_session.os, "getuid", lambda: 1000)
+
+    session = ExecSession(tmp_path, platform_backend=backend)
+    try:
+        session._start(capability)
+        command = launched["command"]
+        kwargs = launched["kwargs"]
+        assert len(kwargs["pass_fds"]) == 1
+        owner_read = kwargs["pass_fds"][0]
+        # _start closes the parent's read end after spawn; inspect its flags at
+        # the Popen boundary and verify that the child handoff is explicit.
+        assert launched["pass_fds_inheritable"] == (False,)
+        if backend == "bwrap":
+            sync_fd = command.index("--sync-fd")
+            assert command[sync_fd + 1] == str(owner_read)
+            supervisor_args = command[command.index("--") + 1:]
+            assert supervisor_args[-1] == str(owner_read)
+        else:
+            assert command[-1] == str(owner_read)
+    finally:
+        if session._control is not None:
+            session._control.close()
+        if session._log is not None:
+            session._log.close()
+        session._close_owner_write_end()

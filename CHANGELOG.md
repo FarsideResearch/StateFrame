@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- Fixed: execution supervisors use an owner-lifetime pipe, so engine death stops jobs even through launch wrappers and while a forked checkpoint writer still holds the control socket; a wrapper exiting on its own leaves its live session running. Forked checkpoint writers and helper children close their inherited owner-write end.
+- Fixed: on Linux, checkpoint and environment-seed temp sweeps treated a zombie (unreaped) owner pid as alive and kept its temp file; they now read the process state and sweep it. macOS is unchanged.
+- Fixed: Linux process-group liveness now treats zombie-only groups as gone; macOS keeps the signal-zero answer and permission-denied probes remain alive.
+- Fixed: macOS verified signalling answers a signal-0 liveness probe by identity recheck instead of calling `proc_signal_with_audittoken`, which rejects signal 0 with `EINVAL`; `EINVAL` on a real signal remains an error and never falls back to numeric PID signalling.
+- Tests: process signal fixtures treat Linux zombies and processes with an empty `/proc/<pid>/cmdline` as gone before identity mismatches; nonempty live mismatches remain errors.
+
 ## 0.4.14 (2026-11-05)
 
 - Runs with stale, missing, or unknown check evidence now stay unverified, even when an earlier completion receipt was accepted. This affects users whose final check cannot be confirmed as current and accepted.

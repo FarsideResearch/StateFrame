@@ -18,8 +18,10 @@ from pathlib import Path
 from typing import Callable
 
 if __package__:
+    from .kernel_pid_liveness import pid_alive
     from .kernel_safe_paths import safe_home
 else:
+    from kernel_pid_liveness import pid_alive
     from kernel_safe_paths import safe_home
 
 
@@ -385,11 +387,9 @@ def _evict_to_cap(store: Path, max_bytes: int, keep: str,
             if priority == 1:
                 pid = int(_TEMPORARY.fullmatch(name).group(1))
                 try:
-                    os.kill(pid, 0)
-                except OSError as error:
-                    if error.errno != errno.ESRCH:
+                    if pid_alive(pid):  # a Linux zombie owner counts as dead
                         continue
-                else:
+                except OSError:
                     continue
             try:
                 if priority == 2:

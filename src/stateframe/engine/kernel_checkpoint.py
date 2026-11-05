@@ -2282,15 +2282,9 @@ def _sweep_stale(root: Path) -> int:
 
 
 def _pid_alive(pid: int) -> bool:
-    if pid <= 0:
-        return False
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-    return True
+    # A Linux zombie owner counts as dead, so its temp file is swept (kernel_pid_liveness).
+    from kernel_pid_liveness import pid_alive
+    return pid_alive(pid)
 
 
 def _fork_writer(run_dir: Path, step: int, final: Path, write, tmp: Path) -> None:
@@ -2299,6 +2293,11 @@ def _fork_writer(run_dir: Path, step: int, final: Path, write, tmp: Path) -> Non
     forked = time.perf_counter()
     pid = os.fork()
     if pid == 0:  # the writer: pickle this frozen image, write, and leave without any cleanup
+        if __package__:
+            from .kernel_exec_session import close_owner_pipe_writers_after_fork
+        else:
+            from kernel_exec_session import close_owner_pipe_writers_after_fork
+        close_owner_pipe_writers_after_fork()
         code = 1
         try:
             import signal
