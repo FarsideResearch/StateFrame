@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- Engine: model-facing ids (unified stop snapshot, check_execution_ref, continuation intention ids) no longer change when only the installed package set changes; certificates, receipts and journal bindings still record it, so a package change still invalidates them.
+- Engine: model-facing ids (unified stop snapshot, check_execution_ref, continuation intention ids) no longer change when only the installed package set changes; certificates, receipts and journal bindings still record it, so a package change still invalidates them. Two internal reference ids (the unified stop snapshot and check_execution_ref) change once on upgrade; requests are otherwise byte-identical, and they no longer vary across installs.
 
 ## 0.4.4 (2026-11-04)
 
