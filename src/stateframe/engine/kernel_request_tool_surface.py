@@ -661,6 +661,11 @@ def author_final_tool_surface(
             dispatch_tools = callable_subset(listed_tools, names)
             if set(_tool_names(dispatch_tools)) != set(names):
                 raise _SurfaceUnavailable("stable_tool_head_unbound")
+        if getattr(capture, "_capacity_retry_compact_tool_prose", False):
+            from kernel_capacity_retry import compact_tool_prose
+            compact_tool_prose({"tools": listed_tools})
+            if dispatch_tools is not listed_tools:
+                compact_tool_prose({"tools": dispatch_tools})
         digest = schema_digest(listed_tools)
         surface: dict[str, object] = {
             "schema": SURFACE_SCHEMA,

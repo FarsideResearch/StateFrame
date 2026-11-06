@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.4.34 (2026-11-05)
+
+- When a provider rejects a request for exceeding its context limit (a recognized HTTP 400), StateFrame now refits the request to the reported limit and retries once. If it still cannot fit, the run stops and the summary says why.
+
 ## 0.4.33 (2026-11-05)
 
 - Fixed: a request could resolve a call-coverage index that another thread had not finished binding to its journal; binding now completes before the index is published, and rebinding an already bound index takes no locks. A coverage snapshot gives one immutable, consistent view of every field. The older fields expose live containers that concurrent writers can change while callers hold or iterate them; use a snapshot for a stable or multi-field view.

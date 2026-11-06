@@ -351,6 +351,21 @@ def build_qualified_request(capture, runtime, body, *, endpoint, key, deadline=N
     )
     body = wire_body
     wire = json.dumps(body).encode()
+    if (getattr(candidate, "_capacity_retry_compact_tool_prose", False)
+            and candidate._request_measurement.body_sha256
+            != "sha256:" + hashlib.sha256(wire).hexdigest()):
+        budget = reconcile_frozen_budget(
+            candidate, context, body,
+            frozen_inputs=snapshot_revalidation_inputs(candidate, context, body),
+        )
+        if budget.get("final_validation_failures"):
+            raise RequestSealError("capacity retry failed final provider budget proof: " +
+                                   ",".join(budget["final_validation_failures"]))
+        candidate._frame_candidate_inputs.update(
+            byte_ceiling=budget["max_request_bytes"],
+            token_ceiling=budget["max_prompt_tokens"],
+            measurement_identity=budget["measure_method"],
+        )
     candidate._assert_wire_string_hygiene(wire)
     visibility, visibility_receipt = qualify_visibility(
         candidate, context, wire, visibility, candidate.request_source_final_delivery,

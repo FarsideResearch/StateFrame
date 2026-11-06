@@ -96,6 +96,42 @@ _CAPACITY_MARKERS = ("context size", "context length", "exceed_context", "n_ctx"
 _SECRET_PATTERN = None
 
 
+def capacity_400_reason(http_status: int | None, server_error: str | None) -> str | None:
+    """Recognize provider context-window 400s, not arbitrary length errors."""
+    if http_status != 400 or not isinstance(server_error, str):
+        return None
+    message = server_error
+    recognized_code = False
+    try:
+        payload = json.loads(server_error)
+    except ValueError:
+        payload = None
+    if isinstance(payload, dict) and isinstance(payload.get("error"), dict):
+        error = payload["error"]
+        code = error.get("code")
+        if isinstance(code, str):
+            if code.casefold() in {"unsupported_parameter", "invalid_tool", "invalid_schema",
+                                   "invalid_parameter", "invalid_request"}:
+                return None
+        message = error.get("message") if isinstance(error.get("message"), str) else ""
+        recognized_code = isinstance(code, str) and code.casefold() == "context_length_exceeded"
+    if re.search(r"\b(?:invalid|unsupported|unrecognized|unknown)\s+"
+                 r"(?:response_format|schema|property|parameter|keyword)\b|"
+                 r"\b(?:response_format|schema|property|parameter|keyword)\b"
+                 r".{0,80}\b(?:invalid|unsupported|not valid|not supported)\b",
+                 message, re.I):
+        return None
+    if recognized_code:
+        return "context_length_exceeded"
+    if message.strip().casefold() == "context_length_exceeded":
+        return "context_length_exceeded"
+    from kernel_capacity_retry import CAPACITY_400_PATTERNS
+    for reason, pattern in CAPACITY_400_PATTERNS:
+        if pattern.search(message):
+            return reason
+    return None
+
+
 def safe_server_error(body: bytes | None, key: str = "") -> str | None:
     """First 2 KB of a provider error body, decoded, with credentials redacted."""
     if not body:
@@ -154,6 +190,8 @@ def transport_class(http_status: int | None, server_error: str | None = None,
     failures and every status-less connection/timeout failure.
     """
     text = (server_error or "").lower()
+    if http_status == 400:
+        return "capacity" if capacity_400_reason(http_status, server_error) else "contract"
     if any(marker in text for marker in _CAPACITY_MARKERS) or http_status in {413, 429, 503}:
         return "capacity"
     if http_status is None:

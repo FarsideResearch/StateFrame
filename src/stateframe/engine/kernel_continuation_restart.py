@@ -276,6 +276,9 @@ def reconcile_environment_notice_tail(
                 payload = json.loads(wire)
             except (TypeError, ValueError, RecursionError):
                 continue
+            if (sent.get("payload") is not None
+                    and payload != sent.get("payload")):
+                continue
             messages = payload.get("messages") if isinstance(payload, Mapping) else None
             if (not isinstance(messages, list)
                     or messages != prepared.get("messages")):
