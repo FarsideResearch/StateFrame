@@ -11,6 +11,7 @@ import os
 from pathlib import Path
 import platform
 import socket
+import stat
 import subprocess
 import sys
 import tempfile
@@ -89,6 +90,58 @@ class ExecResult:
 
 def _cleanup(value: dict) -> CleanupReport:
     return CleanupReport(value["ok"], value["killed"], tuple(value["survivors"]), value["detail"])
+
+
+def _supervisor_diagnostics(process: subprocess.Popen | None, log_path: Path | None,
+                            process_role: str | None = None) -> str:
+    if process is None:
+        status = "execution process status unknown"
+    else:
+        role = process_role or "execution process"
+        try:
+            exit_code = process.poll()
+        except OSError:
+            exit_code = None
+        status = (f"{role} exit status: {exit_code}" if exit_code is not None
+                  else f"{role} status unknown")
+
+    log_diagnostic = "supervisor.log absent"
+    if (log_path is not None and hasattr(os, "O_NOFOLLOW")
+            and hasattr(os, "O_DIRECTORY")):
+        flags = (os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+                 | getattr(os, "O_NONBLOCK", 0))
+        directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+        try:
+            directory = os.open(log_path.parent, directory_flags)
+            descriptor = None
+            try:
+                descriptor = os.open(log_path.name, flags, dir_fd=directory)
+            finally:
+                try:
+                    os.close(directory)
+                except OSError:
+                    if descriptor is not None:
+                        os.close(descriptor)
+                    raise
+            try:
+                if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+                    return f"{status}\n{log_diagnostic}"
+                end = os.lseek(descriptor, 0, os.SEEK_END)
+                os.lseek(descriptor, max(0, end - 8192), os.SEEK_SET)
+                tail = bytearray()
+                while len(tail) < 8192:
+                    chunk = os.read(descriptor, 8192 - len(tail))
+                    if not chunk:
+                        break
+                    tail.extend(chunk)
+                log_diagnostic = "supervisor.log tail (up to 8192 bytes):\n" + tail.decode(
+                    "utf-8", "replace")
+            finally:
+                os.close(descriptor)
+        except OSError:
+            # Missing, linked, non-regular, or unreadable logs are not followed or trusted.
+            log_diagnostic = "supervisor.log absent"
+    return f"{status}\n{log_diagnostic}"
 
 
 def _grace(value: float) -> float:
@@ -192,6 +245,7 @@ class ExecSession:
         self._directory = Path(tempfile.mkdtemp(
             prefix="exec-" + uuid.uuid4().hex + "-", dir=self.run_dir))
         self._process = None
+        self._process_role: str | None = None
         self._control = None
         self._owner_write_fd: int | None = None
         self._receive = bytearray()
@@ -209,6 +263,15 @@ class ExecSession:
         if self._process is not None or self._initial_capability is not None:
             raise ExecSessionError("execution session authority is already configured")
         self._initial_capability = capability
+
+    def startup_diagnostics(self) -> str:
+        """Describe only retained execution-process state and the private supervisor log."""
+        return _supervisor_diagnostics(
+            self._process, self._directory / "supervisor.log", self._process_role)
+
+    def _supervisor_error(self, message: str) -> ExecSessionError:
+        return ExecSessionError(
+            f"{message}\nstartup supervisor diagnostics:\n{self.startup_diagnostics()}")
 
     def _start(self, cap: ExecCapability) -> None:
         if self._closed:
@@ -268,6 +331,7 @@ class ExecSession:
                                              stderr=self._log, env={"PATH": "/usr/bin:/bin", "LC_ALL": "C"},
                                              close_fds=True, start_new_session=True,
                                              pass_fds=(owner_read_fd,))
+            self._process_role = "launcher (bwrap)" if bwrap_executable is not None else "supervisor"
             capture_launch_identity(self._process, session_leader=True)
         except BaseException as error:  # noqa: BLE001 - release every owner fd on launch failure
             parent.close()
@@ -308,12 +372,13 @@ class ExecSession:
                         except socket.timeout as error:
                             load, cpus = _host_load()
                             seconds = self._control.gettimeout()
-                            raise ExecSessionError(
+                            raise self._supervisor_error(
                                 f"execution supervisor did not answer within {seconds:g} s "
                                 f"(host load {load:g} on {cpus} CPUs); retry when the machine is less busy "
                                 "or raise STATEFRAME_EXEC_RPC_SECONDS") from error
                         if not part:
-                            raise ExecSessionError(f"execution supervisor exited; inspect {self._directory / 'supervisor.log'}")
+                            raise self._supervisor_error(
+                                f"execution supervisor exited; inspect {self._directory / 'supervisor.log'}")
                         self._receive.extend(part)
                         if len(self._receive) > 6 << 20:
                             raise ExecSessionError("execution supervisor response exceeds bound")
@@ -328,7 +393,8 @@ class ExecSession:
                         raise ExecSessionError(value["error"])
                     return value
             except OSError as error:
-                raise ExecSessionError(f"execution supervisor communication failed: {error}") from error
+                raise self._supervisor_error(
+                    f"execution supervisor communication failed: {error}") from error
 
     def _spawn(self, argv, cap, *, cwd=None, stdin=None) -> JobHandle:
         if isinstance(argv, (str, bytes)):

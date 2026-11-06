@@ -127,7 +127,7 @@ Set `STATEFRAME_REQUIREMENT_RECHECK=on` in the shell or a custom profile to get 
 
 ## Tools and safety
 
-The [agent tools guide](docs/guide/tools.md) lists the tool arguments, command policies, sandbox boundaries and replay rules. Shell commands are sandboxed by default; user hooks always run in the sandbox. Web fetch is opt-in, and host shell execution requires an explicit flag that prints a warning. Shell and workspace-writing custom commands are reconciled within limits of 16 MiB per file, 256 MiB in aggregate and 20,000 entries. The shipped product profile uses the composed loop; lean mode is not supported. The plain loop only supports foreground shell from this tool set.
+The [agent tools guide](docs/guide/tools.md) lists the tool arguments, command policies, sandbox boundaries and replay rules. Shell commands are sandboxed by default; user hooks always run in the sandbox. Web fetch is opt-in, and host shell execution requires an explicit flag that prints a warning. Shell and workspace-writing custom commands are reconciled within limits of 16 MiB per file, 256 MiB in aggregate and 20,000 entries. Supervisor exit or communication failures during startup probes and import smoke include a proven exit status and bounded log tail when available. The shipped product profile uses the composed loop; lean mode is not supported. The plain loop only supports foreground shell from this tool set.
 
 ## What works today
 

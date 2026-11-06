@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.4.31 (2026-11-05)
+
+- Fixed: supervisor communication failures now include bounded diagnostics in startup probe and import smoke errors before temporary cleanup. Probe cleanup keeps its original try/finally contract without adding a separate primary-error line; Linux reports the retained bwrap launcher status.
+
 ## 0.4.30 (2026-11-05)
 
 - Security: when a server redirects a request to a different scheme, host, or port, StateFrame removes authentication, API key, and cookie headers before following it. This protects users of servers that require credentials.
