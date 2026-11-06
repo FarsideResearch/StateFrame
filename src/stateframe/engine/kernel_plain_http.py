@@ -143,10 +143,14 @@ class AbortiveHTTPTransport:
             connection.abort()
 
     def opener(self, tracker_id: int):
-        return urllib.request.build_opener(
-            urllib.request.ProxyHandler({}),
-            _TrackedHTTPHandler(self, tracker_id),
-            _TrackedHTTPSHandler(self, tracker_id),
+        if __package__:
+            from .kernel_redirect_policy import build_credential_scoped_opener
+        else:
+            from kernel_redirect_policy import build_credential_scoped_opener
+        return build_credential_scoped_opener(
+            proxy_mode="direct",
+            handlers=(_TrackedHTTPHandler(self, tracker_id),
+                      _TrackedHTTPSHandler(self, tracker_id)),
         )
 
     def abort(self, tracker_id: int) -> None:

@@ -121,7 +121,17 @@ def _selected_resume_checkpoint(resume: dict | None) -> dict | None:
 
 
 def _install_direct_opener() -> None:
-    urllib.request.install_opener(urllib.request.build_opener(urllib.request.ProxyHandler({})))
+    if __package__:
+        from .engine.kernel_redirect_policy import (
+            CHILD_DIRECT_OPENER_ATTRIBUTE, build_credential_scoped_opener,
+        )
+    else:
+        from engine.kernel_redirect_policy import (
+            CHILD_DIRECT_OPENER_ATTRIBUTE, build_credential_scoped_opener,
+        )
+    opener = build_credential_scoped_opener(proxy_mode="direct")
+    setattr(opener, CHILD_DIRECT_OPENER_ATTRIBUTE, True)
+    urllib.request.install_opener(opener)
 
 
 def _usage(response: object) -> dict[str, object]:
