@@ -201,7 +201,10 @@ class Endpoint:
         self.check_locality()
         # Do not route loopback requests through an inherited HTTP proxy. Redirects
         # must pass the same local policy before urllib can make another request.
-        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _LocalRedirects(self.allow_remote))
+        from stateframe.engine.kernel_redirect_policy import build_credential_scoped_opener
+        opener = build_credential_scoped_opener(
+            proxy_mode="direct", handlers=(_LocalRedirects(self.allow_remote),),
+        )
         return self._read_json(opener, self.base_url + path)
 
     def get_slots(self) -> list[object] | None:
@@ -214,7 +217,8 @@ class Endpoint:
             return None
         parsed = urllib.parse.urlsplit(self.base_url)
         url = urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, "/slots", "", ""))
-        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _LocalRedirects())
+        from stateframe.engine.kernel_redirect_policy import build_credential_scoped_opener
+        opener = build_credential_scoped_opener(proxy_mode="direct", handlers=(_LocalRedirects(),))
         try:
             payload = self._read_json(opener, url)
         except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError,

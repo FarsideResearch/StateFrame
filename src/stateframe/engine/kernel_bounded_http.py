@@ -1233,16 +1233,19 @@ def _child() -> None:
     tracker.socket_timeout = packet["socket_timeout"]
     tracker.send_stall_seconds = packet.get("send_stall_seconds", DEFAULT_SEND_STALL_S)
     tracker.report_body_sent = packet.get("report_body_sent") is True
+    if __package__:
+        from .kernel_redirect_policy import build_credential_scoped_opener
+    else:
+        from kernel_redirect_policy import build_credential_scoped_opener
     if "route_allow_remote" in packet:
         _require_routed_local(packet["endpoint"], packet["route_allow_remote"])
-        opener = urllib.request.build_opener(
-            urllib.request.ProxyHandler({}),
+        handlers = (
             _AbortiveHTTPHandler(tracker), _AbortiveHTTPSHandler(tracker),
-            _RoutedRedirects(packet["route_allow_remote"]))
+            _RoutedRedirects(packet["route_allow_remote"]),
+        )
     else:
-        opener = urllib.request.build_opener(
-            urllib.request.ProxyHandler({}),
-            _AbortiveHTTPHandler(tracker), _AbortiveHTTPSHandler(tracker))
+        handlers = (_AbortiveHTTPHandler(tracker), _AbortiveHTTPSHandler(tracker))
+    opener = build_credential_scoped_opener(proxy_mode="direct", handlers=handlers)
     response_complete = False
     attempts: list[dict[str, object]] = []
 
