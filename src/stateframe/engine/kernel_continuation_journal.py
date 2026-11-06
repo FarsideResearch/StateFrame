@@ -1759,21 +1759,13 @@ class ContinuationJournal(AuditJournal):
                         if first_record is None:
                             first_record = resolved
                             if projection is not None:
-                                from kernel_stateframe_call_coverage import CoverageIndex, _sha
+                                from kernel_stateframe_call_coverage import CoverageIndex
 
                                 projection.run_id = resolved["run_id"]
                                 projection.task_id = resolved["task_id"]
-                                # CoverageIndex.__init__ registers the instance in
-                                # the shared context registry. Keep replay state
-                                # detached until the full scan passes assert_owner.
-                                coverage_index = object.__new__(CoverageIndex)
-                                coverage_index.journal = projection
-                                coverage_index.sequence = 0
-                                coverage_index.ids = []
-                                coverage_index.members = set()
-                                coverage_index.chains = [_sha([])]
-                                coverage_index.frontier = []
-                                coverage_index.proofs = set()
+                                # Keep the initialized index private until the full
+                                # scan passes assert_owner and publication completes.
+                                coverage_index = CoverageIndex(projection, _register=False)
                         if projection is not None:
                             from kernel_stateframe_call_coverage import EVENT
 
@@ -1782,10 +1774,13 @@ class ContinuationJournal(AuditJournal):
                             projection._advance_framefit_receipt(resolved)
                             if resolved.get("kind") == EVENT:
                                 try:
-                                    coverage_index._accept(resolved.get("coverage_proof"))
+                                    coverage_index._accept(
+                                        resolved.get("coverage_proof"), sequence=sequence)
                                 except Exception:
                                     projection._framefit_receipt_overflow = True
-                            coverage_index.sequence = sequence
+                                    coverage_index._advance_sequence(sequence)
+                            else:
+                                coverage_index._advance_sequence(sequence)
                         record_bytes = len(canonical_bytes(resolved))
                         validated.append((resolved, record_bytes))
                         cache_bytes += record_bytes
@@ -1840,24 +1835,19 @@ class ContinuationJournal(AuditJournal):
                         if coverage_index is not None:
                             # Preserve existing contexts referencing the live index.
                             existing = getattr(self, "_framefit_call_coverage_index", None)
-                            coverage_index.journal = self
+                            with coverage_index._lock:
+                                coverage_index.journal = self
                             if existing is not None:
                                 if (not isinstance(existing, type(coverage_index))
                                         or existing.journal is not self):
                                     raise JournalError(
                                         "call coverage index belongs to a different journal")
-                                # Base CoverageIndex has no state-replacement
-                                # helper; update only after the scan's owner check.
-                                existing.__dict__.update(coverage_index.__dict__)
+                                existing._replace_state_from(coverage_index)
+                                existing._publish_context_index()
                                 coverage_index = existing
                             else:
-                                # The base constructor is the registration path.
-                                # It runs only after the scan and owner check pass.
-                                staged_coverage_index = coverage_index
-                                coverage_index = type(staged_coverage_index)(self)
-                                coverage_index.__dict__.update(
-                                    staged_coverage_index.__dict__)
-                            self._framefit_call_coverage_index = coverage_index
+                                self._framefit_call_coverage_index = coverage_index
+                                coverage_index._publish_context_index()
                         if self._framefit_receipt_history is not None:
                             from kernel_framefit_receipt_history import coverage_session_for
                             coverage = coverage_session_for(self, None)

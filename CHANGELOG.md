@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.4.33 (2026-11-05)
+
+- Fixed: a request could resolve a call-coverage index that another thread had not finished binding to its journal; binding now completes before the index is published, and rebinding an already bound index takes no locks. A coverage snapshot gives one immutable, consistent view of every field. The older fields expose live containers that concurrent writers can change while callers hold or iterate them; use a snapshot for a stable or multi-field view.
+
 ## 0.4.32 (2026-11-05)
 
 - Fixed: a run with a turn limit (the default is 32) could stop with "serialized continuation limits were removed or changed" when a request had to be rebuilt after a turn was already counted but before it was sent. The rebuilt request now gets its own identity, so the check compares it against the right limits; the check itself is as strict as before.

@@ -223,10 +223,6 @@ def test_callback_triggered_external_replace_stops_replay_and_poisons_writer(tmp
         journal.close()
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="pre-existing 0.4.22 behavior: CoverageIndex has no atomic multi-field snapshot; tracked as a follow-up, not part of the journal lease fix",
-)
 def test_coverage_snapshots_are_atomic_during_concurrent_reads(tmp_path):
     import kernel_stateframe_call_coverage as coverage
 
@@ -352,9 +348,6 @@ def test_coverage_snapshots_are_atomic_during_concurrent_reads(tmp_path):
         journal.close()
 
 
-@pytest.mark.xfail(strict=True, reason="pre-existing 0.4.22 behavior: bind_index() registers a new CoverageIndex before "
-                   "attaching it, without the journal lock, so a concurrent thread can resolve it mid-scan; a bind_index "
-                   "thread race, not the journal lease bug; tracked as a follow-up (FOLLOWUP_coverage_concurrency)")
 def test_bind_index_is_not_exposed_during_replay_scan(tmp_path, monkeypatch):
     import kernel_stateframe_call_coverage as coverage
 
