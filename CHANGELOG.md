@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.4.34 (2026-11-05)
 
 - When a provider rejects a request for exceeding its context limit (a recognized HTTP 400), StateFrame now refits the request to the reported limit and retries once. If it still cannot fit, the run stops and the summary says why.
 
