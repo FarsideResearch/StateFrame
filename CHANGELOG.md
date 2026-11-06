@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- `run_tests` accepts directory selectors written with a trailing slash.
+
 ## 0.4.37 (2026-11-05)
 
 - Security: HTTP requests can now select direct or environment proxy routing explicitly, while proxy credentials stay with the proxy and do not return after a cross-origin redirect.
