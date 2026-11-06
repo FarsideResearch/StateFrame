@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.4.31 (2026-11-05)
 
 - Fixed: supervisor communication failures now include bounded diagnostics in startup probe and import smoke errors before temporary cleanup. Probe cleanup keeps its original try/finally contract without adding a separate primary-error line; Linux reports the retained bwrap launcher status.
 
