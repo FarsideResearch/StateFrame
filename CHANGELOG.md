@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.4.32 (2026-11-05)
+
+- Fixed: a run with a turn limit (the default is 32) could stop with "serialized continuation limits were removed or changed" when a request had to be rebuilt after a turn was already counted but before it was sent. The rebuilt request now gets its own identity, so the check compares it against the right limits; the check itself is as strict as before.
+
 ## 0.4.31 (2026-11-05)
 
 - Fixed: supervisor communication failures now include bounded diagnostics in startup probe and import smoke errors before temporary cleanup. Probe cleanup keeps its original try/finally contract without adding a separate primary-error line; Linux reports the retained bwrap launcher status.

@@ -22013,9 +22013,14 @@ class StateFrameRuntime:
                 latest_exchange, self.latest_exchange_reasoning_mode)
         elif f4_on:
             self.latest_exchange = None
+        source_replan_origin = getattr(self, "_source_replan_origin_request_id", None)
         capture = RequestCapture(
             self.journal, getattr(self.owner, "current_step", 0), self.snapshot_id,
-            endpoint_profile=self.endpoint_profile)
+            endpoint_profile=self.endpoint_profile,
+            identity_content=({
+                "task_id": getattr(self.journal, "task_id", ""), "purpose": "",
+                "source_replan_of": source_replan_origin,
+            } if source_replan_origin is not None else None))
         if source_replan_inputs is not None:
             capture._source_replan_inputs = source_replan_inputs
         if ticket_identity is not None:

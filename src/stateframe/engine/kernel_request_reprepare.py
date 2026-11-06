@@ -98,7 +98,10 @@ def source_replan_preparation(runtime: object, capture: object | None = None):
     """Mark the sole fresh build so regenerated stale read caches stay optional."""
     retired = refresh_source_replan_inputs(runtime, capture)
     previous = getattr(runtime, "_source_replan_in_progress", False)
+    missing_origin = object()
+    previous_origin = getattr(runtime, "_source_replan_origin_request_id", missing_origin)
     setattr(runtime, "_source_replan_in_progress", True)
+    setattr(runtime, "_source_replan_origin_request_id", getattr(capture, "request_id", None))
     try:
         yield retired
     finally:
@@ -106,6 +109,10 @@ def source_replan_preparation(runtime: object, capture: object | None = None):
         # Do not carry those bytes into final-wire validation after this scope.
         setattr(runtime, "_empirical_frame_sources", {})
         setattr(runtime, "_source_replan_in_progress", previous)
+        if previous_origin is missing_origin:
+            delattr(runtime, "_source_replan_origin_request_id")
+        else:
+            setattr(runtime, "_source_replan_origin_request_id", previous_origin)
 
 
 def _source_plan_matches_after_deferred_discharge(

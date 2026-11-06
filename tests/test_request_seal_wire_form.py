@@ -72,7 +72,8 @@ def test_visible_message_change_still_breaks_seal(field: str, value: str) -> Non
         _validate(measured, receipt, changed)
 
 
-def _run_scripted(tmp_path: Path, *, strict: bool, steps: list[dict[str, object]]) -> tuple[object, Path, Script]:
+def _run_scripted(tmp_path: Path, *, strict: bool, steps: list[dict[str, object]],
+                  inject_allocation_replan: bool = False) -> tuple[object, Path, Script]:
     source_root = Path(os.environ.get("SF_SEAL_TEST_SOURCE", str(ROOT / "src")))
     repo = tmp_path / "repo"
     repo.mkdir()
@@ -111,6 +112,18 @@ def _run_scripted(tmp_path: Path, *, strict: bool, steps: list[dict[str, object]
         "            break",
         "    return result",
         "allocation._prepare_qualified_hook_body = tagged",
+        *((
+            "import kernel_frame_allocation_validation as validation",
+            "from kernel_frame_optional_allocation import FrameAllocationReplanNeeded",
+            "validate = validation.validate_allocation_authority",
+            "def replan_after_charge(allocation, runtime, messages, tools=None, **kwargs):",
+            "    budget = getattr(runtime, 'continuation_limits', None)",
+            "    if budget is not None and budget.continuation_model_decisions_used and not (run / 'injected-replan').exists():",
+            "        (run / 'injected-replan').write_text(str(budget.continuation_model_decisions_used))",
+            "        raise FrameAllocationReplanNeeded('allocation ledger authority changed')",
+            "    return validate(allocation, runtime, messages, tools, **kwargs)",
+            "validation.validate_allocation_authority = replan_after_charge",
+        ) if inject_allocation_replan else ()),
         "raise SystemExit(host.main([str(child), str(run)]))",
     ))
     wrapper.write_text(
@@ -127,7 +140,8 @@ def _run_scripted(tmp_path: Path, *, strict: bool, steps: list[dict[str, object]
             [sys.executable, "-m", "stateframe", "run", "--repo", str(repo),
              "--task", "Read app.py and tests/test_value.py; run the test and report VALUE.",
              "--endpoint", f"http://127.0.0.1:{server.server_port}/v1",
-             "--model", script.model, "--run-dir", str(run), "--max-turns", "12",
+             "--model", script.model, "--run-dir", str(run), "--max-turns",
+             "32" if inject_allocation_replan else "12",
              "--test-python", sys.executable, "--python", str(wrapper), "--quiet"],
             cwd=ROOT, env=environment, capture_output=True, text=True,
             expected_seconds=240, run_dir=run, check=False)
