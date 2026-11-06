@@ -1,8 +1,8 @@
 # Changelog
 
-## Unreleased
+## 0.4.38 (2026-11-05)
 
-- `run_tests` accepts directory selectors written with a trailing slash.
+- Fixed: `run_tests` now accepts directory selectors written with a trailing slash or a leading `./` (for example `tests/` or `./tests/`). They were refused before running, and a run could stop at that point.
 
 ## 0.4.37 (2026-11-05)
 
