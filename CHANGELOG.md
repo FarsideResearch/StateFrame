@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.4.36 (2026-11-05)
+
+- Tests: the request-path randomness guard reviews the measurement identity key's random calls (they never reach request bytes) and gains a planted control that a new unreviewed call still fails.
+
 ## 0.4.35 (2026-11-05)
 
 - `str_replace` no longer advertises an `edits` field its step contract always refused (one known case of a model trying it); requests are 28 bytes smaller and the opt-in batch form is removed. A new guard checks that every tool schema offered to the model is accepted by its step contract.
