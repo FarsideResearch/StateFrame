@@ -4904,7 +4904,10 @@ def _run_tests_impl(root: pathlib.Path, fn: str, explicit: str | None,
                 _profile.end_span(_selector_span)
             return "pytest exit 4 — invalid test target list; provide file paths or selectors, not options."
         for target in requested:
-            base = str(target).split("::", 1)[0].strip("`'\"").lstrip("./")
+            selector_path = str(target).split("::", 1)[0].strip("`'\"")
+            base = selector_path.lstrip("./")
+            # Normalize only the path inspected here, not the dispatched selector.
+            resolution_base = base.rstrip("/")
             # A path-like selector must resolve before it reaches pytest.  Bare
             # names remain valid -k expressions, but a guessed public test file
             # is a host refusal, not product-red evidence and must not become
@@ -4915,9 +4918,17 @@ def _run_tests_impl(root: pathlib.Path, fn: str, explicit: str | None,
             )
             if path_like:
                 try:
-                    candidate = (root / base).resolve()
+                    candidate = (root / resolution_base).resolve()
                     root_resolved = root.resolve()
-                    if not candidate.is_relative_to(root_resolved) or not candidate.is_file():
+                    directory_selector = (
+                        "::" not in str(target)
+                        and not selector_path.startswith("/")
+                        and not any(char in base for char in "*?[]")
+                        and candidate.is_dir()
+                    )
+                    if not candidate.is_relative_to(root_resolved) or not (
+                        candidate.is_file() or directory_selector
+                    ):
                         from kernel_nav_basics import missing_path_message
                         if _profile:
                             _profile.end_span(_selector_span)

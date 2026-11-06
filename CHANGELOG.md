@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.4.38 (2026-11-05)
+
+- Fixed: `run_tests` now accepts directory selectors written with a trailing slash or a leading `./` (for example `tests/` or `./tests/`). They were refused before running, and a run could stop at that point.
+
 ## 0.4.37 (2026-11-05)
 
 - Security: HTTP requests can now select direct or environment proxy routing explicitly, while proxy credentials stay with the proxy and do not return after a cross-origin redirect.
