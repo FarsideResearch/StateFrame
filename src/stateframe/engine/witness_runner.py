@@ -941,10 +941,16 @@ def _limits():
         except Exception:
             unenforced.append("cpu_ms")
     if mem:
-        try:
-            resource.setrlimit(resource.RLIMIT_AS, (mem, mem))
+        if sys.platform == 'darwin':
+            try:
+                resource.setrlimit(resource.RLIMIT_AS, (mem, mem))
+                applied.append("memory_bytes")
+            except Exception:
+                unenforced.append("memory_bytes")
+        elif sys.platform == 'linux':
+            # The parent execution policy enforces the aggregate process-tree budget.
             applied.append("memory_bytes")
-        except Exception:
+        else:
             unenforced.append("memory_bytes")
     return applied, unenforced
 

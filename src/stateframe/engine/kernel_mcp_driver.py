@@ -32,6 +32,7 @@ VERSIONS = {"2025-06-18", "2025-03-26", "2024-11-05"}
 
 
 NAMESPACE_WAIT_SECONDS = 2.0
+FULL_PROCESS_SCAN_INTERVAL_SECONDS = 1.0
 
 
 class ProtocolError(ValueError):
@@ -56,12 +57,14 @@ class _ContainmentMonitor:
             raise ExecSessionError("cannot capture MCP launch identity for supervision")
         self.family = Descendants(process.pid, self.table, self.launch_identity)
         self.started = time.monotonic()
+        self._next_full_process_scan = self.started
         self.host_namespace = self.table.pid_namespace(os.getpid()) if sys.platform == "linux" else None
         if sys.platform == "linux" and self.host_namespace is None:
             raise ExecSessionError("cannot identify host PID namespace for MCP supervision")
         self.namespace = None
         self.namespace_ready = threading.Event()
         self.failure: tuple[str, str] | None = None
+        self.launch_unit_terminated = False
         self.stopped = threading.Event()
         self.thread = threading.Thread(target=self._run, name="mcp-containment", daemon=True)
 
@@ -86,9 +89,9 @@ class _ContainmentMonitor:
     def require_namespace(self, deadline):
         """Wait for the monitor to find the server's private PID namespace.
 
-        One sample walks the whole host process table, which can take well over 0.2 s on a busy
-        host, so the wait scales with load (namespace_wait_seconds) and is capped by the call's
-        deadline. It ends early when the monitor fails or stops (the server exited)."""
+        The initial full process-table scan can take well over 0.2 s on a busy host, so the wait
+        scales with load (namespace_wait_seconds) and is capped by the call's deadline. It ends
+        early when the monitor fails or stops (the server exited)."""
         if sys.platform != "linux":
             return
         limit = min(deadline, time.monotonic() + namespace_wait_seconds())
@@ -102,10 +105,25 @@ class _ContainmentMonitor:
         if self.namespace is None:
             raise ExecSessionError("cannot identify private MCP PID namespace for supervision")
 
-    def _sample(self):
-        if time.monotonic() - self.started >= self.cap.limits.wall_seconds:
+    def _sample(self, *, force_full_scan: bool = False):
+        now = time.monotonic()
+        if now - self.started >= self.cap.limits.wall_seconds:
             return "wall limit exceeded"
-        rows = self.table.snapshot()
+        if sys.platform == "linux":
+            refresh_members = getattr(self.table, "refresh_members", None)
+            if callable(refresh_members):
+                rows = refresh_members(
+                    self.family.members,
+                    namespace_inode=getattr(self.family, "private_pid_namespace_inode", None),
+                )
+                if force_full_scan or now >= self._next_full_process_scan:
+                    rows.update(self.table.snapshot())
+                    self._next_full_process_scan = (
+                        time.monotonic() + FULL_PROCESS_SCAN_INTERVAL_SECONDS)
+            else:  # Compatibility with older process-table test doubles.
+                rows = self.table.snapshot()
+        else:
+            rows = self.table.snapshot()
         if not self.family.members and self.launch_identity is not None:
             leader = rows.get(self.process.pid)
             if (leader is not None and leader.start == self.launch_identity.start
@@ -140,8 +158,14 @@ class _ContainmentMonitor:
 
     def _run(self):
         while not self.stopped.is_set():
+            leader_exited = False
             try:
                 breach = self._sample()
+                if not breach:
+                    leader_exited = child_exited_unreaped(self.process)
+                    if leader_exited and sys.platform == "linux":
+                        # Capture namespace members that may have detached before cleanup.
+                        breach = self._sample(force_full_scan=True)
             except (OSError, RuntimeError, ValueError) as error:
                 self.failure = ("supervision", f"cannot supervise MCP server resources: {error}")
                 breach = True
@@ -158,8 +182,10 @@ class _ContainmentMonitor:
                     if survivors:
                         self.failure = ("supervision", "MCP server survived the breach kill: "
                                         + ", ".join(str(pid) for pid in survivors))
+                    else:
+                        self.launch_unit_terminated = True
                 return
-            if child_exited_unreaped(self.process):
+            if leader_exited:
                 return
             self.stopped.wait(.02)
 
@@ -175,6 +201,15 @@ def _json_object(pairs: list[tuple[str, object]]) -> dict:
             raise ValueError(f"duplicate JSON key {key}")
         value[key] = item
     return value
+
+
+def _cleanup_launch_unit(process, monitor):
+    """Reuse a completed, verified monitor kill; otherwise verify cleanup here."""
+    if monitor is not None and getattr(monitor, "launch_unit_terminated", False):
+        return ()
+    return kill_launch_unit(
+        process, monitor.family if monitor is not None else None,
+        launch_identity=recorded_launch_identity(process))
 
 
 def _json(value: object) -> bytes:
@@ -201,7 +236,7 @@ def converse(request: dict, cap, cwd: Path) -> object:
         # capability's process count to this call's private PID namespace.
         launch_limits["nproc"] = max(launch_limits["nproc"], 256)
     spec = {"argv": argv, "cwd": str(cwd), "env": dict(cap.env),
-            "limits": launch_limits, "memory_supervised": platform.system() == "Darwin",
+            "limits": launch_limits, "memory_supervised": platform.system() in {"Darwin", "Linux"},
             "new_session": False}
     command = [sys.executable, "-I", str(launcher), json.dumps(spec, separators=(",", ":"))]
     command, environment = capability_command(command, cap,
@@ -359,9 +394,7 @@ def converse(request: dict, cap, cwd: Path) -> object:
         try:
             if monitor is not None:
                 monitor.stop()
-            survivors = kill_launch_unit(
-                process, monitor.family if monitor is not None else None,
-                launch_identity=recorded_launch_identity(process))
+            survivors = _cleanup_launch_unit(process, monitor)
             if survivors:
                 raise ExecSessionError("MCP server survived cleanup: "
                                        + ", ".join(str(pid) for pid in survivors))

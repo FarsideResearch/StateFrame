@@ -20,13 +20,22 @@ import time
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from kernel_exec_capability import capability_from_dict
 from kernel_exec_tracker import Descendants, ProcessTable
+from kernel_execution_policy import (
+    FULL_PROCESS_SCAN_INTERVAL_SECONDS,
+    _remove_command_cgroup,
+)
 from kernel_job_output import JobOutputCollector
 from kernel_test_isolation import capability_command
-from sf_launch import _command_cgroup
+from sf_launch import (
+    _cgroup_leaf_pattern_status,
+    _cgroup_memory_limit_configured,
+    _command_cgroup,
+)
 
 
 class ManagedProcess:
-    def __init__(self, ident, process, collector, cap, table, cgroup=None):
+    def __init__(self, ident, process, collector, cap, table, cgroup=None,
+                 memory_limit_mechanism=None):
         self.id = ident
         self.process = process
         self.collector = collector
@@ -45,15 +54,20 @@ class ManagedProcess:
         self.ended = None
         self.limit_detail = ""
         self.containment_failed = False
+        self.leader_reaped = False
+        self.initial_scan_pending = True
+        self.post_exit_scan_pending = False
+        self.post_exit_scan_complete = False
         self.cgroup = cgroup
+        self.memory_limit_mechanism = memory_limit_mechanism
 
-    def remove_cgroup(self):
-        if self.cgroup is not None:
-            try:
-                self.cgroup.rmdir()
-            except OSError:
-                return  # A still-reaping task can temporarily keep it populated.
-            self.cgroup = None
+    def remove_cgroup(self) -> bool:
+        if self.cgroup is None:
+            return True
+        if not _remove_command_cgroup(self.cgroup):
+            return False
+        self.cgroup = None
+        return True
 
     def stop(self, grace):
         if self.cleanup is None and self.stop_at is None:
@@ -83,7 +97,10 @@ class ManagedProcess:
         if self.exit_code is not None:
             # poll() has reaped the leader: from here its PID may be reused, so only group
             # members born by now still belong to this command.
-            self.family.leader_reaped()
+            if not self.leader_reaped:
+                self.family.leader_reaped()
+                self.leader_reaped = True
+                self.post_exit_scan_pending = True
             self.stop(0.1)
         if now - self.started >= self.cap.limits.wall_seconds and self.stop_at is None:
             self.timed_out = True
@@ -93,7 +110,8 @@ class ManagedProcess:
             self.term_sent |= self.family.signal(fresh, signal.SIGTERM)
             if now >= self.kill_at:
                 self.killed |= self.family.signal(live, signal.SIGKILL)
-            if not live and self.process.poll() is not None:
+            if (not live and self.process.poll() is not None
+                    and self.post_exit_scan_complete):
                 # No producers remain. Drain the finite pipe fully before publishing exit.
                 while not self.eof:
                     before = self.collector.total_bytes
@@ -113,16 +131,23 @@ class ManagedProcess:
             reasons = sorted({self.family.signal_errors[pid] for pid in survivors
                               if pid in self.family.signal_errors} or set(self.family.signal_errors.values()))
             detail += "; " + "; ".join(reasons)[:300]
-        self.cleanup = {"ok": ok and not self.containment_failed, "killed": len(self.killed | self.term_sent),
-                        "survivors": survivors, "detail": detail or self.limit_detail}
         signal_paths = self.family.signal_paths
+        self.cleanup = {"ok": ok and not self.containment_failed,
+                        "killed": len(self.killed | self.term_sent),
+                        "survivors": survivors, "detail": detail or self.limit_detail}
         if signal_paths:
             self.cleanup["signal_paths"] = signal_paths.copy()
         self.exit_code = self.process.poll()
         self.ended = time.monotonic()
         self.process.stdout.close()
         self.collector.seal()
-        self.remove_cgroup()
+        if not self.remove_cgroup():
+            self.containment_failed = True
+            self.cleanup["ok"] = False
+            cleanup_detail = self.cleanup["detail"]
+            self.cleanup["detail"] = (
+                cleanup_detail + "; " if cleanup_detail else "")
+            self.cleanup["detail"] += "per-command cgroup cleanup failed"
 
     def status(self, consume=False):
         output = b""
@@ -132,6 +157,7 @@ class ManagedProcess:
         return {"exit_code": self.exit_code if self.cleanup is not None else None,
                 "finished": self.cleanup is not None, "cleanup": self.cleanup,
                 "timed_out": self.timed_out, "output": base64.b64encode(output).decode(),
+                "memory_limit_mechanism": self.memory_limit_mechanism,
                 "output_total_bytes": self.collector.total_bytes,
                 "lost_bytes": lost, "wall_seconds": (self.ended or time.monotonic()) - self.started}
 
@@ -145,6 +171,7 @@ class Supervisor:
         self.owner_fd = owner_fd
         self.table = ProcessTable()
         self.jobs: dict[str, ManagedProcess] = {}
+        self._next_full_process_scan = time.monotonic()
         self.next_id = 0
         self.closing = False
         self.selector = selectors.DefaultSelector()
@@ -160,6 +187,40 @@ class Supervisor:
         self.outgoing.clear()
         for job in self.jobs.values():
             job.stop(0.1)
+
+    def _sample_rows(self):
+        """Refresh known trees every tick and scan procfs once per second."""
+        active = [job for job in self.jobs.values() if job.cleanup is None]
+        if sys.platform != "linux":
+            rows = self.table.snapshot()
+            for job in active:
+                if getattr(job, "post_exit_scan_pending", False):
+                    job.post_exit_scan_pending = False
+                    job.post_exit_scan_complete = True
+                job.initial_scan_pending = False
+            return rows
+        rows = {}
+        for job in active:
+            rows.update(self.table.refresh_members(
+                job.family.members,
+                namespace_inode=job.family.private_pid_namespace_inode,
+            ))
+        now = time.monotonic()
+        force_scan = any(
+            getattr(job, "initial_scan_pending", False)
+            or getattr(job, "post_exit_scan_pending", False)
+            for job in active
+        )
+        if active and (force_scan or now >= self._next_full_process_scan):
+            rows.update(self.table.snapshot())
+            self._next_full_process_scan = (
+                time.monotonic() + FULL_PROCESS_SCAN_INTERVAL_SECONDS)
+            for job in active:
+                job.initial_scan_pending = False
+                if getattr(job, "post_exit_scan_pending", False):
+                    job.post_exit_scan_pending = False
+                    job.post_exit_scan_complete = True
+        return rows
 
     def start(self, request):
         if any(job.cleanup is not None and not job.cleanup["ok"] for job in self.jobs.values()):
@@ -177,28 +238,51 @@ class Supervisor:
         argv = request["argv"]
         if not isinstance(argv, list) or not argv or any(not isinstance(v, str) or "\0" in v for v in argv):
             raise ValueError("argv must be a nonempty sequence of strings without NUL")
-        cwd = Path(request.get("cwd") or cap.workspace).resolve(strict=True)
-        spec = {"argv": argv, "cwd": str(cwd), "env": dict(cap.env), "limits": asdict(cap.limits),
-                "memory_supervised": True}
-        # The launcher is stdlib-only and isolated (-I): exec the real interpreter, not a venv
-        # symlink, so the sandbox only has to admit the resolved runtime roots.
-        launch = [os.path.realpath(sys.executable), "-I", str(Path(__file__).with_name("sf_launch.py").resolve()),
-                  json.dumps(spec, separators=(",", ":"))]
-        command, environment = capability_command(
-            launch, cap, platform_backend=self.backend,
-            shared_namespace=self.namespace_network != "host")
-        if private_loopback:
-            # A custom tool may narrow a full-network run. Keep the supervised
-            # PID namespace, but give this command a disconnected loopback netns.
-            command.insert(1, "--unshare-net")
         self.next_id += 1
         ident = f"j{self.next_id}"
-        collector = JobOutputCollector(self.directory / f"{ident}.output", capacity=1 << 20)
-        cgroup = _command_cgroup(ident, cap.limits.nproc) if cap.sandboxed and self.backend == "bwrap" else None
-        if cgroup is not None:
-            command = [os.path.realpath(sys.executable), "-I", str(Path(__file__).with_name("sf_launch.py")),
-                       "--cgroup-enter", str(cgroup), *command]
+        cgroup = (_command_cgroup(ident, cap.limits.nproc,
+                                  memory_bytes=cap.limits.memory_bytes)
+                  if cap.sandboxed and self.backend == "bwrap" else None)
+        cgroup_memory_configured = _cgroup_memory_limit_configured(
+            cgroup, cap.limits.memory_bytes)
+        launch_memory_mechanism = (
+            "supervised_rss" if sys.platform == "darwin" else
+            "cgroup_memory_max" if cgroup_memory_configured else "rlimit_data")
+        memory_mechanism = launch_memory_mechanism
+        memory_reader = memory_writer = None
+        collector = None
+        process = None
         try:
+            if cgroup_memory_configured:
+                memory_reader, memory_writer = os.pipe()
+                os.set_inheritable(memory_writer, True)
+            cwd = Path(request.get("cwd") or cap.workspace).resolve(strict=True)
+            spec = {"argv": argv, "cwd": str(cwd), "env": dict(cap.env),
+                    "limits": asdict(cap.limits), "memory_supervised": True,
+                    "memory_limit_mechanism": launch_memory_mechanism}
+            # The launcher is stdlib-only and isolated (-I): exec the real interpreter, not a venv
+            # symlink, so the sandbox only has to admit the resolved runtime roots.
+            launch = [os.path.realpath(sys.executable), "-I",
+                      str(Path(__file__).with_name("sf_launch.py").resolve()),
+                      json.dumps(spec, separators=(",", ":"))]
+            command, environment = capability_command(
+                launch, cap, platform_backend=self.backend,
+                shared_namespace=self.namespace_network != "host")
+            if private_loopback:
+                # A custom tool may narrow a full-network run. Keep the supervised
+                # PID namespace, but give this command a disconnected loopback netns.
+                command.insert(1, "--unshare-net")
+            collector = JobOutputCollector(self.directory / f"{ident}.output", capacity=1 << 20)
+            pass_fds = ()
+            if cgroup is not None:
+                enter = [os.path.realpath(sys.executable), "-I",
+                         str(Path(__file__).with_name("sf_launch.py").resolve()),
+                         "--cgroup-enter", str(cgroup), "--memory-budget",
+                         str(cap.limits.memory_bytes)]
+                if memory_writer is not None:
+                    enter.extend(("--memory-result-fd", str(memory_writer)))
+                    pass_fds = (memory_writer,)
+                command = [*enter, "--", *command]
             with tempfile.TemporaryFile(dir=self.directory) as input_file:
                 supplied = request.get("stdin")
                 if supplied is not None:
@@ -206,18 +290,43 @@ class Supervisor:
                     input_file.seek(0)
                 process = subprocess.Popen(command, stdin=input_file if supplied is not None else subprocess.DEVNULL,
                                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                                           env=environment, close_fds=True)
+                                           env=environment, close_fds=True, pass_fds=pass_fds)
+            if memory_writer is not None:
+                os.close(memory_writer)
+                memory_writer = None
+                marker = os.read(memory_reader, 1)
+                os.close(memory_reader)
+                memory_reader = None
+                reported = {b"C": "cgroup_memory_max", b"D": "rlimit_data"}.get(marker)
+                if reported is None:
+                    raise RuntimeError("command did not report its cgroup memory join result")
+                memory_mechanism = reported
+            if sys.platform.startswith("linux") and memory_mechanism == "rlimit_data":
+                memory_mechanism = "rlimit_data+rss_supervisor"
         except BaseException:
-            collector.close()
-            if cgroup is not None:
+            if process is not None:
                 try:
-                    cgroup.rmdir()
-                except OSError:
+                    if process.poll() is None:
+                        process.kill()
+                    process.wait(timeout=2)
+                except (OSError, subprocess.TimeoutExpired):
                     pass
+            for fd in (memory_reader, memory_writer):
+                if fd is not None:
+                    try:
+                        os.close(fd)
+                    except OSError:
+                        pass
+            if collector is not None:
+                collector.close()
+            if cgroup is not None:
+                _remove_command_cgroup(cgroup)
             raise
-        job = ManagedProcess(ident, process, collector, cap, self.table, cgroup)
+        job = ManagedProcess(ident, process, collector, cap, self.table, cgroup,
+                             memory_limit_mechanism=memory_mechanism)
         self.jobs[ident] = job
-        return {"id": ident}
+        return {"id": ident, "memory_limit_mechanism": memory_mechanism,
+                "cgroup_leaf_pattern": _cgroup_leaf_pattern_status()}
 
     def dispatch(self, request):
         op = request["op"]
@@ -267,7 +376,7 @@ class Supervisor:
         connected = True
         try:
             while True:
-                rows = self.table.snapshot()
+                rows = self._sample_rows()
                 if self.namespace_network != "host":
                     leaders = {j.process.pid for j in self.jobs.values()}
                     for job in self.jobs.values():
@@ -342,7 +451,7 @@ class Supervisor:
             for job in self.jobs.values():
                 job.stop(0)
             while any(j.cleanup is None for j in self.jobs.values()) and time.monotonic() < deadline:
-                rows = self.table.snapshot()
+                rows = self._sample_rows()
                 for job in self.jobs.values():
                     job.tick(rows)
                 time.sleep(0.01)

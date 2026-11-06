@@ -24,6 +24,10 @@ CHECK_OUTCOMES = frozenset({
     "PASS", "BEHAVIOR_FAIL", "INVALID_CHECK", "ENVIRONMENT",
     "RESOURCE_LIMIT", "NOT_RUN", "UNKNOWN",
 })
+MEMORY_LIMIT_MECHANISMS = frozenset({
+    "cgroup_memory_max", "rlimit_data", "rlimit_data+rss_supervisor",
+    "rlimit_as", "supervised_rss",
+})
 FAILURE_PHASES = frozenset({
     "NONE", "HOST", "SETUP", "COLLECTION", "IMPORT", "EXECUTION",
     "ASSERTION", "OBSERVATION", "TIMEOUT", "UNKNOWN",
@@ -380,6 +384,7 @@ def _public_receipt(private: Mapping[str, object], journal: object = None) -> di
         key: value for key, value in private.items()
         if key not in {
             "stdout", "stderr", "assertion_context", "_stateframe_memo_generation",
+            "memory_limit_mechanism",
         }
     }
     # The stored receipt remains lossless. Recompute visible sizes and preview
@@ -635,7 +640,18 @@ def classify_check_outcome(
     return selected, phase or "UNKNOWN", reached
 
 
-def _emit(runtime: object, receipt: Mapping[str, object]) -> None:
+def _valid_cgroup_leaf_pattern(value: object) -> bool:
+    if isinstance(value, str) and value in {"applied", "not_delegated"}:
+        return True
+    if not isinstance(value, str) or not value.startswith("failed:") or len(value) > 128:
+        return False
+    return all(character.isascii() and (character.isalnum() or character in "_.:-")
+               for character in value)
+
+
+def _emit(runtime: object, receipt: Mapping[str, object], *,
+          memory_limit_mechanism: object = None,
+          cgroup_leaf_pattern: object = None) -> None:
     journal = getattr(runtime, "journal", None)
     emit = getattr(journal, "emit", None)
     if callable(emit):
@@ -661,6 +677,10 @@ def _emit(runtime: object, receipt: Mapping[str, object]) -> None:
             execution_complete=receipt.get("execution_complete", False),
             termination_reason=receipt.get("termination_reason", "UNKNOWN"),
             revision=receipt["revision"],
+            **({"memory_limit_mechanism": memory_limit_mechanism}
+               if memory_limit_mechanism in MEMORY_LIMIT_MECHANISMS else {}),
+            **({"cgroup_leaf_pattern": cgroup_leaf_pattern}
+               if _valid_cgroup_leaf_pattern(cgroup_leaf_pattern) else {}),
             **bookmark_fields,
             summary=receipt["summary"],
             stdout_bytes=receipt["stdout_bytes"],
@@ -768,6 +788,8 @@ def record_check_output(
         execution_complete: object = None,
         termination_reason: object = None,
         output_truncated: object = None,
+        memory_limit_mechanism: str | None = None,
+        cgroup_leaf_pattern: str | None = None,
         producer: object = None,
         wrapper_error: object = None,
         wrapper_parse_error: object = None,
@@ -930,6 +952,11 @@ def record_check_output(
         "product_observed": product_observed,
         "wrapper_parse_error": wrapper_text,
     }
+    if memory_limit_mechanism is not None:
+        if (not isinstance(memory_limit_mechanism, str)
+                or memory_limit_mechanism not in MEMORY_LIMIT_MECHANISMS):
+            raise ValueError("unknown memory_limit_mechanism")
+        private["memory_limit_mechanism"] = memory_limit_mechanism
     private.update({
         "stdout_bytes": _bytes(stdout_text),
         "stderr_bytes": _bytes(stderr_text),
@@ -1058,7 +1085,9 @@ def record_check_output(
         except (ImportError, TypeError, ValueError):
             pass
     if not suppress_unchanged:
-        _emit(runtime, public)
+        _emit(runtime, public,
+              memory_limit_mechanism=private.get("memory_limit_mechanism"),
+              cgroup_leaf_pattern=cgroup_leaf_pattern)
     setattr(runtime, "_latest_check_receipt", dict(public))
     _refresh_referencing_rows(runtime, public)
     return dict(public)

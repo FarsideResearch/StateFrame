@@ -248,16 +248,17 @@ def _wire_effect_ordinal(journal: object, *, request_id: object, step: object,
 
 
 def _wire_dependencies(binding: object) -> dict[str, str]:
-    """Dependency versions for a model-facing intention ID, without host environment identity.
+    """Dependency versions for a model-facing intention ID, without host audit identity.
 
     The intention record keeps the full binding_versions() (a package change still makes it
-    stale); only the ID drops the environment, like wire_identity_content() does for refs.
+    stale); only the ID drops host-derived identity, like wire_identity_content() does for refs.
     """
-    from kernel_wire_identity import WIRE_ENV_IDENTITY_FIELDS
+    from kernel_wire_identity import _wire_identity_excluded_fields
 
     if isinstance(binding, dict):
+        excluded_fields = _wire_identity_excluded_fields()
         binding = {key: value for key, value in binding.items()
-                   if key not in WIRE_ENV_IDENTITY_FIELDS}
+                   if key not in excluded_fields}
     return binding_versions(binding)
 
 

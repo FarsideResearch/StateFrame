@@ -5,7 +5,11 @@ import hashlib
 from collections.abc import Mapping
 from pathlib import Path
 
-from kernel_execution_policy import policy_read_grants, run_sandboxed
+from kernel_execution_policy import (
+    policy_memory_limit_mechanism,
+    policy_read_grants,
+    run_sandboxed,
+)
 from kernel_pilot import ACTIVE_RUNTIME
 
 
@@ -57,6 +61,8 @@ def check_result(root: Path, row: Mapping[str, object]) -> tuple[str, int]:
         detail = f"check refused: {type(error).__name__}: {error}"
         _record(runtime, binding, command, 127, detail, outcome="ENVIRONMENT")
         return detail, 127
+    memory_limit_mechanism = policy_memory_limit_mechanism(result)
+    memory_limit_killed = bool(getattr(result, "memory_limit_killed", False))
     output = (result.completed.stdout + result.completed.stderr)[-OUTPUT_LIMIT:]
     from kernel_check_receipts import sandbox_open_denial
     denial = sandbox_open_denial(result.completed.stderr + "\n" + result.completed.stdout,
@@ -81,13 +87,19 @@ def check_result(root: Path, row: Mapping[str, object]) -> tuple[str, int]:
         code, outcome, label = 125, "INVALID_CHECK", "protected test resource changed"
     tail = output[-OUTPUT_TAIL:]
     _record(runtime, binding, command, code, output, outcome=outcome, tail=tail,
-            output_truncated=result.output_truncated)
+            output_truncated=result.output_truncated,
+            memory_limit_mechanism=memory_limit_mechanism,
+            cgroup_leaf_pattern=getattr(result, "cgroup_leaf_pattern", None),
+            memory_limit_killed=memory_limit_killed)
     return f"check exit {code}: {label}\n{tail}", code
 
 
 def _record(runtime: object | None, binding: object, command: tuple[str, ...],
             code: int, output: str, *, outcome: str,
-            tail: str | None = None, output_truncated: bool | None = None) -> None:
+            tail: str | None = None, output_truncated: bool | None = None,
+            memory_limit_mechanism: str | None = None,
+            cgroup_leaf_pattern: str | None = None,
+            memory_limit_killed: bool = False) -> None:
     if runtime is None:
         return
     if not isinstance(binding, dict):
@@ -109,4 +121,7 @@ def _record(runtime: object | None, binding: object, command: tuple[str, ...],
         [CHECK_ID], code, binding, observation=output,
         command=command,
         counts=typed["counts"], typed_observation=typed,
-        output_truncated=output_truncated)
+        output_truncated=output_truncated,
+        memory_limit_mechanism=memory_limit_mechanism,
+        cgroup_leaf_pattern=cgroup_leaf_pattern,
+        memory_limit_killed=memory_limit_killed)

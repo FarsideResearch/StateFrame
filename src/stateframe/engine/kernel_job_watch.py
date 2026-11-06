@@ -227,6 +227,7 @@ class _ManagedJob:
     kill_requested: bool = False
     cleanup_in_progress: bool = False
     completion_journaled: bool = False
+    supervision_error: RuntimeError | None = None
 
 
 def _finite_positive(value: object, label: str) -> float:
@@ -369,6 +370,8 @@ class JobWatch:
             managed = self._jobs.get(job_id)
             if managed is None:
                 return
+            if managed.supervision_error is not None:
+                raise managed.supervision_error
             process = managed.process
             if managed.cleanup_in_progress or (managed.kill_requested and not wait_for_exit):
                 return
@@ -377,6 +380,28 @@ class JobWatch:
                     process.wait(timeout=0.2)
                 except subprocess.TimeoutExpired:
                     pass
+            exit_code = process.poll()
+            verify_supervision = exit_code is not None and managed.reader_done
+
+        if verify_supervision:
+            from kernel_execution_policy import finish_supervision
+            try:
+                finish_supervision(process)
+            except RuntimeError as error:
+                with self._lock:
+                    current = self._jobs.get(job_id)
+                    if current is managed:
+                        managed.supervision_error = error
+                raise
+
+        with self._lock:
+            managed = self._jobs.get(job_id)
+            if managed is None:
+                return
+            if managed.supervision_error is not None:
+                raise managed.supervision_error
+            if managed.cleanup_in_progress or (managed.kill_requested and not wait_for_exit):
+                return
             now_mono = float(self.clock())
             exit_code = process.poll()
             record = managed.record
@@ -442,7 +467,12 @@ class JobWatch:
             managed = self._jobs.get(job_id)
             if managed is not None:
                 managed.reader_done = True
-        self._reconcile(job_id, wait_for_exit=True)
+        try:
+            self._reconcile(job_id, wait_for_exit=True)
+        except RuntimeError as error:
+            from kernel_exec_tracker import ContainmentUnverified
+            if not isinstance(error, ContainmentUnverified):
+                raise
 
     def _append_output(self, job_id: str, chunk: bytes) -> None:
         with self._lock:

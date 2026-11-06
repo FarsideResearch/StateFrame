@@ -585,7 +585,7 @@ def _run_child(snapshot: pathlib.Path, code: str, *, executable: str,
     env[_META_FD_ENV] = str(meta_write)
     env[_SNAPSHOT_ROOT_ENV] = str(snapshot)
     try:
-        from kernel_execution_policy import sandboxed_popen
+        from kernel_execution_policy import finish_supervision, sandboxed_popen
         process, _capabilities = sandboxed_popen(
             [executable, "-B", "-c", _wrapper_source(code)],
             snapshot,
@@ -604,8 +604,12 @@ def _run_child(snapshot: pathlib.Path, code: str, *, executable: str,
     finally:
         os.close(meta_write)
     try:
-        stdout, stderr, capture_truncated, timed_out, group_killed = _collect_process(
-            process, wall_seconds, MAX_CAPTURE_BYTES)
+        try:
+            stdout, stderr, capture_truncated, timed_out, group_killed = _collect_process(
+                process, wall_seconds, MAX_CAPTURE_BYTES)
+        finally:
+            if process.returncode is not None:
+                finish_supervision(process)
         policy_events = _read_policy_metadata(meta_read)
     finally:
         os.close(meta_read)

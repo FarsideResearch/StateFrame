@@ -43,6 +43,7 @@ PRIMITIVE_TESTS = {
     "test_frame_routes_engine.py",
     "test_powerups_python_in_sandbox.py",
     "test_check_sandbox_nproc.py",
+    "test_cgroup_leaf_pattern.py",
 }
 
 

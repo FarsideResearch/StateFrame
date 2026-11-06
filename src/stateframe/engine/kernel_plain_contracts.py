@@ -206,8 +206,8 @@ class PlainJournal:
             os.fsync(stream.fileno())
         return self.sequence
 
-    def receipt(self, kind: str, receipt: object) -> int:
-        return self.write(kind, receipt=asdict(receipt))
+    def receipt(self, kind: str, receipt: object, **fields: object) -> int:
+        return self.write(kind, receipt=asdict(receipt), **fields)
 
     def save(self, name: str, value: object) -> Path:
         path = self.directory / name

@@ -217,7 +217,8 @@ def test_outer_check_uses_and_cleans_up_optional_cgroup(monkeypatch, tmp_path):
     group.mkdir()
     seen = []
     monkeypatch.setattr(policy.platform, "system", lambda: "Linux")
-    monkeypatch.setattr(policy, "_command_cgroup", lambda ident, nproc: group)
+    monkeypatch.setattr(policy, "_command_cgroup",
+                        lambda ident, nproc, memory_bytes=None: group)
 
     class Process:
         pid = 123

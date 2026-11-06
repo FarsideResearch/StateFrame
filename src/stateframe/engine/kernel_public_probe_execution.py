@@ -57,24 +57,26 @@ def execute_probe(root: Path, product_files: dict, source: str, output: Path, *,
             if allowance <= 0:
                 raise TimeoutError('public probe deadline expired before execution')
             with logfile.open('xb') as stream:
-                from kernel_execution_policy import sandboxed_popen
-                with sandboxed_popen(
-                    [
-                        selected_test_python(), '-I', '-c', RUNNER_SOURCE, '-q', '-x', '--noconftest',
-                        '-c', '/dev/null', '--rootdir', str(scratch), '-p', 'no:cacheprovider',
-                        '-o', f'pythonpath={scratch}', 'tests/test_public_probe.py',
-                    ],
-                    scratch,
-                    env=dict(os.environ),
-                    stdin=subprocess.DEVNULL,
-                    stdout=stream,
-                    stderr=subprocess.STDOUT,
-                    readonly_workspace=True,
-                    cpu_seconds=15,
-                    memory_bytes=1024 * 1024 * 1024,
-                    file_bytes=1024 * 1024,
-                    isolation_builder=isolated_command,
-                )[0] as process:
+                from kernel_execution_policy import sandboxed_popen, supervised_process
+                with supervised_process(
+                    sandboxed_popen(
+                        [
+                            selected_test_python(), '-I', '-c', RUNNER_SOURCE, '-q', '-x', '--noconftest',
+                            '-c', '/dev/null', '--rootdir', str(scratch), '-p', 'no:cacheprovider',
+                            '-o', f'pythonpath={scratch}', 'tests/test_public_probe.py',
+                        ],
+                        scratch,
+                        env=dict(os.environ),
+                        stdin=subprocess.DEVNULL,
+                        stdout=stream,
+                        stderr=subprocess.STDOUT,
+                        readonly_workspace=True,
+                        cpu_seconds=15,
+                        memory_bytes=1024 * 1024 * 1024,
+                        file_bytes=1024 * 1024,
+                        isolation_builder=isolated_command,
+                    )[0]
+                ) as process:
                     until = time.monotonic() + allowance
                     while not child_exited_unreaped(process) and time.monotonic() < until:
                         time.sleep(.02)

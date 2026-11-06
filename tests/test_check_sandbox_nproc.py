@@ -72,7 +72,8 @@ def test_check_sandbox_starts_with_many_user_threads(tmp_path, busy_same_uid):
 def test_check_sandbox_still_bounds_new_processes(tmp_path, busy_same_uid, monkeypatch):
     # The budget applies to processes the check creates: a fork loop beyond it must be refused.
     # Force the mandatory RLIMIT fallback so a delegated cgroup cannot mask a host-count regression.
-    monkeypatch.setattr(policy, "_command_cgroup", lambda ident, nproc: None)
+    monkeypatch.setattr(policy, "_command_cgroup",
+                        lambda ident, nproc, memory_bytes=None: None)
     script = ("import os,sys\nn=0\ntry:\n    for _ in range(400):\n        if os.fork()==0:\n"
               "            import time; time.sleep(5); os._exit(0)\n        n+=1\nexcept OSError:\n"
               "    print('bounded', n)\n    sys.exit(0)\nprint('unbounded', n)\n")

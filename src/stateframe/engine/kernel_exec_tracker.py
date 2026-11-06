@@ -5,8 +5,9 @@ missed. Start timestamps protect signals against PID reuse, not that race.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from collections import deque
 from contextlib import nullcontext
+from dataclasses import dataclass
 import ctypes
 import errno
 import os
@@ -345,14 +346,25 @@ class ProcessTable:
             return info.resident
         try:
             fields = (Path("/proc") / str(row.pid) / "statm").read_text().split()
-        except (FileNotFoundError, ProcessLookupError):
+        except FileNotFoundError:
             return 0
+        except OSError as error:
+            if isinstance(error, ProcessLookupError) or error.errno == errno.ESRCH:
+                return 0
+            raise
         return int(fields[1]) * os.sysconf("SC_PAGE_SIZE")
+
+    def resident_memory_limit_breach(self, live: list[ProcessIdentity], memory_bytes: int) -> str:
+        """Return the shared aggregate-RSS breach reason for one launch unit."""
+        if sum(self.resident_bytes(row) for row in live) > memory_bytes:
+            return "aggregate resident-memory limit exceeded"
+        return ""
 
     def limit_breach(self, live: list[ProcessIdentity], limits) -> str:
         """Apply the same aggregate limits to every supervised containment unit."""
-        if sum(self.resident_bytes(row) for row in live) > limits.memory_bytes:
-            return "aggregate resident-memory limit exceeded"
+        breach = self.resident_memory_limit_breach(live, limits.memory_bytes)
+        if breach:
+            return breach
         if len(live) > limits.nproc:
             return "process limit exceeded"
         return ""
@@ -363,6 +375,76 @@ class ProcessTable:
             return os.readlink(f"/proc/{pid}/ns/pid")
         except FileNotFoundError:
             return None
+
+    @staticmethod
+    def pid_namespace_inode(pid: int) -> int | None:
+        """Return a process PID namespace inode for exact namespace membership checks."""
+        if sys.platform != "linux":
+            return None
+        try:
+            return os.stat(f"/proc/{pid}/ns/pid").st_ino
+        except OSError:
+            return None
+
+    @staticmethod
+    def children(pid: int) -> tuple[int, ...]:
+        """Read children created by every thread of a process from procfs."""
+        task_root = Path("/proc") / str(pid) / "task"
+        try:
+            tasks = tuple(task_root.iterdir())
+        except FileNotFoundError:
+            return ()
+        except OSError as error:
+            if isinstance(error, ProcessLookupError) or error.errno == errno.ESRCH:
+                return ()
+            raise
+        children: set[int] = set()
+        for task in tasks:
+            if not task.name.isdecimal():
+                continue
+            try:
+                values = (task / "children").read_text(encoding="ascii").split()
+            except FileNotFoundError:
+                continue
+            except OSError as error:
+                if isinstance(error, ProcessLookupError) or error.errno == errno.ESRCH:
+                    continue
+                raise
+            children.update(int(value) for value in values if value.isdecimal())
+        return tuple(sorted(children))
+
+    def refresh_members(self, members: dict[int, ProcessIdentity], *,
+                        namespace_inode: int | None = None) -> dict[int, ProcessIdentity]:
+        """Refresh known Linux members and discover their descendants without scanning /proc."""
+        if sys.platform != "linux" or self._lib is not None:
+            return self.snapshot()
+        rows: dict[int, ProcessIdentity] = {}
+        pending = deque((pid, None) for pid in members)
+        visited: set[int] = set()
+        while pending:
+            pid, parent_pid = pending.popleft()
+            if pid in visited:
+                continue
+            visited.add(pid)
+            row = self.identity(pid)
+            if row is None:
+                continue
+            expected = members.get(pid)
+            if expected is not None and row.start != expected.start:
+                continue
+            same_namespace = (namespace_inode is not None
+                              and self.pid_namespace_inode(pid) == namespace_inode)
+            if parent_pid is not None and row.ppid != parent_pid and not same_namespace:
+                continue
+            rows[pid] = row
+            child_pids = self.children(pid)
+            current = self.identity(pid)
+            if current is None or current.start != row.start:
+                continue
+            for child_pid in child_pids:
+                if child_pid not in visited:
+                    pending.append((child_pid, pid))
+        return rows
 
     def snapshot(self) -> dict[int, ProcessIdentity]:
         if self._lib is not None:
@@ -392,12 +474,17 @@ class ProcessTable:
 
 class Descendants:
     def __init__(self, leader: int, table: ProcessTable,
-                 launch_identity: LaunchIdentity | None = None):
+                 launch_identity: LaunchIdentity | None = None, *,
+                 allow_unstamped_leader: bool = False):
         self.leader = leader
         self.table = table
         self.members: dict[int, ProcessIdentity] = {}
+        self.launch_leader_start: tuple[int, int] | None = None
         self.signal_errors: dict[int, str] = {}
         self.signal_paths: dict[int, str] = {}
+        namespace_inode = getattr(table, "pid_namespace_inode", None)
+        self.launch_namespace_inode = namespace_inode(leader) if namespace_inode else None
+        self.private_pid_namespace_inode: int | None = None
         # A leader PID cannot be reused until the leader is reaped, so a group or session named
         # by it is ours until then. Afterwards only processes born by the reap belong to it: a
         # reused PID's new group starts later. `reaped_bound` is the reap time when the caller
@@ -405,9 +492,16 @@ class Descendants:
         self.owned_bound: tuple[int, int] | None = None
         self.reaped_bound: tuple[int, int] | None = None
         row = table.identity(leader)
-        if row is not None and (launch_identity is None or
-                                (row.pid == launch_identity.pid and row.start == launch_identity.start)):
+        identity_matches = (
+            launch_identity is None
+            or (row is not None and row.pid == launch_identity.pid
+                and (row.start == launch_identity.start
+                     or (allow_unstamped_leader and launch_identity.start is None)))
+        )
+        if row is not None and identity_matches:
             self.members[leader] = row
+            if launch_identity is not None:
+                self.launch_leader_start = row.start
 
     def leader_reaped(self) -> None:
         """Record that the caller has just reaped the leader; call once, right after the reap."""
@@ -421,6 +515,24 @@ class Descendants:
                 rows[pid] = current
         active = {pid for pid, old in self.members.items()
                   if pid in rows and rows[pid].start == old.start}
+        namespace_inode = getattr(self.table, "pid_namespace_inode", None)
+        if (sys.platform == "linux" and self.private_pid_namespace_inode is None
+                and self.launch_namespace_inode is not None and namespace_inode is not None):
+            for row in rows.values():
+                if row.pid == self.leader or row.ppid not in active:
+                    continue
+                candidate = namespace_inode(row.pid)
+                if candidate is not None and candidate != self.launch_namespace_inode:
+                    self.private_pid_namespace_inode = candidate
+                    break
+        if self.private_pid_namespace_inode is not None and namespace_inode is not None:
+            for pid, row in rows.items():
+                if namespace_inode(pid) != self.private_pid_namespace_inode:
+                    continue
+                previous = self.members.get(pid)
+                if previous is None or previous.start == row.start:
+                    self.members[pid] = row
+                    active.add(pid)
         leader = self.members.get(self.leader)
         leader_live = leader is not None and self.leader in active and self.reaped_bound is None
         if leader_live and rows:
@@ -499,10 +611,22 @@ def kill_launch_unit(process, family: Descendants | None = None,
     table = family.table if family is not None else ProcessTable()
     if launch_identity is None:
         family = None
-    if (launch_identity is not None and family is not None
-            and (family.members.get(process.pid) is None
-                 or family.members[process.pid].start != launch_identity.start)):
-        family = None
+    if launch_identity is not None and family is not None:
+        leader = family.members.get(process.pid)
+        if (leader is None or (launch_identity.start is not None
+                               and leader.start != launch_identity.start)):
+            family = None
+        elif launch_identity.start is None:
+            if getattr(family, "launch_leader_start", None) != leader.start:
+                family = None
+            else:
+                # Only a family explicitly created by the unreaped spawn path may
+                # complete this partial identity; arbitrary families cannot bless
+                # a PID that may already have been reused.
+                launch_identity = LaunchIdentity(
+                    launch_identity.pid, leader.start, launch_identity.boot_id,
+                    launch_identity.pidfd)
+                process._stateframe_launch_identity = launch_identity
     if family is None and launch_identity is not None:
         lock = getattr(process, "_waitpid_lock", None)
         with lock if lock is not None else nullcontext():

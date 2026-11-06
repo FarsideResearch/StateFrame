@@ -7,7 +7,10 @@ fall back to a raw host process.
 """
 from __future__ import annotations
 
+from contextlib import contextmanager
 from dataclasses import dataclass, field
+import errno
+import logging
 import math
 import os
 from pathlib import Path
@@ -17,28 +20,41 @@ import resource
 import selectors
 import signal
 import subprocess
+import threading
 import time
 import uuid
 from collections.abc import Mapping, Sequence
-from typing import Callable
+from typing import Callable, Iterator, TypeVar
 
-from kernel_exec_tracker import (ContainmentUnverified, ProcessTable,
-                                 capture_launch_identity, child_exited_unreaped, kill_launch_unit,
+from kernel_exec_tracker import (ContainmentUnverified, Descendants, LaunchIdentity,
+                                 ProcessIdentity, ProcessTable, capture_launch_identity,
+                                 child_exited_unreaped, kill_launch_unit,
                                  recorded_launch_identity, signal_launch_group)
 from kernel_test_isolation import SandboxReadGrants, isolated_command, sandbox_executable
-from sf_launch import _command_cgroup
+from sf_launch import (
+    _cgroup_leaf_pattern_status,
+    _cgroup_memory_limit_configured,
+    _command_cgroup,
+)
 
 
 MAX_WALL_SECONDS = 900.0
 MAX_INPUT_BYTES = 4 * 1024 * 1024
 DEFAULT_CPU_SECONDS = 30.0
 DEFAULT_MEMORY_BYTES = 512 * 1024 * 1024
-DEFAULT_FILE_BYTES = 8 * 1024 * 1024
+DEFAULT_FILE_BYTES = 64 * 1024 * 1024
 DEFAULT_NOFILE = 128
 DEFAULT_NPROC = 64
 MAX_OUTPUT_BYTES = 256 * 1024
 MAX_PROFILE_OUTPUT_BYTES = 16 * 1024
+CGROUP_CLEANUP_ATTEMPTS = 40
+CGROUP_CLEANUP_INTERVAL_SECONDS = 0.025
+FULL_PROCESS_SCAN_INTERVAL_SECONDS = 1.0
+RSS_FINISH_IDLE_SECONDS = 2.0
+RSS_FINISH_MAX_WAIT_SECONDS = 15.0
+_Result = TypeVar("_Result")
 _PROFILE_FD_ENV = "STATEFRAME_TEST_RUN_SPANS_FD"
+_LOGGER = logging.getLogger(__name__)
 
 _ALLOWED_ENV = frozenset({
     "PATH", "LANG", "LC_ALL", "PYTHONHASHSEED", "PYTEST_DISABLE_PLUGIN_AUTOLOAD",
@@ -87,11 +103,21 @@ class PolicyResult:
     execution_trace: Mapping[str, int] = field(default_factory=dict)
     profile_payload: bytes | None = None
     read_grants: SandboxReadGrants | None = None
+    memory_limit_mechanism: str | None = None
+    memory_limit_killed: bool = False
+    memory_limit_reason: str | None = None
+    cgroup_leaf_pattern: str | None = None
 
 
 def policy_read_grants(result: object) -> SandboxReadGrants | None:
     """Return grants when recorded; older policy results have no such field."""
     return getattr(result, "read_grants", None)
+
+
+def policy_memory_limit_mechanism(result: object) -> str | None:
+    """Return the recorded memory limit mechanism, if this is a newer result."""
+    value = getattr(result, "memory_limit_mechanism", None)
+    return value if isinstance(value, str) else None
 
 
 def capability_report() -> CapabilityReport:
@@ -103,7 +129,10 @@ def capability_report() -> CapabilityReport:
         "RLIMIT_CPU", "RLIMIT_FSIZE", "RLIMIT_CORE", "RLIMIT_NOFILE",
     )
     limits_available = all(hasattr(resource, name) for name in required_limits)
-    memory_available = hasattr(resource, "RLIMIT_AS") or hasattr(resource, "RLIMIT_DATA")
+    memory_available = (
+        hasattr(resource, "RLIMIT_DATA") if system == "Linux"
+        else hasattr(resource, "RLIMIT_AS") or hasattr(resource, "RLIMIT_DATA")
+    )
     network_isolated = system in {"Darwin", "Linux"}
     available = bool(
         executable and network_isolated and limits_available and memory_available
@@ -227,7 +256,8 @@ def _lowered_limits(current: tuple[int, int], limit: int) -> tuple[int, int]:
 
 def _resource_preexec(cpu_seconds: float, memory_bytes: int,
                       file_bytes: int, nofile: int, nproc: int,
-                      cgroup: Path | None = None) -> Callable[[], None]:
+                      cgroup: Path | None = None,
+                      memory_report_fd: int | None = None) -> Callable[[], None]:
     cpu = int(math.ceil(_limit_value("cpu_seconds", cpu_seconds, maximum=MAX_WALL_SECONDS)))
     memory = int(_limit_value("memory_bytes", memory_bytes, maximum=4 * 1024 * 1024 * 1024))
     file_limit = int(_limit_value("file_bytes", file_bytes, maximum=64 * 1024 * 1024))
@@ -244,9 +274,12 @@ def _resource_preexec(cpu_seconds: float, memory_bytes: int,
         resource.setrlimit(which, (value, value))
 
     def apply() -> None:
+        cgroup_joined = False
+        cgroup_memory_configured = _cgroup_memory_limit_configured(cgroup, memory)
         if cgroup is not None:
             try:
                 (cgroup / "cgroup.procs").write_text(str(os.getpid()), encoding="ascii")
+                cgroup_joined = True
             except OSError:
                 pass  # The in-namespace RLIMIT_NPROC is mandatory; cgroup is optional.
         _lower_only(resource.RLIMIT_CPU, cpu)
@@ -254,24 +287,500 @@ def _resource_preexec(cpu_seconds: float, memory_bytes: int,
         _lower_only(resource.RLIMIT_CORE, 0)
         resource.setrlimit(resource.RLIMIT_NOFILE,
                            _lowered_limits(resource.getrlimit(resource.RLIMIT_NOFILE), nofile_limit))
-        if hasattr(resource, "RLIMIT_AS"):
+        system = platform.system()
+        if system == "Linux":
+            if cgroup_memory_configured and cgroup_joined:
+                memory_mechanism = "cgroup_memory_max"
+            elif hasattr(resource, "RLIMIT_DATA"):
+                _lower_only(resource.RLIMIT_DATA, memory)
+                memory_mechanism = "rlimit_data"
+            else:  # Capability discovery should have rejected this before spawn.
+                raise RuntimeError("Linux RLIMIT_DATA memory fallback is unavailable")
+        elif system == "Darwin" and hasattr(resource, "RLIMIT_AS"):
             try:
                 resource.setrlimit(resource.RLIMIT_AS, (memory, memory))
             except (OSError, ValueError):
-                if platform.system() != "Darwin":
+                if system != "Darwin":
                     raise
+            memory_mechanism = "rlimit_as"
         elif hasattr(resource, "RLIMIT_DATA"):
-            resource.setrlimit(resource.RLIMIT_DATA, (memory, memory))
+            _lower_only(resource.RLIMIT_DATA, memory)
+            memory_mechanism = "rlimit_data"
         else:  # Capability discovery should have rejected this before spawn.
             raise RuntimeError("memory resource limit unavailable")
+        if memory_report_fd is not None:
+            marker = {"cgroup_memory_max": b"C", "rlimit_data": b"D", "rlimit_as": b"A"}[
+                memory_mechanism]
+            os.write(memory_report_fd, marker)
+            os.close(memory_report_fd)
 
     return apply
 
 
-def _kill_group(process: subprocess.Popen[bytes]) -> bool:
+def _kill_group(process: subprocess.Popen[bytes], family: Descendants | None = None, *,
+                launch_identity: LaunchIdentity | None = None) -> bool:
     # The whole launch unit, not only the group: a bwrap child still setting up its
     # sandbox, or one that already left the group, must not outlive the timeout.
-    return not kill_launch_unit(process, launch_identity=recorded_launch_identity(process))
+    identity = (launch_identity if launch_identity is not None
+                else recorded_launch_identity(process))
+    return not kill_launch_unit(process, family, launch_identity=identity)
+
+
+class _ProgressTrackingProcessTable:
+    """Track table operations made directly or through launch-unit cleanup."""
+
+    def __init__(self, supervisor: _ResidentMemorySupervisor, table: ProcessTable):
+        object.__setattr__(self, "_supervisor", supervisor)
+        object.__setattr__(self, "_table", table)
+
+    def __getattr__(self, name: str) -> object:
+        table = object.__getattribute__(self, "_table")
+        value = getattr(table, name)
+        if not callable(value):
+            return value
+        operation = value
+        supervisor = object.__getattribute__(self, "_supervisor")
+
+        def tracked(*args: object, **kwargs: object) -> object:
+            return supervisor._track_work(lambda: operation(*args, **kwargs))
+
+        return tracked
+
+    def __setattr__(self, name: str, value: object) -> None:
+        table = object.__getattribute__(self, "_table")
+        setattr(table, name, value)
+
+
+class _ResidentMemorySupervisor:
+    """Reuse process-table RSS accounting to enforce an RLIMIT_DATA fallback."""
+
+    def __init__(self, process: subprocess.Popen[bytes], memory_bytes: int):
+        self.process = process
+        self.memory_bytes = memory_bytes
+        self.table = _ProgressTrackingProcessTable(self, ProcessTable())
+        self.launch_identity = recorded_launch_identity(process)
+        if self.launch_identity is None:
+            raise ExecutionPolicyError("cannot capture launch identity for RSS supervision")
+        allow_unstamped_leader = (
+            isinstance(self.launch_identity, LaunchIdentity)
+            and self.launch_identity.start is None
+        )
+        if allow_unstamped_leader:
+            # sandboxed_popen still owns this unreaped child during supervisor setup.
+            self.family = Descendants(
+                process.pid, self.table, self.launch_identity,
+                allow_unstamped_leader=True,
+            )
+        else:
+            self.family = Descendants(process.pid, self.table, self.launch_identity)
+        self.error: str | None = None
+        self.finish_error: str | None = None
+        self.family_verified_empty = False
+        self.cleanup_verified_no_survivors = False
+        self.containment_verified = False
+        self._error_cause: BaseException | None = None
+        self._leader_reaped = False
+        self._collector_reap_expected = False
+        self._family_lock = threading.Lock()
+        self._leader_reaped_event = threading.Event()
+        self._next_full_process_scan = time.monotonic()
+        self._scan_state_lock = threading.Lock()
+        self._scan_started_at: float | None = None
+        self._last_scan_duration = 0.0
+        self._work_depth = 0
+        self._busy_since: float | None = None
+        self._last_progress_at = time.monotonic()
+        self._stopped = threading.Event()
+        self._leader_exit_processed = threading.Event()
+        self._completion_lock = threading.Lock()
+        self._completion_verified = False
+        self._thread = threading.Thread(
+            target=self._run, name="sandbox-resident-memory", daemon=True)
+
+    def start(self) -> None:
+        self._thread.start()
+
+    def expect_collector_reap(self) -> None:
+        """Prefer the collector's exact reap callback over supervisor observation."""
+        with self._family_lock:
+            self._collector_reap_expected = True
+
+    def notify_leader_reaped(self) -> None:
+        """Record the collector's reap once, at its wait site, under the family lock."""
+        self._leader_reaped_event.set()
+        with self._family_lock:
+            if not self._leader_reaped:
+                self.family.leader_reaped()
+                self._leader_reaped = True
+
+    def _rows_allowed_after_exit(
+            self, rows: dict[int, ProcessIdentity]) -> dict[int, ProcessIdentity]:
+        """Keep post-exit admission to known identities, their children, and our PID namespace."""
+        candidates = dict(rows)
+        members = self.family.members
+        allowed: set[int] = set()
+        for pid, previous in members.items():
+            row = candidates.get(pid)
+            if row is None:
+                identity = getattr(self.table, "identity", None)
+                row = identity(pid) if callable(identity) else None
+                if row is not None:
+                    candidates[pid] = row
+            if row is not None and row.start == previous.start:
+                allowed.add(pid)
+
+        private_namespace = getattr(self.family, "private_pid_namespace_inode", None)
+        namespace_inode = getattr(self.table, "pid_namespace_inode", None)
+        if private_namespace is not None and callable(namespace_inode):
+            allowed.update(
+                pid for pid in candidates
+                if namespace_inode(pid) == private_namespace
+            )
+
+        # The exited leader's PID may already belong to a new process. Keep its
+        # recorded row for identity continuity, but never use it as a new PPID root.
+        parents = allowed - {getattr(self.family, "leader", self.process.pid)}
+        changed = True
+        while changed:
+            changed = False
+            for pid, row in candidates.items():
+                if pid not in allowed and row.ppid in parents:
+                    allowed.add(pid)
+                    parents.add(pid)
+                    changed = True
+        return {pid: row for pid, row in candidates.items() if pid in allowed}
+
+    def _update_family(self, rows: dict[int, ProcessIdentity]) -> list[ProcessIdentity]:
+        with self._family_lock:
+            leader_exited = (
+                self.process.returncode is not None or self._leader_reaped_event.is_set())
+            # Unit callers and exceptional reaping paths may not have a collector
+            # callback. Normal run_sandboxed collection always marks it expected.
+            if (self.process.returncode is not None and not self._collector_reap_expected
+                    and not self._leader_reaped):
+                self.family.leader_reaped()
+                self._leader_reaped = True
+                self._leader_reaped_event.set()
+            update_rows = self._rows_allowed_after_exit(rows) if leader_exited else rows
+            return self.family.update(update_rows)
+
+    def _begin_work(self) -> bool:
+        if threading.current_thread() is not getattr(self, "_thread", None):
+            return False
+        now = time.monotonic()
+        with self._scan_state_lock:
+            if self._work_depth == 0:
+                self._busy_since = now
+            self._work_depth += 1
+            self._last_progress_at = now
+        return True
+
+    def _end_work(self, tracked: bool) -> None:
+        if not tracked:
+            return
+        now = time.monotonic()
+        with self._scan_state_lock:
+            self._work_depth -= 1
+            self._last_progress_at = now
+            if self._work_depth == 0:
+                self._busy_since = None
+
+    def _track_work(self, operation: Callable[[], _Result]) -> _Result:
+        tracked = self._begin_work()
+        try:
+            return operation()
+        finally:
+            self._end_work(tracked)
+
+    def _finish_diagnostics(
+            self, now: float) -> tuple[float, float, float, float, bool]:
+        with self._scan_state_lock:
+            busy_since = self._busy_since
+            last_progress_at = self._last_progress_at
+            scan_started_at = self._scan_started_at
+            last_scan_duration = self._last_scan_duration
+        busy_for = max(0.0, now - busy_since) if busy_since is not None else 0.0
+        progress_age = max(0.0, now - last_progress_at)
+        scan_active = max(0.0, now - scan_started_at) if scan_started_at is not None else 0.0
+        return busy_for, progress_age, scan_active, last_scan_duration, busy_since is not None
+
+    def _finish_timeout_reason(self, started: float, now: float) -> str:
+        busy_for, progress_age, scan_active, last_scan_duration, _busy = (
+            self._finish_diagnostics(now))
+        return (
+            "resident-memory supervisor post-exit verification timed out "
+            f"after {now - started:.2f}s "
+            f"(work active {busy_for:.2f}s; last progress {progress_age:.2f}s ago; "
+            f"scan active {scan_active:.2f}s; "
+            f"last completed scan {last_scan_duration:.2f}s; "
+            f"maximum wait {RSS_FINISH_MAX_WAIT_SECONDS:g}s)"
+        )
+
+    def _finish_failure(self, reason: str) -> bool:
+        self.finish_error = reason
+        self._stopped.set()
+        if self._thread.ident is not None:
+            self._thread.join(0)
+        return False
+
+    def _finish_verified_result(self) -> bool:
+        if self._thread.is_alive():
+            return self._finish_failure(
+                "resident-memory supervisor thread remained active after post-exit processing")
+        if self.error:
+            return self._finish_failure(
+                f"resident-memory supervisor recorded an error: {self.error}")
+        if not self._leader_exit_processed.is_set():
+            return self._finish_failure(
+                "resident-memory supervisor stopped before post-exit processing completed")
+        if not self.containment_verified:
+            return self._finish_failure(
+                "resident-memory supervisor post-exit processing completed without "
+                "verifying containment")
+        self.finish_error = None
+        return True
+
+    def _record_error(self, error: BaseException, *,
+                      context: str = "resident-memory supervision failed") -> None:
+        if self._error_cause is not None:
+            return
+        try:
+            message = " ".join(str(error).split())
+        except BaseException:
+            message = "error message unavailable"
+        if len(message) > 500:
+            message = message[:497] + "..."
+        self.error = f"{context} ({type(error).__name__}: {message})"
+        self._error_cause = error
+
+    def finish(self, timeout: float = 2.0, *, wait_for_post_exit: bool = True) -> bool:
+        if not wait_for_post_exit:
+            self._stopped.set()
+            self._thread.join(max(0.0, timeout))
+            return self._finish_verified_result()
+        if self.process.returncode is None:
+            self._stopped.set()
+            self._thread.join(max(0.0, timeout))
+            return self._finish_verified_result()
+
+        started = time.monotonic()
+        max_deadline = started + max(0.0, RSS_FINISH_MAX_WAIT_SECONDS)
+        idle_seconds = max(0.0, RSS_FINISH_IDLE_SECONDS)
+        while not self._leader_exit_processed.is_set():
+            now = time.monotonic()
+            if not self._thread.is_alive():
+                if self._leader_exit_processed.is_set():
+                    break
+                if self.error:
+                    return self._finish_failure(
+                        f"resident-memory supervisor recorded an error: {self.error}")
+                _busy_for, _progress_age, scan_active, last_scan_duration, _busy = (
+                    self._finish_diagnostics(now))
+                return self._finish_failure(
+                    "resident-memory supervisor thread exited before post-exit verification "
+                    f"completed (scan active {scan_active:.2f}s; "
+                    f"last completed scan {last_scan_duration:.2f}s; "
+                    f"maximum wait {RSS_FINISH_MAX_WAIT_SECONDS:g}s)"
+                )
+
+            busy_for, progress_age, scan_active, last_scan_duration, busy = (
+                self._finish_diagnostics(now))
+            if now >= max_deadline:
+                return self._finish_failure(self._finish_timeout_reason(started, now))
+            if not busy and progress_age >= idle_seconds:
+                return self._finish_failure(
+                    "resident-memory supervisor post-exit verification stalled "
+                    f"after {progress_age:.2f}s without progress while idle "
+                    f"(work active {busy_for:.2f}s; scan active {scan_active:.2f}s; "
+                    f"last completed scan {last_scan_duration:.2f}s; "
+                    f"maximum wait {RSS_FINISH_MAX_WAIT_SECONDS:g}s)"
+                )
+
+            wait_for = min(0.05, max_deadline - now)
+            if not busy:
+                wait_for = min(wait_for, max(0.0, idle_seconds - progress_age))
+            self._leader_exit_processed.wait(wait_for)
+        self._stopped.set()
+        remaining = max_deadline - time.monotonic()
+        if self._thread.ident is not None:
+            self._thread.join(max(0.0, remaining))
+        if self._thread.is_alive():
+            return self._finish_failure(
+                self._finish_timeout_reason(started, time.monotonic()))
+        return self._finish_verified_result()
+
+    def _snapshot(self) -> dict[int, ProcessIdentity]:
+        started = time.monotonic()
+        with self._scan_state_lock:
+            self._scan_started_at = started
+        try:
+            return self.table.snapshot()
+        finally:
+            duration = max(0.0, time.monotonic() - started)
+            with self._scan_state_lock:
+                self._last_scan_duration = duration
+                self._scan_started_at = None
+
+    def _stop_launch_unit(self) -> None:
+        tracked = self._begin_work()
+        try:
+            try:
+                supervisor = self
+                family = self.family
+
+                class AdmissionFamilyView:
+                    @property
+                    def table(self):
+                        return family.table
+
+                    @property
+                    def members(self):
+                        return family.members
+
+                    @property
+                    def launch_leader_start(self):
+                        return getattr(family, "launch_leader_start", None)
+
+                    def update(self, rows):
+                        return supervisor._track_work(
+                            lambda: supervisor._update_family(rows))
+
+                    def signal(self, rows, sig):
+                        return supervisor._track_work(lambda: family.signal(rows, sig))
+
+                survivors = kill_launch_unit(
+                    self.process, AdmissionFamilyView(), launch_identity=self.launch_identity)
+                if survivors:
+                    self.cleanup_verified_no_survivors = False
+                    if self.error is None:
+                        self.error = "resident-memory supervisor could not stop the full launch unit"
+                else:
+                    self.cleanup_verified_no_survivors = True
+                    self.containment_verified = True
+            except (ContainmentUnverified, OSError, RuntimeError, ValueError) as error:
+                self._record_error(
+                    error, context="resident-memory supervisor could not stop the launch unit")
+        finally:
+            self._end_work(tracked)
+
+    def _run(self) -> None:
+        try:
+            while not self._stopped.is_set():
+                post_exit_scan_completed = False
+                try:
+                    refresh_members = getattr(self.table, "refresh_members", None)
+                    if callable(refresh_members):
+                        rows = refresh_members(
+                            self.family.members,
+                            namespace_inode=getattr(self.family, "private_pid_namespace_inode", None),
+                        )
+                    else:  # Compatibility with older process-table test doubles.
+                        rows = self._snapshot()
+                    leader_exited = (
+                        self.process.returncode is not None or self._leader_reaped_event.is_set())
+                    # Check known members before a potentially slow full procfs scan so
+                    # an already-visible memory breach can stop the launch immediately.
+                    live = self._track_work(lambda: self._update_family(rows))
+                    breach = self.table.resident_memory_limit_breach(
+                        live, self.memory_bytes)
+                    now = time.monotonic()
+                    if (not breach and platform.system() == "Linux"
+                            and (now >= self._next_full_process_scan or leader_exited)):
+                        rows.update(self._snapshot())
+                        self._next_full_process_scan = (
+                            time.monotonic() + FULL_PROCESS_SCAN_INTERVAL_SECONDS)
+                        # Recheck the expanded set after the scan finds new processes.
+                        live = self._track_work(lambda: self._update_family(rows))
+                        breach = self.table.resident_memory_limit_breach(
+                            live, self.memory_bytes)
+                        post_exit_scan_completed = leader_exited
+                except (OSError, RuntimeError, ValueError) as error:
+                    self._record_error(error)
+                    self._stop_launch_unit()
+                    return
+                if breach:
+                    self.process.memory_limit_killed = True
+                    self.process.memory_limit_reason = breach
+                    self._stop_launch_unit()
+                    return
+                if leader_exited:
+                    # The bwrap PID namespace kills its members when its init exits.
+                    # In the no-namespace fallback, stop every descendant recorded by
+                    # the launch-unit scan before the check can report completion.
+                    if live:
+                        self._stop_launch_unit()
+                    else:
+                        self.family_verified_empty = post_exit_scan_completed
+                        if self.family_verified_empty:
+                            self.containment_verified = True
+                    return
+                self._stopped.wait(0.02)
+        except BaseException as error:
+            self._record_error(error)
+        finally:
+            if self.process.returncode is not None:
+                self._leader_exit_processed.set()
+
+
+def _transient_cgroup_cleanup_error(error: OSError) -> bool:
+    return error.errno in {
+        errno.EBUSY, errno.EAGAIN, errno.EINTR, errno.ENOTEMPTY,
+    }
+
+
+def _remove_command_cgroup(cgroup: Path) -> bool:
+    """Remove an empty per-command cgroup, retrying transient cleanup failures."""
+    last_error: OSError | UnicodeError | None = None
+    last_reason = "unknown error"
+    attempts = 0
+    for attempt in range(CGROUP_CLEANUP_ATTEMPTS):
+        attempts = attempt + 1
+        if not cgroup.exists():
+            return True
+        members: str | None
+        try:
+            members = (cgroup / "cgroup.procs").read_text(encoding="ascii")
+        except OSError as error:
+            if error.errno == errno.ENOENT:
+                if not cgroup.exists():
+                    return True
+                # A delegated group can disappear between the stat and read, or
+                # its control file can be unavailable while the directory remains.
+                members = ""
+            else:
+                last_error = error
+                if not cgroup.exists():
+                    return True
+                if not _transient_cgroup_cleanup_error(error):
+                    break
+                members = None
+        except UnicodeError as error:
+            last_error = error
+            break
+        if members is not None:
+            if members.split():
+                last_error = None
+                last_reason = "cgroup.procs is not empty"
+            else:
+                try:
+                    cgroup.rmdir()
+                    return True
+                except OSError as error:
+                    if error.errno == errno.ENOENT:
+                        return True
+                    last_error = error
+                    if not cgroup.exists():
+                        return True
+                    if not _transient_cgroup_cleanup_error(error):
+                        break
+        if attempt + 1 < CGROUP_CLEANUP_ATTEMPTS:
+            time.sleep(CGROUP_CLEANUP_INTERVAL_SECONDS)
+    _LOGGER.error(
+        "unable to remove per-command cgroup %s after %d attempts (%s)",
+        cgroup.name, attempts,
+        type(last_error).__name__ if last_error is not None else last_reason,
+    )
+    return False
 
 
 def _prepared(command: Sequence[object], root: Path, env: Mapping[object, object] | None,
@@ -325,21 +834,229 @@ def sandboxed_popen(command: Sequence[object], root: str | os.PathLike[str], *,
         isolation_builder=isolation_builder,
         read_grants_out=read_grants_out)
     factory = popen_factory or subprocess.Popen
-    process = factory(
-        command_line,
-        cwd=str(contained),
-        env=clean,
-        stdin=stdin,
-        stdout=stdout,
-        stderr=stderr,
-        shell=False,
-        start_new_session=True,
-        pass_fds=tuple(pass_fds),
-        preexec_fn=_resource_preexec(cpu_seconds, memory_bytes, file_bytes, nofile, nproc, cgroup)
-        if os.name != "nt" else None,
-    )
+    memory_reader = memory_writer = None
+    report_memory = os.name != "nt" and factory is subprocess.Popen
+    inherited_fds = tuple(pass_fds)
+    if report_memory:
+        try:
+            memory_reader, memory_writer = os.pipe()
+            os.set_inheritable(memory_writer, True)
+            inherited_fds = tuple(dict.fromkeys((*inherited_fds, memory_writer)))
+        except OSError as error:
+            for fd in (memory_reader, memory_writer):
+                if fd is not None:
+                    os.close(fd)
+            raise ExecutionPolicyError("cannot establish memory limit reporting channel") from error
+    try:
+        process = factory(
+            command_line,
+            cwd=str(contained),
+            env=clean,
+            stdin=stdin,
+            stdout=stdout,
+            stderr=stderr,
+            shell=False,
+            start_new_session=True,
+            pass_fds=inherited_fds,
+            preexec_fn=_resource_preexec(
+                cpu_seconds, memory_bytes, file_bytes, nofile, nproc, cgroup,
+                memory_report_fd=memory_writer)
+            if os.name != "nt" else None,
+        )
+    except BaseException:
+        for fd in (memory_reader, memory_writer):
+            if fd is not None:
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
+        raise
+    if memory_writer is not None:
+        os.close(memory_writer)
     capture_launch_identity(process, session_leader=True)
+    if memory_reader is not None:
+        try:
+            marker = os.read(memory_reader, 1)
+        finally:
+            os.close(memory_reader)
+        mechanisms = {b"C": "cgroup_memory_max", b"D": "rlimit_data", b"A": "rlimit_as"}
+        mechanism = mechanisms.get(marker)
+        if mechanism is None:
+            _kill_group(process)
+            try:
+                process.wait(timeout=2)
+            except (OSError, subprocess.TimeoutExpired):
+                pass
+            raise ExecutionPolicyError("sandbox child did not report its memory limit mechanism")
+        process.memory_limit_mechanism = mechanism
+    if (platform.system() == "Linux"
+            and policy_memory_limit_mechanism(process) == "rlimit_data"):
+        process.memory_limit_mechanism = "rlimit_data+rss_supervisor"
+        process.memory_limit_killed = False
+        process.memory_limit_reason = None
+        try:
+            supervisor = _ResidentMemorySupervisor(process, memory_bytes)
+            process._stateframe_memory_supervisor = supervisor
+            supervisor.start()
+        except (ExecutionPolicyError, OSError, RuntimeError, ValueError) as error:
+            _kill_group(process)
+            try:
+                process.wait(timeout=2)
+            except (OSError, subprocess.TimeoutExpired):
+                pass
+            raise ExecutionPolicyError(
+                "cannot establish resident-memory supervision for RLIMIT_DATA fallback") from error
     return process, report
+
+
+def finish_supervision(process: subprocess.Popen[bytes], timeout: float = 3.0) -> None:
+    """Verify post-exit RSS supervision for a completed direct sandbox launch."""
+    supervisor = getattr(process, "_stateframe_memory_supervisor", None)
+    if supervisor is None:
+        return
+
+    completion_lock = getattr(supervisor, "_completion_lock", None)
+    if completion_lock is None:
+        completion_lock = threading.Lock()
+        try:
+            supervisor._completion_lock = completion_lock
+        except (AttributeError, TypeError):
+            pass
+    with completion_lock:
+        if getattr(supervisor, "_completion_verified", False):
+            return
+        prior_failure = getattr(supervisor, "_completion_failure", None)
+        if isinstance(prior_failure, ContainmentUnverified):
+            raise prior_failure from prior_failure.__cause__
+
+        if getattr(process, "returncode", None) is None:
+            reason = "resident-memory supervision completion requested before process exit"
+            failure = ContainmentUnverified(f"containment unverified: {reason}")
+            raise failure from RuntimeError(reason)
+
+        reap_error: BaseException | None = None
+        if not getattr(supervisor, "_leader_reaped", False):
+            notify_reaped = getattr(supervisor, "notify_leader_reaped", None)
+            if not callable(notify_reaped):
+                reap_error = RuntimeError("resident-memory supervisor cannot record leader reap")
+            else:
+                try:
+                    notify_reaped()
+                except BaseException as error:
+                    reap_error = error
+
+        finish = getattr(supervisor, "finish", None)
+        if not callable(finish):
+            reason = "resident-memory supervisor has no completion verifier"
+            cause = reap_error if reap_error is not None else RuntimeError(reason)
+            _raise_supervision_failure(supervisor, reason, cause)
+        try:
+            stopped = finish(timeout=timeout)
+        except BaseException as error:
+            try:
+                finish(timeout=0.1, wait_for_post_exit=False)
+            except BaseException:
+                pass
+            reason = f"resident-memory supervisor completion raised {type(error).__name__}"
+            _raise_supervision_failure(supervisor, reason, error)
+
+        supervisor_error = getattr(supervisor, "error", None)
+        if reap_error is not None or not stopped or supervisor_error:
+            reason = (str(reap_error) if reap_error is not None else
+                      (getattr(supervisor, "finish_error", None) if not stopped else None)
+                      or supervisor_error
+                      or "resident-memory supervisor did not verify cleanup")
+            cause_candidate = reap_error or getattr(supervisor, "_error_cause", None)
+            cause = (cause_candidate if isinstance(cause_candidate, BaseException) else None)
+            _raise_supervision_failure(supervisor, str(reason), cause)
+
+        supervisor._completion_verified = True
+
+
+def _raise_supervision_failure(supervisor: object, reason: str,
+                               cause: BaseException | None) -> None:
+    if not isinstance(cause, BaseException):
+        cause = RuntimeError(reason)
+    failure = ContainmentUnverified(f"containment unverified: {reason}")
+    try:
+        setattr(supervisor, "_completion_failure", failure)
+    except (AttributeError, TypeError):
+        pass
+    raise failure from cause
+
+
+@contextmanager
+def supervised_process(process: subprocess.Popen[bytes], timeout: float = 3.0
+                       ) -> Iterator[subprocess.Popen[bytes]]:
+    """Bound launch cleanup and verify RSS supervision before closing its pipes."""
+    def cleanup() -> BaseException | None:
+        cleanup_error: BaseException | None = None
+        poll = getattr(process, "poll", None)
+        try:
+            still_running = (poll() is None if callable(poll)
+                            else getattr(process, "returncode", None) is None)
+        except BaseException as error:
+            still_running = True
+            cleanup_error = error
+
+        if still_running:
+            try:
+                supervisor = getattr(process, "_stateframe_memory_supervisor", None)
+                family = getattr(supervisor, "family", None)
+                identity = getattr(supervisor, "launch_identity", None)
+                cleaned = (_kill_group(process, family, launch_identity=identity)
+                           if supervisor is not None else _kill_group(process))
+                if not cleaned:
+                    raise ContainmentUnverified(
+                        "containment unverified: launch unit survived context exit")
+            except BaseException as error:
+                if cleanup_error is None:
+                    cleanup_error = error
+
+        # The launch-unit path reaps a killed leader. For an already-exited
+        # child, poll above does the same nonblocking observation before finish.
+        if callable(poll):
+            try:
+                poll()
+            except BaseException as error:
+                if cleanup_error is None:
+                    cleanup_error = error
+        try:
+            finish_supervision(process, timeout=timeout)
+        except BaseException as error:
+            if cleanup_error is None:
+                cleanup_error = error
+
+        for stream in (getattr(process, "stdin", None), getattr(process, "stdout", None),
+                       getattr(process, "stderr", None)):
+            if stream is not None:
+                try:
+                    stream.close()
+                except BaseException as error:
+                    if cleanup_error is None:
+                        cleanup_error = error
+        wait = getattr(process, "wait", None)
+        if callable(wait):
+            try:
+                wait(timeout=max(0.0, timeout))
+            except BaseException as error:
+                if cleanup_error is None:
+                    cleanup_error = error
+        elif getattr(process, "returncode", None) is None and cleanup_error is None:
+            cleanup_error = TypeError("supervised process has no bounded wait method")
+        return cleanup_error
+
+    try:
+        yield process
+    except BaseException as original_error:
+        cleanup_error = cleanup()
+        if cleanup_error is not None:
+            raise original_error from cleanup_error
+        raise
+    else:
+        cleanup_error = cleanup()
+        if cleanup_error is not None:
+            raise cleanup_error
 
 
 def _trace_mark(trace: dict[str, int] | None, name: str) -> None:
@@ -350,7 +1067,9 @@ def _trace_mark(trace: dict[str, int] | None, name: str) -> None:
 def _collect(process: subprocess.Popen[bytes], input_data: bytes | None, deadline: float,
              output_limit: int, *, observer_fd: int | None = None,
              observer_buffer: bytearray | None = None,
-             trace: dict[str, int] | None = None) -> tuple[str, str, bool, bool, bool]:
+             trace: dict[str, int] | None = None,
+             on_leader_reaped: Callable[[], None] | None = None
+             ) -> tuple[str, str, bool, bool, bool]:
     if input_data is not None and len(input_data) > MAX_INPUT_BYTES:
         raise ExecutionPolicyError("child input exceeds the policy bound")
     selector = selectors.DefaultSelector()
@@ -500,6 +1219,8 @@ def _collect(process: subprocess.Popen[bytes], input_data: bytes | None, deadlin
                 time.sleep(.02)
             group_killed = True
     process.wait(timeout=1)
+    if on_leader_reaped is not None:
+        on_leader_reaped()
     if trace is not None:
         _trace_mark(trace, "child_exit_observed_ns")
     return (
@@ -557,7 +1278,9 @@ def run_sandboxed(command: Sequence[object], root: str | os.PathLike[str], *,
             child_internal_env.pop(_PROFILE_FD_ENV, None)
     if trace is not None:
         trace["sandbox_spawn_start_ns"] = time.monotonic_ns()
-    cgroup = _command_cgroup(uuid.uuid4().hex, nproc_budget) if nproc_budget is not None else None
+    cgroup = (_command_cgroup(uuid.uuid4().hex, nproc_budget, memory_bytes=memory_bytes)
+              if nproc_budget is not None else None)
+    child_reaped = False
     read_grants: list[SandboxReadGrants] = []
     try:
         spawn_options = {
@@ -583,10 +1306,7 @@ def run_sandboxed(command: Sequence[object], root: str | os.PathLike[str], *,
                 except OSError:
                     pass
         if cgroup is not None:
-            try:
-                cgroup.rmdir()
-            except OSError:
-                pass
+            _remove_command_cgroup(cgroup)
         raise
     if trace is not None:
         trace["sandbox_spawn_complete_ns"] = time.monotonic_ns()
@@ -598,15 +1318,55 @@ def run_sandboxed(command: Sequence[object], root: str | os.PathLike[str], *,
         profile_writer = None
     try:
         deadline = time.monotonic() + timeout
+        memory_supervisor = getattr(process, "_stateframe_memory_supervisor", None)
+        on_leader_reaped = getattr(memory_supervisor, "notify_leader_reaped", None)
+        if callable(on_leader_reaped):
+            expect_reap = getattr(memory_supervisor, "expect_collector_reap", None)
+            if callable(expect_reap):
+                expect_reap()
+        collect_options = ({"on_leader_reaped": on_leader_reaped}
+                           if callable(on_leader_reaped) else {})
         if trace is None:
             stdout, stderr, timed_out, truncated, group_killed = _collect(
-                process, payload, deadline, output_limit)
+                process, payload, deadline, output_limit, **collect_options)
         else:
             stdout, stderr, timed_out, truncated, group_killed = _collect(
                 process, payload, deadline, output_limit,
-                observer_fd=profile_reader, observer_buffer=profile_buffer, trace=trace)
-    except BaseException:
-        _kill_group(process)
+                observer_fd=profile_reader, observer_buffer=profile_buffer, trace=trace,
+                **collect_options)
+        finish_supervision(process, timeout=3.0)
+        child_reaped = True
+    except BaseException as original_error:
+        memory_supervisor = getattr(process, "_stateframe_memory_supervisor", None)
+        if memory_supervisor is not None:
+            memory_supervisor.finish(timeout=0.1, wait_for_post_exit=False)
+        cleanup_error: BaseException | None = None
+        if not (memory_supervisor is not None and memory_supervisor.containment_verified):
+            try:
+                if memory_supervisor is None:
+                    cleaned = _kill_group(process)
+                else:
+                    cleaned = _kill_group(
+                        process, memory_supervisor.family,
+                        launch_identity=memory_supervisor.launch_identity,
+                    )
+                if not cleaned:
+                    cleanup_error = ContainmentUnverified(
+                        "containment unverified: launch-unit survivors remain after cleanup")
+            except BaseException as error:
+                cleanup_error = error
+        try:
+            process.wait(timeout=2)
+            child_reaped = True
+        except (OSError, subprocess.TimeoutExpired):
+            child_reaped = process.returncode is not None
+        else:
+            if memory_supervisor is not None:
+                on_leader_reaped = getattr(memory_supervisor, "notify_leader_reaped", None)
+                if callable(on_leader_reaped):
+                    on_leader_reaped()
+        if cleanup_error is not None:
+            raise cleanup_error from original_error
         raise
     finally:
         if profile_reader is not None:
@@ -615,10 +1375,15 @@ def run_sandboxed(command: Sequence[object], root: str | os.PathLike[str], *,
             except OSError:
                 pass
         if cgroup is not None:
-            try:
-                cgroup.rmdir()
-            except OSError:
-                pass
+            if child_reaped:
+                if not _remove_command_cgroup(cgroup):
+                    raise ContainmentUnverified(
+                        "containment unverified: per-command cgroup cleanup failed")
+            else:
+                _LOGGER.error(
+                    "retaining per-command cgroup %s because its child was not reaped",
+                    cgroup.name,
+                )
     profile_payload = bytes(profile_buffer) if profile_buffer else None
     return PolicyResult(
         completed=subprocess.CompletedProcess(
@@ -628,15 +1393,20 @@ def run_sandboxed(command: Sequence[object], root: str | os.PathLike[str], *,
         output_truncated=truncated,
         capabilities=report,
         pid=process.pid if isinstance(process.pid, int) else None,
-            execution_trace=trace or {},
+        execution_trace=trace or {},
         profile_payload=profile_payload,
         read_grants=read_grants[0] if read_grants else None,
+        memory_limit_mechanism=policy_memory_limit_mechanism(process),
+        memory_limit_killed=bool(getattr(process, "memory_limit_killed", False)),
+        memory_limit_reason=getattr(process, "memory_limit_reason", None),
+        cgroup_leaf_pattern=_cgroup_leaf_pattern_status(),
     )
 
 
 __all__ = [
     "CapabilityReport", "DEFAULT_CPU_SECONDS", "DEFAULT_FILE_BYTES",
     "DEFAULT_MEMORY_BYTES", "ExecutionPolicyError", "MAX_OUTPUT_BYTES",
-    "PolicyResult", "available", "capability_report", "policy_read_grants", "require_capabilities",
-    "run_sandboxed", "sandboxed_popen",
+    "PolicyResult", "available", "capability_report", "policy_memory_limit_mechanism",
+    "finish_supervision", "policy_read_grants", "require_capabilities",
+    "run_sandboxed", "sandboxed_popen", "supervised_process",
 ]

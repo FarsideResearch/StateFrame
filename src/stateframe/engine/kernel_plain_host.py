@@ -72,6 +72,7 @@ class CheckOutcome:
     timed_out: bool = False
     synthetic: bool = False
     error: str = ""
+    cgroup_leaf_pattern: str | None = None
 
 
 CheckRunner = Callable[[Sequence[str], Path, Mapping[str, str]], CheckOutcome]
@@ -126,7 +127,9 @@ class PlainHost:
             raise PlainContractError("shell call has no wire identity")
         reply = shell.execute(args, self._tool_call_id)
         self.journal.write("shell_effect", observation=reply.observation,
-                           effects=[{"path": e.path, "change": e.change} for e in reply.applied])
+                           effects=[{"path": e.path, "change": e.change} for e in reply.applied],
+                           **({"cgroup_leaf_pattern": reply.cgroup_leaf_pattern}
+                              if reply.cgroup_leaf_pattern else {}))
         for effect in reply.applied:
             self._edit_receipt("shell", effect.path, "product", True,
                                effect.before.digest if effect.before else "absent",
@@ -253,9 +256,15 @@ class PlainHost:
         if profile:
             with profile.span("first_receipt"):
                 self.journal.write("check_receipt", receipt=asdict(receipt),
-                                   execution_id=profile.execution_id)
+                                   execution_id=profile.execution_id,
+                                   **({"cgroup_leaf_pattern": outcome.cgroup_leaf_pattern}
+                                      if outcome.cgroup_leaf_pattern else {}))
         else:
-            self.journal.receipt("check_receipt", receipt)
+            self.journal.receipt(
+                "check_receipt", receipt,
+                **({"cgroup_leaf_pattern": outcome.cgroup_leaf_pattern}
+                   if outcome.cgroup_leaf_pattern else {}),
+            )
         if profile:
             with profile.span("final_result_enrichment"):
                 if outcome.timed_out:
@@ -374,6 +383,8 @@ def sandboxed_check_runner(lock_path: Path, audit_path: Path, *,
                     outcome = execute(preflight_argv, root)
                 canary_receipt = {"argv": list(preflight_argv[1:]), "exit_code": outcome.exit_code,
                                   "timed_out": outcome.timed_out}
+                if outcome.cgroup_leaf_pattern:
+                    canary_receipt["cgroup_leaf_pattern"] = outcome.cgroup_leaf_pattern
                 if profile:
                     canary_receipt["execution_id"] = profile.execution_id
                 on_preflight(canary_receipt)
@@ -430,6 +441,10 @@ def sandboxed_check_runner(lock_path: Path, audit_path: Path, *,
                             result.execution_trace, result.profile_payload,
                             stdout=result.completed.stdout, stderr=result.completed.stderr,
                             returncode=result.completed.returncode,
+                            memory_limit_mechanism=getattr(
+                                result, "memory_limit_mechanism", None),
+                            cgroup_leaf_pattern=getattr(
+                                result, "cgroup_leaf_pattern", None),
                         )
                     except Exception:  # profiler data is advisory
                         pass
@@ -444,7 +459,8 @@ def sandboxed_check_runner(lock_path: Path, audit_path: Path, *,
             stderr = stderr.decode("utf-8", "replace")
         note = "\n[output truncated by the host]" if result.output_truncated else ""
         return CheckOutcome(exit_code=None if result.timed_out else result.completed.returncode,
-                            output=stdout + stderr + note, timed_out=bool(result.timed_out))
+                            output=stdout + stderr + note, timed_out=bool(result.timed_out),
+                            cgroup_leaf_pattern=getattr(result, "cgroup_leaf_pattern", None))
 
     return run
 
