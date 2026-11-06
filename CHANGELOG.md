@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.4.35 (2026-11-05)
 
 - `str_replace` no longer advertises an `edits` field its step contract always refused (one known case of a model trying it); requests are 28 bytes smaller and the opt-in batch form is removed. A new guard checks that every tool schema offered to the model is accepted by its step contract.
 
