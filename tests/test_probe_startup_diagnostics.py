@@ -8,6 +8,7 @@ import signal
 import socket
 import sys
 import time
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -21,6 +22,7 @@ from fixtures.process_signals import (
 from stateframe import runner
 from stateframe.engine import kernel_exec_session, kernel_safe_probe
 from stateframe.engine.kernel_exec_session import ExecSession, ExecSessionError
+from stateframe.engine.kernel_exec_tracker import ProcessTable
 from stateframe.engine.kernel_safe_probe import ProbeCleanupError
 from kernel_exec_session import ExecSession as SmokeExecSession
 from kernel_ship_tree_smoke import ImportSmokeCleanupError, _execute_smoke
@@ -33,31 +35,105 @@ def _retained_process_status_pattern():
 
 
 def _supervisor_command_fragment() -> str:
-    if sys.platform.startswith("linux"):
-        return "bwrap"
     return "kernel_exec_supervisor.py"
+
+
+def _linux_supervisor_pid(launcher_pid: int, *, timeout: float = 5.0) -> int:
+    """Find this bwrap launcher's supervisor, rather than signalling bwrap itself."""
+    table = ProcessTable()
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        rows = table.snapshot()
+        descendants = {launcher_pid}
+        while True:
+            children = {row.pid for row in rows.values() if row.ppid in descendants}
+            new_children = children - descendants
+            if not new_children:
+                break
+            descendants.update(new_children)
+
+        matches = []
+        for pid in sorted(descendants - {launcher_pid}):
+            try:
+                command = (Path("/proc") / str(pid) / "cmdline").read_bytes()
+            except FileNotFoundError:
+                continue
+            if b"kernel_exec_supervisor.py" in command:
+                matches.append(pid)
+        if len(matches) == 1:
+            return matches[0]
+        if len(matches) > 1:
+            raise RuntimeError("bwrap launch has multiple execution supervisors")
+        time.sleep(0.01)
+    raise RuntimeError("could not find execution supervisor below the bwrap launcher")
+
+
+def _signal_target_pid(session) -> int:
+    process = session._process
+    if process is None or process.poll() is not None:
+        raise RuntimeError("execution launcher exited before the death plant")
+    if sys.platform.startswith("linux") and session._process_role == "launcher (bwrap)":
+        return _linux_supervisor_pid(process.pid)
+    return process.pid
+
+
+def _wait_for_signal_target_exit(identity, *, timeout: float = 5.0) -> None:
+    if not sys.platform.startswith("linux"):
+        return
+    expected_start = (int(identity.kernel_identity.rsplit(":", 1)[1]), 0)
+    table = ProcessTable()
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        current = table.identity(identity.pid)
+        if current is None or current.start != expected_start or current.zombie:
+            return
+        time.sleep(0.01)
+    raise RuntimeError(f"retained supervisor {identity.pid} remained live after SIGKILL")
+
+
+def _plant_supervisor_death(session, *, launched_after: float) -> None:
+    """Kill and reap the supervisor, failing the test as setup if that cannot be proved."""
+    binding = None
+    try:
+        target_pid = _signal_target_pid(session)
+        identity = record_identity(
+            target_pid, launched_after=launched_after,
+            command_fragment=_supervisor_command_fragment())
+        binding = retain_signal_binding(identity)
+        signal_bound(binding, signal.SIGKILL)
+        _wait_for_signal_target_exit(identity)
+        session._process.wait(timeout=5)
+    except Exception as error:
+        cleanup_error = None
+        try:
+            session.close()
+        except Exception as close_error:
+            cleanup_error = close_error
+        detail = f"setup: could not plant supervisor death: {type(error).__name__}: {error}"
+        if cleanup_error is not None:
+            detail += f"; session cleanup failed: {type(cleanup_error).__name__}: {cleanup_error}"
+        pytest.fail(detail, pytrace=False)
+    finally:
+        if binding is not None:
+            try:
+                close_signal_binding(binding)
+            except Exception as error:
+                pytest.fail(
+                    f"setup: could not close retained supervisor binding: "
+                    f"{type(error).__name__}: {error}",
+                    pytrace=False)
 
 
 @pytest.mark.host_sandbox
 def test_supervisor_death_before_start_keeps_exit_status_log_tail_and_base_error(
         monkeypatch, tmp_path):
     marker = "planted supervisor log tail"
-    command_fragment = _supervisor_command_fragment()
 
     class DiedBeforeStartSession(ExecSession):
         def _rpc(self, request):
             if request.get("op") == "start" and not getattr(self, "_death_planted", False):
                 self._death_planted = True
-                if self._process.poll() is None:
-                    identity = record_identity(
-                        self._process.pid, launched_after=launched_after,
-                        command_fragment=command_fragment)
-                    binding = retain_signal_binding(identity)
-                    try:
-                        signal_bound(binding, signal.SIGKILL)
-                    finally:
-                        close_signal_binding(binding)
-                self._process.wait(timeout=5)
+                _plant_supervisor_death(self, launched_after=launched_after)
                 self._log.write((marker + "\n").encode())
             return super()._rpc(request)
 
@@ -279,22 +355,12 @@ def test_rpc_failure_keeps_exact_leading_message_and_appends_diagnostics(
 @pytest.mark.host_sandbox
 def test_import_smoke_supervisor_death_includes_diagnostics(monkeypatch, tmp_path):
     marker = "planted import smoke supervisor log tail"
-    command_fragment = _supervisor_command_fragment()
 
     class DiedBeforeStartSession(SmokeExecSession):
         def _rpc(self, request):
             if request.get("op") == "start" and not getattr(self, "_death_planted", False):
                 self._death_planted = True
-                if self._process.poll() is None:
-                    identity = record_identity(
-                        self._process.pid, launched_after=launched_after,
-                        command_fragment=command_fragment)
-                    binding = retain_signal_binding(identity)
-                    try:
-                        signal_bound(binding, signal.SIGKILL)
-                    finally:
-                        close_signal_binding(binding)
-                self._process.wait(timeout=5)
+                _plant_supervisor_death(self, launched_after=launched_after)
                 self._log.write((marker + "\n").encode())
             return super()._rpc(request)
 
