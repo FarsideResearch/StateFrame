@@ -470,6 +470,96 @@ MOVED_ID_FIELDS = frozenset({
 DERIVED_RESULT_FIELDS = frozenset({"result_sha256(tool_result)"})
 
 
+_STR_REPLACE_DESCRIPTION = (
+    "Exact text replacement in a path listed by the single EditAuthority. "
+    "The old text must match the current file exactly once."
+)
+_STR_REPLACE_SCALAR = {
+    "type": "object", "properties": {
+        "path": {"type": "string", "description":
+                 "Declared product file path; the single EditAuthority lists eligible paths."},
+        "old_str": {"type": "string"},
+        "new_str": {"type": "string"},
+        "why": {"type": "string", "description":
+                "one line: what you expect this action to show or achieve, "
+                "and how it serves your current plan"},
+        "operation": {"type": "string", "enum": ["replace"], "description":
+                      "Exact text replacement; insertion and move need a host-issued anchor."},
+    }, "required": ["new_str", "old_str", "path"], "additionalProperties": True,
+}
+_SCALAR_STR_REPLACE = {"type": "function", "function": {
+    "name": "str_replace", "description": _STR_REPLACE_DESCRIPTION,
+    "parameters": _STR_REPLACE_SCALAR,
+}}
+# The c269622 model-facing projection advertised a batch argument as an optional
+# edits array. The source also defined a batch oneOf branch, but these release
+# request captures contain this projected form; match every field exactly.
+_OLD_BATCH_STR_REPLACE = {"type": "function", "function": {
+    "name": "str_replace", "description": _STR_REPLACE_DESCRIPTION,
+    "parameters": {**_STR_REPLACE_SCALAR, "properties": {
+        **_STR_REPLACE_SCALAR["properties"], "edits": {"type": "array"},
+    }},
+}}
+
+
+def _str_replace_span(body: bytes) -> tuple[int, int, dict] | None:
+    """Locate the one top-level str_replace entry without reserializing other wire bytes."""
+    source = body.decode("utf-8")
+    request = json.loads(source)
+    if not isinstance(request, dict) or not isinstance(request.get("tools"), list):
+        return None
+    matches = list(re.finditer(r'(?<!\\)"tools"\s*:\s*\[', source))
+    if len(matches) != 1:
+        return None
+    decoder = json.JSONDecoder()
+    start = matches[0].end() - 1
+    tools, _ = decoder.raw_decode(source, start)
+    if tools != request["tools"]:
+        return None
+    cursor = start + 1
+    found = []
+    for tool in tools:
+        while source[cursor].isspace() or source[cursor] == ",":
+            cursor += 1
+        entry_start = cursor
+        parsed, cursor = decoder.raw_decode(source, cursor)
+        if parsed != tool:
+            return None
+        if isinstance(tool, dict) and isinstance(tool.get("function"), dict) \
+                and tool["function"].get("name") == "str_replace":
+            found.append((entry_start, cursor, tool))
+    return found[0] if len(found) == 1 else None
+
+
+def _old_batch_schema_to_scalar(old: dict, new: dict) -> bool:
+    return old == _OLD_BATCH_STR_REPLACE and new == _SCALAR_STR_REPLACE
+
+
+def release_request_schema_alignment(before: list[bytes], after: list[bytes]) -> list[bytes]:
+    """Align only the c269622 str_replace batch removal in baseline request bytes.
+
+    Once the base release already advertises the scalar schema, remove this allowance.
+    Every byte outside the verified old tool entry is preserved.
+    """
+    if len(before) != len(after):
+        return before
+    aligned = []
+    for old, new in zip(before, after):
+        old_span, new_span = _str_replace_span(old), _str_replace_span(new)
+        if old_span is not None and new_span is not None \
+                and _old_batch_schema_to_scalar(old_span[2], new_span[2]):
+            old_text, new_text = old.decode("utf-8"), new.decode("utf-8")
+            old = (old_text[:old_span[0]] + new_text[new_span[0]:new_span[1]]
+                   + old_text[old_span[1]:]).encode("utf-8")
+        aligned.append(old)
+    return aligned
+
+
+def release_wire_id_drift(before: list[bytes], after: list[bytes]) -> tuple[list[str], dict[str, int]]:
+    """Retain ordinary wire-ID parity after the one guarded schema alignment."""
+    return wire_id_drift(release_request_schema_alignment(before, after), after)
+
+
 def wire_id_drift(before: list[bytes], after: list[bytes]) -> tuple[list[str], dict[str, int]]:
     """Problems outside declared generated fields, plus which fields changed.
 

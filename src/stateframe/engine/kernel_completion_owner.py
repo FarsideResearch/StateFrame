@@ -4999,7 +4999,7 @@ def _registry_schemas() -> tuple[tuple[str, dict[str, object]], ...]:
     add("list_files", {**string("path"), **integer("depth", "limit")})
     add("read", {**string("path", "cursor"), **integer("line", "column", "max_lines", "max_chars", "page_size")}, ("path",))
     add("edit", {**string("path", "function_source", "target_ref")}, ("path", "function_source"))
-    add("str_replace", {**string("path", "old_str", "new_str"), "edits": {"type": "array"}}, ("path", "old_str", "new_str"))
+    add("str_replace", {**string("path", "old_str", "new_str")}, ("path", "old_str", "new_str"))
     add("file_create", {**string("path", "content")}, ("path", "content"))
     add("file_delete", {**string("path", "why")}, ("path",))
     add("file_move", {**string("source", "destination", "why")}, ("source", "destination"))

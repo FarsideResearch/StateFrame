@@ -207,6 +207,50 @@ def test_wire_id_drift_names_moved_fields_and_rejects_other_changes(tmp_path):
     assert request_id_handle_mismatches(run)
 
 
+def test_release_str_replace_allowance_is_exactly_the_old_batch_schema():
+    from tools.compare_no_mcp_requests import release_wire_id_drift
+
+    scalar = {"type": "object", "properties": {
+        "path": {"type": "string", "description":
+                 "Declared product file path; the single EditAuthority lists eligible paths."},
+        "old_str": {"type": "string"}, "new_str": {"type": "string"},
+        "why": {"type": "string", "description":
+                "one line: what you expect this action to show or achieve, "
+                "and how it serves your current plan"},
+        "operation": {"type": "string", "enum": ["replace"], "description":
+                      "Exact text replacement; insertion and move need a host-issued anchor."},
+    }, "required": ["new_str", "old_str", "path"], "additionalProperties": True}
+    description = ("Exact text replacement in a path listed by the single EditAuthority. "
+                   "The old text must match the current file exactly once.")
+    old_tool = {"type": "function", "function": {"name": "str_replace",
+        "description": description, "parameters": {**scalar, "properties": {
+            **scalar["properties"], "edits": {"type": "array"}}}}}
+    new_tool = {"type": "function", "function": {"name": "str_replace",
+        "description": description, "parameters": scalar}}
+    other = {"type": "function", "function": {"name": "read", "parameters": {"type": "object"}}}
+
+    def body(tool, *, other_tool=other, task="same"):
+        return json.dumps({"model": "scripted", "tools": [other_tool, tool],
+                           "messages": [{"role": "user", "content": task}]},
+                          separators=(",", ":")).encode()
+
+    baseline, current = body(old_tool), body(new_tool)
+    assert release_wire_id_drift([baseline], [current]) == ([], {})
+    assert release_wire_id_drift([current], [current]) == ([], {})
+    assert release_wire_id_drift([baseline, baseline], [current])[0]
+    assert release_wire_id_drift([baseline], [body(new_tool, task="changed")])[0]
+    changed_other = {**other, "function": {**other["function"], "description": "changed"}}
+    assert release_wire_id_drift([baseline], [body(new_tool, other_tool=changed_other)])[0]
+    missing_required = {**scalar, "required": ["path", "old_str"]}
+    altered_candidate = {**new_tool, "function": {**new_tool["function"],
+                                                   "parameters": missing_required}}
+    assert release_wire_id_drift([baseline], [body(altered_candidate)])[0]
+    altered_batch = {**old_tool["function"]["parameters"], "required": ["edits"]}
+    altered_baseline = {**old_tool, "function": {**old_tool["function"],
+        "parameters": altered_batch}}
+    assert release_wire_id_drift([body(altered_baseline)], [current])[0]
+
+
 def test_applied_edit_history_digest_masks_only_its_declared_path():
     """The pruned-row digest contains generated IDs; adjacent data remains visible."""
     import json

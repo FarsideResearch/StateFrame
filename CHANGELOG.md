@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.4.35 (2026-11-05)
+
+- `str_replace` no longer advertises an `edits` field its step contract always refused (one known case of a model trying it); requests are 28 bytes smaller and the opt-in batch form is removed. A new guard checks that every tool schema offered to the model is accepted by its step contract.
+
 ## 0.4.34 (2026-11-05)
 
 - When a provider rejects a request for exceeding its context limit (a recognized HTTP 400), StateFrame now refits the request to the reported limit and retries once. If it still cannot fit, the run stops and the summary says why.
