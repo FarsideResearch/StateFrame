@@ -1,4 +1,4 @@
-[![StateFrame: persistent agents, real progress](docs/assets/stateframe-banner.webp)](https://farsideresearch.com/open-source/stateframe)
+[![StateFrame by Farside Research: built for bigger models and more agents per GPU, with flat context, predictable token budgets and engine-checked work.](docs/assets/stateframe-banner-tight-logo.webp)](https://farsideresearch.com/open-source/stateframe)
 
 # StateFrame
 
