@@ -3520,7 +3520,7 @@ def ask_tools(messages, mt=4000, temp=None, tools=None, known_refs=None):
             # for recovery instead of spending attempts on a dead endpoint.  An
             # HTTPError carries a real status from a LIVE server: never await it.
             if _is_connection_failure(_te):
-                print(f"    [kernel-wiring] endpoint failure ({type(_te).__name__}) — "
+                print(f"    [stateframe] endpoint failure ({type(_te).__name__}) — "
                       f"awaiting recovery")
                 if _await_endpoint(*_failed_request_destination(capture)):
                     continue                     # recovered: retry, attempt not wasted
@@ -4870,7 +4870,7 @@ def _host_refusal_observation(runtime, refusal: "_HostExecutionRefused", *, sele
                          error_type=type(refusal.error).__name__, detail=detail,
                          selector=selector[:300], dispatch=False)
         except Exception as emit_error:                              # noqa: BLE001
-            print(f"    [kernel-wiring] run_tests_host_refused emit failed: "
+            print(f"    [stateframe] run_tests_host_refused emit failed: "
                   f"{type(emit_error).__name__}")
     try:
         from kernel_check_truth_adapter import record_native_observation
@@ -6592,7 +6592,7 @@ def work(d, *, resume=None):
             bolt.world = WorldKnowledgeStore(sandbox_id=d["sha"][:8])
         except Exception as _e:                                      # noqa: BLE001
             bolt.world = None
-            print(f"    [kernel-wiring] world cache OFF: {type(_e).__name__}: {_e}")
+            print(f"    [stateframe] world cache OFF: {type(_e).__name__}: {_e}")
         bolt.product_edits = 0        # E307: the done-gate's test-only-edits evidence
         bolt.target_path = d["rel"]   # E313: get_sure orientation target
         # E317 test-navigation oracle: names of the discriminating regression nodes and
@@ -6612,7 +6612,7 @@ def work(d, *, resume=None):
             bolt.f2p_names = ()
             bolt.f2p_ids = ()
             bolt.oracle_file_ids = ()
-            print(f"    [kernel-wiring] f2p name resolution failed (nav oracle OFF): "
+            print(f"    [stateframe] f2p name resolution failed (nav oracle OFF): "
                   f"{type(_e).__name__}: {_e}")
         bolt.oracle_preflight = {} if information.strict else d.get("_oracle_preflight", {})
         bolt.f2p_inworld = ()
@@ -6641,7 +6641,7 @@ def work(d, *, resume=None):
                             _inworld.add(f"{_tf.relative_to(root)}::{_n}")
                 bolt.f2p_inworld = tuple(_inworld)
             except Exception as _e:                                  # noqa: BLE001
-                print(f"    [kernel-wiring] in-world f2p scan failed (held-out msgs "
+                print(f"    [stateframe] in-world f2p scan failed (held-out msgs "
                       f"only): {type(_e).__name__}: {_e}")
         bolt._rec("gate", "nav_armed",
                   f"names={len(bolt.f2p_names)} inworld={len(bolt.f2p_inworld)}")
@@ -6673,35 +6673,35 @@ def work(d, *, resume=None):
                                       organ_out=bolt.organ_out)
         except Exception as _e:                                      # noqa: BLE001
             bolt.sem = None
-            print(f"    [kernel-wiring] semantic bridge OFF: {type(_e).__name__}: {_e}")
+            print(f"    [stateframe] semantic bridge OFF: {type(_e).__name__}: {_e}")
         # E350: vitals EKG (behavioral early warning; degrades to None cleanly).
         try:
             from kernel_vitals import VitalsEKG
             bolt.ekg = VitalsEKG()
         except Exception as _e:                                      # noqa: BLE001
             bolt.ekg = None
-            print(f"    [kernel-wiring] vitals EKG OFF: {type(_e).__name__}: {_e}")
+            print(f"    [stateframe] vitals EKG OFF: {type(_e).__name__}: {_e}")
         # E342: hypothesis tracker (kill-list/frontier; degrades to None cleanly).
         try:
             from kernel_hypotheses import HypothesisTracker
             bolt.hyp = HypothesisTracker(d["sha"][:8], trace_cb=bolt._rec)
         except Exception as _e:                                      # noqa: BLE001
             bolt.hyp = None
-            print(f"    [kernel-wiring] hypothesis tracker OFF: {type(_e).__name__}: {_e}")
+            print(f"    [stateframe] hypothesis tracker OFF: {type(_e).__name__}: {_e}")
         # E393: nit-picker (contract-atom attention; degrades to None cleanly).
         try:
             from kernel_nitpicker import NitpickerState
             bolt.nit = NitpickerState(task_id=d["sha"][:8], target_symbol=fn)
         except Exception as _e:                                      # noqa: BLE001
             bolt.nit = None
-            print(f"    [kernel-wiring] nit-picker OFF: {type(_e).__name__}: {_e}")
+            print(f"    [stateframe] nit-picker OFF: {type(_e).__name__}: {_e}")
         # E415: close-look organ (anchor-stability -> microscope dossier).
         try:
             from kernel_close_look import CloseLookKernel
             bolt.closelook = CloseLookKernel(task_id=d["sha"][:8])
         except Exception as _e:                                      # noqa: BLE001
             bolt.closelook = None
-            print(f"    [kernel-wiring] close-look OFF: {type(_e).__name__}: {_e}")
+            print(f"    [stateframe] close-look OFF: {type(_e).__name__}: {_e}")
         # E428: pivot organ (tiers + pre-graph + loop ban). The fallback order is
         # declared UP FRONT; only a new failing fingerprint moves us along an edge,
         # and a (approach, fingerprint) pair already burned is BANNED (no loops).
@@ -6718,7 +6718,7 @@ def work(d, *, resume=None):
             bolt.pivot = PivotOrgan(_pg)
         except Exception as _e:                                      # noqa: BLE001
             bolt.pivot = None
-            print(f"    [kernel-wiring] pivot OFF: {type(_e).__name__}: {_e}")
+            print(f"    [stateframe] pivot OFF: {type(_e).__name__}: {_e}")
         # E429: ignored-advice ledger — organ_out records deliveries; each action
         # settles them (followed / ignored / overtaken); twice-ignored escalates once.
         try:
@@ -6727,7 +6727,7 @@ def work(d, *, resume=None):
             bolt._advice_escalated_seen = set()
         except Exception as _e:                                      # noqa: BLE001
             bolt.advice = None
-            print(f"    [kernel-wiring] advice-ledger OFF: {type(_e).__name__}: {_e}")
+            print(f"    [stateframe] advice-ledger OFF: {type(_e).__name__}: {_e}")
         # E444: idle governor — the first ENFORCED organ (autopsy_sw2: 145 idle turns
         # while every advisory organ fired and was ignored). Warn at 8 idle
         # non-product actions, GOVERN at 14: reads/greps are refused until one
@@ -6742,7 +6742,7 @@ def work(d, *, resume=None):
             raise
         except Exception as _e:                                      # noqa: BLE001
             bolt.idlegov = None
-            print(f"    [kernel-wiring] idle-governor OFF: {type(_e).__name__}: {_e}")
+            print(f"    [stateframe] idle-governor OFF: {type(_e).__name__}: {_e}")
         bolt.information_policy = information
         bolt.task_row = ({key: value for key, value in d.items()
                           if key not in {'fixed_src', 'test_patch', '_oracle_preflight',
@@ -6757,14 +6757,14 @@ def work(d, *, resume=None):
             bolt.reflect = ReflectionGate()
         except Exception as _e:                                      # noqa: BLE001
             bolt.reflect = None
-            print(f"    [kernel-wiring] reflection OFF: {type(_e).__name__}: {_e}")
+            print(f"    [stateframe] reflection OFF: {type(_e).__name__}: {_e}")
         # E491: changed-condition retry gate (gap-map rank 3).
         try:
             from kernel_retry_gate import RetryGate
             bolt.retrygate = RetryGate()
         except Exception as _e:                                      # noqa: BLE001
             bolt.retrygate = None
-            print(f"    [kernel-wiring] retry-gate OFF: {type(_e).__name__}: {_e}")
+            print(f"    [stateframe] retry-gate OFF: {type(_e).__name__}: {_e}")
         # WAVE 3 / D3: pre-dispatch retry gate. Defaults OFF (KERNEL_MODE unset) --
         # current baseline is unchanged (retry_gate above remains the only, post-hoc,
         # detector). Set KERNEL_MODE="retry_predispatch:ENFORCE" to block dispatch.
@@ -6774,14 +6774,14 @@ def work(d, *, resume=None):
                                      if bolt.retrygate is not None else None)
         except Exception as _e:                                      # noqa: BLE001
             bolt.predispatch_gate = None
-            print(f"    [kernel-wiring] predispatch-gate OFF: {type(_e).__name__}: {_e}")
+            print(f"    [stateframe] predispatch-gate OFF: {type(_e).__name__}: {_e}")
         # E484: cognitive governor — doses organ chatter by measured difficulty.
         try:
             from kernel_cog_governor import CognitiveGovernor
             bolt.cogov = CognitiveGovernor()
         except Exception as _e:                                      # noqa: BLE001
             bolt.cogov = None
-            print(f"    [kernel-wiring] cog-governor OFF: {type(_e).__name__}: {_e}")
+            print(f"    [stateframe] cog-governor OFF: {type(_e).__name__}: {_e}")
         # E525: persistent obligation graph (in-world oracle ids only, E513) so the
         # green->red REGRESSION tripwire can watch every test receipt, not just done.
         try:
@@ -6791,7 +6791,7 @@ def work(d, *, resume=None):
             bolt.obgraph = _cog(d, oracle_ids=_inw)
         except Exception as _e:                                      # noqa: BLE001
             bolt.obgraph = None
-            print(f"    [kernel-wiring] obligation graph OFF: {type(_e).__name__}: {_e}")
+            print(f"    [stateframe] obligation graph OFF: {type(_e).__name__}: {_e}")
         # E470: dependency-invalidation cascade (gap-map rank 2, "make for reasoning")
         # — an edit dirties every belief whose evidence predates it; dirty beliefs get
         # ONE bounded re-observe notice (max 2/turn, deduped).
@@ -6800,7 +6800,7 @@ def work(d, *, resume=None):
             bolt.inval = LedgerIndex()
         except Exception as _e:                                      # noqa: BLE001
             bolt.inval = None
-            print(f"    [kernel-wiring] invalidation OFF: {type(_e).__name__}: {_e}")
+            print(f"    [stateframe] invalidation OFF: {type(_e).__name__}: {_e}")
         # E456: measure-before-infer — an edit whose stated
         # rationale asserts an UNMEASURED workspace fact gets the ONE cheap probe
         # that would ground it, advisory-only.
@@ -6809,7 +6809,7 @@ def work(d, *, resume=None):
             bolt.gt = MeasureBeforeInfer()
         except Exception as _e:                                      # noqa: BLE001
             bolt.gt = None
-            print(f"    [kernel-wiring] groundtruth-B OFF: {type(_e).__name__}: {_e}")
+            print(f"    [stateframe] groundtruth-B OFF: {type(_e).__name__}: {_e}")
         # E417: expectation ledger (every count the agent sees
         # becomes a tripwire; deltas demand investigation).
         # r2b: organs are wired BEFORE StateFrameRuntime exists (measurement is None here); buffer their state events
@@ -6817,7 +6817,7 @@ def work(d, *, resume=None):
         _expectation_wiring = _wire_expectation_ledger(_wiring_journal)
         bolt.expect = _expectation_wiring.value
         if _expectation_wiring.effective == "failed":
-            print("    [kernel-wiring] expectation ledger OFF: "
+            print("    [stateframe] expectation ledger OFF: "
                   f"{_expectation_wiring.error_type}")
         # E423: composed cognition loop (fold->hypotheses->replan->selector->card).
         # Generic per-task assembly: scope from task metadata; acceptance atoms from
@@ -6827,7 +6827,7 @@ def work(d, *, resume=None):
         _composed_wiring = _wire_composed_cognition(d, fn, bolt, _wiring_journal)
         bolt.composed = _composed_wiring.value
         if _composed_wiring.effective == "failed":
-            print("    [kernel-wiring] composed cognition OFF: "
+            print("    [stateframe] composed cognition OFF: "
                   f"{_composed_wiring.error_type}")
         # E377: corpus_fixes overlay — when a task's in-world test is PROVEN misleading
         # (E373: watchdog's rewards the wrong edit) a verified replacement (two-sided:
@@ -6836,10 +6836,10 @@ def work(d, *, resume=None):
         _corpus_wiring = _wire_corpus_fixes(POC, root, d, resume, _wiring_journal)
         _n_fix = int(_corpus_wiring.value or 0) if isinstance(_corpus_wiring.value, int) else 0
         if _corpus_wiring.effective == "failed":
-            print("    [kernel-wiring] corpus_fixes overlay skipped: "
+            print("    [stateframe] corpus_fixes overlay skipped: "
                   f"{_corpus_wiring.error_type}")
         elif _corpus_wiring.reason == "not_shipped":
-            print("    [kernel-wiring] corpus_fixes overlay off: not_shipped")
+            print("    [stateframe] corpus_fixes overlay off: not_shipped")
         if _n_fix:
             bolt._rec("gate", "corpus_fix_applied", f"files={_n_fix}")
             # refresh E310 baseline + register the honest oracle's nodes as
@@ -6887,7 +6887,7 @@ def work(d, *, resume=None):
                         msgs.append({"role": "user", "content": _line0})
                     bolt._rec("semantic", "boot_facts_emitted", _line0[:120])
             except Exception as _e:                                  # noqa: BLE001
-                print(f"    [kernel-wiring] boot semantic derive failed: {type(_e).__name__}")
+                print(f"    [stateframe] boot semantic derive failed: {type(_e).__name__}")
         # E388: GENERIC fact compiler (contract-directed abstract interpreter,
         # with family-agnostic DECISION+EFFECT facts for tasks the four
         # legacy producers do not cover. Same E367 weld; FACT_COMPILER=0 is the A/B
@@ -6923,7 +6923,7 @@ def work(d, *, resume=None):
                         msgs.append({"role": "user", "content": _gline})
                     bolt._rec("semantic", "generic_facts_emitted", _gline[:120])
             except Exception as _e:                                  # noqa: BLE001
-                print(f"    [kernel-wiring] fact compiler OFF: {type(_e).__name__}: {_e}")
+                print(f"    [stateframe] fact compiler OFF: {type(_e).__name__}: {_e}")
         # E408: CROSS-RUN FAILURE MEMORY — amnesia between
         # attempts is over. Prior attempts of THIS (fn, sha) distill into a bounded
         # "PRIOR ATTEMPTS" capsule (tried theories, failed legs, terminal shapes,
@@ -6964,7 +6964,7 @@ def work(d, *, resume=None):
                         msgs.append({"role": "user", "content": _cap})
                     bolt._rec("crossrun", "prior_capsule_welded", _cap[:120])
             except Exception as _e:                                  # noqa: BLE001
-                print(f"    [kernel-wiring] cross-run memory OFF: {type(_e).__name__}: {_e}")
+                print(f"    [stateframe] cross-run memory OFF: {type(_e).__name__}: {_e}")
         # E426: UNIT PLANNER (the horizon unlock, E425) — multi-unit build tasks get a
         # derived sequence (Job -> JobQueue -> QueueStats) with per-unit test gates and
         # the handoff rule welded into the brief; single-unit tasks emit nothing (E394).
@@ -6984,14 +6984,14 @@ def work(d, *, resume=None):
                                   f"units={len(_uplan.units)}")
             except Exception as _e:                                  # noqa: BLE001
                 bolt.unit_plan = None
-                print(f"    [kernel-wiring] unit planner OFF: {type(_e).__name__}: {_e}")
+                print(f"    [stateframe] unit planner OFF: {type(_e).__name__}: {_e}")
         # E334: per-task receipt tape (append-only JSONL, telemetry-only).
         try:
             _rdir = POC / "results" / ("receipts" + os.environ.get("REACT_TAG", ""))
             _rdir.mkdir(parents=True, exist_ok=True)
             bolt.receipts_path = str(_rdir / f"{fn}.jsonl")
         except OSError as _e:
-            print(f"    [kernel-wiring] receipt tape unavailable: {_e}")
+            print(f"    [stateframe] receipt tape unavailable: {_e}")
         # E346 boot fingerprint — AFTER every organ init so it cannot lie (and the
         # E351 lesson: it crashed the whole wave by reading bolt.hyp before init;
         # the observability line must never be able to kill the run it observes).
@@ -7003,7 +7003,7 @@ def work(d, *, resume=None):
                       f"nav={'on' if bolt.f2p_names else 'OFF'} "
                       f"receipts={'on' if getattr(bolt, 'receipts_path', None) else 'OFF'}")
         except Exception as _e:                                      # noqa: BLE001
-            print(f"    [kernel-wiring] fingerprint failed: {type(_e).__name__}")
+            print(f"    [stateframe] fingerprint failed: {type(_e).__name__}")
         toolcall_mode = (os.environ.get("REACT_TOOLCALL", "1") == "1"
                          or action_schema_mode)
         tool_calls_seen = 0
@@ -11571,7 +11571,7 @@ def work(d, *, resume=None):
                     try:
                         bolt.completion_verdict()
                     except Exception as _e:                              # noqa: BLE001
-                        print(f"    [kernel-wiring] completion_verdict failed: {_e}")
+                        print(f"    [stateframe] completion_verdict failed: {_e}")
                 break
             elif line == "list_files" or line.startswith("list_files "):
                 import shlex
@@ -12589,7 +12589,7 @@ def work(d, *, resume=None):
                                 bolt._rec("expectation", "delta_advisory",
                                           _adv[0][:100])
                     except Exception as _e:                          # noqa: BLE001
-                        print(f"    [kernel-wiring] expectation observe failed: "
+                        print(f"    [stateframe] expectation observe failed: "
                               f"{type(_e).__name__}")
                 # E325: remember which test file just went red (self-oracle taint input).
                 if "TESTS FAILED" in obs and rest:
@@ -12621,7 +12621,7 @@ def work(d, *, resume=None):
                         bolt.hyp.open_from_anchor(
                             _anch, (locals().get("_sig") or {}).get("family") or "other")
                     except Exception as _e:                          # noqa: BLE001
-                        print(f"    [kernel-wiring] open_from_anchor: {type(_e).__name__}")
+                        print(f"    [stateframe] open_from_anchor: {type(_e).__name__}")
                 from kernel_continuation_evidence import classify_run_test_exit
                 # Continuation effects need the typed exit vocabulary even when the
                 # separate host-closure arm is off.  The old fallback collapsed every
@@ -12841,7 +12841,7 @@ def work(d, *, resume=None):
                             if isinstance(_adv, str) and _adv:
                                 obs = obs + "\n" + _adv
                     except Exception as _e:                          # noqa: BLE001
-                        print(f"    [kernel-wiring] semantic derive failed: {type(_e).__name__}")
+                        print(f"    [stateframe] semantic derive failed: {type(_e).__name__}")
                 # E320: exact guard text at a product-code anchor.
                 if bolt.last_test_exit == 1:
                     bolt.note_witness_values(obs)   # E340: harvest concrete failure values
@@ -13124,7 +13124,7 @@ def work(d, *, resume=None):
                             bolt._rec("nitpicker", "red_no_atoms",
                                       f"conf={'none' if _conf is None else _conf.count}")
                     except Exception as _e:                          # noqa: BLE001
-                        print(f"    [kernel-wiring] nitpicker red-confront failed: "
+                        print(f"    [stateframe] nitpicker red-confront failed: "
                               f"{type(_e).__name__}: {_e}")
             elif line.split()[0] == "edit" and not _edit_observation_is_rejection(obs):
                 edits_since_test += 1
@@ -13206,7 +13206,7 @@ def work(d, *, resume=None):
                     if _ekg_line:
                         obs = obs + "\n" + _ekg_line
                 except Exception as _e:                              # noqa: BLE001
-                    print(f"    [kernel-wiring] ekg.check failed: {type(_e).__name__}")
+                    print(f"    [stateframe] ekg.check failed: {type(_e).__name__}")
 
             if not interventions:
                 obs = plain_observation
@@ -13593,7 +13593,7 @@ def work(d, *, resume=None):
                     _ff.parent.mkdir(parents=True, exist_ok=True)
                     _ff.write_text(target.read_text(errors="ignore"))
             except Exception as _e:                                      # noqa: BLE001
-                print(f"    [kernel-wiring] final-source persist SKIPPED: "
+                print(f"    [stateframe] final-source persist SKIPPED: "
                       f"{type(_e).__name__}: {_e}", flush=True)
             nf, ng = norm(final), norm(gold)
             ok = nf is not None and nf == ng
@@ -13813,7 +13813,7 @@ def work(d, *, resume=None):
                 "detail": f"digest={_liveness.digest} status={_liveness.status}",
                 "turn": getattr(bolt, "current_step", None)})
         except Exception as _e:                                      # noqa: BLE001
-            print(f"    [kernel-wiring] liveness coverage check failed: {type(_e).__name__}")
+            print(f"    [stateframe] liveness coverage check failed: {type(_e).__name__}")
         # PERSIST THE TRANSCRIPT. The first run reported edits=0 on two tasks and I could not
         # say WHY, because only counts were recorded — the same "saved the score, lost the
         # evidence" defect banked as E240 this morning. The command/observation pairs are the

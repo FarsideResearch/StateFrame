@@ -2,6 +2,7 @@
 
 | Message (or symptom) | Meaning | Fix |
 |---|---|---|
+| `[stateframe] ... failed` or `[stateframe] ... OFF` | An engine component failed or is unavailable; the rest of the line names the component and reason. | Inspect the named error and component settings. Liveness receipt failures say `liveness census receipt` in the diagnostic. |
 | `warning: checkpoints are off for this run: ...` | StateFrame could not use the checkpoint key, saving failed repeatedly, or checkpoints were disabled by configuration. Resume uses full replay. Owned state directories and keys with loose permissions are tightened automatically. | Check the reason in the warning. Replace a linked or foreign-owned state path with a directory you own, or correct the checkpoint setting. |
 | `test interpreter ... cannot import pytest` | The Python chosen for your tests has no pytest. | Install pytest in your project's environment, or pass `--test-python` with one that has it. |
 | `execution supervisor exited`, `execution supervisor communication failed` or an RPC wait timeout | The process supervising a startup probe or import smoke stopped answering. The error includes its exit status only when observed and up to 8 KiB from its log when readable. | Read the appended log tail for the launch failure. If the log is reported absent, the supervisor did not leave a readable log. |

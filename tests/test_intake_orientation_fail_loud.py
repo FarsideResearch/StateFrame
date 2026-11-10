@@ -332,7 +332,7 @@ def test_orientation_failures_are_logged_and_journaled_once(
 @pytest.mark.parametrize("message", [
     "/tmp/my secret.py",
     "file:///tmp/my secret.py",
-    r"C:\Users\mike\secret.py",
+    r"C:\Users\example\secret.py",
     r"\\server\share\my secret.py",
     "prefix/tmp/private",
 ])

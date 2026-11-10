@@ -1461,7 +1461,7 @@ class KernelBolt:
             try:
                 hyp.observe(legacy_retry_record)
             except Exception as _e:                                  # noqa: BLE001
-                print(f"    [kernel-wiring] hyp.observe failed: {type(_e).__name__}")
+                print(f"    [stateframe] hyp.observe failed: {type(_e).__name__}")
         # E423: composed cognition loop (the long-horizon unlock) — every receipt
         # advances fold->hypotheses->replan->seam-actions->selector; a rendered card
         # (discriminating next action) is stashed for same-turn delivery.
@@ -1514,7 +1514,7 @@ class KernelBolt:
                     except Exception:                                # noqa: BLE001
                         pass
             except Exception as _e:                                  # noqa: BLE001
-                print(f"    [kernel-wiring] composed advance failed: {type(_e).__name__}")
+                print(f"    [stateframe] composed advance failed: {type(_e).__name__}")
         # Inspect focused evidence in the close-look component for every
         # test/edit receipt feeds the focus state machine; an OPEN decision renders the
         # microscope dossier, stashed for the orchestrator to append to the observation.
@@ -1536,14 +1536,14 @@ class KernelBolt:
                         self._rec("closelook", "dossier_opened",
                                   getattr(_dec, "trigger", "")[:80])
             except Exception as _e:                                  # noqa: BLE001
-                print(f"    [kernel-wiring] closelook failed: {type(_e).__name__}: {_e}")
+                print(f"    [stateframe] closelook failed: {type(_e).__name__}: {_e}")
         # E350: receipts feed the vitals EKG when wired.
         ekg = getattr(self, "ekg", None)
         if ekg is not None:
             try:
                 ekg.observe(legacy_retry_record)
             except Exception as _e:                                  # noqa: BLE001
-                print(f"    [kernel-wiring] ekg.observe failed: {type(_e).__name__}")
+                print(f"    [stateframe] ekg.observe failed: {type(_e).__name__}")
         if kind == "edit" and result_class == "APPLIED":
             self.workspace_revision = getattr(self, "workspace_revision", 0) + 1
         rp = getattr(self, "receipts_path", None)
@@ -1552,7 +1552,7 @@ class KernelBolt:
                 with open(rp, "a") as fh:
                     fh.write(_json.dumps(rec) + "\n")
             except OSError as e:
-                print(f"    [kernel-wiring] receipt persist failed: {e}")
+                print(f"    [stateframe] receipt persist failed: {e}")
 
     def organ_out(self, name: str, line: str | None) -> str | None:
         """E332 shadow mode: the single chokepoint between an organ's decision and the
@@ -1626,7 +1626,7 @@ class KernelBolt:
                 try:
                     cogov.observe_receipt(receipt)
                 except Exception as exc:                              # noqa: BLE001
-                    print(f"    [kernel-wiring] cog-governor delivery receipt failed: "
+                    print(f"    [stateframe] cog-governor delivery receipt failed: "
                           f"{type(exc).__name__}")
 
     def report(self) -> str:
