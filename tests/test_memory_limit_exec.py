@@ -8,6 +8,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from _portable import TRUE
 
 import sf_launch
 from kernel_exec_capability import ExecLimits
@@ -35,7 +36,7 @@ def _run_launch(monkeypatch, tmp_path, mechanism):
     monkeypatch.setattr(sf_launch.resource, "setrlimit", lambda kind, bounds: calls.append((kind, bounds)))
     monkeypatch.setattr(sf_launch.os, "execvpe", lambda *_args: (_ for _ in ()).throw(_StopExec()))
     spec = {
-        "argv": ["/bin/true"], "cwd": str(tmp_path), "env": {},
+        "argv": [TRUE], "cwd": str(tmp_path), "env": {},
         "limits": {**asdict(ExecLimits()), "memory_bytes": LIMIT},
         "memory_supervised": mechanism == "rlimit_data",
         "memory_limit_mechanism": mechanism,
@@ -130,7 +131,7 @@ def test_darwin_exec_launcher_keeps_supervised_rss_path(monkeypatch, tmp_path):
         resource.RLIM_INFINITY, resource.RLIM_INFINITY))
     monkeypatch.setattr(sf_launch.resource, "setrlimit", lambda kind, bounds: calls.append((kind, bounds)))
     monkeypatch.setattr(sf_launch.os, "execvpe", lambda *_args: (_ for _ in ()).throw(_StopExec()))
-    spec = {"argv": ["/bin/true"], "cwd": str(tmp_path), "env": {},
+    spec = {"argv": [TRUE], "cwd": str(tmp_path), "env": {},
             "limits": {**asdict(ExecLimits()), "memory_bytes": LIMIT},
             "memory_supervised": True, "memory_limit_mechanism": "supervised_rss"}
     with pytest.raises(_StopExec):

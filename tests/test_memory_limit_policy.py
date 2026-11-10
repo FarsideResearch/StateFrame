@@ -10,6 +10,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from _portable import TRUE
 
 import kernel_generic_check as generic_check
 import kernel_execution_policy as policy
@@ -517,7 +518,7 @@ def test_policy_result_records_parent_confirmed_mechanism(monkeypatch, tmp_path)
     monkeypatch.setattr(Path, "read_text", empty_cgroup_procs)
     monkeypatch.setattr(policy, "_collect",
                         lambda *_args, **_kwargs: ("ok", "", False, False, False))
-    result = policy.run_sandboxed(["/bin/true"], tmp_path)
+    result = policy.run_sandboxed([TRUE], tmp_path)
     seen.append(result.memory_limit_mechanism)
     assert seen == ["cgroup_memory_max"]
     assert not group.exists()
@@ -779,7 +780,7 @@ def test_failed_cgroup_cleanup_is_reported_by_completion_path(
                             lambda *_args, **_kwargs: ("ok", "", False, False, False))
 
         detail, code = generic_check.check_result(
-            tmp_path, {"test_command": ["/bin/true"]})
+            tmp_path, {"test_command": [TRUE]})
         assert code == 127
         assert "ContainmentUnverified" in detail
         assert "cgroup cleanup failed" in detail
