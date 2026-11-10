@@ -1,6 +1,8 @@
 """Keep unframed tree hashes from reappearing outside the stage 2 inventory."""
 from pathlib import Path
+from functools import lru_cache
 
+from _guard_scan_cache import source_tree_signature
 from tools.digest_class_guard import scan_source, scan_tree
 
 
@@ -28,8 +30,18 @@ HISTORICAL = {
 }
 
 
-def test_digest_class_guard_current_tree():
+@lru_cache(maxsize=2)
+def _cached_src_tree_scan(_signature):
     scanned, eligible, violated = scan_tree(ROOT / "src")
+    return scanned, eligible, frozenset(violated)
+
+
+def _src_tree_scan():
+    return _cached_src_tree_scan(source_tree_signature(ROOT / "src" / "stateframe"))
+
+
+def test_digest_class_guard_current_tree():
+    scanned, eligible, violated = _src_tree_scan()
     print(f"scanned={scanned} eligible={eligible} violated={len(violated)}")
     assert scanned > 500 and eligible > 0
     assert violated == set(ALLOWLIST), ("new or resolved violation; update the exact allowlist", violated)
@@ -90,7 +102,7 @@ def bad(path, content):
 
 def test_historical_sites_are_flagged_or_fixed():
     # Every historical site is either fixed (gone from the scan) or explicitly allowlisted.
-    _scanned, _eligible, violated = scan_tree(ROOT / "src")
+    _scanned, _eligible, violated = _src_tree_scan()
     remaining = HISTORICAL & violated
     assert remaining <= set(ALLOWLIST)
     assert not (HISTORICAL - set(ALLOWLIST)) & violated

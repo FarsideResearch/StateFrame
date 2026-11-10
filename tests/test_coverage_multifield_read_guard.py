@@ -7,6 +7,17 @@ from pathlib import Path
 
 
 _LEGACY_FIELDS = {"sequence", "ids", "members", "chains", "frontier", "proofs"}
+_INDEX_SOURCE_NAMES = {"CoverageIndex", "context_index", "_framefit_call_coverage_index"}
+
+
+def _has_index_source(tree):
+    """Every index origin recognized below contains one of these AST nodes."""
+    return any(
+        isinstance(node, ast.Name) and node.id in _INDEX_SOURCE_NAMES
+        or isinstance(node, ast.Attribute) and node.attr in _INDEX_SOURCE_NAMES
+        or isinstance(node, ast.Constant) and node.value == "_framefit_call_coverage_index"
+        for node in ast.walk(tree)
+    )
 
 
 def _receiver_key(node):
@@ -233,11 +244,14 @@ def _unlocked_multifield_reads(tree):
     collector = _ScopeCollector()
     collector.visit(tree)
     violations = []
+    class_attributes = {}
     for function, class_node in collector.functions:
         if class_node is not None and class_node.name == "CoverageIndex":
             continue
+        if class_node not in class_attributes:
+            class_attributes[class_node] = _class_index_attributes(class_node)
         aliases, snapshots, indexes = _function_bindings(
-            function, _class_index_attributes(class_node)
+            function, class_attributes[class_node]
         )
         visitor = _ReadVisitor(function, aliases, snapshots, indexes)
         body = (function.body if isinstance(function, (ast.FunctionDef, ast.AsyncFunctionDef))
@@ -260,6 +274,8 @@ def test_engine_multifield_legacy_reads_use_lock_or_snapshot():
     violations = []
     for path in sorted(engine.rglob("*.py")):
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        if not _has_index_source(tree):
+            continue
         for violation in _unlocked_multifield_reads(tree):
             violations.append(f"{path.relative_to(engine)}:{violation}")
     assert violations == [], (
@@ -267,6 +283,18 @@ def test_engine_multifield_legacy_reads_use_lock_or_snapshot():
         "or use `snapshot`; only CoverageIndex methods are allowlisted: "
         + ", ".join(violations)
     )
+
+
+def test_ast_gate_keeps_every_recognized_index_origin():
+    sources = (
+        "def typed(index: CoverageIndex):\n    return index.ids, index.chains\n",
+        "def called(context):\n    return context_index(context).ids\n",
+        "def direct(journal):\n    return journal._framefit_call_coverage_index.ids\n",
+        "def dynamic(journal):\n"
+        "    return getattr(journal, '\\x5fframefit_call_coverage_index').ids\n",
+    )
+    assert all(_has_index_source(ast.parse(source)) for source in sources)
+    assert not _has_index_source(ast.parse("def unrelated(session):\n    return session.ids, session.chains\n"))
 
 
 def test_synthetic_unlocked_multifield_read_is_flagged():

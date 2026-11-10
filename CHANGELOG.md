@@ -2,6 +2,7 @@
 
 ## 0.4.40 (2026-11-10)
 
+- Release guard suite runs faster: the source-scanning guards share one cached parse of the tree (keyed by path, mtime and size) instead of re-reading every file per test; all assertions, scan roots and planted controls are unchanged (test-only).
 - Hosted request metering: the byte-fallback cold estimate now has a raise-only density floor computed from the decoded content (digits, base64/hex runs, dense code, punctuation, non-ASCII), so long numbers, base64, hex and dense JSON or code are no longer underestimated on endpoints without exact tokenization; ordinary prose estimates are unchanged.
 - Tests: a guard now checks every terminal authority error against stale, missing and fresh freshness facts, so a completion receipt can never be accepted while its freshness is unknown.
 - Plain-loop request composition escapes marker-leading assistant, tool, and repository text without mutating stored history or changing marker-free requests.
