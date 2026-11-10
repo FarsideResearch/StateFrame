@@ -5,6 +5,10 @@ import copy
 import json
 import re
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
+from typing import NoReturn
+
+from kernel_request_seal import RequestSealError
 
 
 FACT_SCHEMA = "stateframe-wire-truth-facts/1"
@@ -19,6 +23,42 @@ FACT_FIELDS = (
     "last_refused_action_reason",
 )
 FACT_AUX_FIELDS = ("applied_edit_status",)
+
+
+@dataclass(frozen=True, slots=True)
+class UnavailableFactEvidence:
+    """The host could not observe a required wire fact source."""
+
+    reason_code: str
+
+
+class WireTruthFactUnavailable(RequestSealError):
+    """A required wire fact could not be read before provider dispatch."""
+
+
+def require_fact_context(context: dict[str, object] | UnavailableFactEvidence) -> dict[str, object]:
+    """Refuse a request when its required host facts could not be observed."""
+    if isinstance(context, UnavailableFactEvidence):
+        raise WireTruthFactUnavailable(
+            f"wire truth facts unavailable: {context.reason_code}")
+    return context
+
+
+def _unavailable_fact(runtime: object, reason_code: str) -> UnavailableFactEvidence:
+    emit = getattr(getattr(runtime, "journal", None), "emit", None)
+    if callable(emit):
+        emit("wire_truth_fact_evidence_failure", producer="kernel_wire_truth_facts",
+             dispatch=False, reason_code=reason_code)
+    return UnavailableFactEvidence(reason_code)
+
+
+def _fail_fact_evidence(runtime: object, reason_code: str, error: Exception) -> NoReturn:
+    """Record a failed host fact read before refusing a partial request."""
+    emit = getattr(getattr(runtime, "journal", None), "emit", None)
+    if callable(emit):
+        emit("wire_truth_fact_evidence_failure", producer="kernel_wire_truth_facts",
+             dispatch=False, reason_code=reason_code)
+    raise RuntimeError(f"{reason_code}: wire truth fact evidence unavailable") from error
 
 
 def _tool_name(tool: object) -> str:
@@ -173,7 +213,7 @@ def _public_evidence_refs(evidence: object, journal: object) -> str | None:
 
 
 def _current_public_check(runtime: object, binding: Mapping[str, object] | None
-                          ) -> tuple[bool, object | None, object | None, object | None]:
+                          ) -> tuple[bool, object | None, object | None, object | None] | UnavailableFactEvidence:
     """Read the shared public-selector verdict and its exact supporting receipts."""
     if runtime is None or binding is None:
         return False, None, None, None
@@ -192,7 +232,9 @@ def _current_public_check(runtime: object, binding: Mapping[str, object] | None
             wire_seed=wire_run_seed(journal),
             wire_step=getattr(owner, "current_step", 0),
         )
-    except (ImportError, AttributeError, OSError, RuntimeError, TypeError, ValueError):
+    except OSError:
+        return _unavailable_fact(runtime, "PUBLIC_CHECK_UNAVAILABLE")
+    except (ImportError, AttributeError, RuntimeError, TypeError, ValueError):
         return False, None, None, None
     state = str(getattr(verdict, "state", "UNKNOWN")).upper()
     if state not in {"SATISFIED", "VIOLATED"}:
@@ -217,7 +259,7 @@ def _context_facts(
         request_id: str,
         candidate_revision: str | None,
         binding: Mapping[str, object] | None,
-) -> tuple[dict[str, object], bool, bool, int | None, dict[str, object]]:
+) -> tuple[dict[str, object], bool, bool, int | None, dict[str, object]] | UnavailableFactEvidence:
     store: dict[str, object] = {}
     owner = getattr(runtime, "owner", None)
     receipts = getattr(owner, "_receipts", ()) if owner is not None else ()
@@ -234,14 +276,15 @@ def _context_facts(
         and _action_name(row) in {"edit", "str_replace", "write", "apply_patch"}
         for row in receipts
     )
-    current_green, check_ref, result_scope, green_state = _current_public_check(
-        runtime, binding,
-    )
+    public_check = _current_public_check(runtime, binding)
+    if isinstance(public_check, UnavailableFactEvidence):
+        return public_check
+    current_green, check_ref, result_scope, green_state = public_check
     try:
         from kernel_done_readiness_authority import cached_decision
         shared_done_decision = cached_decision(runtime)
-    except (ImportError, AttributeError, TypeError, ValueError):
-        shared_done_decision = None
+    except (ImportError, AttributeError, TypeError, ValueError) as error:
+        _fail_fact_evidence(runtime, "DONE_READINESS_UNAVAILABLE", error)
     if shared_done_decision is not None:
         current_green = bool(shared_done_decision.current_green)
         green_state = shared_done_decision.public_check_status
@@ -254,7 +297,9 @@ def _context_facts(
     try:
         from kernel_green_lock import product_revision_change_from_parent
         changed, _current_product_revision, _comparison = product_revision_change_from_parent(runtime)
-    except (ImportError, AttributeError, OSError, RuntimeError, TypeError, ValueError):
+    except OSError:
+        return _unavailable_fact(runtime, "PRODUCT_REVISION_UNAVAILABLE")
+    except (ImportError, AttributeError, RuntimeError, TypeError, ValueError):
         changed = False
     limits = getattr(runtime, "continuation_limits", None)
     turns_left = getattr(limits, "model_decisions_remaining", None)
@@ -351,7 +396,7 @@ def _context_facts(
 
 
 def capture_context(capture: object, runtime: object, body: Mapping[str, object], *,
-                    side_call: bool = False) -> dict[str, object]:
+                    side_call: bool = False) -> dict[str, object] | UnavailableFactEvidence:
     """Snapshot cutoff facts and menu authorities for a RequestCapture attempt."""
     override = getattr(capture, "wire_truth_context", None)
     request_id = str(getattr(capture, "request_id", "UNKNOWN"))
@@ -359,7 +404,9 @@ def capture_context(capture: object, runtime: object, body: Mapping[str, object]
     if runtime is not None:
         try:
             raw_binding = runtime.binding()
-        except (AttributeError, OSError, RuntimeError, TypeError, ValueError):
+        except OSError:
+            return _unavailable_fact(runtime, "BINDING_UNAVAILABLE")
+        except (AttributeError, RuntimeError, TypeError, ValueError):
             raw_binding = None
         if isinstance(raw_binding, Mapping):
             binding = raw_binding
@@ -376,9 +423,12 @@ def capture_context(capture: object, runtime: object, body: Mapping[str, object]
     if isinstance(override, Mapping):
         context.update(override)
     elif decision_request:
-        facts, require_done, applied_edit, turns_left, state = _context_facts(
+        evidence = _context_facts(
             runtime, request_id, candidate_revision, binding,
         )
+        if isinstance(evidence, UnavailableFactEvidence):
+            return evidence
+        facts, require_done, applied_edit, turns_left, state = evidence
         context.update(state)
         context.update({
             "required_facts": facts,

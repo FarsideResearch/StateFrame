@@ -12,6 +12,8 @@ from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path, PurePosixPath
 
+from kernel_obligation_assess import UnavailableEvidence, _unavailable_evidence
+
 MODE_ENV = "STATEFRAME_HEADCARRY"
 # T2FIX: carry the complete bytes of every read the frame still OWES
 # (kernel_reread_result_truth.read_is_owed) as a head, not only open-site/edit heads.
@@ -191,26 +193,37 @@ def _safe_relative_path(value: object) -> str | None:
     return path.as_posix()
 
 
-def _read_source(root: Path, relative_path: str) -> bytes | None:
+def _read_source(root: Path, relative_path: str, *, journal: object = None) -> bytes | None | UnavailableEvidence:
     from kernel_stateframe_action_ledger import _read_open_site_file_bytes
 
-    if not _safe_regular_file(root, relative_path):
+    safe = _safe_regular_file(root, relative_path, journal=journal, required=True)
+    if isinstance(safe, UnavailableEvidence):
+        return safe
+    if not safe:
         return None
     try:
         return _read_open_site_file_bytes(root, relative_path)
     except (OSError, RuntimeError, ValueError):
-        return None
+        return _unavailable_evidence(journal, "HEADCARRY_SOURCE_UNAVAILABLE",
+                                     producer="kernel_stateframe_headcarry")
 
 
-def _safe_regular_file(root: Path, relative_path: str) -> bool:
+def _safe_regular_file(root: Path, relative_path: str, *, journal: object = None,
+                       required: bool = False) -> bool | UnavailableEvidence:
     cursor = root
     parts = PurePosixPath(relative_path).parts
     for index, part in enumerate(parts):
         cursor = cursor / part
         try:
             mode = cursor.lstat().st_mode
-        except OSError:
+        except FileNotFoundError:
+            if required:
+                return _unavailable_evidence(journal, "HEADCARRY_STAT_UNAVAILABLE",
+                                             producer="kernel_stateframe_headcarry")
             return False
+        except OSError:
+            return _unavailable_evidence(journal, "HEADCARRY_STAT_UNAVAILABLE",
+                                         producer="kernel_stateframe_headcarry")
         if stat.S_ISLNK(mode):
             return False
         if index < len(parts) - 1 and not stat.S_ISDIR(mode):
@@ -220,7 +233,7 @@ def _safe_regular_file(root: Path, relative_path: str) -> bool:
     return False
 
 
-def _module_files(root: Path, parts: Sequence[str]) -> list[str]:
+def _module_files(root: Path, parts: Sequence[str], *, journal: object = None) -> list[str] | UnavailableEvidence:
     """Resolve a static Python import to in-repository module/package files."""
     if (not parts or any(not part.isidentifier() for part in parts)
             or any(part.casefold() in _SKIP_IMPORT_PARTS for part in parts)):
@@ -229,20 +242,27 @@ def _module_files(root: Path, parts: Sequence[str]) -> list[str]:
     for depth in range(1, len(parts)):
         package = root.joinpath(*parts[:depth], "__init__.py")
         relative = package.relative_to(root).as_posix()
-        if _safe_regular_file(root, relative):
+        safe = _safe_regular_file(root, relative, journal=journal)
+        if isinstance(safe, UnavailableEvidence):
+            return safe
+        if safe:
             if relative not in found:
                 found.append(relative)
     module = root.joinpath(*parts).with_suffix(".py")
     package = root.joinpath(*parts, "__init__.py")
     for candidate in (module, package):
         relative = candidate.relative_to(root).as_posix()
-        if _safe_regular_file(root, relative):
+        safe = _safe_regular_file(root, relative, journal=journal)
+        if isinstance(safe, UnavailableEvidence):
+            return safe
+        if safe:
             if relative not in found:
                 found.append(relative)
     return found
 
 
-def _import_targets(root: Path, path: str, source: bytes) -> Counter[str]:
+def _import_targets(root: Path, path: str, source: bytes, *,
+                    journal: object = None) -> Counter[str] | UnavailableEvidence:
     if not path.endswith(".py"):
         return Counter()
     try:
@@ -256,7 +276,10 @@ def _import_targets(root: Path, path: str, source: bytes) -> Counter[str]:
         if isinstance(node, ast.Import):
             for alias in node.names:
                 parts = alias.name.split(".")
-                for target in _module_files(root, parts):
+                found = _module_files(root, parts, journal=journal)
+                if isinstance(found, UnavailableEvidence):
+                    return found
+                for target in found:
                     targets[target] += 1
             continue
         if not isinstance(node, ast.ImportFrom):
@@ -272,12 +295,18 @@ def _import_targets(root: Path, path: str, source: bytes) -> Counter[str]:
             base = node.module.split(".") if node.module else []
         if not base:
             continue
-        for target in _module_files(root, base):
+        found = _module_files(root, base, journal=journal)
+        if isinstance(found, UnavailableEvidence):
+            return found
+        for target in found:
             targets[target] += 1
         for alias in node.names:
             if alias.name == "*":
                 continue
-            for target in _module_files(root, [*base, *alias.name.split(".")]):
+            found = _module_files(root, [*base, *alias.name.split(".")], journal=journal)
+            if isinstance(found, UnavailableEvidence):
+                return found
+            for target in found:
                 targets[target] += 1
     return targets
 
@@ -466,7 +495,8 @@ def render_headcarry(
     wire_sites: Sequence[object] = (),
     max_bytes: int | None = None,
     owed_reads: Sequence[object] = (),
-) -> dict[str, object]:
+    journal: object = None,
+) -> dict[str, object] | UnavailableEvidence:
     """Build current heads, one import hop deep, under a truthful total byte cap.
 
     ``owed_reads`` (see ``owed_read_rows``) are carried as COMPLETE files at their read
@@ -480,7 +510,8 @@ def render_headcarry(
         if not root.is_dir():
             raise OSError("workspace root unavailable")
     except (OSError, RuntimeError, ValueError):
-        root = None
+        return _unavailable_evidence(journal, "HEADCARRY_ROOT_UNAVAILABLE",
+                                     producer="kernel_stateframe_headcarry")
 
     primary, roles = _requested_paths(open_sites, applied_edits, owed_reads)
     owed_revisions, owed_weights = _owed_read_requirements(owed_reads)
@@ -489,10 +520,15 @@ def render_headcarry(
     first_reference: dict[str, int] = {}
     reference_order = 0
     for path in primary:
-        raw = _read_source(root, path) if root is not None else None
+        raw = _read_source(root, path, journal=journal)
+        if isinstance(raw, UnavailableEvidence):
+            return raw
         if raw is None:
             continue
-        for dependency, count in _import_targets(root, path, raw).items():
+        targets = _import_targets(root, path, raw, journal=journal)
+        if isinstance(targets, UnavailableEvidence):
+            return targets
+        for dependency, count in targets.items():
             imports[dependency] += count
             first_reference.setdefault(dependency, reference_order)
             reference_order += 1
@@ -503,10 +539,9 @@ def render_headcarry(
     current_heads: list[dict[str, object]] = []
     deduplicated = 0
     for path in ordered_paths:
-        if root is None:
-            unavailable += 1
-            continue
-        raw = _read_source(root, path)
+        raw = _read_source(root, path, journal=journal)
+        if isinstance(raw, UnavailableEvidence):
+            return raw
         if raw is not None and roles.get(path) == "owed_read":
             # The file must still be the read revision; otherwise the read is no
             # longer owed and the whole-file head would misstate what was read.

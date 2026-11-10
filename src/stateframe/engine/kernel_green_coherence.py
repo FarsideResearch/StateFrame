@@ -14,6 +14,8 @@ import os
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 
+from kernel_obligation_assess import UnavailableEvidence, _unavailable_evidence
+
 from kernel_counterexample_visibility import (
     COUNTEREXAMPLE_LOCK_LABEL,
     COUNTEREXAMPLE_PUBLIC_FIELD,
@@ -181,14 +183,32 @@ def _required(runtime: object | None, frame: Mapping[str, object] | None) -> lis
     return []
 
 
-def _binding(runtime: object | None, frame: Mapping[str, object] | None) -> Mapping[str, object] | None:
+def _read_or_unavailable(operation, *, runtime: object | None, reason_code: str, errors):
+    from kernel_completion_owner import RequestActionContractError
+
+    try:
+        return operation()
+    except RequestActionContractError:
+        raise
+    except errors:
+        return _unavailable_evidence(
+            getattr(runtime, "journal", None), reason_code,
+            producer="kernel_green_coherence",
+        )
+
+
+def _binding(
+        runtime: object | None, frame: Mapping[str, object] | None,
+) -> Mapping[str, object] | None | UnavailableEvidence:
     if runtime is not None:
         method = getattr(runtime, "binding", None)
         if callable(method):
-            try:
-                value = method()
-            except (AttributeError, TypeError, ValueError):
-                value = None
+            value = _read_or_unavailable(
+                method, runtime=runtime, reason_code="GREEN_COHERENCE_BINDING_UNAVAILABLE",
+                errors=(AttributeError, OSError, UnicodeError, TypeError, LookupError, ValueError),
+            )
+            if isinstance(value, UnavailableEvidence):
+                return value
             if isinstance(value, Mapping):
                 return value
     if isinstance(frame, Mapping):
@@ -241,7 +261,8 @@ def _receipt_rows(runtime: object | None, frame: Mapping[str, object] | None) ->
 
 
 def _verdict(runtime: object | None, frame: Mapping[str, object] | None,
-             required: Sequence[str], receipts: Sequence[Mapping[str, object]]) -> object:
+             required: Sequence[str], receipts: Sequence[Mapping[str, object]],
+             current_binding: Mapping[str, object] | None) -> object:
     if runtime is not None:
         method = getattr(runtime, "public_test_verdict", None)
         if callable(method):
@@ -250,8 +271,7 @@ def _verdict(runtime: object | None, frame: Mapping[str, object] | None,
             except (AttributeError, TypeError, ValueError):
                 pass
     from kernel_verdict import evaluate_required_tests
-    current = _binding(runtime, frame)
-    return evaluate_required_tests(current, required, receipts)
+    return evaluate_required_tests(current_binding, required, receipts)
 
 
 def _verdict_state(value: object) -> str:
@@ -409,13 +429,19 @@ def _open_ids(runtime: object | None, frame: Mapping[str, object] | None,
     return result, blocking
 
 
-def _lock_green(runtime: object | None, frame: Mapping[str, object] | None) -> bool | None:
+def _lock_green(
+        runtime: object | None, frame: Mapping[str, object] | None,
+) -> bool | None | UnavailableEvidence:
     lock = getattr(runtime, "green_lock", None) if runtime is not None else None
     if lock is not None:
-        try:
-            return bool(lock._green_now(frame))
-        except (AttributeError, TypeError, ValueError):
-            return bool(getattr(lock, "green", False))
+        value = _read_or_unavailable(
+            lambda: lock._green_now(frame), runtime=runtime,
+            reason_code="GREEN_LOCK_LIVE_STATUS_UNAVAILABLE",
+            errors=(AttributeError, OSError, UnicodeError, TypeError, LookupError, ValueError),
+        )
+        if isinstance(value, UnavailableEvidence):
+            return value
+        return bool(value)
     return None
 
 
@@ -438,6 +464,8 @@ def green_now(lock: object, frame: Mapping[str, object] | None = None) -> bool:
     except (ImportError, TypeError, ValueError):
         return False
     current = _binding(runtime, frame)
+    if isinstance(current, UnavailableEvidence):
+        return False
     revision = _revision(current)
     if revision is None:
         return False
@@ -650,9 +678,26 @@ def terminal_status(runtime: object | None = None, frame: Mapping[str, object] |
     source = frame if isinstance(frame, Mapping) else {}
     required = _required(runtime, source)
     rows = list(receipts) if receipts is not None else _receipt_rows(runtime, source)
-    authority = verdict if verdict is not None else _verdict(runtime, source, required, rows)
+    current_binding = _binding(runtime, source)
+    if isinstance(current_binding, UnavailableEvidence):
+        return TerminalStatus(
+            green=False, public_check_status="UNAVAILABLE",
+            verdict_state=current_binding.reason_code, current_revision=None,
+            selectors=tuple(required), open_ids=(), blocking=(),
+            submission_state="BLOCKED", next_feasible_action=None,
+        )
+    authority = verdict if verdict is not None else _verdict(
+        runtime, source, required, rows, current_binding,
+    )
     verdict_state = _verdict_state(authority)
     lock_green = _lock_green(runtime, source)
+    if isinstance(lock_green, UnavailableEvidence):
+        return TerminalStatus(
+            green=False, public_check_status="UNAVAILABLE",
+            verdict_state=lock_green.reason_code, current_revision=None,
+            selectors=tuple(required), open_ids=(), blocking=(),
+            submission_state="BLOCKED", next_feasible_action=None,
+        )
     no_host_checks = not required or verdict_state == NO_HOST_CHECKS
     green = False if no_host_checks else (lock_green if lock_green is not None
                                           else verdict_state == "SATISFIED")
@@ -669,7 +714,7 @@ def terminal_status(runtime: object | None = None, frame: Mapping[str, object] |
         # The authority never runs blind to counterexamples.
         readiness_authority_enabled = counterexample_visibility_enabled = True
     counterexamples = _counterexamples(runtime, source)
-    current = _revision(_binding(runtime, source))
+    current = _revision(current_binding)
     if current is None:
         current = _frame_revision(source)
     repair_blocking_counterexamples: tuple[Mapping[str, object], ...] = ()

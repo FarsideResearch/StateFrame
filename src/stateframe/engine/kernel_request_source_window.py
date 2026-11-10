@@ -39,6 +39,7 @@ from kernel_measurement import profile_active_host_span, profiled_function_span
 import kernel_workspace_truth as _workspace_truth
 from kernel_tree_digest import compatible_revision, read_row
 from kernel_evictfix_mode import enabled as evictfix_enabled
+from kernel_obligation_assess import UnavailableEvidence, _unavailable_evidence
 
 
 SCHEMA = "stateframe-request-source-window/1"
@@ -982,7 +983,12 @@ def _line_count(source: str) -> int:
     return len(source.splitlines(keepends=True))
 
 
-def _path_from_runtime(runtime: object) -> str | None:
+def _source_unavailable(journal: object, reason_code: str) -> UnavailableEvidence:
+    return _unavailable_evidence(journal, reason_code,
+                                 producer="kernel_request_source_window")
+
+
+def _path_from_runtime(runtime: object) -> str | None | UnavailableEvidence:
     target = getattr(runtime, "target", None)
     owner = getattr(runtime, "owner", None)
     root = getattr(owner, "root", None)
@@ -990,8 +996,9 @@ def _path_from_runtime(runtime: object) -> str | None:
         return None
     try:
         return target.resolve().relative_to(Path(root).resolve()).as_posix()
-    except (OSError, TypeError, ValueError):
-        return None
+    except (OSError, RuntimeError, ValueError):
+        return _source_unavailable(getattr(runtime, "journal", None),
+                                   "REQUEST_SOURCE_TARGET_UNAVAILABLE")
 
 
 def _ticket_text(runtime: object) -> str:
@@ -2505,7 +2512,8 @@ def bound_source_message(
     )
 
 
-def _cached_closure_is_fresh(root: Path, closure: Mapping[str, object]) -> bool:
+def _cached_closure_is_fresh(root: Path, closure: Mapping[str, object], *,
+                             journal: object = None) -> bool | UnavailableEvidence:
     """Bind cached dependency revisions to their ordered path lists as well."""
     from kernel_request_evidence_closure import (
         _dependency_candidates, dependency_revision, language_adapter_for,
@@ -2520,7 +2528,9 @@ def _cached_closure_is_fresh(root: Path, closure: Mapping[str, object]) -> bool:
         return False
     for raw_path, expected in revisions.items():
         path = str(raw_path)
-        current = _read_product_file(root, path)
+        current = _read_product_file(root, path, journal=journal)
+        if isinstance(current, UnavailableEvidence):
+            return current
         if current is None or source_revision(current) != str(expected):
             return False
         try:
@@ -2597,6 +2607,8 @@ def bound_runtime_sources(
     target = getattr(runtime, "target", None)
     root = getattr(getattr(runtime, "owner", None), "root", None)
     path = _path_from_runtime(runtime)
+    if isinstance(path, UnavailableEvidence):
+        return path
     raw_deferred_paths = getattr(runtime, "_request_deferred_source_paths", ())
     deferred_paths = list(_normalized_deferred_paths(
         raw_deferred_paths
@@ -2614,8 +2626,11 @@ def bound_runtime_sources(
         owner = getattr(runtime, "owner", None)
         row = getattr(owner, "task_row", {})
         roots = row.get("new_file_roots", ()) if isinstance(row, Mapping) else ()
+        editable = editable_product_paths(runtime)
+        if isinstance(editable, UnavailableEvidence):
+            return editable
         if (not Path(target).exists() and isinstance(roots, (list, tuple))
-                and path.split("/", 1)[0] in roots and not editable_product_paths(runtime)):
+                and path.split("/", 1)[0] in roots and not editable):
             ticket = _ticket_text(runtime)
             if ticket:
                 plan = build_source_closure(Path(root), (), ticket).as_dict()
@@ -2663,6 +2678,8 @@ def bound_runtime_sources(
     identity = ticket_identity_for_runtime(runtime)
     base = Path(root)
     declared_paths = editable_product_paths(runtime)
+    if isinstance(declared_paths, UnavailableEvidence):
+        return declared_paths
     parent_sources = _parent_sources(runtime)
     tokens = literal_tokens(ticket, exclude=(entry_symbol(runtime),))
     origins = _token_origins(ticket)
@@ -2677,7 +2694,11 @@ def bound_runtime_sources(
     if tokens:
         cached_sites = inventory_cache.get(inventory_key)
         if cached_sites is None:
-            cached_sites = tuple(literal_site_inventory(base, declared_paths, tokens, origins=origins))
+            scanned = literal_site_inventory(base, declared_paths, tokens, origins=origins,
+                                             journal=getattr(runtime, "journal", None))
+            if isinstance(scanned, UnavailableEvidence):
+                return scanned
+            cached_sites = tuple(scanned)
             inventory_cache[inventory_key] = cached_sites
         sites = copy.deepcopy(cached_sites)
     else:
@@ -2692,8 +2713,12 @@ def bound_runtime_sources(
             closure_cache = {}
             setattr(runtime, "_request_source_closure_cache", closure_cache)
         cached_closure = closure_cache.get(closure_key)
-        if (not isinstance(cached_closure, Mapping)
-                or not _cached_closure_is_fresh(base, cached_closure)):
+        freshness = (False if not isinstance(cached_closure, Mapping) else
+                     _cached_closure_is_fresh(base, cached_closure,
+                                              journal=getattr(runtime, "journal", None)))
+        if isinstance(freshness, UnavailableEvidence):
+            return freshness
+        if not freshness:
             with profile_active_host_span("request_source_closure_build"):
                 closure = build_source_closure(
                     base,
@@ -2751,7 +2776,10 @@ def bound_runtime_sources(
                 continue
             unit = dict(raw_unit)
             unit_path = str(unit.get("path", ""))
-            unit_source = _read_product_file(base, unit_path)
+            unit_source = _read_product_file(base, unit_path,
+                                             journal=getattr(runtime, "journal", None))
+            if isinstance(unit_source, UnavailableEvidence):
+                return unit_source
             start = int(unit.get("start_line", 0) or 0)
             end = int(unit.get("end_line", 0) or 0)
             source_lines = unit_source.splitlines(keepends=True) if unit_source is not None else []
@@ -2931,7 +2959,10 @@ def bound_runtime_sources(
         for other in connected_for_delivery:
             if other == path:
                 continue
-            other_source = _read_product_file(base, other)
+            other_source = _read_product_file(base, other,
+                                              journal=getattr(runtime, "journal", None))
+            if isinstance(other_source, UnavailableEvidence):
+                return other_source
             if other_source is None:
                 continue
             ensure_source_message(other, other_source)
@@ -4121,11 +4152,13 @@ def entry_symbol(runtime: object) -> str:
     return ""
 
 
-def _declared_path_values(runtime: object) -> list[object]:
+def _declared_path_values(runtime: object) -> list[object] | UnavailableEvidence:
     owner = getattr(runtime, "owner", None)
     row = getattr(owner, "task_row", {})
     values: list[object] = []
     target = _path_from_runtime(runtime)
+    if isinstance(target, UnavailableEvidence):
+        return target
     if target:
         values.append(target)
     contract = getattr(runtime, "edit_contract", None)
@@ -4152,14 +4185,17 @@ def _declared_path_values(runtime: object) -> list[object]:
     return values
 
 
-def editable_product_paths(runtime: object) -> tuple[str, ...]:
+def editable_product_paths(runtime: object) -> tuple[str, ...] | UnavailableEvidence:
     """Declared editable PRODUCT files (target first): existing, no tests, no evaluator scope."""
     root = getattr(getattr(runtime, "owner", None), "root", None)
     if root is None:
         return ()
     base = Path(root).resolve()
     result: list[str] = []
-    for value in _declared_path_values(runtime):
+    values = _declared_path_values(runtime)
+    if isinstance(values, UnavailableEvidence):
+        return values
+    for value in values:
         relative = str(value or "").strip().replace("\\", "/").removeprefix("./")
         if (not relative or relative.startswith("/") or _TEST_PATH.search(relative)
                 or any(part.casefold() in _FORBIDDEN_PARTS for part in relative.split("/"))):
@@ -4176,17 +4212,20 @@ def editable_product_paths(runtime: object) -> tuple[str, ...]:
         if is_file:
             result.append(relative)
     target = _path_from_runtime(runtime)
+    if isinstance(target, UnavailableEvidence):
+        return target
     return tuple(sorted(set(result), key=lambda path: (path != target, path)))[:_MAX_EDITABLE_FILES]
 
 
-def _read_product_file(root: Path, relative: str) -> str | None:
+def _read_product_file(root: Path, relative: str, *,
+                       journal: object = None) -> str | None | UnavailableEvidence:
     path = (Path(root) / relative)
     try:
         if path.stat().st_size > _MAX_FILE_BYTES:
             return None
         return path.read_text(encoding="utf-8")
-    except (OSError, UnicodeError):
-        return None
+    except (OSError, UnicodeDecodeError):
+        return _source_unavailable(journal, "REQUEST_SOURCE_FILE_UNAVAILABLE")
 
 
 def _safe_framefit_path(value: object) -> str | None:
@@ -4429,14 +4468,21 @@ def owner_coordinate_is_current(record: Mapping[str, object], *, path: str,
             and end >= start and end <= _line_count(source))
 
 
-def owner_coordinates_for_runtime(runtime: object, path: str) -> dict[str, object] | None:
+def owner_coordinates_for_runtime(runtime: object, path: str
+                                  ) -> dict[str, object] | None | UnavailableEvidence:
     if owner_coordinates_mode() != "on":
         return None
     normalized = str(path).replace("\\", "/")
     root = getattr(getattr(runtime, "owner", None), "root", None)
-    if root is None or normalized not in editable_product_paths(runtime):
+    paths = editable_product_paths(runtime)
+    if isinstance(paths, UnavailableEvidence):
+        return paths
+    if root is None or normalized not in paths:
         return None
-    source = _read_product_file(Path(root), normalized)
+    source = _read_product_file(Path(root), normalized,
+                                journal=getattr(runtime, "journal", None))
+    if isinstance(source, UnavailableEvidence):
+        return source
     return owner_coordinate_data(normalized, source) if source is not None else None
 
 
@@ -4605,13 +4651,16 @@ def enclosing_label(path: str, source: str, line: int) -> str:
 @profiled_function_span("request_source_literal_site_inventory")
 def literal_site_inventory(root: Path, editable_paths: Sequence[str],
                            tokens: Sequence[str], *, origins: Mapping[str, str] | None = None,
-                           max_sites: int = _MAX_SITES) -> list[Site]:
+                           max_sites: int = _MAX_SITES,
+                           journal: object = None) -> list[Site] | UnavailableEvidence:
     """Every lexical match, typed as executable code, comment, or docstring."""
     origins = origins or {}
     patterns = [(token, _literal_pattern(token, origins.get(token, ""))) for token in tokens]
     sites: list[Site] = []
     for path in editable_paths:
-        source = _read_product_file(Path(root), path)
+        source = _read_product_file(Path(root), path, journal=journal)
+        if isinstance(source, UnavailableEvidence):
+            return source
         if source is None:
             continue
         lines = source.splitlines()
@@ -4712,7 +4761,8 @@ def render_literal_inventory(sites: Sequence[Site], tokens: Sequence[str], *,
     return "\n".join(lines)
 
 
-def literal_inventory_block(runtime: object) -> tuple[str | None, dict[str, object]]:
+def literal_inventory_block(runtime: object
+                            ) -> tuple[str | None, dict[str, object]] | UnavailableEvidence:
     """(rendered block or None, journal summary).  Rendered when N >= 2 or a site is module level."""
     root = getattr(getattr(runtime, "owner", None), "root", None)
     if root is None:
@@ -4720,16 +4770,24 @@ def literal_inventory_block(runtime: object) -> tuple[str | None, dict[str, obje
     ticket = _ticket_text(runtime)
     tokens = literal_tokens(ticket, exclude=(entry_symbol(runtime),))
     paths = editable_product_paths(runtime)
+    if isinstance(paths, UnavailableEvidence):
+        return paths
     if not tokens or not paths:
         return None, {}
     origins = _token_origins(ticket)
-    sites = literal_site_inventory(Path(root), paths, tokens, origins=origins)
+    journal = getattr(runtime, "journal", None)
+    sites = literal_site_inventory(Path(root), paths, tokens, origins=origins,
+                                   journal=journal)
+    if isinstance(sites, UnavailableEvidence):
+        return sites
     parents = _parent_sources(runtime)
     covered = 0
     changed_by_path: dict[str, frozenset[int]] = {}
     for site in sites:
         if site.path not in changed_by_path:
-            current = _read_product_file(Path(root), site.path)
+            current = _read_product_file(Path(root), site.path, journal=journal)
+            if isinstance(current, UnavailableEvidence):
+                return current
             parent = parents.get(site.path)
             changed_by_path[site.path] = (changed_lines(parent, current)
                                           if parent is not None and current is not None
@@ -4737,7 +4795,12 @@ def literal_inventory_block(runtime: object) -> tuple[str | None, dict[str, obje
         if site.role == "executable":
             covered += site.line in changed_by_path[site.path]
     site_paths = sorted({site.path for site in sites})
-    current_sources = {path: _read_product_file(Path(root), path) for path in site_paths}
+    current_sources = {}
+    for path in site_paths:
+        current = _read_product_file(Path(root), path, journal=journal)
+        if isinstance(current, UnavailableEvidence):
+            return current
+        current_sources[path] = current
     current_revisions = {
         path: source_revision(source) for path, source in current_sources.items()
         if isinstance(source, str)
@@ -4781,11 +4844,14 @@ def literal_inventory_block(runtime: object) -> tuple[str | None, dict[str, obje
 
 # ----------------------------------------------------------------- entry symbol verification (P3)
 
-def _declared_definitions(root: Path, paths: Sequence[str], symbol: str) -> list[tuple[str, int]]:
+def _declared_definitions(root: Path, paths: Sequence[str], symbol: str, *,
+                          journal: object = None) -> list[tuple[str, int]] | UnavailableEvidence:
     short = symbol.rsplit(".", 1)[-1]
     found: list[tuple[str, int]] = []
     for path in paths:
-        source = _read_product_file(root, path)
+        source = _read_product_file(root, path, journal=journal)
+        if isinstance(source, UnavailableEvidence):
+            return source
         if source is None:
             continue
         if path.endswith(".py"):
@@ -4795,8 +4861,8 @@ def _declared_definitions(root: Path, paths: Sequence[str], symbol: str) -> list
             continue
         try:
             outline = _outline_for(path, source)
-        except (ImportError, OSError, TypeError, ValueError):
-            continue
+        except (ImportError, OSError, ValueError):
+            return _source_unavailable(journal, "REQUEST_SOURCE_OUTLINE_UNAVAILABLE")
         for row in [*(outline.get("functions", ()) or ()), *(outline.get("types", ()) or ())]:
             if isinstance(row, Mapping) and row.get("name") == short:
                 found.append((path, int(row.get("line", 0) or 0)))
@@ -4804,11 +4870,14 @@ def _declared_definitions(root: Path, paths: Sequence[str], symbol: str) -> list
     return found
 
 
-def _declared_references(root: Path, paths: Sequence[str], symbol: str) -> int:
+def _declared_references(root: Path, paths: Sequence[str], symbol: str, *,
+                         journal: object = None) -> int | UnavailableEvidence:
     pattern = re.compile(rf"(?<![A-Za-z0-9_]){re.escape(symbol.rsplit('.', 1)[-1])}(?![A-Za-z0-9_])")
     count = 0
     for path in paths:
-        source = _read_product_file(root, path)
+        source = _read_product_file(root, path, journal=journal)
+        if isinstance(source, UnavailableEvidence):
+            return source
         if source is not None:
             count += sum(1 for line in source.splitlines() if pattern.search(line))
     return count
@@ -4856,7 +4925,7 @@ def public_test_paths(runtime: object) -> tuple[str, ...]:
     return tuple(dict.fromkeys(result))[:_MAX_EDITABLE_FILES]
 
 
-def entry_verification(runtime: object) -> dict[str, object] | None:
+def entry_verification(runtime: object) -> dict[str, object] | None | UnavailableEvidence:
     """Host ``where_defined`` of the task row's entry symbol (declared files first).
 
     Q1: the declared public test files are scanned too.  A symbol with 0
@@ -4869,15 +4938,26 @@ def entry_verification(runtime: object) -> dict[str, object] | None:
         return None
     base = Path(root).resolve()
     paths = editable_product_paths(runtime)
+    if isinstance(paths, UnavailableEvidence):
+        return paths
     revision = _revision12(base, paths)
-    definitions = _declared_definitions(base, paths, symbol)
+    journal = getattr(runtime, "journal", None)
+    definitions = _declared_definitions(base, paths, symbol, journal=journal)
+    if isinstance(definitions, UnavailableEvidence):
+        return definitions
     if definitions:
         return {"symbol": symbol, "status": "FOUND", "definitions": definitions,
                 "revision": revision, "paths": list(paths)}
-    references = _declared_references(base, paths, symbol)
+    references = _declared_references(base, paths, symbol, journal=journal)
+    if isinstance(references, UnavailableEvidence):
+        return references
     tests = public_test_paths(runtime)
-    test_definitions = _declared_definitions(base, tests, symbol) if tests else []
-    test_references = _declared_references(base, tests, symbol) if tests else 0
+    test_definitions = _declared_definitions(base, tests, symbol, journal=journal) if tests else []
+    if isinstance(test_definitions, UnavailableEvidence):
+        return test_definitions
+    test_references = _declared_references(base, tests, symbol, journal=journal) if tests else 0
+    if isinstance(test_references, UnavailableEvidence):
+        return test_references
     from kernel_repo_intel import host_where_defined
     payload = host_where_defined(base, symbol)
     status = str(payload.get("status", "UNAVAILABLE"))
@@ -4996,15 +5076,20 @@ def _import_fact_cached(root: str, path: str, digest: str,
 
 
 def module_head_blocks(runtime: object,
-                       entry: Mapping[str, object] | None = None) -> list[str]:
+                       entry: Mapping[str, object] | None = None
+                       ) -> list[str] | UnavailableEvidence:
     """``[MODULE HEAD]`` (+ ``[IMPORT GRAPH FACT]``) for the target when P3 triggers."""
     root = getattr(getattr(runtime, "owner", None), "root", None)
     path = _path_from_runtime(runtime)
+    if isinstance(path, UnavailableEvidence):
+        return path
     if root is None or not path:
         return []
     blocks: list[str] = []
     if owner_coordinates_mode() == "on":
         coordinates = owner_coordinates_for_runtime(runtime, path)
+        if isinstance(coordinates, UnavailableEvidence):
+            return coordinates
         if coordinates and coordinates.get("owners_listed"):
             blocks.append(owner_coordinate_block(coordinates))
     ticket = _ticket_text(runtime)
@@ -5012,7 +5097,10 @@ def module_head_blocks(runtime: object,
                                                      "FOUND_OUTSIDE_DECLARED"}
     if not absent and not _MODULE_HEAD_TRIGGER.search(ticket):
         return blocks
-    source = _read_product_file(Path(root), path)
+    source = _read_product_file(Path(root), path,
+                                journal=getattr(runtime, "journal", None))
+    if isinstance(source, UnavailableEvidence):
+        return source
     if source is None:
         return blocks
     fact = None
@@ -5100,7 +5188,7 @@ def render_initialization_fact(fact: Mapping[str, object]) -> str:
 
 
 def site_fact_blocks(runtime: object, entry: Mapping[str, object] | None
-                     ) -> tuple[list[str], dict[str, object]]:
+                     ) -> tuple[list[str], dict[str, object]] | UnavailableEvidence:
     """All P2/P3 sidecars for one provider request (entry verification is supplied cached)."""
     blocks: list[str] = []
     owner = getattr(runtime, "owner", None)
@@ -5111,8 +5199,13 @@ def site_fact_blocks(runtime: object, entry: Mapping[str, object] | None
     if rendered_entry:
         blocks.append(rendered_entry)
     module_blocks = module_head_blocks(runtime, entry)
+    if isinstance(module_blocks, UnavailableEvidence):
+        return module_blocks
     blocks.extend(module_blocks)
-    inventory, summary = literal_inventory_block(runtime)
+    inventory_result = literal_inventory_block(runtime)
+    if isinstance(inventory_result, UnavailableEvidence):
+        return inventory_result
+    inventory, summary = inventory_result
     if inventory:
         blocks.append(inventory)
     if owner_coordinates_mode() == "on":

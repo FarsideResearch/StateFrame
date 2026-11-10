@@ -21,6 +21,7 @@ from pathlib import Path
 
 import kernel_parse_cache as _parse_cache
 from kernel_tree_digest import path_entry, tree_digest as canonical_tree_digest
+from kernel_obligation_assess import UnavailableEvidence, _unavailable_evidence
 
 
 MODE_ENV = "STATEFRAME_GET_SURE"
@@ -386,17 +387,27 @@ def table_from_dict(value: object) -> ClauseTable | None:
     return ClauseTable(clauses, normalized_rows, str(data.get("revision")) if data.get("revision") is not None else None)
 
 
-def violated_rows(table: ClauseTable | Mapping[str, object]) -> tuple[dict[str, object], ...]:
+def violated_rows(
+        table: ClauseTable | Mapping[str, object] | UnavailableEvidence,
+) -> tuple[dict[str, object], ...]:
+    if isinstance(table, UnavailableEvidence):
+        return ()
     rows = table.rows if isinstance(table, ClauseTable) else _as_dict(table).get("rows", ())
     return tuple(row for row in rows if isinstance(row, Mapping) and row.get("verdict") == "VIOLATED")
 
 
-def unprobed_rows(table: ClauseTable | Mapping[str, object]) -> tuple[dict[str, object], ...]:
+def unprobed_rows(
+        table: ClauseTable | Mapping[str, object] | UnavailableEvidence,
+) -> tuple[dict[str, object], ...]:
+    if isinstance(table, UnavailableEvidence):
+        return ()
     rows = table.rows if isinstance(table, ClauseTable) else _as_dict(table).get("rows", ())
     return tuple(row for row in rows if isinstance(row, Mapping) and row.get("verdict") == "UNPROBED")
 
 
-def has_violations(table: ClauseTable | Mapping[str, object]) -> bool:
+def has_violations(table: ClauseTable | Mapping[str, object] | UnavailableEvidence) -> bool:
+    if isinstance(table, UnavailableEvidence):
+        return True
     return bool(violated_rows(table))
 
 
@@ -522,7 +533,10 @@ def render_applied_edit(path: object, revision: object, changed_region: object) 
     )
 
 
-def done_refusal(table: ClauseTable | Mapping[str, object]) -> str | None:
+def done_refusal(table: ClauseTable | Mapping[str, object] | UnavailableEvidence) -> str | None:
+    if isinstance(table, UnavailableEvidence):
+        return ("DONE REFUSED: current revision evidence is unavailable ("
+                + table.reason_code + "); refresh the source evidence before submitting.")
     rows = violated_rows(table)
     if not rows:
         return None
@@ -531,7 +545,7 @@ def done_refusal(table: ClauseTable | Mapping[str, object]) -> str | None:
 
 
 def menu_with_repair_tools(selected: Sequence[dict], full_tools: Sequence[dict],
-                           table: ClauseTable | Mapping[str, object]) -> list[dict]:
+                           table: ClauseTable | Mapping[str, object] | UnavailableEvidence) -> list[dict]:
     result = [dict(item) for item in selected]
     available = {str(_as_dict(item.get("function")).get("name")) for item in full_tools
                  if isinstance(item, Mapping)}
@@ -738,18 +752,36 @@ def _runtime_ticket(runtime: object, frame: Mapping[str, object] | None) -> obje
     return ""
 
 
-def _runtime_revision(runtime: object, frame: Mapping[str, object] | None = None) -> str | None:
+def _path_revision_or_unavailable(
+        runtime: object, journal: object,
+) -> str | None | UnavailableEvidence:
+    from kernel_completion_owner import RequestActionContractError
+
+    try:
+        target = getattr(runtime, "target", None)
+        if target is None:
+            return None
+        path = Path(target)
+        if path.is_file():
+            return "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
+    except RequestActionContractError:
+        raise
+    except (OSError, LookupError, TypeError, ValueError):
+        return _unavailable_evidence(
+            journal, "GET_SURE_RUNTIME_REVISION_UNAVAILABLE",
+            producer="kernel_stateframe_get_sure",
+        )
+    return None
+
+
+def _runtime_revision(
+        runtime: object, frame: Mapping[str, object] | None = None,
+) -> str | None | UnavailableEvidence:
     if isinstance(frame, Mapping):
         revisions = frame.get("artifact_revisions")
         if isinstance(revisions, Mapping) and revisions:
             return str(next(iter(revisions.values())))
-    try:
-        target = getattr(runtime, "target", None)
-        if target is not None and Path(target).is_file():
-            return "sha256:" + hashlib.sha256(Path(target).read_bytes()).hexdigest()
-    except OSError:
-        pass
-    return None
+    return _path_revision_or_unavailable(runtime, getattr(runtime, "journal", None))
 
 
 def _runtime_evidence(runtime: object, frame: Mapping[str, object] | None) -> list[dict[str, object]]:
@@ -808,8 +840,12 @@ def _authority_evidence(runtime: object, frame: Mapping[str, object] | None):
     return rows, decision.revision
 
 
-def runtime_table(runtime: object, frame: Mapping[str, object] | None = None, *, revision: object = None) -> ClauseTable:
+def runtime_table(
+        runtime: object, frame: Mapping[str, object] | None = None, *, revision: object = None,
+) -> ClauseTable | UnavailableEvidence:
     table = _runtime_table_base(runtime, frame, revision=revision)
+    if isinstance(table, UnavailableEvidence):
+        return table
     if os.environ.get("STATEFRAME_NAMED_LAYER_REPAIR", "off").strip().lower() == "on":
         # autopsy-ldev01-cross-release #2: a clause naming a layer is never "INVALID CHECK, IGNORE"; it is
         # UNPROBED and bound to its named-layer row (kernel_named_layer_coverage).  Off: unchanged.
@@ -827,8 +863,10 @@ def runtime_table(runtime: object, frame: Mapping[str, object] | None = None, *,
 
 
 def _runtime_table_base(runtime: object, frame: Mapping[str, object] | None = None, *,
-                        revision: object = None) -> ClauseTable:
+                        revision: object = None) -> ClauseTable | UnavailableEvidence:
     supplied_revision = revision if revision not in (None, "") else _runtime_revision(runtime, frame)
+    if isinstance(supplied_revision, UnavailableEvidence):
+        return supplied_revision
     if authority_on(runtime):
         evidence, decision_revision = _authority_evidence(runtime, frame)
         if evidence is not None:
@@ -859,11 +897,15 @@ def _changed_region(runtime: object, receipt: Mapping[str, object]) -> str:
     return "edit result recorded by host"
 
 
-def after_applied_edit(runtime: object, receipt: Mapping[str, object]) -> str | None:
+def after_applied_edit(
+        runtime: object, receipt: Mapping[str, object],
+) -> str | UnavailableEvidence | None:
     """Record a revision-bound APPLIED receipt after the normal host hooks run."""
     if not enabled() or str(receipt.get("result_class", "")).upper() != "APPLIED":
         return None
     revision = _runtime_revision(runtime)
+    if isinstance(revision, UnavailableEvidence):
+        return revision
     marker = render_applied_edit(receipt.get("target_path", "source"), revision or "unknown", _changed_region(runtime, receipt))
     setattr(runtime, "_get_sure_last_applied", marker)
     setattr(runtime, "_get_sure_last_applied_revision", revision)
@@ -881,6 +923,8 @@ def run_relevant_checks(runtime: object, receipt: Mapping[str, object]) -> objec
     runner = getattr(runtime, "get_sure_check_runner", None)
     if callable(runner):
         table = runtime_table(runtime)
+        if isinstance(table, UnavailableEvidence):
+            return table
         try:
             return runner(table, receipt)
         except TypeError:
@@ -902,8 +946,12 @@ def run_relevant_checks(runtime: object, receipt: Mapping[str, object]) -> objec
     return None
 
 
-def predict_runtime(runtime: object, arguments: Mapping[str, object]) -> dict[str, object]:
+def predict_runtime(
+        runtime: object, arguments: Mapping[str, object],
+) -> dict[str, object] | UnavailableEvidence:
     table = runtime_table(runtime)
+    if isinstance(table, UnavailableEvidence):
+        return table
     root = Path(getattr(runtime, "root", None) or getattr(getattr(runtime, "owner", None), "root", Path.cwd()))
     runner = getattr(runtime, "get_sure_public_runner", None)
     clause_runner = getattr(runtime, "get_sure_clause_runner", None)
@@ -934,8 +982,10 @@ def record_last_decision(runtime: object) -> tuple[str, str]:
 
 
 def runtime_model_block(runtime: object, frame: Mapping[str, object] | None = None,
-                        *, path: str = "", revision: object = None) -> str:
+                        *, path: str = "", revision: object = None) -> str | UnavailableEvidence:
     table = runtime_table(runtime, frame, revision=revision)
+    if isinstance(table, UnavailableEvidence):
+        return table
     last, next_step = record_last_decision(runtime)
     return render_model_block(table, source_path=path, source_revision=revision,
                              last_conclusion=last, next_step=next_step,

@@ -187,6 +187,8 @@ def build_qualified_request(capture, runtime, body, *, endpoint, key, deadline=N
     candidate._tokenize_endpoint = routed_tokenize_endpoint(capture) or endpoint
     body = copy.deepcopy(body)
     truth = capture_context(candidate, context, body, side_call=False)
+    from kernel_wire_truth_facts import require_fact_context
+    truth = require_fact_context(truth)
     if enabled():
         body = add_fact_messages(body, truth, append_only=False)
         from kernel_release_wire_claims import READ_PREFIX, read_contract_capsule
@@ -396,7 +398,8 @@ def build_qualified_request(capture, runtime, body, *, endpoint, key, deadline=N
                            dispatch=False)
     candidate._wire_truth_runtime = context
     candidate._wire_truth_side_call = False
-    candidate._wire_truth_context = capture_context(candidate, context, body, side_call=False)
+    candidate._wire_truth_context = require_fact_context(
+        capture_context(candidate, context, body, side_call=False))
     try:
         check = check_wire(wire, candidate._wire_truth_context, emit=candidate.journal.emit,
                            attempt=1, allow_done_repair=False)

@@ -222,6 +222,12 @@ class RequestActionContractError(ValueError):
     boundary_recovery_eligible: bool = True
 
 
+_RECORDED_UNAVAILABLE_ERRORS = (
+    AttributeError, ImportError, OSError, RuntimeError, TypeError, ValueError,
+    LookupError, StopIteration, ArithmeticError,
+)
+
+
 def _disposition_for(code: str) -> str:
     """Return the owner disposition for every declared refusal code."""
     normalized = str(code).strip().upper()
@@ -5822,7 +5828,16 @@ def align_tools_to_completion_route(runtime: object, tools: Sequence[object]) ->
             runtime, getattr(runtime, "_last_completion_decision", None),
             tools=getattr(runtime, "_completion_owner_full_tools", ()) or (),
         )
-    except Exception:  # noqa: BLE001 - alignment is a projection; the contract check still runs after it
+    except RequestActionContractError:
+        raise
+    except _RECORDED_UNAVAILABLE_ERRORS as error:
+        _emit(
+            runtime, "completion_owner_unavailable",
+            operation="completion_route_alignment",
+            reason_code="COMPLETION_ROUTE_ALIGNMENT_UNAVAILABLE",
+            reason=f"completion route alignment unavailable: {type(error).__name__}",
+            error_type=type(error).__name__,
+        )
         return original
     if decision.route not in {"ACTION", "UNCERTIFIED_SUBMIT"} or not decision.tool_schemas:
         return original
@@ -6824,7 +6839,16 @@ def bind_final_tool_surface(
             rebound_contract["revision"] = _contract_revision(runtime)
             rebound_contract["unresolved_work"] = _contract_unresolved_work(runtime)
             rebound_contract["decision_digest"] = _contract_decision_digest(rebound_contract)
-        except Exception:
+        except RequestActionContractError:
+            raise
+        except _RECORDED_UNAVAILABLE_ERRORS as error:
+            _emit(
+                runtime, "completion_owner_unavailable",
+                operation="final_surface_revision_rebind",
+                reason_code="FINAL_SURFACE_REVISION_REBIND_UNAVAILABLE",
+                reason=f"final-surface revision rebind unavailable: {type(error).__name__}",
+                error_type=type(error).__name__,
+            )
             contract = legacy_contract
             if revision_mode == "shadow":
                 _emit_request_contract_revision_rebind_shadow_mismatch(
@@ -6852,7 +6876,16 @@ def bind_final_tool_surface(
             setattr(runtime, "offered_tools", tuple(normalized_names))
             setattr(runtime, "_question_done_available", "done" in normalized_names)
         return True
-    except (AttributeError, TypeError, ValueError):
+    except RequestActionContractError:
+        raise
+    except _RECORDED_UNAVAILABLE_ERRORS as error:
+        _emit(
+            runtime, "completion_owner_unavailable",
+            operation="final_tool_surface_binding",
+            reason_code="FINAL_TOOL_SURFACE_BINDING_UNAVAILABLE",
+            reason=f"final tool-surface binding unavailable: {type(error).__name__}",
+            error_type=type(error).__name__,
+        )
         return False
 
 
@@ -7449,7 +7482,16 @@ def terminal_tool_menu(runtime: object, tools: Sequence[Mapping[str, object]]) -
         try:
             from kernel_greenlock_menu_authority import finalize_wire_menu_authority
             finalize_wire_menu_authority(runtime, result)
-        except Exception:  # noqa: BLE001 - authority bookkeeping must not break menu composition
+        except RequestActionContractError:
+            raise
+        except _RECORDED_UNAVAILABLE_ERRORS as error:
+            _emit(
+                runtime, "completion_owner_unavailable",
+                operation="terminal_menu_authority",
+                reason_code="TERMINAL_MENU_AUTHORITY_UNAVAILABLE",
+                reason=f"terminal menu authority unavailable: {type(error).__name__}",
+                error_type=type(error).__name__,
+            )
             pass
         return result
     floor_available_tools = copy.deepcopy(_contract_tools(tools))

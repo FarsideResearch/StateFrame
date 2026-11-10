@@ -751,10 +751,18 @@ def render_sibling_site_facts(runtime: object) -> str | None:
         )
         root = Path(getattr(getattr(runtime, "owner", None), "root"))
         paths = editable_product_paths(runtime)
+        from kernel_obligation_assess import UnavailableEvidence
+        if isinstance(paths, UnavailableEvidence):
+            return None
         symbol = entry_symbol(runtime).rsplit(".", 1)[-1]
         if not paths or not symbol:
             return None
-        sites = literal_site_inventory(root, paths, (symbol,), max_sites=12)
+        sites = literal_site_inventory(
+            root, paths, (symbol,), max_sites=12,
+            journal=getattr(runtime, "journal", None),
+        )
+        if isinstance(sites, UnavailableEvidence):
+            return None
     except (AttributeError, OSError, TypeError, ValueError):
         return None
     lines = [

@@ -96,17 +96,25 @@ def _update_headcarry(
             render_headcarry,
         )
 
-        panel = _json_value(render_headcarry(
+        from kernel_obligation_assess import UnavailableEvidence
+        panel = render_headcarry(
             root,
             open_sites,
             applied_edits,
             messages=messages,
             wire_sites=open_sites,
             owed_reads=owed_reads,
-        ))
+            journal=getattr(runtime, "journal", None),
+        )
+        if isinstance(panel, UnavailableEvidence):
+            frame.pop("headcarry", None)
+            setattr(runtime, "_framefit5_headcarry_failed", True)
+            setattr(runtime, "_framefit5_headcarry_unavailable", panel)
+            return
+        panel = _json_value(panel)
         if not isinstance(panel, dict):
             raise TypeError("head-carry renderer did not return a JSON object")
-    except Exception:
+    except (AttributeError, ImportError, OSError, RuntimeError, TypeError, ValueError):
         # Head carry is enrichment; a renderer fault must leave the legacy frame usable.
         frame.pop("headcarry", None)
         try:
@@ -117,6 +125,7 @@ def _update_headcarry(
 
     try:
         setattr(runtime, "_framefit5_headcarry_failed", False)
+        setattr(runtime, "_framefit5_headcarry_unavailable", None)
     except Exception:
         pass
     if mode == "shadow" and not already_attached:
@@ -2728,7 +2737,8 @@ def validate_product_request(
 
                     # T2FIX: same owed-read inputs as _update_headcarry, or this final
                     # re-render would silently drop the heads the frame just promised.
-                    fresh_headcarry = _json_value(render_headcarry(
+                    from kernel_obligation_assess import UnavailableEvidence
+                    fresh_headcarry = render_headcarry(
                         _workspace_root(runtime),
                         open_sites,
                         framefit5["applied_edits"],
@@ -2736,10 +2746,16 @@ def validate_product_request(
                         wire_sites=[next_site] if compact_inventory else open_sites,
                         owed_reads=(owed_read_rows(framefit5.get("read_facts"))
                                     if headcarry_owed_reads_enabled() else []),
-                    ))
+                        journal=getattr(runtime, "journal", None),
+                    )
+                    if isinstance(fresh_headcarry, UnavailableEvidence):
+                        setattr(runtime, "_framefit5_headcarry_unavailable", fresh_headcarry)
+                        fresh_headcarry = current_headcarry
+                    else:
+                        fresh_headcarry = _json_value(fresh_headcarry)
                     if not isinstance(fresh_headcarry, dict):
                         raise TypeError("head-carry renderer did not return a JSON object")
-            except Exception as error:
+            except (AttributeError, ImportError, OSError, RuntimeError, TypeError, ValueError) as error:
                 if not refresh_headcarry:
                     raise FrameFit5Error(
                         "final typed head-carry could not be verified"

@@ -24,6 +24,7 @@ import sys
 import time
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
+from kernel_obligation_assess import UnavailableEvidence
 
 from kernel_context import (
     FRAME_CEILING_TOKENS, FRAME_TARGET_TOKENS, RenderOverflow, SelectableItem,
@@ -2725,6 +2726,71 @@ def note_provider_request(runtime: object, messages: Sequence[Mapping[str, objec
 
     runtime._frame_budget_request_count = getattr(runtime, "_frame_budget_request_count", 0) + 1
     record_serialized_read_pages(runtime, messages, runtime._frame_budget_request_count)
+
+
+def _prepare_request_capture(runtime: object) -> RequestCapture:
+    """Keep normal and early-stop request identities on the same authority."""
+    origin = getattr(runtime, "_source_replan_origin_request_id", None)
+    journal = runtime.journal
+    return RequestCapture(
+        journal, getattr(runtime.owner, "current_step", 0), runtime.snapshot_id,
+        endpoint_profile=runtime.endpoint_profile,
+        identity_content=({
+            "task_id": getattr(journal, "task_id", ""), "purpose": "",
+            "source_replan_of": origin,
+        } if origin is not None else None),
+    )
+
+
+def _unavailable_frame_request(runtime: object, reason_code: str) -> PreparedRequest:
+    """Stop before dispatch even when frame evidence fails before normal capture creation."""
+    capture = _prepare_request_capture(runtime)
+    return _unavailable_prepared_capture(runtime, capture, reason_code)
+
+
+def _unavailable_prepared_capture(
+        runtime: object, capture: RequestCapture, reason_code: str,
+) -> PreparedRequest:
+    """Preserve the existing request identity when preparation loses evidence."""
+    runtime.system_outcome = "request_builder_unavailable"
+    return PreparedRequest((), capture, {
+        "kind": "REQUEST_BUILDER_UNAVAILABLE", "reason_code": reason_code,
+    })
+
+
+def _lean_wire_truth_context(
+        capture: RequestCapture, runtime: object,
+        prepared: list[dict], selected_tools: list[dict],
+) -> dict[str, object] | PreparedRequest:
+    from kernel_wire_truth_facts import UnavailableFactEvidence
+    from kernel_wire_truth_gate import capture_context
+
+    context = capture_context(
+        capture, runtime, {"messages": prepared, "tools": selected_tools})
+    if isinstance(context, UnavailableFactEvidence):
+        return _unavailable_prepared_capture(runtime, capture, context.reason_code)
+    return context
+
+
+def _read_requested_source(
+        candidate: Path, root: Path, sources: Mapping[str, str], journal: object,
+) -> tuple[str, str] | None | UnavailableEvidence:
+    from kernel_completion_owner import RequestActionContractError
+    from kernel_obligation_assess import _unavailable_evidence
+
+    try:
+        resolved = candidate.resolve()
+        relative = resolved.relative_to(root).as_posix()
+        if resolved.is_file() and relative not in sources:
+            return relative, resolved.read_text(encoding="utf-8")
+    except RequestActionContractError:
+        raise
+    except (OSError, UnicodeError, LookupError, ValueError):
+        return _unavailable_evidence(
+            journal, "STATEFRAME_SECONDARY_SOURCE_UNAVAILABLE",
+            producer="kernel_stateframe_runtime",
+        )
+    return None
 
 
 class StateFrameRuntime:
@@ -8714,7 +8780,11 @@ class StateFrameRuntime:
                 and not hstate_plus_history) or str(kind or "").strip().lower() != "predict":
             return None
         from kernel_stateframe_get_sure import predict_runtime
-        return predict_runtime(self, arguments or {})
+        prediction = predict_runtime(self, arguments or {})
+        from kernel_obligation_assess import UnavailableEvidence
+        if isinstance(prediction, UnavailableEvidence):
+            return {"prediction_status": "UNAVAILABLE", "reason_code": prediction.reason_code}
+        return prediction
 
     def _get_sure_menu(self, selected: Sequence[dict], full_tools: Sequence[dict]) -> list[dict]:
         if getattr(self, "stateframe_get_sure_mode", "off") != "on":
@@ -8983,7 +9053,7 @@ class StateFrameRuntime:
                 or not self.host_closure_payload):
             return
         from kernel_obligation_assess import (
-            CheckReceipt, assess_obligations, needs_work_payload,
+            CheckReceipt, UnavailableEvidence, assess_obligations, needs_work_payload,
             repair_episode, run_registered_checks, workspace_snapshot,
         )
         bundle = self._host_check_bundle()
@@ -9002,7 +9072,10 @@ class StateFrameRuntime:
         if not check_ids:
             return
         binding = self.binding()
-        snapshot = workspace_snapshot(Path(self.owner.root), binding=binding)
+        snapshot = workspace_snapshot(Path(self.owner.root), binding=binding,
+                                      journal=self.journal)
+        if isinstance(snapshot, UnavailableEvidence):
+            return
         environment = self._host_closure_environment()
         requirements_ledger = None
         if (os.environ.get("STATEFRAME_NAMED_LAYER_REPAIR", "off").strip().lower() == "on"
@@ -9011,10 +9084,12 @@ class StateFrameRuntime:
         receipts = run_registered_checks(
             Path(self.owner.root), bundle.checks, snapshot=snapshot,
             environment=environment, cache=self.host_repair_check_cache,
-            check_ids=check_ids,
+            check_ids=check_ids, journal=self.journal,
             identity=getattr(self, "verdict_identity_provider", None),
             requirements_ledger=requirements_ledger,
         )
+        if isinstance(receipts, UnavailableEvidence):
+            return
         for receipt in receipts:
             if not isinstance(receipt, CheckReceipt):
                 continue
@@ -9655,7 +9730,13 @@ class StateFrameRuntime:
         checks = tuple(getattr(bundle, "checks", ()) or ()) if bundle is not None else ()
         specs = tuple(getattr(bundle, "specs", ()) or ()) if bundle is not None else ()
         binding = self.binding()
-        starter_snapshot = workspace_snapshot(root, binding=binding)
+        starter_snapshot = workspace_snapshot(root, binding=binding, journal=self.journal)
+        from kernel_obligation_assess import UnavailableEvidence
+        if isinstance(starter_snapshot, UnavailableEvidence):
+            self.starter_conflict_tracker = None
+            self.starter_conflict_facts = ()
+            self.starter_conflict_starter_snapshot = None
+            return
         self.starter_conflict_starter_snapshot = starter_snapshot
 
         # A resumed runtime carries the immutable starter facts in its journal;
@@ -9732,12 +9813,16 @@ class StateFrameRuntime:
         if tracker is None:
             return
         try:
-            tracker.refresh_from_root(
+            refreshed = tracker.refresh_from_root(
                 Path(self.owner.root).resolve(),
                 environment=self._host_closure_environment(),
                 cache=self.starter_conflict_check_cache,
                 binding=self.binding(),
+                journal=self.journal,
             )
+            from kernel_obligation_assess import UnavailableEvidence
+            if isinstance(refreshed, UnavailableEvidence):
+                return
             self.starter_conflict_facts = tracker.facts
         except (OSError, TypeError, ValueError, RuntimeError) as error:
             self.journal.emit(
@@ -9764,7 +9849,7 @@ class StateFrameRuntime:
             _NO_BUNDLE = None
             cache_none_bundle = False
         from kernel_obligation_assess import (
-            augment_input_preservation_bundle, input_preservation_bundle,
+            UnavailableEvidence, augment_input_preservation_bundle, input_preservation_bundle,
             load_check_bundle, static_bundles_enabled,
         )
         cached = getattr(self, "_host_check_bundle_cache", None)
@@ -9844,10 +9929,8 @@ class StateFrameRuntime:
                 } or "backup" in part.lower() for part in relative.parts):
                     continue
                 if path.is_file():
-                    try:
-                        public_source = path.read_text(encoding="utf-8")
-                    except (OSError, UnicodeError):
-                        pass
+                    # Let the obligation scanner read and journal this source.
+                    public_source = path
                     break
         public_material = None
         if (row.get("runner_kind") != "generic"
@@ -9867,7 +9950,9 @@ class StateFrameRuntime:
         static = load_check_bundle(task_id, public_material=public_material)
         if static is not None:
             bundle = augment_input_preservation_bundle(
-                static, root, public_test_source=public_source)
+                static, root, public_test_source=public_source, journal=self.journal)
+            if isinstance(bundle, UnavailableEvidence):
+                return None
             if (getattr(self, "stateframe_check_generator_fixes_mode", "off") == "on"
                     and bundle is not None and bundle is not static
                     and isinstance(public_material, Mapping)):
@@ -9913,7 +9998,10 @@ class StateFrameRuntime:
                 task_id=str(task_id or "dynamic-input-preservation"), clause=str(clause),
                 entry_point=entry, fixture=fixture, root=root,
                 public_test_source=public_source, selection=selection, targets=targets,
+                journal=self.journal,
             )
+            if isinstance(bundle, UnavailableEvidence):
+                return None
         else:
             bundle = None
         if (getattr(self, "stateframe_check_generator_fixes_mode", "off") == "on"
@@ -10126,7 +10214,7 @@ class StateFrameRuntime:
         if getattr(self, "stateframe_host_closure_mode", "off") != "on":
             return (), None, None
         from kernel_obligation_assess import (
-            CheckReceipt, assess_obligations,
+            CheckReceipt, UnavailableEvidence, assess_obligations,
             needs_work_payload, run_registered_checks, unknown_no_verifier,
             workspace_snapshot,
         )
@@ -10134,7 +10222,13 @@ class StateFrameRuntime:
         bundle = self._host_check_bundle()
         root = Path(self.owner.root)
         binding = self.binding()
-        snapshot = workspace_snapshot(root, binding=binding)
+        snapshot = workspace_snapshot(root, binding=binding, journal=self.journal)
+        if isinstance(snapshot, UnavailableEvidence):
+            self.host_closure_snapshot = None
+            self.host_closure_assessments = ()
+            self.host_closure_receipts = []
+            self.host_closure_payload = None
+            return (), None, None
         environment = self._host_closure_environment()
         requirements_ledger = None
         if (os.environ.get("STATEFRAME_NAMED_LAYER_REPAIR", "off").strip().lower() == "on"
@@ -10167,8 +10261,13 @@ class StateFrameRuntime:
             root, bundle.checks, snapshot=snapshot, environment=environment,
             cache=self.host_check_cache,
             identity=getattr(self, "verdict_identity_provider", None),
-            requirements_ledger=requirements_ledger,
+            requirements_ledger=requirements_ledger, journal=self.journal,
         )
+        if isinstance(receipts, UnavailableEvidence):
+            self.host_closure_assessments = ()
+            self.host_closure_receipts = []
+            self.host_closure_payload = None
+            return (), None, None
         for receipt in receipts:
             if not isinstance(receipt, CheckReceipt):
                 continue
@@ -11019,13 +11118,19 @@ class StateFrameRuntime:
             table = self.get_sure_table()
             refusal = done_refusal(table) if table is not None else None
             if refusal is not None:
-                open_ids = tuple(str(row.get("id")) for row in table.rows
-                                 if row.get("verdict") == "VIOLATED")
-                codes = tuple(dict.fromkeys((*codes, "GET_SURE_OPEN_CLAUSE")))
+                from kernel_obligation_assess import UnavailableEvidence
+                unavailable = isinstance(table, UnavailableEvidence)
+                open_ids = (() if unavailable else tuple(
+                    str(row.get("id")) for row in table.rows
+                    if row.get("verdict") == "VIOLATED"))
+                refusal_code = ("GET_SURE_EVIDENCE_UNAVAILABLE" if unavailable
+                                else "GET_SURE_OPEN_CLAUSE")
+                codes = tuple(dict.fromkeys((*codes, refusal_code)))
                 detail = refusal
                 admissible = False
-                unresolved_gating_items = tuple(unresolved_gating_items) + open_ids
-                if challenge_budget_active:
+                unresolved_gating_items = tuple(unresolved_gating_items) + (
+                    (table.reason_code,) if unavailable else open_ids)
+                if challenge_budget_active and not unavailable:
                     self._challenge_budget_open_evidence.extend(
                         copy.deepcopy(list(table.rows)))
                 self.journal.emit(
@@ -14244,6 +14349,12 @@ class StateFrameRuntime:
     def accept_action(self) -> None:
         self.parent.charge('tool_work', reason='worker dispatch')
 
+    def _remember_intent_carry_outcome(self, result: object) -> None:
+        from kernel_obligation_assess import UnavailableEvidence
+
+        if isinstance(result, UnavailableEvidence):
+            self._intent_carry_unavailable = result
+
     def record_model_decision(self, *, reasoning: object = None,
                               content: object = None, action: object = None,
                               step: int | None = None) -> None:
@@ -14283,10 +14394,11 @@ class StateFrameRuntime:
             delivered = getattr(self, "_empirical_serialized_sources", None)
             reference_kwargs["reference_paths"] = [
                 path, *(sorted(str(key) for key in delivered) if isinstance(delivered, Mapping) else ())]
-        intent_carry.observe_model(
+        result = intent_carry.observe_model(
             reasoning=reasoning, content=content, default_path=path,
             default_symbol=getattr(self.owner, "fn", None), step=int(step), action=action,
             **reference_kwargs)
+        self._remember_intent_carry_outcome(result)
 
     def _record_rejected_edit_intent(self, receipt: Mapping[str, object]) -> None:
         """Preserve every changed definition from a rejected multi-def edit."""
@@ -14320,9 +14432,10 @@ class StateFrameRuntime:
             current = path.read_text(encoding="utf-8") if path.is_file() else ""
         except (OSError, UnicodeError, TypeError, ValueError):
             return
-        intent_carry.record_rejected_edit(
+        result = intent_carry.record_rejected_edit(
             path=relative, current_source=current, candidate_source=candidate,
             step=int(receipt.get("turn", getattr(self.owner, "current_step", 0)) or 0))
+        self._remember_intent_carry_outcome(result)
 
     def _capture_self_edit_view(self, receipt: Mapping[str, object], current: Mapping[str, object]) -> dict | None:
         if not self._edit_before_known or self._edit_before is None:
@@ -14669,9 +14782,10 @@ class StateFrameRuntime:
             result_class = receipt.get("result_class")
             if kind in {"edit", "str_replace", "file_create", "shell_effect", "replace_module", "write", "replace"}:
                 if result_class == "APPLIED":
-                    intent_carry.clear_for_edit(
+                    result = intent_carry.clear_for_edit(
                         receipt.get("target_path") or (self.current_action or {}).get("arguments", {}).get("path", ""),
                         step=int(receipt.get("turn", getattr(self.owner, "current_step", 0)) or 0))
+                    self._remember_intent_carry_outcome(result)
                 elif result_class == "REJECTED":
                     self._record_rejected_edit_intent(receipt)
         if getattr(self, "_auto_verify_running", False) and receipt.get("kind") == "test":
@@ -15601,7 +15715,8 @@ class StateFrameRuntime:
             return
 
     def read_already_present(self, path: str, start_line: int,
-                             *, range_requested: bool = False) -> dict | None:
+                             *, range_requested: bool = False
+                             ) -> dict | None | UnavailableEvidence:
         from kernel_read_fixes import read_receipt_enabled
         from kernel_host_autopilot import enabled as host_autopilot_enabled
         dedup_observation = None
@@ -15615,6 +15730,9 @@ class StateFrameRuntime:
                 and self.empirical_fixes_mode != "on" and not read_receipt_enabled()):
             from kernel_intent_carry import delivered_source_observation
             dedup_observation = delivered_source_observation(self, path, start_line)
+        from kernel_obligation_assess import UnavailableEvidence
+        if isinstance(dedup_observation, UnavailableEvidence):
+            return dedup_observation
         intent_carry = getattr(self, "intent_carry", None)
         if dedup_observation is None or intent_carry is None:
             return dedup_observation
@@ -17362,7 +17480,11 @@ class StateFrameRuntime:
         frame["micrograph"] = wire.projection()
         return frame
 
-    def _frame(self) -> tuple[dict, str, str]:
+    def _frame(self) -> tuple[dict, str, str] | UnavailableEvidence:
+        from kernel_obligation_assess import UnavailableEvidence
+        intent_gap = getattr(self, "_intent_carry_unavailable", None)
+        if isinstance(intent_gap, UnavailableEvidence):
+            return intent_gap
         receipts = getattr(self.owner, "_receipts", [])
         self.working_source_exists = self.target is not None and self.target.exists()
         source = self._target_source()
@@ -17662,13 +17784,15 @@ class StateFrameRuntime:
                 candidate = Path(str(raw_path))
                 if not candidate.is_absolute():
                     candidate = root_path / candidate
-                try:
-                    candidate = candidate.resolve()
-                    relative = candidate.relative_to(root_path).as_posix()
-                    if candidate.is_file() and relative not in sources:
-                        sources[relative] = candidate.read_text(encoding="utf-8")
-                except (OSError, UnicodeError, ValueError):
-                    continue
+                from kernel_obligation_assess import UnavailableEvidence
+                source_result = _read_requested_source(
+                    candidate, root_path, sources, self.journal,
+                )
+                if isinstance(source_result, UnavailableEvidence):
+                    return source_result
+                if source_result is not None:
+                    relative, source_text = source_result
+                    sources[relative] = source_text
             s1_view = self.stateframe_v2_s1.update(
                 brief=brief, sources=sources, path=path,
                 receipts=getattr(self.owner, "_receipts", ()),
@@ -17976,6 +18100,9 @@ class StateFrameRuntime:
             frame = project_green_coherence_frame(frame, runtime=self, lock=self.green_lock)
         if getattr(self, "stateframe_get_sure_mode", "off") == "on":
             table = self.get_sure_table(frame)
+            from kernel_obligation_assess import UnavailableEvidence
+            if isinstance(table, UnavailableEvidence):
+                return table
             frame["get_sure"] = table.to_dict()
         frame = self._micrograph_frame(frame)
         from kernel_wire_identity import public_wire_value
@@ -19818,9 +19945,13 @@ class StateFrameRuntime:
             facts += "\nmicrograph: " + canonical_bytes(
                 self.micrograph_wire.projection()).decode("utf-8")
         if getattr(self, "stateframe_get_sure_mode", "off") == "on":
-            from kernel_stateframe_get_sure import runtime_model_block
+            from kernel_stateframe_get_sure import done_refusal, runtime_model_block
             get_sure_content = runtime_model_block(
                 self, working_view_frame, path=path, revision=current_revision)
+            from kernel_obligation_assess import UnavailableEvidence
+            if isinstance(get_sure_content, UnavailableEvidence):
+                get_sure_content = done_refusal(get_sure_content) or (
+                    "DONE REFUSED: current revision evidence is unavailable; refresh source evidence.")
             messages["get_sure"] = {"role": "user", "content": get_sure_content}
             items.append(SelectableItem(
                 "get_sure", Priority.REQUIRED_CONTROL_CONTEXT, "get_sure",
@@ -21006,7 +21137,10 @@ class StateFrameRuntime:
         try:
             if site_facts_on:
                 from kernel_request_source_window import entry_verification, site_fact_blocks
+                from kernel_obligation_assess import UnavailableEvidence
                 entry = entry_verification(self)
+                if isinstance(entry, UnavailableEvidence):
+                    return []
                 entry_key = None if entry is None else (
                     # Ordered paths distinguish equal legacy revisions from different inventories.
                     entry.get("revision"), entry.get("status"),
@@ -21019,14 +21153,22 @@ class StateFrameRuntime:
                         self.journal.emit("entry_symbol_verification",
                                           producer="kernel_request_source_window",
                                           result=self._site_facts_entry, dispatch=False)
-                blocks, summary = site_fact_blocks(self, self._site_facts_entry)
+                site_result = site_fact_blocks(self, self._site_facts_entry)
+                if isinstance(site_result, UnavailableEvidence):
+                    return []
+                blocks, summary = site_result
             else:
                 from kernel_request_source_window import (
                     _path_from_runtime, owner_coordinate_block,
                     owner_coordinates_for_runtime,
                 )
                 path = _path_from_runtime(self)
+                from kernel_obligation_assess import UnavailableEvidence
+                if isinstance(path, UnavailableEvidence):
+                    return []
                 coordinates = owner_coordinates_for_runtime(self, path) if path else None
+                if isinstance(coordinates, UnavailableEvidence):
+                    return []
                 blocks = ([owner_coordinate_block(coordinates)]
                           if coordinates and coordinates.get("owners_listed") else [])
                 summary = {"owners_listed": int(
@@ -21366,18 +21508,35 @@ class StateFrameRuntime:
         capture.completion_owner_runtime = self
         capture.presentation = "lean-plain-loop"
         capture.stateframe_f4_mode = "off"
-        from kernel_request_budget import _record_lean_required_source_paths, _runtime_context, stage_budget
+        from kernel_request_budget import (
+            _mark_budget_unavailable, _record_lean_required_source_paths,
+            _runtime_context, stage_budget,
+        )
+        from kernel_obligation_assess import UnavailableEvidence
         from kernel_lean import LEAN_SOURCE_WINDOW_HEADROOM_BYTES
         from capability_request_preflight import bound_runtime_sources
-        source_stage, _, _ = _runtime_context(self, capture, selected_tools, prepared)
+        source_context = _runtime_context(self, capture, selected_tools, prepared)
+        if isinstance(source_context, UnavailableEvidence):
+            _mark_budget_unavailable(capture, source_context)
+            return PreparedRequest((), capture, {
+                "kind": "REQUEST_BUILDER_UNAVAILABLE",
+                "reason_code": source_context.reason_code,
+            })
+        source_stage, _, _ = source_context
         source_budget = stage_budget(source_stage)
         source_window_budget = max(
             512, source_budget.max_request_bytes - LEAN_SOURCE_WINDOW_HEADROOM_BYTES,
         )
-        bound_runtime_sources(
+        source_result = bound_runtime_sources(
             prepared, self, max_request_bytes=source_window_budget,
             tools=selected_tools,
         )
+        if isinstance(source_result, UnavailableEvidence):
+            _mark_budget_unavailable(capture, source_result)
+            return PreparedRequest((), capture, {
+                "kind": "REQUEST_BUILDER_UNAVAILABLE",
+                "reason_code": source_result.reason_code,
+            })
         source_closure = getattr(self, "_request_source_closure", None)
         deferred_source_paths = (
             source_closure.get("deferred_paths", ())
@@ -21394,12 +21553,12 @@ class StateFrameRuntime:
         _record_lean_required_source_paths(capture, self)
         try:
             from kernel_wire_truth_facts import render_fact_messages
-            from kernel_wire_truth_gate import capture_context, enabled as wire_truth_enabled
+            from kernel_wire_truth_gate import enabled as wire_truth_enabled
             if wire_truth_enabled():
-                truth_context = capture_context(
-                    capture, self,
-                    {"messages": prepared, "tools": selected_tools},
-                )
+                truth_context = _lean_wire_truth_context(
+                    capture, self, prepared, selected_tools)
+                if isinstance(truth_context, PreparedRequest):
+                    return truth_context
                 required = truth_context.get("required_facts")
                 latest_tool_index = next(
                     (index for index in range(len(prepared) - 1, -1, -1)
@@ -21943,7 +22102,11 @@ class StateFrameRuntime:
         continuation_outcome = self._prepare_continuation_boundary(uncapped)
         if continuation_outcome is not None:
             return continuation_outcome
-        frame, working, path = self._frame()
+        frame_result = self._frame()
+        from kernel_obligation_assess import UnavailableEvidence
+        if isinstance(frame_result, UnavailableEvidence):
+            return _unavailable_frame_request(self, frame_result.reason_code)
+        frame, working, path = frame_result
         self._sync_work_carry(frame, path)
         if provider_request:
             from kernel_v46_mechanism_wiring import decide2_checkpoint
@@ -22013,14 +22176,7 @@ class StateFrameRuntime:
                 latest_exchange, self.latest_exchange_reasoning_mode)
         elif f4_on:
             self.latest_exchange = None
-        source_replan_origin = getattr(self, "_source_replan_origin_request_id", None)
-        capture = RequestCapture(
-            self.journal, getattr(self.owner, "current_step", 0), self.snapshot_id,
-            endpoint_profile=self.endpoint_profile,
-            identity_content=({
-                "task_id": getattr(self.journal, "task_id", ""), "purpose": "",
-                "source_replan_of": source_replan_origin,
-            } if source_replan_origin is not None else None))
+        capture = _prepare_request_capture(self)
         if source_replan_inputs is not None:
             capture._source_replan_inputs = source_replan_inputs
         if ticket_identity is not None:
@@ -22130,6 +22286,7 @@ class StateFrameRuntime:
         )
         if framefit5_on:
             self._framefit_action_context = None
+            self._framefit5_headcarry_unavailable = None
             try:
                 if not _frame_routes.ROUTES_ACTIVE:
                     from kernel_stateframe_action_ledger import ActionLedgerError, build_framefit_action_context
@@ -22237,6 +22394,14 @@ class StateFrameRuntime:
                     dispatch=False,
                 )
                 raise RuntimeError("frame-only typed state could not be constructed") from error
+            from kernel_obligation_assess import UnavailableEvidence
+            headcarry_gap = getattr(self, "_framefit5_headcarry_unavailable", None)
+            if isinstance(headcarry_gap, UnavailableEvidence):
+                self.system_outcome = "request_builder_unavailable"
+                return PreparedRequest((), capture, {
+                    "kind": "REQUEST_BUILDER_UNAVAILABLE",
+                    "reason_code": headcarry_gap.reason_code,
+                })
         framefit5_shape_trace: list[dict[str, str]] | None = (
             [] if provider_request and f4_on
             and getattr(self, "stateframe_framefit_mode", "off") == "on" else None
@@ -24001,6 +24166,14 @@ class StateFrameRuntime:
                 capture._framefit5_newest_user_suffix = copy.deepcopy(newest_suffix)
                 capture._framefit5_owner_presentation_contract = copy.deepcopy(final_presentation_contract)
             prepared, tools = apply_runtime_budget(self, capture, prepared, tools)
+            from kernel_obligation_assess import UnavailableEvidence
+            budget_gap = getattr(capture, "request_budget_unavailable", None)
+            if isinstance(budget_gap, UnavailableEvidence):
+                self.system_outcome = "request_builder_unavailable"
+                return PreparedRequest((), capture, {
+                    "kind": "REQUEST_BUILDER_UNAVAILABLE",
+                    "reason_code": budget_gap.reason_code,
+                })
             _record_framefit5_envelope_shape(
                 framefit5_shape_trace, "after_runtime_budget", prepared,
             )
@@ -24812,6 +24985,14 @@ class StateFrameRuntime:
                         self, prepared, prepared_tools,
                         frame_request_allocation=capture.frame_request_allocation,
                     )
+                from kernel_obligation_assess import UnavailableEvidence
+                headcarry_gap = getattr(self, "_framefit5_headcarry_unavailable", None)
+                if isinstance(headcarry_gap, UnavailableEvidence):
+                    self.system_outcome = "request_builder_unavailable"
+                    return PreparedRequest((), capture, {
+                        "kind": "REQUEST_BUILDER_UNAVAILABLE",
+                        "reason_code": headcarry_gap.reason_code,
+                    })
                 final_hash = digest({"messages": prepared, "tools": prepared_tools})
                 self.owner.current_prompt_hash = final_hash
                 capture.final_submitted_bytes_hash = final_hash

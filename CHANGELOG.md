@@ -1,5 +1,20 @@
 # Changelog
 
+## Unreleased
+
+- Completion-owner route alignment, final-surface binding, and terminal-menu authority now preserve request-contract errors and journal typed unavailability once while retaining their established fallbacks.
+- Repo-map cache identity now returns reason-coded unavailable evidence when a snapshot walker yields a path outside the workspace. The builder bypasses cache lookup and writes, then preserves the reason for the existing journal receipt.
+- Engine: ten RC9 filesystem and binding guards now return reason-coded unavailable evidence with journal events; request-contract errors still escape, and a missing live green binding cannot be rendered as confirmed completion.
+- Head-carry source reads and starter-conflict snapshots and refreshes now preserve reason-coded unavailable evidence. Live paths journal failed evidence before fallback or dispatch, and runner signature adaptation never retries an internal TypeError.
+- Request budgeting and source-window planning now preserve six reason-coded unavailable results when owner, runtime, target, source file, or outline evidence cannot be read. Live request paths journal the gap and stop before dispatch; unexpected errors still propagate.
+- Done-readiness authority now returns a reason-coded unavailable result and records one journal event when scope identity, open IDs, or the readiness decision cannot be read, instead of silently treating missing evidence as ready.
+- Obligation source, public-test and workspace-snapshot I/O failures now return typed unavailable evidence and emit one journal reason on live host-closure paths. Wire-truth binding, public-check and revision I/O failures use the same typed, journaled no-evidence contract.
+- Wire truth facts now stop request construction with `DONE_READINESS_UNAVAILABLE` if the shared done-readiness decision cannot be read; the failure is journaled when a journal is available.
+- Host obligation assessment now raises typed evidence failures when oracle grounding or green-lock check classification fails, instead of silently continuing with weaker or stronger evidence.
+- Unified stop now records a reason and refuses to build a completion snapshot when public verdict, declared path, owner root, or binding evidence cannot be read; invalid paths outside the owner root remain filtered. The three tracked HIGH completion-policy swallow entries were retired; the MED ledger entry remains tracked.
+- Check receipts now surface failures in live or pinned revision resolution, execution context and mode reads, execution ID allocation, and malformed outcome fields instead of presenting fallback evidence as current. The six matching silent-swallow baseline entries were retired; the remaining medium-risk entries stay tracked.
+- Fixed: unavailable frame evidence now creates a terminal request capture before stopping preparation, preserving the distinct source-replan request identity and avoiding an unbound capture error.
+
 ## 0.4.38 (2026-11-05)
 
 - Fixed: `run_tests` now accepts directory selectors written with a trailing slash or a leading `./` (for example `tests/` or `./tests/`). They were refused before running, and a run could stop at that point.
