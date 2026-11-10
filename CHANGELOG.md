@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Fixed: A test selector refused before dispatch now returns its refusal to the model and lets the run continue, instead of stopping with CONTINUATION_BLOCKED.
+
 ## 0.4.39 (2026-11-10)
 
 - Completion-owner route alignment, final-surface binding, and terminal-menu authority now preserve request-contract errors and journal typed unavailability once while retaining their established fallbacks.
