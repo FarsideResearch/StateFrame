@@ -3783,8 +3783,8 @@ class StateFrameRuntime:
             "kernel_public_probe_sandbox.py", "kernel_public_contract.py", "kernel_public_multifile.py",
             "kernel_review_deadline.py", "kernel_bounded_http.py", "capability_study_support.py",
             "unit_planner.py",
-            "probes/react_repair.py", "probes/converge.py", "probes/stateframe_shadow.py", "kernel_sidekick.py",
-            "kernel_pilot.py", "pilot.py", "sidekick.py"))
+            "probes/react_repair.py", "probes/stateframe_shadow.py", "kernel_sidekick.py",
+            "kernel_pilot.py", "sidekick.py"))
         if os.environ.get("LONG_HORIZON_DECODE_DEPTH_PER_ARM", "off").strip().lower() in {
                 "on", "1", "true", "yes"}:
             # The opt-in accounting module is part of the run identity only in

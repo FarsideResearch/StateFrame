@@ -116,7 +116,7 @@ class TestResult:
 
 
 def default_db_guard() -> bool:
-    """Standalone-safe default; production callers inject ``react_repair._ensure_db``."""
+    """Allow the runner without probing for or starting a local database."""
 
     return True
 

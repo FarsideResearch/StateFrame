@@ -16,6 +16,7 @@
 
 - StateFrame no longer probes a local database port for namespace evidence.
 - Removed internal benchmarking scripts from the package.
+- Run identity now hashes only shipped engine modules; moved lab workloads retain a fail-closed concurrent-run guard.
 
 ## 0.4.39 (2026-11-10)
 

@@ -105,6 +105,8 @@ In a repository with more than 200 source files, only a chosen set of files is e
 
 ## Optional analysis
 
+Namespace evidence for database-backed cases is limited to source observations. StateFrame does not probe a local database port; when runtime acceptance cannot be observed, the evidence and run summary report `runtime_namespace_acceptance_not_observed` instead of claiming the check passed.
+
 - **Syntax-aware repo map: on by default** for 12 languages (Python, JavaScript, TypeScript, TSX, Go, Rust, Java, Ruby, PHP, C, C++, C#), each from its own MIT grammar package. For HTML, CSS, JSON, TOML and YAML files the engine reads structure (ids and headings, selectors, keys, tables) from five more grammar packages. Other languages, including Vue, use the built-in text-scan repo map. `./install.sh --no-repomap` skips it.
 - **Named working sets are not available to the model in this release.** The engine keeps its own set of files it is working on, but the tool that lets the model name and manage working sets is not offered in its requests yet.
 - **Offline install** (`--offline`): schema validation and the syntax-aware repo map are OFF; the engine skips schema validation and uses the text-scan repo map.

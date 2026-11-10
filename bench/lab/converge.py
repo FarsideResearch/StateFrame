@@ -756,9 +756,11 @@ def main() -> int:
         import subprocess as _sp
         # Concurrent workers may already be using the database.
         # its own react_* DBs — dropping them under it injects phantom infra errors into its
-        # agent's world. Sweep only when this process is the only converge alive.
-        _others = _sp.run(["pgrep", "-f", "probes/converge.py"], capture_output=True,
-                          text=True).stdout.split()
+        # agent's world. Pilot runs converge too. A failed lookup must skip the sweep.
+        _others = _sp.run(
+            ["pgrep", "-f", r"(^|[ /])(converge|pilot)\.py( |$)"],
+            capture_output=True, text=True, check=True,
+        ).stdout.split()
         if len([p for p in _others if p.strip() and int(p) != os.getpid()]) > 0:
             raise RuntimeError("another converge work stream is live; skipping the DB sweep")
         _sp.run(["docker", "exec", "mission-control-db", "bash", "-c",

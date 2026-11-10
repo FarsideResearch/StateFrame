@@ -5042,8 +5042,8 @@ def _run_tests_impl(root: pathlib.Path, fn: str, explicit: str | None,
         # per TASK is the right grain: the E265 pollution was parent-control-vs-gold WITHIN
         # a task's grading legs, which target-file rewrites between legs already reset;
         # cross-invocation reuse inside one task is the iteration loop working as intended.
-        # REACT_DB_NAME is set per task by the caller; converge sweeps react_* leftovers at
-        # startup so even a crashed run leaks at most a handful.
+        # REACT_DB_NAME is set per task by the caller. The shipped runtime does
+        # not start a database or sweep task databases.
         import uuid as _uuid
         _dbname = os.environ.get("REACT_DB_NAME") or (
             f"mission_control_test_react_{_uuid.uuid4().hex[:8]}")
