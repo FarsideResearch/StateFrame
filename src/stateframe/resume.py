@@ -26,6 +26,7 @@ from pathlib import Path
 
 from . import outcomes, profiles, replay_tape, workcopy
 from .engine.kernel_tool_tape import ToolTape, ToolTapeError
+from .storage_gc import _write_json_atomic
 
 ENGINE_LOCK = ".engine.lock"
 RUN_LOCK = ".run.lock"
@@ -637,7 +638,7 @@ def archive_attempt(state: dict[str, object], engine_dir: Path, *, use_checkpoin
         # diagnosis, but release state, run snapshots and pools so repeated resumes stay bounded.
         os.replace(run / "checkpoints", folder / "checkpoints")
         _compact_archived_checkpoints(folder / "checkpoints")
-    (run / "spec.json").write_text(json.dumps(spec, indent=1, sort_keys=True))
+    _write_json_atomic(run / "spec.json", spec)
     return folder
 
 

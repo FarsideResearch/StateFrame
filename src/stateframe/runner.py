@@ -39,6 +39,7 @@ from . import instructions as project_instructions
 from .skills import SkillError, measured_skills_digest, resolve_skills, skills_digest, verify_records
 from .state_dirs import private_directory
 from .request_records import RequestRecordsError, list_request_records
+from .storage_gc import _fsync_directory, _write_json_atomic
 
 from .engine.kernel_safe_paths import safe_home
 
@@ -869,31 +870,19 @@ def profile_steps(profile: str) -> int:
     return int(profiles.load(profile)["REACT_STEPS"])
 
 
+def _write_run_spec_atomic(run_dir: Path, spec: dict, *, mode: int | None = None) -> None:
+    """Publish a spec atomically without changing its existing privacy mode."""
+    path = run_dir / "spec.json"
+    _write_json_atomic(path, spec, mode=mode)
+
+
 def _write_hook_spec(run_dir: Path, spec: dict) -> None:
     """Publish hook state atomically after its durable tape records are complete."""
     path = run_dir / "spec.json"
-    temporary = None
     try:
-        with tempfile.NamedTemporaryFile(mode="wb", prefix=".spec-", dir=run_dir,
-                                         delete=False) as target:
-            temporary = Path(target.name)
-            target.write(json.dumps(spec, indent=1, sort_keys=True).encode("utf-8"))
-            target.flush()
-            os.fsync(target.fileno())
-        os.replace(temporary, path)
-        directory = os.open(run_dir, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
-        try:
-            os.fsync(directory)
-        finally:
-            os.close(directory)
+        _write_run_spec_atomic(run_dir, spec, mode=0o600)
     except OSError as error:
         raise RunError(f"cannot publish hook state to {path}: {error}") from error
-    finally:
-        if temporary is not None:
-            try:
-                temporary.unlink()
-            except FileNotFoundError:
-                pass
 
 
 def _write_hook_terminal_summary(run_dir: Path, *, runtime_outcome: str, engine_result: str,
@@ -924,7 +913,7 @@ def _write_hook_terminal_summary(run_dir: Path, *, runtime_outcome: str, engine_
         "succeeded": False,
         "hooks": counts,
     }
-    (run_dir / "summary.json").write_text(json.dumps(summary, indent=1))
+    _write_json_atomic(run_dir / "summary.json", summary)
     printer(f"hooks: {counts['runs']} runs, {counts['denied']} denied, "
             f"{counts['vetoes']} vetoes, {counts['errors']} errors")
     return containment_error
@@ -1160,15 +1149,13 @@ def prepare(options: RunOptions, printer=print) -> tuple[Path, workcopy.WorkCopy
     # bytes diverged and replay went live early. resume archives worker/, so each attempt starts cold.
     environment["STATEFRAME_REPO_CACHE_DIR"] = str(run / "worker" / "repo-intel-cache")
     settings_file = run / "tool-settings.json"
-    settings_file.write_text(json.dumps(settings.as_dict(), indent=1, sort_keys=True))
-    settings_file.chmod(0o600)
+    _write_json_atomic(settings_file, settings.as_dict(), mode=0o600)
     skills_file = run / "skill-settings.json"
     skills_record = {"schema": "stateframe-skill-settings/1", "skills": records,
                      "skills_digest": (measured_skills_digest(records, measurements)
                                        if measurements is not None else skills_digest(records)),
                      **({"measurements": measurements} if measurements is not None else {})}
-    skills_file.write_text(json.dumps(skills_record, indent=1, sort_keys=True))
-    skills_file.chmod(0o600)
+    _write_json_atomic(skills_file, skills_record, mode=0o600)
     environment.update(options._context_env)
     environment.update(resolve_exec_rpc_env())
     opt_in = resolve_opt_in_switches()
@@ -1305,7 +1292,7 @@ def prepare(options: RunOptions, printer=print) -> tuple[Path, workcopy.WorkCopy
         except hook_host.HookConfigError as error:
             raise RunError(str(error)) from error
     if hooks is None:
-        (run / "spec.json").write_text(json.dumps(spec, indent=1, sort_keys=True))
+        _write_json_atomic(run / "spec.json", spec)
     return run, work, spec
 
 
@@ -1896,13 +1883,19 @@ def drive(run: Path, options: RunOptions, printer=print) -> int:
             spec["environment_sources"]["CAPABILITY_ATTEMPT_DEADLINE_MONOTONIC"] = "wrapper:run-deadline"
         else:
             environment.pop("CAPABILITY_ATTEMPT_DEADLINE_MONOTONIC", None)
-        spec_path.write_text(json.dumps(spec, indent=1, sort_keys=True))
+        _write_run_spec_atomic(run, spec)
     command = [options.python, "-B", str(CHILD), str(run)]
     log_path = run / "engine.log"
     checkpoint_warned: set[str] = set()
     if spec_path.exists() and environment.get("STATEFRAME_CHECKPOINT", "on").strip().lower() in {"off", "0"}:
         _warn_checkpoint_disabled("disabled by configuration", checkpoint_warned)
-    with log_path.open("w") as log:
+    # Checkpoints copy the live log path; resume archives the previous attempt before this append.
+    try:
+        with log_path.open("x", encoding="utf-8"):
+            pass
+    except FileExistsError:
+        pass
+    with log_path.open("a", encoding="utf-8") as log:
         _remaining(options)
         child_env = _child_env(options)
         if spec_path.exists():
@@ -2759,9 +2752,9 @@ def resume_run(run_dir: Path, *, endpoint: Endpoint | None = None, max_turns: in
                                                    old_default=old_default, new_default=new_default)
             lock = resume_module.hold_run_lock(run_dir)  # noqa: F841 - held until this resume returns
             if "tool_settings" in spec:
-                (run_dir / "tool-settings.json").write_text(json.dumps(settings.as_dict(), indent=1, sort_keys=True))
+                _write_json_atomic(run_dir / "tool-settings.json", settings.as_dict(), mode=0o600)
                 spec["tool_settings"] = settings.as_dict()
-                (run_dir / "spec.json").write_text(json.dumps(spec, indent=1, sort_keys=True))
+                _write_run_spec_atomic(run_dir, spec)
             # A checkpoint holds the engine's loop limit, endpoint and model name as they were; a resume
             # that changes any of them rebuilds the run by replay instead.
             same_limits = (int(state["max_turns"]) == int(spec["max_turns"])
@@ -2799,7 +2792,7 @@ def resume_run(run_dir: Path, *, endpoint: Endpoint | None = None, max_turns: in
                 spec["routes"] = options._routes.public()
             _compose_resume_route_changes(spec, route_changes)
             _apply_resumed_time_limit(options, spec["resume"], started, timeout_s, printer)
-            (run_dir / "spec.json").write_text(json.dumps(spec, indent=1, sort_keys=True))
+            _write_run_spec_atomic(run_dir, spec)
             # The cache slot stays the one the run started with: it is part of the request bytes.
             slot = spec.get("prompt_cache_slot") or {}
             if isinstance(slot.get("slot"), int):
@@ -2877,7 +2870,7 @@ def resume_run(run_dir: Path, *, endpoint: Endpoint | None = None, max_turns: in
                 spec["routes"] = options._routes.public()
             _compose_resume_route_changes(spec, route_changes)
             spec["resume"]["checkpoint_refused"] = refused
-            (run_dir / "spec.json").write_text(json.dumps(spec, indent=1, sort_keys=True))
+            _write_run_spec_atomic(run_dir, spec)
             from .shell_host import provision
             provision(options, run_dir, spec)
             work = resume_module.fresh_workcopy(run_dir, options.repo)
@@ -2891,7 +2884,7 @@ def _resume_spec(run_dir: Path, endpoint: Endpoint) -> dict:
     if endpoint.chat_url != spec["chat_url"]:
         spec["chat_url"] = endpoint.chat_url
         spec["environment"]["DS_URL"] = endpoint.chat_url
-        (run_dir / "spec.json").write_text(json.dumps(spec, indent=1, sort_keys=True))
+        _write_run_spec_atomic(run_dir, spec)
     return spec
 
 
@@ -3064,6 +3057,21 @@ def _resume_record(run_dir: Path, resume: dict, summary: dict) -> dict[str, obje
 
 def _execute(options: RunOptions, started: float, printer, run_dir: Path, work: workcopy.WorkCopy,
              spec: dict) -> dict[str, object]:
+    def atomic_bytes(path: Path, data: bytes) -> None:
+        temporary = None
+        try:
+            with tempfile.NamedTemporaryFile(mode="wb", prefix=f".{path.name}.",
+                                             dir=path.parent, delete=False) as stream:
+                temporary = Path(stream.name)
+                stream.write(data)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary, path)
+            _fsync_directory(path.parent)
+        finally:
+            if temporary is not None:
+                temporary.unlink(missing_ok=True)
+
     printer(f"working copy: {work.copy} ({len(work.baseline)} files; original untouched"
             f"{' until the end (--in-place)' if options.in_place else ''})")
     if options.runner_kind != "generic":
@@ -3090,7 +3098,7 @@ def _execute(options: RunOptions, started: float, printer, run_dir: Path, work: 
     if options.protect_tests == "task" and before["passed"] is False:
         row = spec["public_row"]
         lock_initial_failing_tests(row, before)
-        (run_dir / "spec.json").write_text(json.dumps(spec, indent=1, sort_keys=True))
+        _write_json_atomic(run_dir / "spec.json", spec)
     if options.protect_tests in {"task", "off"} or options.runner_kind == "generic":
         from .test_runners import failing_test_nodes, is_test_file, judging_test_selection
         row = spec["public_row"]
@@ -3110,7 +3118,7 @@ def _execute(options: RunOptions, started: float, printer, run_dir: Path, work: 
             path: (original / path).read_text(encoding="utf-8", errors="replace")
             for path in selection}
         row["test_wrong_hashes"] = {path: work.baseline[path] for path in selection}
-        (run_dir / "spec.json").write_text(json.dumps(spec, indent=1, sort_keys=True))
+        _write_json_atomic(run_dir / "spec.json", spec)
     cancelled = False
     _remaining(options)
     try:
@@ -3169,7 +3177,7 @@ def _execute(options: RunOptions, started: float, printer, run_dir: Path, work: 
         except KeyboardInterrupt:
             cancelled = True
     diff = workcopy.unified_diff(work)
-    (run_dir / "final.diff").write_text(diff)
+    atomic_bytes(run_dir / "final.diff", diff.encode("utf-8"))
     commits = None
     if (run_dir / "commits.jsonl").is_file():
         from .commit_export import CommitExportError, export_commits
@@ -3222,7 +3230,7 @@ def _execute(options: RunOptions, started: float, printer, run_dir: Path, work: 
                                                for finding in item["weakening"]]
     if isinstance(spec.get("resume"), dict):
         summary["resume"] = _resume_record(run_dir, spec["resume"], summary)
-    (run_dir / "tests-after.txt").write_text(after["tail"])
+    atomic_bytes(run_dir / "tests-after.txt", after["tail"].encode("utf-8"))
     summary.update(outcomes.project(
         summary, cancelled=cancelled, timed_out=child_exit == 124,
         check_output=str(after.get("output") or after.get("tail") or ""),
@@ -3242,6 +3250,15 @@ def _execute(options: RunOptions, started: float, printer, run_dir: Path, work: 
                 summary["apply_error"] = str(error)
                 summary["exit_code"] = 2
                 summary["succeeded"] = False
+            else:
+                try:
+                    _write_json_atomic(run_dir / "apply-receipt.json", {
+                        "applied_files": summary["applied_in_place"],
+                    })
+                except OSError as error:
+                    raise RunError(
+                        f"in-place changes were applied, but the durable receipt could not be published: "
+                        f"{error}") from error
         else:
             summary["applied_in_place"] = []
             summary["in_place_skipped"] = (
@@ -3303,7 +3320,7 @@ def _execute(options: RunOptions, started: float, printer, run_dir: Path, work: 
         summary["hooks"] = hook_summary
         printer(f"hooks: {hook_summary['runs']} runs, {hook_summary['denied']} denied, "
                 f"{hook_summary['vetoes']} vetoes, {hook_summary['errors']} errors")
-    (run_dir / "summary.json").write_text(json.dumps(summary, indent=1))
+    _write_json_atomic(run_dir / "summary.json", summary)
     removed = finish_run_storage(run_dir, keep_checkpoints=options.keep_checkpoints,
                                  keep_run_env=options.keep_run_env, printer=printer)
     if removed["checkpoints"] is not None:
