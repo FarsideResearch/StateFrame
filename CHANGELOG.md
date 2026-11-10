@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.4.39 (2026-11-10)
 
 - Completion-owner route alignment, final-surface binding, and terminal-menu authority now preserve request-contract errors and journal typed unavailability once while retaining their established fallbacks.
 - Repo-map cache identity now returns reason-coded unavailable evidence when a snapshot walker yields a path outside the workspace. The builder bypasses cache lookup and writes, then preserves the reason for the existing journal receipt.
