@@ -179,11 +179,10 @@ The final cache layout, on by default since 0.4.0, raised the cached share after
 
 ## Token counting
 
-- Without `LLAMA_CPP_TOKENIZE_URL`, tokens are counted on the model server. If that server is remote, each count is a network round trip and adds noticeable time per turn. Co-locate a tokenizer (QUICKSTART.md).
-- The engine counts tokens through a `/tokenize` endpoint (llama.cpp servers have one; other servers are untested; set `LLAMA_CPP_TOKENIZE_URL` to use a separate llama.cpp tokenizer). With a server that has none (for example Ollama or hosted APIs) and no separate tokenizer, the engine falls back to a conservative estimate, and a run can then stop before its first request because even the minimum frame looks too big (`ERR:FrameFit5ImpossibleMinimum`).
-- If the tokenizer stops answering mid-run, the engine falls back to an estimate that can undercount, so a request can exceed the server's context slot and be rejected. Keep the tokenizer up for the whole run.
-- The byte-count fallback used when an endpoint offers no exact tokenizer deliberately overestimates prompt size (about 39% on average in our measurements), so hosted runs without exact tokenization fit less content than they could.
-- On those same endpoints, very dense content such as long runs of numbers, base64 data, or dense code can be underestimated, which can push a request past the model's context limit. A recognized context-limit HTTP 400 triggers one deterministic refit and retry with smaller byte and token ceilings. If that retry is also rejected, or the protected minimum cannot be reduced, the run stops as incomplete with a capacity reason. For dense files, an endpoint with /tokenize remains the most reliable choice.
+- When the model endpoint provides a valid `/tokenize` response, StateFrame uses it for exact token counts. `LLAMA_CPP_TOKENIZE_URL` can point to a separate tokenizer. Each count against a remote server adds a network round trip; a local tokenizer can avoid that delay (QUICKSTART.md). llama.cpp is the tested server type; other server types are untested.
+- If the selected endpoint cannot provide a valid tokenizer response, StateFrame uses a conservative estimate. A run can stop before its first model request if even the smallest request does not fit.
+- When tokenization becomes unavailable mid-run, StateFrame falls back to a calibrated byte estimate. The estimate was about 39% high on average in measured requests, so runs without exact tokenization fit less content, but very dense content such as long runs of numbers, base64 data, or dense code can be underestimated and push a request past the server's context limit. Keep the tokenizer available for the whole run.
+- A recognized HTTP 400 for a context-limit overflow can trigger one smaller request with reduced byte and token limits when time and a retry attempt remain. Other HTTP 400 responses do not trigger this retry. If the retry is rejected or the minimum request cannot fit, the run ends incomplete. An available `/tokenize` endpoint is the most reliable choice for dense files.
 
 ## Endpoint locality
 

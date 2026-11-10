@@ -11,7 +11,7 @@ Diagram: [ARCHITECTURE.md](../../ARCHITECTURE.md#request-lifecycle).
    - the engine builds the typed state frame from its current state (check results, files in play, recent action results, what is owed);
    - it fits frame, source and the newest execution reply into the 33,344-token budget, trimming lower-priority detail or execution output delivery if needed while retaining engine-owned status and effects;
    - it qualifies the request: complete, within budget, addressed to an allowed endpoint;
-   - it sends exactly one sealed request body and records its bytes under `wire/`;
+   - it sends a sealed request body and records its bytes under `wire/`; a recognized provider context-limit rejection can refit the request and retry once within the same deadline;
    - it admits the tool against the current menu and its host-issued capability, then runs commands in the configured sandbox and network mode;
    - for shell, job, Git, web and custom calls it records a tool-tape intent and completion for replay. Native file operations follow the edit replay path. Authorized workspace effects become receipts, invalidate stale reads and checks, and appear in the next frame. Executable-bit changes and other unauthorized effects are restored. Reconciliation refuses to promote effects if its 16 MiB per-file, 256 MiB aggregate or 20,000-entry bound is exceeded. Job state is snapshotted once for the request.
 7. **Done.** When the model calls `done`, the engine checks the result and stores it as the final candidate.
