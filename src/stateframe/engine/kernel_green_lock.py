@@ -46,7 +46,7 @@ def _get_sure_open(runtime: object) -> bool:
             and os.environ.get("STATEFRAME_GET_SURE", "off").strip().lower() != "on"):
         return False
     if getattr(runtime, "stateframe_readiness_authority_mode", "off") == "on":
-        return False  # r39: the readiness authority owns the gate (repair is outright there, wire3)
+        return False  # earlier run: the readiness authority owns the gate (repair is outright there, wire3)
     try:
         from kernel_stateframe_get_sure import has_violations, runtime_table
         table = (runtime.get_sure_table() if callable(getattr(runtime, "get_sure_table", None))
@@ -158,7 +158,7 @@ def _normalize_obligation_ids(value: object) -> list[str]:
 def _open_requirement_ids(runtime: object, frame: Mapping[str, object] | None = None) -> list[str]:
     """Open host-owned requirements: the lock's obligation view plus the completion owner's
     authoritative ``open_ids`` (the owner reported R1/R2 open at the very moment the lock engaged
-    in batch 846).  Read-only; never a completion decision."""
+    in prior run).  Read-only; never a completion decision."""
     result = list(_open_obligation_ids(runtime, frame))
     try:
         from kernel_completion_owner import open_ids
@@ -820,7 +820,7 @@ class GreenLock:
             return False
         if not stall_enabled(self.runtime):
             return False
-        # r39: no reset on decision-version drift (a volatile advisory digest would silently
+        # earlier run: no reset on decision-version drift (a volatile advisory digest would silently
         # re-arm the count forever); _reset_refusal_state after an accepted edit/restore is the
         # only reset, so every post-green refusal counts toward the host-submit backstop.
         self._post_green_refusal_state_version = getattr(decision, "state_version", None)
@@ -1060,7 +1060,7 @@ class GreenLock:
         if getattr(self.runtime, "stateframe_post_green_work_menu_mode", "off") == "on":
             from kernel_post_green_menu import owns_lock
             if owns_lock(self):
-                # r44 review F1: the repeat fallback changes PRESENTATION only.  Clearing the
+                # earlier run review F1: the repeat fallback changes PRESENTATION only.  Clearing the
                 # green here re-opened edits as ``not_engaged`` and bypassed the cycle cap and
                 # the pending-verification guard; the lock/policy state stays as it is.
                 self._emit("terminal_fallback", product_revision=revision,
@@ -1276,7 +1276,7 @@ class GreenLock:
             self._terminal_fallback_revision = None
         green = self._green_now(frame)
         if green:
-            # 10-06 batch 846 (sample task): the parent was already public-GREEN; after the FIRST of
+            # 10-06 prior run (sample task): the parent was already public-GREEN; after the FIRST of
             # three hunks the auto-verify was green again and the lock engaged its terminal menu
             # ("done" only), so the remaining hunks could never be applied and the export graded
             # INCORRECT.  A green public check while host-owned requirements remain open is not a
@@ -1334,7 +1334,7 @@ class GreenLock:
                               ) -> str | None:
         """Legacy action gate retained as the OFF-switch implementation."""
         if self.mode == "terminal":
-            # r43: one allow authority shared with the request menu (opt-in).
+            # earlier run: one allow authority shared with the request menu (opt-in).
             from kernel_greenlock_menu_authority import applies, dispatch_action
             if applies(self):
                 return dispatch_action(self, kind, arguments)
@@ -1352,9 +1352,9 @@ class GreenLock:
         if stopped is not None:
             return stopped
         if action_kind in {"read", "probe"} and _unverified_window_open(self.runtime):
-            # r41b option 1: the terminal menu offers read/probe beside done while disclosed
+            # earlier run option 1: the terminal menu offers read/probe beside done while disclosed
             # unverified checks are open and this revision's challenge is unspent; the gate
-            # must allow exactly what the menu offers (r39 lesson: menu == gate).
+            # must allow exactly what the menu offers (earlier run lesson: menu == gate).
             try:
                 from kernel_live_counterexample_challenge import note_window_action
                 used = note_window_action(self.runtime)
@@ -1512,7 +1512,7 @@ class GreenLock:
     def _before_mutation_legacy(self, path: object, *, action_kind: str = "edit") -> str | None:
         """Legacy mutation gate retained as the OFF-switch implementation."""
         if self.mode == "terminal":
-            # r43: one allow authority shared with the request menu (opt-in).
+            # earlier run: one allow authority shared with the request menu (opt-in).
             from kernel_greenlock_menu_authority import applies, dispatch_mutation
             if applies(self):
                 return dispatch_mutation(self, path, action_kind=action_kind)

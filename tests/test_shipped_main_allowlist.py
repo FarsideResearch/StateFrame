@@ -11,7 +11,7 @@ import zipfile
 
 # Paths are relative to the wheel root or the sdist's project root. A main
 # block is allowed only for the purpose recorded here; batch drivers live in
-# bench/lab and are deliberately absent from both release artifacts.
+# maintainer task driver and are deliberately absent from both release artifacts.
 ALLOWLIST = {
     "scripts/build_wheelhouse.py": "sdist installer dependency build tool",
     "stateframe/_child.py": "isolated engine child process",

@@ -46,7 +46,7 @@ _CHURN_KEYS = frozenset({
 def mode(lock_mode: str | None = None) -> str:
     """Return the strict coherence mode.
 
-    Default OFF (r37t integration): the history arm also runs
+    Default OFF (earlier run integration): the history arm also runs
     STATEFRAME_GREEN_LOCK=terminal, so an implicit terminal opt-in would change
     history behaviour.  The frame arm sets STATEFRAME_GREEN_COHERENCE=on.
     ``on`` takes effect only with a terminal green lock: when ``lock_mode`` is
@@ -1156,7 +1156,7 @@ def project_frame(frame: Mapping[str, object], *, runtime: object | None = None,
     if readiness is not None:
         public["readiness"] = readiness.to_dict()
         if alignment_repairable:
-            # r39 single authority: the repair prompt follows the gate's repairability, so the
+            # earlier run single authority: the repair prompt follows the gate's repairability, so the
             # text never asks for a repair the menu does not offer.
             from kernel_requirement_alignment import is_repairable_literal_counterexample
             alignment_repairable = any(is_repairable_literal_counterexample(item)
@@ -1166,7 +1166,7 @@ def project_frame(frame: Mapping[str, object], *, runtime: object | None = None,
         public["pending_decision"] = BLOCKED_PENDING_DECISION
         public["next_action"] = REPAIR_ACTION
     elif alignment_repairable:
-        # r39 single policy: an open ticket-literal counterexample is repairable; never "Call done".
+        # earlier run single policy: an open ticket-literal counterexample is repairable; never "Call done".
         from kernel_requirement_alignment import suppress_done_prompt
         public["pending_decision"] = suppress_done_prompt(
             public.get("pending_decision", ""), status.counterexamples)
@@ -1178,7 +1178,7 @@ def project_frame(frame: Mapping[str, object], *, runtime: object | None = None,
             public["resume"] = resume
     elif readiness is not None and readiness.repairable_advisories:
         public["pending_decision"] = readiness.refusal_text()
-        public["next_action"] = REPAIR_ACTION  # r39: never direct done while a repairable counterexample is open
+        public["next_action"] = REPAIR_ACTION  # earlier run: never direct done while a repairable counterexample is open
     elif status.green:
         public["pending_decision"] = (readiness.refusal_text()
                                        if readiness is not None else REFUSAL_LEAD)

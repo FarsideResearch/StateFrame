@@ -1,7 +1,7 @@
-"""Pinned, self-contained Mission Control repo-intelligence primitives.
+"""Pinned, self-contained repository-intelligence primitives.
 
 Source provenance is intentionally explicit because this package is vendored
-into a frozen request fitting release and must not import Mission Control at runtime.
+into a frozen request fitting release and must not import the source project at runtime.
 """
 
 import os

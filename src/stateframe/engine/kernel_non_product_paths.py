@@ -1,7 +1,7 @@
 """ONE authority for tool output that is never product source (audit 2026-10-05 #2).
 
 Coverage, caches and build output written into the solver root by the model's
-own checks (AHA's pytest.ini forces ``--cov ... --cov-report=html``) were bound
+own checks (sample project's pytest.ini forces ``--cov ... --cov-report=html``) were bound
 as ``product_files``, retained as changed source and journaled until the source
 archive hit its 64 MB cap and killed a 10 000 s run.  Every consumer that
 enumerates the workspace (live projection binding, retained-context refresh,

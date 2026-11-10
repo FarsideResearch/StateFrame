@@ -7,7 +7,7 @@ from probes import react_repair
 from stateframe.engine import check_selection
 
 
-def test_repair_module_identity_and_mc_selector_overlay(monkeypatch, tmp_path: Path):
+def test_repair_module_identity_and_repo_selector_overlay(monkeypatch, tmp_path: Path):
     assert check_selection.rr is react_repair
     mc_root = tmp_path / "mc"
     mc_root.mkdir()

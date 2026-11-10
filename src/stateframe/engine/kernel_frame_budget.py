@@ -672,7 +672,7 @@ def prompt_guidance(variant: str = "v3") -> str:
     base = compact_system_prompt("g0")
     from kernel_intent_carry import f4_enabled as _intent_carry_f4_enabled
     if _intent_carry_f4_enabled():
-        # r46 STATEFRAME_INTENT_CARRY_F4 (tt_output_gap_v2 item 2): the system prompt is built
+        # earlier run STATEFRAME_INTENT_CARRY_F4 (tt_output_gap_v2 item 2): the system prompt is built
         # once, so "Current host phase: BOOT" stayed on the wire for the whole run.  The frame
         # carries the real phase; drop the static sentence.
         base = base.replace("Current host phase: " + PHASE_BY_GEAR["g0"].replace("_", "/") + ". ", "")

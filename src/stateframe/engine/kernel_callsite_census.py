@@ -378,7 +378,7 @@ def _source_block(content: object) -> tuple[_Source, int] | None:
 
 
 # Native read results arrive as role=tool "[read page] path=P revision=sha256:H lines=S-E/T ..."
-# followed by one status line and then the delivered source lines. Live benchmark r2AR (batch
+# followed by one status line and then the delivered source lines. Live benchmark earlier run (batch
 # 1028): census only parsed "[... source: P]" user blocks, saw no source on any turn and
 # reported route_off 13/13, so the model never received the call-site list.
 _READ_PAGE_HEADER = re.compile(

@@ -1,4 +1,4 @@
-"""Generate, but never launch, the r45 model-hopping comparison arm."""
+"""Generate, but never launch, the earlier run model-hopping comparison arm."""
 
 from __future__ import annotations
 

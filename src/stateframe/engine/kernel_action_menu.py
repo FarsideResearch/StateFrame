@@ -39,7 +39,7 @@ def synchronize_tool_instructions(messages: list[dict], tools: list[dict], restr
             prefix, tail = content.split(marker, 1)
             _, end = json.JSONDecoder().raw_decode(tail)
             content = prefix + marker + json.dumps(tools) + tail[end:]
-        # b1380: this ran every call, so the system prompt accumulated one
+        # earlier run: this ran every call, so the system prompt accumulated one
         # "Current tool availability: null" line per turn, and the model read "null" as "no tools available"
         # while edit/str_replace were on its menu. Keep exactly one line, and only for a real restriction.
         content = _AVAILABILITY_LINE.sub('', content)

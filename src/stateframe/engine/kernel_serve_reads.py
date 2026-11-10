@@ -1,6 +1,6 @@
-"""STATEFRAME_TOKENLAB_SERVE_READS (token lab v11): serve in-frame reads, and say what is in the frame.
+"""STATEFRAME_TOKENLAB_SERVE_READS (feature implementation): serve in-frame reads, and say what is in the frame.
 
-Measured (703 ldev_05 v6a, classify.py): 5 reads of files whose current bytes were already in the request were
+Measured (703 reviewer v6a, classify.py): 5 reads of files whose current bytes were already in the request were
 answered with a READ_UNCHANGED/ALREADY_PRESENT stub or a stub-sweep REFUSED_PREDISPATCH; each such turn cost a
 full reasoning burst (34k completion tokens in total) while the boss simply receives the bytes and moves on.
 

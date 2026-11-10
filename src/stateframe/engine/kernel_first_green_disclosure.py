@@ -1,4 +1,4 @@
-"""First-green disclosure and bounded progress bookkeeping for the r40 frame.
+"""First-green disclosure and bounded progress bookkeeping for the earlier run frame.
 
 The feature is intentionally separate from the older green-lock text and the
 older done arbiter.  With ``STATEFRAME_FIRST_GREEN_DISCLOSURE=off`` every
@@ -189,10 +189,10 @@ def decorate_test_result(runtime: object, observation: object,
     live_ce = getattr(runtime, "stateframe_live_ce_challenge_mode", "off") == "on"
     rows, error = [], None
     if live_ce:
-        # r41b: the done challenge must act on exactly what was disclosed for this revision.
+        # earlier run: the done challenge must act on exactly what was disclosed for this revision.
         # The open set is frame-scoped (readiness snapshot), so capture it HERE, where the
         # frame exists; at done time there is no frame and the recomputed set was empty
-        # (smokefull-330-ldev_01: 5 IDs disclosed, done naturally accepted).
+        # (smokefull-330-reviewer: 5 IDs disclosed, done naturally accepted).
         try:
             rows = _disclosed_rows(runtime, frame, identifiers)
         except Exception as exc:  # noqa: BLE001 - witness capture must never break a test result
@@ -212,7 +212,7 @@ def decorate_test_result(runtime: object, observation: object,
                 f"{body}. If one remains, {ACTION_HINT}.")
     _emit(runtime, "first_green_disclosure", revision=key,
           counterexample_ids=list(identifiers))
-    # r41 (F4 x first-green, smokefull-319-ldev_09): the first green is usually the host's
+    # earlier run (F4 x first-green, smokefull-319-reviewer): the first green is usually the host's
     # automatic post-edit verification, whose synthetic call/result pair F4 never renders, so
     # the decorated text alone never reached the model.  Keep the disclosure as revision-bound
     # state for presentations that must show it (current_disclosure()).
@@ -235,7 +235,7 @@ def decorate_test_result(runtime: object, observation: object,
 
 
 def _disclosure_body(identifiers: Sequence[str], rows: Sequence[Mapping[str, object]]) -> str | None:
-    """r41b relabel: host-demoted check problems are "unverified checks", not counterexamples."""
+    """earlier run relabel: host-demoted check problems are "unverified checks", not counterexamples."""
     try:
         from kernel_live_counterexample_challenge import label_ids
         return label_ids(list(identifiers), rows)

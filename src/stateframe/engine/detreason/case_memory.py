@@ -81,7 +81,7 @@ OUT_OF_SCOPE = {
                        "provenance stream; this log is a case store, not it",
 }
 
-#: The ONE spelling of each externally-verified outcome. Rule #223: a reader
+#: The ONE spelling of each externally-verified outcome. rule: a reader
 #: with no writer is a dead feature, so each of these names its producer.
 #:
 #:   * ``gold_match``      — produced HERE, by comparing ``cert['final_files']``

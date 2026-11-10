@@ -161,7 +161,7 @@ def validate_procedure_receipt(receipt: Mapping[str, Any]) -> List[str]:
     This is intentionally the single source of truth the conformance test in
     test_receipt_contract.py runs against a REAL ProcedureResult.receipt()
     output, so contract drift between this file and procedure.py fails a test
-    instead of silently rotting (rule #223's whole point)."""
+    instead of silently rotting (rule's whole point)."""
     problems: List[str] = []
     if not isinstance(receipt, Mapping):
         return [f"receipt is not a mapping: {type(receipt).__name__}"]

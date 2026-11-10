@@ -1,6 +1,6 @@
 """Class guard: a timed-out launch is killed as a whole unit, never only its launcher.
 
-Regression (foundry gate, 11-02): the MCP timeout killed the outer bwrap while its inner
+Regression (Linux gate, 11-02): the MCP timeout killed the outer bwrap while its inner
 child was still setting up the sandbox. The child survived, reparented away and ran the
 server for an hour with no supervisor while the engine reported a clean stop.
 

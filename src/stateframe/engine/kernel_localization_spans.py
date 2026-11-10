@@ -430,7 +430,7 @@ def acquire_owner_spans(
         if whole_file_mode:
             # W8: the scan already read every byte within budget, so parse the
             # whole file once.  A mid-file window that starts inside a block is
-            # not valid source for an indentation/brace parser (the real AHA
+            # not valid source for an indentation/brace parser (the real sample project
             # 24.8 KB target degraded to zero candidates in window mode).
             whole = (raw_override if raw_override is not None
                      else b"".join(_read_at(handle, start, min(SCAN_CHUNK_BYTES, total_bytes - start))

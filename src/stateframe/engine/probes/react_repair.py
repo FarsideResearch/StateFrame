@@ -148,7 +148,7 @@ from kernel_step_limits import (  # noqa: E402
 MAX_STEPS = parse_step_limit(os.environ.get("REACT_STEPS", str(DEFAULT_STEPS)))
 STEPS_UNBOUNDED = True  # product capability marker: REACT_STEPS=0 / MAX_STEPS=0 means unbounded
 # CPU budget for one public check, aligned with its 300 s wall timeout (recorded bound; the
-# policy default of 30 s RLIMIT_CPU SIGKILLed a 37 s check in batch 843).  Bounded by the
+# policy default of 30 s RLIMIT_CPU SIGKILLed a 37 s check in prior run).  Bounded by the
 # execution policy's MAX_WALL_SECONDS.
 PUBLIC_CHECK_CPU_SECONDS = float(os.environ.get("STATEFRAME_PUBLIC_CHECK_CPU_SECONDS", "300"))
 # Module-level so a persistence wrapper can diversify retries: attempt 1 stays at 0 for
@@ -422,7 +422,7 @@ def _repeat_query_surgery_eligible(
     """Excise looping QUERIES only.
 
     Reads stay dispatchable so exact-range reuse can settle them, and the loop-breaking
-    actions themselves (edit/test/done...) are never intercepted; benchmark r2j
+    actions themselves (edit/test/done...) are never intercepted; benchmark earlier run
     had its only edit suppressed as REPEAT_SUPPRESSED because a READ count reached 18.
     """
     command = line.split(maxsplit=1)[0] if line.strip() else ""
@@ -1279,9 +1279,9 @@ def _record_final_product_no_candidate(
     # Mark before the durable append so a finalizer retry cannot duplicate a
     # record if the journal reports a post-fsync observer error.
     setattr(measurement, "_final_product_no_candidate_emitted", True)
-    # 10-08 merge amendments (SEER/OPERATOR2): salvage_gradable tells RUNREAL to grade the final snapshot like the
+    # 10-08 merge amendments (review harness/operator harness): salvage_gradable tells real-task runner to grade the final snapshot like the
     # TIMEOUT path when edits exist (a correct-but-unaccepted candidate is never lost); every field stays a short
-    # scalar so the event is never blob-externalized (OPERATOR2's scanner reads raw journal lines).
+    # scalar so the event is never blob-externalized (operator harness's scanner reads raw journal lines).
     # The post-finish recorder journals while the writer is open, else stderr + post_finish_facts.jsonl; never raises.
     _record_post_finish_fact(
         measurement, "final_product_no_candidate",
@@ -1746,7 +1746,7 @@ def _canonical_typed_edit_rejection(observation: object) -> str | None:
 def _create_path_contained(root: pathlib.Path, rel: str) -> bool:
     """True only for a non-empty path that resolves inside the workspace root.
 
-    Bughunt r2AE #3: single-file file_create had no containment check. This is the
+    bug investigation earlier run #3: single-file file_create had no containment check. This is the
     same rule reads use (resolve, then is_relative_to the resolved root), including
     symlinked-directory escapes, but without read-side basename recovery.
     """
@@ -1761,7 +1761,7 @@ def _create_path_contained(root: pathlib.Path, rel: str) -> bool:
 def _read_edit_source(path: pathlib.Path, verb: str) -> tuple[str, str | None]:
     """Return (text, None) for an editable UTF-8 file, else ("", typed refusal).
 
-    Edit applicators must never raise on file content (bughunt r2AE #1, #4): a
+    Edit applicators must never raise on file content (bug investigation earlier run #1, #4): a
     non-UTF-8 byte or a NUL byte is a property of the existing file, not of the
     model's edit, so the refusal says so and nothing is changed.
     """
@@ -2047,7 +2047,7 @@ def _apply_multi_definition_edit(path: pathlib.Path, current: str, replacement: 
 
     try:
         candidate_tree = ast.parse(candidate, filename=str(path))
-    except SyntaxError as error:   # r45 in-flight fix 2: typed refusal, never an exception out of the edit tool
+    except SyntaxError as error:   # earlier run in-flight fix 2: typed refusal, never an exception out of the edit tool
         return _typed_edit_rejection(
             "MULTI_DEFINITION_EDIT", path, root=root,
             hint=f"multi-definition result does not parse: {error.msg}; nothing was written",
@@ -2352,9 +2352,9 @@ def _render_multifile_list(fileset: FileSet, *, limit: int = 1400) -> str:
 # Native tool calls deliver structured arguments and avoid ambiguities in
 # free-form command parsing, including quoting and truncated code fences.
 #
-# Ported from MC's agent-runner/app/openai_client.py: the DeepSeek DSML quirk — Flash
+# Ported from sample project's agent-runner/app/openai_client.py: the DeepSeek DSML quirk — Flash
 # occasionally emits tool calls as literal <｜DSML｜...> markup inside content with an empty
-# tool_calls array (known upstream bug). MC's parser grammar is reproduced verbatim.
+# tool_calls array (known upstream bug). sample project's parser grammar is reproduced verbatim.
 
 
 def _list_files_command(args: Mapping[str, object]) -> str:
@@ -2954,7 +2954,7 @@ def _parse_r1_tool_calls(content: str) -> list:
 
 
 def parse_dsml_tool_calls(content: str) -> list:
-    """MC's grammar, verbatim semantics: never raises, [] on truncated/absent markup."""
+    """sample project's grammar, verbatim semantics: never raises, [] on truncated/absent markup."""
     if not content:
         return []
     if f"{_DSML_PIPE}DSML{_DSML_PIPE}" not in content:
@@ -3545,7 +3545,7 @@ def ask_tools(messages, mt=4000, temp=None, tools=None, known_refs=None):
             retry_available = attempt + 1 < POLICY.transport_attempts
             ceiling_exhausted = next_max_tokens <= mt
             if typed_truncation and ceiling_exhausted:
-                # r45 rule 11d (kernel_response_truncation): at the ceiling a truncated completion is never parsed;
+                # earlier run rule 11d (kernel_response_truncation): at the ceiling a truncated completion is never parsed;
                 # journal it and end typed on the FIRST truncation (a seeded identical retry repeats the loop).
                 from kernel_response_truncation import EVENT, MODEL_NOTE, RESULT_CLASS
                 truncations += 1
@@ -3745,7 +3745,7 @@ def ask(messages, mt=4000, temp=None):
         # half-dead connection that dribbles a byte every few minutes never trips it.
         # Measured live (v15): one request wedged in SSL read for 20+ minutes; the stack
         # dump showed poll() inside _ssl read with the process at 0% CPU. Run the call in a
-        # worker thread with a hard overall deadline (rule #54's pattern); an abandoned
+        # worker thread with a hard overall deadline (rule's pattern); an abandoned
         # thread holds its socket until process exit, which a short-lived bench worker can
         # afford. A wall-clock timeout counts as a failed attempt and retries.
         import concurrent.futures as _cf
@@ -3962,7 +3962,7 @@ def _str_replace_nonpy_edit(path: pathlib.Path, old_str: str, new_str: str, *,
 def str_replace_edit(path: pathlib.Path, old_str: str, new_str: str, *,
                      target_ref: object = None, root: pathlib.Path | None = None,
                      public_brief: object = None, journal: object = None) -> str:
-    """MC coding.py's _code_str_replace contract, transplanted:
+    """sample project coding.py's _code_str_replace contract, transplanted:
     exactly-one match required; whole-file syntax check; revert on breakage."""
     from kernel_edit_guard import edit_guard_mode
     edit_guard_mode()
@@ -3978,7 +3978,7 @@ def str_replace_edit(path: pathlib.Path, old_str: str, new_str: str, *,
     if path.is_dir():
         return f"str_replace REJECTED: {path.name} is a directory, not a file."
     if not old_str:
-        # Bughunt r2AE #5: an empty/missing old_str matched "every position" and produced
+        # bug investigation earlier run #5: an empty/missing old_str matched "every position" and produced
         # a false "matches N places" repair loop. It is a schema error, not an ambiguity.
         return ("str_replace REJECTED: old_str is required and must be non-empty: copy the "
                 "exact current text to replace. Nothing was changed.")
@@ -3994,7 +3994,7 @@ def str_replace_edit(path: pathlib.Path, old_str: str, new_str: str, *,
         return _str_replace_nonpy_edit(
             path, old_str, new_str, root=root, public_brief=public_brief,
         )
-    # Bughunt r2AE #1: strict read_text() raised UnicodeDecodeError out of the tool
+    # bug investigation earlier run #1: strict read_text() raised UnicodeDecodeError out of the tool
     # handler and ended the run. Decode explicitly and return a typed rejection.
     src, decode_refusal = _read_edit_source(path, "str_replace")
     if decode_refusal is not None:
@@ -4208,7 +4208,7 @@ def replace_fn(path: pathlib.Path, name: str, new_src: str,
             if not applied:
                 return shadow or "edit SHADOW: effect withheld"
             note_applied_product_edit(path)
-            # r44 staging (attribution): the class-edit path is only reachable with STATEFRAME_JQ_CLASS_EDIT on;
+            # earlier run staging (attribution): the class-edit path is only reachable with STATEFRAME_JQ_CLASS_EDIT on;
             # journal that it acted.  Best-effort, never changes the tool result.
             try:
                 from kernel_pilot import ACTIVE_RUNTIME
@@ -4611,7 +4611,7 @@ def _effect_write_bytes(path: pathlib.Path, source: bytes, *, operation: str = "
 def _effect_test_subprocess(command, *, root: pathlib.Path, targets, env, runner=None):
     """Run one test child through the caller-supplied central execution policy.
 
-    r45 merge: ``runner`` is the caller's check runner (staging's supervised-executor
+    earlier run merge: ``runner`` is the caller's check runner (staging's supervised-executor
     aware ``_run_check``); the effect boundary wraps it rather than replacing it.
     A missing runner is a refusal, never permission to start a raw child.
     """
@@ -4660,7 +4660,7 @@ def _nearest_pytest_config_args(root, targets) -> list[str]:
 
     Real repositories keep pytest config in a subproject (e.g. backend/pytest.ini sets
     pythonpath); running from the repo root without it makes conftest imports fail
-    (pytest exit 4). 10-03: every AHA bug-replay check died this way. This mirrors
+    (pytest exit 4). 10-03: every sample project bug-replay check died this way. This mirrors
     `cd backend && pytest`: walk up from each target to `root`, first config wins.
     Returns [] when the repo root already has a config, targets disagree, or none found.
     """
@@ -4727,7 +4727,7 @@ def _classify_runner_failure(blob: str, fn: str = "", rel_hint: str | None = Non
 
 
 # A host execution-contract refusal (sandbox/canary/policy) is an INFRA fact, never a
-# test verdict.  Measured batch 834: the canary RuntimeError escaped run_tests, the
+# test verdict.  Measured prior run: the canary RuntimeError escaped run_tests, the
 # worker re-raised without a journal row, and finish() closed the step with "".
 HOST_REFUSED_PREFIX = "HOST_REFUSED: host could not run tests"
 
@@ -5032,11 +5032,11 @@ def _run_tests_impl(root: pathlib.Path, fn: str, explicit: str | None,
         # control run genuinely independent?" and the answer was NO, measured: the parent run
         # (-x, stops at the fail-to-pass assertion) leaves ledger rows behind, and the gold
         # run then fails on protocol state it inherited — a sha-era test failing against the
-        # sha-era tree purely from OUR reuse. MC's conftest never drops schemas (rule #190,
+        # sha-era tree purely from OUR reuse. sample project's conftest never drops schemas (rule,
         # the accumulating test DB) but it DOES auto-create any database name it is handed,
         # so a unique name per run buys clean state for the cost of schema creation.
         # E279 — THE FRESH-DB-PER-INVOCATION FIX WAS A DISK BOMB. A uuid per pytest run
-        # created 118 full MC schemas in one night and filled the Docker volume until
+        # created 118 full sample project schemas in one night and filled the Docker volume until
         # postgres could not write its own pid file ("No space left on device") — my E265
         # isolation fix industrialised the rule-#190 accumulation it was avoiding. One DB
         # per TASK is the right grain: the E265 pollution was parent-control-vs-gold WITHIN
@@ -5047,16 +5047,16 @@ def _run_tests_impl(root: pathlib.Path, fn: str, explicit: str | None,
         import uuid as _uuid
         _dbname = os.environ.get("REACT_DB_NAME") or (
             f"stateframe_test_react_{_uuid.uuid4().hex[:8]}")
-        # E387b: the AHA sandbox conftest imports Settings, which REQUIRES database_url +
+        # E387b: the sample project sandbox conftest imports Settings, which REQUIRES database_url +
         # jwt_secret at import time — absent env means pytest exit 4 on EVERY invocation
         # (both preflight legs died identically, masquerading as "no usable oracle").
         # Harmless defaults only fill MISSING vars; suites that read them get a real-shaped
         # local value, never production anything.
         # E387c (v2): corpus-fix replacement oracles are dependency-light BY MANDATE, but
-        # blanket --noconftest broke MC oracles whose fixtures legitimately live in
+        # blanket --noconftest broke sample project oracles whose fixtures legitimately live in
         # conftest (measured: _collect_metrics "fixture not found" on both legs). The
         # precise rule: run normally; ONLY when the repo's conftest itself fails to
-        # IMPORT (exit 4, AHA's Settings/DB-at-import world) retry oracle targets
+        # IMPORT (exit 4, sample project's Settings/DB-at-import world) retry oracle targets
         # without conftests — the conftest was unusable anyway, so nothing is lost.
         from kernel_test_python import selected_test_python
         executable = (
@@ -5161,7 +5161,7 @@ def _run_tests_impl(root: pathlib.Path, fn: str, explicit: str | None,
             from kernel_pilot import ParentBudgetExhausted
             try:
                 # The CPU budget must match the wall budget: the policy default (30 s RLIMIT_CPU,
-                # hard) SIGKILLed a 37 s public check mid-run (rc 137, batch 843) while this call
+                # hard) SIGKILLed a 37 s public check mid-run (rc 137, prior run) while this call
                 # allowed 300 s of wall time.  Recorded bound: PUBLIC_CHECK_CPU_SECONDS.
                 result = run_sandboxed(
                     command,
@@ -5305,7 +5305,7 @@ def _run_tests_impl(root: pathlib.Path, fn: str, explicit: str | None,
     tail = _strip_pytest_separators((p.stdout + p.stderr).strip().splitlines())
     # INTERPRET THE EXIT CODE. A bare "pytest exit 4" is unreadable feedback and the agent
     # treats it as a failing test — but 4 is a USAGE error (bad path / bad node id) and 5 is
-    # "no tests collected". Our own rule #209: a pytest result with no test count is not a
+    # "no tests collected". rule: a pytest result with no test count is not a
     # verdict. Seen live: the agent got `exit 4` on a node id it guessed, and had no way to
     # know its command was malformed rather than its patch wrong. Telling it which one is
     # true costs nothing and saves the rest of the run.
@@ -5333,7 +5333,7 @@ def _run_tests_impl(root: pathlib.Path, fn: str, explicit: str | None,
     # DISTINGUISH "BAD PATH" FROM "THIS SUITE CANNOT RUN HERE" (exit 4 covers both).
     #
     # Measured live: the agent ran the SAME valid test file three times and was told each time
-    # that the path did not exist. The path was fine — the AHA repo's conftest.py fails to
+    # that the path did not exist. The path was fine — the sample project repo's conftest.py fails to
     # import in our sandbox, so nothing can collect. Telling an agent to fix a path that was
     # never wrong is the same lie class as the grep and read defects: it sends it hunting for
     # a problem that is ours, not its.
@@ -5942,10 +5942,10 @@ def work(d, *, resume=None):
             # neighbouring module and on the tests themselves. Autopilot never has this problem:
             # it works on a coherent checkout.
             #
-            # For MC tasks, materialise the PARENT COMMIT of the fix via `git archive` — every
+            # For sample project tasks, materialise the PARENT COMMIT of the fix via `git archive` — every
             # module, and the tests, from the same moment the bug existed. Falls back to the
-            # copy-current approach if the sha does not resolve (and for AHA, whose git root is
-            # the whole lab-repo tree).
+            # copy-current approach if the sha does not resolve (and for sample project, whose git root is
+            # the whole sample repository tree).
             root = (sbox / "repo") if d.get("repo") == "build" else root
             if (d.get("repo") == "mc") and d.get("sha") and \
                     os.environ.get("COHERENT_SNAPSHOT", "1") == "1":
@@ -5990,7 +5990,7 @@ def work(d, *, resume=None):
                 root = sbox / "repo"
             # THE SANDBOX MUST BE SELF-CONTAINED OR THERE IS NO TEST ORACLE AT ALL.
             #
-            # Measured: MC tests collect fine in the real repo (20 tests) and FAIL in our copy with
+            # Measured: sample project tests collect fine in the real repo (20 tests) and FAIL in our copy with
             #   ImportError: plugin "test_support.guard_pytest": No module named 'test_support'
             # because `test_support/` lives at mission-control/, one level ABOVE the backend/
             # directory we copy. pytest loads it as a plugin before collecting anything, so every
@@ -6066,7 +6066,7 @@ def work(d, *, resume=None):
         # measurably does not point at the defect — Flash edits lines with 0-6% overlap with
         # gold. When the repository contains a test that FAILS on this buggy code, that
         # failure is a real, non-leaky bug report: it exists independently of the patch and is
-        # the same artefact MC's autopilot receives when it succeeds. Prefer it.
+        # the same artefact sample project's autopilot receives when it succeeds. Prefer it.
         #
         # FAIR_BRIEF=0 disables, so the keyword arm stays reproducible for comparison.
         brief = d.get("symptom") or d.get("msg")
@@ -6082,7 +6082,7 @@ def work(d, *, resume=None):
                 and src_repo is not None and d.get("repo") != "build":
             # (build tasks have a synthetic sha and no git world — their brief IS the spec)
             git_root = (src_repo.parent if d.get("repo") == "mc"
-                        else src_repo.parent)               # lab-repo root for aha
+                        else src_repo.parent)               # sample repository root for sample project
             gm = subprocess.run(["git", "-C", str(git_root), "log", "--format=%s",
                                  "-1", d["sha"]], capture_output=True, text=True, timeout=30)
             if gm.returncode == 0 and gm.stdout.strip():
@@ -6108,7 +6108,7 @@ def work(d, *, resume=None):
         # concluded nothing was broken, and made zero edits in 200 steps — the fix-shipped
         # f2p test is absent from its world by design, so the agent had no red signal at
         # all. The preflight already captured the f2p test's FAILURE LINES against this very
-        # code; that is the symptom a real bug report carries (and exactly what MC's
+        # code; that is the symptom a real bug report carries (and exactly what sample project's
         # autopilot receives). It quotes the assertion, never the patch; the test file
         # itself stays out of the agent's world.
         if "_bridge_ordinary_brief" in d:
@@ -6812,7 +6812,7 @@ def work(d, *, resume=None):
             print(f"    [stateframe] groundtruth-B OFF: {type(_e).__name__}: {_e}")
         # E417: expectation ledger (every count the agent sees
         # becomes a tripwire; deltas demand investigation).
-        # r2b: organs are wired BEFORE StateFrameRuntime exists (measurement is None here); buffer their state events
+        # earlier run: organs are wired BEFORE StateFrameRuntime exists (measurement is None here); buffer their state events
         # and flush them into the run journal right after the runtime is constructed (930/931 startup crash).
         _expectation_wiring = _wire_expectation_ledger(_wiring_journal)
         bolt.expect = _expectation_wiring.value
@@ -6945,7 +6945,7 @@ def work(d, *, resume=None):
                         row=d, worker_id=worker_identity_from_row(d), max_tokens=800,
                         diagnostics=_carry_diag)
                     if _carry_diag.get("filtered"):
-                        bolt.memory_carry_filtered = dict(_carry_diag)  # r44 M6: journaled by the runtime
+                        bolt.memory_carry_filtered = dict(_carry_diag)  # earlier run M6: journaled by the runtime
                     if _env and bolt.organ_out("crossrun", _env["records"][0]["value"]):
                         bolt.memory_carry_envelope = _env
                         bolt._rec("crossrun", "prior_capsule_enveloped",
@@ -7063,7 +7063,7 @@ def work(d, *, resume=None):
                 _working_backwards.get("worker"),
                 analysis=_working_backwards.get("analysis"),
             )
-        # (benchmark r2j: 4 "changed" files with zero applied edits): net product
+        # (benchmark earlier run: 4 "changed" files with zero applied edits): net product
         # change is measured against the tree the run actually started from, not the
         # row's declared parent text (which can differ byte-wise from the materialized repo).
         _initial_product_sources = None
@@ -8873,7 +8873,7 @@ def work(d, *, resume=None):
                             measurement.observe(_name, _series_feedback)
                             msgs.append(_tool_reply_for_call(msgs, tool_call_id, _series_feedback))
                             continue
-                        # r46: STATEFRAME_STUB_SWEEP_DISPATCH refuses the exact redundant read at
+                        # earlier run: STATEFRAME_STUB_SWEEP_DISPATCH refuses the exact redundant read at
                         # dispatch (default off; kernel_stub_sweep_cut.dispatch_refusal).
                         _stub_sweep_dispatch_fn = getattr(
                             measurement, "stub_sweep_dispatch_refusal", None)
@@ -8886,7 +8886,7 @@ def work(d, *, resume=None):
                             continue
                         # Terminal green-lock refusal MUST run before continuation authorization:
                         # refusing after authorize left an open effect, stranded the continuation,
-                        # and every later action was REFUSED_PREDISPATCH (batch 136 crawl_a_one:
+                        # and every later action was REFUSED_PREDISPATCH (prior run crawl_a_one:
                         # 37 blocked reads, done never reached).
                         from kernel_green_lock import guard_action as _green_guard_action
                         # A check receipt is a read-only evidence lookup.  It
@@ -9338,7 +9338,7 @@ def work(d, *, resume=None):
                                     _create_error = str(_e)
                             else:
                                 _fc = root / _create_rel
-                                # Bughunt r2AE #3: single-file mode had no containment check,
+                                # bug investigation earlier run #3: single-file mode had no containment check,
                                 # so "../x.py" wrote outside the checkout with an APPLIED
                                 # receipt. Same containment rule (and text) as reads; no
                                 # basename recovery, which could redirect a create.
@@ -9627,7 +9627,7 @@ def work(d, *, resume=None):
                         if is_truncated(reply):
                             if _edit_nturn_request_active:
                                 _finish_edit_nturn()
-                            # r45 rule 11d: typed truncation -- no proposal, no invalid edit; the model gets the note.
+                            # earlier run rule 11d: typed truncation -- no proposal, no invalid edit; the model gets the note.
                             measurement.start_action(TRUNCATED_ACTION, {}, charge_dispatch=False)
                             measurement.observe(TRUNCATED_ACTION, reply)
                             msgs.append({"role": "user", "content": reply})
@@ -9710,7 +9710,7 @@ def work(d, *, resume=None):
                     finish_native_batch_transcript(msgs)
                     measurement.finish(outcome, messages=msgs)
                     return _attach_env_receipt(outcome, measurement)
-                # r38: never lose the cause of an ERR:* outcome (smoke 295 ran blind).
+                # earlier run: never lose the cause of an ERR:* outcome (smoke 295 ran blind).
                 import traceback as _err_tb
                 _err_trace = _err_tb.format_exc()[-6000:]
                 print(_err_trace, flush=True)
@@ -10703,7 +10703,7 @@ def work(d, *, resume=None):
                                                or _reuse_result_class)
                     bolt.receipt('test', line, line, _reuse_result_class, detail=reused)
                     import kernel_inflight_fixes as _inflight
-                    if _inflight.enabled():   # r45 in-flight fix 3: the one reuse predicate's writer
+                    if _inflight.enabled():   # earlier run in-flight fix 3: the one reuse predicate's writer
                         _inflight.note_reused_revision(measurement, _inflight.verification_key(measurement),
                                                        line[4:].strip())
                         _inflight.emit(measurement, "reused_verification", stage="applicable",
@@ -10741,7 +10741,7 @@ def work(d, *, resume=None):
                             measurement.journal.emit("v2_terminal", terminal="STALLED",
                                                      reason="third identical settled verification")
                         if _inflight.enabled():
-                            # r45 in-flight fix 3: a green, submit-ready stall submits instead of ending unsubmitted.
+                            # earlier run in-flight fix 3: a green, submit-ready stall submits instead of ending unsubmitted.
                             from kernel_green_then_exhaust import submit_if_ready
                             _stall_decision = submit_if_ready(measurement, boundary="post_green_stall")
                             _inflight.emit(measurement, "post_green_stall_submit",
@@ -11032,7 +11032,7 @@ def work(d, *, resume=None):
                         reason_codes=("SHIP_TREE_SMOKE",),
                         path=(d.get("rel") if isinstance(d, Mapping) else None))
                     if _smoke_decision.accepted:
-                        # r44 fix DONE (consult item 2): consume the SHARED decision.  A
+                        # earlier run fix DONE (consult item 2): consume the SHARED decision.  A
                         # witnessed smoke FAIL is never waived (kernel_done_challenge_once.
                         # witnessed_failure_bound); should any policy still accept, the runner
                         # must not render a refusal beside an accepted submission -- journal
@@ -11074,7 +11074,7 @@ def work(d, *, resume=None):
                         break
                     continue
                 # Re-audit the CURRENT source at every done (bounded inside the gate); a
-                # refuse-once gate accepted half-repairs (batch 121 JobQueue-924083).
+                # refuse-once gate accepted half-repairs (prior run JobQueue-924083).
                 _jq_gate_kwargs = {}
                 if (getattr(measurement, "jq_finish_enabled", False) and target is not None
                         and getattr(measurement, "jq_audit", None) is not None):
@@ -11133,7 +11133,7 @@ def work(d, *, resume=None):
                 _public_review = measurement.public_review_completion(
                     d, _remaining_budget_units(), API, KEY)
                 if _public_review is not None:
-                    # Fix (post-review r44, finding 1): PROBE_INCONCLUSIVE is
+                    # Fix (post-review earlier run, finding 1): PROBE_INCONCLUSIVE is
                     # a diagnostic card only; the internal design note is not evidence.
                     # validity-20260923.md" requires it never become
                     # completion evidence, but it must NOT itself refuse an
@@ -11435,7 +11435,7 @@ def work(d, *, resume=None):
                 if not ok_finish:
                     why = _completion_decision.detail
                 if _v2_terminal:
-                    # r44 review F2: the terminal is read off the SHARED stop decision
+                    # earlier run review F2: the terminal is read off the SHARED stop decision
                     # (V2_TERMINAL is protected from the challenge arbiter), so an accepted
                     # decision can never be labelled INCOMPLETE or vice versa.
                     _v2_terminal = not bool(_completion_decision.accepted)
@@ -13489,7 +13489,7 @@ def work(d, *, resume=None):
             measurement.bounded_completion(
                 detail=("closure reserve became unaffordable at the step cap; "
                         "the current artifact was preserved"))
-        # b1426 (r2EW, benchmark): the completion reducer ACCEPTED and SEALED done (seq 2311) and set
+        # earlier run (earlier run, benchmark): the completion reducer ACCEPTED and SEALED done (event sequence) and set
         # completion_accepted, but this check read only the legacy v2_disposition flag, so an accepted done
         # was relabelled "step limit without accepted done" / step_budget_exhausted and the terminal
         # downgraded it to NOT_COMPLETED. Either acceptance authority counts as an accepted done.
@@ -13517,7 +13517,7 @@ def work(d, *, resume=None):
             from kernel_bridge_evidence import capture_candidate
             # Candidate files are indexed by LOOP step inside the loop (line ~3832). In budget-unit=response mode
             # _reported_steps() counts a different quantity and could reuse an already-captured index with
-            # different contents (r35d full smoke: "captured twice with different contents"). The grader takes the
+            # different contents (earlier run full smoke: "captured twice with different contents"). The grader takes the
             # highest index as final, so the final capture must be strictly past every loop capture.
             from kernel_bridge_evidence import final_capture_index
             try:
@@ -13897,7 +13897,7 @@ def work(d, *, resume=None):
                 and measurement.system_outcome is None
                 and _finish_result == "PASS"):
             # 10-08: a manifest-write failure must NEVER turn a won run into an ERROR. It is journaled as a
-            # host fact (final_product_manifest_failed) and the PASS stands; RUNREAL's clean-finish path then falls
+            # host fact (final_product_manifest_failed) and the PASS stands; real-task runner's clean-finish path then falls
             # back to the timeout-salvage export so the candidate is still graded (never silently dropped).
             try:
                 from kernel_final_product_manifest import emit_stage6_clean_finish_manifest
@@ -14125,7 +14125,7 @@ def work(d, *, resume=None):
             )
         if not isinstance(exc, ParentBudgetExhausted):
             if os.environ.get('REACT_STEP_CONTRACT', '0') != '1':
-                # Batch 834: this re-raise left NO journal row while finish() closed the
+                # prior run: this re-raise left NO journal row while finish() closed the
                 # in-flight step with an empty observation.  Record the cause first.
                 if measurement is not None:
                     try:

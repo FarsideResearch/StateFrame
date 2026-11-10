@@ -49,8 +49,8 @@ _SOURCE_BLOCK_HEADER = re.compile(
 _NOTICE_PREFIXES = (
     "GREEN LOCK /", "GREEN LOCK:", "[Named-layer coverage", "[Named notice]",
     "[Live verbose notice]", "[Notice]", "NOTICE:", "[Render notice]",
-    "[False-completion coverage",  # r44 F4 item 4: now an F4 notice carrier
-    "[Working sets | host-retained]", "<settled_state>",  # r44 F4 item 6
+    "[False-completion coverage",  # earlier run F4 item 4: now an F4 notice carrier
+    "[Working sets | host-retained]", "<settled_state>",  # earlier run F4 item 6
     "[Source page evicted]", "[Source page deferred]",
 )
 _OPEN_WORDS = frozenset({
@@ -779,7 +779,7 @@ RETAIN_BYTE_HEADROOM = 2048
 def _retained_request_fits_bytes(messages: object, tools: object) -> bool:
     """The kept frame must also fit the endpoint BYTE cap, not only the token ceiling.
 
-    b1441 (10-19): F1 kept 84,149/96,432-byte requests under the token ceiling; final revalidation
+    earlier run (10-19): F1 kept 84,149/96,432-byte requests under the token ceiling; final revalidation
     refused them (request_bytes_exceed_max_request_bytes > 82,026), recovery could not shrink them,
     and the run died RUN_INCOMPLETE. Unmeasurable -> not retained (historical fallback).
     """

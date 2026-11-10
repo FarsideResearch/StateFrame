@@ -27,7 +27,7 @@ def install() -> None:
     import kernel_rejected_candidate
     import kernel_stateframe_f4
     import kernel_stateframe_receipts
-    try:  # lab-only accounting tool; absent from frozen releases
+    try:  # development-only accounting tool; absent from frozen releases
         import scripts.compare_release as _compare_release
     except ImportError:
         _compare_release = None

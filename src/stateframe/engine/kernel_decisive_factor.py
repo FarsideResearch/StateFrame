@@ -1,4 +1,4 @@
-"""Advisory decisive-factor and hidden-disqualifier records for r44.
+"""Advisory decisive-factor and hidden-disqualifier records for earlier run.
 
 The organ is deliberately small and host-owned.  A model can record one
 approach, one factor, and one ticket-implied disqualifier; the host renders that

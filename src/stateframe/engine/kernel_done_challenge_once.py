@@ -1,6 +1,6 @@
 """Challenge-once-per-revision done policy for the enforced (frame) arm.
 
-r39 dissection: requirement alignment refused ``done`` ("no repair action is
+earlier run dissection: requirement alignment refused ``done`` ("no repair action is
 available") 46-51 times in a row while the green-lock terminal menu offered
 ONLY ``done`` -- a deadlock that burned ~1.3M tokens.  This module is the
 single post-reducer arbiter that makes that state impossible:
@@ -39,7 +39,7 @@ NO_AGREE_TEXT = "Do not change correct code merely to agree with this challenge.
 # attempt assessment: run-wide cap that edits cannot replenish (done -> cosmetic edit ->
 # new revision -> challenge treadmill).
 CHALLENGE_RUN_CAP = 2
-# r44 fix DONE: the shared done-path vocabulary lives in kernel_completion_policy (one list).
+# earlier run fix DONE: the shared done-path vocabulary lives in kernel_completion_policy (one list).
 from kernel_completion_policy import NON_WAIVABLE_CODES, TERMINAL_CODES  # noqa: E402
 
 _COUNTEREXAMPLE_CODES = frozenset({
@@ -47,7 +47,7 @@ _COUNTEREXAMPLE_CODES = frozenset({
     "OPEN_COUNTEREXAMPLE", "GREEN_LOCK_REPAIR_OPEN_COUNTEREXAMPLE", *NON_WAIVABLE_CODES})
 # Unified stop (kernel_completion_policy.CODE_VIOLATED) owns its challenge/stop ledger.
 _UNIFIED_OWNED_CODE = "UNIFIED_VIOLATED"
-# r41b (kernel_live_counterexample_challenge.UNVERIFIED_CODE): challenge class UNVERIFIED, strict
+# earlier run (kernel_live_counterexample_challenge.UNVERIFIED_CODE): challenge class UNVERIFIED, strict
 # first-green progress rule.  Only ever produced with STATEFRAME_LIVE_CE_CHALLENGE=on.
 _STRICT_UNVERIFIED_CODES = frozenset({"UNVERIFIED_DISCLOSED_CHECKS"})
 CLASS_TEXT = {
@@ -77,7 +77,7 @@ REPAIR_EDIT_TOOLS = frozenset({"edit", "str_replace", "write", "file_create", "f
 QUALIFYING_ACTIONS = frozenset({
     *REPAIR_EDIT_TOOLS, "read", "grep", "find", "search", "probe", "predict",
 })
-# V2_TERMINAL (disposition-v2 INCOMPLETE, r44 completion_gaps F2) is a non-accepted terminal
+# V2_TERMINAL (disposition-v2 INCOMPLETE, earlier run completion_gaps F2) is a non-accepted terminal
 # of the shared stop decision: the arbiter must never convert it into a submission.
 _TERMINAL_CODES = TERMINAL_CODES
 
@@ -124,7 +124,7 @@ def repair_hold(runtime: object, menu: Sequence[str]) -> bool:
 
 
 def revision_key(basis: object, runtime: object = None) -> str:
-    """The PRODUCT revision of a done basis.  Measured on the r39 deadlock journals:
+    """The PRODUCT revision of a done basis.  Measured on the earlier run deadlock journals:
     ``snapshot_digest`` changes on every done even with zero edits (it carries host
     evidence), so keying on it would make every done a "new revision" and the
     challenge would never be overridden.  ``binding_digest`` is the candidate
@@ -198,11 +198,11 @@ def arbitrate(runtime: object, decision, *, caller_admissible: bool, rebuild_acc
         # Q23 NO_RED_TERMINAL owns this refusal; CAP1 must never waive it.
         return decision
     if codes & NON_WAIVABLE_CODES:
-        # r44 fix DONE/D2: a witnessed failure (e.g. N14 import FAIL) is never waived by the
+        # earlier run fix DONE/D2: a witnessed failure (e.g. N14 import FAIL) is never waived by the
         # challenge cap / sole-done submission; it is refused, then bounded by a terminal.
         return witnessed_failure_bound(runtime, decision)
     if _UNIFIED_OWNED_CODE in codes:
-        # r44 fix DONE (consult item 3): unified stop already challenged/stopped this done on
+        # earlier run fix DONE (consult item 3): unified stop already challenged/stopped this done on
         # its own snapshot ledger; a second challenge here would spend budget twice and
         # promise an override (CHALLENGE_SUFFIX) unified stop will not honour.
         _emit(runtime, "done_challenge_deferred", owner="unified_stop",
@@ -259,7 +259,7 @@ def arbitrate(runtime: object, decision, *, caller_admissible: bool, rebuild_acc
     key = revision_key(getattr(decision, "basis", None), runtime)
     spent = int(getattr(runtime, "_done_challenge_count", 0) or 0)
     same_revision = getattr(runtime, "_done_challenge_revision", None) == key
-    # r41b: disclosed-but-host-demoted checks (UNVERIFIED class) follow the same first-green
+    # earlier run: disclosed-but-host-demoted checks (UNVERIFIED class) follow the same first-green
     # rules as a counterexample: challenge once, second done after one non-redundant action.
     strict_counterexample = bool(first_green and codes & (_COUNTEREXAMPLE_CODES | _STRICT_UNVERIFIED_CODES))
     if strict_counterexample:
@@ -270,7 +270,7 @@ def arbitrate(runtime: object, decision, *, caller_admissible: bool, rebuild_acc
         progressed = False
         cap_reached = spent >= CHALLENGE_RUN_CAP and not same_revision
     klass = challenge_class(codes)
-    # r41 composition (first_green_disclosure x challenge_budget), trials/r41_resolutions.md:
+    # earlier run composition (first_green_disclosure x challenge_budget), trials/r41_resolutions.md:
     # when the budget is active its durable counter/cap/challenged revision are the ONE
     # authority; the first-green gates read them instead of the legacy attributes.
     budget_view = plan(runtime, key, request=None) if budget is not None else None
@@ -478,7 +478,7 @@ WITNESSED_REFUSAL_TEXT = ("[done] refused: a host-witnessed failure ({codes}) ho
 
 
 def witnessed_failure_bound(runtime: object, decision):
-    """r44 fix DONE/D2: refusals carrying a NON_WAIVABLE witnessed failure.
+    """earlier run fix DONE/D2: refusals carrying a NON_WAIVABLE witnessed failure.
 
     Never accepted.  Each such refused done counts run-wide; while a repair edit is on the
     menu the first CHALLENGE_RUN_CAP refusals stay recoverable, the next one (or any with no
@@ -628,7 +628,7 @@ def _counterexample_ids(runtime: object, codes: set[str]) -> list[str]:
 def _strict_waiting_suffix(runtime: object, codes: set[str]) -> str:
     labels = json.dumps(_counterexample_ids(runtime, codes), ensure_ascii=False)
     if codes & _STRICT_UNVERIFIED_CODES and not codes & _COUNTEREXAMPLE_CODES:
-        # r41b relabel: host-demoted check problems are "unverified checks", never
+        # earlier run relabel: host-demoted check problems are "unverified checks", never
         # "open counterexamples" (not a demonstrated failure).
         return ("[done challenge] No qualifying action happened since the challenge; "
                 f"unverified checks {labels} remain unverified. Before done, {ACTION_HINT}.")

@@ -20,7 +20,7 @@ class LocateCfg:
     # tokens, rerank, cap. Its paths are APPENDED after the existing menu
     # prefix and can only reach the overflow menu, so the primary menu (and
     # therefore the false-locate rate) is provably unchanged. The four known
-    # pool misses at MC scale sit at Stage-A ranks 19-58: inside W=100, outside
+    # pool misses at sample project scale sit at Stage-A ranks 19-58: inside W=100, outside
     # today's cap of 48.
     pool_recall: bool = True
     pool_recall_w: int = 100        # Stage-A sweep width

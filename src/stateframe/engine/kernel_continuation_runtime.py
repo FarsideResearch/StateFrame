@@ -467,7 +467,7 @@ class LiveContinuation:
     def reconcile_external_effects(self) -> set[str]:
         """Settle durable external evidence before scheduling another action.
 
-        r45 merge (single owner of this seam = restart_reconcile's executive bridge):
+        earlier run merge (single owner of this seam = restart_reconcile's executive bridge):
         guarded_effects receipts settle first, then unknown_outcomes tri-state
         reconciliation for whatever is still pending.  Each adapter is inert
         (returns an empty set, imports nothing new) when its switch is off."""

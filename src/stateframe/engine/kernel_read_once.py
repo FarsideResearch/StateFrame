@@ -1,6 +1,6 @@
 """Read-once note at the first repeated read of an unchanged range (soak CONFIRMED lead C3).
 
-Qualification (multi-turn read-loop anchor, real r2j journal cut after the 3rd unchanged
+Qualification (multi-turn read-loop anchor, real earlier run journal cut after the 3rd unchanged
 re-read, exact token-parity placebo): T 6/12, C 2/12, P 1/12. Timing matters: at the 6th
 re-read it was weak, so the note fires at the FIRST repeat, once per run.
 

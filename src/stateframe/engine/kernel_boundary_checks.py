@@ -1766,7 +1766,7 @@ class _Compiler:
                 expected = expected["body"]
             module, class_name, method = entries[0].rsplit(".", 2)
             from kernel_named_layer_repair import enabled as named_layer_repair_enabled
-            # r45 (autopsy-a3b-r44c-ldev01, check 001): the class lives INSIDE the module file, so the
+            # earlier run (autopsy-a3b-earlier run-ldev01, check 001): the class lives INSIDE the module file, so the
             # entry point is module:Class.method (app/models.py), never module.Class:method (app/models/Event.py).
             entry = (f"{module}:{class_name}.{method}" if named_layer_repair_enabled()
                      else f"{module}.{class_name}:{method}")

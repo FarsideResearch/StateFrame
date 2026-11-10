@@ -4,7 +4,7 @@ The adapter refreshes from the existing language-neutral structural catalog and
 projects bounded evidence into FRAMEBUILD.  It never executes repository code,
 executes documentation instructions, calls a model, or treats a missing/stale
 packet as permission to invent a fact.  Python graph/AST queries are isolated
-to :class:`PythonAnalysisAdapter`; every other language uses ``mc-outline/1``
+to :class:`PythonAnalysisAdapter`; every other language uses ``sample project-outline/1``
 and explicit degraded/unknown coverage.
 """
 

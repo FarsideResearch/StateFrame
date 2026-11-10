@@ -554,7 +554,7 @@ def _capture_clean_meter_request_bodies(
     # v0.4.0 changes default request order; the 0.3.30 byte oracle uses plain order.
     # Stop at the needed request count instead of replaying all 41 tape turns.
     # Each clean-meter request costs ~71 s of engine-side prep on Linux (measured on e62db60:
-    # 34 sends in 2422 s; journal attribution by crew-08: public_test_verdict_fact_normalized,
+    # 34 sends in 2422 s; journal attribution by prior contributor: public_test_verdict_fact_normalized,
     # code_bookmark_activation_decision, continuation_transition), so the full replay ran past
     # the engine deadline before submitting. Current capture compares requests 1-6.
     outcome = corpus._run_case(
@@ -670,8 +670,8 @@ def test_healthy_measurement_preserves_baseline_request_bytes(tmp_path, baseline
     assert _masked_wire_sha256(bytes(changed_body)) != computed_masked_hashes[0]
 
     # Compare requests 1-2 only: a callsite census at step 12 fires depending on run timing
-    # and changes request 3+ bytes (a determinism leak). Owner: sf-test-runners.
-    # Finding: sf-work/lanes/findings/census_timing_1104.md.
+    # and changes request 3+ bytes (a determinism leak). The timing finding is tracked with
+    # the test-runner maintenance notes.
     # Full masked identity is checked by ident_pair.sh.
     assert computed_masked_hashes[:2] == baseline_masked_hashes, (
         f"masked request SHA-256s differ from the immediate base {baseline_tree} "

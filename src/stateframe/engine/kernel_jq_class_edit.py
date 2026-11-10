@@ -292,7 +292,7 @@ def prepare_class_edit(
         )
 
     payload_classes = [node for node in replacement_tree.body if isinstance(node, ast.ClassDef)]
-    # r45 in-flight fix 1 (STATEFRAME_INFLIGHT_FIXES): import lines next to the class are not a second definition.
+    # earlier run in-flight fix 1 (STATEFRAME_INFLIGHT_FIXES): import lines next to the class are not a second definition.
     payload_imports = ([node for node in replacement_tree.body if isinstance(node, (ast.Import, ast.ImportFrom))]
                        if _inflight_enabled() else [])
     payload_body_len = len(replacement_tree.body) - len(payload_imports)
@@ -309,7 +309,7 @@ def prepare_class_edit(
             ),
         )
     if len(payload_classes) != 1 or payload_body_len != 1:
-        # r44 M1: like its siblings, only own the edit when the target resolves to a
+        # earlier run M1: like its siblings, only own the edit when the target resolves to a
         # class; a multi-definition payload aimed at a function belongs to the legacy /
         # boundary-checks multi-definition path.
         if not targets:

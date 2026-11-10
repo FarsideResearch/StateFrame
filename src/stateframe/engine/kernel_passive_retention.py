@@ -31,7 +31,7 @@ MAX_STORED_TEXT = 1200
 MAX_CANDIDATE_TEXT = 12000
 MAX_RENDER_CHARS = 2400
 MAX_RENDER_ITEM_CHARS = 500
-MAX_RENDER_TOKENS = 480  # serialized request tokens (kernel_context.token_estimate), r44 F4 item 7
+MAX_RENDER_TOKENS = 480  # serialized request tokens (kernel_context.token_estimate), earlier run F4 item 7
 
 _CONCLUSION_CUES = re.compile(
     r"\b(?:conclusion|finding|root cause|the issue|the fix|therefore|thus|"
@@ -535,7 +535,7 @@ class PassiveRetentionStore:
                        ) -> dict[str, str] | None:
         """Render the bounded passive block for one work item.
 
-        r44 F4 fixes (all behind this lane's switch):
+        earlier run F4 fixes (all behind this lane's switch):
         R1 -- a record whose exact claim identity (``claim_id``) or response/record
         id is already carried by another rendered host block (decision handoff,
         exchange ring, settled_state) is skipped instead of repeated as UNVERIFIED
@@ -618,7 +618,7 @@ class PassiveRetentionStore:
         content = "\n".join(lines)
         from kernel_prompt_compact import compact_passive_text, enabled as prompt_compact_enabled
         if prompt_compact_enabled():
-            # r47 F4/L2: short response ids + one withheld-body note (fit bound above was
+            # earlier run F4/L2: short response ids + one withheld-body note (fit bound above was
             # measured on the longer full form, so the compact block always fits too).
             content = compact_passive_text(content)
             if not content:

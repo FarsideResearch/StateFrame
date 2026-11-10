@@ -1,4 +1,4 @@
-"""Self-contained Mission Control repository intelligence for StateFrame.
+"""Self-contained repository intelligence for StateFrame.
 
 The extraction and graph algorithms are vendored from the coding executor;
 this module is the release-local adapter.  It owns only bounded, read-only

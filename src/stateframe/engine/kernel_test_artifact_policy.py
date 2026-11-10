@@ -218,7 +218,7 @@ def _explicit_config(root: Path, tokens: Sequence[str]) -> Path | None:
     nearest subproject config); reading only ``<root>/pytest.ini`` missed its
     ``--cov ... --cov-report=html`` addopts, so coverage was never disabled.
     """
-    # 10-22 (census b1542/b1606 'File name too long'): only PYTEST's own arguments count. A profiled command such as
+    # 10-22 (census earlier runs 'File name too long'): only PYTEST's own arguments count. A profiled command such as
     # `python -c "<wrapper>" pytest -c backend/pytest.ini` has Python's -c first; scanning the whole argv returned the wrapper
     # body as the config path (ENAMETOOLONG in _pytest_config). Same own-program rule as the machine-wide pytest detectors.
     tokens = _pytest_arguments(tokens)

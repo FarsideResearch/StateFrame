@@ -162,7 +162,7 @@ def _install_declared_environment(spec: Mapping[str, object]) -> dict[str, str]:
             raise ValueError(f"run environment value is not scalar: {key}")
         environment[str(key)] = str(value)
     # Host task-execution policy (STATEFRAME_TASK_NETWORK / _ENV_KEYS / _PYTEST_PLUGINS) is declared
-    # by the worker LAUNCH (docker --env), never by a spec.  10-06 batch 837: this purge was the hop
+    # by the worker LAUNCH (docker --env), never by a spec.  10-06 prior run: this purge was the hop
     # that dropped it (source_env had 256 STATEFRAME_* keys and zero STATEFRAME_TASK_*), so the
     # sandbox lost --share-net and the capability canary could never prove runtime policy.  Host
     # policy is authoritative: a spec may restate it verbatim but never override or invent it.
@@ -298,7 +298,7 @@ def _postflight_effective_config(run: Path, spec: Mapping[str, object]) -> None:
         raise ValueError(f"effective config postflight expected one record, found {len(events)}")
     # Host task policy (STATEFRAME_TASK_*) is declared by the docker launch, not the spec: the purge
     # above lets it survive and the kernel records it from the process environment.  Compare the
-    # SAME allowlist here, or every run ends in FINALIZATION_ERROR after a clean finish (batch 857:
+    # SAME allowlist here, or every run ends in FINALIZATION_ERROR after a clean finish (prior run:
     # 60 requests, RESPONSE_BUDGET_EXHAUSTED, then this raise; no salvage grade).  Any other key
     # that drifts, appears, or disappears still raises.
     effective = events[0].get("effective_config")
@@ -353,7 +353,7 @@ def check_request_contract(messages, tools, public_row: Mapping[str, object], *,
 
     Pure (no run directory, no runtime) so the cut gate's scripted first-turn replays can run
     the exact same check in every mode the release supports: a release whose first request
-    violates its mode's contract must fail the cut, not die on the GPU (10-13: r2BG LEAN died
+    violates its mode's contract must fail the cut, not die on the GPU (10-13: earlier run LEAN died
     before request 1 on the full-mode EditAuthority assertion).
     Returns ``(edit_tool_function_or_None, system_text)``.
     """
@@ -383,7 +383,7 @@ def check_request_contract(messages, tools, public_row: Mapping[str, object], *,
         # Offline harnesses filter KERNEL_* (no KERNEL_EDIT_AFFORDANCE), so no scope exists there;
         # the live runner always declares it and keeps the refusal above.
         if scope is not None:
-            # r38 single EditAuthority: the tool points at the authority, the system carries its
+            # earlier run single EditAuthority: the tool points at the authority, the system carries its
             # one line, and the legacy scope sentence must be gone (scope rendered once).
             from kernel_edit_affordance import AUTHORITY_EDIT_DESCRIPTION, AUTHORITY_SYSTEM_LINE
             assert edit["description"].startswith(AUTHORITY_EDIT_DESCRIPTION)

@@ -345,7 +345,7 @@ SAFE_TAIL = frozenset({
     # STATEFRAME_PERPETUAL_SOAK=on prepare audit event (no state change).  Found by the
     # real-child soak: without it every soak resume refused (fix round, perpetual_soak).
     "perpetual_soak_prepare",
-    # Restore-time audit of the post-green checkpoint section (r44 fix DONE, item 9).
+    # Restore-time audit of the post-green checkpoint section (earlier run fix DONE, item 9).
     "post_green_menu_restored",
 }) | _CAPACITY_SAFE_TAIL
 CHALLENGE_BUDGET_SAFE_TAIL = frozenset({
@@ -1022,7 +1022,7 @@ def validate_profile(information) -> None:
         "KERNEL_DECISION_STATE": "0",
         "KERNEL_REJECTED_CANDIDATE": "0",
         "FACT_COMPILER": "0", "CROSSRUN_MEMORY": "0",
-        # A capsule bank is an external immutable input, but this r43 restart
+        # A capsule bank is an external immutable input, but this earlier run restart
         # checkpoint has no bank binding/replay section.  Refuse it rather than
         # silently loading a different bank after worker restart.
         "STATEFRAME_MEMORY_CAPSULE": "off",
@@ -1284,7 +1284,7 @@ def restore_first_green_checkpoint(runtime, section) -> None:
     setattr(runtime, "_done_submission_record", copy.deepcopy(submission))
 
 
-# r44 fix DONE (consult item 9): STATEFRAME_POST_GREEN_WORK_MENU state (edit cycles, pending
+# earlier run fix DONE (consult item 9): STATEFRAME_POST_GREEN_WORK_MENU state (edit cycles, pending
 # verification, reopen sets) survives a worker restart; without it a restart replenished the
 # post-green edit budget and dropped the pending re-verification.
 POST_GREEN_CHECKPOINT_KEY = "post_green_work_menu"

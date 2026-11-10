@@ -887,7 +887,7 @@ def render_f4_handoff(*, slots: object = None, host: object = None,
             estimate = token_estimate({"role": "user", "content": text})
             if estimate <= maximum:
                 break
-    # r41 review fix F4-R4: this runs inside prepare(); a budget miss must never crash the
+    # earlier run review fix F4-R4: this runs inside prepare(); a budget miss must never crash the
     # run (ERR).  Model-authored slots can contain escaped unicode that inflates the JSON
     # estimate, so degrade to a hard field clip and record the miss instead of raising.
     budget_note = None
@@ -961,7 +961,7 @@ def _pair_messages(messages: Sequence[Mapping[str, object]], allowed: set[str]) 
 
 
 def _wire_safe_call(call: Mapping[str, object]) -> dict:
-    """r41 live fix (smokefull-323-ldev_01, llama.cpp /apply-template HTTP 500 "Failed to parse
+    """earlier run live fix (smokefull-323-reviewer, llama.cpp /apply-template HTTP 500 "Failed to parse
     tool call arguments as JSON"): a replayed assistant call whose arguments string is not a
     JSON object (the model's truncated/broken call, which the host already REJECTED) kills
     every later request.  Valid arguments stay byte-identical; invalid ones are carried as a
@@ -1749,7 +1749,7 @@ def provider_batch_id(capture: object, provider_ids: Sequence[str]) -> str:
 def provider_call_ids(capture: object) -> tuple[str, ...]:
     """IDs under which this provider response's calls appear in the worker transcript.
 
-    r41 live fix (smokefull-311 ldev_05: ring empty on every request, model re-read the
+    earlier run live fix (smokefull-311 reviewer: ring empty on every request, model re-read the
     same file 6x blind): with native tool batches (kernel_native_tools) the worker renames
     every provider call to ``native_<origin request_id>_<index>`` before it reaches the
     transcript, so the provider's own ids never match.  Those renamed ids are host-minted
@@ -1776,7 +1776,7 @@ def order_messages(messages: Sequence[Mapping[str, object]]) -> Sequence[Mapping
 
 
 def _reasoning_anchor_header() -> str:
-    # r46: lazy import keeps kernel_stateframe_reasoning_anchor an optional dependency of
+    # earlier run: lazy import keeps kernel_stateframe_reasoning_anchor an optional dependency of
     # this module -- unused unless STATEFRAME_REASONING_ANCHOR is exercised.
     from kernel_stateframe_reasoning_anchor import ANCHOR_HEADER
     return ANCHOR_HEADER
@@ -1789,7 +1789,7 @@ def _reasoning_ledger_header() -> str:
 
 
 def _pending_intent_header() -> str:
-    # r46 STATEFRAME_INTENT_CARRY_F4: lazy import, same pattern as the anchor header.
+    # earlier run STATEFRAME_INTENT_CARRY_F4: lazy import, same pattern as the anchor header.
     from kernel_intent_carry import PENDING_INTENT_HEADER
     return PENDING_INTENT_HEADER
 
@@ -1844,7 +1844,7 @@ def frame_bytes(messages: Sequence[Mapping[str, object]]) -> bytes:
     return b"".join(_canonical(dict(message)) + b"\n" for message in messages)
 
 
-# r41 review fix F4-R3: ``claims`` restates every predicate already in ``state`` and
+# earlier run review fix F4-R3: ``claims`` restates every predicate already in ``state`` and
 # ``tool_menu_digest`` is host bookkeeping; both stay in the projection/journal, never in
 # the model-visible block (one field per predicate).
 MODEL_VISIBLE_STATE_KEYS = ("schema", "revision", "state")
@@ -1884,7 +1884,7 @@ def compose_messages(*, prefix: Sequence[Mapping[str, object]], path: str, worki
     """``source_messages`` (runtime-rendered, header contract owned by kernel_read_fixes)
     replaces the legacy literal "[Working source: ...]" block when supplied.
 
-    ``anchor_entries`` (r46, STATEFRAME_REASONING_ANCHOR): rendered as at most one
+    ``anchor_entries`` (earlier run, STATEFRAME_REASONING_ANCHOR): rendered as at most one
     "[Settled findings]" block, and only when the switch is on AND entries is non-empty --
     off-parity is byte-identical to before this parameter existed either way.
     ``verbatim_turns`` appends an explicit legacy F4 suffix; FrameFit5 never passes it.

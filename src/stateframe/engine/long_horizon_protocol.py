@@ -579,7 +579,7 @@ _HYBRID_HELPER_FLAGS = {
 
 def _common_flags(family: str = TASK_FAMILY) -> dict[str, str]:
     # These are explicit so a batch is not accidentally rebuilt from a stale
-    # r39/r40 template.  The large trim value disables the legacy message-count
+    # earlier runs template.  The large trim value disables the legacy message-count
     # cap without using the runtime's integer-valued REACT_TRIM as a mode flag.
     flags = {
         PROTOCOL_SWITCH: "on",

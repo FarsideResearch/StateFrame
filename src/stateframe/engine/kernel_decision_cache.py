@@ -77,7 +77,7 @@ def enabled() -> bool:
 
 
 def _ext() -> bool:
-    """r44 conclusion-cache extension (own default-off switch on top of r43)."""
+    """earlier run conclusion-cache extension (own default-off switch on top of earlier run)."""
     from kernel_conclusion_cache import enabled as conclusion_cache_enabled
     return conclusion_cache_enabled()
 
@@ -445,7 +445,7 @@ def _dependency_rows(draft: DecisionDraft, context: Mapping[str, object]) -> lis
                                  "ast": [ast.dump(item, include_attributes=False)
                                          for item in getattr(definition, "body", ())]})
     if interpretation and not structural:
-        # r44: an interpretation of a clause also rests on the definition's
+        # earlier run: an interpretation of a clause also rests on the definition's
         # signature (a changed parameter list changes what "optional" means).
         if definition is None or not isinstance(source, str):
             add("signature", target, None, unknown=True)
@@ -577,7 +577,7 @@ class DecisionCacheStore:
             "brief": brief,
             "receipts": copy.deepcopy(list(receipts)),
         }
-        # r44 host premises (only supplied when the conclusion-cache switch is on).
+        # earlier run host premises (only supplied when the conclusion-cache switch is on).
         self._context.update(copy.deepcopy(premises))
         self._input_receipt_refs: set[str] = set()
         self._last_delta: list[dict[str, object]] = []
@@ -968,7 +968,7 @@ def _compact(value: object) -> str:
 def render_reusable_receipts(receipts: Sequence[object] | None, *,
                              current_revision: object = None,
                              max_rows: int = MAX_RENDER_RECEIPTS) -> str:
-    """Render bounded host receipts as answers the model can reuse (r44 switch only)."""
+    """Render bounded host receipts as answers the model can reuse (earlier run switch only)."""
     if not enabled() or not _ext() or not isinstance(max_rows, int) or max_rows < 1:
         return ""
     from kernel_conclusion_cache import receipt_lines
@@ -1075,7 +1075,7 @@ def _record_text(row: Mapping[str, object]) -> str:
             if key in selected:
                 selected_fields[key] = selected[key]
     resolution = row.get("resolution") if isinstance(row.get("resolution"), Mapping) else {}
-    # r44: short digests keep a CURRENT record small enough to share the budget.
+    # earlier run: short digests keep a CURRENT record small enough to share the budget.
     dependencies = [
         str(item.get("facet")) + ":" + str(item.get("digest", "")).split(":", 1)[-1][:10]
         for item in row.get("basis_dependencies", ())
@@ -1160,7 +1160,7 @@ def _render_settled_state_r43(cache: DecisionCacheStore, *,
                               active_symbols: Sequence[object],
                               max_tokens: int,
                               emit: Callable[..., object] | None) -> str:
-    """The r43 projection, unchanged, used whenever the r44 switch is off."""
+    """The earlier run projection, unchanged, used whenever the earlier run switch is off."""
     rows = _selected_rows(cache, active_symbols)
     frontier = [str(item) for item in work_frontier if str(item)]
     if enabled() and not rows and not frontier and not cache.delta():

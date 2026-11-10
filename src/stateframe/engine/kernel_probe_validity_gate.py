@@ -48,7 +48,7 @@ _INVERT_RELATION = {
     "eq": "eq", "ne": "ne", "lt": "gt", "le": "ge", "gt": "lt", "ge": "le",
     "is": "is", "is_not": "is_not",
 }
-# Fix (post-review r44, finding 3, part B): `pytest.raises(<name>)` used to
+# Fix (post-review earlier run, finding 3, part B): `pytest.raises(<name>)` used to
 # accept ANY identifier/dotted-path string -- including an unresolved,
 # fictitious exception type -- as a "restricted typed predicate". A raises
 # clause naming a real but never-raised builtin exception is itself a
@@ -339,7 +339,7 @@ def _predicate_from_assert(
         relation, expected = "truthy", False
         test = test.operand
     if negated and isinstance(test, ast.Compare):
-        # Fix (post-review r44, finding 2): `not <comparison>` used to fall
+        # Fix (post-review earlier run, finding 2): `not <comparison>` used to fall
         # through into the Compare branch below, which unconditionally
         # OVERWRITES relation/expected from the comparison itself -- silently
         # dropping the negation (`assert not target() == 1` was accepted as
@@ -415,7 +415,7 @@ def _raises_predicate(
     exception = _dotted(context.args[0])
     if not exception or not exception.isidentifier() and "." not in exception:
         return None, None
-    # Fix (post-review r44, finding 3, part B): reject any exception name
+    # Fix (post-review earlier run, finding 3, part B): reject any exception name
     # that does not resolve to a real approved builtin exception type. A
     # fictitious identifier (`ImaginaryError`) is a guaranteed error, not
     # public evidence.
@@ -491,7 +491,7 @@ def _analyse(source: object) -> _Analysis:
     if any(not isinstance(node, (ast.Import, ast.ImportFrom, ast.FunctionDef)) for node in tree.body):
         result.reasons.append("UNSUPPORTED_TOP_LEVEL")
     for function in functions:
-        # Fix (post-review r44, finding 4, part B): a fixture-configured or
+        # Fix (post-review earlier run, finding 4, part B): a fixture-configured or
         # decorated function's real state/inputs are unmodeled here (no
         # fixture value, parametrize expansion, or setup/teardown is
         # analyzed). Comparing its predicates against a fixture-free
@@ -532,7 +532,7 @@ def _analyse(source: object) -> _Analysis:
                     info.predicates.append(predicate)
                     if call_node is not None:
                         info.operation_nodes.append(call_node)
-                    # Fix (post-review r44, finding 4, part A): executing
+                    # Fix (post-review earlier run, finding 4, part A): executing
                     # this assertion's call is itself a state transition for
                     # every LATER statement in the same function. Advance
                     # the prefix so a subsequent assert's state_key differs
@@ -562,7 +562,7 @@ def _analyse(source: object) -> _Analysis:
                 info.reasons.append(reason or "UNSUPPORTED_LEGAL_PREFIX")
                 info.first_bad_index = index if info.first_bad_index is None else info.first_bad_index
                 continue
-            # Fix (post-review r44, finding 3, part A): an assignment that
+            # Fix (post-review earlier run, finding 3, part A): an assignment that
             # shadows an imported callable/module/pytest alias (e.g.
             # `target = 2` where `target` is the imported function under
             # test) must be rejected outright. Otherwise a LATER `target()`
@@ -576,7 +576,7 @@ def _analyse(source: object) -> _Analysis:
                 info.reasons.append("SHADOWED_IMPORT_BINDING")
                 info.first_bad_index = index if info.first_bad_index is None else info.first_bad_index
                 continue
-            # Fix (post-review r44, finding 3, part A): invalidate any STALE
+            # Fix (post-review earlier run, finding 3, part A): invalidate any STALE
             # binding on every reassignment of the same name, even when the
             # new value is not itself a call (e.g. `x = target(); x = 2`
             # must forget that `x` was ever call-bound -- the old code never

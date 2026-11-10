@@ -40,7 +40,7 @@ evidence). They are complements with a shared spine:
 
 WHAT IS REAL AND WHAT IS DECLARED
 ---------------------------------
-Rule #223: a reader with no writer is a dead feature. Every field consumed here
+rule: a reader with no writer is a dead feature. Every field consumed here
 names its producer, and where the producer does not exist yet it is said out
 loud rather than guessed at:
 
@@ -1026,7 +1026,7 @@ class LearnedCaseStore(cm.CaseStore):
         recover from one bad stretch — a case that misbehaved early would stay
         condemned no matter how well it behaved afterwards, and the "two
         consecutive bad windows" rule would be meaningless because there is
-        only ever one window. (Same trap as MC rule #160: a displayed rate must
+        only ever one window. (Same trap as rule: a displayed rate must
         come from a trailing window over raw terminal events, never from an
         increment-only counter.) Lifetime numbers remain in ``stats_view`` for
         operator visibility; the LIFECYCLE decision reads this.

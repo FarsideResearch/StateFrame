@@ -482,7 +482,7 @@ def render_lean_state(frame: Mapping[str, object], *, continuation: Mapping[str,
     required_checks = _required_checks(authority.get("required", ()))
     # The first line MUST be exactly "[StateFrame]": the study request preflight and the
     # runtime message classifiers key on that prefix. A custom header here rejected every
-    # lean request before the provider (batch 112, ERR:ValueError, 0 responses).
+    # lean request before the provider (prior run, ERR:ValueError, 0 responses).
     lines = [
         "[StateFrame]",
         f"lean_render: {VERSION}",

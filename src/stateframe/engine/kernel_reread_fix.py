@@ -1,6 +1,6 @@
 """STATEFRAME_REREAD_FIX: make a source block the model can see count as delivered.
 
-Root cause (r35e ldev_02, 57 reads / 1 edit): with STATEFRAME_SOURCE_LABELS=plain every
+Root cause (earlier run reviewer, 57 reads / 1 edit): with STATEFRAME_SOURCE_LABELS=plain every
 source block is rendered as ``[Current source: <path>]``.  The native-prefix edit authority
 (``kernel_native_prefix.delivered_source``) only recognised ``[Working source: ...]`` and
 ``[Retained source: ...]`` headers, so a correct multi-file ``str_replace`` batch applied its

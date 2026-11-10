@@ -139,7 +139,7 @@ def _is_assertion_call(node: ast.AST) -> bool:
 
 
 def public_assertion_text(public_tests: object) -> str:
-    """The text of public ASSERTION expressions only (r44 review F2).
+    """The text of public ASSERTION expressions only (earlier run review F2).
 
     Coverage evidence comes from ``assert`` statements, assertion-style calls and the body of a
     ``with ...raises(...)`` block.  Comments, docstrings, bare layer mentions, imports and other
@@ -459,7 +459,7 @@ def accepted_submission_fields(runtime: object) -> dict[str, object]:
     report = report_for(runtime)
     if not isinstance(report, Mapping) or not report.get("low_coverage"):
         return {}
-    # r44 review F1: coverage is a SEPARATE annotation.  It never overwrites the record's
+    # earlier run review F1: coverage is a SEPARATE annotation.  It never overwrites the record's
     # ``assessment``/``challenge_class`` (a known violation must not become LOW_COVERAGE).
     return {
         "coverage": LOW_COVERAGE,

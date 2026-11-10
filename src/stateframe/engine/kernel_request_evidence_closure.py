@@ -2,7 +2,7 @@
 
 This module is a projection seam, not a second repository index.  It binds
 the authorized ticket bytes, plans bounded semantic source spans, and asks the
-existing ``mc-outline/1`` and EC01 contracts to describe what is current.  It
+existing ``sample project-outline/1`` and EC01 contracts to describe what is current.  It
 never executes product code and never turns source discovery into behavioral
 proof.
 """

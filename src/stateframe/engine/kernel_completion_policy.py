@@ -36,10 +36,10 @@ CODE_UNKNOWN_ADMITTED = "UNIFIED_UNKNOWN_UNCERTIFIED"
 # other gate code is a refusal WITHOUT clause evidence and is UNKNOWN.
 HOST_VIOLATION_CODES = frozenset({"ORACLE_TESTS_RED", "OPEN_COUNTEREXAMPLE",
                                   "BOUND_COUNTEREXAMPLE",
-                                  # r44 fix DONE/D2: N14 ship-tree smoke is a host-executed
+                                  # earlier run fix DONE/D2: N14 ship-tree smoke is a host-executed
                                   # import failure of the candidate (kernel_ship_tree_smoke).
                                   "SHIP_TREE_SMOKE"})
-# r44 fix DONE/D1 -- the ONE shared vocabulary of the done path (kernel_done_challenge_once
+# earlier run fix DONE/D1 -- the ONE shared vocabulary of the done path (kernel_done_challenge_once
 # imports these; never re-list them).  TERMINAL_CODES are non-accepted terminals of the shared
 # stop decision; V2_OWNED_CODES are refusals disposition-v2 owns end to end (its one
 # recoverable witnessed refusal and its INCOMPLETE terminal).
@@ -55,7 +55,7 @@ NON_WAIVABLE_CODES = frozenset({"SHIP_TREE_SMOKE"})
 REPAIR_TOOLS = frozenset({"edit", "str_replace", "write", "file_create", "replace",
                           "replace_module"})
 
-# The provider inventory (verified in the r44 lane report) is documentation only.  The
+# The provider inventory (verified in the earlier run lane report) is documentation only.  The
 # providers WIRED here are the three above; the rest stay independent legacy gates whose
 # refusals reach this arbiter as reason codes.
 WIRED_PROVIDERS = ("host_closure_assessments", "public_test_verdict", "runner_reason_codes")
@@ -487,7 +487,7 @@ def transform(runtime: object, admissible: bool, kwargs: dict) -> tuple[bool, di
     upper = {str(code).strip().upper() for code in codes}
     owned = upper & (TERMINAL_CODES | V2_OWNED_CODES)
     if owned:
-        # r44 fix DONE/D1: a terminal or a disposition-v2 refusal is owned by its producer;
+        # earlier run fix DONE/D1: a terminal or a disposition-v2 refusal is owned by its producer;
         # unified stop passes it through unchanged (refusal + codes + detail preserved).
         _emit_pass_through(runtime, admissible, codes, sorted(owned))
         return bool(admissible), dict(kwargs)

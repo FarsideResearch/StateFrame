@@ -12,7 +12,7 @@ signature skeletons, test-impact) works uniformly across languages.
 The Python extractor stays in ``call_graph.py`` on stdlib ``ast`` (proven, exact
 line numbers, zero parser-availability risk) — this module never touches ``.py``.
 
-Design rules (inherited from call_graph.py — rule #158):
+Design rules (inherited from call_graph.py — rule):
   * BIAS TO OVER-REPORT. A call whose target can't be pinned down is emitted as
     a bare short-name (call_graph's resolver then links it to every same-named
     def) rather than dropped. A missed caller is the silent break we exist to
@@ -76,7 +76,7 @@ def is_tree_sitter_functional() -> bool:
     ``.type``/``.children`` property, ``root_node`` as a method not a property,
     ``.kind``/``.child()`` instead) still returns a tree from ``parse()`` — a
     probe that stops there reports "functional" while every real extraction
-    AttributeErrors inside the walk (rule #158/#189-class: looks parsed,
+    AttributeErrors inside the walk (rules: looks parsed,
     is actually broken).
     """
     global _tslp_functional
@@ -544,7 +544,7 @@ class _TSVisitor:
         # field than a plain call — `constructor` / `type` respectively, never
         # `spec.call_func_field` ("function"/"name"). Without this, a
         # constructor invocation is invisible to the call graph entirely
-        # (rule #158-class: looks parsed, produces zero edges).
+        # (rule: looks parsed, produces zero edges).
         field = _CONSTRUCTOR_CALL_FIELD.get(node.type, self.spec.call_func_field)
         func = node.child_by_field_name(field)
         if func is None:
@@ -893,7 +893,7 @@ def extract_ts_like(source: str, relpath: str, lang: str,
                          line_offset=line_offset, qual_prefix=qual_prefix)
     walk_failure = visitor.run(root)
     # tree-sitter always returns a tree; an ERROR node in it means the extract
-    # below is genuinely INCOMPLETE, not empty — say which (rule #158).
+    # below is genuinely INCOMPLETE, not empty — say which (rule).
     if walk_failure:
         status, reason = COVERAGE_PARSE_PARTIAL, walk_failure
     elif _has_error(root):

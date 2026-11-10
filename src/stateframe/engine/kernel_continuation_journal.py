@@ -734,7 +734,7 @@ class ContinuationJournal(AuditJournal):
         self._blob_cache: dict[str, int] = {}
         # Keep recent validated records for cursor readers. Older records remain
         # available through the hash-verified journal; an unbounded list grows
-        # by several GB on long runs. The lab-only legacy mode restores it.
+        # by several GB on long runs. The development-only legacy mode restores it.
         self._record_cache: list[dict] = []
         self._record_cache_start = 0
         self._record_cache_bytes = 0
@@ -2145,7 +2145,7 @@ class ContinuationJournal(AuditJournal):
             if kind == "run_started" and self._sequence != 0:
                 raise ValueError("run_started is only valid as the first event")
             if not isinstance(kind, str) or not kind or RESERVED.intersection(fields):
-                # N1 class: a telemetry write must never kill a run. The r2EY ALL arm died at
+                # N1 class: a telemetry write must never kill a run. The earlier run ALL arm died at
                 # step 0 on this raise. Record a typed rejection instead and continue; the reserved journal
                 # fields are never overwritten by caller data.
                 rejected_fields = sorted(str(name)[:64] for name in RESERVED.intersection(fields))

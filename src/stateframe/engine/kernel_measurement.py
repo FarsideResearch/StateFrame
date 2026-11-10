@@ -936,7 +936,7 @@ def _rebudget_enabled() -> bool:
 def refit_guarded_body(candidate, *, limit, budget, finalize, guard, emit=None):
     """Re-fit a request the final-wire guard grew past the budgeted byte cap.
 
-    10-15 live batch 1198 (full engine): the final budget pass dropped tools from the menu, then the
+    10-15 live prior run (full engine): the final budget pass dropped tools from the menu, then the
     final-wire guard rewrote prose that still named those tools (sanitize_tool_references:
     "use grep" -> "use only a tool listed in this request"), adding 58 bytes AFTER budgeting; the
     81,997-of-82,026-byte request became 82,055 and final validation raised
@@ -1656,7 +1656,7 @@ def _runtime_stateframe_mode_snapshot() -> dict[str, object]:
         for row in _SWITCH_REFS
         if str(getattr(row, "name", "")).startswith("STATEFRAME_")
     }
-    # Gate switches (r2Z) default to on; record them even when unset.
+    # Gate switches (earlier run) default to on; record them even when unset.
     defaults.setdefault("STATEFRAME_IDLE_GOVERNOR", "on")
     defaults.setdefault("STATEFRAME_REPEAT_GATE", "on")
     # Requested-byte delivery remains enabled under LEAN: LEAN controls what
@@ -5556,7 +5556,7 @@ class RequestCapture:
             # remains terminal instead of entering legacy boundary recovery.
             if self.qualified_request is None:
                 self._framefit5_pending_qualification = True
-            # Lazily set by the budget pass (kernel_request_budget); a capture that skipped it has no attribute (census b1604 benchmark-v2
+            # Lazily set by the budget pass (kernel_request_budget); a capture that skipped it has no attribute (census benchmark run-v2
             # req 17 AttributeError). Read it the way every other site does.
             proposal = getattr(self, "_frame_request_allocation_candidate", None)
             if proposal is not None:
@@ -6195,8 +6195,8 @@ class RequestCapture:
                                 json.dumps(body).encode()):
                             raise RequestPreparationContractError(
                                 "final boundary body retained an unrouted deferred-source notice")
-            # read_once notes are confirmed on the exact final body (lean writer, r2AB);
-            # the r2AT merge dropped this call, so read_once queued but never fired.
+            # read_once notes are confirmed on the exact final body (lean writer, earlier run);
+            # the earlier run merge dropped this call, so read_once queued but never fired.
             owner_runtime = getattr(self, "completion_owner_runtime", None)
             if not lean_on:
                 from kernel_read_once import ensure_wire_note
@@ -6374,7 +6374,7 @@ class RequestCapture:
                     if wire_truth_revalidation_baseline is not None
                     and wire_truth_revalidation_baseline[0] == current_digest else None
                 )
-                # B1403/B1421 class: identical bytes revalidate as a pure function of the
+                # earlier runs class: identical bytes revalidate as a pure function of the
                 # wire-truth snapshot, never of state the extensions moved afterwards.
                 try:
                     final_budget_receipt = reconcile_frozen_budget(
@@ -6952,7 +6952,7 @@ class RequestCapture:
             cache_prefill_row = _cache_prefill_response_row(
                 self, accounting, response=response, request=body)
             # One canonical response_received per response: every lane-owned
-            # payload is a nested field of that single event (rule #211).
+            # payload is a nested field of that single event (rule).
             response_extensions = {
                 **response_extensions,
                 **({"decode_depth_per_arm": decode_depth_per_arm_row}

@@ -541,7 +541,7 @@ def current_source_alias(frame: Mapping[str, object], path: str,
 def _status(value: object) -> str:
     text = str(value or "").upper()
     if text in {"UNVERIFIED", "BLOCKED", "UNKNOWN"}:
-        return "BLOCKED"                          # not yet checked is not a failure (r45 triage)
+        return "BLOCKED"                          # not yet checked is not a failure (earlier run triage)
     return "PASS" if text in {"GREEN", "PASS", "PASSED", "CERTIFIED", "SATISFIED", "ACCEPTED"} else "FAIL"
 
 

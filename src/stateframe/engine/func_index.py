@@ -22,7 +22,7 @@ Layout:
                           absolute construct count + function-local density.
   file_menu_from_functions() menu contract + membership ledger w/ controlled
                           elimination codes.
-  bench/lab/func_index_shadow.py pairs file-level and function-level measurements
+  maintainer task driver pairs file-level and function-level measurements
                           over the real corpus and seeded synthetic tasks.
 """
 from __future__ import annotations

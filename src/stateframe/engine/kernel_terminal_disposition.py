@@ -152,7 +152,7 @@ def _stop_reason(result: Mapping[str, object], terminal: str, *, accepted: bool)
         "RESOURCE": "RESOURCE_EXHAUSTION",
         "RESOURCE_EXHAUSTION": "RESOURCE_EXHAUSTION",
         "FINALIZATION_ERROR": "FINALIZATION_ERROR",
-        # r2EP b1378: the legacy v39 uncertified-submit result carries this stop
+        # earlier run earlier run: the legacy v39 uncertified-submit result carries this stop
         # reason with D2 off; without the alias it fell through to FINALIZATION_ERROR and the
         # settlement treated a real (uncertified) submission as an operational error.
         "UNCERTIFIED_SUBMIT": "UNCERTIFIED_SUBMIT",
@@ -323,7 +323,7 @@ def mint(runtime: object, result: Mapping[str, object]) -> dict[str, object]:
     requested_delivery = result.get("delivery")
     if (requested_delivery is None and stop_reason == "UNCERTIFIED_SUBMIT"
             and _uncertified_candidate_present(runtime, result, facts)):
-        # r2EP b1378: an uncertified submit IS a submission of the current scoped
+        # earlier run earlier run: an uncertified submit IS a submission of the current scoped
         # candidate. Record it as stored so settlement exports and grades it (certification stays
         # UNCERTIFIED and acceptance UNACCEPTED; the open obligations stay attached).
         requested_delivery = STORED

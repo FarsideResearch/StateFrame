@@ -1,8 +1,8 @@
-"""r44 conclusion-cache extension of the r43 settled-decision cache.
+"""earlier run conclusion-cache extension of the earlier run settled-decision cache.
 
 Own switch ``STATEFRAME_CONCLUSION_CACHE`` (default off).  It only has an
-effect when the r43 ``STATEFRAME_DECISION_CACHE`` arm is also on; with this
-switch off the r43 schema, state and render path are unchanged.
+effect when the earlier run ``STATEFRAME_DECISION_CACHE`` arm is also on; with this
+switch off the earlier run schema, state and render path are unchanged.
 
 This module owns three host-side mechanisms:
 
@@ -59,7 +59,7 @@ def mode() -> str:
 
 
 def enabled() -> bool:
-    """The extension is live only on top of the r43 decision cache."""
+    """The extension is live only on top of the earlier run decision cache."""
     if mode() != "on":
         return False
     from kernel_decision_cache import mode as decision_cache_mode
@@ -285,7 +285,7 @@ def note_reuse(runtime: object, selectors: object, current_binding: object,
     }
     notes.append(note)
     del notes[:-MAX_REUSE_NOTES]
-    # r44 F4 R4: a recorded reuse is a mechanism action -> journal it.
+    # earlier run F4 R4: a recorded reuse is a mechanism action -> journal it.
     journal = getattr(runtime, "journal", None)
     emit = getattr(journal, "emit", None)
     if callable(emit):

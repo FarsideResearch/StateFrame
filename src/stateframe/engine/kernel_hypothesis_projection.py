@@ -351,8 +351,8 @@ def project_frame(frame: Mapping[str, object], *, current_revision: object = Non
         (active if row["staleness"] in {STALENESS_CURRENT, STALENESS_UNKNOWN}
          else dropped).append(row)
     if not active and not dropped and not changed:
-        # r44 F4 R6: nothing carried -> no empty ACTIVE list and no meta block on
-        # every request (pure per-turn boilerplate, r42 regression class).  Only
+        # earlier run F4 R6: nothing carried -> no empty ACTIVE list and no meta block on
+        # every request (pure per-turn boilerplate, earlier run regression class).  Only
         # the host-internal revision field is removed, as below.
         public.pop(HOST_REVISION_FIELD, None)
         return public
@@ -427,10 +427,10 @@ def render_block(frame: Mapping[str, object], *, current_revision: object = None
     if _sequence(changed) and changed:
         lines.append("premises_changed_paths: " + ", ".join(map(str, changed)))
     if len(lines) == 5:
-        # r44 F4 R6: nothing carried (no active/stale/eliminated rows, no changed
+        # earlier run F4 R6: nothing carried (no active/stale/eliminated rows, no changed
         # premises) -> no block at all.  A "none carried" boilerplate block on
         # every request under the default projector was a pure per-turn cost
-        # (r42 regression class) with zero information.
+        # (earlier run regression class) with zero information.
         return ""
     return "\n".join(lines)
 

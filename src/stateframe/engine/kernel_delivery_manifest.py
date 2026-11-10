@@ -859,7 +859,7 @@ class DeliveryManifestTracker:
         text = render_manifest(self._pending_manifest)
         from kernel_prompt_compact import compact_delivery_text, enabled as prompt_compact_enabled
         if prompt_compact_enabled():
-            # r47 F4/L2: model view only (files, deltas, checks, open/blocking items); the full
+            # earlier run F4/L2: model view only (files, deltas, checks, open/blocking items); the full
             # manifest stays in the journal via note_prepared -> delivery_manifest_prepared.
             text = compact_delivery_text(text)
         return {"role": "user", "content": text}

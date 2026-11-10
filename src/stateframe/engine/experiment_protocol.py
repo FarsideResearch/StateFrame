@@ -296,7 +296,7 @@ class BatchPlan:
     blocks: tuple[PlannedBlock, ...]
     confirmation_tickets: tuple[ConfirmationTicket, ...] = ()
     warnings: tuple[str, ...] = ()
-    # Fix (post-review r44, finding 3): the plan's own phase (and, for
+    # Fix (post-review earlier run, finding 3): the plan's own phase (and, for
     # confirmation, its unique run id) are persisted so analyze_confirmation
     # can reject a screen plan or a stale/reused confirmation run outright,
     # instead of trusting whatever pair/block ids the caller happens to pass.
@@ -377,7 +377,7 @@ class BatchPlan:
         )
         if len(tickets) > MAX_CONFIRMATION_TICKETS:
             raise ValueError("confirmation tickets exceed the per-release maximum")
-        # Fix (post-review r44, finding 4): validate id uniqueness on LOAD
+        # Fix (post-review earlier run, finding 4): validate id uniqueness on LOAD
         # too, not only at construction time -- a hand-edited or corrupted
         # plan file must not silently pass an aliased pair/block through.
         _assert_unique_ids(pairs, blocks)
@@ -475,7 +475,7 @@ def build_batch_plan(
     ``phase`` and (for confirmation) ``confirmation_run_id`` are baked into
     every pair/block id so a confirmation plan can never collide with, or be
     satisfied by, outcomes recorded against a screen plan for the same
-    release (post-review r44, finding 3).
+    release (post-review earlier run, finding 3).
     """
     if phase not in _VALID_PHASES:
         raise ValueError("phase must be screen or confirmation")
@@ -517,7 +517,7 @@ def build_batch_plan(
             key=lambda slot: _digest_label((seed, candidate.candidate_id, *slot), length=64),
         ))[:requested_pairs]
         for pair_index, (task_id, replicate) in enumerate(ordered_slots, start=1):
-            # Fix (post-review r44, findings 3 & 4): a sanitized slug alone
+            # Fix (post-review earlier run, findings 3 & 4): a sanitized slug alone
             # is not a unique identity -- distinct raw values (punctuation
             # difference, or the same release used for a different phase/
             # confirmation run) can slug to the same string. Append a digest
@@ -699,7 +699,7 @@ def _success_value(row: Mapping[str, object], *, name: str) -> bool:
 
 
 def _delivery_value(row: Mapping[str, object], *, arm: str) -> bool:
-    # Fix (post-review r44, finding 2): delivery/effective-config evidence
+    # Fix (post-review earlier run, finding 2): delivery/effective-config evidence
     # must be explicit. Defaulting a missing field to True let every
     # success-only outcome row silently pass the delivery checkpoint
     # The experiment contract requires this validation.
@@ -793,7 +793,7 @@ def _observations(
     for pair in candidate_pairs:
         existing = direct.get(pair.pair_id)
         if existing is not None:
-            # Fix (post-review r44, finding 1): the row's own pair_index/
+            # Fix (post-review earlier run, finding 1): the row's own pair_index/
             # candidate_id are attacker/producer-supplied and must never
             # override the plan's frozen registration -- otherwise
             # rotating supplied indices across the same 48 outcomes can
@@ -814,7 +814,7 @@ def _observations(
                 off_delivered=existing.off_delivered,
             ))
             continue
-        # Fix (post-review r44, finding 1): join strictly by registered
+        # Fix (post-review earlier run, finding 1): join strictly by registered
         # block ID AND arm. The previous arm-blind `by_block` fallback let a
         # row submitted under the wrong `arm` satisfy either side of a pair
         # whenever its block_id happened to equal `on_block_id`/
@@ -1051,7 +1051,7 @@ def analyze_confirmation(
             fresh_data=bool(ticket.get("fresh_data", True)),
         )
     plan_obj = BatchPlan.from_dict(plan) if isinstance(plan, Mapping) else plan
-    # Fix (post-review r44, finding 3): "fresh confirmation" was only a
+    # Fix (post-review earlier run, finding 3): "fresh confirmation" was only a
     # label -- a screen plan (same pair/block ids, since the old scheme
     # ignored phase entirely) was silently accepted and its screening rows
     # reproduced CONFIRMED_EARLY. Reject anything that is not an explicit

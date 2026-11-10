@@ -1,4 +1,4 @@
-"""Opt-in r44 repairs for the real04 frame failures.
+"""Opt-in earlier run repairs for the real04 frame failures.
 
 Each repair has an independent switch.  The helpers are deliberately small and
 side-effect free so callers can import them only after their corresponding arm
@@ -237,16 +237,16 @@ def bound_required_source_items(items: Sequence[object], messages: Mapping[str, 
 
 def classify_real04_run_test_result(observation: object, exit_code: object, *,
                                     default: str) -> str:
-    """Preserve r43's classification for proven collection/import failures.
+    """Preserve earlier run's classification for proven collection/import failures.
 
     Fix round (rv_real04_bugs_REPORT.md finding 1): the original body reclassified
     a proven exit-2 import/collection failure as NO_VERDICT (retryable_unknown).
-    r43 already settles that exit code as HARNESS_ERROR (settled_not_applied) via
+    earlier run already settles that exit code as HARNESS_ERROR (settled_not_applied) via
     RUN_TEST_RESULT_CLASSES_BY_EXIT; overriding it to a retryable class fenced the
     continuation runtime's unknown-effect retry (kernel_continuation_runtime.py)
     down to only the exact run_tests repair, so a persistently missing dependency
     could never repair itself and the run livelocked. There is no known-good
-    reclassification for this case, so this function now always returns r43's
+    reclassification for this case, so this function now always returns earlier run's
     own classification unchanged; ``observation``/``exit_code`` are accepted for
     API compatibility with existing call sites but are intentionally unused.
     """

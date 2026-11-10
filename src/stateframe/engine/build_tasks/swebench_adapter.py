@@ -8,7 +8,7 @@ The adapter has three deliberately separate boundaries:
 * Row conversion emits the existing repair-row shape, including a grader-only test
   runner whose assertion carries the failing test tail.
 
-The maintainer-only driver in bench/lab/swebench_adapter_driver.py never
+The maintainer-only driver in maintainer task driver never
 downloads a dataset. Use scripts/fetch_swebench_lite.py to fetch a pinned
 Hugging Face export first.
 """

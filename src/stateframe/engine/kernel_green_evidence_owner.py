@@ -99,12 +99,12 @@ def reset() -> None:
 
 
 # ---------------------------------------------------------------------------
-# R4' (r46b): one completion-evidence predicate shared by the continuation
+# R4' (earlier run): one completion-evidence predicate shared by the continuation
 # commit gate (``HostEvidence._public_completion``) and the preflight
 # (``ContinuationRuntime.completion_finding``).  Only consulted when the flag
 # is on; flag-off callers keep their original inline check byte-for-byte.
 #
-# J02 (r44d 370 ldev_02, journal seqs 2939/2950/2957/2976/3202/3221): a
+# J02 (earlier run 370 reviewer, journal seqs 2939/2950/2957/2976/3202/3221): a
 # post-green ``str_replace`` was refused by the green lock and settled
 # ``not_applied`` with ``binding_changed: false``; the host's auto-verification
 # then ran the required test under that same effect id and it came back green

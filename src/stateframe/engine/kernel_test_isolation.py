@@ -59,7 +59,7 @@ else:
 
 
 # Host task policy is read LAZILY at sandbox-build time, never frozen at import: a module imported
-# before the host policy is visible (or across a config purge) must still honour it (10-06, batch 837).
+# before the host policy is visible (or across a config purge) must still honour it (10-06, prior run).
 def host_task_network() -> str:
     return os.environ.get("STATEFRAME_TASK_NETWORK", "")
 
@@ -236,7 +236,7 @@ def isolated_command(command: list[str], root: Path, env: dict[str, str], *,
     scratch.mkdir(exist_ok=True)
     # Second filter layer: keep it in sync with kernel_execution_policy._safe_environment,
     # which also admits host-declared task keys (STATEFRAME_TASK_ENV_KEYS). 10-03: this
-    # layer re-stripped DATABASE_URL and every AHA check still died with pytest exit 4.
+    # layer re-stripped DATABASE_URL and every sample project check still died with pytest exit 4.
     if __package__:  # lazy: kernel_execution_policy imports this module at load time
         from .kernel_execution_policy import _host_task_env_keys
     else:
@@ -251,7 +251,7 @@ def isolated_command(command: list[str], root: Path, env: dict[str, str], *,
                  PYTEST_DISABLE_PLUGIN_AUTOLOAD="1")
     # HOST-declared: a real project's pytest.ini can require installed plugins
     # (pytest-cov addopts, pytest-asyncio). The image's installed plugins are host
-    # supplied, not model supplied. 10-03: forcing autoload off made every AHA check
+    # supplied, not model supplied. 10-03: forcing autoload off made every sample project check
     # exit 4 ("unrecognized arguments: --cov=...").
     if host_task_pytest_plugins() == "installed":
         clean.pop("PYTEST_DISABLE_PLUGIN_AUTOLOAD", None)
@@ -343,7 +343,7 @@ def isolated_command(command: list[str], root: Path, env: dict[str, str], *,
     # The HOST (never the model) may declare that checks need the container's own
     # private network, e.g. a stage6 worker whose tests reach a per-run Postgres on an
     # unpublished Docker bridge. Only then share the net namespace and expose the two
-    # name-resolution files (nothing else from /etc). 10-03: without this, AHA checks
+    # name-resolution files (nothing else from /etc). 10-03: without this, sample project checks
     # failed to connect to their database inside the sandbox.
     if host_task_network() == "container":
         arguments.append("--share-net")

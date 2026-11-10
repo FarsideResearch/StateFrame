@@ -1,7 +1,7 @@
 """Opt-in composition seam for the green-lock menu and live continuation.
 
 The continuation is a stateful dispatch executive.  This module owns only the
-new r44 switch and the small adapter which reads its immutable per-step
+new earlier run switch and the small adapter which reads its immutable per-step
 allow-set; it never calls ``authorize`` (which creates a dispatch fence and
 therefore is not a menu predicate).
 """
@@ -14,7 +14,7 @@ from kernel_bounded_locate_code import OBSERVATION_TOOLS
 
 
 MODE_ENV = "STATEFRAME_GREENLOCK_MENU_AUTHORITY_CONTINUATION"
-# r46: predict was absent from EFFECT_TOOLS, so the continuation's per-step allow set could never
+# earlier run: predict was absent from EFFECT_TOOLS, so the continuation's per-step allow set could never
 # offer it even though kernel_greenlock_menu_authority.VERIFY_ACTIONS already treats "predict"
 # as a verification action alongside run_tests/test/pytest.  Gated: off-parity is byte-identical.
 PREDICT_MODE_ENV = "STATEFRAME_CONTINUATION_PREDICT"

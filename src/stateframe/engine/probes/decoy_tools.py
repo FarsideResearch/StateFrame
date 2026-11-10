@@ -368,7 +368,7 @@ def validate_tool_arguments(
             errors.append(f"parameter {key} must be {prop.get('type')}")
         elif (isinstance(prop, Mapping) and isinstance(prop.get("enum"), list)
               and value not in prop["enum"]):
-            # r45 (r44c waiver W2): the menu's enum is the owner's restriction (e.g. repair-lock read targets)
+            # earlier run (earlier run waiver W2): the menu's enum is the owner's restriction (e.g. repair-lock read targets)
             errors.append(f"parameter {key} must be one of {json.dumps(prop['enum'])}")
     return tuple(errors)
 

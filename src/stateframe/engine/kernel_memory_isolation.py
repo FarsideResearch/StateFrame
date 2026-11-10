@@ -692,7 +692,7 @@ def build_prior_carry_envelope(artifact_root: str, task_fn: str, task_sha: str,
         distilled, task_id=task_id, task_fn=task_fn, task_sha=task_sha,
         repo=_row_text(row, "repo"))
     if diagnostics is not None:
-        # r44 M6: transcripts are file-named by fn, so a same-fn task can overwrite this
+        # earlier run M6: transcripts are file-named by fn, so a same-fn task can overwrite this
         # task's history.  Counts only (never foreign identities) so the runtime can
         # journal a refused/lost carry instead of dropping it silently.
         diagnostics.update({"distilled": len(distilled), "eligible": len(records),

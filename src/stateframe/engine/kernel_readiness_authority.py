@@ -185,7 +185,7 @@ def _repairable_advisory(row: Mapping[str, object], revision: object) -> bool:
     """Classify an advisory using only bounded, current, executable evidence."""
     if bool(row.get("counterexample_authority")):
         return False
-    # r39: host literal alignment (kernel_requirement_alignment) is typed proof that the check
+    # earlier run: host literal alignment (kernel_requirement_alignment) is typed proof that the check
     # is entailed by a ticket sentence, so it outranks a NOT_ENTAILED demotion and stands in for
     # the ticket basis.  Every other gate (binding, execution, revision, site) still applies.
     aligned = _literal_aligned(row)
@@ -532,7 +532,7 @@ def decide(status: object, *, previous: "ReadinessDecision | None" = None) -> Re
     # `done` as stale (kernel_continuation_evidence.py, `_public_completion`).
     # Without this, `run_tests` stays denied here while continuation loops
     # refusing `done` for the same reason -- the model has no allowed action
-    # left that can change the outcome (r44d 370 ldev_02, 36x). Once the
+    # left that can change the outcome (earlier run 370 reviewer, 36x). Once the
     # owner has recorded that refusal, offer the one repair action that can
     # actually resolve it, without weakening `ready`/`done` itself.
     if dispositions.get("run_tests") == "deny":

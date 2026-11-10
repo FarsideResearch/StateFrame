@@ -42,7 +42,7 @@ def _isolated_stateframe_home(tmp_path_factory):
 
 @pytest.fixture(autouse=True)
 def reject_retired_shared_parity_baseline(request):
-    """Keep old foundry mounts from silently routing tests to the wrong source tree."""
+    """Keep old Linux mounts from silently routing tests to the wrong source tree."""
     reference = _RETIRED_PARITY_BASELINES.get(request.node.path.name)
     if reference is not None and "SF_TEST_PARITY_BASELINE" in os.environ:
         pytest.fail(

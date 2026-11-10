@@ -28,7 +28,7 @@ _PASS_ENV = ("PATH", "HOME", "LANG", "TMPDIR")
 # Slowest stateframe subprocess wall time per case, in seconds. The acceptance cases use
 # 3 reps on the slowest gate host (2x Xeon E5-2680 v1 container, 1 worker; 850db00 at
 # load5 61-70 and f8e8925 at load5 70-90, 2026-11-03). The recorded blocked case uses
-# Mike's completed 122.9s host run on 2026-11-03; remeasure it after the host can run
+# A completed 122.9s host run on 2026-11-03; remeasure it after the host can run
 # nested sandbox-exec. Gates rarely run solo, so the loaded maximum is the reference.
 # Re-measure when a case changes; tests/acceptance/test_acceptance_budgets.py checks that
 # every case is used and that measured callers carry no bare deadline literal.

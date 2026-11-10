@@ -1,4 +1,4 @@
-"""Opt-in r47 fixes for green-lock terminal and done-challenge paths.
+"""Opt-in earlier run fixes for green-lock terminal and done-challenge paths.
 
 Each switch defaults OFF; disabled paths remain owned by the v33 implementation.
 """

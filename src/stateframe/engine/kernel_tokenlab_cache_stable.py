@@ -1,7 +1,7 @@
-"""Token-lab v8: KV-cache-friendly F4 request layout (STATEFRAME_TOKENLAB_CACHE_STABLE).
+"""In-frame behavior: KV-cache-friendly F4 request layout (STATEFRAME_TOKENLAB_CACHE_STABLE).
 
 Why: llama.cpp reuses the longest common TOKEN prefix between consecutive requests on a slot.
-The r46/v6 F4 order puts per-turn blocks (StateFrame, handoff) before the real-exchange ring
+The earlier run/v6 F4 order puts per-turn blocks (StateFrame, handoff) before the real-exchange ring
 and trails slow notices after it, and the tool list (rendered inside the system turn by the
 MiniCPM5 template) changes whenever the menu is gated -- so the cache breaks early and the
 whole prompt is re-prefilled every turn (lane 2: 21.8% message-prefix reuse vs the boss's 61.4%).
@@ -17,7 +17,7 @@ exercises the exact code the live arm runs:
 * :class:`ToolLayout` -- a per-run append-only registry of every tool schema the run has been
   offered, in first-seen order.  A tool whose PARAMETERS change is replaced in place; a
   description-only change (the menu flips tools between their verbose description and a terse
-  "Host X action." form: 5 flips in the ldev_12 v6a run) keeps the first-seen schema.  The PROVIDER
+  "Host X action." form: 5 flips in the reviewer v6a run) keeps the first-seen schema.  The PROVIDER
   body carries the registry; authorization is untouched -- dispatch still validates against the
   request's real menu, so a listed-but-gated tool is refused as "currently unavailable".  When
   the menu is narrower than the registry a short trailing note names the callable tools.
@@ -39,7 +39,7 @@ V15_EVENT = "tokenlab_v15_cache_prefill_protected"
 MENU_NOTE_HEADER = "[Tool menu | this turn]"
 
 # Tier table.  Order inside a tier = original order.  Rates are the fraction of consecutive
-# requests in which the block changed (703 v6a ldev_04/05/12, 24 pairs).
+# requests in which the block changed (703 v6a reviewer/05/12, 24 pairs).
 _CONSTANT = ("[SHIP-TREE SMOKE]", "[Decisive factor]")                      # 0.00
 _SOURCE = ("[Working source:", "[Current source:", "[Observed source:",
            "[Retained source:", "[Source content:", "CURRENT_SOURCE ")     # 0.00-0.11

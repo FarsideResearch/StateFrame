@@ -253,7 +253,7 @@ def _scan(
 def _line_offsets(body: bytes) -> tuple[int, ...]:
     """Cumulative byte offsets of splitlines(keepends=True): offsets[i] = start of line i+1.
 
-    Host-time fix (r2AC): the structural index called _line_range once per span and
+    Host-time fix (earlier run): the structural index called _line_range once per span and
     re-split + re-summed the whole file each time (quadratic; ~68s per request on
     benchmark). bytes cache their hash, so this per-body table is computed once. Output is
     byte-identical to the original sum-over-splitlines computation.

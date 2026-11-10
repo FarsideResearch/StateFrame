@@ -294,7 +294,7 @@ def structure_facts_for_edit(before: str | None, after: str, *, path: str = "") 
     after_defs = _structure_definitions(after_tree)
     facts: list[dict[str, object]] = []
 
-    # A method that left its class is the high-signal ldev_12 failure.  Require
+    # A method that left its class is the high-signal reviewer failure.  Require
     # the old qualified path to be absent so a legitimate helper with the same
     # leaf name does not create a false move fact.
     for qualified in sorted(before_defs):
@@ -924,7 +924,7 @@ def read_dedup_observation(runtime: object, path: str, start_line: int,
     # KERNEL_FRAME_SERIES=1). In a transcript (history arm) "was in the last request" does not survive
     # later trimming: the stub kept
     # saying "already present" after the bytes were trimmed away, blinding history to the file
-    # (ldev_12-924105 dissection, 09-25; 22/36 history runs received stubs, 0/36 frame runs).
+    # (reviewer-924105 dissection, 09-25; 22/36 history runs received stubs, 0/36 frame runs).
     if getattr(runtime, "frame_series", None) is None:
         return None
     relative = str(path).replace("\\", "/").lstrip("./")

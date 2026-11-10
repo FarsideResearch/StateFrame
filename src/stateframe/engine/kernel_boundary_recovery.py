@@ -11,7 +11,7 @@ from collections.abc import Mapping, Sequence
 
 
 ENV = "STATEFRAME_BOUNDARY_RECOVERY"
-# live r2EF benchmark (batch 1322) recovered 8/8 then died on this cap alone; recovery is already
+# live benchmark run (prior run) recovered 8/8 then died on this cap alone; recovery is already
 # limited to one per request, so the run cap is only a runaway guard. Env-tunable, default 64.
 RUN_CAP_ENV = "STATEFRAME_BOUNDARY_RECOVERY_RUN_CAP"
 DEFAULT_RECOVERIES_PER_RUN = 64
@@ -51,7 +51,7 @@ _SAFE_ERROR_MESSAGES = frozenset({
     "qualified request changed during recovery",
     "captured frame allocation failed integrity validation",
     "final source delivery failed after frame-only wire ordering",
-    # Added at r2EV merge: SUBMIT's fixed deferred-source boundary messages (no paths/secrets).
+    # Added at earlier run merge: SUBMIT's fixed deferred-source boundary messages (no paths/secrets).
     "final boundary body retained an unrouted deferred-source notice",
     "final boundary menu cannot dispatch deferred source reads",
     "hard host completion violation has no callable current recovery",

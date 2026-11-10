@@ -387,7 +387,7 @@ def trailing_panels_audit(
     original_history = history_messages(before)
     final_history = history_messages(after)
     return {
-        "trailing_panels_schema": "stateframe-trailing-panels/1",  # never "schema": journal-RESERVED (r2EY ALL9 crash)
+        "trailing_panels_schema": "stateframe-trailing-panels/1",  # never "schema": journal-RESERVED (earlier run ALL9 crash)
         "changed": list(before) != list(after),
         "message_count_before": len(before),
         "message_count_after": len(after),

@@ -27,7 +27,7 @@ def budget_verdict_signature(receipt: object) -> tuple[object, ...] | None:
             return None
         # The notice/read-tool flags only decide a verdict for paths actually deferred
         # (see deferred receipt acceptance). With nothing deferred they are vacuous and
-        # can flip on byte-identical wire when the live plan discharges a path (b1421).
+        # can flip on byte-identical wire when the live plan discharges a path (earlier run).
         has_deferred = bool(deferred_paths)
         source_signature = (
             source.get("status"),
@@ -165,7 +165,7 @@ _MISSING = object()
 def snapshot_revalidation_inputs(capture, runtime, body):
     """Freeze the non-body BOOKKEEPING inputs of reconcile_frozen_budget at the wire-truth PASS.
 
-    B1403/B1421 class: revalidation of byte-identical wire must not change verdict because state that the
+    earlier runs class: revalidation of byte-identical wire must not change verdict because state that the
     pre-wire extensions / visibility pass legitimately move afterwards (source plan override or runtime
     closure, runtime source cache, the receipt byte cap) moved. Those are read once here.
     Deliberately NOT frozen: the admitted owner contract (immutable by its own integrity check) and the
@@ -438,7 +438,7 @@ def _emit_revalidation_consistency(
         current_deferred_path_count=(
             len(current_paths) if _is_nonstring_sequence(current_paths) else 0
         ),
-        # b1403 (diagnostic only): counts hid the cause of a DRIFTED verdict.
+        # earlier run (diagnostic only): counts hid the cause of a DRIFTED verdict.
         # Name the failures and the signature fields that differ; values are safe constants/bools.
         previous_failures=[str(item)[:80] for item in previous_failures][:16],
         current_failures=[str(item)[:80] for item in failures][:16],

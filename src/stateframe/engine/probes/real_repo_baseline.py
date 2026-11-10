@@ -1,7 +1,7 @@
-"""REAL-REPO BASELINE — the harness meets actual production code (AHA backend).
+"""REAL-REPO BASELINE — the harness meets actual production code (sample project backend).
 
 Purpose: first measurement of the gap between the 6-file gauntlet and reality.
-- Corpus: every .py under backend/app/ (real MC-style production code, hundreds of
+- Corpus: every .py under backend/app/ (real sample project-style production code, hundreds of
   files) — read-only; nothing is written to the repo.
 - Task generation: sample real functions (5-30 lines), inject ONE deterministic
   single-line bug (operator flip, comparison flip, and/or swap, is/is-not None flip,

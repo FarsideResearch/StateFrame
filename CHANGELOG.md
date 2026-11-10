@@ -18,6 +18,7 @@
 - Removed internal benchmarking scripts from the package.
 - Run identity now hashes only shipped engine modules; moved lab workloads retain a fail-closed concurrent-run guard.
 - Internal names removed from shipped code: optional decoy tool schemas use neutral names, and DB-backed test runs name their databases `stateframe_test_react_*`. Default requests are unchanged.
+- Removed private project, contributor, host, and measurement labels from shipped prose; added a source/test leak guard.
 
 ## 0.4.39 (2026-11-10)
 

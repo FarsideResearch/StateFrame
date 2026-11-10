@@ -1832,7 +1832,7 @@ unfinished sentence is discarded."""
 # MEASURED: staged reasoning was ENGAGED 8/8 — every mutation trace opens by
 # quoting it — and it hurt on 3 tasks because the model treats it as settled.
 # `curriculum_framework`'s block named line 457; the model repeated the claim
-# verbatim and picked 456 (gold 459). Project rule #197: a model-authored claim
+# verbatim and picked 456 (gold 459). rule: a model-authored claim
 # must never present itself with the authority of measured evidence, so the
 # label says what it is. `"PRIOR ANALYSIS: "` is preserved as the prefix because
 # it is the string the ledger and the offline tests key on.
@@ -3140,7 +3140,7 @@ def _is_transport_blip(exc) -> bool:
 def _post(body, url, timeout=600):
     """The ONE network seam. Offline tests monkeypatch this and nothing else.
 
-    RETRIES TRANSPORT BLIPS (FINDINGS E248). Our own rule #137: provider/infra failures
+    RETRIES TRANSPORT BLIPS (FINDINGS E248). rule: provider/infra failures
     self-heal and are never terminalised. They were being terminalised here — 48 of the last
     300 bench rows died as ERROR, 38 of them `Connection refused`, on a port-forward that
     flaps under the canaries' concurrent load. Every one was scored as a TASK failure,
@@ -3425,7 +3425,7 @@ _GRAMMAR_UNSUPPORTED = False        # set once, process-wide, on first rejection
 # forming. Those were recorded as `pick=None` -> ABSTAIN, which is a lie: the
 # model did not decline, it was guillotined. 27 of 84 ladder runs died this way.
 #
-# Two halves, and BOTH are required (production rule #11d):
+# Two halves, and BOTH are required (rule):
 #   (a) every budget is reasoning_headroom + answer_floor, never answer-only;
 #   (b) `finish_reason == "length"` is a FAILURE, never a parseable answer.
 # Grammar-constrained calls make the ANSWER short; headroom makes the THINKING
@@ -6837,7 +6837,7 @@ def run(root, task_text, apply=False, cfg: "gym_config.GymConfig | None" = None,
         #   BM25 top-W  ->  keep candidates with >= 2 distinct symptom-token
         #   hits  ->  rerank  ->  cap 64  ->  APPEND (never insert).
         #
-        # The four known pool misses at MC scale sit at Stage-A ranks 19-58,
+        # The four known pool misses at sample project scale sit at Stage-A ranks 19-58,
         # i.e. inside a W=100 sweep and outside today's cap. The >=2-hit gate is
         # the precision guard: the doc proves the gold cannot be removed by it
         # (every gold in the slice carries at least three symptom tokens) while

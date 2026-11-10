@@ -1,4 +1,4 @@
-"""Single post-green no-veto owner for frame product work (r45 F1 bet 1).
+"""Single post-green no-veto owner for frame product work (earlier run F1 bet 1).
 
 With ``STATEFRAME_POSTGREEN_NO_VETO=on`` and a terminal lock engaged after
 public green, product ``edit``/``str_replace``/``read`` actions are admitted

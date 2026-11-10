@@ -8,7 +8,7 @@ the public tests, and only hands the public row to the test runner.
 
 The feature is off unless ``STATEFRAME_REAL_TASK_BENCHMARK=on``.  Extraction
 and validation can be used offline by calling the functions or the
-maintainer-only bench/lab/realtask_benchmark_driver.py command. The runtime
+maintainer-only maintainer task driver command. The runtime
 hook only presents a task's public symptom ticket.
 """
 

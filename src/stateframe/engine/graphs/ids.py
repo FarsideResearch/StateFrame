@@ -34,8 +34,8 @@ reassignment, or unreported L2 truncation are not."
 THE FIX: every entity ID carries a DISAMBIGUATOR — a 12-hex-char digest of the
 exact raw ``(repo, kind, name)`` triple, appended to the readable slug::
 
-    component:mc:function:routers-audiences-py-get-audience-h4f2c1a90b3de
-    component:mc:function:routers-audiences-py--get-audience-h71bd0c4e2a15
+    component:sample project:function:routers-audiences-py-get-audience-h4f2c1a90b3de
+    component:sample project:function:routers-audiences-py--get-audience-h71bd0c4e2a15
 
 The readable half survives for humans and for grep; the digest half makes the ID
 injective on the raw key. The result is still a well-formed ``domain_ids`` ID —

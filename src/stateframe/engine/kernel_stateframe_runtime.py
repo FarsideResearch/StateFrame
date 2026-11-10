@@ -387,7 +387,7 @@ def gate_evidence_identity(value: object) -> object:
 
     Dataclasses (e.g. ``ShipTreeSmokeResult``) become their field mapping, mappings and
     sequences recurse, JSON primitives pass through, anything else becomes ``repr`` so the
-    gate vector digest never raises on a host-owned object (10-06 batch 836: a TypeError here
+    gate vector digest never raises on a host-owned object (10-06 prior run: a TypeError here
     made ``done`` uncertifiable while every public check was green)."""
     if dataclasses.is_dataclass(value) and not isinstance(value, type):
         return gate_evidence_identity(dataclasses.asdict(value))
@@ -521,7 +521,7 @@ def attach_idealpath(runtime: object, *, resume: object | None = None):
 
 def assert_no_orphaned_tool_result(messages):
     """Lazy wrapper: many legacy tests stub `kernel_context` with a fixed name set, so a new
-    top-level import from it broke their module import (r31 gate: 218 -> 516 failures)."""
+    top-level import from it broke their module import (earlier run gate: 218 -> 516 failures)."""
     from kernel_context import assert_no_orphaned_tool_result as _check
     return _check(messages)
 
@@ -653,12 +653,12 @@ class PreparedRequest:
         return allocation
 
 
-# r44 F4 item 6: bounded F4 carriers for working sets / settled decisions.
+# earlier run F4 item 6: bounded F4 carriers for working sets / settled decisions.
 F4_WORKING_SET_HEADER = "[Working sets | host-retained]"
 F4_RETAINED_BLOCK_MAX_CHARS = 2400
 
 
-# r44 staging attribution: block-header prefix -> mechanism.  Each literal is the producer's own header constant
+# earlier run staging attribution: block-header prefix -> mechanism.  Each literal is the producer's own header constant
 # (cited); test_r44_composition asserts every prefix equals its producer constant so a rename cannot go silent.
 R44_BLOCK_PREFIXES: tuple[tuple[str, str], ...] = (
     ("[HYPOTHESES_NOT_FACTS", "hypotheses_not_facts"),            # kernel_hypothesis_projection.BLOCK_HEADER
@@ -696,7 +696,7 @@ def _r44_any_render_switch(runtime: object) -> bool:
 
 
 def _r44_rendered_blocks(messages: object) -> list[dict]:
-    """[{mechanism, header, tokens}] for every r44 block found at the START of a line in the wire messages."""
+    """[{mechanism, header, tokens}] for every earlier run block found at the START of a line in the wire messages."""
     found: list[dict] = []
     for message in messages if isinstance(messages, (list, tuple)) else ():
         content = message.get("content") if isinstance(message, Mapping) else None
@@ -714,9 +714,9 @@ def _r44_rendered_blocks(messages: object) -> list[dict]:
 
 
 def _r44_plugged_keys(runtime: object) -> list[tuple[str, str]]:
-    """r44 staging: (manifest key, value) for every r44 switch that is ON and had no PLUGGED key of its own.
+    """earlier run staging: (manifest key, value) for every earlier run switch that is ON and had no PLUGGED key of its own.
 
-    Nothing is returned for an off switch, so every off-arm manifest is byte-identical to r43.  jq_class_edit and
+    Nothing is returned for an off switch, so every off-arm manifest is byte-identical to earlier run.  jq_class_edit and
     probe_validity_gate have no runtime attribute (the runner/public review read them), so their module mode is used.
     """
     out: list[tuple[str, str]] = []
@@ -749,9 +749,9 @@ def _r44_plugged_keys(runtime: object) -> list[tuple[str, str]]:
     return out
 
 
-# r45 staging (PLUGGED keys, rule #9): r45 switches whose mechanism lives outside the runtime manifest (runner /
+# earlier run staging (PLUGGED keys, rule): earlier run switches whose mechanism lives outside the runtime manifest (runner /
 # continuation / receipts seams) stamp a key ONLY when their env value is on, so the fired check can tell "off / not
-# plugged" from "never triggered".  Off-arm manifests are unchanged (whole-stack off parity vs r44b).
+# plugged" from "never triggered".  Off-arm manifests are unchanged (whole-stack off parity vs earlier run).
 # Contract: kit/fired_check_r45.py MECHS; test: probes/test_r45_composition.py.
 R45_ENV_PLUGGED_KEYS = (
     ("STATEFRAME_DIET_EVICT_DUPLICATED_ONLY", "stateframe_diet_evict_duplicated_only"),
@@ -772,27 +772,27 @@ R45_ENV_PLUGGED_KEYS = (
     ("STATEFRAME_POSTGREEN_NO_VETO", "stateframe_postgreen_no_veto"),     # kernel_postgreen_no_veto (frame arms)
     ("STATEFRAME_STUB_SWEEP_CUT", "stateframe_stub_sweep_cut"),           # kernel_stub_sweep_cut (frame arms)
     ("STATEFRAME_RESPONSE_TRUNCATION", "stateframe_response_truncation"),  # kernel_response_truncation (all arms)
-    ("STATEFRAME_RIPPLE_INLINE", "stateframe_ripple_inline"),             # kernel_ripple_inline (off in r45)
+    ("STATEFRAME_RIPPLE_INLINE", "stateframe_ripple_inline"),             # kernel_ripple_inline (off in earlier run)
     ("STATEFRAME_SCHEMA_SINGLE_CARRIER", "stateframe_schema_single_carrier"),  # kernel_tool_schema_diet (frame arms)
-    ("STATEFRAME_HY_STEP_FIX", "stateframe_hy_step_fix"),                 # kernel_hy_step_fix (r46, hy arm only)
-    # r46: kernel_stub_sweep_cut dispatch-time refusal of the exact redundant read.
+    ("STATEFRAME_HY_STEP_FIX", "stateframe_hy_step_fix"),                 # kernel_hy_step_fix (earlier run, hy arm only)
+    # earlier run: kernel_stub_sweep_cut dispatch-time refusal of the exact redundant read.
     ("STATEFRAME_STUB_SWEEP_DISPATCH", "stateframe_stub_sweep_dispatch"),
-    ("STATEFRAME_GREEN_EVIDENCE_OWNER", "stateframe_green_evidence_owner"),  # kernel_green_evidence_owner (r46 frame)
-    ("STATEFRAME_STALL_SUBMIT_STRICT", "stateframe_stall_submit_strict"),    # kernel_green_then_exhaust (r46 frame)
-    ("STATEFRAME_PROMPT_DIET", "stateframe_prompt_diet"),                    # kernel_prompt_diet (r46 frame+history)
-    ("STATEFRAME_CONTINUATION_PREDICT", "stateframe_continuation_predict"),  # r46, off in every arm
-    ("STATEFRAME_REASONING_ANCHOR", "stateframe_reasoning_anchor"),          # r46, off in every arm
+    ("STATEFRAME_GREEN_EVIDENCE_OWNER", "stateframe_green_evidence_owner"),  # kernel_green_evidence_owner (earlier run frame)
+    ("STATEFRAME_STALL_SUBMIT_STRICT", "stateframe_stall_submit_strict"),    # kernel_green_then_exhaust (earlier run frame)
+    ("STATEFRAME_PROMPT_DIET", "stateframe_prompt_diet"),                    # kernel_prompt_diet (earlier run frame+history)
+    ("STATEFRAME_CONTINUATION_PREDICT", "stateframe_continuation_predict"),  # earlier run, off in every arm
+    ("STATEFRAME_REASONING_ANCHOR", "stateframe_reasoning_anchor"),          # earlier run, off in every arm
     ("STATEFRAME_REASONING_LEDGER", "stateframe_reasoning_ledger"),  # [reasoning-ledger patch]
-    ("STATEFRAME_POSTGREEN_NO_PROGRESS", "stateframe_postgreen_no_progress"),  # r46, off in every arm
-    ("STATEFRAME_INTENT_CARRY_F4", "stateframe_intent_carry_f4"),  # r46 kernel_intent_carry F4 delivery
-    ("STATEFRAME_PROMPT_COMPACT", "stateframe_prompt_compact"),  # r47 kernel_prompt_compact port
+    ("STATEFRAME_POSTGREEN_NO_PROGRESS", "stateframe_postgreen_no_progress"),  # earlier run, off in every arm
+    ("STATEFRAME_INTENT_CARRY_F4", "stateframe_intent_carry_f4"),  # earlier run kernel_intent_carry F4 delivery
+    ("STATEFRAME_PROMPT_COMPACT", "stateframe_prompt_compact"),  # earlier run kernel_prompt_compact port
     ("STATEFRAME_PROGRESS_LEDGER", "stateframe_progress_ledger"),  # receipt-derived presentation only
     ("STATEFRAME_TOKENLAB_SIDECAR_OFF", "stateframe_tokenlab_sidecar_off"),  # kernel_tool_schema_diet
     ("STATEFRAME_TOKENLAB_CACHE_STABLE", "stateframe_tokenlab_cache_stable"),  # 
     ("STATEFRAME_TOKENLAB_MULTIDEF_CLOSE", "stateframe_tokenlab_multidef_close"),  # 
     ("STATEFRAME_TOKENLAB_PASSIVE_WITHHELD_DROP", "stateframe_tokenlab_passive_withheld_drop"),  # 
     ("STATEFRAME_TOKENLAB_POSTGREEN_QUIET", "stateframe_tokenlab_postgreen_quiet"),  # 
-    ("STATEFRAME_RIPPLE_HOLD_MIN3", "stateframe_ripple_hold_min3"),  # r47 kernel_ripple_hold_threshold
+    ("STATEFRAME_RIPPLE_HOLD_MIN3", "stateframe_ripple_hold_min3"),  # earlier run kernel_ripple_hold_threshold
     ("STATEFRAME_TOKENLAB_MULTIDEF_RETIRE", "stateframe_tokenlab_multidef_retire"),  # 
     ("STATEFRAME_TOKENLAB_SERVE_READS", "stateframe_tokenlab_serve_reads"),  # 
     ("STATEFRAME_TOKENLAB_CHALLENGE_SPLIT", "stateframe_tokenlab_challenge_split"),  # M1
@@ -808,11 +808,11 @@ R45_ENV_PLUGGED_KEYS = (
     ("STATEFRAME_TOKENLAB_EDIT_HARDENING", "stateframe_tokenlab_edit_hardening"),  # 
     ("STATEFRAME_TOKENLAB_HOST_RESULT_GUARD", "stateframe_tokenlab_host_result_guard"),  # 
     ("STATEFRAME_TOKENLAB_SAMPLER_VARIANT", "stateframe_tokenlab_sampler_variant"),  # 
-    ("STATEFRAME_BOOT_READ", "stateframe_boot_read"),  # r47 kernel_lane4_fixes
-    ("STATEFRAME_DECIDE_NOTICE_GATED", "stateframe_decide_notice_gated"),  # r47 kernel_lane4_fixes
-    ("STATEFRAME_GREENLOCK_FIRST_EDIT", "stateframe_greenlock_first_edit"),  # Q23 r47 R3a
-    ("STATEFRAME_NO_RED_TERMINAL", "stateframe_no_red_terminal"),  # Q23 r47 R5
-    ("STATEFRAME_DONE_CHALLENGE_CAP1", "stateframe_done_challenge_cap1"),  # Q23 r47 R3c
+    ("STATEFRAME_BOOT_READ", "stateframe_boot_read"),  # earlier run kernel_lane4_fixes
+    ("STATEFRAME_DECIDE_NOTICE_GATED", "stateframe_decide_notice_gated"),  # earlier run kernel_lane4_fixes
+    ("STATEFRAME_GREENLOCK_FIRST_EDIT", "stateframe_greenlock_first_edit"),  # Q23 earlier run R3a
+    ("STATEFRAME_NO_RED_TERMINAL", "stateframe_no_red_terminal"),  # Q23 earlier run R5
+    ("STATEFRAME_DONE_CHALLENGE_CAP1", "stateframe_done_challenge_cap1"),  # Q23 earlier run R3c
     ("STATEFRAME_HEADCARRY", "stateframe_headcarry"),  # release FrameFit5 current module heads
     ("STATEFRAME_CHECK_EXECUTION_BINDING", "stateframe_check_execution_binding"),
     ("STATEFRAME_CHECK_RECEIPT_ENRICHMENT_DEDUP", "stateframe_check_receipt_enrichment_dedup"),
@@ -822,7 +822,7 @@ _R45_OFF_VALUES = frozenset({"", "off", "0", "false", "no"})
 
 
 def _r45_plugged_keys() -> list[tuple[str, str]]:
-    """(manifest key, raw value) for every env-only r45 switch that is on; [] when all are off."""
+    """(manifest key, raw value) for every env-only earlier run switch that is on; [] when all are off."""
     out: list[tuple[str, str]] = []
     for env_name, key in R45_ENV_PLUGGED_KEYS:
         value = str(os.environ.get(env_name, "off") or "off").strip().lower()
@@ -2988,7 +2988,7 @@ class StateFrameRuntime:
         self.stateframe_frame_epoch_mode = stateframe_frame_epoch_mode()
         from kernel_stateframe_hybrid_compaction import mode as hybrid_compaction_mode
         self.stateframe_hybrid_mode = hybrid_compaction_mode()
-        # r42 staging resolution: F4 budget fit measures the raw per-message estimate while
+        # earlier run staging resolution: F4 budget fit measures the raw per-message estimate while
         # the frame epoch (and hybrid, which crosses into an epoch) admits on the scrubbed
         # whole-request measure; stacked they disagree (measured: epoch+fit overflowed where
         # plain F4+fit fit).  Untested composition -> fail closed at construction.
@@ -2998,11 +2998,11 @@ class StateFrameRuntime:
             raise ValueError(
                 "STATEFRAME_F4_FIT=on or STATEFRAME_FRAMEFIT=on cannot be combined with "
                 "STATEFRAME_FRAME_EPOCH=on or STATEFRAME_HYBRID_COMPACTION=on")
-        # r46 STATEFRAME_HY_STEP_FIX (kernel_hy_step_fix.py): the hy arm (STATEFRAME_
+        # earlier run STATEFRAME_HY_STEP_FIX (kernel_hy_step_fix.py): the hy arm (STATEFRAME_
         # HYBRID_COMPACTION=on) hits REACT_STEPS=60 far more than f4/hs (f3_r44d_review.md
         # #2c).  ToolCallLoopBreaker.observe()/consume() are already wired below and in
         # _emit_tool_call_cap_audit, but nothing ever attaches a live instance -- the shared
-        # STATEFRAME_TOOL_CALL_LOOP_BREAKER switch is pod-pinned off for hy and r46 must not
+        # STATEFRAME_TOOL_CALL_LOOP_BREAKER switch is pod-pinned off for hy and earlier run must not
         # touch it (controls 381-383).  Switch off, or arm != hy: self._tool_call_loop_breaker
         # stays unset (None), so every existing off-parity/other-arm path is byte-identical.
         from kernel_hy_step_fix import enabled as hy_step_fix_enabled
@@ -3374,7 +3374,7 @@ class StateFrameRuntime:
         from kernel_continuation_restart import enabled as restart_enabled
         self.restart_enabled = restart_enabled()
         if self.stateframe_obs_mask_turns is not None and self.stateframe_hybrid_mode == "on":
-            # r42 staging: both lanes rewrite the history arm's request (mask vs crossing
+            # earlier run staging: both lanes rewrite the history arm's request (mask vs crossing
             # threshold); their composition has no test -> fail closed.
             raise ValueError(
                 "STATEFRAME_OBS_MASK cannot be combined with STATEFRAME_HYBRID_COMPACTION=on")
@@ -3392,7 +3392,7 @@ class StateFrameRuntime:
             raise ValueError("retained workspace requires the continuation executive")
         if self.stateframe_memory_capsule_mode == "on":
             if self.restart_enabled:
-                # r43 checkpoints do not carry a bank binding.  Refusing this
+                # earlier run checkpoints do not carry a bank binding.  Refusing this
                 # combination is restart-safe; loading an unbound external bank
                 # would make the resumed request non-reproducible.
                 raise ValueError(
@@ -3802,7 +3802,7 @@ class StateFrameRuntime:
             modules += (root / "kernel_passive_retention_delivery.py",)
         from kernel_conclusion_cache import enabled as _conclusion_cache_on
         if _conclusion_cache_on():
-            # r44 F4 R4 (rule #9): the conclusion-cache arm is plugged in only when
+            # earlier run F4 R4 (rule): the conclusion-cache arm is plugged in only when
             # its module hash is part of the run identity.
             modules += (root / "kernel_conclusion_cache.py",)
         if self.retained_lossless_paging:
@@ -4027,7 +4027,7 @@ class StateFrameRuntime:
             modules += (root / "kernel_ripple_preview.py",)
         if getattr(self, "stateframe_oracle_literal_canary_mode", "off") == "on":
             modules += (root / "kernel_oracle_literal_canary.py",)
-        # r41: oracle grounding had no source-identity or manifest footprint (unprovable
+        # earlier run: oracle grounding had no source-identity or manifest footprint (unprovable
         # live).  On-only, so the off manifest/digest stay byte-identical.
         from kernel_oracle_grounding import enabled as _oracle_grounding_enabled
         if _oracle_grounding_enabled():
@@ -4044,7 +4044,7 @@ class StateFrameRuntime:
             modules += (root / "kernel_stateframe_fork_a.py",)
             if root / "kernel_stateframe_portfolio.py" not in modules:
                 modules += (root / "kernel_stateframe_portfolio.py",)
-        # r37t token-release organs: provenance follows the effective switches.
+        # earlier run token-release organs: provenance follows the effective switches.
         from kernel_reread_fix import enabled as _reread_fix_on
         if _reread_fix_on():
             modules += (root / "kernel_reread_fix.py",)
@@ -4124,7 +4124,7 @@ class StateFrameRuntime:
             from kernel_decisive_factor import SCHEMA as decisive_factor_schema
             manifest["stateframe_decisive_factor"] = "on"
             manifest["decisive_factor_schema"] = decisive_factor_schema
-        # r44 staging (PLUGGED keys, rule 9): these r44 switches journaled only when their mechanism ACTED, so the
+        # earlier run staging (PLUGGED keys, rule 9): these earlier run switches journaled only when their mechanism ACTED, so the
         # fired check could not tell "off / not plugged" from "never triggered".  Stamped ONLY when on (off manifests
         # are unchanged).  Contract: kit/fired_check_r44.py MECHS; test: probes/test_r44_composition.py.
         for _r44_key, _r44_value in _r44_plugged_keys(self):
@@ -4269,7 +4269,7 @@ class StateFrameRuntime:
             from kernel_guarded_effects import SCHEMA as guarded_effect_schema
             manifest["stateframe_guarded_effects"] = "on"
             manifest["guarded_effect_schema"] = guarded_effect_schema
-        # r43 staging: PLUGGED evidence for the fired check (kit/fired_check_r43.py); stamped only when on,
+        # earlier run staging: PLUGGED evidence for the fired check (kit/fired_check_r43.py); stamped only when on,
         # so every off arm's manifest is unchanged.
         if getattr(self, "stateframe_greenlock_menu_authority_mode", "off") == "on":
             manifest["stateframe_greenlock_menu_authority"] = "on"
@@ -4488,7 +4488,7 @@ class StateFrameRuntime:
             manifest["passive_retention_delivery_schema"] = passive_retention_delivery_schema
         from kernel_conclusion_cache import enabled as _conclusion_cache_manifest_on
         if _conclusion_cache_manifest_on():
-            # r44 F4 R4: stamped ONLY when on (off manifest stays byte-identical).
+            # earlier run F4 R4: stamped ONLY when on (off manifest stays byte-identical).
             from kernel_conclusion_cache import SCHEMA as conclusion_cache_schema
             manifest["stateframe_conclusion_cache"] = "on"
             manifest["conclusion_cache_schema"] = conclusion_cache_schema
@@ -4844,7 +4844,7 @@ class StateFrameRuntime:
             validate_resume(self)
         if getattr(self, "_tool_call_loop_breaker", None) is not None and getattr(
                 self, "stateframe_hy_step_fix_mode", "off") == "on":
-            # r46 HY_STEP_FIX own event (evaluated): the hy-arm breaker is live in this run.
+            # earlier run HY_STEP_FIX own event (evaluated): the hy-arm breaker is live in this run.
             self.journal.emit("hy_step_fix_armed", producer="kernel_hy_step_fix", dispatch=False,
                               stage="evaluated")
         if self.stateframe_decisive_factor_mode == "on":
@@ -4916,7 +4916,7 @@ class StateFrameRuntime:
                     producer="kernel_memory_isolation")
             filtered = getattr(owner, "memory_carry_filtered", None)
             if isinstance(filtered, Mapping) and filtered.get("filtered"):
-                # r44 M6: prior same-fn transcripts the producer refused (foreign task,
+                # earlier run M6: prior same-fn transcripts the producer refused (foreign task,
                 # ambiguous identity, other repo -- e.g. a same-fn task overwrote this
                 # task's transcript).  Counts only; the carry loss is visible, not silent.
                 self.journal.emit(
@@ -6632,7 +6632,7 @@ class StateFrameRuntime:
         finding = finding_from_test_observation(
             receipt_id=receipt_id, selectors=list(selectors), exit_code=exit_code,
             source_revision=revision,
-            # r44 F4 item 8: bind to the receipt's full product/dependency binding.
+            # earlier run F4 item 8: bind to the receipt's full product/dependency binding.
             product_binding=(digest(receipt_binding)
                              if isinstance(receipt_binding, Mapping) else None))
         finding["supersedes"] = superseded_by_scope(self.history_findings, str(finding["scope"]))
@@ -8464,7 +8464,7 @@ class StateFrameRuntime:
                 dispatch=False,
             )
         continuation = getattr(self, "continuation", None)
-        # 10-06 batch 843: a public check SIGKILLed by the sandbox (rc 137) left no signal or
+        # 10-06 prior run: a public check SIGKILLed by the sandbox (rc 137) left no signal or
         # initiator in this record.  Decode the exit so the journal says what killed it.
         signal_number = (-exit_code if isinstance(exit_code, int) and exit_code < 0
                          else exit_code - 128 if isinstance(exit_code, int) and exit_code >= 128 else None)
@@ -8793,7 +8793,7 @@ class StateFrameRuntime:
         full = tool_surface(list(full_tools))
         if (getattr(self, "stateframe_readiness_authority_mode", "off") == "on"
                 or getattr(self, "stateframe_repair_blocks_done_mode", "off") == "on"):
-            # r39: the authority already projected done/repair; get_sure only adds predict
+            # earlier run: the authority already projected done/repair; get_sure only adds predict
             # when the authority keeps repair open (never re-decides done).
             result = [dict(item) for item in selected]
             names = {str(_tool.get("function", {}).get("name", "")) for _tool in result
@@ -9200,7 +9200,7 @@ class StateFrameRuntime:
                 and bool(getattr(getattr(self, "green_lock", None), "green", False))):
             # The repair controller owns the post-GREEN verification boundary and
             # has captured the pre-edit bytes for rollback.  Before green it is a
-            # no-op (r38), so the host auto-verify rail must still run.
+            # no-op (earlier run), so the host auto-verify rail must still run.
             return
         if self.auto_verify_mode != "on" or not self._is_product_edit(receipt):
             return
@@ -10148,7 +10148,7 @@ class StateFrameRuntime:
         from kernel_requirements_ledger import host_record_receipts, host_update_assessments, write_ledger
         checks = getattr(bundle, "checks", ()) if bundle is not None else ()
         ledger = self._requirements_ledger_for(bundle, revision=snapshot)
-        # r35b full smoke: an exception here escaped into react_repair's catch-all as a bare ERR:ValueError and
+        # earlier run full smoke: an exception here escaped into react_repair's catch-all as a bare ERR:ValueError and
         # killed the run. Admission/reduction are ledger diagnostics too: on failure keep the unreduced
         # assessments (pre-ledger behavior) and journal the error instead of ending the live loop.
         try:
@@ -10574,7 +10574,7 @@ class StateFrameRuntime:
         """Sole completion entry: the reducer decision, then (opt-in) the
         challenge-once-per-revision arbiter (kernel_done_challenge_once).  Both
         the legacy done switch and first-green disclosure can opt into that
-        post-reducer policy; with both off this returns the core decision as-is.  r41: an active
+        post-reducer policy; with both off this returns the core decision as-is.  earlier run: an active
         challenge budget first replays a durable terminal submission (absorbing)."""
         from kernel_done_is_submit_authority import (
             accepted_decision as sealed_done_decision,
@@ -10859,7 +10859,7 @@ class StateFrameRuntime:
             except (ImportError, TypeError, ValueError):
                 pass
         if getattr(self, "stateframe_unified_stop_mode", "off") == "on":
-            # r44 unified stop: ONE three-valued arbiter over the caller's admissibility, inside
+            # earlier run unified stop: ONE three-valued arbiter over the caller's admissibility, inside
             # the idempotency wrapper / guarded commit / durable replay above and before the
             # existing reducer + challenge arbiter below (kernel_completion_policy.transform).
             from kernel_completion_policy import transform as unified_stop_transform
@@ -10942,7 +10942,7 @@ class StateFrameRuntime:
                 except (ImportError, OSError, TypeError, ValueError):
                     pass
             if not getattr(decision, "accepted", False):
-                # r44 fix DONE/D2: a witnessed failure refusal (N14) is bounded even with the
+                # earlier run fix DONE/D2: a witnessed failure refusal (N14) is bounded even with the
                 # challenge arbiter off -- the code only exists while its lane switch is on.
                 from kernel_completion_policy import NON_WAIVABLE_CODES
                 if set(getattr(decision, "reason_codes", ()) or ()) & NON_WAIVABLE_CODES:
@@ -11139,7 +11139,7 @@ class StateFrameRuntime:
         # The stricter policy owns aligned-row admission when enabled.  Keep
         # the existing alignment advisory gate untouched while the new switch
         # is off, preserving its legacy byte shape and disposition.  H+state+
-        # (history arm) never uses this repeated done gate (r40 merge).
+        # (history arm) never uses this repeated done gate (earlier run merge).
         if (getattr(self, "stateframe_requirement_alignment_mode", "off") == "on"
                 and getattr(self, "stateframe_repair_blocks_done_mode", "off") != "on"
                 and not hstate_plus_history and not postgreen_no_veto_active
@@ -11504,9 +11504,9 @@ class StateFrameRuntime:
             detail = pre_facts_detail
             repair_action = pre_facts_repair_action
             admissible = False
-        # r41b: placed AFTER host done-facts, which recomputes admissibility from host facts and
+        # earlier run: placed AFTER host done-facts, which recomputes admissibility from host facts and
         # silently drops every earlier refusal code not in _HOST_DONE_FACT_GATE_CODES (live
-        # smokescratch-r41b-ldev_01: the unverified refusal was erased, done accepted).
+        # smokescratch-earlier run-reviewer: the unverified refusal was erased, done accepted).
         # A live counterexample on the current revision that none of the
         # narrower gates above turned into a refusal still challenges done ONCE.
         # Refuse BEFORE the reducer seals, and only when a one-shot arbiter owns
@@ -11531,7 +11531,7 @@ class StateFrameRuntime:
             # Disclosed-but-host-demoted checks: the SAME one-shot challenge, class UNVERIFIED.
             live_ce_unverified = (unverified_rows(self)
                                   if live_ce_eligible and not live_ce_rows else [])
-            # Plugged-in proof on EVERY done (r41b smokefull-334: no gate and no reason why).
+            # Plugged-in proof on EVERY done (earlier run smokefull-334: no gate and no reason why).
             self.journal.emit("live_counterexample_done_check",
                               producer="kernel_live_counterexample_challenge",
                               dispatch=False, eligible=live_ce_eligible,
@@ -11733,7 +11733,7 @@ class StateFrameRuntime:
             "_bridge_ordinary_brief", "msg", "brief", "symptom")
                       if isinstance(row.get(key), str) and row.get(key).strip()), "")
         key = self._v2_candidate_key()
-        # r44 review F3: synchronize the candidate BEFORE the cache lookup, so a cache hit
+        # earlier run review F3: synchronize the candidate BEFORE the cache lookup, so a cache hit
         # after A -> B -> A resets B's refusal/reuse state instead of inheriting it.
         self.v2_disposition.set_candidate(key)
         if key in self.v2_host_reviews:
@@ -11741,7 +11741,7 @@ class StateFrameRuntime:
         source = self._target_source()
         path = self._target_relative()
         from kernel_completion_disposition import smoke_named_elements
-        # r44 review F1: this is a HOST-owned review with a fixed program, so it runs on the
+        # earlier run review F1: this is a HOST-owned review with a fixed program, so it runs on the
         # host's own bounded executor (subprocess, 10s timeout), never through the
         # model-facing ``run_probe`` whose 1,600-character limit rejected it unexecuted.
         findings = smoke_named_elements(
@@ -12018,7 +12018,7 @@ class StateFrameRuntime:
             tools = figure_it_out_tool_surface(tools, runtime=self)
             from kernel_prompt_diet import enabled as prompt_diet_enabled, filter_figure_it_out_tools
             if prompt_diet_enabled():
-                # r44d finding 2e: append_operator_message (the guidance for
+                # earlier run finding 2e: append_operator_message (the guidance for
                 # these three tool schemas) is unconditionally suppressed for
                 # the whole history-tail arm -- the schemas still went out on
                 # every request for nothing (~420 prompt tokens/request).
@@ -12073,7 +12073,7 @@ class StateFrameRuntime:
         if getattr(self, "stateframe_live_ce_challenge_mode", "off") == "on":
             selected = self._unverified_window_menu(selected, tools)
         if getattr(self, "stateframe_greenlock_menu_authority_mode", "off") == "on":
-            # r43: the final menu IS the dispatch allow-set (one decision function).
+            # earlier run: the final menu IS the dispatch allow-set (one decision function).
             from kernel_greenlock_menu_authority import project_request_menu
             self._greenlock_menu_authority_surface = list(tools)
             selected = project_request_menu(self, selected, tools)
@@ -12102,7 +12102,7 @@ class StateFrameRuntime:
         return self._idealpath_project_menu(tools)
 
     def _unverified_window_menu(self, selected: list[dict], tools: Sequence[dict]) -> list[dict]:
-        """r41b option 1: while disclosed unverified checks are open and this revision's one-shot
+        """earlier run option 1: while disclosed unverified checks are open and this revision's one-shot
         challenge is unspent, keep read/probe beside done (never edit).  Afterwards the menu
         returns to whatever the terminal policy offers (done-only -> "sole done submits")."""
         from kernel_live_counterexample_challenge import UNVERIFIED_WINDOW_TOOLS, unverified_window_open
@@ -12114,7 +12114,7 @@ class StateFrameRuntime:
         permitted = None
         lock = getattr(self, "green_lock", None)
         if lock is not None:
-            # r45 one owner (r44c 368 ldev_01 seq 1870/1914): after the authority decided the menu, the window may
+            # earlier run one owner (earlier run 368 reviewer event sequence/1914): after the authority decided the menu, the window may
             # only re-add tools the authority itself permits (never one dispatch would refuse).
             from kernel_greenlock_menu_authority import _permitted_on_surface, applies
             if applies(lock):
@@ -12132,7 +12132,7 @@ class StateFrameRuntime:
             self.journal.emit("unverified_checks_menu_window", producer="kernel_live_counterexample_challenge",
                               added=added, offered=list(self.completion_menu), dispatch=False)
         elif any(name in names for name in UNVERIFIED_WINDOW_TOOLS):
-            # r44: the post-green work menu already offers read/probe, so the window adds nothing; it is
+            # earlier run: the post-green work menu already offers read/probe, so the window adds nothing; it is
             # still OPEN beside done and must journal (fired-check launch gate keys on this event).
             # Journal only: menu and completion state are unchanged.
             self.journal.emit("unverified_checks_menu_window", producer="kernel_live_counterexample_challenge",
@@ -12152,8 +12152,8 @@ class StateFrameRuntime:
                 readiness_status, readiness_snapshot(self))
         decision = decide(readiness_status, previous=previous)
         if getattr(self, "stateframe_post_green_work_menu_mode", "off") == "on":
-            # r45 one owner: the journaled disposition defers to the authority's post-green work window, so it
-            # matches what the authority offers and dispatches (ldev_01 replay).  Off: r44c decision unchanged.
+            # earlier run one owner: the journaled disposition defers to the authority's post-green work window, so it
+            # matches what the authority offers and dispatches (reviewer replay).  Off: earlier run decision unchanged.
             from kernel_post_green_menu import window_admitted_files, window_dispositions
             from kernel_readiness_authority import defer_to_post_green
             green_lock = getattr(self, "green_lock", None)
@@ -12331,10 +12331,10 @@ class StateFrameRuntime:
             self._completion_owner_dispatch_tools = copy.deepcopy(menu)
             self._completion_owner_actionable = bool(names)
         elif getattr(self, "stateframe_live_ce_challenge_mode", "off") == "on":
-            # r41b option 1: the readiness projection is the LAST word on the wire menu
+            # earlier run option 1: the readiness projection is the LAST word on the wire menu
             # (re-applied after request compaction), so the unverified-check window must be
             # applied here too, or ready_to_submit strips read/probe back to done-only
-            # (live smokescratch-r41b-ldev_01: window added, wire menu done-only, challenge
+            # (live smokescratch-earlier run-reviewer: window added, wire menu done-only, challenge
             # became a sole-done submission).
             menu = self._unverified_window_menu(menu, full_tools)
         return menu
@@ -12726,7 +12726,7 @@ class StateFrameRuntime:
     def _terminal_tool_menu(self, tools: list[dict]) -> list[dict]:
         """While terminal green lock is engaged, offer only done (+ run_tests to re-verify).
 
-        Batch 138 crawl_a_one: terminal frame said "The task is complete. Call done now."
+        prior run crawl_a_one: terminal frame said "The task is complete. Call done now."
         with done on the menu, yet the 2B made 0 done attempts over ~50 requests and kept
         reading (each read's result is omitted from the terminal frame, so it read again).
         The stop criterion is unchanged: every required public check GREEN on the current
@@ -13079,7 +13079,7 @@ class StateFrameRuntime:
             store.record_render_success()
 
     def repo_intel_operation(self, name: str, arguments: Mapping[str, object]) -> str | None:
-        """Dispatch read-only Mission Control graph queries through StateFrame."""
+        """Dispatch read-only repository graph queries through StateFrame."""
         from kernel_repo_intel import operation
         return operation(self, name, arguments)
 
@@ -13097,7 +13097,7 @@ class StateFrameRuntime:
         return feedback
 
     def stub_sweep_dispatch_refusal(self, name: str, arguments: Mapping[str, object]) -> str | None:
-        """r46: dispatch-time twin of ``kernel_stub_sweep_cut.apply_menu``'s menu hint. Refuses only the
+        """earlier run: dispatch-time twin of ``kernel_stub_sweep_cut.apply_menu``'s menu hint. Refuses only the
         exact redundant default-range read of a path the cut already excluded -- never a new file, never a
         new range (line >= 2). Off unless BOTH STATEFRAME_STUB_SWEEP_CUT and STATEFRAME_STUB_SWEEP_DISPATCH
         are on (read-only against the cut's own state; apply_menu/observe_response remain the sole owners of
@@ -13779,7 +13779,7 @@ class StateFrameRuntime:
                               "public_tests": public_tests})
         repeat_number = 0
         if reused:
-            # r44 review F3: count reuse against the CURRENT candidate even when no host
+            # earlier run review F3: count reuse against the CURRENT candidate even when no host
             # review has synchronized it yet (A -> B -> A must not inherit B's state).
             self.v2_disposition.set_candidate(self._v2_candidate_key())
             repeat_number, terminal = self.v2_disposition.reused_verification(request_key)
@@ -13946,7 +13946,7 @@ class StateFrameRuntime:
         engine = getattr(self, "ripple_preview_engine", None)
         if (engine is not None and kind == "text"
                 and not getattr(self, "_ripple_preview_text_mode_noted", False)):
-            # r44 M5: text-mode (REACT_TOOLCALL=0) edits never pass a typed edit action
+            # earlier run M5: text-mode (REACT_TOOLCALL=0) edits never pass a typed edit action
             # through this seam, so no preview/stage can exist -- say so once, not silently.
             self._ripple_preview_text_mode_noted = True
             self.journal.emit("ripple_preview_unavailable", payload_schema="stateframe-ripple-preview/1",
@@ -14107,7 +14107,7 @@ class StateFrameRuntime:
                 dispatch=False,
             )
         if _ripple_inline_enabled() and not _inline_safety_blocked:
-            # r45 (token cause 1): advisory without the refusal -- the edit applies now; the advisory is journaled
+            # earlier run (token cause 1): advisory without the refusal -- the edit applies now; the advisory is journaled
             # and still reaches the next request through the advisory frame projection.
             staged.add(preview.binding)
             self.journal.emit("ripple_preview_inline", payload_schema="stateframe-ripple-preview/1",
@@ -14115,7 +14115,7 @@ class StateFrameRuntime:
                               advisory=preview.render(), advisory_only=True, dispatch=False)
             return None
         if _ripple_hold is not None:
-            # r47 L4 (STATEFRAME_RIPPLE_HOLD_MIN3): inline below MIN_CANDIDATES, hold only a wide blast radius.
+            # earlier run L4 (STATEFRAME_RIPPLE_HOLD_MIN3): inline below MIN_CANDIDATES, hold only a wide blast radius.
             self.journal.emit(_ripple_hold_event, payload_schema="stateframe-ripple-preview/1",
                               decision=_ripple_hold, candidate_count=len(preview.candidates),
                               min_candidates=_ripple_hold_min, binding=preview.binding,
@@ -14389,7 +14389,7 @@ class StateFrameRuntime:
             path = ""
         reference_kwargs: dict[str, object] = {}
         if getattr(self, "stateframe_intent_carry_f4_mode", "off") == "on":
-            # r46: suppress an intent whose target agrees with neither this response's own
+            # earlier run: suppress an intent whose target agrees with neither this response's own
             # tool-call path, the task target, nor any source path the host delivered.
             delivered = getattr(self, "_empirical_serialized_sources", None)
             reference_kwargs["reference_paths"] = [
@@ -15940,7 +15940,7 @@ class StateFrameRuntime:
 
         The frame arm has no transcript: the refusal text reached the model in exactly ONE
         request (latest exchange) and then vanished, so the model re-called done without
-        repairing (batch 134 JobQueue-924078: 3 refusals, witnesses never re-shown). History
+        repairing (prior run JobQueue-924078: 3 refusals, witnesses never re-shown). History
         keeps the refusal in its transcript, so this restores parity rather than adding help.
         Shown only after a refusal and only while the latest audit still fails.
         """
@@ -15969,7 +15969,7 @@ class StateFrameRuntime:
 
         The audit used to run once and refuse once, so a half-repair (dead_letter added
         but appended to `_dead_letters`; snapshot still missing `now`) was accepted on the
-        next done (batch 121 JobQueue-924083). Now each done re-audits the current source
+        next done (prior run JobQueue-924083). Now each done re-audits the current source
         when its revision changed, bounded by JQ_AUDIT_MAX_REFUSALS so it cannot trap a run.
         """
         audit = getattr(self, "jq_audit", None)
@@ -17323,7 +17323,7 @@ class StateFrameRuntime:
             "catalog": getattr(self, "_catalog_receipt_fingerprint", None),
             "scope": getattr(self, "_scope_lock_last_result", None),
             "scope_authorizations": getattr(self, "scope_lock_authorizations", ()),
-            # 10-06 batch 836: ShipTreeSmokeResult (a frozen dataclass) is not JSON-serializable,
+            # 10-06 prior run: ShipTreeSmokeResult (a frozen dataclass) is not JSON-serializable,
             # so digest() raised TypeError on EVERY pass_gates_vector call -> both callers swallowed
             # it -> every wire HOST_BLOCKED and done uncertifiable.  Normalize to a stable identity.
             "smoke": gate_evidence_identity(getattr(self, "_ship_tree_smoke_result",
@@ -17920,7 +17920,7 @@ class StateFrameRuntime:
                 else:
                     # Preserve the empirical-fixes OFF branch exactly. Its
                     # older ledger accepted the legacy omitted_chars/end_line
-                    # shape; the stricter r34 receipt proof is only needed by
+                    # shape; the stricter earlier run receipt proof is only needed by
                     # the new receipt switch.
                     complete = (
                         isinstance(evidence_path, str)
@@ -18170,7 +18170,7 @@ class StateFrameRuntime:
 
     def _note_history_findings_projection(self, frame: Mapping[str, object],
                                           projection: object, projector: str) -> None:
-        """r44 F4 R5: a projection that drops carried findings must say so."""
+        """earlier run F4 R5: a projection that drops carried findings must say so."""
         if getattr(self, "history_findings", None) is None or not isinstance(frame, Mapping):
             return
         payload = frame.get("history_findings")
@@ -18711,7 +18711,7 @@ class StateFrameRuntime:
 
     def _f4_source_messages(self, frame: Mapping[str, object], working: str,
                             path: str) -> list[dict]:
-        """r41 review fix F4-R5: source blocks under F4 use the SAME header contract as the
+        """earlier run review fix F4-R5: source blocks under F4 use the SAME header contract as the
         legacy view (kernel_read_fixes.source_header; lane_common "a label is a contract").
         The lane hardcoded "[Working source: ...]", which the runner presentation preflight
         rejects under STATEFRAME_SOURCE_LABELS=plain (smoke1-307 ERR:ValueError), and it
@@ -18793,7 +18793,7 @@ class StateFrameRuntime:
                 from kernel_source_presentation import source_block
                 block = source_block(dict(record), label="Observed source")
             messages.append({"role": "user", "content": block})
-        # r41 live fix F4-R7 (smokefull-315-ldev_09: 13 reads in 8 responses, the same four files
+        # earlier run live fix F4-R7 (smokefull-315-reviewer: 13 reads in 8 responses, the same four files
         # re-read in a loop): a read older than the two-exchange ring vanished, because the
         # legacy view keeps it as RETAINED evidence, not in earlier_other_file_reads.  Render every
         # retained read whose bytes are not known-stale (a product file whose recorded revision
@@ -18902,7 +18902,7 @@ class StateFrameRuntime:
 
     def _f4_notices(self, frame: Mapping[str, object], *, provider_request: bool = True) -> list[str]:
         """Revision-bound host notices F4 must render because their carrier (a host-injected
-        auto-verify result) is never a real exchange: the first-green disclosure (r41), and the
+        auto-verify result) is never a real exchange: the first-green disclosure (earlier run), and the
         opt-in turn-one named-layer coverage checklist."""
         notices: list[str] = []
         source_working_set_notices: tuple[str, ...] = ()
@@ -18964,7 +18964,7 @@ class StateFrameRuntime:
         elif (dedup and reminders
               and getattr(self, "stateframe_false_completion_mode", "off") == "on"
               and not getattr(self, "_false_completion_rendered", False)):
-            # r44 F4 (composition report item 4): the dedup bundle replaces the
+            # earlier run F4 (composition report item 4): the dedup bundle replaces the
             # coverage-content path above, which was the ONLY carrier of the
             # false-completion notice -> low-coverage evidence was silently lost
             # under F4 + notice_dedup + coverage reminders.  Deliver it here with
@@ -18974,7 +18974,7 @@ class StateFrameRuntime:
             if false_content:
                 notices.append(false_content)
         if getattr(self, "stateframe_raising_h_packets_mode", "off") == "on":
-            # r44 M3 (raising_h producer only): the packet fitted by _f4_view for THIS
+            # earlier run M3 (raising_h producer only): the packet fitted by _f4_view for THIS
             # provider request; a pure read so repeated calls stay idempotent.
             packet_text = getattr(self, "_raising_h_f4_text", None)
             if isinstance(packet_text, str) and packet_text:
@@ -19002,7 +19002,7 @@ class StateFrameRuntime:
         return notices
 
     def _f4_retained_state_blocks(self, frame: Mapping[str, object]) -> list[str]:
-        """r44 F4 (composition report item 6): F4's state allowlist carries neither the
+        """earlier run F4 (composition report item 6): F4's state allowlist carries neither the
         named-working-set manifest nor the settled-decision cache, so under F4 both were
         computed and never presented.  Render bounded projections through the existing
         renderers as F4 notices, i.e. BEFORE the common F4 fit (whose notice pass can
@@ -19021,8 +19021,8 @@ class StateFrameRuntime:
                             + "…[working-set manifest clipped; expand via working_set]")
                 blocks.append(F4_WORKING_SET_HEADER + "\n" + body)
         if (getattr(self, "decision_cache", None) is not None and isinstance(frame, Mapping)
-                # behind the r44 conclusion_cache switch: the r43 F4+DECISION_CACHE
-                # arm (batch 347) keeps its exact request shape with it off.
+                # behind the earlier run conclusion_cache switch: the earlier run F4+DECISION_CACHE
+                # arm (prior run) keeps its exact request shape with it off.
                 and getattr(self, "conclusion_cache_mode", "off") == "on"):
             try:
                 settled = self._settled_state_message(frame)
@@ -19035,7 +19035,7 @@ class StateFrameRuntime:
             if content:
                 blocks.append(content)
         if getattr(self, "stateframe_intent_carry_f4_mode", "off") == "on":
-            # r46 (tt_output_gap_v2 item 1): _view returns _f4_view before its pending_intent
+            # earlier run (tt_output_gap_v2 item 1): _view returns _f4_view before its pending_intent
             # render, so F4 extracted the model's own pending edit decision and never delivered
             # it.  Stage the exact text; `intent_delivered` is journaled only after prepare()
             # proves these bytes survived the final fit (never at payload-build time).
@@ -19050,7 +19050,7 @@ class StateFrameRuntime:
         return blocks
 
     def _f4_attach_anchor_ring(self, ledger: object) -> None:
-        """r46 STATEFRAME_REASONING_ANCHOR (own switch): one AnchorRing per run, fed by the
+        """earlier run STATEFRAME_REASONING_ANCHOR (own switch): one AnchorRing per run, fed by the
         provider pairs the bounded F4 ring evicts. Off: no ring, no callback."""
         from kernel_stateframe_reasoning_anchor import enabled as anchor_enabled
         if not anchor_enabled() or ledger is None:
@@ -19205,7 +19205,7 @@ class StateFrameRuntime:
 
     def _journal_intent_f4_delivery(self, prepared: Sequence[Mapping[str, object]],
                                     capture: object) -> bool:
-        """r46: `intent_delivered` iff the staged pending-intent text is byte-present in a
+        """earlier run: `intent_delivered` iff the staged pending-intent text is byte-present in a
         user message of the FINAL prepared request (post fit/scrub).  Staging is consumed."""
         staged = getattr(self, "_intent_f4_block", None)
         self._intent_f4_block = None
@@ -19392,11 +19392,11 @@ class StateFrameRuntime:
             self._f4_exchange_ledger = ledger
             self._f4_attach_reasoning_ledger(ledger)  # [reasoning-ledger patch]
         # ledger sync on EVERY F4 view.  v5 had it inside the first-creation branch above, so the
-        # block was rendered exactly once (empty, before any claim existed) and never again: 702 ldev_12 v5 =
+        # block was rendered exactly once (empty, before any claim existed) and never again: 702 reviewer v5 =
         # 12 reasoning_ledger_evaluated / 0 reasoning_ledger_delivered / no ledger block in any request.
         # revision = _recorded_revision(frame, path) (same source as the get-sure block below).
         self._f4_reasoning_ledger_sync(frame, path)
-        # r41 review fix F4-R1: the F4 view replaced _view() wholesale and so dropped the
+        # earlier run review fix F4-R1: the F4 view replaced _view() wholesale and so dropped the
         # get-sure clause verdict table (the frame arm's current VIOLATED/SATISFIED/UNPROBED
         # clause evidence, which first-green disclosure IDs refer to).  Keep it as one
         # clause-evidence block.  Its "Your last conclusion; next step" line is removed:
@@ -19436,7 +19436,7 @@ class StateFrameRuntime:
         from kernel_prompt_compact import enabled as _prompt_compact_enabled
         _prompt_compact = _prompt_compact_enabled()
         if _prompt_compact and clause_blocks:
-            # r47 F4/L2 STATEFRAME_PROMPT_COMPACT: the Get-sure + HYPOTHESES block is compacted
+            # earlier run F4/L2 STATEFRAME_PROMPT_COMPACT: the Get-sure + HYPOTHESES block is compacted
             # at F4's direct render path, so every sizing trial and fit below sees the compact
             # bytes.  Off: untouched (byte-identical).
             from kernel_prompt_compact import compact_clause_block, set_collision_scope
@@ -19446,7 +19446,7 @@ class StateFrameRuntime:
                 task_present=any(str(item.get("content") or "").startswith("Task:") for item in prefix))}]
         self._raising_h_f4_text = None
         if provider_request and getattr(self, "stateframe_raising_h_packets_mode", "off") == "on":
-            # r44 M3: F4 composes its own request, so the Raising-H packet is delivered as an
+            # earlier run M3: F4 composes its own request, so the Raising-H packet is delivered as an
             # F4 notice (before any F4 fit), sized against the serialized F4 request.
             self._raising_h_pending = None
             staged = self._raising_h_build()
@@ -19458,8 +19458,8 @@ class StateFrameRuntime:
                     source_messages=self._f4_source_messages(frame, working, path),
                     anchor_entries=self._f4_anchor_entries(),
                     ledger_block=self._f4_ledger_block(),  # [reasoning-ledger patch]
-                    # r45: a sizing trial is never a provider request -> unified_thinking selection
-                    # stays provisional (off: r44b call shape)
+                    # earlier run: a sizing trial is never a provider request -> unified_thinking selection
+                    # stays provisional (off: earlier run call shape)
                     notices=(self._f4_notices(frame, provider_request=False)
                              if getattr(self, "stateframe_unified_thinking_mode", "off") == "on"
                              else self._f4_notices(frame)))
@@ -19481,7 +19481,7 @@ class StateFrameRuntime:
                 source_messages=self._f4_source_messages(frame, working, path),
                 anchor_entries=self._f4_anchor_entries(),
                 ledger_block=self._f4_ledger_block(),  # [reasoning-ledger patch]
-                # r45: provider_request reaches _f4_notices only for unified_thinking (off = r44b call shape)
+                # earlier run: provider_request reaches _f4_notices only for unified_thinking (off = earlier run call shape)
                 notices=(self._f4_notices(frame, provider_request=provider_request)
                          if getattr(self, "stateframe_unified_thinking_mode", "off") == "on"
                          else self._f4_notices(frame)),
@@ -19494,7 +19494,7 @@ class StateFrameRuntime:
                 self.journal.emit("frame_files_listed", producer="kernel_serve_reads", paths=_listed,
                                   dispatch=False)
         if _prompt_compact:
-            # r47 F4/L2: StateFrame/working sets/the design notes stop/certificate/smoke
+            # earlier run F4/L2: StateFrame/working sets/the design notes stop/certificate/smoke
             # and the system glossary; clause block already compacted above.
             from kernel_prompt_compact import compact_f4_messages
             read_pins = getattr(self, "_read_reuse_visibility_candidates", ())
@@ -19661,7 +19661,7 @@ class StateFrameRuntime:
             copy.deepcopy(frame.get("working_set_manifest"))
             if getattr(self, "stateframe_working_sets_mode", "off") == "on"
             and isinstance(frame.get("working_set_manifest"), Mapping) else None)
-        # r44 F4 R5: the operational view drops the host-owned history_findings
+        # earlier run F4 R5: the operational view drops the host-owned history_findings
         # payload before the gear projection sees it; keep it for that seam.
         history_findings_payload = (
             copy.deepcopy(frame.get("history_findings"))
@@ -19680,7 +19680,7 @@ class StateFrameRuntime:
             if settled_findings_payload is not None and "settled_findings" not in frame:
                 frame["settled_findings"] = copy.deepcopy(settled_findings_payload)
             if history_findings_payload is not None:
-                # r44 F4 R5: operational_view's allowlist silently dropped the
+                # earlier run F4 R5: operational_view's allowlist silently dropped the
                 # reverse-history payload in the frame arm (not only in gears).
                 frame["history_findings"] = copy.deepcopy(history_findings_payload)
             if settled_findings_payload is not None:
@@ -20331,7 +20331,7 @@ class StateFrameRuntime:
 
     def _raising_h_fit(self, staged: Mapping[str, object], *, estimate: int,
                        measure: Callable[[str], int]) -> str:
-        """Render the staged packet within the request headroom (r44 M3).
+        """Render the staged packet within the request headroom (earlier run M3).
 
         The raw-character budget is only a first guess: the wire carries the JSON-escaped
         text inside a message envelope, so every candidate is re-measured with
@@ -20422,7 +20422,7 @@ class StateFrameRuntime:
             next_operation=pending["exploration"].get("next_attempt", {}).get("operation"),
             rendered_chars=len(rendered), budget_chars=pending["budget_chars"],
             delivered=delivered,
-            # r44 M3: a rendered packet that a later final-boundary pass removed is reported
+            # earlier run M3: a rendered packet that a later final-boundary pass removed is reported
             # as such, never as a silent (delivered=False, declined_reason=None) row.
             declined_reason=(None if delivered else
                              pending.get("declined_reason") or
@@ -20710,7 +20710,7 @@ class StateFrameRuntime:
 
     def _passive_retention_known_claims(
             self, prepared: Sequence[Mapping[str, object]]) -> tuple[set[str], set[str]]:
-        """r44 F4 R1: exact claim ids/refs carried by host blocks on THIS request.
+        """earlier run F4 R1: exact claim ids/refs carried by host blocks on THIS request.
 
         Only blocks actually present in ``prepared`` count: the decision handoff
         (decision-continuity slots + exchange ring) and ``<settled_state>``
@@ -22008,7 +22008,7 @@ class StateFrameRuntime:
             )
         if (provider_request
                 and getattr(self, "stateframe_greenlock_menu_authority_mode", "off") == "on"):
-            # r43 (after the previous step is closed): an empty allow-set is settled
+            # earlier run (after the previous step is closed): an empty allow-set is settled
             # by the host, never sent as a request whose every tool is refused.
             from kernel_greenlock_menu_authority import empty_menu_outcome
             empty = empty_menu_outcome(self)
@@ -22518,7 +22518,7 @@ class StateFrameRuntime:
                 passive_context, known_claim_ids=known_ids, known_refs=known_refs)
             passive_stats = dict(getattr(self.passive_retention, "last_render_stats", {}) or {})
             if passive_stats.get("skipped_duplicate") or passive_stats.get("stale_reference_only"):
-                # r44 F4 R1/R3: dedup against host blocks already on the wire and
+                # earlier run F4 R1/R3: dedup against host blocks already on the wire and
                 # stale reference-only rendering are mechanism actions -> journal.
                 self.journal.emit(
                     "passive_retention_dedup",
@@ -22869,7 +22869,7 @@ class StateFrameRuntime:
                 and AXES[self.modes["render_selection"]][2]
                 and _has_advisory_blocks(prepared)):
             prepared, _ = _bound_optional_blocks(prepared, tools, self.frame_ceiling)
-        # r41 review fix F4-R2: the get-sure boundary scrub (host-only labels) is a wire
+        # earlier run review fix F4-R2: the get-sure boundary scrub (host-only labels) is a wire
         # contract, not a sidecar; F4 must not bypass it.
         if getattr(self, "stateframe_get_sure_mode", "off") == "on":
             from kernel_stateframe_get_sure import scrub_request
@@ -22878,25 +22878,25 @@ class StateFrameRuntime:
                 tools[:] = clean_tools
             else:
                 tools = clean_tools
-        # r44 P1-4: under continuation composition a queued native-batch sibling is
+        # earlier run P1-4: under continuation composition a queued native-batch sibling is
         # dispatched from a provider_request=False prepare whose menu the batch froze
         # (kernel_native_tools.menu_for_pending).  Re-project that menu too, or a
         # window that closed mid-batch keeps read/probe on the dispatch menu while
-        # the lock refuses them (the r43 347/350 ldev_01 + ldev_11 replay class).
+        # the lock refuses them (the earlier run 347/350 reviewer + reviewer replay class).
         continuation_composed = (
             getattr(self, "stateframe_greenlock_menu_authority_continuation_mode", "off") == "on"
             and getattr(self, "continuation", None) is not None)
         if ((provider_request or continuation_composed) and isinstance(tools, list)
                 and getattr(self, "stateframe_greenlock_menu_authority_mode", "off") == "on"
                 and getattr(self, "_greenlock_menu_authority_surface", None) is not None):
-            # r43: the FINAL tool-set transform on the wire.  Closing the step,
+            # earlier run: the FINAL tool-set transform on the wire.  Closing the step,
             # rendering (third identical terminal render), the model router, budget
             # compaction and the readiness rewrite all run above and may change the
             # tools or the lock state; re-project in place so the provider receives
             # exactly decide()'s allow-set.  Below this point tools are only
             # reordered (cache layout) or measured, never added or removed.
             from kernel_greenlock_menu_authority import empty_menu_outcome, project_request_menu
-            # r47 lane 4 M6 (STATEFRAME_BOOT_READ): the boot menu was composed while the
+            # earlier run lane 4 M6 (STATEFRAME_BOOT_READ): the boot menu was composed while the
             # continuation gate allowed only done, so read never reached this projection.
             # Offer it upstream on the boot request only; the authority still decides.
             _boot_read_added = False
@@ -22936,7 +22936,7 @@ class StateFrameRuntime:
                 and getattr(self, "stateframe_tokenlab_stall_breaker_mode", "off") == "on"):
             from kernel_tokenlab_stall_breaker import apply_menu as apply_stall_menu
             tools[:] = apply_stall_menu(self, tools)
-        # r47 lane 1 L4 (STATEFRAME_DECIDE_NOTICE_GATED): the tool set is final above;
+        # earlier run lane 1 L4 (STATEFRAME_DECIDE_NOTICE_GATED): the tool set is final above;
         # withhold the [Decisive factor] "use decide" notice when decide is not offered.
         if (provider_request and getattr(self, "decisive_factor", None) is not None
                 and isinstance(tools, list)):
@@ -22960,7 +22960,7 @@ class StateFrameRuntime:
             prepared = self._apply_rulebook_mechanisms(
                 prepared, provider_request=provider_request)
         if passive_appended_content is not None:
-            # r44 F4 R2: the passive block is an unverified, optional sidecar that is
+            # earlier run F4 R2: the passive block is an unverified, optional sidecar that is
             # appended after selection/fit.  It may never be the reason a request
             # crosses frame_ceiling (F4: RENDER_OVERFLOW still dispatched; frame arm:
             # degradation compacting StateFrame).  If the request with it exceeds the
@@ -23278,7 +23278,7 @@ class StateFrameRuntime:
                     overflow = None
                 else:
                     overflow = {**original_overflow, "required_tokens": estimate}
-        # r42 resolution: hybrid crossing may replace the whole request, so it runs first;
+        # earlier run resolution: hybrid crossing may replace the whole request, so it runs first;
         # the model router then validates the exact final body (no-op unless ROUTER=on).
         if getattr(self, "stateframe_hybrid_mode", "off") == "on" and provider_request:
             prepared, estimate, overflow, f4_on = self._hybrid_compaction(
@@ -23311,7 +23311,7 @@ class StateFrameRuntime:
         # the request is already over the hard ceiling; the next request then
         # retries the first-request cue because it was not delivered.
         #
-        # Fix (post-review r44): self.boot_packet is also built (mode
+        # Fix (post-review earlier run): self.boot_packet is also built (mode
         # forced to "boot") when frame budgeting owns the packet path even
         # though the STATEFRAME_BOOT switch is off -- that packet is
         # consumed separately by kernel_frame_budget.enforce_request_budget
@@ -23348,7 +23348,7 @@ class StateFrameRuntime:
         # request carry the same registered ON/OFF metadata.  The block is
         # model-visible only in the ON arm; the default/off path never calls
         # the renderer and remains byte-identical.
-        # Fix (post-review r44, finding 5): appending unconditionally broke
+        # Fix (post-review earlier run, finding 5): appending unconditionally broke
         # the final-message contract whenever STATEFRAME_STATE_PLACEMENT=end
         # (StateFrame no longer last) or STATEFRAME_THINK_PREFILL=on (the
         # assistant reasoning continuation no longer last) -- both fail
@@ -23531,7 +23531,7 @@ class StateFrameRuntime:
                     "available_tokens": error.available_tokens,
                 }
         # The perpetual-soak sidecar is deliberately a late, opt-in hook:
-        # every ordinary preparation keeps the r43 byte path, while an
+        # every ordinary preparation keeps the earlier run byte path, while an
         # enabled run records the worker/task epoch in the request that will
         # actually be presented to the provider.
         soak_rendered = False
@@ -24249,7 +24249,7 @@ class StateFrameRuntime:
             # mutation, including grounded-intake notices and lean hygiene.
             # The drift assertion remains strict; its snapshot now describes
             # the bytes actually sent to the provider.
-            # r2b 934/935: the completion route is the single authority for the menu; align before freezing.
+            # earlier run 934/935: the completion route is the single authority for the menu; align before freezing.
             from kernel_completion_owner import align_tools_to_completion_route
             before_route_names = [
                 str(tool.get("function", {}).get("name", ""))
@@ -24832,9 +24832,9 @@ class StateFrameRuntime:
         if provider_request and _ledger_enabled():
             self._journal_ledger_delivery(prepared, capture)
         if provider_request and _r44_any_render_switch(self):
-            # r44 staging (attribution): which r44 blocks reached THIS request, with a token estimate each.  Several
+            # earlier run staging (attribution): which earlier run blocks reached THIS request, with a token estimate each.  Several
             # render mechanisms (hypotheses, working sets, boot sidecar, ...) journaled nothing when they rendered.
-            # Emitted only when an r44 render switch is on, so off arms' journals are unchanged.
+            # Emitted only when an earlier run render switch is on, so off arms' journals are unchanged.
             _r44_rendered = _r44_rendered_blocks(prepared)
             self.journal.emit("r44_blocks_rendered", request_id=capture.request_id,
                               blocks=_r44_rendered, producer="r44_staging_attribution", dispatch=False)
@@ -24842,7 +24842,7 @@ class StateFrameRuntime:
                 and getattr(self, "delivery_contract", None) is not None):
             _note_not_rendered = getattr(self.delivery_contract, "note_not_rendered", None)
             if callable(_note_not_rendered):
-                _note_not_rendered()   # r45 triage: no stale last_prepared
+                _note_not_rendered()   # earlier run triage: no stale last_prepared
         if (not framefit_on and delivery_manifest_rendered
                 and getattr(self, "delivery_contract", None) is not None):
             try:

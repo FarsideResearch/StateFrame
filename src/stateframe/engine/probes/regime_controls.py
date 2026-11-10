@@ -23,7 +23,7 @@ _FURNITURE = (
 
 
 def render_neutral_preamble(target_tokens: int) -> str:
-    """Render deterministic MC-like furniture with no task, target, or solution facts."""
+    """Render deterministic sample project-like furniture with no task, target, or solution facts."""
     if target_tokens <= 0:
         return ""
     target_chars = target_tokens * 4

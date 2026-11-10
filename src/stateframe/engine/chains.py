@@ -88,7 +88,7 @@ def module_to_path(module: str, files: dict) -> str | None:
 
     Tolerates the package prefix being present or absent (`app.services.x` vs
     `services/x.py`) by stripping leading components until something matches —
-    the AHA corpus is rooted at backend/app but imports itself as `app.*`.
+    the sample project corpus is rooted at backend/app but imports itself as `app.*`.
     """
     if not module:
         return None
@@ -394,7 +394,7 @@ def seam_violations(manifest: dict, files: dict) -> list:
         if r["name"] == "*":
             continue
         # `from pkg import submod` is a SUBMODULE import, not a name lookup in
-        # pkg/__init__.py — measured as 53/93 of the AHA false positives.
+        # pkg/__init__.py — measured as 53/93 of the sample project false positives.
         if module_to_path(f"{r['module']}.{r['name']}", files):
             continue
         if r["name"] not in defs_in_file[target]:
@@ -450,7 +450,7 @@ def seam_violations(manifest: dict, files: dict) -> list:
             continue
         # A class inheriting from something OUTSIDE the corpus (pydantic
         # BaseModel, SQLAlchemy Base, Enum...) has an unknown attribute surface,
-        # so no absence is evidence — fail open. This was 37/93 of the AHA
+        # so no absence is evidence — fail open. This was 37/93 of the sample project
         # false positives (`.model_validate` on a pydantic model).
         inherited, opaque, seen, queue = set(), False, {cls}, [cls]
         while queue:

@@ -1,6 +1,6 @@
-"""r41b: a live counterexample on the current revision challenges ``done`` once.
+"""earlier run: a live counterexample on the current revision challenges ``done`` once.
 
-r41 dissection (``dissection-r41-unchallenged-done.md``): first-green disclosure
+earlier run dissection (``dissection-earlier run-unchallenged-done.md``): first-green disclosure
 showed open counterexample IDs to the model (broad collection), but admission
 only refused ``done`` when one of the narrower gates (requirement alignment's
 literal-repairable filter, readiness blockers, green-lock repair, get-sure)
@@ -185,7 +185,7 @@ def _disclosed_rows(runtime: object, frame: Mapping[str, object] | None) -> list
 def unverified_rows(runtime: object, frame: Mapping[str, object] | None = None) -> list[dict]:
     """Disclosed-but-host-demoted checks on the current revision (INVALID_BINDING,
     UNBOUND_OBSERVABLE, not_entailed, ...).  They feed the SAME one-shot done challenge as class
-    UNVERIFIED, never COUNTEREXAMPLE (r41 dissection: winners were pushed back once on them)."""
+    UNVERIFIED, never COUNTEREXAMPLE (earlier run dissection: winners were pushed back once on them)."""
     return _disclosed(runtime, frame)[1]
 
 
@@ -202,7 +202,7 @@ _REASON_TEXT = {
 # Tools the green-lock terminal menu keeps beside ``done`` while the unverified-check window is
 # open (orchestrator option 1).  ``edit`` stays out: first-green rules decide edits.
 UNVERIFIED_WINDOW_TOOLS = frozenset({"read", "probe"})
-# Live smokescratch-r41b-ldev_01 (1481d2): with the window open and no done yet, the model spent
+# Live smokescratch-earlier run-reviewer (1481d2): with the window open and no done yet, the model spent
 # all 24 responses on read/probe and never called done.  The window is bounded per revision:
 # after this many window actions without a done it closes (done-only -> sole done submits).
 UNVERIFIED_WINDOW_ACTION_CAP = 2
@@ -232,7 +232,7 @@ def unverified_window_open(runtime: object, frame: Mapping[str, object] | None =
     revision's one-shot challenge is unspent and the run-wide cap/budget allows one.
 
     Once the challenge is spent (or the cap is hit) the terminal menu returns to done-only,
-    and "a done-only menu always submits" (r39 deadlock protection) takes over unchanged."""
+    and "a done-only menu always submits" (earlier run deadlock protection) takes over unchanged."""
     if not enabled(runtime):
         return False
     try:
@@ -309,7 +309,7 @@ def unverified_detail(rows: Sequence[Mapping[str, object]], runtime: object = No
 
 def label_ids(ids: Sequence[str], witnesses: Sequence[Mapping[str, object]]) -> str:
     """Model-visible disclosure body: real counterexamples and unverified checks are labelled
-    separately (the r41 disclosure called host-demoted check problems "open counterexamples")."""
+    separately (the earlier run disclosure called host-demoted check problems "open counterexamples")."""
     import json as _json
     live, unverified = classify_disclosed(ids, witnesses)
     parts = [f"open counterexamples {_json.dumps([row['check_id'] for row in live], ensure_ascii=False, separators=(',', ':'))}"]

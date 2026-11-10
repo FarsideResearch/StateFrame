@@ -20,7 +20,7 @@ from tools.immediate_baseline import baseline_checkout  # noqa: F401  (pytest fi
 
 ROOT = Path(__file__).resolve().parents[1]
 pytestmark = pytest.mark.host_sandbox
-# Per scripted run. tiny_site measured ~420 s solo for the whole parity test on the foundry host;
+# Per scripted run. tiny_site measured ~420 s solo for the whole parity test on the Linux host;
 # a 240 s per-call limit flaked under full-suite load, so allow ~1.5x the solo time per call.
 RUN_TIMEOUT_SECONDS = 600
 

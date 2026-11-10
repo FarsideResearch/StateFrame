@@ -663,7 +663,7 @@ def collect_counterexamples(runtime: object | None = None,
     seen: set[tuple[str, str, str]] = set()
     result: list[dict[str, object]] = []
     sources = list(_receipt_sources(runtime, frame))
-    # r38: a LATER current-revision PASS of the same check closes an earlier
+    # earlier run: a LATER current-revision PASS of the same check closes an earlier
     # counterexample (same rule as the open-obligation policy), so every consumer
     # of this collector agrees on which observations are still live.
     closed_after: dict[str, int] = {}
@@ -780,7 +780,7 @@ def collect_counterexamples(runtime: object | None = None,
             except (ImportError, TypeError, ValueError):
                 pass
         if os.environ.get("STATEFRAME_NAMED_LAYER_REPAIR", "off").strip().lower() == "on":
-            # autopsy-a3b-r44c-ldev01 A: a resolved entry point that rejects a ticket-literal call is a
+            # autopsy-a3b-earlier run-ldev01 A: a resolved entry point that rejects a ticket-literal call is a
             # repairable SIGNATURE_GAP, not INVALID_BINDING.  Unresolved/unaligned rows are unchanged.
             from kernel_named_layer_repair import apply_signature_gap
             row = apply_signature_gap(row, receipt)

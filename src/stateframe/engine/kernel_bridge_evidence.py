@@ -63,6 +63,6 @@ def final_capture_index(loop_step: int, reported_steps: int) -> int:
     """Index for the final/exception candidate capture: strictly past every in-loop capture (keyed by loop step).
 
     In budget-unit=response mode the reported step count is a different quantity and could reuse an already
-    captured index with different contents (r35d: 'candidate boundary was captured twice with different contents').
+    captured index with different contents (earlier run: 'candidate boundary was captured twice with different contents').
     """
     return max(int(loop_step) + 1, int(reported_steps))

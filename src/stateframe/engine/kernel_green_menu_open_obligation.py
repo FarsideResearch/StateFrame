@@ -345,7 +345,7 @@ def counterexample_ids(runtime: object | None = None,
 def blocking_counterexamples(runtime: object | None = None,
                              frame: Mapping[str, object] | None = None
                              ) -> tuple[OpenCounterexample, ...]:
-    """Open counterexamples that BLOCK submission (r38 convergence).
+    """Open counterexamples that BLOCK submission (earlier run convergence).
 
     The counterexample-visibility classifier is the single validity authority:
     a check it demotes to advisory (unbound entry point, self-contradicting,

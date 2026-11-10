@@ -512,7 +512,7 @@ def checklist(runtime: object, frame: Mapping[str, object] | None = None) -> tup
 def _revision(runtime: object, explicit: object = None) -> str:
     if explicit not in (None, ""):
         return str(explicit)
-    # r40 review: the green lock's _green_revision is the revision at which green
+    # earlier run review: the green lock's _green_revision is the revision at which green
     # was OBSERVED (stale after an edit); the lock's own current product revision
     # is authoritative when present.
     current = getattr(getattr(runtime, "green_lock", None), "_current_revision", None)
@@ -787,7 +787,7 @@ def done_decision(runtime: object, *, revision: object = None, admissible: bool 
         budget = None
     open_rows = _aligned_violations(runtime, frame, revision=current)
     if not open_rows and admissible:
-        # r41b: the aligned-clause filter is narrower than "a host check found a
+        # earlier run: the aligned-clause filter is narrower than "a host check found a
         # live counterexample on this revision"; with the switch on, those rows
         # get the same one-shot budgeted challenge (kernel_live_counterexample_challenge).
         try:
@@ -1054,7 +1054,7 @@ def ground_verdicts(rows: Sequence[Mapping[str, object]], runtime: object,
                     frame: Mapping[str, object] | None = None) -> list[dict[str, object]]:
     """observable binding UNBOUND_OBSERVABLE: a VIOLATED verdict is rendered only when its
     witness is a public test result or a ticket-literal-aligned violation. A host
-    check asserting an expectation the ticket does not state (ldev_09
+    check asserting an expectation the ticket does not state (reviewer
     ``late_fee_cents`` vs ticket ``fee_cents``) is UNKNOWN: it never blocks and
     never passes."""
     oracle_grounding = False

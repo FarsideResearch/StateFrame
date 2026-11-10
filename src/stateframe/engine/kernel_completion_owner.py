@@ -1056,7 +1056,7 @@ def postgreen_done_offer(runtime: object) -> tuple[bool, str]:
     except (ImportError, AttributeError, OSError, RuntimeError, TypeError, ValueError):
         return False, "UNKNOWN"
     # An unknown parent is not proof of an applied product edit. This keeps the
-    # pre-edit terminal path closed while the live r2e unchanged-parent case
+    # pre-edit terminal path closed while the live earlier run unchanged-parent case
     # remains explicitly suppressed.
     if not changed or not (_green_current(runtime) or current_public_verdict_is_green(runtime)):
         return False, str(revision or "UNKNOWN")[:180]
@@ -2909,7 +2909,7 @@ def _declared_repair_state(runtime: object) -> dict[str, object] | None:
     if not isinstance(current, dict) or current.get("digest") != digest:
         cue = bool(_DECLARED_REPAIR_CUE_RE.search(text)
                    and not _DECLARED_REPAIR_RETRACTION_RE.search(text))
-        # 10-06 batch 906 (sample task oracle, seq 3302/3316/3359): after hunk 1 the
+        # 10-06 prior run (sample task oracle, event sequence/3316/3359): after hunk 1 the
         # public check was green, the green lock DEFERRED for open requirements
         # [obl-000, obl-001, R1, R2], yet the terminal choice collapsed the menu to
         # ``done`` and refused hunks 2-3.  An admitted product edit made during the
@@ -5815,7 +5815,7 @@ def _contract_route(runtime: object, messages: object, tool_names: Sequence[str]
 def align_tools_to_completion_route(runtime: object, tools: Sequence[object]) -> list[object]:
     """Make the submitted tool list BE the completion route's admitted schemas (one decision -> prose, menu, dispatch).
 
-    r2b live 934/935 (10-08): the route decided its actions, but the request's tool surface was still built by the
+    earlier run live 934/935 (10-08): the route decided its actions, but the request's tool surface was still built by the
     older terminal-menu path (str_replace/read/read_check_receipt, the J928 menu), so the new identity invariant fired
     and killed both runs at prepare(). The decision is the authority: when it routes ACTION/UNCERTIFIED_SUBMIT with
     concrete schemas, those ARE the menu. Other routes (and no runtime) leave the tools untouched.
@@ -5843,7 +5843,7 @@ def align_tools_to_completion_route(runtime: object, tools: Sequence[object]) ->
         return original
     aligned = [copy.deepcopy(dict(schema)) for schema in decision.tool_schemas]
     aligned_names = tuple(_tool_name(tool) for tool in aligned)
-    # Live benchmark r2AK (batch 1025, seq 6305): green with R1-R3 open, the ACTION route
+    # Live benchmark earlier run (prior run, event sequence): green with R1-R3 open, the ACTION route
     # aligned [edit, str_replace, read, ...] down to [read, read_check_receipt, done],
     # undoing owner_green_open_repair_kept one event later; with a declared file still
     # unedited the model could only re-read (read loop to the cap). While green evidence
@@ -5885,7 +5885,7 @@ def align_tools_to_completion_route(runtime: object, tools: Sequence[object]) ->
 
 def _route_surface_strict() -> bool:
     """STATEFRAME_COMPLETION_ROUTE_STRICT=on makes a route/menu identity violation a hard contract error (tests, lab).
-    Default OFF in live: r2b 934/935 died at prepare() on it (green-lock menu authority advertised tools the final-wire
+    Default OFF in live: earlier run 934/935 died at prepare() on it (green-lock menu authority advertised tools the final-wire
     composer strips). A run must never die on a host projection mismatch; it is journaled as a finding instead."""
     return os.environ.get("STATEFRAME_COMPLETION_ROUTE_STRICT", "off").strip().lower() == "on"
 
@@ -5926,7 +5926,7 @@ def _completion_route_surface_error(
     from kernel_done_readiness_authority import cached_decision
     try:
         # The memo must key on the shared SUBMIT decision: the uncached body reads it, so a cached
-        # answer computed under an older decision would be stale (BUILD r2GU merge, W2 x DONEWIRE).
+        # answer computed under an older decision would be stale (BUILD earlier run merge, W2 x DONEWIRE).
         shared_done_decision = cached_decision(runtime)
         decision_key = (id(shared_done_decision), getattr(shared_done_decision, "decision", None))
         normalized_names = tuple(str(name) for name in tool_names)
@@ -5967,7 +5967,7 @@ def _completion_route_surface_error_uncached(
                 or done_routes[0].get("route") != "UNCERTIFIED_SUBMIT"):
             return "shared done readiness decision is missing from the completion route"
     # HOST_BLOCKER carries no actions by definition; the identity invariant applies to routes that advertise actions
-    # (r2b 934/935: a blocker route vs a live working menu was a guaranteed false violation).
+    # (earlier run 934/935: a blocker route vs a live working menu was a guaranteed false violation).
     if decision.route not in {"ACTION", "UNCERTIFIED_SUBMIT"}:
         return None
     try:
@@ -7661,7 +7661,7 @@ def terminal_tool_menu(runtime: object, tools: Sequence[Mapping[str, object]]) -
             selected,
             block_id="menu:" + _digest(_contract_tools(selected)),
         )
-        # 10-06 batch 839: when no owner branch narrowed the menu, the dispatch surface was left
+        # 10-06 prior run: when no owner branch narrowed the menu, the dispatch surface was left
         # unregistered, so kernel_request_budget saw no protected completion surface and applied
         # its ordinary 5-tool cap -> every wire offered only {authored_check, done, edit,
         # file_create, read}; str_replace and run_tests were never offered and the frozen

@@ -77,7 +77,7 @@ def _turn(runtime: object, explicit: object = None) -> int:
 
 
 def _revision(runtime: object, frame: Mapping[str, object] | None) -> str:
-    # Fix (post-review r44, finding 1): the ordinary live path never sets any
+    # Fix (post-review earlier run, finding 1): the ordinary live path never sets any
     # of these top-level fields on `frame` or `runtime` -- `binding()` nests
     # the real value under `product_revision` inside its OWN dict, and the
     # live frame only carries `artifact_revisions` (a dict of hashes, not a
@@ -261,7 +261,7 @@ def select_notices(runtime: object, notices: Sequence[object], *,
     can still be delivered.  Advisory candidates stop repeating after two
     unchanged exposures in one product revision.
 
-    Fix (post-review r44, finding 2): selection is PROVISIONAL for
+    Fix (post-review earlier run, finding 2): selection is PROVISIONAL for
     ``provider_request=False`` calls (queued native actions rendered for
     logging, never actually dispatched to the model). Only a
     ``provider_request=True`` call commits exposure/history -- two

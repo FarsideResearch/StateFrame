@@ -523,7 +523,7 @@ def render_remaining_sites(runtime: object) -> str:
             return ""
 
         # Inventory each literal separately and keep only sites whose line holds the literal
-        # verbatim. On b1433 c10 the fuzzy "HTTP/1.1" pattern matched 39 unrelated lines,
+        # verbatim. On earlier run c10 the fuzzy "HTTP/1.1" pattern matched 39 unrelated lines,
         # hit the shared site cap and blanked the panel, http2=True included. A noisy literal now drops
         # only itself.
         grouped: dict[str, list[source_window.Site]] = {}

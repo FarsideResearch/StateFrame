@@ -1,6 +1,6 @@
 """Offer solver check authoring while host obligations lack any check.
 
-Measured (batch 800 sample task, seq 591/869): public tests PASS but host obligations
+Measured (prior run sample task, event sequence/869): public tests PASS but host obligations
 sat at ``UNKNOWN / MISSING_CHECKS`` and the continuation gate withheld
 ``authored_check`` / ``read_check_receipt``, so the solver could only submit
 uncertified. This module is the single predicate the continuation uses to admit

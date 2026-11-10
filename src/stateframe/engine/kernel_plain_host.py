@@ -339,7 +339,7 @@ def capability_preflight_argv(root: Path, row: Mapping[str, object]) -> list[str
 
     Stage 6 runs its child-capability canary lazily, only inside a declared-public-selector
     pytest command, while every check leaves a test-lock row. A plain run whose model never
-    names a public test file (batch 1076) therefore had lock rows but no canary receipt and
+    names a public test file (prior run) therefore had lock rows but no canary receipt and
     settled ERROR/EVIDENCE_INCOMPLETE, dropping a salvage-gradable candidate.
     """
     paths = row.get("public_check_paths")
