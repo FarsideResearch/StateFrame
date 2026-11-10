@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Tests: a guard now checks every terminal authority error against stale, missing and fresh freshness facts, so a completion receipt can never be accepted while its freshness is unknown.
 - Plain-loop request composition escapes marker-leading assistant, tool, and repository text without mutating stored history or changing marker-free requests.
 - A run no longer stops when a model reply or a file begins with StateFrame's state marker; such text is kept as data.
 - Fixed: A test selector refused before dispatch now returns its refusal to the model and lets the run continue, instead of stopping with CONTINUATION_BLOCKED.
