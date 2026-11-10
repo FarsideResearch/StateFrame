@@ -12,6 +12,7 @@ import concurrent.futures as cf
 from contextlib import nullcontext
 import hashlib
 import json
+import logging
 import os
 import pathlib
 import re
@@ -64,6 +65,52 @@ else:  # Direct historical script entrypoint.
     )
 
 POC = pathlib.Path(__file__).resolve().parents[1]
+logger = logging.getLogger(__name__)
+
+
+def _record_intake_orientation_failure(
+    error: BaseException, step: str, journal: object,
+) -> None:
+    """Record safe failure metadata without rendering the exception."""
+    error_type = type(error)
+    exc_type = "<unknown>"
+    try:
+        candidate_name = type.__dict__["__name__"].__get__(error_type, type)
+        if type(candidate_name) is str:
+            exc_type = "<invalid>"
+            if re.fullmatch(r"^[A-Za-z_][A-Za-z0-9_]{0,99}$", candidate_name) is not None:
+                exc_type = candidate_name
+    except BaseException:  # noqa: BLE001 - this guards only the built-in type slot descriptor
+        pass
+    errno_value: int | None = None
+    try:
+        error_mro = type.__dict__["__mro__"].__get__(error_type, type)
+        if any(base is OSError for base in error_mro):
+            # Invoke the built-in descriptor directly; an OSError subclass may
+            # override `errno` with a property that runs arbitrary code.
+            candidate = OSError.errno.__get__(error)
+            if type(candidate) is int:
+                errno_value = candidate
+    except BaseException:  # noqa: BLE001 - diagnostics must never replace the intake failure
+        errno_value = None
+
+    try:
+        logger.warning(
+            "NAVBASICS intake orientation failed: exc_type=%s step=%s errno=%s",
+            exc_type, step, errno_value,
+        )
+    except Exception:  # noqa: BLE001 - ordinary logging failures must not replace intake handling
+        pass
+    try:
+        journal.emit(
+            "intake_orientation_failed",
+            exc_type=exc_type,
+            step=step,
+            errno=errno_value,
+        )
+    except Exception:  # noqa: BLE001 - ordinary journal failures must not stop request preparation
+        pass
+
 sys.path.insert(0, str(POC))
 sys.path.insert(0, str(POC / "probes"))
 import kernel_py39_compat  # noqa: E402,F401
@@ -6396,16 +6443,25 @@ def work(d, *, resume=None):
                         f"The suspect function is `{fn}` in `{d['rel']}`.")
         if _real04_target_metadata:
             _orientation += "\n\n" + _real04_target_metadata
+        # This buffer also owns failures from request preparation, which happens
+        # before StateFrameRuntime creates the append-only run journal.
+        _wiring_journal = _PendingWiringJournal()
+        _intake_step = "import"
         try:
             from kernel_nav_basics import append_intake_orientation
             from kernel_repo_intel import intake_orientation
+            _intake_step = "selectors"
             _nav_selectors = tuple(_public_check_ids(d, fn))
+            _intake_step = "target_path"
             _target_relative = (target.relative_to(root).as_posix()
                                 if target is not None else str(d.get("rel", "")))
+            _intake_step = "intake_orientation"
             _intake_orientation = intake_orientation(
-                root, target_path=_target_relative, symbol=fn, selectors=_nav_selectors)
-        except (ImportError, OSError, TypeError, ValueError):
+                root, target_path=_target_relative, symbol=fn, selectors=_nav_selectors,
+                journal=_wiring_journal)
+        except (ImportError, OSError, TypeError, ValueError) as _error:
             _intake_orientation = ""
+            _record_intake_orientation_failure(_error, _intake_step, _wiring_journal)
         msgs = [{"role": "system", "content": _system},
                 {"role": "user", "content":
                     f"Bug report: {brief}\n\n{_orientation}\n\n"
@@ -6816,7 +6872,6 @@ def work(d, *, resume=None):
         # becomes a tripwire; deltas demand investigation).
         # r2b: organs are wired BEFORE StateFrameRuntime exists (measurement is None here); buffer their state events
         # and flush them into the run journal right after the runtime is constructed (930/931 startup crash).
-        _wiring_journal = _PendingWiringJournal()
         _expectation_wiring = _wire_expectation_ledger(_wiring_journal)
         bolt.expect = _expectation_wiring.value
         if _expectation_wiring.effective == "failed":
@@ -7086,19 +7141,27 @@ def work(d, *, resume=None):
             temperature=TEMPERATURE, source_resolver=fn_src,
             step_limit=_budget.tool_attempt_limit,
             multi_file=multifile, edit_contract=_edit_contract, workspace=continuation_workspace, resume=resume)
-        if d.get("runner_kind") == "generic" and not d.get("test_command") and resume is None:
-            measurement._authored_check_parent_binding = measurement.binding()
-        if isinstance(fixture_initial_src, str) and isinstance(target, pathlib.Path):
-            # Seed only after parent capture to reproduce a host/source divergence
-            # that has no corresponding StepLedger edit in the current run.
-            target.write_text(fixture_initial_src, encoding="utf-8")
-            refresh_view = getattr(measurement, "current_view", None)
-            if callable(refresh_view):
-                refresh_view("external")
-            invalidate_binding = getattr(measurement, "_invalidate_binding_cache", None)
-            if callable(invalidate_binding):
-                invalidate_binding()
-            measurement.prepared_binding = measurement.binding()
+        try:
+            if d.get("runner_kind") == "generic" and not d.get("test_command") and resume is None:
+                measurement._authored_check_parent_binding = measurement.binding()
+            if isinstance(fixture_initial_src, str) and isinstance(target, pathlib.Path):
+                # Seed only after parent capture to reproduce a host/source divergence
+                # that has no corresponding StepLedger edit in the current run.
+                target.write_text(fixture_initial_src, encoding="utf-8")
+                refresh_view = getattr(measurement, "current_view", None)
+                if callable(refresh_view):
+                    refresh_view("external")
+                invalidate_binding = getattr(measurement, "_invalidate_binding_cache", None)
+                if callable(invalidate_binding):
+                    invalidate_binding()
+                measurement.prepared_binding = measurement.binding()
+        except BaseException:
+            try:
+                _wiring_journal.flush(measurement.journal)
+            except BaseException:
+                # Preserve the post-construction failure even if best-effort journaling fails.
+                pass
+            raise
         _wiring_journal.flush(measurement.journal)
         if _hook_wiring_for_run is not None:
             _hook_wiring_for_run.bind(root, d, baseline_tests, _shell, measurement)

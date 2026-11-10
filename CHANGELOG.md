@@ -2,6 +2,8 @@
 
 ## 0.4.40 (2026-11-10)
 
+- NAVBASICS intake orientation no longer fails silently: when building the intake orientation raises, the engine logs a warning and journals one `intake_orientation_failed` event (exception type, failing step, errno) instead of quietly dropping the block, so intermittent first-request differences can be traced to a cause.
+- The repo map's HEAD lookup now keeps its documented contract: on an I/O, value or git-object failure it returns an empty commit (uncached map) and journals `repo_map_commit_sha_unavailable` with the exception type and errno, instead of escaping into the intake orientation.
 - Release guard suite runs faster: the source-scanning guards share one cached parse of the tree (keyed by path, mtime and size) instead of re-reading every file per test; all assertions, scan roots and planted controls are unchanged (test-only).
 - Hosted request metering: the byte-fallback cold estimate now has a raise-only density floor computed from the decoded content (digits, base64/hex runs, dense code, punctuation, non-ASCII), so long numbers, base64, hex and dense JSON or code are no longer underestimated on endpoints without exact tokenization; ordinary prose estimates are unchanged.
 - Tests: a guard now checks every terminal authority error against stale, missing and fresh freshness facts, so a completion receipt can never be accepted while its freshness is unknown.
