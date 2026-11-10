@@ -270,8 +270,12 @@ def remaining_site_inventory(runtime: object) -> list[dict[str, object]]:
     if root_value is None:
         raise ValueError("remaining-site workspace root is unavailable")
     root = Path(root_value).resolve(strict=True)
+    from kernel_obligation_assess import UnavailableEvidence
+    editable = source_window.editable_product_paths(runtime)
+    if isinstance(editable, UnavailableEvidence):
+        return []
     paths = tuple(
-        path for path in source_window.editable_product_paths(runtime)
+        path for path in editable
         if all(character.isprintable() for character in path)
     )
     if not paths:
@@ -286,7 +290,10 @@ def remaining_site_inventory(runtime: object) -> list[dict[str, object]]:
     rows: list[tuple[int, int, int, dict[str, object]]] = []
     seen: set[tuple[str, int, str]] = set()
     for literal in patterns:
-        sites = source_window.literal_site_inventory(root, paths, (literal,))
+        sites = source_window.literal_site_inventory(
+            root, paths, (literal,), journal=getattr(runtime, "journal", None))
+        if isinstance(sites, UnavailableEvidence):
+            return []
         # A broad literal is not allowed to consume the shared inventory budget.
         if len(sites) >= source_window._MAX_SITES:
             continue
@@ -331,8 +338,12 @@ def current_workspace_revision(runtime: object) -> str | None:
         if root_value is None:
             return None
         root = Path(root_value).resolve()
+        from kernel_obligation_assess import UnavailableEvidence
+        editable = source_window.editable_product_paths(runtime)
+        if isinstance(editable, UnavailableEvidence):
+            return None
         paths = tuple(
-            path for path in source_window.editable_product_paths(runtime)
+            path for path in editable
             if isinstance(path, str) and path and all(character.isprintable() for character in path)
         )
         if not paths:
@@ -362,8 +373,12 @@ def inventory_ticket_sites(runtime: object) -> tuple[TicketSite, ...] | None:
         if root_value is None:
             return None
         root = Path(root_value).resolve()
+        from kernel_obligation_assess import UnavailableEvidence
+        editable = source_window.editable_product_paths(runtime)
+        if isinstance(editable, UnavailableEvidence):
+            return None
         paths = tuple(
-            path for path in source_window.editable_product_paths(runtime)
+            path for path in editable
             if isinstance(path, str) and path and all(character.isprintable() for character in path)
         )
         if not paths:
@@ -380,7 +395,10 @@ def inventory_ticket_sites(runtime: object) -> tuple[TicketSite, ...] | None:
         resolved_patterns = 0
         sites: set[TicketSite] = set()
         for literal in patterns:
-            literal_sites = source_window.literal_site_inventory(root, paths, (literal,))
+            literal_sites = source_window.literal_site_inventory(
+                root, paths, (literal,), journal=getattr(runtime, "journal", None))
+            if isinstance(literal_sites, UnavailableEvidence):
+                return None
             if len(literal_sites) >= source_window._MAX_SITES:
                 continue
             resolved_patterns += 1
@@ -489,8 +507,12 @@ def render_remaining_sites(runtime: object) -> str:
         if root_value is None:
             return ""
         root = Path(root_value).resolve()
+        from kernel_obligation_assess import UnavailableEvidence
+        editable = source_window.editable_product_paths(runtime)
+        if isinstance(editable, UnavailableEvidence):
+            return ""
         paths = tuple(
-            path for path in source_window.editable_product_paths(runtime)
+            path for path in editable
             if all(character.isprintable() for character in path)
         )
         if not paths:
@@ -506,7 +528,10 @@ def render_remaining_sites(runtime: object) -> str:
         # only itself.
         grouped: dict[str, list[source_window.Site]] = {}
         for literal in patterns:
-            literal_sites = source_window.literal_site_inventory(root, paths, (literal,))
+            literal_sites = source_window.literal_site_inventory(
+                root, paths, (literal,), journal=getattr(runtime, "journal", None))
+            if isinstance(literal_sites, UnavailableEvidence):
+                return ""
             if len(literal_sites) >= source_window._MAX_SITES:
                 continue
             grouped[literal] = [

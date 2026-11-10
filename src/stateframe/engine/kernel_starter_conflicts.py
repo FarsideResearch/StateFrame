@@ -25,8 +25,11 @@ import hashlib
 import json
 import os
 import re
+import inspect
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from pathlib import Path
+
+from kernel_obligation_assess import UnavailableEvidence, _unavailable_evidence
 
 
 MODE_ENV = "STATEFRAME_STARTER_CONFLICTS"
@@ -617,7 +620,8 @@ def detect_starter_conflicts(
     return tuple(facts)
 
 
-def workspace_snapshot(root: str | Path, *, binding: object = None) -> str:
+def workspace_snapshot(root: str | Path, *, binding: object = None,
+                       journal: object = None) -> str | UnavailableEvidence:
     """Hash the visible starter/current checkout without cache noise."""
     root = Path(root).resolve()
     rows: list[dict[str, object]] = []
@@ -632,21 +636,39 @@ def workspace_snapshot(root: str | Path, *, binding: object = None) -> str:
             try:
                 content = path.read_bytes()
             except OSError:
-                continue
+                return _unavailable_evidence(journal, "STARTER_SNAPSHOT_UNAVAILABLE",
+                                             producer="kernel_starter_conflicts")
             rows.append({"path": relative.as_posix(),
                          "sha256": hashlib.sha256(content).hexdigest(),
                          "size": len(content)})
     return digest({"files": rows, "binding": binding})
 
 
-def _call_runner(runner: Callable, root: Path, checks: Sequence[object], **kwargs) -> tuple[object, ...]:
+def _call_runner(runner: Callable, root: Path, checks: Sequence[object], *,
+                 journal: object = None, **kwargs) -> tuple[object, ...] | UnavailableEvidence:
+    try:
+        signature = inspect.signature(runner)
+    except (TypeError, ValueError):
+        return _unavailable_evidence(journal, "STARTER_RUNNER_UNAVAILABLE",
+                                     producer="kernel_starter_conflicts")
+    if journal is not None and "journal" in signature.parameters:
+        kwargs["journal"] = journal
+    try:
+        signature.bind(root, checks, **kwargs)
+    except TypeError:
+        try:
+            signature.bind(root, checks)
+        except TypeError:
+            return _unavailable_evidence(journal, "STARTER_RUNNER_UNAVAILABLE",
+                                         producer="kernel_starter_conflicts")
+        kwargs = {}
     try:
         result = runner(root, checks, **kwargs)
     except TypeError:
-        # Synthetic runners commonly expose only ``(root, checks)``.  This
-        # adapter does not weaken the receipt rule; it only keeps the pure API
-        # convenient for offline tests.
-        result = runner(root, checks)
+        return _unavailable_evidence(journal, "STARTER_RUNNER_UNAVAILABLE",
+                                     producer="kernel_starter_conflicts")
+    if isinstance(result, UnavailableEvidence):
+        return result
     if isinstance(result, Iterable) and not isinstance(result, (str, bytes, bytearray, Mapping)):
         return tuple(result)
     return (result,) if result is not None else ()
@@ -745,10 +767,14 @@ class StarterConflictTracker:
 
     def refresh_from_root(self, root: str | Path | None = None, *, runner: Callable | None = None,
                           environment: object = None, cache: dict | None = None,
-                          binding: object = None, force: bool = False) -> tuple[StarterConflictFact, ...]:
+                          binding: object = None, force: bool = False,
+                          journal: object = None) -> tuple[StarterConflictFact, ...] | UnavailableEvidence:
         """Run the frozen checks against the current checkout after an edit."""
         root_path = Path(root or self.root or ".").resolve()
-        current_snapshot = workspace_snapshot(root_path, binding=binding)
+        journal = journal if journal is not None else self._emit_callback
+        current_snapshot = workspace_snapshot(root_path, binding=binding, journal=journal)
+        if isinstance(current_snapshot, UnavailableEvidence):
+            return current_snapshot
         if not force and current_snapshot == self.current_snapshot:
             return self.facts
         # Missing ticket/bundle evidence cannot prove that an existing
@@ -762,9 +788,12 @@ class StarterConflictTracker:
                 from kernel_obligation_assess import run_registered_checks
                 runner = run_registered_checks
             except ImportError:
-                return self.facts
+                return _unavailable_evidence(journal, "STARTER_CHECKS_UNAVAILABLE",
+                                             producer="kernel_starter_conflicts")
         kwargs = {"snapshot": current_snapshot, "environment": environment, "cache": cache}
-        receipts = _call_runner(runner, root_path, self.checks, **kwargs)
+        receipts = _call_runner(runner, root_path, self.checks, journal=journal, **kwargs)
+        if isinstance(receipts, UnavailableEvidence):
+            return receipts
         return self.refresh(receipts, snapshot=current_snapshot, revision=current_snapshot)
 
     def frame_facts(self) -> tuple[dict[str, object], ...]:

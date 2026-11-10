@@ -7,6 +7,8 @@ import os
 import re
 from collections.abc import Mapping, Sequence
 
+from kernel_obligation_assess import UnavailableEvidence, _unavailable_evidence
+
 ALLOC_ENV = "STATEFRAME_OWNER_FIRST_ALLOC"
 COORDS_ENV = "STATEFRAME_OWNER_COORDS"
 PRIORITY_ORDER = (
@@ -83,7 +85,25 @@ def _message_category(message: Mapping[str, object], requested_paths: set[str]) 
     return "other"
 
 
-def build_priority_plan(body: Mapping[str, object], runtime: object | None) -> dict[str, object]:
+def _target_path_or_unavailable(runtime: object | None) -> str | None | UnavailableEvidence:
+    from kernel_completion_owner import RequestActionContractError
+
+    try:
+        from kernel_request_source_window import _path_from_runtime
+        target = _path_from_runtime(runtime) if runtime is not None else None
+    except RequestActionContractError:
+        raise
+    except (AttributeError, ImportError, OSError, LookupError, TypeError, ValueError):
+        return _unavailable_evidence(
+            getattr(runtime, "journal", None), "OWNER_FIRST_TARGET_UNAVAILABLE",
+            producer="kernel_owner_first",
+        )
+    return target
+
+
+def build_priority_plan(
+        body: Mapping[str, object], runtime: object | None,
+) -> dict[str, object] | UnavailableEvidence:
     """Capture request priorities and revision-bound requested ranges once."""
     source_plan = getattr(runtime, "_request_source_closure", None)
     source_plan = source_plan if isinstance(source_plan, Mapping) else {}
@@ -93,11 +113,9 @@ def build_priority_plan(body: Mapping[str, object], runtime: object | None) -> d
                  if isinstance(raw_revisions, Mapping) else {})
     requested_paths: list[str] = []
     requested_ranges: list[dict[str, object]] = []
-    try:
-        from kernel_request_source_window import _path_from_runtime
-        target = _path_from_runtime(runtime) if runtime is not None else None
-    except (AttributeError, ImportError, OSError, TypeError, ValueError):
-        target = None
+    target = _target_path_or_unavailable(runtime)
+    if isinstance(target, UnavailableEvidence):
+        return target
     if target:
         requested_paths.append(str(target).replace("\\", "/"))
     units = source_plan.get("units", ())

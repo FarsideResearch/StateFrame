@@ -12,6 +12,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from kernel_evictfix_mode import enabled as evictfix_enabled
+from kernel_obligation_assess import UnavailableEvidence, _unavailable_evidence
 
 
 ACTION_SCHEMA_ENV = "STATEFRAME_ACTION_SCHEMA"
@@ -1399,31 +1400,60 @@ def _structured_edit_site_records(
     return _merge_edit_site_records(found)
 
 
+def _resolve_or_unavailable(operation, *, journal: object, reason_code: str, errors):
+    from kernel_completion_owner import RequestActionContractError
+
+    try:
+        return operation()
+    except RequestActionContractError:
+        raise
+    except errors:
+        return _unavailable_evidence(
+            journal, reason_code, producer="kernel_step_contract",
+        )
+
+
 def _resolve_public_plan_paths(
     sites: Sequence[EditNTurnPlanSite],
     repository_root: object,
-) -> tuple[EditNTurnPlanSite, ...]:
-    """Resolve public plan paths within the active workspace; drop ambiguous basenames."""
+    *, journal: object = None,
+) -> tuple[EditNTurnPlanSite, ...] | UnavailableEvidence:
+    """Resolve public plan paths and return an evidence gap on path I/O failure."""
     if repository_root is None:
         return tuple(sites)
     from pathlib import Path
     from kernel_tool_paths import AmbiguousToolPath, resolve_tool_path
 
-    try:
-        root = Path(repository_root).resolve()
-    except (OSError, RuntimeError, TypeError, ValueError):
-        return ()
-    if not root.is_dir():
+    def resolve_root():
+        root_path = Path(repository_root).resolve()
+        return root_path if root_path.is_dir() else None
+
+    root = _resolve_or_unavailable(
+        resolve_root, journal=journal,
+        reason_code="EDIT_NTURN_PLAN_ROOT_UNAVAILABLE",
+        errors=(OSError, RuntimeError, TypeError, LookupError, ValueError),
+    )
+    if isinstance(root, UnavailableEvidence):
+        return root
+    if root is None:
         return ()
 
     resolved: list[EditNTurnPlanSite] = []
     for site in sites:
-        try:
+        def resolve_site() -> str | None:
             target = resolve_tool_path(root, site.path)
             if not target.exists() and "/" not in site.path:
-                continue
-            relative_path = target.resolve().relative_to(root).as_posix()
-        except (AmbiguousToolPath, OSError, RuntimeError, ValueError):
+                return None
+            return target.resolve().relative_to(root).as_posix()
+
+        relative_path = _resolve_or_unavailable(
+            resolve_site, journal=journal,
+            reason_code="EDIT_NTURN_PLAN_PATH_UNAVAILABLE",
+            errors=(AmbiguousToolPath, OSError, RuntimeError, LookupError, ValueError),
+        )
+        if isinstance(relative_path, UnavailableEvidence):
+            return relative_path
+        if relative_path is None:
             continue
         resolved.append(EditNTurnPlanSite(
             owner=site.owner, path=relative_path, symbol=site.symbol,
@@ -1611,19 +1641,24 @@ def resolve_edit_nturn_sites(
     str_replace_targets: object = None,
     live_config: object = None,
     record_id: object = None,
-) -> EditNTurnSiteResolution:
+    journal: object = None,
+) -> EditNTurnSiteResolution | UnavailableEvidence:
     """Resolve only public model/worker site evidence, preserving plan order and labels."""
     default_record_id = str(record_id or "")
     text_plan_rows = _resolve_public_plan_paths(
-        _model_plan_site_records(model_plan_text), repository_root,
+        _model_plan_site_records(model_plan_text), repository_root, journal=journal,
     )
+    if isinstance(text_plan_rows, UnavailableEvidence):
+        return text_plan_rows
     structured_plan_rows = _resolve_public_plan_paths(
         _structured_edit_site_records(
             model_plan_sites,
             keys=("sites", "planned_sites", "files", "targets", "units"),
         ),
-        repository_root,
+        repository_root, journal=journal,
     )
+    if isinstance(structured_plan_rows, UnavailableEvidence):
+        return structured_plan_rows
     structured_paths = {site.path for site in structured_plan_rows}
     plan_rows = _merge_edit_site_records(
         structured_plan_rows,
@@ -1835,7 +1870,7 @@ def start_edit_nturn_episode(
     str_replace_targets: object = None,
     live_config: object = None,
     record_id: object = None,
-) -> tuple["EditNTurnSession | None", EditNTurnSiteResolution | None]:
+) -> tuple["EditNTurnSession | None", EditNTurnSiteResolution | None] | UnavailableEvidence:
     """Resolve and journal one edit episode, using a fixed two-turn fallback as needed."""
     if not enabled:
         return None, None
@@ -1850,7 +1885,10 @@ def start_edit_nturn_episode(
         str_replace_targets=str_replace_targets,
         live_config=live_config,
         record_id=record_id,
+        journal=journal,
     )
+    if isinstance(resolution, UnavailableEvidence):
+        return resolution
     emit_edit_nturn_sites_resolved(journal, resolution)
     if resolution.accepted_count >= 2:
         # R2 defines N as the number of cumulative continuation opportunities, one

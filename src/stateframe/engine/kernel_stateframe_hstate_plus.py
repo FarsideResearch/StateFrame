@@ -1116,7 +1116,11 @@ def tail_blocks(runtime: object, frame: Mapping[str, object], tools: object, *,
 
 def prediction(runtime: object, arguments: Mapping[str, object]) -> dict[str, object]:
     from kernel_stateframe_get_sure import predict_runtime
-    return predict_runtime(runtime, arguments)
+    result = predict_runtime(runtime, arguments)
+    from kernel_obligation_assess import UnavailableEvidence
+    if isinstance(result, UnavailableEvidence):
+        return {"prediction_status": "UNAVAILABLE", "reason_code": result.reason_code}
+    return result
 
 
 __all__ = [

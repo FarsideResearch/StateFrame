@@ -7867,7 +7867,7 @@ def work(d, *, resume=None):
                     and receipt.get("scope") is not None
                     and receipt.get("scope") not in ("diagnostic", "workspace", "full")
                 )
-            _edit_nturn_session, _resolution = start_edit_nturn_episode(
+            edit_nturn_result = start_edit_nturn_episode(
                 True,
                 measurement.journal,
                 repository_root=root,
@@ -7885,6 +7885,10 @@ def work(d, *, resume=None):
                 live_config=d,
                 record_id=request_id,
             )
+            from kernel_obligation_assess import UnavailableEvidence
+            if isinstance(edit_nturn_result, UnavailableEvidence):
+                return
+            _edit_nturn_session, _resolution = edit_nturn_result
             if _edit_nturn_session is not None:
                 _edit_nturn_record_changed_owner(model_action_args, current_step)
                 _queue_edit_nturn_extra(current_step)
@@ -8926,6 +8930,12 @@ def work(d, *, resume=None):
                             from kernel_stateframe_get_sure import predict_runtime
                             _prediction = predict_runtime(
                                 measurement, tool_predict_args or _args)
+                            from kernel_obligation_assess import UnavailableEvidence
+                            if isinstance(_prediction, UnavailableEvidence):
+                                _prediction = {
+                                    "prediction_status": "UNAVAILABLE",
+                                    "reason_code": _prediction.reason_code,
+                                }
                             _prediction_text = json.dumps(
                                 _prediction, ensure_ascii=False, sort_keys=True, default=str)
                             bolt.receipt(
@@ -10216,6 +10226,12 @@ def work(d, *, resume=None):
                         tool_predict_args = dict(parsed_predict)
                 from kernel_stateframe_get_sure import predict_runtime
                 _prediction = predict_runtime(measurement, tool_predict_args or _args)
+                from kernel_obligation_assess import UnavailableEvidence
+                if isinstance(_prediction, UnavailableEvidence):
+                    _prediction = {
+                        "prediction_status": "UNAVAILABLE",
+                        "reason_code": _prediction.reason_code,
+                    }
                 _prediction_text = json.dumps(
                     _prediction, ensure_ascii=False, sort_keys=True, default=str)
                 bolt.receipt(

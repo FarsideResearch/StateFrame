@@ -16,6 +16,8 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
+from kernel_obligation_assess import UnavailableEvidence, _unavailable_evidence
+
 
 MODE_ENV = "STATEFRAME_INTENT_CARRY"
 SCHEMA = "stateframe-intent-carry/1"
@@ -98,7 +100,22 @@ def _compact(value: object, limit: int = _MAX_SUMMARY) -> str:
     return text[: max(1, limit - 3)].rstrip() + "..."
 
 
-def normalize_path(value: object, root: Path | None = None) -> str:
+def _read_or_unavailable(operation, *, journal: object, reason_code: str, errors):
+    from kernel_completion_owner import RequestActionContractError
+
+    try:
+        return operation()
+    except RequestActionContractError:
+        raise
+    except errors:
+        return _unavailable_evidence(
+            journal, reason_code, producer="kernel_intent_carry",
+        )
+
+
+def normalize_path(
+        value: object, root: Path | None = None, *, journal: object = None,
+) -> str | UnavailableEvidence:
     """Normalize a workspace-relative path without accepting an outside path."""
     if not isinstance(value, str):
         return ""
@@ -107,13 +124,20 @@ def normalize_path(value: object, root: Path | None = None) -> str:
         return ""
     raw = raw.replace("\\", "/")
     if root is not None:
-        try:
+        def resolve_path() -> str:
             candidate = Path(raw)
             if not candidate.is_absolute():
                 candidate = root / candidate
             return candidate.resolve().relative_to(root.resolve()).as_posix()
-        except (OSError, RuntimeError, ValueError):
-            return ""
+
+        normalized = _read_or_unavailable(
+            resolve_path,
+            journal=journal, reason_code="INTENT_PATH_UNAVAILABLE",
+            errors=(OSError, RuntimeError, LookupError, ValueError),
+        )
+        if isinstance(normalized, UnavailableEvidence):
+            return normalized
+        return normalized
     return raw.lstrip("./")
 
 
@@ -397,7 +421,8 @@ def extract_pending_intents(
 
 def split_by_reference_paths(
         intents: Sequence[PendingIntent], reference_paths: Sequence[object],
-        root: Path | None = None) -> tuple[tuple[PendingIntent, ...], tuple[PendingIntent, ...]]:
+        root: Path | None = None, *, journal: object = None,
+) -> tuple[tuple[PendingIntent, ...], tuple[PendingIntent, ...]] | UnavailableEvidence:
     """(kept, suppressed): an intent survives only when its target agrees with at least one
     reference path (the response's own tool-call path, the task target, or a source path the
     host actually delivered).  With no usable reference every intent is kept -- this guard
@@ -405,7 +430,9 @@ def split_by_reference_paths(
     invent one."""
     refs = []
     for raw in reference_paths:
-        path = normalize_path(raw, root) if root is not None else normalize_path(raw)
+        path = normalize_path(raw, root, journal=journal) if root is not None else normalize_path(raw)
+        if isinstance(path, UnavailableEvidence):
+            return path
         if path and path not in refs:
             refs.append(path)
     if not refs:
@@ -555,7 +582,8 @@ class IntentCarryState:
     def observe_model(self, *, reasoning: object, content: object,
                       default_path: str, default_symbol: str | None,
                       step: int, action: object = None,
-                      reference_paths: Sequence[object] | None = None) -> tuple[PendingIntent, ...]:
+                      reference_paths: Sequence[object] | None = None
+                      ) -> tuple[PendingIntent, ...] | UnavailableEvidence:
         self.advance(step)
         intents = extract_pending_intents(
             reasoning=reasoning, content=content, default_path=default_path,
@@ -563,8 +591,12 @@ class IntentCarryState:
         if reference_paths is not None and intents:
             # r46 STATEFRAME_INTENT_CARRY_F4: the caller passes references only when on.
             _tool, action_path, _symbol = _action_info(action)
-            intents, suppressed = split_by_reference_paths(
-                intents, [action_path, *reference_paths], self.root)
+            split = split_by_reference_paths(
+                intents, [action_path, *reference_paths], self.root, journal=self.journal,
+            )
+            if isinstance(split, UnavailableEvidence):
+                return split
+            intents, suppressed = split
             for intent in suppressed:
                 self._emit("intent_suppressed", intent=intent.to_dict(),
                            intent_id=intent.intent_id, target_path=intent.target_path,
@@ -587,8 +619,12 @@ class IntentCarryState:
                        source=intent.source)
         return intents
 
-    def clear_for_edit(self, path: object, *, step: int, symbol: str | None = None) -> None:
-        normalized = normalize_path(path, self.root)
+    def clear_for_edit(
+            self, path: object, *, step: int, symbol: str | None = None,
+    ) -> None | UnavailableEvidence:
+        normalized = normalize_path(path, self.root, journal=self.journal)
+        if isinstance(normalized, UnavailableEvidence):
+            return normalized
         if not normalized:
             return
         for intent in tuple(self.pending):
@@ -597,8 +633,11 @@ class IntentCarryState:
                 self._clear(intent, reason="edit_applied", step=step)
 
     def record_rejected_edit(self, *, path: str, current_source: str,
-                             candidate_source: str, step: int) -> tuple[PendingIntent, ...]:
-        normalized = normalize_path(path, self.root)
+                             candidate_source: str, step: int
+                             ) -> tuple[PendingIntent, ...] | UnavailableEvidence:
+        normalized = normalize_path(path, self.root, journal=self.journal)
+        if isinstance(normalized, UnavailableEvidence):
+            return normalized
         if not normalized:
             return ()
         names = unapplied_rejected_definitions(current_source, candidate_source)
@@ -631,20 +670,29 @@ class IntentCarryState:
         return payload
 
     def redirect_already_present(self, base: Mapping[str, object], path: str,
-                                 start_line: int, *, step: int) -> dict[str, object]:
+                                 start_line: int, *, step: int
+                                 ) -> dict[str, object] | UnavailableEvidence:
         """Add current target lines and a typed action note to a dedup result."""
         self.advance(step)
-        normalized = normalize_path(path, self.root)
+        normalized = normalize_path(path, self.root, journal=self.journal)
+        if isinstance(normalized, UnavailableEvidence):
+            return normalized
         intent = next((item for item in self.pending
                        if _same_target(item, normalized, None)), None)
         if intent is None or self.root is None:
             return dict(base)
-        candidate = (self.root / normalized).resolve()
-        try:
+        def read_current_source() -> str:
+            candidate = (self.root / normalized).resolve()
             candidate.relative_to(self.root)
-            source = candidate.read_text(encoding="utf-8")
-        except (OSError, UnicodeError, ValueError):
-            return dict(base)
+            return candidate.read_text(encoding="utf-8")
+
+        source = _read_or_unavailable(
+            read_current_source, journal=self.journal,
+            reason_code="INTENT_CURRENT_SOURCE_UNAVAILABLE",
+            errors=(OSError, UnicodeError, LookupError, ValueError),
+        )
+        if isinstance(source, UnavailableEvidence):
+            return source
         span = _safe_symbol_span(source, intent.target_symbol)
         if span is None:
             first = max(1, int(start_line) + 1)
@@ -674,12 +722,17 @@ class IntentCarryState:
         return result
 
 
-def delivered_source_observation(runtime: object, path: str, start_line: int) -> dict | None:
+def delivered_source_observation(
+        runtime: object, path: str, start_line: int,
+) -> dict | None | UnavailableEvidence:
     """Build an ALREADY_PRESENT observation from final request-delivery evidence."""
     owner = getattr(runtime, "owner", None)
     raw_root = getattr(owner, "root", None)
-    root = Path(raw_root).resolve() if raw_root is not None else None
-    relative = normalize_path(path, root) if root is not None else normalize_path(path)
+    root = Path(raw_root) if raw_root is not None else None
+    relative = (normalize_path(path, root, journal=getattr(runtime, "journal", None))
+                if root is not None else normalize_path(path))
+    if isinstance(relative, UnavailableEvidence):
+        return relative
     serialized = getattr(runtime, "_empirical_serialized_sources", {})
     row = serialized.get(relative) if isinstance(serialized, Mapping) else None
     revisions = getattr(runtime, "_empirical_current_revisions", {})

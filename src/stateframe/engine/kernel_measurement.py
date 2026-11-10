@@ -3310,6 +3310,8 @@ class RequestCapture:
                     retry_context = capture_context(
                         self, retry_runtime, retry_body,
                         side_call=bool(getattr(self, "_wire_truth_side_call", False)))
+                    from kernel_wire_truth_facts import require_fact_context
+                    retry_context = require_fact_context(retry_context)
                     retry_check = check_wire(
                         wire, retry_context, emit=self.journal.emit,
                         attempt=attempt + 1, allow_done_repair=False,
@@ -3319,6 +3321,11 @@ class RequestCapture:
                         raise RequestPreparationContractError(
                             "wire truth retry did not pass strict qualification")
                 except Exception as error:
+                    from kernel_completion_owner import RequestActionContractError
+                    from kernel_wire_truth_facts import WireTruthFactUnavailable
+                    if isinstance(error, (RequestActionContractError,
+                                          WireTruthFactUnavailable)):
+                        raise
                     if _record_retry_disagreement(
                             "transport_retry_validation", type(error).__name__, wire):
                         first_wire = getattr(self, "_one_snapshot_first_wire", None)
@@ -4029,6 +4036,11 @@ class RequestCapture:
                                 capacity_retry_limits,
                             )
                         except Exception as refit_error:
+                            from kernel_completion_owner import RequestActionContractError
+                            from kernel_wire_truth_facts import WireTruthFactUnavailable
+                            if isinstance(refit_error, (RequestActionContractError,
+                                                       WireTruthFactUnavailable)):
+                                raise
                             # The rejected request remains the terminal transport
                             # evidence when its protected minimum cannot shrink.
                             capacity_retry_refit_error = type(refit_error).__name__

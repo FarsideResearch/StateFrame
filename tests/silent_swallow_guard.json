@@ -1,0 +1,4362 @@
+{
+  "module_globs": [
+    "src/stateframe/engine/capability_request_preflight.py",
+    "src/stateframe/engine/kernel_advice_ledger.py",
+    "src/stateframe/engine/kernel_bolt.py",
+    "src/stateframe/engine/kernel_boot_cards.py",
+    "src/stateframe/engine/kernel_capacity_retry.py",
+    "src/stateframe/engine/kernel_callsite_census.py",
+    "src/stateframe/engine/kernel_check_admission.py",
+    "src/stateframe/engine/kernel_check_receipts*.py",
+    "src/stateframe/engine/kernel_check_receipts.py",
+    "src/stateframe/engine/kernel_completion_disposition.py",
+    "src/stateframe/engine/kernel_completion_owner.py",
+    "src/stateframe/engine/kernel_completion_policy.py",
+    "src/stateframe/engine/kernel_completion_status.py",
+    "src/stateframe/engine/kernel_context.py",
+    "src/stateframe/engine/kernel_decisive_factor.py",
+    "src/stateframe/engine/kernel_done_readiness_authority.py",
+    "src/stateframe/engine/kernel_edit_affordance.py",
+    "src/stateframe/engine/kernel_edit_guard.py",
+    "src/stateframe/engine/kernel_editready_fact.py",
+    "src/stateframe/engine/kernel_frame_budget.py",
+    "src/stateframe/engine/kernel_frame_clarity.py",
+    "src/stateframe/engine/kernel_frame_hygiene.py",
+    "src/stateframe/engine/kernel_green_coherence.py",
+    "src/stateframe/engine/kernel_green_lock.py",
+    "src/stateframe/engine/kernel_greenlock_menu_authority.py",
+    "src/stateframe/engine/kernel_grounded_intake.py",
+    "src/stateframe/engine/kernel_host_facts.py",
+    "src/stateframe/engine/kernel_intent_carry.py",
+    "src/stateframe/engine/kernel_job_watch.py",
+    "src/stateframe/engine/kernel_jq_class_edit.py",
+    "src/stateframe/engine/kernel_lean.py",
+    "src/stateframe/engine/kernel_lean_presentation.py",
+    "src/stateframe/engine/kernel_native_receipt*.py",
+    "src/stateframe/engine/kernel_native_tools*.py",
+    "src/stateframe/engine/kernel_native_tools.py",
+    "src/stateframe/engine/kernel_nav_basics*.py",
+    "src/stateframe/engine/kernel_nav_basics.py",
+    "src/stateframe/engine/kernel_obligation_assess.py",
+    "src/stateframe/engine/kernel_owner_first.py",
+    "src/stateframe/engine/kernel_paged_source.py",
+    "src/stateframe/engine/kernel_postgreen_quiet.py",
+    "src/stateframe/engine/kernel_progress_ledger.py",
+    "src/stateframe/engine/kernel_prompt_compact.py",
+    "src/stateframe/engine/kernel_provability.py",
+    "src/stateframe/engine/kernel_read_once.py",
+    "src/stateframe/engine/kernel_read_reuse_visibility.py",
+    "src/stateframe/engine/kernel_recall.py",
+    "src/stateframe/engine/kernel_redirect_policy.py",
+    "src/stateframe/engine/kernel_refusal_compact.py",
+    "src/stateframe/engine/kernel_repo_intel*.py",
+    "src/stateframe/engine/kernel_repo_intel.py",
+    "src/stateframe/engine/kernel_repo_signals.py",
+    "src/stateframe/engine/kernel_request_auth_identity.py",
+    "src/stateframe/engine/kernel_request_budget*.py",
+    "src/stateframe/engine/kernel_request_budget.py",
+    "src/stateframe/engine/kernel_request_diet*.py",
+    "src/stateframe/engine/kernel_request_diet.py",
+    "src/stateframe/engine/kernel_request_evidence_closure.py",
+    "src/stateframe/engine/kernel_request_source_window*.py",
+    "src/stateframe/engine/kernel_request_source_window.py",
+    "src/stateframe/engine/kernel_request_tool_surface.py",
+    "src/stateframe/engine/kernel_retry_gate.py",
+    "src/stateframe/engine/kernel_starter_conflicts.py",
+    "src/stateframe/engine/kernel_stateframe_action_ledger.py",
+    "src/stateframe/engine/kernel_stateframe_f4.py",
+    "src/stateframe/engine/kernel_stateframe_f4_fit.py",
+    "src/stateframe/engine/kernel_stateframe_framefit5*.py",
+    "src/stateframe/engine/kernel_stateframe_framefit5.py",
+    "src/stateframe/engine/kernel_stateframe_gears.py",
+    "src/stateframe/engine/kernel_stateframe_get_sure.py",
+    "src/stateframe/engine/kernel_stateframe_headcarry.py",
+    "src/stateframe/engine/kernel_stateframe_lean.py",
+    "src/stateframe/engine/kernel_stateframe_memory_capsule.py",
+    "src/stateframe/engine/kernel_stateframe_runtime.py",
+    "src/stateframe/engine/kernel_stateframe_v2_s1.py",
+    "src/stateframe/engine/kernel_step_contract.py",
+    "src/stateframe/engine/kernel_step_ledger*.py",
+    "src/stateframe/engine/kernel_terminal_policy.py",
+    "src/stateframe/engine/kernel_tokenlab_host_result_guard.py",
+    "src/stateframe/engine/kernel_tokenlab_stall_breaker.py",
+    "src/stateframe/engine/kernel_tool_reply.py",
+    "src/stateframe/engine/kernel_v33_lean.py",
+    "src/stateframe/engine/kernel_vitals.py",
+    "src/stateframe/engine/kernel_wire_*.py",
+    "src/stateframe/engine/kernel_wire_truth_facts.py",
+    "src/stateframe/engine/mc_repo_intel_vendor/call_graph.py",
+    "src/stateframe/engine/mc_repo_intel_vendor/repo_map.py",
+    "src/stateframe/engine/probes/react_repair.py"
+  ],
+  "required_modules": [
+    "src/stateframe/engine/capability_request_preflight.py",
+    "src/stateframe/engine/kernel_advice_ledger.py",
+    "src/stateframe/engine/kernel_bolt.py",
+    "src/stateframe/engine/kernel_boot_cards.py",
+    "src/stateframe/engine/kernel_capacity_retry.py",
+    "src/stateframe/engine/kernel_callsite_census.py",
+    "src/stateframe/engine/kernel_check_admission.py",
+    "src/stateframe/engine/kernel_check_receipts.py",
+    "src/stateframe/engine/kernel_completion_disposition.py",
+    "src/stateframe/engine/kernel_completion_owner.py",
+    "src/stateframe/engine/kernel_completion_policy.py",
+    "src/stateframe/engine/kernel_completion_status.py",
+    "src/stateframe/engine/kernel_context.py",
+    "src/stateframe/engine/kernel_decisive_factor.py",
+    "src/stateframe/engine/kernel_done_readiness_authority.py",
+    "src/stateframe/engine/kernel_edit_affordance.py",
+    "src/stateframe/engine/kernel_edit_guard.py",
+    "src/stateframe/engine/kernel_editready_fact.py",
+    "src/stateframe/engine/kernel_frame_budget.py",
+    "src/stateframe/engine/kernel_frame_clarity.py",
+    "src/stateframe/engine/kernel_frame_hygiene.py",
+    "src/stateframe/engine/kernel_green_coherence.py",
+    "src/stateframe/engine/kernel_green_lock.py",
+    "src/stateframe/engine/kernel_greenlock_menu_authority.py",
+    "src/stateframe/engine/kernel_grounded_intake.py",
+    "src/stateframe/engine/kernel_host_facts.py",
+    "src/stateframe/engine/kernel_intent_carry.py",
+    "src/stateframe/engine/kernel_job_watch.py",
+    "src/stateframe/engine/kernel_jq_class_edit.py",
+    "src/stateframe/engine/kernel_lean.py",
+    "src/stateframe/engine/kernel_lean_presentation.py",
+    "src/stateframe/engine/kernel_native_tools.py",
+    "src/stateframe/engine/kernel_nav_basics.py",
+    "src/stateframe/engine/kernel_obligation_assess.py",
+    "src/stateframe/engine/kernel_owner_first.py",
+    "src/stateframe/engine/kernel_paged_source.py",
+    "src/stateframe/engine/kernel_postgreen_quiet.py",
+    "src/stateframe/engine/kernel_progress_ledger.py",
+    "src/stateframe/engine/kernel_prompt_compact.py",
+    "src/stateframe/engine/kernel_provability.py",
+    "src/stateframe/engine/kernel_read_once.py",
+    "src/stateframe/engine/kernel_read_reuse_visibility.py",
+    "src/stateframe/engine/kernel_recall.py",
+    "src/stateframe/engine/kernel_redirect_policy.py",
+    "src/stateframe/engine/kernel_refusal_compact.py",
+    "src/stateframe/engine/kernel_repo_intel.py",
+    "src/stateframe/engine/kernel_repo_signals.py",
+    "src/stateframe/engine/kernel_request_auth_identity.py",
+    "src/stateframe/engine/kernel_request_budget.py",
+    "src/stateframe/engine/kernel_request_diet.py",
+    "src/stateframe/engine/kernel_request_evidence_closure.py",
+    "src/stateframe/engine/kernel_request_source_window.py",
+    "src/stateframe/engine/kernel_request_tool_surface.py",
+    "src/stateframe/engine/kernel_retry_gate.py",
+    "src/stateframe/engine/kernel_starter_conflicts.py",
+    "src/stateframe/engine/kernel_stateframe_action_ledger.py",
+    "src/stateframe/engine/kernel_stateframe_f4.py",
+    "src/stateframe/engine/kernel_stateframe_f4_fit.py",
+    "src/stateframe/engine/kernel_stateframe_framefit5.py",
+    "src/stateframe/engine/kernel_stateframe_gears.py",
+    "src/stateframe/engine/kernel_stateframe_get_sure.py",
+    "src/stateframe/engine/kernel_stateframe_headcarry.py",
+    "src/stateframe/engine/kernel_stateframe_lean.py",
+    "src/stateframe/engine/kernel_stateframe_memory_capsule.py",
+    "src/stateframe/engine/kernel_stateframe_runtime.py",
+    "src/stateframe/engine/kernel_stateframe_v2_s1.py",
+    "src/stateframe/engine/kernel_step_contract.py",
+    "src/stateframe/engine/kernel_step_ledger.py",
+    "src/stateframe/engine/kernel_terminal_policy.py",
+    "src/stateframe/engine/kernel_tokenlab_host_result_guard.py",
+    "src/stateframe/engine/kernel_tokenlab_stall_breaker.py",
+    "src/stateframe/engine/kernel_tool_reply.py",
+    "src/stateframe/engine/kernel_v33_lean.py",
+    "src/stateframe/engine/kernel_vitals.py",
+    "src/stateframe/engine/kernel_wire_identity.py",
+    "src/stateframe/engine/kernel_wire_stability.py",
+    "src/stateframe/engine/kernel_wire_string_hygiene.py",
+    "src/stateframe/engine/kernel_wire_truth_facts.py",
+    "src/stateframe/engine/kernel_wire_truth_gate.py",
+    "src/stateframe/engine/mc_repo_intel_vendor/call_graph.py",
+    "src/stateframe/engine/mc_repo_intel_vendor/repo_map.py",
+    "src/stateframe/engine/probes/react_repair.py"
+  ],
+  "allowlist": [
+    {
+      "file": "src/stateframe/engine/capability_request_preflight.py",
+      "function": "_history_target_source_is_current",
+      "except_clause": "except (OSError, RuntimeError, TypeError, ValueError, UnicodeError):",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/capability_request_preflight.py",
+      "function": "_history_target_source_is_current",
+      "except_clause": "except (ImportError, OSError, RuntimeError, TypeError, ValueError, UnicodeError):",
+      "ordinal": 2,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/capability_request_preflight.py",
+      "function": "_refresh_current_target_source",
+      "except_clause": "except (OSError, RuntimeError, TypeError, ValueError, UnicodeError):",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/capability_request_preflight.py",
+      "function": "_journal_framefit5_preflight_error",
+      "except_clause": "except Exception:",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_advice_ledger.py",
+      "function": "_int",
+      "except_clause": "except (TypeError, ValueError):",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "med"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_advice_ledger.py",
+      "function": "load_receipts",
+      "except_clause": "except OSError:",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_bolt.py",
+      "function": "KernelBolt._oracle_selector_counts",
+      "except_clause": "except (TypeError, ValueError):",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_bolt.py",
+      "function": "KernelBolt._oracle_selector_counts",
+      "except_clause": "except (OSError, SyntaxError):",
+      "ordinal": 2,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_bolt.py",
+      "function": "KernelBolt.contract_card",
+      "except_clause": "except (OSError, SyntaxError):",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_bolt.py",
+      "function": "KernelBolt.contract_card",
+      "except_clause": "except Exception:",
+      "ordinal": 3,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_bolt.py",
+      "function": "KernelBolt.guard_at_anchor",
+      "except_clause": "except (IndexError, ValueError):",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_bolt.py",
+      "function": "KernelBolt.guard_at_anchor",
+      "except_clause": "except (OSError, SyntaxError):",
+      "ordinal": 2,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_bolt.py",
+      "function": "KernelBolt.edit_relevance",
+      "except_clause": "except OSError:",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_bolt.py",
+      "function": "KernelBolt.plan_summary",
+      "except_clause": "except Exception:",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_bolt.py",
+      "function": "KernelBolt.receipt",
+      "except_clause": "except Exception:",
+      "ordinal": 2,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_bolt.py",
+      "function": "KernelBolt.receipt",
+      "except_clause": "except Exception:",
+      "ordinal": 3,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_bolt.py",
+      "function": "KernelBolt.receipt",
+      "except_clause": "except Exception:",
+      "ordinal": 4,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_bolt.py",
+      "function": "KernelBolt.receipt",
+      "except_clause": "except Exception:",
+      "ordinal": 6,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_bolt.py",
+      "function": "KernelBolt.organ_out",
+      "except_clause": "except Exception:",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_bolt.py",
+      "function": "KernelBolt.organ_out",
+      "except_clause": "except Exception:",
+      "ordinal": 2,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_boot_cards.py",
+      "function": "load_method_card",
+      "except_clause": "except OSError:",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "med"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_capacity_retry.py",
+      "function": "reported_context_limit",
+      "except_clause": "except ValueError:",
+      "ordinal": 2,
+      "reason": "baseline debt v0.4.35: invalid provider-reported token limit returns no learned limit",
+      "risk": "low"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_callsite_census.py",
+      "function": "_error_site",
+      "except_clause": "except (AttributeError, TypeError, ValueError):",
+      "ordinal": 1,
+      "reason": "Pre-existing v0.4.20 silent fallback; request effect unclassified pending review.",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_callsite_census.py",
+      "function": "_source_block",
+      "except_clause": "except (TypeError, ValueError, json.JSONDecodeError):",
+      "ordinal": 2,
+      "reason": "Pre-existing v0.4.20 baseline debt: If source metadata JSON parsing fails, returns None.",
+      "risk": "med"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_callsite_census.py",
+      "function": "_verified_read_page_span",
+      "except_clause": "except (LookupError, UnicodeError, OSError, StructuralIndexError):",
+      "ordinal": 1,
+      "reason": "Pre-existing v0.4.20 baseline debt: If current indexed source bytes cannot be read/decoded, returns None.",
+      "risk": "med"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_callsite_census.py",
+      "function": "_editable_paths",
+      "except_clause": "except Exception:",
+      "ordinal": 1,
+      "reason": "Pre-existing v0.4.20 baseline debt: If declared editable paths cannot be loaded, returns an empty tuple.",
+      "risk": "high"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_callsite_census.py",
+      "function": "_shown_sources",
+      "except_clause": "except (LookupError, UnicodeError, OSError, StructuralIndexError):",
+      "ordinal": 1,
+      "reason": "Pre-existing v0.4.20 baseline debt: If current source bytes for a user source block cannot be read, continues without that shown path.",
+      "risk": "high"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_callsite_census.py",
+      "function": "_capture_public_sources",
+      "except_clause": "except (LookupError, UnicodeError, OSError, StructuralIndexError):",
+      "ordinal": 1,
+      "reason": "Pre-existing v0.4.20 baseline debt: If any indexed source read fails, returns an empty source-fact set.",
+      "risk": "high"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_callsite_census.py",
+      "function": "_build_packet",
+      "except_clause": "except (AttributeError, TypeError):",
+      "ordinal": 1,
+      "reason": "Pre-existing v0.4.20 silent fallback; request effect unclassified pending review.",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_callsite_census.py",
+      "function": "_build_packet",
+      "except_clause": "except (AttributeError, TypeError):",
+      "ordinal": 2,
+      "reason": "Pre-existing v0.4.20 silent fallback; request effect unclassified pending review.",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_callsite_census.py",
+      "function": "_build_packet",
+      "except_clause": "except (AttributeError, TypeError):",
+      "ordinal": 5,
+      "reason": "Pre-existing v0.4.20 silent fallback; request effect unclassified pending review.",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_callsite_census.py",
+      "function": "_emit_incremental_shadow",
+      "except_clause": "except Exception:",
+      "ordinal": 1,
+      "reason": "Pre-existing v0.4.20 silent fallback; request effect unclassified pending review.",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_check_admission.py",
+      "function": "_generator_policy_cap",
+      "except_clause": "except ImportError:",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "high"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_check_admission.py",
+      "function": "admit_check",
+      "except_clause": "except (ImportError, TypeError, ValueError):",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "high"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_check_admission.py",
+      "function": "frame_projection",
+      "except_clause": "except (ImportError, TypeError, ValueError):",
+      "ordinal": 2,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "med"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_check_admission.py",
+      "function": "frame_projection",
+      "except_clause": "except ImportError:",
+      "ordinal": 3,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "high"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_check_receipts.py",
+      "function": "current_wire_revision",
+      "except_clause": "except Exception:",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "med"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_check_receipts.py",
+      "function": "_emit_shadow_mismatch",
+      "except_clause": "except Exception:",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_check_receipts.py",
+      "function": "_receipt_content_equal",
+      "except_clause": "except Exception:",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_check_receipts.py",
+      "function": "record_check_output",
+      "except_clause": "except (ImportError, TypeError, ValueError):",
+      "ordinal": 2,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "med"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_check_receipts.py",
+      "function": "_check_receipt_memo_mode",
+      "except_clause": "except Exception:",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_check_receipts.py",
+      "function": "_invalidate_check_receipt_memo",
+      "except_clause": "except Exception:",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_check_receipts.py",
+      "function": "_store_check_receipt_page",
+      "except_clause": "except Exception:",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_completion_disposition.py",
+      "function": "_parse_smoke_output",
+      "except_clause": "except (TypeError, ValueError):",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_completion_owner.py",
+      "function": "no_done_only_collapse_enabled",
+      "except_clause": "except Exception:",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "med"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_completion_owner.py",
+      "function": "_common_sense_enabled",
+      "except_clause": "except (ImportError, AttributeError, OSError, RuntimeError, TypeError, ValueError):",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "med"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_completion_owner.py",
+      "function": "_premature_frame",
+      "except_clause": "except (ImportError, AttributeError, OSError, RuntimeError, TypeError, ValueError):",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "high"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_completion_owner.py",
+      "function": "_record_advisory_failure",
+      "except_clause": "except Exception:",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_completion_owner.py",
+      "function": "_revision",
+      "except_clause": "except (AttributeError, OSError, RuntimeError, TypeError, ValueError):",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "high"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_completion_owner.py",
+      "function": "_green_current_uncached",
+      "except_clause": "except (AttributeError, OSError, RuntimeError, TypeError, ValueError):",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "high"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_completion_owner.py",
+      "function": "_no_host_checks",
+      "except_clause": "except (AttributeError, OSError, RuntimeError, TypeError, ValueError):",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "med"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_completion_owner.py",
+      "function": "completion_owner_reused_verification",
+      "except_clause": "except (ImportError, AttributeError, TypeError, ValueError):",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_completion_owner.py",
+      "function": "host_public_check_arguments",
+      "except_clause": "except (AttributeError, OSError, RuntimeError, TypeError, ValueError):",
+      "ordinal": 2,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "med"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_completion_owner.py",
+      "function": "_assessment_is_context_only",
+      "except_clause": "except (ImportError, AttributeError, TypeError, ValueError):",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "med"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_completion_owner.py",
+      "function": "_open_ids_uncached",
+      "except_clause": "except (ImportError, AttributeError, OSError, RuntimeError, TypeError, ValueError):",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "high"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_completion_owner.py",
+      "function": "_reqwitness_open_ids",
+      "except_clause": "except (AttributeError, TypeError):",
+      "ordinal": 2,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "high"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_completion_owner.py",
+      "function": "_current_witness_receipt_closes_clause",
+      "except_clause": "except (ImportError, AttributeError, OSError, RuntimeError, TypeError, ValueError):",
+      "ordinal": 2,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_completion_owner.py",
+      "function": "_cutoff_rule_menu",
+      "except_clause": "except (ImportError, AttributeError, OSError, RuntimeError, TypeError, ValueError):",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "high"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_completion_owner.py",
+      "function": "_cutoff_rule_menu",
+      "except_clause": "except (ImportError, AttributeError, OSError, RuntimeError, TypeError, ValueError):",
+      "ordinal": 2,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "high"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_completion_owner.py",
+      "function": "capability_floor_action_admissible",
+      "except_clause": "except Exception:",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "med"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_completion_owner.py",
+      "function": "_stall_rule_signal",
+      "except_clause": "except (ImportError, AttributeError, TypeError, ValueError):",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "high"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_completion_owner.py",
+      "function": "_stall_rule_probe_refused",
+      "except_clause": "except (ImportError, AttributeError, TypeError, ValueError):",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "high"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_completion_owner.py",
+      "function": "_stall_rule_no_progress_edit_state",
+      "except_clause": "except (ImportError, AttributeError, TypeError, ValueError):",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "high"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_completion_owner.py",
+      "function": "_notify_v46_attempt_ceiling",
+      "except_clause": "except (ImportError, AttributeError, OSError, RuntimeError, TypeError, ValueError):",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_completion_owner.py",
+      "function": "_green_lock_open_requirement_ids",
+      "except_clause": "except (ImportError, AttributeError, OSError, RuntimeError, TypeError, ValueError):",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "high"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_completion_owner.py",
+      "function": "_witness_evidence_actions",
+      "except_clause": "except (ImportError, AttributeError, OSError, RuntimeError, TypeError, ValueError):",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_completion_owner.py",
+      "function": "_witness_evidence_actions",
+      "except_clause": "except (ImportError, AttributeError, OSError, RuntimeError, TypeError, ValueError):",
+      "ordinal": 2,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_completion_owner.py",
+      "function": "_route_decision_data",
+      "except_clause": "except (AttributeError, TypeError, ValueError):",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "high"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_completion_owner.py",
+      "function": "_postgreen_verification_pending",
+      "except_clause": "except (ImportError, AttributeError, OSError, RuntimeError, TypeError, ValueError):",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "med"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_completion_owner.py",
+      "function": "_postgreen_work_actions",
+      "except_clause": "except (ImportError, AttributeError, OSError, RuntimeError, TypeError, ValueError):",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_completion_owner.py",
+      "function": "_postgreen_work_actions",
+      "except_clause": "except (AttributeError, OSError, RuntimeError, TypeError, ValueError):",
+      "ordinal": 2,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_completion_owner.py",
+      "function": "_postgreen_work_actions",
+      "except_clause": "except (AttributeError, OSError, RuntimeError, TypeError, ValueError):",
+      "ordinal": 3,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_completion_owner.py",
+      "function": "_done_submit_next_actions_line",
+      "except_clause": "except Exception:",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "med"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_completion_owner.py",
+      "function": "_request_contract_revision_rebind_mode",
+      "except_clause": "except Exception:",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_completion_owner.py",
+      "function": "_emit_request_contract_revision_rebind_shadow_mismatch",
+      "except_clause": "except Exception:",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_completion_owner.py",
+      "function": "_framefit5_owner_protocol",
+      "except_clause": "except (TypeError, ValueError, json.JSONDecodeError):",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "med"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_completion_owner.py",
+      "function": "_route_surface_violation",
+      "except_clause": "except Exception:",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_completion_owner.py",
+      "function": "_restricted_tools_admissible",
+      "except_clause": "except (AttributeError, ImportError, OSError, RuntimeError, TypeError, ValueError):",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "med"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_completion_owner.py",
+      "function": "terminal_result",
+      "except_clause": "except (ImportError, AttributeError, OSError, RuntimeError, TypeError, ValueError):",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_completion_policy.py",
+      "function": "_ledger",
+      "except_clause": "except (AttributeError, TypeError):",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "med"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_completion_policy.py",
+      "function": "transform",
+      "except_clause": "except (AttributeError, TypeError):",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_completion_status.py",
+      "function": "_mapping",
+      "except_clause": "except Exception:",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "high"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_context.py",
+      "function": "_select",
+      "except_clause": "except KeyError:",
+      "ordinal": 2,
+      "reason": "Pre-existing v0.4.20 baseline debt: On a missing dependency in an optional item group, continues without selecting that group or its dependents.",
+      "risk": "med"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_decisive_factor.py",
+      "function": "_binding_digest",
+      "except_clause": "except (TypeError, ValueError):",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "med"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_decisive_factor.py",
+      "function": "evidence_rows",
+      "except_clause": "except (TypeError, ValueError):",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "med"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_decisive_factor.py",
+      "function": "DecisiveFactorStore.restore",
+      "except_clause": "except ValueError:",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "med"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_done_readiness_authority.py",
+      "function": "_unmappable_task_obligation_ids",
+      "except_clause": "except (AttributeError, OSError, RuntimeError, TypeError, ValueError):",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_done_readiness_authority.py",
+      "function": "_product_file_identity",
+      "except_clause": "except ImportError:",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_done_readiness_authority.py",
+      "function": "_callable_recovery",
+      "except_clause": "except (AttributeError, TypeError, ValueError):",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_done_readiness_authority.py",
+      "function": "_record_decision_unavailable",
+      "except_clause": "except Exception:",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_done_readiness_authority.py",
+      "function": "uncertified_gate_compatible",
+      "except_clause": "except (AttributeError, OSError, RuntimeError, TypeError, ValueError):",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_editready_fact.py",
+      "function": "_normalize_repo_path",
+      "except_clause": "except (OSError, ValueError):",
+      "ordinal": 1,
+      "reason": "Pre-existing v0.4.20 baseline debt: If resolving an absolute source path fails, returns None.",
+      "risk": "med"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_editready_fact.py",
+      "function": "_normalize_repo_path",
+      "except_clause": "except (OSError, ValueError):",
+      "ordinal": 2,
+      "reason": "Pre-existing v0.4.20 baseline debt: If resolving an absolute source path fails, returns None.",
+      "risk": "med"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_editready_fact.py",
+      "function": "editable_source_ranges",
+      "except_clause": "except (OSError, TypeError, ValueError):",
+      "ordinal": 1,
+      "reason": "Pre-existing v0.4.20 baseline debt: If the repository root cannot be resolved for range collection, returns an empty mapping.",
+      "risk": "med"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_frame_clarity.py",
+      "function": "successful_changes",
+      "except_clause": "except (ImportError, TypeError, ValueError):",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "med"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_frame_clarity.py",
+      "function": "continuation_text",
+      "except_clause": "except (IndexError, TypeError, ValueError, json.JSONDecodeError):",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "med"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_green_coherence.py",
+      "function": "runtime_enabled",
+      "except_clause": "except ValueError:",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "med"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_green_coherence.py",
+      "function": "_counterexample_visibility_enabled",
+      "except_clause": "except (AttributeError, TypeError, ValueError):",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "high"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_green_coherence.py",
+      "function": "_verdict",
+      "except_clause": "except (AttributeError, TypeError, ValueError):",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "med"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_green_coherence.py",
+      "function": "_counterexamples",
+      "except_clause": "except (AttributeError, ImportError, TypeError, ValueError):",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "high"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_green_coherence.py",
+      "function": "_open_ids",
+      "except_clause": "except (ImportError, TypeError, ValueError):",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "med"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_green_coherence.py",
+      "function": "_open_ids",
+      "except_clause": "except (AttributeError, TypeError, ValueError):",
+      "ordinal": 2,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "high"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_green_coherence.py",
+      "function": "green_now",
+      "except_clause": "except (ImportError, TypeError, ValueError):",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "med"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_green_coherence.py",
+      "function": "green_now",
+      "except_clause": "except (AttributeError, TypeError, ValueError):",
+      "ordinal": 2,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_green_coherence.py",
+      "function": "green_now",
+      "except_clause": "except (AttributeError, TypeError, ValueError):",
+      "ordinal": 3,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_green_coherence.py",
+      "function": "project_frame",
+      "except_clause": "except (AttributeError, TypeError, ValueError):",
+      "ordinal": 3,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "high"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_green_lock.py",
+      "function": "_get_sure_open",
+      "except_clause": "except (ImportError, AttributeError, TypeError, ValueError, OSError):",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_green_lock.py",
+      "function": "_open_requirement_ids",
+      "except_clause": "except (ImportError, AttributeError, TypeError, ValueError):",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_green_lock.py",
+      "function": "_unverified_window_open",
+      "except_clause": "except (ImportError, AttributeError, TypeError, ValueError, OSError):",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_green_lock.py",
+      "function": "_workspace_product_file_digests",
+      "except_clause": "except (OSError, RuntimeError, TypeError, ValueError):",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_green_lock.py",
+      "function": "_workspace_product_file_digests",
+      "except_clause": "except (OSError, RuntimeError, ValueError):",
+      "ordinal": 3,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_green_lock.py",
+      "function": "_workspace_product_file_digests",
+      "except_clause": "except (OSError, RuntimeError, TypeError, ValueError):",
+      "ordinal": 4,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_green_lock.py",
+      "function": "_capture_parent_product_identity",
+      "except_clause": "except Exception:",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_green_lock.py",
+      "function": "note_unchanged_parent_green_suppressed",
+      "except_clause": "except Exception:",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_green_lock.py",
+      "function": "current_public_verdict_is_green",
+      "except_clause": "except (ImportError, AttributeError, OSError, RuntimeError, TypeError, ValueError):",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_green_lock.py",
+      "function": "_target_relative",
+      "except_clause": "except (OSError, TypeError, ValueError):",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_green_lock.py",
+      "function": "_product_sources",
+      "except_clause": "except (OSError, UnicodeError, TypeError, ValueError):",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_green_lock.py",
+      "function": "GreenLock._coherence_enabled",
+      "except_clause": "except (ImportError, ValueError):",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_green_lock.py",
+      "function": "GreenLock._reset_refusal_state",
+      "except_clause": "except (ImportError, TypeError, ValueError):",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_green_lock.py",
+      "function": "GreenLock._readiness_snapshot",
+      "except_clause": "except (AttributeError, ImportError, TypeError, ValueError):",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_green_lock.py",
+      "function": "GreenLock._repair_blocks_done_refusal",
+      "except_clause": "except (ImportError, TypeError, ValueError):",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_green_lock.py",
+      "function": "GreenLock._record_post_green_refusal",
+      "except_clause": "except (ImportError, TypeError, ValueError):",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_green_lock.py",
+      "function": "GreenLock._record_post_green_refusal",
+      "except_clause": "except (ImportError, ValueError):",
+      "ordinal": 2,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_green_lock.py",
+      "function": "GreenLock._workspace_path",
+      "except_clause": "except (OSError, TypeError, ValueError):",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_green_lock.py",
+      "function": "GreenLock._repair_enabled",
+      "except_clause": "except (ImportError, ValueError):",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_green_lock.py",
+      "function": "GreenLock._repair_evidence",
+      "except_clause": "except (ImportError, TypeError, ValueError):",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_green_lock.py",
+      "function": "GreenLock._before_action_legacy",
+      "except_clause": "except (ImportError, TypeError, ValueError):",
+      "ordinal": 2,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_green_lock.py",
+      "function": "GreenLock._before_action_legacy",
+      "except_clause": "except (ImportError, TypeError, ValueError):",
+      "ordinal": 3,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_green_lock.py",
+      "function": "GreenLock._before_mutation_legacy",
+      "except_clause": "except (ImportError, TypeError, ValueError):",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_green_lock.py",
+      "function": "GreenLock._before_mutation_legacy",
+      "except_clause": "except (ImportError, TypeError, ValueError):",
+      "ordinal": 2,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_green_lock.py",
+      "function": "GreenLock._before_mutation_legacy",
+      "except_clause": "except (ImportError, TypeError, ValueError):",
+      "ordinal": 3,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_green_lock.py",
+      "function": "GreenLock._remember_product_edit_request",
+      "except_clause": "except (AttributeError, TypeError):",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_green_lock.py",
+      "function": "guard_product_mutation",
+      "except_clause": "except (ImportError, LookupError, TypeError, ValueError):",
+      "ordinal": 2,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_green_lock.py",
+      "function": "guard_product_mutation",
+      "except_clause": "except (ImportError, TypeError, ValueError):",
+      "ordinal": 4,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_green_lock.py",
+      "function": "guard_product_mutation",
+      "except_clause": "except (ImportError, TypeError, ValueError):",
+      "ordinal": 5,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_green_lock.py",
+      "function": "guard_action",
+      "except_clause": "except (ImportError, AttributeError, TypeError, ValueError):",
+      "ordinal": 2,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_green_lock.py",
+      "function": "note_applied_product_edit",
+      "except_clause": "except (ImportError, OSError, TypeError, ValueError):",
+      "ordinal": 2,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_green_lock.py",
+      "function": "note_applied_product_edit",
+      "except_clause": "except (ImportError, OSError, TypeError, ValueError):",
+      "ordinal": 3,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_green_lock.py",
+      "function": "note_applied_product_edit",
+      "except_clause": "except (ImportError, TypeError, ValueError):",
+      "ordinal": 4,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_greenlock_menu_authority.py",
+      "function": "_history_arm",
+      "except_clause": "except (ImportError, AttributeError, TypeError, ValueError):",
+      "ordinal": 1,
+      "reason": "Pre-existing v0.4.20 baseline debt: If history-arm state cannot be imported or read, assumes the history arm is inactive.",
+      "risk": "med"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_greenlock_menu_authority.py",
+      "function": "_linked",
+      "except_clause": "except (ImportError, TypeError, ValueError):",
+      "ordinal": 1,
+      "reason": "Pre-existing v0.4.20 baseline debt: If counterexample-link evaluation fails, reports that the action is not linked.",
+      "risk": "med"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_greenlock_menu_authority.py",
+      "function": "_repair_evidence",
+      "except_clause": "except (ImportError, TypeError, ValueError):",
+      "ordinal": 1,
+      "reason": "Pre-existing v0.4.20 baseline debt: If readiness repair evidence cannot be loaded, returns an empty evidence tuple.",
+      "risk": "high"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_greenlock_menu_authority.py",
+      "function": "_continuation_acted_event",
+      "except_clause": "except Exception:",
+      "ordinal": 1,
+      "reason": "Pre-existing v0.4.20 silent fallback; request effect unclassified pending review.",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_greenlock_menu_authority.py",
+      "function": "_continuation_acted_event",
+      "except_clause": "except Exception:",
+      "ordinal": 2,
+      "reason": "Pre-existing v0.4.20 silent fallback; request effect unclassified pending review.",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_greenlock_menu_authority.py",
+      "function": "_continuation_projection_event",
+      "except_clause": "except Exception:",
+      "ordinal": 1,
+      "reason": "Pre-existing v0.4.20 silent fallback; request effect unclassified pending review.",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_greenlock_menu_authority.py",
+      "function": "_readiness_done_deny_is_stale_or_host_debt",
+      "except_clause": "except (AttributeError, ImportError, OSError, RuntimeError, TypeError, ValueError):",
+      "ordinal": 1,
+      "reason": "Pre-existing v0.4.20 baseline debt: If the current-green check fails, treats the readiness denial as not stale/host-debt.",
+      "risk": "med"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_greenlock_menu_authority.py",
+      "function": "_lock_label_stale_readiness",
+      "except_clause": "except (AttributeError, TypeError):",
+      "ordinal": 1,
+      "reason": "Pre-existing v0.4.20 silent fallback; request effect unclassified pending review.",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_greenlock_menu_authority.py",
+      "function": "_note_floor_kept",
+      "except_clause": "except Exception:",
+      "ordinal": 1,
+      "reason": "Pre-existing v0.4.20 silent fallback; request effect unclassified pending review.",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_greenlock_menu_authority.py",
+      "function": "dispatch_action",
+      "except_clause": "except (ImportError, AttributeError, TypeError, ValueError):",
+      "ordinal": 5,
+      "reason": "Pre-existing v0.4.20 silent fallback; request effect unclassified pending review.",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_greenlock_menu_authority.py",
+      "function": "dispatch_action",
+      "except_clause": "except (ImportError, TypeError, ValueError):",
+      "ordinal": 7,
+      "reason": "Pre-existing v0.4.20 silent fallback; request effect unclassified pending review.",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_greenlock_menu_authority.py",
+      "function": "dispatch_mutation",
+      "except_clause": "except Exception:",
+      "ordinal": 2,
+      "reason": "Pre-existing v0.4.20 silent fallback; request effect unclassified pending review.",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_greenlock_menu_authority.py",
+      "function": "dispatch_mutation",
+      "except_clause": "except (ImportError, TypeError, ValueError):",
+      "ordinal": 3,
+      "reason": "Pre-existing v0.4.20 silent fallback; request effect unclassified pending review.",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_greenlock_menu_authority.py",
+      "function": "dispatch_mutation",
+      "except_clause": "except (ImportError, TypeError, ValueError):",
+      "ordinal": 4,
+      "reason": "Pre-existing v0.4.20 silent fallback; request effect unclassified pending review.",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_grounded_intake.py",
+      "function": "_mapping",
+      "except_clause": "except (AttributeError, OSError, RuntimeError, TypeError, ValueError):",
+      "ordinal": 1,
+      "reason": "Pre-existing v0.4.20 baseline debt: If an object-to-mapping conversion fails, returns None and allows state extraction to continue without that candidate.",
+      "risk": "med"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_host_facts.py",
+      "function": "_coerce_facts",
+      "except_clause": "except (TypeError, ValueError):",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "med"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_intent_carry.py",
+      "function": "_committed_candidates",
+      "except_clause": "except ValueError:",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "med"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_intent_carry.py",
+      "function": "_plan_candidates",
+      "except_clause": "except ValueError:",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "med"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_intent_carry.py",
+      "function": "extract_pending_intents",
+      "except_clause": "except ValueError:",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "med"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_intent_carry.py",
+      "function": "_safe_symbol_span",
+      "except_clause": "except (SyntaxError, TypeError):",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "med"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_intent_carry.py",
+      "function": "IntentCarryState._restore",
+      "except_clause": "except (TypeError, ValueError):",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "med"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_job_watch.py",
+      "function": "enabled",
+      "except_clause": "except (ImportError, RuntimeError):",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_job_watch.py",
+      "function": "JobWatch.job_kill",
+      "except_clause": "except (OSError, ProcessLookupError):",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_job_watch.py",
+      "function": "JobWatch.job_kill",
+      "except_clause": "except OSError:",
+      "ordinal": 2,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_job_watch.py",
+      "function": "JobWatch.job_kill",
+      "except_clause": "except (OSError, ProcessLookupError):",
+      "ordinal": 3,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_job_watch.py",
+      "function": "JobWatch.job_kill",
+      "except_clause": "except OSError:",
+      "ordinal": 4,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_job_watch.py",
+      "function": "JobWatch.job_kill",
+      "except_clause": "except (AttributeError, subprocess.TimeoutExpired):",
+      "ordinal": 5,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_jq_class_edit.py",
+      "function": "_relative",
+      "except_clause": "except (OSError, ValueError):",
+      "ordinal": 1,
+      "reason": "Pre-existing v0.4.20 baseline debt: If path.resolve().relative_to(root.resolve()) fails, suppresses the exception and later returns path.as_posix().",
+      "risk": "low"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_lean.py",
+      "function": "render_sibling_site_facts",
+      "except_clause": "except (AttributeError, OSError, TypeError, ValueError):",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "med"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_lean.py",
+      "function": "_prune_deferred_paths_with_current_evidence",
+      "except_clause": "except Exception:",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_lean_presentation.py",
+      "function": "_source_message_parts",
+      "except_clause": "except (TypeError, ValueError, json.JSONDecodeError):",
+      "ordinal": 1,
+      "reason": "Pre-existing v0.4.20 baseline debt: If source metadata JSON parsing fails, returns None and the message is no longer recognized as a structured source block.",
+      "risk": "med"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_lean_presentation.py",
+      "function": "public_check_status",
+      "except_clause": "except (ImportError, AttributeError, TypeError, ValueError):",
+      "ordinal": 1,
+      "reason": "Pre-existing v0.4.20 baseline debt: If the frame helper cannot determine whether checks never ran, continues without that result.",
+      "risk": "high"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_lean_presentation.py",
+      "function": "public_check_status",
+      "except_clause": "except (ImportError, AttributeError, OSError, RuntimeError, TypeError, ValueError):",
+      "ordinal": 2,
+      "reason": "Pre-existing v0.4.20 baseline debt: If current-green evaluation fails, continues to later status sources.",
+      "risk": "high"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_lean_presentation.py",
+      "function": "_open_clause_rows",
+      "except_clause": "except (ImportError, AttributeError, OSError, RuntimeError, TypeError, ValueError):",
+      "ordinal": 1,
+      "reason": "Pre-existing v0.4.20 baseline debt: If the open-clause helper fails, skips it and falls back to frame-provided clauses.",
+      "risk": "high"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_lean_presentation.py",
+      "function": "_host_line",
+      "except_clause": "except (ImportError, AttributeError, OSError, RuntimeError, TypeError, ValueError):",
+      "ordinal": 1,
+      "reason": "Pre-existing v0.4.20 baseline debt: If stall_open_work_frame fails, skips that source and tries the weaker stall-rule excerpt.",
+      "risk": "med"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_lean_presentation.py",
+      "function": "_host_line",
+      "except_clause": "except (ImportError, AttributeError, OSError, RuntimeError, TypeError, ValueError):",
+      "ordinal": 2,
+      "reason": "Pre-existing v0.4.20 baseline debt: If stall_open_work_frame fails, skips that source and tries the weaker stall-rule excerpt.",
+      "risk": "med"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_lean_presentation.py",
+      "function": "_runtime_continuation_limits",
+      "except_clause": "except (AttributeError, OSError, RuntimeError, TypeError, ValueError):",
+      "ordinal": 1,
+      "reason": "Pre-existing v0.4.20 baseline debt: If rendering continuation limits fails, returns an empty string.",
+      "risk": "high"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_native_tools.py",
+      "function": "NativeToolBatch._note_same_file_edit",
+      "except_clause": "except (TypeError, ValueError):",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_nav_basics.py",
+      "function": "list_workspace_files",
+      "except_clause": "except OSError:",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "med"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_obligation_assess.py",
+      "function": "assessment_is_blocking",
+      "except_clause": "except (ImportError, TypeError, ValueError):",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "med"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_obligation_assess.py",
+      "function": "_visible_python_paths",
+      "except_clause": "except ValueError:",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_obligation_assess.py",
+      "function": "fixture_from_public_test",
+      "except_clause": "except (ValueError, TypeError, SyntaxError):",
+      "ordinal": 3,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "med"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_obligation_assess.py",
+      "function": "check_bundle_text",
+      "except_clause": "except ImportError:",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "med"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_obligation_assess.py",
+      "function": "_receipt_for",
+      "except_clause": "except (TypeError, ValueError):",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "med"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_obligation_assess.py",
+      "function": "_assessment_for_packet",
+      "except_clause": "except (TypeError, ValueError):",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "med"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_obligation_assess.py",
+      "function": "_entry_point_state",
+      "except_clause": "except (OSError, UnicodeError, SyntaxError):",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_obligation_assess.py",
+      "function": "run_check",
+      "except_clause": "except (ImportError, OSError, TypeError, ValueError):",
+      "ordinal": 3,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_owner_first.py",
+      "function": "finalize_range_plan",
+      "except_clause": "except (json.JSONDecodeError, TypeError):",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_paged_source.py",
+      "function": "parse_descriptor",
+      "except_clause": "except (TypeError, ValueError, json.JSONDecodeError):",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_prompt_compact.py",
+      "function": "compact_state_text",
+      "except_clause": "except (TypeError, ValueError):",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_provability.py",
+      "function": "_receipt_is_passing",
+      "except_clause": "except (TypeError, ValueError):",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "low"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_read_once.py",
+      "function": "_read_identity",
+      "except_clause": "except (OSError, RuntimeError, TypeError, ValueError):",
+      "ordinal": 1,
+      "reason": "Pre-existing v0.4.20 silent fallback; request effect unclassified pending review.",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_read_once.py",
+      "function": "_repeat_detected",
+      "except_clause": "except (AttributeError, TypeError):",
+      "ordinal": 1,
+      "reason": "Pre-existing v0.4.20 silent fallback; request effect unclassified pending review.",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_read_once.py",
+      "function": "note_for",
+      "except_clause": "except (AttributeError, TypeError, ValueError):",
+      "ordinal": 1,
+      "reason": "Pre-existing v0.4.20 silent fallback; request effect unclassified pending review.",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_read_once.py",
+      "function": "note_for",
+      "except_clause": "except (AttributeError, TypeError):",
+      "ordinal": 2,
+      "reason": "Pre-existing v0.4.20 silent fallback; request effect unclassified pending review.",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_read_once.py",
+      "function": "note_for",
+      "except_clause": "except (AttributeError, TypeError):",
+      "ordinal": 3,
+      "reason": "Pre-existing v0.4.20 silent fallback; request effect unclassified pending review.",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_read_once.py",
+      "function": "take_pending_message",
+      "except_clause": "except (AttributeError, TypeError):",
+      "ordinal": 1,
+      "reason": "Pre-existing v0.4.20 baseline debt: If runtime state cannot be cleared, returns None and silently skips the queued one-time read note.",
+      "risk": "med"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_read_once.py",
+      "function": "confirm_wire_delivery",
+      "except_clause": "except (AttributeError, TypeError, ValueError):",
+      "ordinal": 1,
+      "reason": "Pre-existing v0.4.20 silent fallback; request effect unclassified pending review.",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_read_once.py",
+      "function": "final_wire_receipt",
+      "except_clause": "except (TypeError, ValueError, AttributeError):",
+      "ordinal": 1,
+      "reason": "Pre-existing v0.4.20 silent fallback; request effect unclassified pending review.",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_read_once.py",
+      "function": "wire_receipt",
+      "except_clause": "except (TypeError, ValueError, AttributeError):",
+      "ordinal": 1,
+      "reason": "Pre-existing v0.4.20 silent fallback; request effect unclassified pending review.",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_read_reuse_visibility.py",
+      "function": "_remember_dropped_span",
+      "except_clause": "except (AttributeError, TypeError):",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_read_reuse_visibility.py",
+      "function": "remember_read_span",
+      "except_clause": "except (OSError, TypeError, ValueError):",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_read_reuse_visibility.py",
+      "function": "remember_read_span",
+      "except_clause": "except (AttributeError, TypeError):",
+      "ordinal": 3,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_read_reuse_visibility.py",
+      "function": "_contract_paths",
+      "except_clause": "except (OSError, TypeError, ValueError):",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_read_reuse_visibility.py",
+      "function": "_contract_paths",
+      "except_clause": "except (OSError, TypeError, ValueError):",
+      "ordinal": 2,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_read_reuse_visibility.py",
+      "function": "_contract_paths",
+      "except_clause": "except (ImportError, OSError, TypeError, ValueError):",
+      "ordinal": 3,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "med"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_read_reuse_visibility.py",
+      "function": "_full_line_source_message",
+      "except_clause": "except (ImportError, TypeError, ValueError):",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_read_reuse_visibility.py",
+      "function": "_is_target",
+      "except_clause": "except (OSError, TypeError, ValueError):",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_read_reuse_visibility.py",
+      "function": "_message_claims_source_path",
+      "except_clause": "except (ImportError, AttributeError, TypeError, ValueError):",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_read_reuse_visibility.py",
+      "function": "_message_claims_source_path",
+      "except_clause": "except (ImportError, AttributeError, TypeError, ValueError):",
+      "ordinal": 2,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_read_reuse_visibility.py",
+      "function": "defer_unproven_source_claims",
+      "except_clause": "except (TypeError, ValueError):",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_read_reuse_visibility.py",
+      "function": "clear_candidates",
+      "except_clause": "except (AttributeError, TypeError):",
+      "ordinal": 3,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_recall.py",
+      "function": "record_runtime_item",
+      "except_clause": "except (TypeError, ValueError, RecallError):",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "med"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_redirect_policy.py",
+      "function": "_origin",
+      "except_clause": "except ValueError:",
+      "ordinal": 1,
+      "reason": "baseline debt v0.4.30: malformed redirect origin is rejected",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_refusal_compact.py",
+      "function": "_as_mapping",
+      "except_clause": "except (AttributeError, OSError, RuntimeError, TypeError, ValueError):",
+      "ordinal": 1,
+      "reason": "Pre-existing v0.4.20 baseline debt: If object-to-mapping conversion fails, returns None.",
+      "risk": "high"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_refusal_compact.py",
+      "function": "_number",
+      "except_clause": "except (TypeError, ValueError):",
+      "ordinal": 1,
+      "reason": "Pre-existing v0.4.20 baseline debt: If ordinal parsing fails, returns -1.",
+      "risk": "med"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_refusal_compact.py",
+      "function": "_canonical_check_rows",
+      "except_clause": "except (ImportError, AttributeError, OSError, RuntimeError, TypeError, ValueError):",
+      "ordinal": 1,
+      "reason": "Pre-existing v0.4.20 baseline debt: If progress-ledger projection fails, returns an empty check-row list.",
+      "risk": "high"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_refusal_compact.py",
+      "function": "_check_rows",
+      "except_clause": "except (AttributeError, OSError, RuntimeError, TypeError, ValueError):",
+      "ordinal": 1,
+      "reason": "Pre-existing v0.4.20 baseline debt: If journal record retrieval fails, skips journal-derived check rows and continues with other sources.",
+      "risk": "med"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_refusal_compact.py",
+      "function": "_refusal_rows",
+      "except_clause": "except (AttributeError, OSError, RuntimeError, TypeError, ValueError):",
+      "ordinal": 1,
+      "reason": "Pre-existing v0.4.20 baseline debt: If journal retrieval fails, skips journal-derived refusal rows.",
+      "risk": "med"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_refusal_compact.py",
+      "function": "_action_history",
+      "except_clause": "except (AttributeError, OSError, RuntimeError, TypeError, ValueError):",
+      "ordinal": 1,
+      "reason": "Pre-existing v0.4.20 baseline debt: If journal retrieval fails, skips journal-derived action outcomes.",
+      "risk": "med"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_refusal_compact.py",
+      "function": "_requirement_rows",
+      "except_clause": "except (ImportError, AttributeError, OSError, RuntimeError, TypeError, ValueError):",
+      "ordinal": 1,
+      "reason": "Pre-existing v0.4.20 baseline debt: If clause-review retrieval fails, skips its requirement rows and may fall back to brief text only.",
+      "risk": "high"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_refusal_compact.py",
+      "function": "_witness_pin_row",
+      "except_clause": "except (ImportError, AttributeError, OSError, RuntimeError, TypeError, ValueError):",
+      "ordinal": 1,
+      "reason": "Pre-existing v0.4.20 silent fallback; request effect unclassified pending review.",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_refusal_compact.py",
+      "function": "_emit_continuity_event",
+      "except_clause": "except Exception:",
+      "ordinal": 1,
+      "reason": "Pre-existing v0.4.20 silent fallback; request effect unclassified pending review.",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_repo_intel.py",
+      "function": "_inside",
+      "except_clause": "except ValueError:",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_repo_intel.py",
+      "function": "import_construction_fact",
+      "except_clause": "except (OSError, UnicodeError, SyntaxError, ValueError):",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "med"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_repo_intel.py",
+      "function": "_journal_repo_map_receipt",
+      "except_clause": "except (ImportError, LookupError):",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_repo_signals.py",
+      "function": "_relative_path",
+      "except_clause": "except (OSError, ValueError):",
+      "ordinal": 1,
+      "reason": "Pre-existing v0.4.20 baseline debt: Absolute path resolution or containment failure becomes an empty relative-path value.",
+      "risk": "med"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_repo_signals.py",
+      "function": "_source_paths",
+      "except_clause": "except ValueError:",
+      "ordinal": 1,
+      "reason": "Pre-existing v0.4.20 silent fallback; request effect unclassified pending review.",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_repo_signals.py",
+      "function": "_workspace_paths",
+      "except_clause": "except ValueError:",
+      "ordinal": 1,
+      "reason": "Pre-existing v0.4.20 silent fallback; request effect unclassified pending review.",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_repo_signals.py",
+      "function": "_read_source",
+      "except_clause": "except (OSError, UnicodeError):",
+      "ordinal": 1,
+      "reason": "Pre-existing v0.4.20 baseline debt: Unreadable or undecodable source is represented as an empty string.",
+      "risk": "med"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_repo_signals.py",
+      "function": "_file_digest",
+      "except_clause": "except (OSError, IOError):",
+      "ordinal": 1,
+      "reason": "Pre-existing v0.4.20 baseline debt: Digest failure returns the sentinel string `missing`.",
+      "risk": "med"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_repo_signals.py",
+      "function": "_git_root",
+      "except_clause": "except (OSError, ValueError):",
+      "ordinal": 1,
+      "reason": "Pre-existing v0.4.20 baseline debt: Git-root/path validation failure returns `None`.",
+      "risk": "med"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_repo_signals.py",
+      "function": "_task_prefix",
+      "except_clause": "except (OSError, ValueError):",
+      "ordinal": 1,
+      "reason": "Pre-existing v0.4.20 baseline debt: Path resolution failure returns an empty task prefix.",
+      "risk": "high"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_request_auth_identity.py",
+      "function": "_read_secret",
+      "except_clause": "except Exception:",
+      "ordinal": 1,
+      "reason": "Pre-existing v0.4.20 silent fallback; request effect unclassified pending review.",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_request_auth_identity.py",
+      "function": "_read_secret",
+      "except_clause": "except OSError:",
+      "ordinal": 2,
+      "reason": "Pre-existing v0.4.20 silent fallback; request effect unclassified pending review.",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_request_auth_identity.py",
+      "function": "_create_secret",
+      "except_clause": "except Exception:",
+      "ordinal": 2,
+      "reason": "Pre-existing v0.4.20 silent fallback; request effect unclassified pending review.",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_request_auth_identity.py",
+      "function": "_create_secret",
+      "except_clause": "except OSError:",
+      "ordinal": 3,
+      "reason": "Pre-existing v0.4.20 silent fallback; request effect unclassified pending review.",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_request_budget.py",
+      "function": "_ordered_reserved_messages",
+      "except_clause": "except (ImportError, TypeError, ValueError):",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "med"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_request_budget.py",
+      "function": "_required_source_paths",
+      "except_clause": "except (AttributeError, OSError, TypeError, ValueError):",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "med"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_request_budget.py",
+      "function": "_request_token_meter",
+      "except_clause": "except Exception:",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_request_budget.py",
+      "function": "_request_token_meter",
+      "except_clause": "except (AttributeError, TypeError):",
+      "ordinal": 2,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_request_budget.py",
+      "function": "_apply_budget_with_diet",
+      "except_clause": "except (ImportError, TypeError, ValueError):",
+      "ordinal": 4,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "low"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_request_budget.py",
+      "function": "_apply_budget_with_diet.dispatchable",
+      "except_clause": "except (AttributeError, OSError, RuntimeError, TypeError, ValueError):",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_request_diet.py",
+      "function": "resolve_tokenize_url",
+      "except_clause": "except Exception:",
+      "ordinal": 2,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "med"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_request_diet.py",
+      "function": "resolve_tokenize_url",
+      "except_clause": "except Exception:",
+      "ordinal": 3,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "med"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_request_diet.py",
+      "function": "resolve_tokenize_url",
+      "except_clause": "except ValueError:",
+      "ordinal": 5,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_request_diet.py",
+      "function": "tokenize_route_label",
+      "except_clause": "except ValueError:",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_request_diet.py",
+      "function": "_url_origin",
+      "except_clause": "except ValueError:",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_request_diet.py",
+      "function": "_current_source_segments",
+      "except_clause": "except (TypeError, ValueError, KeyError):",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_request_diet.py",
+      "function": "_read_page_source_segment",
+      "except_clause": "except (ImportError, TypeError, ValueError, UnicodeError):",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_request_diet.py",
+      "function": "_current_source_duplicate_location",
+      "except_clause": "except Exception:",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_request_evidence_closure.py",
+      "function": "_outline",
+      "except_clause": "except (ImportError, OSError, TypeError, ValueError, SyntaxError):",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_request_evidence_closure.py",
+      "function": "_safe_path",
+      "except_clause": "except (OSError, ValueError):",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_request_evidence_closure.py",
+      "function": "_source_imports",
+      "except_clause": "except (SyntaxError, ValueError):",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "med"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_request_source_window.py",
+      "function": "_read_page_source_range",
+      "except_clause": "except (TypeError, ValueError):",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_request_source_window.py",
+      "function": "parse_model_source_window",
+      "except_clause": "except (TypeError, ValueError, json.JSONDecodeError):",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "med"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_request_source_window.py",
+      "function": "_generated_window_ranges",
+      "except_clause": "except (TypeError, ValueError):",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_request_source_window.py",
+      "function": "_is_framefit5_closure_projection_input",
+      "except_clause": "except (FrameFit5Error, TypeError, ValueError):",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_request_source_window.py",
+      "function": "parse_window",
+      "except_clause": "except (TypeError, ValueError, json.JSONDecodeError):",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "med"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_request_source_window.py",
+      "function": "_page_limit",
+      "except_clause": "except (TypeError, ValueError, OverflowError):",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_request_source_window.py",
+      "function": "_cached_closure_is_fresh",
+      "except_clause": "except (OSError, RecursionError, RuntimeError, SyntaxError, TypeError, ValueError):",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_request_source_window.py",
+      "function": "editable_product_paths",
+      "except_clause": "except ValueError:",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_request_source_window.py",
+      "function": "editable_product_paths",
+      "except_clause": "except (OSError, ValueError):",
+      "ordinal": 2,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "med"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_request_source_window.py",
+      "function": "_model_requested_read_paths",
+      "except_clause": "except (TypeError, ValueError, json.JSONDecodeError):",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "med"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_request_source_window.py",
+      "function": "_task_requested_source_paths",
+      "except_clause": "except (OSError, ValueError):",
+      "ordinal": 2,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "med"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_request_source_window.py",
+      "function": "_python_enclosing",
+      "except_clause": "except (SyntaxError, ValueError):",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_request_source_window.py",
+      "function": "_candidate_symbol",
+      "except_clause": "except (ImportError, OSError, TypeError, ValueError):",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "low"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_request_source_window.py",
+      "function": "public_test_paths",
+      "except_clause": "except ValueError:",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_request_source_window.py",
+      "function": "entry_verification",
+      "except_clause": "except (AttributeError, TypeError):",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_request_source_window.py",
+      "function": "_first_definition_line",
+      "except_clause": "except (SyntaxError, ValueError):",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "low"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_request_source_window.py",
+      "function": "_first_definition_line",
+      "except_clause": "except (ImportError, OSError, TypeError, ValueError):",
+      "ordinal": 2,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "low"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_request_tool_surface.py",
+      "function": "_emit_capability_floor_restored",
+      "except_clause": "except Exception:",
+      "ordinal": 1,
+      "reason": "Pre-existing v0.4.20 silent fallback; request effect unclassified pending review.",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_request_tool_surface.py",
+      "function": "_restore",
+      "except_clause": "except Exception:",
+      "ordinal": 1,
+      "reason": "Pre-existing v0.4.20 baseline debt: If deleting a request-state attribute during rollback fails, silently continues.",
+      "risk": "high"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_request_tool_surface.py",
+      "function": "_restore",
+      "except_clause": "except Exception:",
+      "ordinal": 2,
+      "reason": "Pre-existing v0.4.20 baseline debt: If deleting a request-state attribute during rollback fails, silently continues.",
+      "risk": "high"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_request_tool_surface.py",
+      "function": "_record_failure",
+      "except_clause": "except Exception:",
+      "ordinal": 1,
+      "reason": "Pre-existing v0.4.20 silent fallback; request effect unclassified pending review.",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_request_tool_surface.py",
+      "function": "_tool_menu_memo_mode",
+      "except_clause": "except Exception:",
+      "ordinal": 1,
+      "reason": "Pre-existing v0.4.20 silent fallback; request effect unclassified pending review.",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_request_tool_surface.py",
+      "function": "_tool_surface_bytes",
+      "except_clause": "except (TypeError, ValueError, UnicodeEncodeError):",
+      "ordinal": 1,
+      "reason": "Pre-existing v0.4.20 silent fallback; request effect unclassified pending review.",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_request_tool_surface.py",
+      "function": "_tool_menu_frame_digest",
+      "except_clause": "except Exception:",
+      "ordinal": 1,
+      "reason": "Pre-existing v0.4.20 silent fallback; request effect unclassified pending review.",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_request_tool_surface.py",
+      "function": "_tool_menu_memo_key",
+      "except_clause": "except Exception:",
+      "ordinal": 1,
+      "reason": "Pre-existing v0.4.20 silent fallback; request effect unclassified pending review.",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_request_tool_surface.py",
+      "function": "_store_tool_menu_memo_state",
+      "except_clause": "except AttributeError:",
+      "ordinal": 1,
+      "reason": "Pre-existing v0.4.20 silent fallback; request effect unclassified pending review.",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_request_tool_surface.py",
+      "function": "_store_tool_menu_memo_state",
+      "except_clause": "except Exception:",
+      "ordinal": 2,
+      "reason": "Pre-existing v0.4.20 silent fallback; request effect unclassified pending review.",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_request_tool_surface.py",
+      "function": "_emit_tool_menu_memo_shadow_mismatch",
+      "except_clause": "except Exception:",
+      "ordinal": 1,
+      "reason": "Pre-existing v0.4.20 silent fallback; request effect unclassified pending review.",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_retry_gate.py",
+      "function": "_int",
+      "except_clause": "except (TypeError, ValueError):",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "med"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_retry_gate.py",
+      "function": "RetryGate._record_failure",
+      "except_clause": "except ValueError:",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_starter_conflicts.py",
+      "function": "_source_location",
+      "except_clause": "except (OSError, UnicodeError, SyntaxError, ValueError):",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "low"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_starter_conflicts.py",
+      "function": "_ast_literal",
+      "except_clause": "except (ValueError, TypeError, SyntaxError):",
+      "ordinal": 2,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_starter_conflicts.py",
+      "function": "attach_to_requirements_ledger",
+      "except_clause": "except (TypeError, ValueError):",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "med"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_stateframe_action_ledger.py",
+      "function": "_arguments",
+      "except_clause": "except (TypeError, ValueError, json.JSONDecodeError):",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "med"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_stateframe_action_ledger.py",
+      "function": "_turn_groups.drop",
+      "except_clause": "except Exception:",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_stateframe_action_ledger.py",
+      "function": "_emit_action_context_shadow_mismatch",
+      "except_clause": "except Exception:",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_stateframe_f4_fit.py",
+      "function": "parse_deferred_source_receipt",
+      "except_clause": "except (TypeError, ValueError, json.JSONDecodeError):",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_stateframe_f4_fit.py",
+      "function": "parse_deferred_source_receipt",
+      "except_clause": "except ValueError:",
+      "ordinal": 2,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_stateframe_f4_fit.py",
+      "function": "_ledger_covered_call_ids",
+      "except_clause": "except (TypeError, ValueError, json.JSONDecodeError):",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_stateframe_f4_fit.py",
+      "function": "_state_message_parts",
+      "except_clause": "except (TypeError, ValueError, json.JSONDecodeError):",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_stateframe_f4_fit.py",
+      "function": "_defer_target_source",
+      "except_clause": "except ValueError:",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_stateframe_f4_fit.py",
+      "function": "_retained_request_fits_bytes",
+      "except_clause": "except Exception:",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "med"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_stateframe_f4_fit.py",
+      "function": "_source_section",
+      "except_clause": "except ImportError:",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "high"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_stateframe_f4_fit.py",
+      "function": "_serialized_request_bytes",
+      "except_clause": "except (TypeError, ValueError, OverflowError):",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_stateframe_f4_fit.py",
+      "function": "_should_retain_ceiling_fitting_frame",
+      "except_clause": "except Exception:",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "med"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_stateframe_framefit5.py",
+      "function": "_update_headcarry",
+      "except_clause": "except Exception:",
+      "ordinal": 2,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_stateframe_framefit5.py",
+      "function": "_update_headcarry",
+      "except_clause": "except Exception:",
+      "ordinal": 3,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_stateframe_framefit5.py",
+      "function": "_current_file_revision",
+      "except_clause": "except (OSError, RuntimeError, ValueError):",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_stateframe_framefit5.py",
+      "function": "_editable_site",
+      "except_clause": "except (OSError, RuntimeError, ValueError):",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "med"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_stateframe_framefit5.py",
+      "function": "_is_micrograph_projection",
+      "except_clause": "except (TypeError, ValueError):",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_stateframe_framefit5.py",
+      "function": "validate_product_request",
+      "except_clause": "except Exception:",
+      "ordinal": 2,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "med"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_stateframe_gears.py",
+      "function": "_int",
+      "except_clause": "except (TypeError, ValueError, OverflowError):",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "high"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_stateframe_get_sure.py",
+      "function": "runtime_table",
+      "except_clause": "except (ImportError, OSError, TypeError, ValueError):",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "med"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_stateframe_get_sure.py",
+      "function": "_changed_region",
+      "except_clause": "except (OSError, UnicodeError, ValueError):",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "med"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_stateframe_headcarry.py",
+      "function": "_message_covers_head",
+      "except_clause": "except ImportError:",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_stateframe_headcarry.py",
+      "function": "_message_covers_head",
+      "except_clause": "except (KeyError, TypeError, ValueError, OSError):",
+      "ordinal": 2,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_stateframe_headcarry.py",
+      "function": "record_headcarry_shadow_mismatches",
+      "except_clause": "except Exception:",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_stateframe_headcarry.py",
+      "function": "record_headcarry_shadow_mismatches",
+      "except_clause": "except Exception:",
+      "ordinal": 2,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_stateframe_headcarry.py",
+      "function": "record_headcarry_rendered",
+      "except_clause": "except Exception:",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_stateframe_lean.py",
+      "function": "render_requested_generated",
+      "except_clause": "except (KeyError, TypeError, ValueError):",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "med"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_stateframe_runtime.py",
+      "function": "public_test_verdict_fact_mode",
+      "except_clause": "except Exception:",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_stateframe_runtime.py",
+      "function": "_emit_public_test_verdict_fact_event",
+      "except_clause": "except Exception:",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_stateframe_runtime.py",
+      "function": "classify_deferred_finalization_no_changes",
+      "except_clause": "except Exception:",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_stateframe_runtime.py",
+      "function": "_emit_prepare_timing",
+      "except_clause": "except (OSError, RuntimeError, TypeError, ValueError):",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_stateframe_runtime.py",
+      "function": "_fit_requested_message",
+      "except_clause": "except (TypeError, ValueError, json.JSONDecodeError):",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_stateframe_runtime.py",
+      "function": "_filter_hypotheses_not_facts",
+      "except_clause": "except ImportError:",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_stateframe_runtime.py",
+      "function": "_filter_hypotheses_not_facts",
+      "except_clause": "except ImportError:",
+      "ordinal": 2,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_stateframe_runtime.py",
+      "function": "_apply_self_edit_public_view",
+      "except_clause": "except ImportError:",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_stateframe_runtime.py",
+      "function": "_tokenlab_conclusion",
+      "except_clause": "except (ImportError, TypeError, ValueError):",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_stateframe_runtime.py",
+      "function": "_tokenlab_conclusion",
+      "except_clause": "except (AttributeError, TypeError, ValueError):",
+      "ordinal": 2,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_stateframe_runtime.py",
+      "function": "_model_frame_facts",
+      "except_clause": "except ImportError:",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_stateframe_runtime.py",
+      "function": "_model_frame_facts",
+      "except_clause": "except ImportError:",
+      "ordinal": 2,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_stateframe_runtime.py",
+      "function": "_model_frame_facts",
+      "except_clause": "except ImportError:",
+      "ordinal": 3,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_stateframe_runtime.py",
+      "function": "_model_frame_facts",
+      "except_clause": "except ImportError:",
+      "ordinal": 4,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_stateframe_runtime.py",
+      "function": "_working_view_decision_state.status_of",
+      "except_clause": "except ImportError:",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_stateframe_runtime.py",
+      "function": "build_working_view",
+      "except_clause": "except ImportError:",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_stateframe_runtime.py",
+      "function": "build_working_view",
+      "except_clause": "except ImportError:",
+      "ordinal": 2,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_stateframe_runtime.py",
+      "function": "_boundary_json_payload",
+      "except_clause": "except (TypeError, ValueError):",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_stateframe_runtime.py",
+      "function": "_authored_candidate_revision",
+      "except_clause": "except (AttributeError, OSError, RuntimeError, TypeError, ValueError):",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_stateframe_runtime.py",
+      "function": "StateFrameRuntime.__init__",
+      "except_clause": "except (TypeError, ValueError):",
+      "ordinal": 7,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_stateframe_runtime.py",
+      "function": "StateFrameRuntime.__init__",
+      "except_clause": "except (TypeError, ValueError):",
+      "ordinal": 8,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_stateframe_runtime.py",
+      "function": "StateFrameRuntime._bind_target",
+      "except_clause": "except (OSError, ValueError):",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_stateframe_runtime.py",
+      "function": "StateFrameRuntime._decision_cache_context",
+      "except_clause": "except (OSError, UnicodeError, ValueError):",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_stateframe_runtime.py",
+      "function": "StateFrameRuntime._sync_work_carry",
+      "except_clause": "except (AttributeError, TypeError, ValueError):",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_stateframe_runtime.py",
+      "function": "StateFrameRuntime._decision_continuity_assistant_statement",
+      "except_clause": "except (AttributeError, TypeError, ValueError):",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_stateframe_runtime.py",
+      "function": "StateFrameRuntime._decision_cache_work_frontier",
+      "except_clause": "except (ImportError, TypeError, ValueError):",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_stateframe_runtime.py",
+      "function": "StateFrameRuntime.test_observation",
+      "except_clause": "except (ImportError, AttributeError, TypeError, ValueError):",
+      "ordinal": 3,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_stateframe_runtime.py",
+      "function": "StateFrameRuntime._replay_green_observation",
+      "except_clause": "except (AttributeError, TypeError, ValueError):",
+      "ordinal": 2,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_stateframe_runtime.py",
+      "function": "StateFrameRuntime._replay_postgreen_actions",
+      "except_clause": "except (AttributeError, ImportError, OSError, RuntimeError, TypeError, ValueError):",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_stateframe_runtime.py",
+      "function": "StateFrameRuntime._starter_conflict_bundle",
+      "except_clause": "except (ImportError, OSError, TypeError, ValueError):",
+      "ordinal": 3,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_stateframe_runtime.py",
+      "function": "StateFrameRuntime._initialize_starter_conflicts",
+      "except_clause": "except (TypeError, ValueError, KeyError):",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_stateframe_runtime.py",
+      "function": "StateFrameRuntime._host_check_bundle",
+      "except_clause": "except Exception:",
+      "ordinal": 4,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_stateframe_runtime.py",
+      "function": "StateFrameRuntime._host_check_bundle",
+      "except_clause": "except (OSError, ValueError):",
+      "ordinal": 5,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_stateframe_runtime.py",
+      "function": "StateFrameRuntime._host_check_bundle",
+      "except_clause": "except Exception:",
+      "ordinal": 7,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_stateframe_runtime.py",
+      "function": "StateFrameRuntime._host_check_bundle",
+      "except_clause": "except Exception:",
+      "ordinal": 8,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_stateframe_runtime.py",
+      "function": "StateFrameRuntime.prepublish_diff_review",
+      "except_clause": "except (TypeError, ValueError):",
+      "ordinal": 2,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_stateframe_runtime.py",
+      "function": "StateFrameRuntime.completion_decision",
+      "except_clause": "except (ImportError, TypeError, ValueError):",
+      "ordinal": 3,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_stateframe_runtime.py",
+      "function": "StateFrameRuntime.completion_decision",
+      "except_clause": "except (ImportError, OSError, TypeError, ValueError):",
+      "ordinal": 4,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_stateframe_runtime.py",
+      "function": "StateFrameRuntime._completion_decision_core",
+      "except_clause": "except (ImportError, TypeError, ValueError):",
+      "ordinal": 4,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_stateframe_runtime.py",
+      "function": "StateFrameRuntime._base_tool_menu",
+      "except_clause": "except (ImportError, AttributeError, TypeError, ValueError):",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_stateframe_runtime.py",
+      "function": "StateFrameRuntime._terminal_tool_menu",
+      "except_clause": "except (AttributeError, TypeError, ValueError):",
+      "ordinal": 2,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_stateframe_runtime.py",
+      "function": "StateFrameRuntime.bounded_locate_before_dispatch",
+      "except_clause": "except (TypeError, ValueError):",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_stateframe_runtime.py",
+      "function": "StateFrameRuntime.decisive_factor_operation",
+      "except_clause": "except (TypeError, ValueError):",
+      "ordinal": 2,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_stateframe_runtime.py",
+      "function": "StateFrameRuntime._ripple_preview_before_write",
+      "except_clause": "except (AttributeError, TypeError):",
+      "ordinal": 2,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_stateframe_runtime.py",
+      "function": "StateFrameRuntime._ripple_preview_after_apply",
+      "except_clause": "except (AttributeError, TypeError):",
+      "ordinal": 3,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_stateframe_runtime.py",
+      "function": "StateFrameRuntime._record_rejected_edit_intent",
+      "except_clause": "except (OSError, UnicodeError, TypeError, ValueError):",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_stateframe_runtime.py",
+      "function": "StateFrameRuntime._capture_self_edit_view",
+      "except_clause": "except (OSError, UnicodeError, ValueError):",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_stateframe_runtime.py",
+      "function": "StateFrameRuntime.completed_receipt",
+      "except_clause": "except (ImportError, AttributeError, TypeError, ValueError, OSError):",
+      "ordinal": 3,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_stateframe_runtime.py",
+      "function": "StateFrameRuntime.completed_receipt",
+      "except_clause": "except (ImportError, AttributeError, TypeError, ValueError, OSError):",
+      "ordinal": 4,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_stateframe_runtime.py",
+      "function": "StateFrameRuntime.completed_receipt",
+      "except_clause": "except (ImportError, AttributeError, TypeError, ValueError, OSError):",
+      "ordinal": 5,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_stateframe_runtime.py",
+      "function": "StateFrameRuntime.completed_receipt",
+      "except_clause": "except (ImportError, AttributeError, TypeError, ValueError):",
+      "ordinal": 6,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_stateframe_runtime.py",
+      "function": "StateFrameRuntime.completed_receipt",
+      "except_clause": "except (ImportError, AttributeError, TypeError, ValueError):",
+      "ordinal": 10,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_stateframe_runtime.py",
+      "function": "StateFrameRuntime._multidef_ast_definitions",
+      "except_clause": "except (SyntaxError, TypeError, ValueError):",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_stateframe_runtime.py",
+      "function": "StateFrameRuntime._retire_multi_definition_open_work",
+      "except_clause": "except (OSError, TypeError, ValueError):",
+      "ordinal": 2,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_stateframe_runtime.py",
+      "function": "StateFrameRuntime._record_multi_definition_open_work",
+      "except_clause": "except (TypeError, ValueError, json.JSONDecodeError):",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_stateframe_runtime.py",
+      "function": "StateFrameRuntime.close_step",
+      "except_clause": "except Exception:",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_stateframe_runtime.py",
+      "function": "StateFrameRuntime.close_step",
+      "except_clause": "except (ImportError, AttributeError, TypeError, ValueError):",
+      "ordinal": 2,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_stateframe_runtime.py",
+      "function": "StateFrameRuntime.close_step",
+      "except_clause": "except (ImportError, AttributeError, TypeError, ValueError):",
+      "ordinal": 3,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_stateframe_runtime.py",
+      "function": "StateFrameRuntime._emit_tool_call_cap_audit",
+      "except_clause": "except Exception:",
+      "ordinal": 2,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_stateframe_runtime.py",
+      "function": "StateFrameRuntime.jobqueue_audit_frame_context",
+      "except_clause": "except (OSError, UnicodeError):",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_stateframe_runtime.py",
+      "function": "StateFrameRuntime._turtle_obligations",
+      "except_clause": "except (ImportError, AttributeError, TypeError):",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_stateframe_runtime.py",
+      "function": "StateFrameRuntime._turtle_host_findings",
+      "except_clause": "except (ImportError, OSError, UnicodeError):",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_stateframe_runtime.py",
+      "function": "StateFrameRuntime.turtle_trigger",
+      "except_clause": "except (OSError, UnicodeError, ImportError, AttributeError, TypeError):",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_stateframe_runtime.py",
+      "function": "StateFrameRuntime._host_repair_source_paths",
+      "except_clause": "except (OSError, ValueError):",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_stateframe_runtime.py",
+      "function": "StateFrameRuntime._host_repair_source_paths",
+      "except_clause": "except ValueError:",
+      "ordinal": 2,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_stateframe_runtime.py",
+      "function": "StateFrameRuntime._host_repair_packet",
+      "except_clause": "except (OSError, UnicodeError):",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_stateframe_runtime.py",
+      "function": "StateFrameRuntime._mark_false_completion_accepted",
+      "except_clause": "except (ImportError, OSError, TypeError, ValueError):",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_stateframe_runtime.py",
+      "function": "StateFrameRuntime._working_source_message",
+      "except_clause": "except (AttributeError, OSError, TypeError, UnicodeError, ValueError):",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_stateframe_runtime.py",
+      "function": "StateFrameRuntime.pass_gates_vector",
+      "except_clause": "except (AttributeError, OSError, RuntimeError, TypeError, ValueError):",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_stateframe_runtime.py",
+      "function": "StateFrameRuntime.pass_gates_vector.make",
+      "except_clause": "except (ImportError, AttributeError, OSError, TypeError, ValueError):",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_stateframe_runtime.py",
+      "function": "StateFrameRuntime._pass_gates_menu.dispatchable",
+      "except_clause": "except (AttributeError, OSError, RuntimeError, TypeError, ValueError):",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_stateframe_runtime.py",
+      "function": "StateFrameRuntime._terminal_block_sizes",
+      "except_clause": "except (AttributeError, TypeError, ValueError):",
+      "ordinal": 2,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_stateframe_runtime.py",
+      "function": "StateFrameRuntime._terminal_block_sizes",
+      "except_clause": "except (TypeError, ValueError):",
+      "ordinal": 3,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_stateframe_runtime.py",
+      "function": "StateFrameRuntime._terminal_view",
+      "except_clause": "except ImportError:",
+      "ordinal": 2,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_stateframe_runtime.py",
+      "function": "StateFrameRuntime._f4_framefit_target_source_route",
+      "except_clause": "except (OSError, TypeError, UnicodeError, ValueError):",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_stateframe_runtime.py",
+      "function": "StateFrameRuntime._f4_view",
+      "except_clause": "except Exception:",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "high"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_stateframe_runtime.py",
+      "function": "StateFrameRuntime._f4_view",
+      "except_clause": "except (ImportError, AttributeError, TypeError, ValueError):",
+      "ordinal": 2,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "high"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_stateframe_runtime.py",
+      "function": "StateFrameRuntime._f4_view",
+      "except_clause": "except ImportError:",
+      "ordinal": 3,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "med"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_stateframe_runtime.py",
+      "function": "StateFrameRuntime._view",
+      "except_clause": "except ImportError:",
+      "ordinal": 2,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "med"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_stateframe_runtime.py",
+      "function": "StateFrameRuntime._raising_h_note_observation",
+      "except_clause": "except (OSError, UnicodeDecodeError):",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_stateframe_runtime.py",
+      "function": "StateFrameRuntime._raising_h_build",
+      "except_clause": "except (OSError, UnicodeDecodeError):",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_stateframe_runtime.py",
+      "function": "StateFrameRuntime._run_env_preflight",
+      "except_clause": "except (AttributeError, TypeError):",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_stateframe_runtime.py",
+      "function": "StateFrameRuntime._history_state_tail_active",
+      "except_clause": "except (ImportError, AttributeError, TypeError, ValueError):",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_stateframe_runtime.py",
+      "function": "StateFrameRuntime._history_state_tail_blocks",
+      "except_clause": "except (ImportError, AttributeError, TypeError, ValueError):",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_stateframe_runtime.py",
+      "function": "StateFrameRuntime._prepare_lean_plain_loop",
+      "except_clause": "except (ImportError, OSError, TypeError, ValueError):",
+      "ordinal": 3,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_stateframe_runtime.py",
+      "function": "StateFrameRuntime.prepare",
+      "except_clause": "except AttributeError:",
+      "ordinal": 4,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_stateframe_runtime.py",
+      "function": "StateFrameRuntime.prepare",
+      "except_clause": "except (ImportError, AttributeError, OSError, TypeError, ValueError):",
+      "ordinal": 14,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_stateframe_runtime.py",
+      "function": "StateFrameRuntime.prepare",
+      "except_clause": "except ImportError:",
+      "ordinal": 18,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_stateframe_runtime.py",
+      "function": "StateFrameRuntime.finish",
+      "except_clause": "except Exception:",
+      "ordinal": 4,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_stateframe_v2_s1.py",
+      "function": "_brief_names",
+      "except_clause": "except (ImportError, AttributeError, TypeError):",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "med"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_step_contract.py",
+      "function": "reconcile_final_source_access",
+      "except_clause": "except (TypeError, ValueError, RecursionError):",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "high"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_step_contract.py",
+      "function": "commit_environment_notice_delivery",
+      "except_clause": "except (TypeError, ValueError, RecursionError):",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_step_contract.py",
+      "function": "action_schema",
+      "except_clause": "except (ImportError, ModuleNotFoundError):",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "med"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_step_contract.py",
+      "function": "action_schema",
+      "except_clause": "except (ImportError, ModuleNotFoundError):",
+      "ordinal": 2,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "med"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_step_contract.py",
+      "function": "action_schema",
+      "except_clause": "except (ImportError, ModuleNotFoundError):",
+      "ordinal": 3,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "med"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_step_contract.py",
+      "function": "decode_action_envelope",
+      "except_clause": "except (ImportError, ModuleNotFoundError):",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_step_contract.py",
+      "function": "decode_action_envelope",
+      "except_clause": "except (ImportError, ModuleNotFoundError):",
+      "ordinal": 2,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_step_contract.py",
+      "function": "decode_action_envelope",
+      "except_clause": "except (ImportError, ModuleNotFoundError):",
+      "ordinal": 3,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_step_contract.py",
+      "function": "edit_nturn_budget_allows",
+      "except_clause": "except (TypeError, ValueError):",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "med"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_terminal_policy.py",
+      "function": "queue_advisory",
+      "except_clause": "except Exception:",
+      "ordinal": 1,
+      "reason": "Pre-existing v0.4.20 silent fallback; request effect unclassified pending review.",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_tokenlab_host_result_guard.py",
+      "function": "_state",
+      "except_clause": "except (AttributeError, TypeError):",
+      "ordinal": 1,
+      "reason": "Pre-existing v0.4.20 baseline debt: If state cannot be attached to the runtime, silently keeps a fresh ephemeral state dictionary.",
+      "risk": "high"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_tokenlab_stall_breaker.py",
+      "function": "_state",
+      "except_clause": "except (AttributeError, TypeError):",
+      "ordinal": 1,
+      "reason": "Pre-existing v0.4.20 baseline debt: If the runtime cannot retain the stall-breaker state attribute, silently continues with an ephemeral state dict.",
+      "risk": "high"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_tokenlab_stall_breaker.py",
+      "function": "_open_obligation_ids",
+      "except_clause": "except (ImportError, AttributeError, TypeError, ValueError, OSError):",
+      "ordinal": 1,
+      "reason": "Pre-existing v0.4.20 baseline debt: If open-clause retrieval fails, returns an empty obligation tuple.",
+      "risk": "high"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_tokenlab_stall_breaker.py",
+      "function": "observe_read_unchanged",
+      "except_clause": "except (ImportError, AttributeError, TypeError, ValueError):",
+      "ordinal": 1,
+      "reason": "Pre-existing v0.4.20 silent fallback; request effect unclassified pending review.",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_tokenlab_stall_breaker.py",
+      "function": "_json_mapping",
+      "except_clause": "except (TypeError, ValueError, json.JSONDecodeError):",
+      "ordinal": 1,
+      "reason": "Pre-existing v0.4.20 silent fallback; request effect unclassified pending review.",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_tokenlab_stall_breaker.py",
+      "function": "_stallwire_owner",
+      "except_clause": "except (AttributeError, TypeError):",
+      "ordinal": 1,
+      "reason": "Pre-existing v0.4.20 silent fallback; request effect unclassified pending review.",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_tokenlab_stall_breaker.py",
+      "function": "observe_closed_action",
+      "except_clause": "except (ImportError, AttributeError, OSError, TypeError, ValueError):",
+      "ordinal": 1,
+      "reason": "Pre-existing v0.4.20 silent fallback; request effect unclassified pending review.",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_tokenlab_stall_breaker.py",
+      "function": "observe_closed_action",
+      "except_clause": "except (ImportError, AttributeError, TypeError, ValueError):",
+      "ordinal": 2,
+      "reason": "Pre-existing v0.4.20 silent fallback; request effect unclassified pending review.",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_tokenlab_stall_breaker.py",
+      "function": "_apply_menu_legacy",
+      "except_clause": "except (ImportError, AttributeError, TypeError, ValueError):",
+      "ordinal": 1,
+      "reason": "Pre-existing v0.4.20 baseline debt: If the post-green no-progress owner cannot be queried, continues with the legacy read-blocking projection.",
+      "risk": "med"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_tokenlab_stall_breaker.py",
+      "function": "apply_menu.finish.admitted_projection_tool",
+      "except_clause": "except Exception:",
+      "ordinal": 1,
+      "reason": "Pre-existing v0.4.20 silent fallback; request effect unclassified pending review.",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_tokenlab_stall_breaker.py",
+      "function": "apply_menu",
+      "except_clause": "except (ImportError, AttributeError, OSError, TypeError, ValueError):",
+      "ordinal": 4,
+      "reason": "Pre-existing v0.4.20 baseline debt: If convergence-menu projection fails, silently keeps the prior projected menu.",
+      "risk": "med"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_tool_reply.py",
+      "function": "compose_tool_replies",
+      "except_clause": "except Exception:",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_tool_reply.py",
+      "function": "record_and_strip_receipts",
+      "except_clause": "except AttributeError:",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_tool_reply.py",
+      "function": "record_and_strip_receipts",
+      "except_clause": "except Exception:",
+      "ordinal": 2,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_v33_lean.py",
+      "function": "_compact_stateframe",
+      "except_clause": "except (ImportError, AttributeError, TypeError, ValueError):",
+      "ordinal": 2,
+      "reason": "Pre-existing v0.4.20 baseline debt: If the helper that identifies public checks that never ran cannot be imported or evaluated, leaves the compacted public_checks status unchanged.",
+      "risk": "high"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_vitals.py",
+      "function": "VitalsEKG._as_int",
+      "except_clause": "except ValueError:",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "med"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_wire_identity.py",
+      "function": "action_receipt_ordinal",
+      "except_clause": "except TypeError:",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_wire_truth_facts.py",
+      "function": "capture_context",
+      "except_clause": "except (AttributeError, TypeError):",
+      "ordinal": 4,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_wire_truth_gate.py",
+      "function": "_bound_source_delivery_paths",
+      "except_clause": "except ImportError:",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/mc_repo_intel_vendor/call_graph.py",
+      "function": "_entry_bytes",
+      "except_clause": "except OSError:",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/mc_repo_intel_vendor/call_graph.py",
+      "function": "_entry_bytes",
+      "except_clause": "except OSError:",
+      "ordinal": 2,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/mc_repo_intel_vendor/call_graph.py",
+      "function": "enforce_repo_cache_cap",
+      "except_clause": "except OSError:",
+      "ordinal": 2,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/mc_repo_intel_vendor/call_graph.py",
+      "function": "enforce_repo_cache_cap",
+      "except_clause": "except OSError:",
+      "ordinal": 3,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/mc_repo_intel_vendor/call_graph.py",
+      "function": "enforce_repo_cache_cap",
+      "except_clause": "except OSError:",
+      "ordinal": 4,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/mc_repo_intel_vendor/call_graph.py",
+      "function": "repo_cache_file",
+      "except_clause": "except OSError:",
+      "ordinal": 2,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/mc_repo_intel_vendor/call_graph.py",
+      "function": "_finite_number",
+      "except_clause": "except (OverflowError, TypeError, ValueError):",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/mc_repo_intel_vendor/call_graph.py",
+      "function": "_cached_extract",
+      "except_clause": "except (AttributeError, IndexError, KeyError, OverflowError, RecursionError, TypeError, ValueError):",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/mc_repo_intel_vendor/call_graph.py",
+      "function": "_build_import_table._resolve",
+      "except_clause": "except ValueError:",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/mc_repo_intel_vendor/call_graph.py",
+      "function": "_extract_source",
+      "except_clause": "except (SyntaxError, ValueError, MemoryError, RecursionError):",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/mc_repo_intel_vendor/call_graph.py",
+      "function": "_load_cache",
+      "except_clause": "except (OSError, RecursionError, UnicodeError, ValueError):",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/mc_repo_intel_vendor/call_graph.py",
+      "function": "_atomic_write_text",
+      "except_clause": "except OSError:",
+      "ordinal": 2,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/mc_repo_intel_vendor/call_graph.py",
+      "function": "dispatch_boundaries_in_file",
+      "except_clause": "except Exception:",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/mc_repo_intel_vendor/call_graph.py",
+      "function": "dispatch_boundaries_in_file",
+      "except_clause": "except (SyntaxError, ValueError, MemoryError, RecursionError):",
+      "ordinal": 2,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/mc_repo_intel_vendor/call_graph.py",
+      "function": "dispatch_boundaries_near",
+      "except_clause": "except OSError:",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/mc_repo_intel_vendor/call_graph.py",
+      "function": "_iter_py_files",
+      "except_clause": "except ValueError:",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/mc_repo_intel_vendor/call_graph.py",
+      "function": "_scan_source_files",
+      "except_clause": "except ValueError:",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/mc_repo_intel_vendor/call_graph.py",
+      "function": "_extract_any_file",
+      "except_clause": "except OSError:",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/mc_repo_intel_vendor/call_graph.py",
+      "function": "changed_ranges",
+      "except_clause": "except OSError:",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/mc_repo_intel_vendor/repo_map.py",
+      "function": "_generate_repo_map_with_stats",
+      "except_clause": "except ValueError:",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/mc_repo_intel_vendor/repo_map.py",
+      "function": "_get_cache_dir",
+      "except_clause": "except OSError:",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/mc_repo_intel_vendor/repo_map.py",
+      "function": "_load_cached_map",
+      "except_clause": "except OSError:",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/mc_repo_intel_vendor/repo_map.py",
+      "function": "_save_cached_map",
+      "except_clause": "except OSError:",
+      "ordinal": 2,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/probes/react_repair.py",
+      "function": "FileSet.from_row",
+      "except_clause": "except ImportError:",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "med"
+    },
+    {
+      "file": "src/stateframe/engine/probes/react_repair.py",
+      "function": "_authored_check_snapshots",
+      "except_clause": "except (OSError, ValueError):",
+      "ordinal": 2,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/probes/react_repair.py",
+      "function": "_is_product_path",
+      "except_clause": "except (ImportError, ValueError):",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/probes/react_repair.py",
+      "function": "_edit_scope_widen_refusal",
+      "except_clause": "except (ImportError, ValueError):",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/probes/react_repair.py",
+      "function": "_edit_scope_widen_refusal",
+      "except_clause": "except OSError:",
+      "ordinal": 2,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/probes/react_repair.py",
+      "function": "_edit_scope_widen_refusal",
+      "except_clause": "except OSError:",
+      "ordinal": 3,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/probes/react_repair.py",
+      "function": "_product_files_changed_count",
+      "except_clause": "except (OSError, TypeError, ValueError):",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/probes/react_repair.py",
+      "function": "_terminal_finalization_deferred",
+      "except_clause": "except Exception:",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/probes/react_repair.py",
+      "function": "_edit_path_label",
+      "except_clause": "except (OSError, ValueError):",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/probes/react_repair.py",
+      "function": "_is_typed_edit_rejection",
+      "except_clause": "except (TypeError, ValueError):",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/probes/react_repair.py",
+      "function": "_canonical_typed_edit_rejection",
+      "except_clause": "except (TypeError, ValueError):",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/probes/react_repair.py",
+      "function": "_create_path_contained",
+      "except_clause": "except (OSError, RuntimeError):",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/probes/react_repair.py",
+      "function": "_read_path_is_deferred_required",
+      "except_clause": "except (ImportError, LookupError):",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/probes/react_repair.py",
+      "function": "_read_path_is_deferred_required",
+      "except_clause": "except ImportError:",
+      "ordinal": 2,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/probes/react_repair.py",
+      "function": "_read_path_is_deferred_required",
+      "except_clause": "except (AttributeError, TypeError, ValueError):",
+      "ordinal": 3,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/probes/react_repair.py",
+      "function": "_parse_r1_tool_calls",
+      "except_clause": "except (ImportError, ValueError):",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/probes/react_repair.py",
+      "function": "_parse_r1_tool_calls",
+      "except_clause": "except (ImportError, ValueError):",
+      "ordinal": 2,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/probes/react_repair.py",
+      "function": "_parse_r1_tool_calls",
+      "except_clause": "except (TypeError, ValueError):",
+      "ordinal": 3,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/probes/react_repair.py",
+      "function": "_parse_r1_tool_calls",
+      "except_clause": "except Exception:",
+      "ordinal": 4,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/probes/react_repair.py",
+      "function": "parse_dsml_tool_calls",
+      "except_clause": "except Exception:",
+      "ordinal": 2,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/probes/react_repair.py",
+      "function": "_render_semantic_facts",
+      "except_clause": "except Exception:",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "med"
+    },
+    {
+      "file": "src/stateframe/engine/probes/react_repair.py",
+      "function": "_live_action_references",
+      "except_clause": "except (AttributeError, OSError, ValueError):",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "med"
+    },
+    {
+      "file": "src/stateframe/engine/probes/react_repair.py",
+      "function": "_live_action_references",
+      "except_clause": "except Exception:",
+      "ordinal": 2,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/probes/react_repair.py",
+      "function": "_live_action_references",
+      "except_clause": "except Exception:",
+      "ordinal": 3,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/probes/react_repair.py",
+      "function": "replace_fn",
+      "except_clause": "except (TypeError, ValueError, OSError):",
+      "ordinal": 5,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/probes/react_repair.py",
+      "function": "_db_alive",
+      "except_clause": "except OSError:",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/probes/react_repair.py",
+      "function": "_ensure_db",
+      "except_clause": "except Exception:",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/probes/react_repair.py",
+      "function": "_discover_test_targets",
+      "except_clause": "except (OSError, UnicodeError):",
+      "ordinal": 2,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/probes/react_repair.py",
+      "function": "_nearest_pytest_config_args._has_pytest_config",
+      "except_clause": "except OSError:",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/probes/react_repair.py",
+      "function": "_nearest_pytest_config_args",
+      "except_clause": "except ValueError:",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/probes/react_repair.py",
+      "function": "_journal_records",
+      "except_clause": "except TypeError:",
+      "ordinal": 2,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/probes/react_repair.py",
+      "function": "_journal_records",
+      "except_clause": "except Exception:",
+      "ordinal": 3,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/probes/react_repair.py",
+      "function": "_journal_records",
+      "except_clause": "except (TypeError, ValueError, UnicodeError):",
+      "ordinal": 4,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/probes/react_repair.py",
+      "function": "_journal_records",
+      "except_clause": "except (OSError, TypeError, ValueError):",
+      "ordinal": 5,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/probes/react_repair.py",
+      "function": "_run_tests_impl._run_check",
+      "except_clause": "except Exception:",
+      "ordinal": 3,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/probes/react_repair.py",
+      "function": "_record_post_finish_fact",
+      "except_clause": "except Exception:",
+      "ordinal": 2,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/probes/react_repair.py",
+      "function": "_record_post_finish_fact",
+      "except_clause": "except Exception:",
+      "ordinal": 7,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/probes/react_repair.py",
+      "function": "work",
+      "except_clause": "except Exception:",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/probes/react_repair.py",
+      "function": "work._collection_reason",
+      "except_clause": "except ValueError:",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/probes/react_repair.py",
+      "function": "work._outside_edit_scope",
+      "except_clause": "except ValueError:",
+      "ordinal": 1,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/probes/react_repair.py",
+      "function": "work",
+      "except_clause": "except Exception:",
+      "ordinal": 23,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/probes/react_repair.py",
+      "function": "work._run_repro_check",
+      "except_clause": "except OSError:",
+      "ordinal": 2,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/probes/react_repair.py",
+      "function": "work",
+      "except_clause": "except (TypeError, ValueError):",
+      "ordinal": 35,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "high"
+    },
+    {
+      "file": "src/stateframe/engine/probes/react_repair.py",
+      "function": "work",
+      "except_clause": "except (TypeError, ValueError):",
+      "ordinal": 38,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "high"
+    },
+    {
+      "file": "src/stateframe/engine/probes/react_repair.py",
+      "function": "work",
+      "except_clause": "except Exception:",
+      "ordinal": 40,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/probes/react_repair.py",
+      "function": "work",
+      "except_clause": "except OSError:",
+      "ordinal": 41,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/probes/react_repair.py",
+      "function": "work",
+      "except_clause": "except Exception:",
+      "ordinal": 56,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/probes/react_repair.py",
+      "function": "work",
+      "except_clause": "except (OSError, ValueError):",
+      "ordinal": 62,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "med"
+    },
+    {
+      "file": "src/stateframe/engine/probes/react_repair.py",
+      "function": "work",
+      "except_clause": "except (ImportError, AttributeError, TypeError, ValueError):",
+      "ordinal": 66,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/probes/react_repair.py",
+      "function": "work",
+      "except_clause": "except AttributeError:",
+      "ordinal": 68,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/probes/react_repair.py",
+      "function": "work",
+      "except_clause": "except Exception:",
+      "ordinal": 82,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/probes/react_repair.py",
+      "function": "work",
+      "except_clause": "except (AttributeError, TypeError):",
+      "ordinal": 85,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/probes/react_repair.py",
+      "function": "work",
+      "except_clause": "except (ImportError, AttributeError, TypeError, ValueError, OSError):",
+      "ordinal": 89,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/probes/react_repair.py",
+      "function": "work",
+      "except_clause": "except Exception:",
+      "ordinal": 98,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/probes/react_repair.py",
+      "function": "work",
+      "except_clause": "except Exception:",
+      "ordinal": 100,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/probes/react_repair.py",
+      "function": "work",
+      "except_clause": "except Exception:",
+      "ordinal": 102,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/probes/react_repair.py",
+      "function": "work",
+      "except_clause": "except Exception:",
+      "ordinal": 103,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/probes/react_repair.py",
+      "function": "work",
+      "except_clause": "except Exception:",
+      "ordinal": 105,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/probes/react_repair.py",
+      "function": "work",
+      "except_clause": "except Exception:",
+      "ordinal": 107,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/probes/react_repair.py",
+      "function": "work",
+      "except_clause": "except Exception:",
+      "ordinal": 108,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/probes/react_repair.py",
+      "function": "work",
+      "except_clause": "except Exception:",
+      "ordinal": 109,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/probes/react_repair.py",
+      "function": "work",
+      "except_clause": "except Exception:",
+      "ordinal": 110,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/probes/react_repair.py",
+      "function": "work",
+      "except_clause": "except Exception:",
+      "ordinal": 111,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/probes/react_repair.py",
+      "function": "work",
+      "except_clause": "except Exception:",
+      "ordinal": 112,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/probes/react_repair.py",
+      "function": "work",
+      "except_clause": "except Exception:",
+      "ordinal": 114,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/probes/react_repair.py",
+      "function": "work",
+      "except_clause": "except Exception:",
+      "ordinal": 118,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/probes/react_repair.py",
+      "function": "work",
+      "except_clause": "except Exception:",
+      "ordinal": 128,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/probes/react_repair.py",
+      "function": "work",
+      "except_clause": "except Exception:",
+      "ordinal": 130,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    }
+  ]
+}

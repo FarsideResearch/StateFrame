@@ -18,6 +18,8 @@ import os
 import tempfile
 from pathlib import Path
 
+from kernel_obligation_assess import UnavailableEvidence
+
 from .ts_dispatch import outline_source
 
 logger = logging.getLogger(__name__)
@@ -352,7 +354,7 @@ def _get_cache_dir() -> Path | None:
 _CACHE_FORMAT = "repo-map/3"
 
 
-def _cache_snapshot_digest(workspace_dir: str) -> str:
+def _cache_snapshot_digest(workspace_dir: str) -> str | UnavailableEvidence:
     """Hash paths and contents of supported, non-excluded files that can affect a map."""
     from kernel_tree_digest import file_entry, tree_digest, unreadable_entry
 
@@ -367,7 +369,7 @@ def _cache_snapshot_digest(workspace_dir: str) -> str:
         try:
             parts = file_path.relative_to(root).parts
         except ValueError:
-            continue
+            return UnavailableEvidence("REPO_MAP_CACHE_SNAPSHOT_PATH_OUTSIDE_ROOT")
         if any(part in _SKIP_DIRS or part.endswith(".egg-info") for part in parts):
             continue
         if file_path.suffix.lower() not in _LANG_MAP:
@@ -394,12 +396,14 @@ def _make_cache_key(
     commit_sha: str,
     workspace_dir: str | None = None,
     snapshot_digest: str | None = None,
-) -> str:
+) -> str | UnavailableEvidence:
     """Hash repository identity and snapshot. Empty commit_sha → never cache."""
     if not commit_sha or workspace_dir is None:
         return ""
     resolved_root = str(Path(workspace_dir).resolve())
     snapshot = snapshot_digest or _cache_snapshot_digest(workspace_dir)
+    if not isinstance(snapshot, str):
+        return snapshot
     fields = (_CACHE_FORMAT, repo_url, commit_sha, resolved_root, snapshot)
     digest = hashlib.sha256()
     for field in fields:
@@ -463,9 +467,14 @@ def build_repo_map_with_stats(
 
     cache_dir = _get_cache_dir() if use_cache and commit_sha else None
     cache_key = ""
+    cache_identity_reason_code: str | None = None
     if cache_dir is not None:
         try:
-            cache_key = _make_cache_key(repo_url, commit_sha, workspace_dir=workspace_dir)
+            cache_identity = _make_cache_key(repo_url, commit_sha, workspace_dir=workspace_dir)
+            if isinstance(cache_identity, str):
+                cache_key = cache_identity
+            else:
+                cache_identity_reason_code = cache_identity.reason_code
         except (OSError, RuntimeError) as exc:
             logger.debug("repo_map: cache identity unavailable: %s", type(exc).__name__)
     cached = _load_cached_map(cache_key, cache_dir)
@@ -477,7 +486,10 @@ def build_repo_map_with_stats(
         repo_map, stats = _generate_repo_map_with_stats(workspace_dir)
     except Exception as exc:  # noqa: BLE001 - repo-map generation remains fail-open at intake.
         logger.warning("repo_map: generation failed: %s", exc)
-        return "", {"source": "error", "error": type(exc).__name__}
+        failure_stats = {"source": "error", "error": type(exc).__name__}
+        if cache_identity_reason_code is not None:
+            failure_stats["cache_identity_reason_code"] = cache_identity_reason_code
+        return "", failure_stats
 
     if repo_map and cache_key:
         _save_cached_map(cache_key, repo_map, cache_dir)
@@ -488,7 +500,10 @@ def build_repo_map_with_stats(
         "repo_map: generated %d chars (~%d tokens) for %s",
         char_count, approx_tokens, workspace_dir,
     )
-    return repo_map, {"source": "generated", **stats}
+    result_stats = {"source": "generated", **stats}
+    if cache_identity_reason_code is not None:
+        result_stats["cache_identity_reason_code"] = cache_identity_reason_code
+    return repo_map, result_stats
 
 
 def build_repo_map(

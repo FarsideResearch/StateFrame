@@ -10,6 +10,7 @@ from dataclasses import dataclass, replace
 from typing import Literal
 
 from kernel_boundary_recovery import safe_obligation_ids
+from kernel_obligation_assess import UnavailableEvidence, _unavailable_evidence
 
 MODE_ENV = "STATEFRAME_READINESS_SINGLE_AUTHORITY"
 UNCERTIFIED_HOST_DEBT_ENV = "STATEFRAME_UNCERTIFIED_SUBMIT_ON_HOST_DEBT"
@@ -124,14 +125,24 @@ def _tools(runtime: object, fallback: object = ()) -> list[dict[str, object]]:
     return []
 
 
-def _scope_identity(runtime: object, tools: Sequence[Mapping[str, object]]) -> str:
+def _gap(runtime: object, reason_code: str) -> UnavailableEvidence:
+    gap = _unavailable_evidence(getattr(runtime, "journal", None), reason_code,
+                                producer="kernel_done_readiness_authority")
+    step = _current_step(runtime)
+    if step is not None:
+        setattr(runtime, "_done_decision_abandoned_step", step)
+    setattr(runtime, "_done_readiness_decision", None)
+    return gap
+
+
+def _scope_identity(runtime: object, tools: Sequence[Mapping[str, object]]) -> str | UnavailableEvidence:
     scope: object = None
     scope_fn = getattr(runtime, "_catalog_task_scope", None)
     if callable(scope_fn):
         try:
             scope = scope_fn()
-        except (AttributeError, OSError, RuntimeError, TypeError, ValueError):
-            scope = "unavailable"
+        except (OSError, RuntimeError):
+            return _gap(runtime, "TASK_SCOPE_UNAVAILABLE")
     tool_contract = []
     for tool in tools:
         name = _tool_name(tool)
@@ -417,12 +428,12 @@ def _host_owned_debt_only(
     return True
 
 
-def _open_ids(runtime: object) -> tuple[str, ...]:
+def _open_ids(runtime: object) -> tuple[str, ...] | UnavailableEvidence:
+    from kernel_completion_owner import open_ids
     try:
-        from kernel_completion_owner import open_ids
         values = open_ids(runtime)
-    except (ImportError, AttributeError, OSError, RuntimeError, TypeError, ValueError):
-        values = getattr(runtime, "_v39_uncertified_submit_ids", ())
+    except (OSError, RuntimeError):
+        return _gap(runtime, "OPEN_IDS_UNAVAILABLE")
     return tuple(safe_obligation_ids(values, limit=MAX_SPECIFICS))
 
 
@@ -737,12 +748,12 @@ def _decision(
         artifact_identity: str,
         evidence_identity: str,
         scope_identity: str,
-) -> DoneReadinessDecision:
+        open_ids: tuple[str, ...],
+) -> DoneReadinessDecision | UnavailableEvidence:
     host_debt_mode = uncertified_host_debt_enabled()
     status = _public_status(readiness)
     status_green = bool(getattr(readiness, "green", False)) and status in GREEN_STATUSES
     rows = _blocker_rows(vector, readiness)
-    open_ids = _open_ids(runtime)
     blocker_ids = tuple(safe_obligation_ids(
         [row["id"] for row in rows] + list(open_ids), limit=MAX_SPECIFICS,
     ))
@@ -765,8 +776,8 @@ def _decision(
     bound = getattr(runtime, "binding", None)
     try:
         binding = bound() if callable(bound) else {}
-    except (AttributeError, OSError, RuntimeError, TypeError, ValueError):
-        binding = {}
+    except (OSError, RuntimeError):
+        return _gap(runtime, "DECISION_BINDING_UNAVAILABLE")
     current_revision = str(
         binding.get("product_revision", "") or ""
         if isinstance(binding, Mapping) else ""
@@ -893,7 +904,7 @@ def _decision(
 def _host_debt_decision_scoped(
         runtime: object, readiness: object | None, vector: object | None,
         tools: Sequence[Mapping[str, object]],
-) -> bool:
+) -> bool | UnavailableEvidence:
     """Enable the shared authority under D2-off only for proven green host debt."""
     if not uncertified_host_debt_enabled():
         return False
@@ -918,6 +929,8 @@ def _host_debt_decision_scoped(
         return False
     rows = _blocker_rows(vector, readiness)
     open_ids = _open_ids(runtime)
+    if isinstance(open_ids, UnavailableEvidence):
+        return open_ids
     return bool((rows or open_ids)
                 and _host_owned_debt_only(rows, open_ids, readiness, tools, runtime))
 
@@ -941,6 +954,9 @@ def decision_for_runtime(
     # current tool contract.
     if "done" not in {_tool_name(tool) for tool in tools}:
         return None
+    step_now = _current_step(runtime)
+    if step_now is not None and getattr(runtime, "_done_decision_abandoned_step", _UNSET) == step_now:
+        return None
     if readiness is None:
         readiness = _readiness_for_runtime(runtime, tools)
     if vector is None:
@@ -950,35 +966,40 @@ def decision_for_runtime(
                 vector = factory(tools)
             except TypeError:
                 vector = factory()
-    if not d2_enabled and not _host_debt_decision_scoped(
-            runtime, readiness, vector, tools):
-        return None
+    if not d2_enabled:
+        scoped = _host_debt_decision_scoped(runtime, readiness, vector, tools)
+        if isinstance(scoped, UnavailableEvidence):
+            return None
+        if not scoped:
+            return None
     artifact = str(getattr(vector, "artifact_identity", "") or "")
     if not artifact:
         binding = getattr(runtime, "binding", None)
         try:
             bound = binding() if callable(binding) else {}
-        except (AttributeError, OSError, RuntimeError, TypeError, ValueError):
-            bound = {}
+        except (OSError, RuntimeError):
+            _gap(runtime, "ARTIFACT_BINDING_UNAVAILABLE")
+            return None
         artifact = str((bound or {}).get("product_revision", "unknown"))
     gate_evidence = str(getattr(vector, "evidence_identity", "") or "unavailable")
     readiness_evidence = str(getattr(readiness, "candidate_digest", "") or "unavailable")
     current_blockers = _blocker_rows(vector, readiness)
+    open_ids = _open_ids(runtime)
+    if isinstance(open_ids, UnavailableEvidence):
+        return None
     evidence = _digest({
         "gate_evidence": gate_evidence,
         "readiness_evidence": readiness_evidence,
         "public_check_status": _public_status(readiness),
         "check_revision": str(getattr(readiness, "revision", "") or ""),
         "current_blockers": current_blockers,
-        "open_obligation_ids": _open_ids(runtime),
+        "open_obligation_ids": open_ids,
         "current_assessments": _assessment_rows(runtime),
     })
     scope = _scope_identity(runtime, tools)
-    key = (artifact, evidence, scope)
-    step_now = _current_step(runtime)
-    if step_now is not None and getattr(runtime, "_done_decision_abandoned_step", _UNSET) == step_now:
-        # Abandoned this step: every consumer stays on the legacy path together.
+    if isinstance(scope, UnavailableEvidence):
         return None
+    key = (artifact, evidence, scope)
     if getattr(runtime, "_done_decision_unavailable_key", None) == key:
         return None
     cached = getattr(runtime, "_done_readiness_decision", None)
@@ -990,6 +1011,7 @@ def decision_for_runtime(
             artifact_identity=artifact,
             evidence_identity=evidence,
             scope_identity=scope,
+            open_ids=open_ids,
         )
     except DoneReadinessContractError as error:
         # A state with no callable recovery must not crash request
@@ -1000,6 +1022,8 @@ def decision_for_runtime(
         if step is not None:
             setattr(runtime, "_done_decision_abandoned_step", step)
         setattr(runtime, "_done_readiness_decision", None)
+        return None
+    if isinstance(decision, UnavailableEvidence):
         return None
     setattr(runtime, "_done_readiness_decision", decision)
     return decision

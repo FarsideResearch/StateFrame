@@ -29,6 +29,7 @@ from collections.abc import Callable, Mapping, Sequence
 from kernel_context import token_estimate
 from kernel_measurement import profiled_function_span
 from kernel_endpoint_size import ENDPOINT_SIZE
+from kernel_obligation_assess import UnavailableEvidence
 from kernel_request_auth_identity import auth_binding_for_key as _auth_binding_for_key
 
 
@@ -3270,7 +3271,7 @@ def apply_diet(
         allocation_plan: dict[str, object] | None = None,
         _measurement_retry: bool = True,
         _incremental_accounting: bool = True,
-) -> dict[str, object]:
+) -> dict[str, object] | UnavailableEvidence:
     """Diet requests that exceed either the token budget or serialized byte cap.
 
     ``required_source_paths`` names source windows reserved through ordinary
@@ -3340,7 +3341,7 @@ def apply_diet(
     # of `after`; lets the final verify reuse that count instead of re-measuring.
     last_measured_messages: list[object] | None = None
 
-    def restart_with_stable_method() -> dict[str, object]:
+    def restart_with_stable_method() -> dict[str, object] | UnavailableEvidence:
         if not _measurement_retry:
             raise RuntimeError("request diet tokenizer changed measurement method twice")
         return apply_diet(
@@ -3413,6 +3414,8 @@ def apply_diet(
             except (ImportError, LookupError):
                 active_runtime = None
             allocation_plan = build_priority_plan(body, active_runtime)
+            if isinstance(allocation_plan, UnavailableEvidence):
+                return allocation_plan
     owner_first_changed = False
     owner_first_dropped_ranges: list[dict[str, object]] = []
     if allocation_plan is not None:

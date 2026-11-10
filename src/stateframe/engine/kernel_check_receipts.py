@@ -122,32 +122,23 @@ def _revision_value(runtime: object, value: object) -> str:
 def current_wire_revision(runtime: object) -> str:
     """Resolve the product revision currently bound to a provider wire."""
     missing = object()
-    try:
-        binding = getattr(runtime, "binding", missing)
-    except Exception:
-        return "UNKNOWN"
+    binding = getattr(runtime, "binding", missing)
     if binding is not missing:
         value = binding
         if callable(binding):
-            try:
-                value = binding()
-            except Exception:
-                return "UNKNOWN"
+            value = binding()
         if isinstance(value, Mapping):
-            try:
-                stable = _stable_product_revision(runtime, value)
-                if stable is not None:
-                    return stable
-                for key in ("product_revision", "revision", "artifact"):
-                    if value.get(key) not in (None, ""):
-                        return str(value[key])
-                # An empty binding carries no product identity: report UNKNOWN so the stale-wire guard fails closed and
-                # the menu memo fails open (digest({}) used to masquerade as a real revision).
-                if not value:
-                    return "UNKNOWN"
-                return digest(value)
-            except Exception:
+            stable = _stable_product_revision(runtime, value)
+            if stable is not None:
+                return stable
+            for key in ("product_revision", "revision", "artifact"):
+                if value.get(key) not in (None, ""):
+                    return str(value[key])
+            # An empty binding carries no product identity: report UNKNOWN so the stale-wire guard fails closed and
+            # the menu memo fails open (digest({}) used to masquerade as a real revision).
+            if not value:
                 return "UNKNOWN"
+            return digest(value)
         if value not in (None, ""):
             return str(value)
         return "UNKNOWN"
@@ -171,10 +162,7 @@ def _current_revision(runtime: object) -> str:
     binding = getattr(runtime, "binding", None)
     value = binding
     if callable(binding):
-        try:
-            value = binding()
-        except (AttributeError, OSError, RuntimeError, TypeError, ValueError):
-            value = None
+        value = binding()
     revision = _revision_value(runtime, value)
     if revision != "UNKNOWN":
         return revision
@@ -186,12 +174,9 @@ def _current_revision(runtime: object) -> str:
 
 
 def _stateframe_mode(runtime: object | None, attribute: str, environment: str) -> str:
-    try:
-        configured = getattr(runtime, attribute, None) if runtime is not None else None
-        raw = configured if configured is not None else os.environ.get(environment, "off")
-        value = str(raw).strip().lower()
-    except Exception:
-        return "off"
+    configured = getattr(runtime, attribute, None) if runtime is not None else None
+    raw = configured if configured is not None else os.environ.get(environment, "off")
+    value = str(raw).strip().lower()
     return value if value in {"off", "shadow", "on"} else "off"
 
 
@@ -209,11 +194,8 @@ def check_receipt_enrichment_dedup_mode(runtime: object | None = None) -> str:
 
 
 def _check_execution_context(runtime: object, execution_id: str) -> Mapping[str, object] | None:
-    try:
-        contexts = getattr(runtime, "_stateframe_check_execution_contexts", None)
-        context = contexts.get(execution_id) if isinstance(contexts, Mapping) else None
-    except Exception:
-        return None
+    contexts = getattr(runtime, "_stateframe_check_execution_contexts", None)
+    context = contexts.get(execution_id) if isinstance(contexts, Mapping) else None
     return context if isinstance(context, Mapping) else None
 
 
@@ -351,10 +333,7 @@ def _next_check_execution_ordinal(journal: object | None) -> int:
     completed = completed if isinstance(completed, int) else 0
     allocated = allocated if isinstance(allocated, int) else 0
     ordinal = max(completed, allocated) + 1
-    try:
-        setattr(journal, "check_execution_allocations", ordinal)
-    except (AttributeError, TypeError):
-        pass
+    setattr(journal, "check_execution_allocations", ordinal)
     return ordinal
 
 
@@ -544,8 +523,8 @@ def classify_check_outcome(
     explicit_unknown = str(outcome or "").strip().upper() == "UNKNOWN"
     try:
         exit_value = int(exit_code) if exit_code is not None and not isinstance(exit_code, bool) else None
-    except (TypeError, ValueError):
-        exit_value = None
+    except (TypeError, ValueError) as exc:
+        raise ValueError("CHECK_RECEIPT_INVALID_EXIT_CODE") from exc
     typed_termination = _execution_termination(exit_code, termination_reason)
     normalized_counts = _count_map(counts)
     if collected_tests is None:
@@ -554,8 +533,8 @@ def classify_check_outcome(
         collected = int(collected_tests) if (
             collected_tests is not None and not isinstance(collected_tests, bool)
         ) else None
-    except (TypeError, ValueError):
-        collected = None
+    except (TypeError, ValueError) as exc:
+        raise ValueError("CHECK_RECEIPT_INVALID_COLLECTED_TESTS") from exc
     if phase not in FAILURE_PHASES:
         phase = ""
     reached = reached_observation if isinstance(reached_observation, bool) else None
@@ -828,15 +807,11 @@ def record_check_output(
     if isinstance(execution_context, Mapping):
         pinned_binding = execution_context.get("binding")
         if isinstance(pinned_binding, Mapping):
-            try:
-                pinned_revision = _revision_value(runtime, pinned_binding)
-                legacy_revision = (
-                    _revision_value(runtime, revision) if revision is not None
-                    else _current_revision(runtime)
-                )
-            except Exception:
-                pinned_revision = "UNKNOWN"
-                legacy_revision = "UNKNOWN"
+            pinned_revision = _revision_value(runtime, pinned_binding)
+            legacy_revision = (
+                _revision_value(runtime, revision) if revision is not None
+                else _current_revision(runtime)
+            )
             if execution_binding_mode == "shadow" and pinned_revision != legacy_revision:
                 _emit_shadow_mismatch(
                     runtime,

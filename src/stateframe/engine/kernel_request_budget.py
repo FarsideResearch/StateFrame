@@ -20,6 +20,7 @@ from typing import TYPE_CHECKING
 
 from kernel_measurement import profiled_function_span
 from kernel_endpoint_size import ENDPOINT_SIZE
+from kernel_obligation_assess import UnavailableEvidence, _unavailable_evidence
 
 if TYPE_CHECKING:
     from kernel_request_diet import RequestTokenMeter
@@ -802,7 +803,8 @@ _RETRIEVAL_ROUTE = re.compile(
     r"\b(?:cursor=\S+|full_output_handle=\S+|receipt_id=\S+|expansion_handle\"?:\"?expand:[0-9a-f]+)")
 
 
-def _required_source_paths(runtime: object | None) -> tuple[str, ...] | None:
+def _required_source_paths(runtime: object | None
+                           ) -> tuple[str, ...] | None | UnavailableEvidence:
     """Target plus editable product paths whose source bodies are reserved.
 
     ``None`` (no runtime, or no resolvable target) keeps the legacy rule that
@@ -813,9 +815,13 @@ def _required_source_paths(runtime: object | None) -> tuple[str, ...] | None:
     try:
         from kernel_request_source_window import _path_from_runtime, editable_product_paths
         target = _path_from_runtime(runtime)
+        if isinstance(target, UnavailableEvidence):
+            return target
         editable = editable_product_paths(runtime)
     except (AttributeError, OSError, TypeError, ValueError):
         return None
+    if isinstance(editable, UnavailableEvidence):
+        return editable
     if not target:
         return None
     paths = [str(target).replace("\\", "/")]
@@ -830,6 +836,9 @@ def _record_lean_required_source_paths(capture: object | None, runtime: object |
     from kernel_lean import enabled as lean_enabled
 
     required_paths = _required_source_paths(runtime)
+    if isinstance(required_paths, UnavailableEvidence):
+        _mark_budget_unavailable(capture, required_paths)
+        return
     if lean_enabled() and isinstance(required_paths, tuple):
         plan = _request_source_plan_for_request(runtime, capture)
         units = plan.get("units") if isinstance(plan, Mapping) else None
@@ -1956,11 +1965,15 @@ def _apply_budget_with_diet(
         # closure alongside freshly rendered source bytes. Recovery overrides
         # remain frozen and still fail the ordinary freshness checks.
         from capability_request_preflight import bound_runtime_sources
-        bound_runtime_sources(
+        source_result = bound_runtime_sources(
             body["messages"], runtime,
             max_request_bytes=stage_budget(stage).max_request_bytes,
             tools=body["tools"],
         )
+        if isinstance(source_result, UnavailableEvidence):
+            if capture is not None:
+                _mark_budget_unavailable(capture, source_result)
+            return destination_body
     request_source_plan = _request_source_plan_for_request(runtime, capture)
     request_source_plan_before = (
         copy.deepcopy(dict(request_source_plan))
@@ -2002,6 +2015,10 @@ def _apply_budget_with_diet(
             *((task_message,) if isinstance(task_message, Mapping) else ()),
         )
     base_required_source_paths = _required_source_paths(runtime)
+    if isinstance(base_required_source_paths, UnavailableEvidence):
+        if capture is not None:
+            _mark_budget_unavailable(capture, base_required_source_paths)
+        return destination_body
     _record_lean_required_source_paths(capture, runtime)
     required_source_paths = base_required_source_paths
     required_source_order: tuple[str, ...] = ()
@@ -2068,11 +2085,15 @@ def _apply_budget_with_diet(
     owner_requested_paths: tuple[str, ...] = ()
     if runtime is not None:
         from capability_request_preflight import bound_runtime_sources
-        bound_runtime_sources(
+        source_result = bound_runtime_sources(
             body["messages"], runtime,
             max_request_bytes=selected_budget.max_request_bytes,
             tools=body["tools"],
         )
+        if isinstance(source_result, UnavailableEvidence):
+            if capture is not None:
+                _mark_budget_unavailable(capture, source_result)
+            return destination_body
         required_source_paths, required_source_order = _required_source_plan_paths(
             runtime, base_required_source_paths, source_plan=request_source_plan,
         )
@@ -2085,6 +2106,10 @@ def _apply_budget_with_diet(
     if allocation_enabled():
         from kernel_owner_first import build_priority_plan, protected_priority_messages
         owner_first_plan = build_priority_plan(body, runtime)
+        if isinstance(owner_first_plan, UnavailableEvidence):
+            if capture is not None:
+                _mark_budget_unavailable(capture, owner_first_plan)
+            return destination_body
         protected_messages = tuple(protected_messages) + protected_priority_messages(
             body, owner_first_plan)
         owner_requested_paths = tuple(str(path) for path in owner_first_plan.get("requested_paths", ())
@@ -2124,6 +2149,10 @@ def _apply_budget_with_diet(
                 token_meter=token_meter,
                 allocation_plan=owner_first_plan,
             )
+            if isinstance(audit, UnavailableEvidence):
+                if capture is not None:
+                    _mark_budget_unavailable(capture, audit)
+                return {}
             audit["dropped_sections"] = list(pretrimmed) + list(audit.get("dropped_sections", ()))
             raw_paths = audit.get("deferred_source_paths", ())
             if isinstance(raw_paths, Sequence) and not isinstance(raw_paths, (str, bytes, bytearray)):
@@ -2158,6 +2187,10 @@ def _apply_budget_with_diet(
                     max_request_bytes=HARD_MAX_REQUEST_BYTES,
                     tools=body["tools"],
                 )
+                if isinstance(rebound, UnavailableEvidence):
+                    if capture is not None:
+                        _mark_budget_unavailable(capture, rebound)
+                    return audit
                 request_source_plan, request_source_plan_before = (
                     _refresh_request_source_plan_after_rebind(
                         runtime,
@@ -2195,6 +2228,10 @@ def _apply_budget_with_diet(
                 max_request_bytes=selected_budget.max_request_bytes,
                 tools=body["tools"],
             )
+            if isinstance(rebound, UnavailableEvidence):
+                if capture is not None:
+                    _mark_budget_unavailable(capture, rebound)
+                return destination_body
             request_source_plan, request_source_plan_before = (
                 _refresh_request_source_plan_after_rebind(
                     runtime,
@@ -2254,11 +2291,15 @@ def _apply_budget_with_diet(
         )
         if runtime is not None:
             from capability_request_preflight import bound_runtime_sources
-            bound_runtime_sources(
+            source_result = bound_runtime_sources(
                 body["messages"], runtime,
                 max_request_bytes=HARD_MAX_REQUEST_BYTES,
                 tools=body["tools"],
             )
+            if isinstance(source_result, UnavailableEvidence):
+                if capture is not None:
+                    _mark_budget_unavailable(capture, source_result)
+                return destination_body
             request_source_plan, request_source_plan_before = (
                 _refresh_request_source_plan_after_rebind(
                     runtime,
@@ -3022,7 +3063,7 @@ def _apply_budget_with_diet(
 def _runtime_context(
         runtime: object, capture: object, tools: Sequence[object],
         messages: Sequence[object] | None = None,
-) -> tuple[str, set[str], set[str]]:
+) -> tuple[str, set[str], set[str]] | UnavailableEvidence:
     available_tool_names = {
         _tool_name(tool) for tool in tools if _tool_name(tool)
     }
@@ -3032,8 +3073,11 @@ def _runtime_context(
         if callable(resolver):
             try:
                 owner = resolver()
-            except (AttributeError, RuntimeError, TypeError, ValueError):
-                owner = None
+            except (AttributeError, RuntimeError):
+                return _unavailable_evidence(
+                    getattr(capture, "journal", None), "REQUEST_BUDGET_OWNER_UNAVAILABLE",
+                    producer="kernel_request_budget",
+                )
     # A capture can retain the last staged value after IDEALPATH is detached.
     # It is not an authority for a new request: ownerless work is a native
     # free loop.  Continue through completion dispatch below so the returned
@@ -3051,8 +3095,12 @@ def _runtime_context(
         try:
             live = owner.stage_exit_liveness()
             exits.update(str(name) for name in live.get("satisfying_action_ids", ()))
-        except (AttributeError, RuntimeError, TypeError, ValueError):
-            pass
+        except (AttributeError, RuntimeError, ValueError):
+            return _unavailable_evidence(
+                getattr(capture, "journal", None),
+                "REQUEST_BUDGET_STAGE_LIVENESS_UNAVAILABLE",
+                producer="kernel_request_budget",
+            )
     else:
         # Owner-free IDEALPATH-off requests are native work, not S1.  Protect
         # one currently available route for each irreducible contract: editor,
@@ -3126,6 +3174,18 @@ def _runtime_context(
     return str(stage), exits, completion | ({_PROTECTED_SURFACE_MARKER} if protected_surface else set())
 
 
+def _mark_budget_unavailable(capture: object, gap: UnavailableEvidence) -> None:
+    """Keep the failed request explicit on its capture and final wire verdict."""
+    setattr(capture, "request_budget_unavailable", gap)
+    setattr(capture, "request_budget_exceeded", True)
+    setattr(capture, "request_budget_contract_status", HOST_CONTRACT_LIMIT)
+    setattr(capture, "request_budget_final_wire", {
+        "schema": "stateframe-request-wire/1", "status": HOST_CONTRACT_LIMIT,
+        "reason_code": gap.reason_code,
+        "final_validation_failures": (gap.reason_code,),
+    })
+
+
 def _presentation_spec(runtime: object, capture: object) -> dict[str, object]:
     declared = getattr(runtime, "declared_environment", {})
     environment = dict(declared) if isinstance(declared, Mapping) else {}
@@ -3152,7 +3212,11 @@ def apply_runtime_budget(runtime: object, capture: object,
     # Captures are reused by some transport paths.  Ownerless FREE requests
     # must not inherit a prior staged hard-block bit.
     setattr(capture, "request_budget_exceeded", False)
-    stage, exits, completion = _runtime_context(runtime, capture, tools, prepared)
+    context = _runtime_context(runtime, capture, tools, prepared)
+    if isinstance(context, UnavailableEvidence):
+        _mark_budget_unavailable(capture, context)
+        return prepared, tools
+    stage, exits, completion = context
     protected_surface = _PROTECTED_SURFACE_MARKER in completion
     completion_only = _COMPLETION_ONLY_MARKER in completion
     completion.difference_update({_PROTECTED_SURFACE_MARKER, _COMPLETION_ONLY_MARKER})
@@ -3189,6 +3253,10 @@ def apply_runtime_budget(runtime: object, capture: object,
         tokenizer=tokenizer,
         tokenizer_endpoint=tokenizer_endpoint,
     )
+    gap = getattr(capture, "request_budget_unavailable", None)
+    if isinstance(gap, UnavailableEvidence):
+        _mark_budget_unavailable(capture, gap)
+        return prepared, tools
     setattr(capture, "request_budget_prepared", True)
     setattr(capture, "request_budget_stage", stage)
     setattr(capture, "request_budget_exits", exits)
@@ -3219,6 +3287,9 @@ def _owner_first_transport_check(capture: object, runtime: object,
     plan = getattr(capture, "request_owner_first_allocation_plan", None)
     if not isinstance(plan, dict):
         plan = build_priority_plan(body, runtime)
+        if isinstance(plan, UnavailableEvidence):
+            _mark_budget_unavailable(capture, plan)
+            return None
         setattr(capture, "request_owner_first_allocation_plan", plan)
         emit_event = True
     meter = _request_token_meter(runtime, capture)
@@ -3283,11 +3354,20 @@ def apply_capture_budget(
         tokenizer_endpoint: str | None = None,
 ) -> dict[str, object]:
     """Apply/validate at the transport seam for standalone captures."""
+    prior_gap = getattr(capture, "request_budget_unavailable", None)
+    if isinstance(prior_gap, UnavailableEvidence):
+        _mark_budget_unavailable(capture, prior_gap)
+        return body
     try:
         from kernel_pilot import ACTIVE_RUNTIME
         runtime = ACTIVE_RUNTIME.get()
     except (ImportError, LookupError):
-        runtime = None
+        gap = _unavailable_evidence(
+            getattr(capture, "journal", None), "REQUEST_BUDGET_RUNTIME_UNAVAILABLE",
+            producer="kernel_request_budget",
+        )
+        _mark_budget_unavailable(capture, gap)
+        return body
     if runtime is None:
         runtime = getattr(capture, "presentation_runtime", None)
     if runtime is None:
@@ -3297,6 +3377,9 @@ def apply_capture_budget(
         # It must be mutable without borrowing an active primary owner.
         runtime = SimpleNamespace()
     _record_lean_required_source_paths(capture, runtime)
+    gap = getattr(capture, "request_budget_unavailable", None)
+    if isinstance(gap, UnavailableEvidence):
+        return body
     from kernel_owner_first import allocation_enabled
     if not _runtime_enabled(runtime) and not allocation_enabled():
         return body
@@ -3343,6 +3426,10 @@ def apply_capture_budget(
                     or FREE_STAGE)
         allocation_outcome = _owner_first_transport_check(
             capture, runtime, body, stage, emit_event=True)
+        gap = getattr(capture, "request_budget_unavailable", None)
+        if isinstance(gap, UnavailableEvidence):
+            _mark_budget_unavailable(capture, gap)
+            return body
         if lean_contract:
             measured_prompt_tokens, measure_method = _request_token_meter(
                 runtime, capture,
@@ -3412,12 +3499,19 @@ def apply_capture_budget(
             emit_event=not isinstance(
                 getattr(capture, "request_owner_first_allocation_plan", None), Mapping),
         )
+        gap = getattr(capture, "request_budget_unavailable", None)
+        if isinstance(gap, UnavailableEvidence):
+            _mark_budget_unavailable(capture, gap)
+            return body
         _validate_wire_ceiling(capture, body)
         return body
     body_tools = body.get("tools", [])
     body_messages = body.get("messages", [])
-    stage, exits, completion = _runtime_context(runtime, capture, body_tools,
-                                                body_messages)
+    context = _runtime_context(runtime, capture, body_tools, body_messages)
+    if isinstance(context, UnavailableEvidence):
+        _mark_budget_unavailable(capture, context)
+        return body
+    stage, exits, completion = context
     protected_surface = _PROTECTED_SURFACE_MARKER in completion
     completion_only = _COMPLETION_ONLY_MARKER in completion
     completion.difference_update({_PROTECTED_SURFACE_MARKER, _COMPLETION_ONLY_MARKER})
@@ -3444,6 +3538,10 @@ def apply_capture_budget(
         tokenizer=tokenizer,
         tokenizer_endpoint=tokenizer_endpoint,
     )
+    gap = getattr(capture, "request_budget_unavailable", None)
+    if isinstance(gap, UnavailableEvidence):
+        _mark_budget_unavailable(capture, gap)
+        return body
     setattr(capture, "request_budget_prepared", True)
     setattr(capture, "request_budget_stage", stage)
     setattr(capture, "request_budget_exits", exits)

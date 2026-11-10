@@ -25,6 +25,7 @@ import sys
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import NoReturn
 from kernel_test_python import selected_test_python
 
 
@@ -127,6 +128,32 @@ MAX_OUTPUT_CHARS = 8_000
 MAX_FIXTURE_BYTES = 32_000
 MAX_TIMEOUT_SECONDS = 30.0
 HOST_CLOSURE_RENDER_CAP = 6_000
+
+
+@dataclass(frozen=True, slots=True)
+class UnavailableEvidence:
+    """A deterministic gap in host evidence, with no partial scan or snapshot."""
+
+    reason_code: str
+
+
+def _unavailable_evidence(journal: object, reason_code: str, *,
+                          producer: str = "kernel_obligation_assess") -> UnavailableEvidence:
+    emit = getattr(journal, "emit", None)
+    if callable(emit):
+        emit("host_obligation_evidence_failure", producer=producer,
+             dispatch=False, reason_code=reason_code)
+    return UnavailableEvidence(reason_code)
+
+
+def _fail_obligation_evidence(journal: object, reason_code: str,
+                              error: Exception) -> NoReturn:
+    """Record a single host evidence failure before refusing a partial result."""
+    emit = getattr(journal, "emit", None)
+    if callable(emit):
+        emit("host_obligation_evidence_failure", producer="kernel_obligation_assess",
+             dispatch=False, reason_code=reason_code)
+    raise RuntimeError(f"{reason_code}: host obligation evidence unavailable") from error
 
 
 def mode() -> str:
@@ -1284,7 +1311,8 @@ class _SourceDefinition:
     qualname: str
 
 
-def _source_definitions(root: Path) -> tuple[_SourceDefinition, ...]:
+def _source_definitions(root: Path, *, journal: object = None
+                        ) -> tuple[_SourceDefinition, ...] | UnavailableEvidence:
     definitions: list[_SourceDefinition] = []
     for path in _visible_python_paths(root):
         try:
@@ -1294,7 +1322,7 @@ def _source_definitions(root: Path) -> tuple[_SourceDefinition, ...]:
             if module.endswith(".__init__"):
                 module = module.removesuffix(".__init__")
         except (OSError, UnicodeError, SyntaxError):
-            continue
+            return _unavailable_evidence(journal, "DEFINITION_SOURCE_UNAVAILABLE")
 
         def visit(node: ast.AST, prefix: tuple[str, ...]) -> None:
             next_prefix = prefix
@@ -1389,11 +1417,12 @@ def _definition_calls(definition: _SourceDefinition,
 
 
 def _scan_definition(root: Path, definition: _SourceDefinition,
-                     call_chain: tuple[str, ...]) -> tuple[MutationSite, ...]:
+                     call_chain: tuple[str, ...], *, journal: object = None
+                     ) -> tuple[MutationSite, ...] | UnavailableEvidence:
     try:
         source = definition.path.read_text(encoding="utf-8")
     except (OSError, UnicodeError):
-        return ()
+        return _unavailable_evidence(journal, "MUTATION_SOURCE_UNAVAILABLE")
     aliases: dict[str, str] = {}
     arguments = definition.node.args
     for argument in (*arguments.posonlyargs, *arguments.args, *arguments.kwonlyargs):
@@ -1463,10 +1492,13 @@ def _scan_definition(root: Path, definition: _SourceDefinition,
     return tuple(unique.values())
 
 
-def mutation_sites(root: str | Path, entry_point: str) -> tuple[MutationSite, ...]:
+def mutation_sites(root: str | Path, entry_point: str, *, journal: object = None
+                   ) -> tuple[MutationSite, ...] | UnavailableEvidence:
     """Find caller-argument writes over the entry point's reachable call chain."""
     root = Path(root).resolve()
-    definitions = _source_definitions(root)
+    definitions = _source_definitions(root, journal=journal)
+    if isinstance(definitions, UnavailableEvidence):
+        return definitions
     entry = _entry_definition(definitions, root, entry_point)
     if entry is None:
         return ()
@@ -1479,7 +1511,10 @@ def mutation_sites(root: str | Path, entry_point: str) -> tuple[MutationSite, ..
         if key in visited:
             continue
         visited.add(key)
-        sites.extend(_scan_definition(root, definition, chain))
+        scanned = _scan_definition(root, definition, chain, journal=journal)
+        if isinstance(scanned, UnavailableEvidence):
+            return scanned
+        sites.extend(scanned)
         for child in _definition_calls(definition, definitions):
             pending.append((child, (*chain, child.qualname)))
     return tuple(sites)
@@ -1497,7 +1532,9 @@ def has_preservation_clause(clause: object) -> bool:
     return bool(_PRESERVATION_RE.search(str(clause or "")))
 
 
-def fixture_from_public_test(source: object, entry_point: str | None = None) -> dict[str, object] | None:
+def fixture_from_public_test(source: object, entry_point: str | None = None, *,
+                             journal: object = None
+                             ) -> dict[str, object] | None | UnavailableEvidence:
     """Extract the first literal entry-point call from a public test snippet."""
     if isinstance(source, Mapping):
         candidate = source.get("fixture", source)
@@ -1510,7 +1547,7 @@ def fixture_from_public_test(source: object, entry_point: str | None = None) -> 
         try:
             source = source.read_text(encoding="utf-8")
         except (OSError, UnicodeError):
-            return None
+            return _unavailable_evidence(journal, "PUBLIC_TEST_SOURCE_UNAVAILABLE")
     if not isinstance(source, str):
         return None
     try:
@@ -1556,15 +1593,23 @@ def bind_input_preservation(clause: str = "", entry_point: str | None = None, *,
                             check_id_prefix: str | None = None,
                             selection: object = (), targets: object = (),
                             coupled_obligations: object = (), clause_span: object = None,
-                            interpretation: str = VALIDATED) -> tuple[CheckDefinition, ...]:
+                            interpretation: str = VALIDATED,
+                            journal: object = None
+                            ) -> tuple[CheckDefinition, ...] | UnavailableEvidence:
     """Create the paired host checks required by an input-preservation clause."""
     if not has_preservation_clause(clause) or not isinstance(entry_point, str):
         return ()
+    if isinstance(mutation_site_records, UnavailableEvidence):
+        return mutation_site_records
     sites = tuple(mutation_site_records or ())
     if not sites and root is not None:
-        sites = mutation_sites(root, entry_point)
+        sites = mutation_sites(root, entry_point, journal=journal)
+        if isinstance(sites, UnavailableEvidence):
+            return sites
     if fixture is None:
-        fixture = fixture_from_public_test(public_test_source, entry_point)
+        fixture = fixture_from_public_test(public_test_source, entry_point, journal=journal)
+    if isinstance(fixture, UnavailableEvidence):
+        return fixture
     if fixture is None:
         return ()
     if isinstance(fixture, Mapping) and "args" not in fixture:
@@ -1607,14 +1652,18 @@ def input_preservation_bundle(*, task_id: str, clause: str, entry_point: str,
                              mutation_site_records: Sequence[MutationSite] | None = None,
                              selection: object = (), targets: object = (),
                              coupled_obligations: object = (), clause_span: object = None,
-                             obligation_id: str = "input-preservation") -> CheckBundle | None:
+                             obligation_id: str = "input-preservation",
+                             journal: object = None) -> CheckBundle | None | UnavailableEvidence:
     checks = bind_input_preservation(
         clause, entry_point, fixture=fixture, root=root,
         public_test_source=public_test_source,
         mutation_site_records=mutation_site_records,
         obligation_id=obligation_id, selection=selection, targets=targets,
         coupled_obligations=coupled_obligations, clause_span=clause_span,
+        journal=journal,
     )
+    if isinstance(checks, UnavailableEvidence):
+        return checks
     if not checks:
         return None
     check_ids = tuple(check.check_id for check in checks)
@@ -1628,7 +1677,9 @@ def input_preservation_bundle(*, task_id: str, clause: str, entry_point: str,
 
 
 def augment_input_preservation_bundle(bundle: CheckBundle | None, root: str | Path, *,
-                                      public_test_source: object = None) -> CheckBundle | None:
+                                      public_test_source: object = None,
+                                      journal: object = None
+                                      ) -> CheckBundle | None | UnavailableEvidence:
     """Add typed preservation/replay checks to a frozen public check bundle.
 
     Existing public check files remain authoritative for their ordinary checks.
@@ -1661,7 +1712,9 @@ def augment_input_preservation_bundle(bundle: CheckBundle | None, root: str | Pa
         for candidate in candidates:
             if not candidate.entry_point:
                 continue
-            sites = mutation_sites(root, candidate.entry_point)
+            sites = mutation_sites(root, candidate.entry_point, journal=journal)
+            if isinstance(sites, UnavailableEvidence):
+                return sites
             if candidate.template != "PRESERVE_INPUT" and not sites:
                 continue
             fixture = candidate.fixture if isinstance(candidate.fixture, Mapping) else None
@@ -1673,7 +1726,10 @@ def augment_input_preservation_bundle(bundle: CheckBundle | None, root: str | Pa
                 selection=candidate.selection, targets=spec.targets,
                 coupled_obligations=spec.coupled_obligations,
                 clause_span=spec.clause_span,
+                journal=journal,
             )
+            if isinstance(generated, UnavailableEvidence):
+                return generated
             for item in generated:
                 if item.check_id not in existing_ids:
                     bound.append(item)
@@ -1710,7 +1766,8 @@ def augment_input_preservation_bundle(bundle: CheckBundle | None, root: str | Pa
     )
 
 
-def workspace_snapshot(root: str | Path, *, binding: object = None) -> str:
+def workspace_snapshot(root: str | Path, *, binding: object = None,
+                       journal: object = None) -> str | UnavailableEvidence:
     """Hash every visible workspace file, with cache/bytecode noise excluded."""
     root = Path(root).resolve()
     rows: list[dict[str, object]] = []
@@ -1725,7 +1782,7 @@ def workspace_snapshot(root: str | Path, *, binding: object = None) -> str:
             try:
                 content = path.read_bytes()
             except OSError:
-                continue
+                return _unavailable_evidence(journal, "WORKSPACE_SNAPSHOT_UNAVAILABLE")
             rows.append({
                 "path": relative.as_posix(),
                 "sha256": "sha256:" + hashlib.sha256(content).hexdigest(),
@@ -2082,8 +2139,9 @@ def assess_obligation(spec: ObligationSpec | Mapping[str, object], receipts: obj
                       ledger: object = None, public_api: object = None,
                       public_contract: object = None, contract: object = None,
                       sources: object = None, public_context: object = None,
-                      authored_revision: object = None) -> ObligationAssessment:
-    """Purely reduce one spec and already-produced receipts.
+                      authored_revision: object = None,
+                      journal: object = None) -> ObligationAssessment:
+    """Reduce one spec and already-produced receipts; journal evidence failures.
 
     ``authored_revision`` is the live candidate product revision; a certifying
     solver-authored check receipt closes a ``MISSING_CHECKS`` obligation only
@@ -2150,8 +2208,8 @@ def assess_obligation(spec: ObligationSpec | Mapping[str, object], receipts: obj
                 if grounding.unknown:
                     unknown_reasons.append("UNBOUND_OBSERVABLE")
                     continue
-            except (ImportError, TypeError, ValueError):
-                pass
+            except (ImportError, TypeError, ValueError) as error:
+                _fail_obligation_evidence(journal, "ORACLE_GROUNDING_UNAVAILABLE", error)
         if (definition is not None
                 and str(definition.oracle_basis).upper() == ADVISORY):
             unknown_reasons.append("ADVISORY_ONLY")
@@ -3396,7 +3454,8 @@ def run_check(root: str | Path, check: CheckDefinition | Mapping[str, object], *
               snapshot: object = None, environment: object = None,
               cache: dict[str, CheckReceipt] | None = None,
               timeout: float = 8.0, identity: object = None,
-              requirements_ledger: Mapping[str, object] | None = None) -> CheckReceipt:
+              requirements_ledger: Mapping[str, object] | None = None,
+              journal: object = None) -> CheckReceipt | UnavailableEvidence:
     """Execute one frozen check in a fresh, disposable workspace process."""
     if not isinstance(check, CheckDefinition):
         check = CheckDefinition.from_mapping(check)
@@ -3406,9 +3465,11 @@ def run_check(root: str | Path, check: CheckDefinition | Mapping[str, object], *
             from kernel_green_lock_repair import classify_check
             policy = classify_check(check, starter_root=root)
             check = policy.check
-        except (ImportError, TypeError, ValueError):
-            pass
-    snap = snapshot if snapshot is not None else workspace_snapshot(root)
+        except (ImportError, TypeError, ValueError) as error:
+            _fail_obligation_evidence(journal, "GREEN_LOCK_CLASSIFICATION_UNAVAILABLE", error)
+    snap = snapshot if snapshot is not None else workspace_snapshot(root, journal=journal)
+    if isinstance(snap, UnavailableEvidence):
+        return snap
     environment = environment if environment is not None else {
         "python": sys.version.split()[0],
         "platform": sys.platform,
@@ -3570,7 +3631,7 @@ def run_check(root: str | Path, check: CheckDefinition | Mapping[str, object], *
             try:
                 from kernel_green_lock_repair import annotate_preservation_counterexample
                 counterexample = annotate_preservation_counterexample(
-                    root, check, counterexample, detail)
+                    root, check, counterexample, detail, journal=journal)
             except (ImportError, OSError, TypeError, ValueError):
                 # Diagnostic enrichment must never change the underlying
                 # check verdict when a source tree cannot be scanned.
@@ -3609,12 +3670,20 @@ def run_registered_checks(root: str | Path, checks: Sequence[CheckDefinition], *
                           cache: dict[str, CheckReceipt] | None = None,
                           check_ids: Sequence[str] | None = None,
                           timeout: float = 8.0, identity: object = None,
-                          requirements_ledger: Mapping[str, object] | None = None) -> tuple[CheckReceipt, ...]:
+                          requirements_ledger: Mapping[str, object] | None = None,
+                          journal: object = None) -> tuple[CheckReceipt, ...] | UnavailableEvidence:
     selected = set(check_ids or ())
-    return tuple(run_check(root, check, snapshot=snapshot, environment=environment,
-                           cache=cache, timeout=timeout, identity=identity,
-                           requirements_ledger=requirements_ledger)
-                 for check in checks if check.cheap and (not selected or check.check_id in selected))
+    receipts: list[CheckReceipt] = []
+    for check in checks:
+        if not check.cheap or (selected and check.check_id not in selected):
+            continue
+        receipt = run_check(root, check, snapshot=snapshot, environment=environment,
+                            cache=cache, timeout=timeout, identity=identity,
+                            requirements_ledger=requirements_ledger, journal=journal)
+        if isinstance(receipt, UnavailableEvidence):
+            return receipt
+        receipts.append(receipt)
+    return tuple(receipts)
 
 
 def unknown_no_verifier(obligation_id: str, *, clause: str = "",

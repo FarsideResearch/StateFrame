@@ -8,7 +8,7 @@ import os
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 
-from kernel_obligation_assess import assessment_is_blocking
+from kernel_obligation_assess import UnavailableEvidence, _unavailable_evidence, assessment_is_blocking
 from kernel_verdict import SATISFIED, evaluate_required_tests
 
 MODE_ENV = "STATEFRAME_GREEN_LOCK"
@@ -259,7 +259,11 @@ def green_lock_fact(runtime: object, frame: Mapping[str, object] | None = None) 
     selectors = _declared_selectors(runtime, frame)
     ids = _open_obligation_ids(runtime, frame)
     selector_text = json.dumps(selectors, ensure_ascii=False, separators=(",", ":"))
-    revision = _product_revision(_current_binding(runtime))
+    binding = _current_binding(runtime)
+    if isinstance(binding, UnavailableEvidence):
+        return ("GREEN LOCK: current binding is unavailable (" + binding.reason_code
+                + "); completion cannot be confirmed.")
+    revision = _product_revision(binding)
     revision_text = json.dumps(revision, ensure_ascii=False, separators=(",", ":"), default=str)
     obligations_text = json.dumps(ids, ensure_ascii=False, separators=(",", ":")) if ids else "none"
     result = (TERMINAL_GREEN_LOCK_PREFIX + selector_text + " at revision "
@@ -280,11 +284,28 @@ def _product_revision(binding: object) -> object:
     return None
 
 
-def _current_binding(runtime: object) -> Mapping[str, object] | None:
+def _read_or_unavailable(operation, *, runtime: object, reason_code: str, errors):
+    from kernel_completion_owner import RequestActionContractError
+
     try:
-        value = runtime.binding()
-    except (AttributeError, OSError, UnicodeError, TypeError, ValueError):
-        return None
+        return operation()
+    except RequestActionContractError:
+        raise
+    except errors:
+        return _unavailable_evidence(
+            getattr(runtime, "journal", None), reason_code,
+            producer="kernel_green_lock",
+        )
+
+
+def _current_binding(runtime: object) -> Mapping[str, object] | None | UnavailableEvidence:
+    value = _read_or_unavailable(
+        lambda: runtime.binding(), runtime=runtime,
+        reason_code="GREEN_LOCK_BINDING_UNAVAILABLE",
+        errors=(AttributeError, OSError, UnicodeError, TypeError, LookupError, ValueError),
+    )
+    if isinstance(value, UnavailableEvidence):
+        return value
     return value if isinstance(value, Mapping) else None
 
 
@@ -438,6 +459,8 @@ def product_revision_change_from_parent(runtime: object) -> tuple[bool, str, str
     identity is not evidence that product work occurred.
     """
     current = _current_binding(runtime)
+    if isinstance(current, UnavailableEvidence):
+        return False, "UNKNOWN", "current_product_binding_unavailable:" + current.reason_code
     lock = getattr(runtime, "green_lock", None)
     owner = getattr(runtime, "owner", None)
     parent = None
@@ -862,8 +885,11 @@ class GreenLock:
                        reason="repeated_non_done_refusals")
         return crossed
 
-    def _current_revision(self) -> object:
-        return _product_revision(_current_binding(self.runtime))
+    def _current_revision(self) -> object | UnavailableEvidence:
+        binding = _current_binding(self.runtime)
+        if isinstance(binding, UnavailableEvidence):
+            return binding
+        return _product_revision(binding)
 
     def _capture_starting_binding_if_available(
             self, frame: Mapping[str, object] | None = None) -> bool:
@@ -928,6 +954,10 @@ class GreenLock:
 
     def _terminal_change_diff(self) -> str:
         current = _current_binding(self.runtime)
+        if isinstance(current, UnavailableEvidence):
+            return ("--- a/<product>\n+++ b/<product>\n"
+                    "@@ current product binding unavailable: "
+                    + current.reason_code + " @@")
         current_files = _binding_product_files(current)
         fallback_paths = set(self._starting_product_files)
         fallback_paths.update(self._starting_product_sources)
@@ -976,6 +1006,10 @@ class GreenLock:
         receipts = [row for row in getattr(self.runtime, "test_receipts", ())
                     if isinstance(row, Mapping)]
         current = _current_binding(self.runtime)
+        if isinstance(current, UnavailableEvidence):
+            return "; ".join(
+                f"{selector} UNAVAILABLE ({current.reason_code})" for selector in required
+            ) or "current product binding UNAVAILABLE (" + current.reason_code + ")"
         authority = evaluate_required_tests(current, required, receipts)
         lines = []
         if authority.state != SATISFIED:
@@ -1054,6 +1088,9 @@ class GreenLock:
         revision = self._green_revision
         if revision is None:
             revision = self._current_revision()
+        if isinstance(revision, UnavailableEvidence):
+            return ("GREEN LOCK: current binding is unavailable (" + revision.reason_code
+                    + "); completion cannot be confirmed.")
         revision_text = json.dumps(revision, ensure_ascii=False,
                                    separators=(",", ":"), default=str)
         obligations_text = (json.dumps(ids, ensure_ascii=False, separators=(",", ":"))
@@ -1226,6 +1263,10 @@ class GreenLock:
         if self.mode not in {"on", "terminal"}:
             return False
         revision = self._current_revision()
+        if isinstance(revision, UnavailableEvidence):
+            self._green = False
+            self._green_revision = None
+            return False
         if (self.mode == "terminal" and revision == self._terminal_fallback_revision
                 and revision is not None):
             self._green = False
@@ -1604,7 +1645,8 @@ class GreenLock:
             if self.mode == "terminal":
                 current_revision = self._current_revision()
                 fallback_same_revision = (
-                    current_revision is not None
+                    not isinstance(current_revision, UnavailableEvidence)
+                    and current_revision is not None
                     and current_revision == self._terminal_fallback_revision)
             self._product_edit_applied = True
             self._green = False

@@ -12,6 +12,7 @@ import os
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
+from typing import NoReturn
 
 MODE_ENV = "STATEFRAME_UNIFIED_STOP"
 DECLARED_PATH_DONE_GATE_ENV = "STATEFRAME_DECLARED_PATH_DONE_GATE"
@@ -58,6 +59,15 @@ REPAIR_TOOLS = frozenset({"edit", "str_replace", "write", "file_create", "replac
 # providers WIRED here are the three above; the rest stay independent legacy gates whose
 # refusals reach this arbiter as reason codes.
 WIRED_PROVIDERS = ("host_closure_assessments", "public_test_verdict", "runner_reason_codes")
+
+
+def _fail_evidence(runtime: object | None, reason_code: str, error: Exception) -> NoReturn:
+    """Record one failed producer read, then prevent a partial completion snapshot."""
+    emit = getattr(getattr(runtime, "journal", None), "emit", None)
+    if callable(emit):
+        emit("unified_stop_evidence_failure", producer="kernel_completion_policy",
+             dispatch=False, reason_code=reason_code)
+    raise RuntimeError(f"{reason_code}: completion evidence unavailable") from error
 
 
 def mode(value: object = None) -> str:
@@ -182,9 +192,8 @@ def _public_row(runtime: object) -> ClauseAssessment | None:
         return None
     try:
         verdict = verdict_fn()
-    except Exception:  # noqa: BLE001 - an unavailable verdict is UNKNOWN, never a veto
-        return ClauseAssessment("public.required_tests", UNKNOWN, ("public_test_verdict",),
-                                "VERDICT_UNAVAILABLE")
+    except (OSError, RuntimeError, TypeError, ValueError) as error:
+        _fail_evidence(runtime, "VERDICT_UNAVAILABLE", error)
     state = str(getattr(verdict, "state", "") or "").upper()
     refs = _strings(getattr(verdict, "supporting_evidence", ()))
     codes = ",".join(_strings(getattr(verdict, "reason_codes", ())))
@@ -272,7 +281,7 @@ def _declared_path_values(runtime: object) -> list[object]:
     return values[:512]
 
 
-def _safe_relative_path(value: object, base: Path) -> str | None:
+def _safe_relative_path(value: object, base: Path, runtime: object | None = None) -> str | None:
     raw = str(value or "").strip().replace("\\", "/").removeprefix("./")
     if (not raw or raw.startswith("/") or "\x00" in raw
             or (len(raw) > 1 and raw[1] == ":")):
@@ -284,8 +293,10 @@ def _safe_relative_path(value: object, base: Path) -> str | None:
         return None
     normalized = relative.as_posix()
     try:
-        (base / normalized).resolve().relative_to(base)
-    except (OSError, ValueError):
+        resolved = (base / normalized).resolve()
+    except (OSError, ValueError) as error:
+        _fail_evidence(runtime, "DECLARED_PATH_UNAVAILABLE", error)
+    if not resolved.is_relative_to(base):
         return None
     return normalized
 
@@ -296,11 +307,11 @@ def _safe_declared_paths(runtime: object) -> tuple[str, ...]:
         return ()
     try:
         base = Path(root).resolve()
-    except (OSError, TypeError, ValueError):
-        return ()
+    except (OSError, TypeError, ValueError) as error:
+        _fail_evidence(runtime, "DECLARED_ROOT_UNAVAILABLE", error)
     paths = []
     for value in _declared_path_values(runtime):
-        normalized = _safe_relative_path(value, base)
+        normalized = _safe_relative_path(value, base, runtime)
         if normalized and normalized not in paths:
             paths.append(normalized)
     return tuple(paths[:128])
@@ -397,8 +408,8 @@ def _menu(runtime: object) -> tuple[str, ...]:
 def _binding(runtime: object) -> object:
     try:
         return runtime.binding()
-    except Exception:  # noqa: BLE001
-        return None
+    except (OSError, RuntimeError, TypeError, ValueError) as error:
+        _fail_evidence(runtime, "BINDING_UNAVAILABLE", error)
 
 
 def snapshot_id(runtime: object, clauses: Sequence[ClauseAssessment]) -> str:

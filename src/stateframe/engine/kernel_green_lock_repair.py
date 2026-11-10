@@ -697,7 +697,8 @@ def repair_terminal_menu(current_tools: Sequence[dict], all_tools: Sequence[dict
 
 def annotate_preservation_counterexample(root: str | Path, check: object,
                                          counterexample: object,
-                                         detail: object = None) -> object:
+                                         detail: object = None, *,
+                                         journal: object = None) -> object:
     """Attach static/dynamic input mutation locations to a failed replay."""
     template = _reason_text(getattr(check, "template", ""))
     if template not in {"PRESERVE_INPUT", "REPLAY_EQUIVALENT"}:
@@ -714,8 +715,9 @@ def annotate_preservation_counterexample(root: str | Path, check: object,
     entry = getattr(check, "entry_point", None)
     if entry:
         try:
-            from kernel_obligation_assess import mutation_sites
-            sites = list(mutation_sites(root, entry))
+            from kernel_obligation_assess import UnavailableEvidence, mutation_sites
+            scanned = mutation_sites(root, entry, journal=journal)
+            sites = [] if isinstance(scanned, UnavailableEvidence) else list(scanned)
         except (ImportError, OSError, TypeError, ValueError):
             sites = []
     site_dicts = []
