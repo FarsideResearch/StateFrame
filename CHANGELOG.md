@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.4.40 (2026-11-10)
 
 - Hosted request metering: the byte-fallback cold estimate now has a raise-only density floor computed from the decoded content (digits, base64/hex runs, dense code, punctuation, non-ASCII), so long numbers, base64, hex and dense JSON or code are no longer underestimated on endpoints without exact tokenization; ordinary prose estimates are unchanged.
 - Tests: a guard now checks every terminal authority error against stale, missing and fresh freshness facts, so a completion receipt can never be accepted while its freshness is unknown.
