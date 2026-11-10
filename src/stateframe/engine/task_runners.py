@@ -522,7 +522,7 @@ def _process_env(env: Mapping[str, str] | None, requires_db: bool) -> dict[str, 
         result.update(env)
     if requires_db:
         database_name = result.get("REACT_DB_NAME") or (
-            f"mission_control_test_react_{uuid.uuid4().hex[:8]}"
+            f"stateframe_test_react_{uuid.uuid4().hex[:8]}"
         )
         pass  # product: no lab database default
     return result

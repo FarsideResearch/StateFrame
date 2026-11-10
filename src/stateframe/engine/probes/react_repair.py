@@ -5046,7 +5046,7 @@ def _run_tests_impl(root: pathlib.Path, fn: str, explicit: str | None,
         # not start a database or sweep task databases.
         import uuid as _uuid
         _dbname = os.environ.get("REACT_DB_NAME") or (
-            f"mission_control_test_react_{_uuid.uuid4().hex[:8]}")
+            f"stateframe_test_react_{_uuid.uuid4().hex[:8]}")
         # E387b: the AHA sandbox conftest imports Settings, which REQUIRES database_url +
         # jwt_secret at import time — absent env means pytest exit 4 on EVERY invocation
         # (both preflight legs died identically, masquerading as "no usable oracle").
@@ -5883,7 +5883,7 @@ def work(d, *, resume=None):
     import uuid as _uuid
     os.environ.setdefault("REACT_RUN_ID", _uuid.uuid4().hex[:6])
     os.environ["REACT_DB_NAME"] = (
-        f"mission_control_test_react_{os.environ['REACT_RUN_ID']}_{fn[:20].lower()}")
+        f"stateframe_test_react_{os.environ['REACT_RUN_ID']}_{fn[:20].lower()}")
 
     src_repo = REPOS.get(d.get("repo") or "aha")
     if src_repo is None and d.get("repo") != "build" and not (d.get("source_dataset") and d.get("base_commit")):
@@ -13714,7 +13714,7 @@ def work(d, *, resume=None):
                 # agent-loop DB is per-task and must not bleed in here either.
                 _rid = os.environ.get("REACT_RUN_ID", "r0")
                 os.environ["REACT_DB_NAME"] = (
-                    f"mission_control_test_react_{_rid}_{fn[:18].lower()}_g")
+                    f"stateframe_test_react_{_rid}_{fn[:18].lower()}_g")
                 if multifile:
                     after, _after_codes = run_tests_for_selectors(
                         root, fn, _sel, d["rel"], row=d)
@@ -13751,7 +13751,7 @@ def work(d, *, resume=None):
                         target.write_text(d["parent_src"])          # unpatched control
                     try:
                         os.environ["REACT_DB_NAME"] = (
-                            f"mission_control_test_react_{_rid}_{fn[:18].lower()}_c")
+                            f"stateframe_test_react_{_rid}_{fn[:18].lower()}_c")
                         if multifile:
                             before, _before_codes = run_tests_for_selectors(
                                 root, fn, _sel, d["rel"], row=d)
