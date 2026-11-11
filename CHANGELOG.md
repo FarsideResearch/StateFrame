@@ -10,6 +10,7 @@
 
 ## 0.4.42 (2026-11-11)
 
+- Mutation helpers now get their full running time after sandbox startup; a stalled startup is stopped separately with a clear refusal.
 - Expanded the mutation guide with the complete CLI surface, refusal codes and enforced limits, and added a Linux quickstart that exercises a shipped helper.
 - Mutations 0.5.0 hardening: host-owned mem/wall/cpu ceilings, truncated output counts as overflow, fresh survivor snapshot with Z/X/x terminal, broker CA symlink targets bound read-only, broker connects to the vetted address directly, and fail-closed resume after mutation interruption.
 - Mutations 0.5.0 Linux fixes: authorize test-environment StateFrame editable imports, preserve committed edits through replay, keep disabled hooks disabled after reattachment, retry validated addresses in the mutation broker only while ordinary fetch retains its first-vetted-address behavior and refusal text, bind the loader cache read-only, expose Python's compiled CA roots to the HTTPS broker, skip generic PATH executable scans for exact probes, keep managed probe descendants in a trackable launch session, and expose the direct engine identity early in argv while preserving selected interpreter and venv behavior.

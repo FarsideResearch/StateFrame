@@ -235,6 +235,7 @@ def test_supervisor_timeout_uses_armed_wall_clock(monkeypatch):
                                                        snapshot=lambda: {}))
     job.process = SimpleNamespace(poll=lambda: None)
     job.started = 100.0
+    job.armed = True
     job.wall_seconds = 1.0
     job.stop_at = None
     job.kill_at = None
@@ -245,6 +246,27 @@ def test_supervisor_timeout_uses_armed_wall_clock(monkeypatch):
     job.tick({})
     assert job.timed_out and job.timeout_at == 101.1
     assert job.stop_at == 101.1
+
+
+def test_supervisor_does_not_charge_unarmed_startup_to_wall(monkeypatch):
+    import kernel_exec_supervisor as supervisor
+
+    monkeypatch.setattr(supervisor, "time", SimpleNamespace(monotonic=lambda: 111.0))
+    job = object.__new__(supervisor.ManagedProcess)
+    job.cleanup = None
+    job.eof = True
+    job.cap = SimpleNamespace(limits=SimpleNamespace(kill_on_output=False))
+    job.family = SimpleNamespace(update=lambda _rows: [], signal=lambda *_args: set(),
+                                 table=SimpleNamespace(limit_breach=lambda *_args: ""))
+    job.process = SimpleNamespace(poll=lambda: None)
+    job.started = 100.0
+    job.armed = False
+    job.wall_seconds = 3.0
+    job.stop_at = None
+    job.timed_out = False
+    job.tick({})
+    assert not job.timed_out
+    assert job.stop_at is None
 
 
 def test_payload_boot_signals_ready_before_release_and_handler(monkeypatch):

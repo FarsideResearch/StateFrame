@@ -105,6 +105,16 @@ def wait_for_release(ctl: Path, launch: str, nonce: str, *, timeout: float = 30.
     return None
 
 
+def _startup_wait_seconds(value: object) -> float:
+    try:
+        timeout = float(value)
+    except (TypeError, ValueError) as error:
+        raise ValueError("invalid mutation startup wait") from error
+    if not math.isfinite(timeout) or timeout <= 0:
+        raise ValueError("invalid mutation startup wait")
+    return timeout
+
+
 def macos_profile(read_paths: tuple[str, ...], *, network_full: bool = False) -> str:
     """Single final deny-default Seatbelt profile, assembled before unit import."""
     paths = " ".join(f"(subpath {json.dumps(path)})" for path in read_paths)
@@ -206,11 +216,12 @@ def main() -> int:
     call = ""
     activated = False
     try:
-        if len(sys.argv) == 4 and sys.argv[1] == "--broker":
+        if len(sys.argv) in {4, 5} and sys.argv[1] == "--broker":
             launch, nonce = sys.argv[2:4]
             ctl = (Path("/sf/ctl") if sys.platform != "darwin"
                    else Path(__file__).resolve().parent.parent / "stage" / launch / "ctl")
-            if wait_for_release(ctl, launch, nonce) is None:
+            timeout = (_startup_wait_seconds(sys.argv[4]) if len(sys.argv) == 5 else 30.0)
+            if wait_for_release(ctl, launch, nonce, timeout=timeout) is None:
                 return 4
             import runpy
             boot = Path(__file__).resolve().parent
@@ -232,7 +243,9 @@ def main() -> int:
         launch, nonce = doc["launch"], doc["nonce"]
         stage = Path("/sf/ctl") if sys.platform != "darwin" else Path(__file__).resolve().parent.parent / "stage" / launch / "ctl"
         hook_ready = doc.get("hook_ready") is True and doc.get("role") == "payload"
-        if not hook_ready and wait_for_release(stage, launch, nonce) is None:
+        timeout = (_startup_wait_seconds(doc["startup_wait_s"])
+                   if not hook_ready and "startup_wait_s" in doc else 30.0)
+        if not hook_ready and wait_for_release(stage, launch, nonce, timeout=timeout) is None:
             return 4
         boot_path = Path("/sf/boot") if sys.platform != "darwin" else Path(__file__).resolve().parent
         unit_path = Path("/sf/unit") if sys.platform != "darwin" else stage.parent / "unit"

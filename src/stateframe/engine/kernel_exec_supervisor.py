@@ -122,7 +122,7 @@ class ManagedProcess:
                 self.leader_reaped = True
                 self.post_exit_scan_pending = True
             self.stop(0.1)
-        if now - self.started >= self.wall_seconds and self.stop_at is None:
+        if self.armed and now - self.started >= self.wall_seconds and self.stop_at is None:
             self.timed_out = True
             self.timeout_at = now
             self.stop(0.1)
@@ -290,9 +290,11 @@ class Supervisor:
         mutation = cap.purpose in {"mutation", "mutation_broker"}
         armable_wall_s = request.get("armable_wall_s")
         if armable_wall_s is not None:
-            if (cap.purpose != "mutation" or type(armable_wall_s) not in {int, float}
-                    or not 0 < armable_wall_s <= 1.0):
-                raise ValueError("invalid mutation hook arm budget")
+            if (cap.purpose not in {"mutation", "mutation_broker"}
+                    or type(armable_wall_s) not in {int, float}
+                    or not math.isfinite(armable_wall_s)
+                    or not 0 < armable_wall_s <= cap.limits.wall_seconds):
+                raise ValueError("invalid mutation arm budget")
         cwd = (Path("/sf/unit") if mutation and cap.purpose == "mutation" and self.backend == "bwrap"
                else Path("/") if mutation and self.backend == "bwrap"
                else Path(request.get("cwd") or cap.workspace).resolve(strict=True))
@@ -493,7 +495,7 @@ class Supervisor:
         if op == "arm":
             job = self.jobs[request["id"]]
             if job.armed or job.cleanup is not None or job.stop_at is not None:
-                raise ValueError("mutation hook cannot be armed")
+                raise ValueError("mutation cannot be armed")
             deadline = request.get("deadline")
             if deadline is not None and (type(deadline) not in (int, float)
                                          or not math.isfinite(deadline)):

@@ -15,9 +15,11 @@ from typing import Mapping
 if __package__:
     from .kernel_mutate_inputs import admit_inputs, input_id_for, input_path_admitted
     from .kernel_mutate_build import BuildError, _safe_detail
+    from .kernel_mutate_exec import MutationStartupTimeout
 else:
     from kernel_mutate_inputs import admit_inputs, input_id_for, input_path_admitted
     from kernel_mutate_build import BuildError, _safe_detail
+    from kernel_mutate_exec import MutationStartupTimeout
 
 
 LEVELS = ("off", "prebuilt", "authored")
@@ -480,7 +482,11 @@ class MutationRuntime:
         for name, amount in reservations:
             self.journal.append("BUDGET_RESERVE", name=name, amount=amount,
                                 id=token + ":" + name)
-        outcome = self._ensure_executor().run(spec)
+        try:
+            outcome = self._ensure_executor().run(spec)
+        except MutationStartupTimeout:
+            self.retire_hook_executor()
+            raise
         meter = "broker" if spec.role == "broker" else "payload"
         for name, measured in ((meter + "_wall_s", outcome.wall_s),
                                (meter + "_cpu_s", outcome.cpu_s)):
@@ -1175,6 +1181,9 @@ class MutationRuntime:
             result = _refuse("DIGEST", str(error))
         except MutationBudgetError as error:
             result = _refuse("BUDGET", str(error))
+        except MutationStartupTimeout as error:
+            result = self._with_repair(_refuse("STARTUP_TIMEOUT", str(error)))
+            self.journal.append("REFUSAL", call=call_id, observation=result)
         except (ValueError, OSError) as error:
             result = (_admission_refusal(error) if fields["op"] == "submit" and self.episode is not None
                       else _refuse("ADMISSION", _safe_detail(str(error))[:160]))
@@ -1225,6 +1234,8 @@ class MutationRuntime:
             result = _refuse("DIGEST", str(error))
         except MutationBudgetError as error:
             result = _refuse("BUDGET", str(error))
+        except MutationStartupTimeout as error:
+            result = _refuse("STARTUP_TIMEOUT", str(error))
         except (ValueError, OSError) as error:
             result = (_admission_refusal(error) if fields["op"] == "submit" and self.episode is not None
                       else _refuse("ADMISSION", _safe_detail(str(error))[:160]))

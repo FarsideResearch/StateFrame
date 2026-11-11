@@ -151,7 +151,7 @@ Budgets are durable across the whole run and resume. The run and chat commands d
 | Committed edit files / bytes | 16 / 256 KiB | 64 / 1 MiB |
 | Journal bytes | 2 MiB | 8 MiB |
 
-Each edit proposal set can contain at most 16 files. One mutation result is limited to 64 KiB. A payload launch is capped at 256 MiB of memory, 120 seconds of wall time, and 300 seconds of CPU time. Reaching a run budget returns a `REFUSED MUTATION_BUDGET` observation and disables mutations for the rest of that run. The main task can continue.
+Each edit proposal set can contain at most 16 files. One mutation result is limited to 64 KiB. A payload is capped at 256 MiB of memory, 120 seconds of running time, and 300 seconds of CPU time. Its wall clock starts when the sandbox is released to run the payload. Sandbox startup has a separate 10-second window, scaled by the existing execution supervisor timeout setting and host load. A startup timeout returns `REFUSED MUTATION_STARTUP_TIMEOUT` after cleanup; it does not count as a payload timeout. Reaching a run budget returns a `REFUSED MUTATION_BUDGET` observation and disables mutations for the rest of that run. The main task can continue.
 
 For an edit proposal, the host checks the grant, edit scope, protected paths, parent directory identity, and base SHA-256 for the entire set before writing. It records pre and post bytes durably before the first replacement, checks each target again just before replacing it, and attempts to roll back its replacements after an ordinary write failure. An interrupted commit is reconciled on resume; an unprovable rollback blocks recovery.
 
@@ -254,6 +254,7 @@ Mutation tool calls return a refusal observation with one of these codes. Run or
 | `MUTATION_DIGEST` | A unit source digest did not match its recorded value. |
 | `MUTATION_EDIT` | An edit proposal failed path, scope, or base-state validation. |
 | `MUTATION_EXECUTION` | A unit failed, timed out, exceeded output limits, or replayed a recorded failure. |
+| `MUTATION_STARTUP_TIMEOUT` | The sandbox did not reach payload release within its startup window. The launch is stopped and cleaned up. |
 | `MUTATION_FRAME` | The operation is not allowed in the current authoring episode. |
 | `MUTATION_GRANT` | The requested network, write, or retention capability was not granted. |
 | `MUTATION_LEVEL` | The operation requires the `authored` level. |

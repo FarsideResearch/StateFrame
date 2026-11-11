@@ -23,7 +23,7 @@ import uuid
 
 if __package__:
     from .kernel_exec_capability import ExecCapability, ExecLimits, symlink_hops
-    from .kernel_exec_session import CleanupReport, ExecSession, ExecSessionError
+    from .kernel_exec_session import CleanupReport, ExecSession, ExecSessionError, rpc_timeout_seconds
     from .kernel_exec_tracker import ProcessTable, process_cmdline_digest
     from .kernel_mutate_debug import _hook_timing
     from .kernel_mutate_build import (MAX_MUTATION_MEMORY_MB, MAX_MUTATION_WALL_S,
@@ -32,7 +32,7 @@ if __package__:
     from .sf_mutate_boot import strict_loads
 else:
     from kernel_exec_capability import ExecCapability, ExecLimits, symlink_hops
-    from kernel_exec_session import CleanupReport, ExecSession, ExecSessionError
+    from kernel_exec_session import CleanupReport, ExecSession, ExecSessionError, rpc_timeout_seconds
     from kernel_exec_tracker import ProcessTable, process_cmdline_digest
     from kernel_mutate_debug import _hook_timing
     from kernel_mutate_build import (MAX_MUTATION_MEMORY_MB, MAX_MUTATION_WALL_S,
@@ -115,6 +115,10 @@ class MutationPlatformError(RuntimeError):
 
 class MutationContainmentError(BaseException):
     code = "MUTATION_CONTAINMENT"
+
+
+class MutationStartupTimeout(Exception):
+    code = "MUTATION_STARTUP_TIMEOUT"
 
 
 def _fsync_dir(path: Path) -> None:
@@ -482,8 +486,8 @@ class MutationExecutor:
         doc = strict_loads(spec.stdin_doc)
         if not isinstance(doc, dict):
             raise ValueError("mutation stdin document must be an object")
-        if "hook_ready" in doc or "hook_cpu_s" in doc:
-            raise ValueError("mutation hook startup fields are host-reserved")
+        if "hook_ready" in doc or "hook_cpu_s" in doc or "startup_wait_s" in doc:
+            raise ValueError("mutation startup fields are host-reserved")
         if doc.get("launch") != spec.launch or doc.get("call") != spec.call or doc.get("role") != spec.role:
             raise ValueError("mutation stdin identity differs from LaunchSpec")
         if spec.role != "broker":
@@ -513,6 +517,8 @@ class MutationExecutor:
         try:
             mounts["boot"] = str(self._boot)
             nonce = uuid.uuid4().hex
+            startup_window = (10.0 * rpc_timeout_seconds() / 15.0
+                              if not spec.budget_after_ready else None)
             if spec.role == "broker":
                 if set(doc) != {"call", "launch", "role", "request"} or not isinstance(doc["request"], dict):
                     raise ValueError("broker launch needs an isolated request document")
@@ -522,6 +528,8 @@ class MutationExecutor:
                 if spec.budget_after_ready:
                     doc["hook_ready"] = True
                     doc["hook_cpu_s"] = spec.limits.cpu_s
+                else:
+                    doc["startup_wait_s"] = startup_window + 2.0
                 stdin = json.dumps(doc, separators=(",", ":")).encode()
             if sys.platform == "darwin":
                 for row in doc.get("inputs", []):
@@ -553,17 +561,37 @@ class MutationExecutor:
                            else Path("/sf/boot/sf_mutate_boot.py"))
             command = [str(Path(sys.executable).resolve()), "-I", "-S", "-B", str(boot_script)]
             if spec.role == "broker":
-                command += ["--broker", spec.launch, nonce]
+                command += ["--broker", spec.launch, nonce, str(startup_window + 2.0)]
             self._record(spec, "PREPARED")
             if self._hidden:
                 mounts = {**mounts, "hide": [str(path) for path in self._hidden]}
             launch_started = time.monotonic()
+            startup_deadline = (launch_started + startup_window
+                                if not spec.budget_after_ready else None)
+            def startup_remaining() -> float:
+                remaining = startup_deadline - time.monotonic()
+                if remaining <= 0:
+                    raise MutationStartupTimeout("mutation startup exceeded bound")
+                return remaining
+
             if spec.budget_after_ready:
                 _hook_timing("hook launch")
                 handle = self._session._spawn(command, cap, stdin=stdin, mounts=mounts,
                                               armable_wall_s=spec.limits.wall_s)
             else:
-                handle = self._session._spawn(command, cap, stdin=stdin, mounts=mounts)
+                control = self._session._control
+                original_timeout = control.gettimeout()
+                try:
+                    control.settimeout(startup_remaining())
+                    handle = self._session._spawn(command, cap, stdin=stdin, mounts=mounts,
+                                                  armable_wall_s=spec.limits.wall_s)
+                    startup_remaining()
+                except ExecSessionError as error:
+                    if time.monotonic() >= startup_deadline:
+                        raise MutationStartupTimeout("mutation startup exceeded bound") from error
+                    raise
+                finally:
+                    control.settimeout(original_timeout)
             identity = handle.identity
             self._write_owner()
             self._record(spec, "STARTED", identity)
@@ -571,8 +599,13 @@ class MutationExecutor:
                 raise MutationContainmentError("mutation launch identity missing")
             self._record(spec, "REGISTERED", identity)
             ready_at = self._await_hook_ready(handle) if spec.budget_after_ready else None
+            if not spec.budget_after_ready:
+                startup_remaining()
+            # An ordinary arm reply can be slow while still inside the startup window.
+            # Its gate record must remain valid through release and the payload budget.
             release = {"launch": spec.launch, "nonce": nonce,
-                       "deadline": time.monotonic() + spec.limits.wall_s + 2,
+                       "deadline": (time.monotonic() if spec.budget_after_ready else startup_deadline)
+                       + spec.limits.wall_s + 2,
                        "identity": identity}
             target = stage / "ctl" / "release.json"
             temporary = stage / "ctl" / (".release-" + nonce)
@@ -590,9 +623,24 @@ class MutationExecutor:
                 armed = self._session._rpc(arm_request)
                 _hook_timing("budget clock start", at=armed["started"])
                 expired = armed.get("expired", False)
+            else:
+                control = self._session._control
+                original_timeout = control.gettimeout()
+                try:
+                    control.settimeout(startup_remaining())
+                    armed = self._session._rpc({"op": "arm", "id": handle.id})
+                except ExecSessionError as error:
+                    if time.monotonic() >= startup_deadline:
+                        raise MutationStartupTimeout("mutation startup exceeded bound") from error
+                    raise
+                finally:
+                    control.settimeout(original_timeout)
+                expired = armed.get("expired", False)
             if expired:
                 temporary.unlink()
             else:
+                if not spec.budget_after_ready:
+                    startup_remaining()
                 os.replace(temporary, target)
                 _fsync_dir(stage / "ctl")
                 self._record(spec, "RELEASED", identity)
@@ -624,7 +672,11 @@ class MutationExecutor:
                     raise MutationContainmentError(report.detail)
                 if stage.exists() or stage.is_symlink():
                     _remove_tree(stage)
-                if identity is not None:
+                if isinstance(error, MutationStartupTimeout):
+                    if identity is not None:
+                        self._record(spec, "REAPED", identity)
+                    self.close()
+                elif identity is not None:
                     self._record(spec, "REAPED", identity)
                 if isinstance(error, MutationContainmentError):
                     raise error

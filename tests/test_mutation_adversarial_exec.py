@@ -4,6 +4,7 @@ from __future__ import annotations
 from dataclasses import replace
 from pathlib import Path
 import sys
+import time
 import uuid
 
 import pytest
@@ -481,6 +482,71 @@ def test_mutation_gigabyte_output_and_truncation_are_bounded(mutation_root):
     assert outcome.exit_code != 0
     assert outcome.wall_s < limits.wall_s
     assert outcome.cleanup.ok
+
+
+def test_payload_wall_starts_after_slow_registered_launch(mutation_root):
+    import kernel_mutate_build as build
+    import kernel_mutate_exec as execution
+    import kernel_mutate_wire as wire
+
+    staged = stage_test_unit(build, mutation_root,
+                             "import time\ndef handle(input, ctx):\n"
+                             "    time.sleep(0.1)\n    return {'finished': True}\n")
+    def delay_release(state):
+        if state == "REGISTERED":
+            time.sleep(2.5)
+
+    executor = execution.MutationExecutor(mutation_root, network_envelope="none",
+                                         launch_stage_hook=delay_release)
+    spec = make_launch_spec(execution, wire, staged,
+                            limits=execution.MutationLimits(wall_s=2, cpu_s=2, mem_mb=128))
+    try:
+        outcome = executor.run(spec)
+    finally:
+        assert executor.close().ok
+    sweep_and_assert(mutation_root)
+    assert outcome.exit_code == 0
+    assert not outcome.timed_out
+    assert wire.parse_stdout(outcome.stdout, call="case-1").result == {"finished": True}
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux bubblewrap is required for mutation startup cleanup")
+def test_stalled_startup_refuses_before_release_and_reaps_everything(mutation_root, monkeypatch):
+    import json
+    import kernel_mutate_build as build
+    import kernel_mutate_exec as execution
+    import kernel_mutate_wire as wire
+
+    sentinel = mutation_root.parent / "payload-ran"
+    source = ("from pathlib import Path\n"
+              f"Path({str(sentinel)!r}).write_text('ran')\n"
+              "def handle(input, ctx):\n    return {'finished': True}\n")
+    staged = stage_test_unit(build, mutation_root, source)
+    monkeypatch.setattr(execution, "rpc_timeout_seconds", lambda: 1.5)
+
+    def stall_before_release(state):
+        if state == "REGISTERED":
+            time.sleep(1.25)
+
+    executor = execution.MutationExecutor(mutation_root, network_envelope="none",
+                                         launch_stage_hook=stall_before_release)
+    spec = make_launch_spec(execution, wire, staged)
+    with pytest.raises(execution.MutationStartupTimeout, match="startup exceeded bound"):
+        executor.run(spec)
+    assert not sentinel.exists()
+    states = [json.loads(line)["state"] for line in
+              (mutation_root / "launches.jsonl").read_text().splitlines()]
+    assert "REGISTERED" in states
+    assert "RELEASED" not in states
+    assert states[-1] == "REAPED"
+    assert executor._closed and executor._ledger.closed
+    assert executor._session._closed
+    assert executor._session._control.fileno() == -1
+    assert executor._session._process.poll() is not None
+    assert not executor._stage.exists()
+    assert not executor._boot.exists()
+    assert not executor._session_dir.exists()
+    sweep_and_assert(mutation_root)
 
 
 @pytest.mark.skipif(
