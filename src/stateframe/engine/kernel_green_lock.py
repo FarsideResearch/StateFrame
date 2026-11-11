@@ -8,7 +8,7 @@ import os
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 
-from kernel_obligation_assess import UnavailableEvidence, _unavailable_evidence, assessment_is_blocking
+from kernel_obligation_assess import UnavailableEvidence, assessment_is_blocking
 from kernel_verdict import SATISFIED, evaluate_required_tests
 
 MODE_ENV = "STATEFRAME_GREEN_LOCK"
@@ -291,11 +291,19 @@ def _read_or_unavailable(operation, *, runtime: object, reason_code: str, errors
         return operation()
     except RequestActionContractError:
         raise
-    except errors:
-        return _unavailable_evidence(
-            getattr(runtime, "journal", None), reason_code,
-            producer="kernel_green_lock",
+    except errors as error:
+        sub_reason = (
+            "runtime_not_initialized"
+            if isinstance(error, AttributeError)
+            and error.name in {"_binding_cache", "_binding_epoch", "_workspace_snapshot_cache"}
+            else type(error).__name__[:64]
         )
+        journal = getattr(runtime, "journal", None)
+        emit = getattr(journal, "emit", None)
+        if callable(emit):
+            emit("host_obligation_evidence_failure", producer="kernel_green_lock",
+                 dispatch=False, reason_code=reason_code, sub_reason=sub_reason)
+        return UnavailableEvidence(reason_code)
 
 
 def _current_binding(runtime: object) -> Mapping[str, object] | None | UnavailableEvidence:
