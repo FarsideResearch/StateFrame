@@ -14,6 +14,8 @@ _TIMEOUT_SCALE = float(next(
      if arg.startswith(_TIMEOUT_SCALE_FLAG)),
     os.environ.get("SF_TEST_TIMEOUT_SCALE", "1.0"),
 ))
+# Drop the scale flag so positional arguments (marker, variant path) keep their indexes.
+sys.argv = [arg for arg in sys.argv if not arg.startswith(_TIMEOUT_SCALE_FLAG)]
 
 
 def _scaled(seconds: float) -> float:
