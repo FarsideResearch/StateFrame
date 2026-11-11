@@ -137,6 +137,9 @@ def runtime_fields(runtime=None) -> tuple[str, ...]:
     from kernel_stable_wire import enabled_for_replay
     if enabled_for_replay():
         fields.append("_stable_wire_state")
+    from kernel_cache_layout_candidate import FINAL_SOURCE_ORDER_STATE_ATTR
+    if runtime is not None and hasattr(runtime, FINAL_SOURCE_ORDER_STATE_ATTR):
+        fields.append(FINAL_SOURCE_ORDER_STATE_ATTR)
     if getattr(runtime, "stateframe_challenge_budget", None) is not None:
         fields.append("_challenge_budget_state")
     if getattr(runtime, "stateframe_preedit_coverage_arm", None) in {"treatment", "placebo"}:
@@ -160,6 +163,14 @@ def checkpoint_runtime_fields_match(runtime, saved_runtime) -> bool:
             validate_checkpoint_state(saved_runtime.get("_stable_wire_state"))
         except (TypeError, ValueError):
             return False
+    from kernel_cache_layout_candidate import (
+        FINAL_SOURCE_ORDER_STATE_ATTR, validate_final_source_order_state,
+    )
+    if FINAL_SOURCE_ORDER_STATE_ATTR in actual:
+        try:
+            validate_final_source_order_state(saved_runtime[FINAL_SOURCE_ORDER_STATE_ATTR])
+        except (TypeError, ValueError):
+            return False
     notice_fields = set(_EVICTFIX_NOTICE_FIELDS)
     present_notice_fields = actual & notice_fields
     if present_notice_fields:
@@ -173,6 +184,12 @@ def checkpoint_runtime_fields_match(runtime, saved_runtime) -> bool:
         if type(announced) is not bool or (announced and pending is not None):
             return False
     if actual == expected:
+        return True
+    # Source-order state was added after existing checkpoints. Accept its
+    # presence or absence across a restart while retaining strict checks for
+    # every other field.
+    if (actual - {FINAL_SOURCE_ORDER_STATE_ATTR}
+            == expected - {FINAL_SOURCE_ORDER_STATE_ATTR}):
         return True
     optional = []
     if getattr(runtime, "stateframe_preedit_coverage_arm", None) in {"treatment", "placebo"}:
@@ -200,6 +217,9 @@ def restore_runtime_field_values(runtime, saved_runtime: Mapping[str, object]) -
         elif key == "_stable_wire_state":
             from kernel_stable_wire import validate_checkpoint_state
             runtime._stable_wire_state = validate_checkpoint_state(value)
+        elif key == "_final_cache_source_order_state":
+            from kernel_cache_layout_candidate import validate_final_source_order_state
+            runtime._final_cache_source_order_state = validate_final_source_order_state(value)
         else:
             setattr(runtime, key, copy.deepcopy(value))
 

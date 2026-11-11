@@ -14,6 +14,14 @@ from kernel_frame_optional_allocation import FrameAllocationReplanNeeded
 from stateframe.workcopy import frame_source_path_allowed
 
 
+class _RuntimeBoundSourceWindows(list[dict[str, object]]):
+    """Keep the source selector's runtime available to its paired budget fitter."""
+
+    def __init__(self, runtime: object):
+        super().__init__()
+        self.runtime = runtime
+
+
 def _current_window(root: Path, path: str, start: int, end: int,
                     revision: str, *, owner: str = "recent_editable_read") -> tuple[str, str] | None:
     """Render only exact, confined current file lines as a typed source window."""
@@ -346,7 +354,7 @@ def editable_product_windows(runtime: object, frame: Mapping[str, object],
     from kernel_stateframe_headcarry import _read_optional_source
 
     if not bookmarks_enabled():
-        return [], []
+        return _RuntimeBoundSourceWindows(runtime), []
     editable = editable_read_paths(runtime)
     for edit in frame.get("applied_edits", ()):
         if (isinstance(edit, Mapping) and edit.get("result_class") == "APPLIED"
@@ -392,7 +400,7 @@ def editable_product_windows(runtime: object, frame: Mapping[str, object],
         path = row["path"]
         priority[path] = min(priority.get(path, rank), rank)
     ordered = sorted(available, key=lambda row: (priority.get(row[0], 3), row[0]))
-    windows = []
+    windows = _RuntimeBoundSourceWindows(runtime)
     total = 0
     for path, raw, count, revision in ordered:
         if not small and total + len(raw) > 12 * 1024:
@@ -406,6 +414,25 @@ def editable_product_windows(runtime: object, frame: Mapping[str, object],
                         "rank": priority.get(path, 3)})
         total += len(raw)
     return windows, editable
+
+
+def editable_product_windows_for_request(runtime: object, frame: Mapping[str, object],
+                                         bookmarks: Sequence[Mapping[str, object]]
+                                         ) -> tuple[list[dict[str, object]], list[str]]:
+    """Expose the request selector with the same priority and runtime binding."""
+    return editable_product_windows(runtime, frame, bookmarks)
+
+
+def record_source_window_order(runtime: object, body: Mapping[str, object]) -> None:
+    """Commit delivered source order for direct fitter callers."""
+    from kernel_cache_layout_candidate import (
+        _final_source_order_enabled_for_fitting,
+        _order_final_source_windows,
+        _persist_final_source_order_state,
+    )
+    if _final_source_order_enabled_for_fitting():
+        _ordered, state = _order_final_source_windows(body, runtime)
+        _persist_final_source_order_state(runtime, state)
 
 
 def public_check_source_windows(runtime: object, state: Mapping[str, object]) -> list[dict[str, str]]:
@@ -710,7 +737,9 @@ def fit_recent_read_windows(body: Mapping[str, object], windows: Sequence[Mappin
                             deferred_source_paths: Sequence[str] = (),
                             editable_paths: Sequence[str] = (),
                             fits: object,
-                            candidate_nonfit: Callable[[Mapping[str, object]], bool] | None = None
+                            candidate_nonfit: Callable[[Mapping[str, object]], bool] | None = None,
+                            runtime: object | None = None,
+                            persist_source_order: bool = True,
                             ) -> dict[str, object]:
     """Fit source messages against the caller's measured complete-wire budget.
 
@@ -720,6 +749,39 @@ def fit_recent_read_windows(body: Mapping[str, object], windows: Sequence[Mappin
     from kernel_code_bookmarks import enabled as bookmarks_enabled
     from kernel_request_source_window import parse_model_source_window, parse_window
     from kernel_stateframe_framefit5 import _is_volatile_tail_message
+
+    source_order_runtime = runtime
+    if source_order_runtime is None:
+        source_order_runtime = getattr(windows, "runtime", None)
+    if source_order_runtime is None:
+        source_order_runtime = getattr(product_windows, "runtime", None)
+    source_order_enabled = False
+    if source_order_runtime is not None:
+        from kernel_cache_layout_candidate import (
+            _final_source_order_enabled_for_fitting,
+            _order_final_source_windows,
+            _persist_final_source_order_state,
+        )
+        source_order_enabled = _final_source_order_enabled_for_fitting()
+    else:
+        _order_final_source_windows = None
+        _persist_final_source_order_state = None
+
+    def source_order(body_candidate: dict[str, object],
+                     *, commit: bool = False
+                     ) -> dict[str, object]:
+        if not source_order_enabled or source_order_runtime is None:
+            return body_candidate
+        ordered, state = _order_final_source_windows(body_candidate, source_order_runtime)
+        if not isinstance(ordered, dict):
+            return body_candidate
+        if commit and persist_source_order:
+            _persist_final_source_order_state(source_order_runtime, state)
+        return ordered
+
+    def accept(body_candidate: dict[str, object],
+               _selected_reads: Sequence[Mapping[str, object]]) -> dict[str, object]:
+        return source_order(body_candidate, commit=True)
 
     show_coverage = bookmarks_enabled()
     windows = [row for row in windows if frame_source_path_allowed(row.get("path"))]
@@ -875,12 +937,13 @@ def fit_recent_read_windows(body: Mapping[str, object], windows: Sequence[Mappin
 
     def upgrade(reads: list[dict[str, object]], checks: Sequence[tuple[str, int]],
                 release_deferred: bool, with_coverage: bool,
-                baseline: dict[str, object]) -> dict[str, object]:
+                baseline: dict[str, object]
+                ) -> tuple[dict[str, object], list[dict[str, object]]]:
         # Whole files spend only budget left after the selected read/bookmark
         # windows and failing-check sites. A non-fitting file cannot block a
         # later, smaller file; selected windows are never displaced.
         if not show_coverage or not product_windows:
-            return baseline
+            return baseline, list(reads)
         upgraded = list(reads)
         result = baseline
         for whole in product_windows:
@@ -892,7 +955,7 @@ def fit_recent_read_windows(body: Mapping[str, object], windows: Sequence[Mappin
             if fits(trial):
                 upgraded = proposal
                 result = trial
-        return result
+        return result, upgraded
 
     for count in range(limit, -1, -1):
         for release_deferred in ((False, True) if deferred_paths and count else (False,)):
@@ -910,8 +973,11 @@ def fit_recent_read_windows(body: Mapping[str, object], windows: Sequence[Mappin
                         if candidate_nonfit is not None and candidate_nonfit(trial):
                             continue
                         if fits(trial):
-                            return upgrade(selection, checks, release_deferred,
-                                           with_coverage, trial)
+                            accepted, selected = upgrade(
+                                selection, checks, release_deferred,
+                                with_coverage, trial,
+                            )
+                            return accept(accepted, selected)
     for count in range(limit, -1, -1):
         for release_deferred in ((False, True) if deferred_paths and count else (False,)):
             for with_coverage in ((True, False) if show_coverage else (False,)):
@@ -923,9 +989,11 @@ def fit_recent_read_windows(body: Mapping[str, object], windows: Sequence[Mappin
                     if candidate_nonfit is not None and candidate_nonfit(trial):
                         continue
                     if fits(trial):
-                        return upgrade(selection, (), release_deferred,
-                                       with_coverage, trial)
-    return base
+                        accepted, selected = upgrade(
+                            selection, (), release_deferred, with_coverage, trial,
+                        )
+                        return accept(accepted, selected)
+    return accept(base, ())
 
 
 def allocation_semantic_messages(

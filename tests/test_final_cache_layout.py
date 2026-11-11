@@ -616,3 +616,168 @@ def test_physical_send_records_layout_disposition_from_capture(monkeypatch, tmp_
     record = json.loads((tmp_path / "sends.jsonl").read_text())
     assert record["final_layout"] == "applied"
     assert kernel_measurement.ACTIVE_REQUEST.get() is None
+
+
+def test_real_fitter_reserves_measured_layout_overhead_before_render(monkeypatch, tmp_path):
+    import kernel_code_bookmarks as bookmarks
+    import kernel_completion_owner as completion_owner
+    import kernel_execution_reply_budget as reply_budget
+    import kernel_frame_allocation_capture as allocation_capture
+    import kernel_frame_optional_allocation as optional_allocation
+    import kernel_frame_source_snapshot as source_snapshot
+    import kernel_request_budget as request_budget
+    import kernel_request_diet as request_diet
+    import kernel_stateframe_capacity as capacity
+    import kernel_stateframe_framefit5 as framefit5
+    import kernel_step_contract as step_contract
+    import kernel_request_source_window as source_window
+    from kernel_context import token_estimate
+    from kernel_request_diet import RequestTokenMeter
+
+    ceiling = 33_344  # T22 trace: sends were over by only 2–300 tokens.
+    monkeypatch.delenv("STATEFRAME_FINAL_CACHE_LAYOUT", raising=False)
+    monkeypatch.setenv("STATEFRAME_PAGE_LOG", "off")
+    monkeypatch.setenv("STATEFRAME_STABLE_WIRE", "off")
+    body = _body()
+    body["messages"].insert(2, {
+        "role": "user", "_request_budget_section": "optional",
+        "content": "[Optional context] " + "x" * 4096,
+    })
+    state_message = next(
+        message for message in body["messages"]
+        if message["content"].startswith("[StateFrame]\n")
+    )
+    state_payload = json.loads(state_message["content"].split("\n", 1)[1])
+    state_payload["state"]["framefit5"]["mode"] = framefit5.PRODUCT_MODE
+    state_message["content"] = framefit5._serialize_state_message(state_payload)
+
+    from kernel_cache_layout_candidate import _project_final_cache_layout
+    plain_text = request_diet._tokenization_content(body)
+    layout_text = request_diet._tokenization_content(_project_final_cache_layout(body))
+    added_chars = len(layout_text) - len(plain_text)
+    assert added_chars > 0
+    trace_overage = 183  # T22 send 10's measured projection overage.
+
+    def tokenize(text):
+        delta = len(text) - len(plain_text)
+        return ceiling + round(delta * trace_overage / added_chars)
+
+    meter = RequestTokenMeter(
+        tokenizer=tokenize,
+        template_overhead_tokens=0,
+    )
+    journal = _Journal()
+    capture = SimpleNamespace(
+        request_id="layout-overhead-fit", journal=journal,
+        _framefit5_semantic_messages=copy.deepcopy(body["messages"]),
+        _framefit5_task_message=body["messages"][1],
+        _request_source_closure_override={
+            "units": [], "paths": [], "revisions": {}, "deferred_paths": [],
+            "source_contents": {},
+        },
+        request_source_final_delivery=None,
+    )
+    meter.bind_request(capture.request_id, capture.request_id)
+    trace_plain, _ = meter.measure(body)
+    trace_layout, _ = meter.measure(_project_final_cache_layout(body))
+    trace_overhead = trace_layout - trace_plain
+    assert trace_plain == ceiling
+    assert trace_overhead == trace_overage
+
+    runtime = SimpleNamespace(
+        frame_ceiling=40_000, owner=SimpleNamespace(root=tmp_path),
+        _code_bookmark_carry=(), _empirical_frame_sources={},
+        _framefit_action_context={},
+    )
+
+    def request_meter(_runtime, current_capture, **_kwargs):
+        meter.bind_request(current_capture.request_id, current_capture.request_id)
+        return meter
+
+    monkeypatch.setattr(request_budget, "_request_token_meter", request_meter)
+    monkeypatch.setattr(request_budget, "_lean_request_limits",
+                        lambda *_args, **_kwargs: (533_504, ceiling))
+    monkeypatch.setattr(reply_budget, "fit_execution_replies", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(reply_budget, "project_execution_delivery",
+                        lambda semantic, *_args, **_kwargs: semantic)
+    monkeypatch.setattr(capacity, "fit_protected_frame", lambda *_args, **_kwargs: {"changed": False})
+    monkeypatch.setattr(capacity, "fit_protected_source_overhead", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(capacity, "within_protected_capacity", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(optional_allocation, "snapshot_optional_inputs", lambda *_args: ({}, {}))
+    monkeypatch.setattr(framefit5, "_workspace_root", lambda *_args: tmp_path)
+    monkeypatch.setattr(source_snapshot, "recent_editable_read_windows", lambda *_args: [])
+    monkeypatch.setattr(source_snapshot, "public_check_source_windows", lambda *_args: [])
+    monkeypatch.setattr(source_snapshot, "editable_product_windows", lambda *_args: ([], []))
+    monkeypatch.setattr(source_snapshot, "frame_source_snapshot", lambda *_args: {})
+    monkeypatch.setattr(bookmarks, "resolve", lambda *_args: None)
+    monkeypatch.setattr(bookmarks, "windows", lambda *_args: [])
+    monkeypatch.setattr(bookmarks, "enabled", lambda: False)
+    monkeypatch.setattr(completion_owner, "_current_tool_admission", lambda *_args: (False, None))
+    monkeypatch.setattr(source_window, "verify_final_source_delivery",
+                        lambda *_args, **_kwargs: {"status": "COMPLETE"})
+    monkeypatch.setattr(source_window, "source_delivery_satisfied", lambda _receipt: True)
+    monkeypatch.setattr(step_contract, "reconcile_final_source_access", lambda *_args: False)
+
+    fitted = allocation_capture.finalize_frame_candidate(
+        runtime, capture, body, frame_counter=token_estimate,
+    )
+    fitted_tokens, _ = allocation_capture.final_request_tokens(fitted, meter, capture)
+    fitted_projection = _project_final_cache_layout(fitted)
+    projected_tokens, _ = allocation_capture.final_request_tokens(fitted_projection, meter, capture)
+
+    # The live trace's late trim callback could no longer free its measured
+    # reserve. With early reservation the projected body already fits, so this
+    # last-resort callback must not be needed.
+    capture._frame_candidate_inputs["_final_layout_trim"] = lambda *_args: False
+    rendered = render_final_cache_candidate(
+        capture, runtime, fitted, meter=meter,
+        inputs=capture._frame_candidate_inputs,
+    )
+    rendered_tokens, _ = allocation_capture.final_request_tokens(rendered, meter, capture)
+    assert rendered is not fitted
+    assert rendered["messages"][-1]["name"] == "stateframe_final_cache_1"
+    assert not [kind for kind, _fields in journal.events
+                if kind == "final_cache_layout_failed_open"]
+    assert rendered_tokens <= ceiling
+    assert projected_tokens <= ceiling
+    assert fitted_tokens <= ceiling - trace_overhead
+
+
+def test_final_layout_trim_target_requires_token_and_byte_fit():
+    import kernel_frame_allocation_capture as allocation
+
+    body = _body()
+    capture = SimpleNamespace()
+    wire_bytes = len(json.dumps(body).encode())
+
+    assert allocation._final_layout_trim_reached_target(
+        body, Meter(), capture, token_limit=100, byte_limit=wire_bytes,
+    )
+    assert not allocation._final_layout_trim_reached_target(
+        body, Meter(), capture, token_limit=99, byte_limit=wire_bytes,
+    )
+    assert not allocation._final_layout_trim_reached_target(
+        body, Meter(), capture, token_limit=100, byte_limit=wire_bytes - 1,
+    )
+
+
+def test_final_layout_reallocation_has_at_most_two_extra_passes():
+    import kernel_frame_allocation_capture as allocation
+
+    ceiling = 100
+    reserve = 0
+    allocation_passes = 1
+    for retry_pass in range(5):
+        next_reserve = allocation._next_final_layout_reserve(
+            retry_pass=retry_pass, current_reserve=reserve,
+            measured_growth=reserve + 10, projected_tokens=ceiling + 1,
+            token_ceiling=ceiling,
+        )
+        if next_reserve is None:
+            break
+        assert next_reserve > reserve
+        reserve = next_reserve
+        allocation_passes += 1
+
+    assert allocation_passes == 3
+    assert reserve == 20
