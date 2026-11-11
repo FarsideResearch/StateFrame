@@ -367,6 +367,10 @@ SAFE_TAIL = frozenset({
     "perpetual_soak_prepare",
     # Restore-time audit of the post-green checkpoint section (earlier run fix DONE, item 9).
     "post_green_menu_restored",
+    # Resume retired replay authority because only the unanswered in-flight request
+    # diverged. Audit only: the retirement is process-local, and every request built
+    # live afterwards carries its own request_submitted/response_received records.
+    "replay_pending_discarded",
 }) | _CAPACITY_SAFE_TAIL
 CHALLENGE_BUDGET_SAFE_TAIL = frozenset({
     "challenge_budget_state", "done_challenge_once", "done_challenge_overridden",

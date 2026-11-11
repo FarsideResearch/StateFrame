@@ -349,12 +349,21 @@ def install_wire_recorder(run: Path, chat_url: str, replayer: Replayer | None = 
                          "reason": replayer.diverged["reason"]}, indent=1).encode())
                     raise CheckpointUnfaithful(f"send {index}: {replayer.diverged['reason']}")
                 if replayer.pending_mismatch:
+                    # No answer exists for this send. Retire replay authority before
+                    # handing the rebuilt request to the live transport.
+                    fields = {k: v for k, v in replayer.diverged.items()
+                              if k != "first_difference"}
+                    from kernel_measurement import ACTIVE_REQUEST
+                    capture = ACTIVE_REQUEST.get()
+                    journal = getattr(capture, "journal", None)
+                    if journal is not None:
+                        journal.emit("replay_pending_discarded", send=index, **fields)
+                    emit("replay_pending_discarded", send=index, **fields)
+                    from kernel_tool_tape import end_replay
+                    end_replay()
+                    _start_resumed_deadline()
+                else:
                     raise ReplayUnfaithful(f"send {index}: {replayer.diverged['reason']}")
-                if (run / "tool-tape.jsonl").is_file() or hook_wiring is not None:
-                    from kernel_tool_tape import ToolReplayRefused
-                    raise ToolReplayRefused(f"send {index}: {replayer.diverged['reason']}")
-                emit("replay_diverged", send=index, **{k: v for k, v in replayer.diverged.items()
-                                                       if k != "first_difference"})
             elif replayed is not None and not replayer.active:
                 emit("replay_done", send=index, replayed=replayer.cursor)
                 # The next request is the first one built live: it shows the resumed time left.
