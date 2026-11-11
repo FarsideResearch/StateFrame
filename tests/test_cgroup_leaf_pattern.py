@@ -1,8 +1,10 @@
 """Fake cgroup v2 trees exercise the delegated leaf setup and its rollback."""
 from __future__ import annotations
 
+import errno
 import multiprocessing
 import os
+import sys
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -146,7 +148,7 @@ def _fake_stateframe_scope_processes(monkeypatch, script_path: Path, *, foreign=
         foreign_pid: (1, uid),
     }
     argv = {
-        cli_pid: ("/usr/bin/python3", str(script_path), "run"),
+        cli_pid: (sys.executable, str(script_path), "run"),
         engine_pid: ("python", "-I", "engine.py"),
         helper_pid: ("python", "-I", "sf_launch.py"),
         sibling_helper_pid: ("python", "-I", "outer_checks.py"),
@@ -220,10 +222,10 @@ def test_similarly_named_script_does_not_claim_scope_ownership(
 
 
 @pytest.mark.parametrize("foreign", [False, True])
-def test_fresh_helper_reproves_supervisor_ownership_from_cli_ancestry(
+def test_fresh_helper_does_not_reuse_unproven_supervisor_from_cli_ancestry(
         monkeypatch, cgroup_tree, foreign):
     root = cgroup_tree
-    members, helper_pid, _foreign_pid = _fake_stateframe_scope_processes(
+    members, _helper_pid, _foreign_pid = _fake_stateframe_scope_processes(
         monkeypatch, root.parent / "stateframe", foreign=foreign)
     supervisor = root / "supervisor"
     (root / "cgroup.subtree_control").write_text("memory pids")
@@ -231,6 +233,8 @@ def test_fresh_helper_reproves_supervisor_ownership_from_cli_ancestry(
     supervisor_members = members
     (supervisor / "cgroup.procs").write_text(
         "\n".join(map(str, supervisor_members)))
+    (supervisor / "memory.max").write_text(str(LIMIT // 2))
+    (supervisor / "pids.max").write_text("2")
     (root / "cgroup.procs").write_text("")
     monkeypatch.setattr(sf_launch, "_current_cgroup", lambda: supervisor)
     # A separately executed launcher has no process-local creator proof.
@@ -238,15 +242,13 @@ def test_fresh_helper_reproves_supervisor_ownership_from_cli_ancestry(
 
     group = sf_launch._command_cgroup("fresh-helper", 8, memory_bytes=LIMIT)
 
-    if foreign:
-        assert group is None
-        assert (supervisor / "cgroup.procs").read_text().split() == list(
-            map(str, supervisor_members))
-        assert sf_launch._cgroup_leaf_pattern_status() == "failed:supervisor_foreign"
-    else:
-        assert group == root / f"stateframe-{helper_pid}-fresh-helper"
-        assert (group / "memory.max").read_text() == str(LIMIT)
-        assert sf_launch._cgroup_leaf_pattern_status() == "applied"
+    assert group is None
+    assert sorted(path.name for path in root.glob("stateframe-*")) == []
+    assert (supervisor / "cgroup.procs").read_text().split() == list(
+        map(str, supervisor_members))
+    assert (supervisor / "memory.max").read_text() == str(LIMIT // 2)
+    assert (supervisor / "pids.max").read_text() == "2"
+    assert sf_launch._cgroup_leaf_pattern_status() == "failed:supervisor_foreign"
 
 
 def test_leaf_pattern_moves_process_and_sets_sibling_memory_and_pids_limits(
@@ -623,3 +625,50 @@ def test_failed_rollback_returns_none_so_memory_fallback_cannot_be_skipped(
     assert "memory" not in (root / "cgroup.subtree_control").read_text().split()
     assert not any(path.name.startswith("stateframe-") for path in root.iterdir())
     assert sf_launch._cgroup_leaf_pattern_status().startswith("failed:")
+
+
+def test_esrch_during_partial_migration_rolls_back_idempotently(
+        monkeypatch, cgroup_tree):
+    root = cgroup_tree
+    members, helper_pid, _foreign_pid = _fake_stateframe_scope_processes(
+        monkeypatch, root.parent / "stateframe")
+    engine_pid = members[1]
+    sibling_pid = members[-1]
+    supervisor = root / "supervisor"
+    (root / "cgroup.procs").write_text("\n".join(map(str, members)))
+    (root / "cgroup.subtree_control").write_text("pids")
+    initial_paths = {path.relative_to(root) for path in root.rglob("*")}
+    write_text = Path.write_text
+
+    def remove_pid(path: Path, pid: int) -> None:
+        remaining = [line for line in path.read_text().splitlines()
+                     if line.strip() and int(line) != pid]
+        with path.open("w", encoding="ascii") as stream:
+            stream.write("\n".join(remaining))
+
+    def exit_during_migration(path, value, *args, **kwargs):
+        if path == supervisor / "cgroup.procs":
+            pid = int(str(value).strip())
+            if pid == engine_pid:
+                remove_pid(root / "cgroup.procs", pid)
+                raise OSError(errno.ESRCH, "process exited during migration")
+        if path == root / "cgroup.procs" and int(str(value).strip()) == sibling_pid:
+            remove_pid(supervisor / "cgroup.procs", sibling_pid)
+            raise OSError(errno.ESRCH, "process exited during rollback")
+        return write_text(path, value, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "write_text", exit_during_migration)
+
+    parent, applied, status = sf_launch._try_cgroup_leaf_pattern(root)
+
+    assert not supervisor.exists()
+    assert parent == root
+    assert not applied
+    assert status.startswith("failed:")
+    assert set((root / "cgroup.procs").read_text().split()) == {
+        str(pid) for pid in members if pid not in {engine_pid, sibling_pid}}
+    assert (root / "cgroup.controllers").read_text().split() == [
+        "cpu", "memory", "pids"]
+    assert (root / "cgroup.subtree_control").read_text().split() == ["pids"]
+    assert {path.relative_to(root) for path in root.rglob("*")} == initial_paths
+    assert sf_launch._rollback_leaf_pattern(root, supervisor, set()) == (True, "")

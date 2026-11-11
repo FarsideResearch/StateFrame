@@ -264,16 +264,15 @@ def _controller_names(cgroup: Path, filename: str) -> set[str]:
 
 
 def _supervisor_parent(cgroup: Path) -> Path | None:
-    """Recognize a leaf proved by this process family or its live CLI ancestor."""
+    """Reuse only a supervisor leaf this process can prove it created."""
     if cgroup.name != "supervisor":
         return None
     parent = cgroup.parent
     created_parent = _CGROUP_LEAF_PATTERN_CREATED_PARENT
     creator_pid = _CGROUP_LEAF_PATTERN_CREATOR_PID
-    local_proof = created_parent is not None or creator_pid is not None
-    if local_proof and (created_parent is None or creator_pid is None
-                        or parent != created_parent
-                        or cgroup != created_parent / "supervisor"):
+    if (created_parent is None or creator_pid is None
+            or parent != created_parent
+            or cgroup != created_parent / "supervisor"):
         return None
     try:
         if (parent.resolve() == _cgroup_mount_root()
@@ -287,9 +286,7 @@ def _supervisor_parent(cgroup: Path) -> Path | None:
             return None
         members = _read_cgroup_pids(cgroup)
         owned, foreign = _owned_cgroup_pids(
-            members,
-            root_pid=creator_pid if local_proof else os.getpid(),
-            require_stateframe_root=not local_proof)
+            members, root_pid=creator_pid)
         if os.getpid() in owned and not foreign:
             return parent
     except (OSError, RuntimeError, ValueError):
@@ -329,8 +326,18 @@ def _cgroup_leaf_pattern_process_lock(cgroup: Path):
 
 
 def _rollback_leaf_pattern(parent: Path, supervisor: Path,
-                           enabled_by_us: set[str]) -> tuple[bool, str]:
-    """Undo our unused controllers, return our processes, and remove the leaf."""
+                            enabled_by_us: set[str],
+                            owned_pids: set[int] | None = None
+                            ) -> tuple[bool, str]:
+    """Undo setup; owned_pids preserves family proof after partial migration."""
+    try:
+        supervisor.stat()
+    except FileNotFoundError:
+        # A repeated rollback may start after the leaf was already removed.
+        pass
+    except OSError:
+        return False, "read_supervisor"
+
     try:
         children = {child for child in parent.iterdir() if child.is_dir()}
     except OSError:
@@ -353,11 +360,19 @@ def _rollback_leaf_pattern(parent: Path, supervisor: Path,
 
     try:
         members = _read_cgroup_pids(supervisor)
-        owned, foreign = _owned_cgroup_pids(members)
+        if owned_pids is None:
+            owned, foreign = _owned_cgroup_pids(members)
+        else:
+            owned = members
+            foreign = [pid for pid in members if pid not in owned_pids]
         if foreign:
             return False, "foreign_supervisor_process"
         for pid in owned:
-            (parent / "cgroup.procs").write_text(str(pid), encoding="ascii")
+            try:
+                (parent / "cgroup.procs").write_text(str(pid), encoding="ascii")
+            except OSError as error:
+                if error.errno != errno.ESRCH:
+                    raise
         if _read_cgroup_pids(supervisor):
             return False, "return_processes"
         try:
@@ -403,6 +418,7 @@ def _try_cgroup_leaf_pattern(cgroup: Path) -> tuple[Path | None, bool, str]:
     stage = "create_supervisor"
     supervisor_created = False
     enabled_by_us: set[str] = set()
+    rollback_owned_pids = set(owned)
     try:
         supervisor.mkdir()
         supervisor_created = True
@@ -417,6 +433,7 @@ def _try_cgroup_leaf_pattern(cgroup: Path) -> tuple[Path | None, bool, str]:
                 remaining, root_pid=os.getpid())
             if remaining_foreign:
                 raise RuntimeError("foreign_process")
+            rollback_owned_pids.update(more_owned)
             for pid in more_owned:
                 (supervisor / "cgroup.procs").write_text(str(pid), encoding="ascii")
         if _read_cgroup_pids(cgroup):
@@ -450,7 +467,7 @@ def _try_cgroup_leaf_pattern(cgroup: Path) -> tuple[Path | None, bool, str]:
         rollback_reason = ""
         if supervisor_created:
             rollback_ok, rollback_reason = _rollback_leaf_pattern(
-                cgroup, supervisor, enabled_by_us)
+                cgroup, supervisor, enabled_by_us, rollback_owned_pids)
         else:
             rollback_ok = True
         not_delegated = (stage == "create_supervisor"
