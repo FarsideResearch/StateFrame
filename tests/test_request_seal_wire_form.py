@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import sys
+import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -91,7 +92,10 @@ def _run_scripted(tmp_path: Path, *, strict: bool, steps: list[dict[str, object]
                                                          str(source_root / "stateframe/engine"))),
                         "PYTHONDONTWRITEBYTECODE": "1", "PYTHONHASHSEED": "0",
                         "STATEFRAME_HOME": str(tmp_path / "state-home")})
-    wrapper = tmp_path / "python-with-private-source-tag"
+    # The isolated startup probe replaces /dev, so a wrapper under a
+    # /dev/shm-backed pytest basetemp is invisible inside its mount namespace.
+    wrapper_directory = tempfile.TemporaryDirectory(prefix="stateframe-test-python-", dir="/tmp")
+    wrapper = Path(wrapper_directory.name) / "python-with-private-source-tag"
     bootstrap = "\n".join((
         "import json, sys",
         "from pathlib import Path",
@@ -126,16 +130,16 @@ def _run_scripted(tmp_path: Path, *, strict: bool, steps: list[dict[str, object]
         ) if inject_allocation_replan else ()),
         "raise SystemExit(host.main([str(child), str(run)]))",
     ))
-    wrapper.write_text(
-        f"#!{sys.executable}\n"
-        "import os,sys\n"
-        f"real_python={sys.executable!r}\n"
-        "args=sys.argv[1:]\n"
-        "if len(args) >= 3 and args[0] == '-B' and os.path.basename(args[1]) == '_child.py':\n"
-        f"    os.execv(real_python, [real_python, '-B', '-c', {bootstrap!r}, *args[1:]])\n"
-        "os.execv(real_python, [real_python, *args])\n", encoding="utf-8")
-    wrapper.chmod(0o755)
     try:
+        wrapper.write_text(
+            f"#!{sys.executable}\n"
+            "import os,sys\n"
+            f"real_python={sys.executable!r}\n"
+            "args=sys.argv[1:]\n"
+            "if len(args) >= 3 and args[0] == '-B' and os.path.basename(args[1]) == '_child.py':\n"
+            f"    os.execv(real_python, [real_python, '-B', '-c', {bootstrap!r}, *args[1:]])\n"
+            "os.execv(real_python, [real_python, *args])\n", encoding="utf-8")
+        wrapper.chmod(0o755)
         process = run_monitored(
             [sys.executable, "-m", "stateframe", "run", "--repo", str(repo),
              "--task", "Read app.py and tests/test_value.py; run the test and report VALUE.",
@@ -147,8 +151,13 @@ def _run_scripted(tmp_path: Path, *, strict: bool, steps: list[dict[str, object]
             expected_seconds=240, run_dir=run, check=False)
         return process, run, script
     finally:
-        server.shutdown()
-        server.server_close()
+        try:
+            server.shutdown()
+        finally:
+            try:
+                server.server_close()
+            finally:
+                wrapper_directory.cleanup()
 
 
 def assert_sealed_wire(run: Path, *, minimum: int) -> None:

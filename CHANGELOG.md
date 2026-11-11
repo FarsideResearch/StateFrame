@@ -2,6 +2,7 @@
 
 ## 0.4.41 (2026-11-11)
 
+- Tests: keep strict-provider interpreter wrappers and determinism planted engines in managed `/tmp` directories so `/dev/shm` test roots remain usable when isolated probes replace `/dev`.
 - Checkpoint resume now admits deterministic census audit events and journal-replayed provider context limits; capacity preflights, pending retries, failed refits, reroutes and completion-owner, obligation, unified-stop and wire-truth evidence failures remain fail-closed pending reconciliation, as do `intake_orientation_failed` and `repo_map_commit_sha_unavailable`.
 - Checkpoint resume now admits deterministic census audit events and journal-replayed provider context limits; capacity preflights, pending retries, failed refits, reroutes and completion-owner, obligation, unified-stop and wire-truth evidence failures remain fail-closed pending reconciliation.
 - Fixed: run spec, result, summary, settings, and child records now publish atomically with file fsync, replace, and directory fsync. Successful `--in-place` runs durably record applied files in `apply-receipt.json` before publishing the summary.
