@@ -13,16 +13,35 @@ from pathlib import Path
 import pytest
 
 from kernel_cache_layout_view import CacheLayoutError, FINAL_LAYOUT_NAME, semantic_messages
+import kernel_provider_dialect as provider_dialect
 from kernel_stateframe_page_log import _payload_has_authority_keys
 from _journal import measurement_events
 from stateframe.scripted_endpoint import Script, serve
 from tools.immediate_baseline import baseline_checkout  # noqa: F401  (pytest fixture)
+from tools.sandbox_temp import timeout_scale
 
 ROOT = Path(__file__).resolve().parents[1]
 pytestmark = pytest.mark.host_sandbox
 # Per scripted run. tiny_site measured ~420 s solo for the whole parity test on the Linux host;
 # a 240 s per-call limit flaked under full-suite load, so allow ~1.5x the solo time per call.
-RUN_TIMEOUT_SECONDS = 600
+RUN_TIMEOUT_SECONDS = 600 * timeout_scale()
+
+
+def _scripted_environment(checkout: Path) -> dict[str, str]:
+    # Cold /props probes can miss under host load and change reasoning controls,
+    # which is unrelated to the cache-layout behavior these runs compare.
+    return {
+        **os.environ,
+        "PYTHONPATH": str(checkout / "src"),
+        provider_dialect.PROVIDER_OVERRIDE_ENV: provider_dialect.LLAMA_CPP,
+    }
+
+
+def test_scripted_environment_pins_provider_dialect(monkeypatch):
+    monkeypatch.setenv(provider_dialect.PROVIDER_OVERRIDE_ENV, "openai-strict")
+    environment = _scripted_environment(ROOT)
+    assert environment["PYTHONPATH"] == str(ROOT / "src")
+    assert environment[provider_dialect.PROVIDER_OVERRIDE_ENV] == provider_dialect.LLAMA_CPP
 
 
 def _parity_launchers(tmp_path):
@@ -79,7 +98,7 @@ def test_switch_off_bytes_match_base_release(tmp_path, baseline_checkout, exampl
         script = Script(json.loads((ROOT / "examples" / f"{example}.script.json").read_text()))
         server = serve(script)
         run = tmp_path / "run"
-        environment = {**os.environ, "PYTHONPATH": str(checkout / "src")}
+        environment = _scripted_environment(checkout)
         # Pinned off on both sides: switch-off bytes must match the immediate base release.
         environment["STATEFRAME_FINAL_CACHE_LAYOUT"] = "off"
         environment["STATEFRAME_PAGE_LOG"] = "off"
@@ -126,7 +145,7 @@ def _scripted_wire(tmp_path, label, layout, *, example="discount_bug",
     script = Script(script_document)
     server = serve(script)
     run = tmp_path / "run"
-    environment = {**os.environ, "PYTHONPATH": str(ROOT / "src")}
+    environment = _scripted_environment(ROOT)
     environment.pop("STATEFRAME_FINAL_CACHE_LAYOUT", None)
     if layout is not None:
         environment["STATEFRAME_FINAL_CACHE_LAYOUT"] = layout
@@ -340,7 +359,7 @@ def test_scripted_final_sealed_wire_and_planted_violation(tmp_path):
     script = Script(json.loads((ROOT / "examples/discount_bug.script.json").read_text()))
     server = serve(script)
     run = tmp_path / "run"
-    environment = {**os.environ, "PYTHONPATH": str(ROOT / "src")}
+    environment = _scripted_environment(ROOT)
     environment["STATEFRAME_FINAL_CACHE_LAYOUT"] = "on"
     environment["STATEFRAME_PAGE_LOG"] = "off"
     try:

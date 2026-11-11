@@ -21,6 +21,7 @@ from tests import test_allocation_replay_corpus as corpus
 from tests.tape_server import TapeServer
 from tools.immediate_baseline import baseline_checkout  # noqa: F401 (pytest fixture)
 from tools.compare_no_mcp_requests import mask_wire_ids
+from tools.sandbox_temp import sandbox_visible_temp_dir, timeout_scale
 
 
 TOKENIZE_TIMEOUT_SECONDS = 0.05
@@ -300,14 +301,15 @@ def test_props_proof_survives_a_later_probe_miss_and_slot_probe(monkeypatch):
 
     with TapeServer(script) as endpoint:
         origin = provider_dialect.origin_of(endpoint.url)
+        request_budget = 4.0 * timeout_scale()
         first_tokens = request_diet._http_tokenize(
-            "props capability", f"{endpoint.url}/tokenize", deadline=monotonic() + 1.0,
+            "props capability", f"{endpoint.url}/tokenize", deadline=monotonic() + request_budget,
         )
         probe_misses_enabled = True
         slot_miss = provider_dialect.capabilities_for(endpoint.url, "", require_slots=True)
         second_tokens = request_diet._http_tokenize(
             "cached props capability after slot miss",
-            f"{endpoint.url}/tokenize", deadline=monotonic() + 1.0,
+            f"{endpoint.url}/tokenize", deadline=monotonic() + request_budget,
         )
 
         props_proof = cache[origin]
@@ -420,16 +422,17 @@ def test_tool_schema_meter_records_one_initial_retry_group(monkeypatch):
 
 
 @pytest.mark.host_sandbox
-def test_permanent_tokenizer_outage_replay_submits_with_bounded_probes(tmp_path):
+def test_permanent_tokenizer_outage_replay_submits_with_bounded_probes():
     probe_interval = 2
-    outcome = corpus._run_case(
-        tmp_path,
-        "factory-a-econ-flat-r1",
-        tokenize_delay_s=TOKENIZE_DELAY_SECONDS,
-        tokenize_slow_calls=tuple(range(1, 512)),
-        tokenize_timeout_s=TOKENIZE_TIMEOUT_SECONDS,
-        tokenize_reprobe_after_requests=probe_interval,
-    )
+    with sandbox_visible_temp_dir() as scratch:
+        outcome = corpus._run_case(
+            Path(scratch),
+            "factory-a-econ-flat-r1",
+            tokenize_delay_s=TOKENIZE_DELAY_SECONDS,
+            tokenize_slow_calls=tuple(range(1, 512)),
+            tokenize_timeout_s=TOKENIZE_TIMEOUT_SECONDS,
+            tokenize_reprobe_after_requests=probe_interval,
+        )
 
     assert outcome.engine_result == "SUBMITTED", (
         f"result={outcome.engine_result!r}; exit={outcome.returncode}; "
@@ -602,7 +605,7 @@ def _clean_meter_fingerprints(request_bodies):
 
 
 @pytest.mark.host_sandbox
-def test_healthy_measurement_preserves_baseline_request_bytes(tmp_path, baseline_checkout):
+def test_healthy_measurement_preserves_baseline_request_bytes(baseline_checkout):
     body = _body("wire identity")
     expected = (
         b'{"model":"allocation-replay-model","messages":[{"role":"user",'
@@ -629,16 +632,17 @@ def test_healthy_measurement_preserves_baseline_request_bytes(tmp_path, baseline
     # Compare against the immediate base release in this same environment (shared discovery:
     # SF_TEST_BASELINE_IMMEDIATE, else the merge base / nearest ancestor release), never a pin.
     baseline_tree = baseline_checkout
-    baseline_capture_root = tmp_path / "baseline-capture"
-    baseline_capture_root.mkdir()
-    baseline_bodies = _capture_clean_meter_request_bodies(
-        baseline_capture_root,
-        request_limit=2,
-        source_root=baseline_tree / "src",
-    )
+    with sandbox_visible_temp_dir() as scratch:
+        scratch_root = Path(scratch)
+        baseline_capture_root = scratch_root / "baseline-capture"
+        baseline_capture_root.mkdir()
+        baseline_bodies = _capture_clean_meter_request_bodies(
+            baseline_capture_root,
+            request_limit=2,
+            source_root=baseline_tree / "src",
+        )
+        request_bodies = _capture_clean_meter_request_bodies(scratch_root)
     baseline_masked_hashes, baseline_copy_counts = _clean_meter_fingerprints(baseline_bodies)
-
-    request_bodies = _capture_clean_meter_request_bodies(tmp_path)
     computed_masked_hashes, countdown_copy_counts = _clean_meter_fingerprints(request_bodies)
     # REQUESTS 3-6 ARE NOT COMPARED HERE ON PURPOSE. Whole-request countdown copies depend on
     # that turn's frame layout, and requests 3+ sit in the callsite-census timing region (see

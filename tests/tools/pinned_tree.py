@@ -5,14 +5,27 @@ from __future__ import annotations
 import re
 import shutil
 import subprocess
+import tempfile
 from pathlib import Path
 
 import pytest
-
+from tools.sandbox_temp import sandbox_visible_temp_dir, shadowed_by_bwrap_dev
 
 _REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 _COMMIT_PATTERN = re.compile(r"[0-9a-fA-F]{7,40}\Z")
 _SESSION_TREES: dict[tuple[str, str], Path] = {}
+_SESSION_DISK_TEMPS: dict[tuple[str, str], tempfile.TemporaryDirectory[str]] = {}
+
+
+def _archive_destination(tmp_path_factory, full_commit: str,
+                         session_key: tuple[str, str]) -> Path:
+    # bwrap's --dev mount hides /dev/shm, including a pinned tree's engine supervisor.
+    # A disk tree remains visible to the supervisor while pytest may keep its fast basetemp.
+    if shadowed_by_bwrap_dev(Path(tmp_path_factory.getbasetemp())):
+        temporary = sandbox_visible_temp_dir()
+        _SESSION_DISK_TEMPS[session_key] = temporary
+        return Path(temporary.name)
+    return tmp_path_factory.mktemp(f"pinned-tree-{full_commit[:12]}")
 
 
 def pinned_tree(commit: str, tmp_path_factory) -> Path:
@@ -46,7 +59,7 @@ def pinned_tree(commit: str, tmp_path_factory) -> Path:
             f"could not archive pinned commit {commit}: {archive.stderr.decode(errors='replace')}"
         )
 
-    destination = tmp_path_factory.mktemp(f"pinned-tree-{full_commit[:12]}")
+    destination = _archive_destination(tmp_path_factory, full_commit, session_key)
     extracted = subprocess.run(
         ["tar", "-xf", "-", "-C", str(destination)],
         input=archive.stdout,

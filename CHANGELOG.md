@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Fixed Linux sandbox parity, tokenizer replay, and security tests with a shared-memory pytest basetemp by keeping sandbox-visible fixtures on disk and pinning the scripted provider dialect; probe test budgets now honor `SF_TEST_TIMEOUT_SCALE`.
 ## 0.6.6 (2026-11-13)
 
 - Token metering now memoizes the countdown-canonical tokenization text of an unchanged request body behind the existing structural-stamp guard and reuses the digest of the last measured text, so re-measuring an unchanged candidate no longer rebuilds and re-hashes it (about 3.5 ms to 0.9 ms per repeat on a 120-message body). Token counts, fit decisions and request bytes are unchanged.
