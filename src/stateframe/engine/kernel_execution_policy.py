@@ -50,6 +50,10 @@ MAX_PROFILE_OUTPUT_BYTES = 16 * 1024
 CGROUP_CLEANUP_ATTEMPTS = 40
 CGROUP_CLEANUP_INTERVAL_SECONDS = 0.025
 FULL_PROCESS_SCAN_INTERVAL_SECONDS = 1.0
+# A live check's procfs sample can race process exit or a torn read. Skip such
+# samples; only a sample failure that persists this long stops the check.
+PROCFS_SAMPLE_RACE_MAX_SECONDS = 5.0
+_PROCFS_RACE_ERRNOS = frozenset({errno.ESRCH, errno.ENOENT})
 RSS_FINISH_IDLE_SECONDS = 2.0
 RSS_FINISH_MAX_WAIT_SECONDS = 15.0
 _Result = TypeVar("_Result")
@@ -107,6 +111,8 @@ class PolicyResult:
     memory_limit_killed: bool = False
     memory_limit_reason: str | None = None
     cgroup_leaf_pattern: str | None = None
+    memory_limit_samples_skipped: int = 0
+    memory_limit_sample_skip_reason: str | None = None
 
 
 def policy_read_grants(result: object) -> SandboxReadGrants | None:
@@ -391,6 +397,7 @@ class _ResidentMemorySupervisor:
         self._busy_since: float | None = None
         self._last_progress_at = time.monotonic()
         self._stopped = threading.Event()
+        self._race_since: float | None = None
         self._leader_exit_processed = threading.Event()
         self._completion_lock = threading.Lock()
         self._completion_verified = False
@@ -663,6 +670,31 @@ class _ResidentMemorySupervisor:
         finally:
             self._end_work(tracked)
 
+    def _leader_gone(self) -> bool:
+        return self.process.returncode is not None or self._leader_reaped_event.is_set()
+
+    def _skip_raced_sample(self, error: BaseException, *, leader_exited: bool) -> bool:
+        """Treat a procfs race on a live check as an unreadable sample, not a breach.
+
+        Only a positive over-budget measurement may kill a check. Post-exit
+        containment scans keep failing closed, and a sample failure that
+        persists past PROCFS_SAMPLE_RACE_MAX_SECONDS is no longer a race.
+        """
+        if leader_exited:
+            return False
+        if isinstance(error, OSError) and error.errno not in _PROCFS_RACE_ERRNOS:
+            return False
+        now = time.monotonic()
+        if self._race_since is None:
+            self._race_since = now
+        elif now - self._race_since > PROCFS_SAMPLE_RACE_MAX_SECONDS:
+            return False
+        skipped = int(getattr(self.process, "memory_limit_samples_skipped", 0) or 0) + 1
+        self.process.memory_limit_samples_skipped = skipped
+        self.process.memory_limit_sample_skip_reason = (
+            f"procfs sample raced process state ({type(error).__name__})")
+        return True
+
     def _run(self) -> None:
         try:
             while not self._stopped.is_set():
@@ -694,10 +726,14 @@ class _ResidentMemorySupervisor:
                         breach = self.table.resident_memory_limit_breach(
                             live, self.memory_bytes)
                         post_exit_scan_completed = leader_exited
-                except (OSError, RuntimeError, ValueError) as error:
+                except (OSError, RuntimeError, ValueError, IndexError) as error:
+                    if self._skip_raced_sample(error, leader_exited=self._leader_gone()):
+                        self._stopped.wait(0.02)
+                        continue
                     self._record_error(error)
                     self._stop_launch_unit()
                     return
+                self._race_since = None
                 if breach:
                     self.process.memory_limit_killed = True
                     self.process.memory_limit_reason = breach
@@ -894,6 +930,8 @@ def sandboxed_popen(command: Sequence[object], root: str | os.PathLike[str], *,
         process.memory_limit_mechanism = "rlimit_data+rss_supervisor"
         process.memory_limit_killed = False
         process.memory_limit_reason = None
+        process.memory_limit_samples_skipped = 0
+        process.memory_limit_sample_skip_reason = None
         try:
             supervisor = _ResidentMemorySupervisor(process, memory_bytes)
             process._stateframe_memory_supervisor = supervisor
@@ -1400,6 +1438,8 @@ def run_sandboxed(command: Sequence[object], root: str | os.PathLike[str], *,
         memory_limit_killed=bool(getattr(process, "memory_limit_killed", False)),
         memory_limit_reason=getattr(process, "memory_limit_reason", None),
         cgroup_leaf_pattern=_cgroup_leaf_pattern_status(),
+        memory_limit_samples_skipped=int(getattr(process, "memory_limit_samples_skipped", 0) or 0),
+        memory_limit_sample_skip_reason=getattr(process, "memory_limit_sample_skip_reason", None),
     )
 
 
