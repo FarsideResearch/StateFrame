@@ -8,6 +8,7 @@ import math
 import os
 import platform
 import resource
+import stat
 import sys
 import threading
 from contextlib import contextmanager
@@ -125,9 +126,84 @@ def _process_details(pid: int) -> tuple[int, int]:
     return int(fields[1]), proc.stat().st_uid
 
 
-def _owned_cgroup_pids(pids: list[int], *, root_pid: int | None = None
+def _process_argv(pid: int) -> tuple[str, ...]:
+    """Return one process's NUL-separated command line from procfs."""
+    raw = (Path("/proc") / str(pid) / "cmdline").read_bytes()
+    return tuple(os.fsdecode(value) for value in raw.split(b"\0") if value)
+
+
+def _is_stateframe_cli(argv: tuple[str, ...]) -> bool:
+    """Recognize the installed Python console script from its procfs arguments."""
+    script = None
+    if argv and Path(argv[0]).name == "stateframe":
+        script = Path(argv[0])
+    elif len(argv) > 1 and Path(argv[1]).name == "stateframe":
+        script = Path(argv[1])
+    if script is None:
+        return False
+    try:
+        descriptor = os.open(
+            script, os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NONBLOCK", 0))
+    except OSError:
+        return False
+    try:
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            return False
+        return b"from stateframe.cli import main" in os.read(descriptor, 4096)
+    except OSError:
+        return False
+    finally:
+        os.close(descriptor)
+
+
+def _stateframe_scope_root(candidates: set[int],
+                           details: dict[int, tuple[int, int]],
+                           current_pid: int, real_uid: int) -> int | None:
+    """Find the outermost in-cgroup StateFrame CLI ancestor of this process."""
+    cursor = current_pid
+    visited: set[int] = set()
+    root: int | None = None
+    while cursor in details and cursor not in visited:
+        visited.add(cursor)
+        if cursor in candidates and details[cursor][1] == real_uid:
+            try:
+                argv = _process_argv(cursor)
+            except OSError:
+                argv = ()
+            if _is_stateframe_cli(argv):
+                root = cursor
+        parent_pid = details[cursor][0]
+        if parent_pid not in details:
+            break
+        cursor = parent_pid
+    return root
+
+
+def _scope_descendant_depth(pid: int, root_pid: int,
+                            details: dict[int, tuple[int, int]]) -> int | None:
+    """Return a member's distance below a scope root, or None if unrelated."""
+    if pid == root_pid:
+        return 0
+    cursor = pid
+    depth = 0
+    visited: set[int] = set()
+    while cursor in details and cursor not in visited:
+        visited.add(cursor)
+        parent_pid = details[cursor][0]
+        depth += 1
+        if parent_pid == root_pid:
+            return depth
+        if parent_pid not in details:
+            return None
+        cursor = parent_pid
+    return None
+
+
+def _owned_cgroup_pids(pids: list[int], *, root_pid: int | None = None,
+                       require_stateframe_root: bool = False
                        ) -> tuple[list[int], list[int]]:
-    """Select the current process and descendants; ancestors remain foreign."""
+    """Select the StateFrame family or, absent its CLI, current descendants."""
     current_pid = os.getpid() if root_pid is None else root_pid
     candidates = set(pids)
     details: dict[int, tuple[int, int]] = {}
@@ -139,6 +215,22 @@ def _owned_cgroup_pids(pids: list[int], *, root_pid: int | None = None
     real_uid = os.getuid()
     current = details.get(current_pid)
     if current is None or current[1] != real_uid:
+        return [], sorted(candidates)
+
+    scope_root = _stateframe_scope_root(
+        candidates, details, current_pid, real_uid)
+    if scope_root is not None:
+        descendants: list[tuple[int, int]] = []
+        for pid in candidates:
+            if pid not in details or details[pid][1] != real_uid:
+                continue
+            depth = _scope_descendant_depth(pid, scope_root, details)
+            if depth is not None:
+                descendants.append((depth, pid))
+        owned = [pid for _depth, pid in sorted(descendants, reverse=True)]
+        owned_set = set(owned)
+        return owned, sorted(candidates - owned_set)
+    if require_stateframe_root:
         return [], sorted(candidates)
 
     descendants: list[tuple[int, int]] = []
@@ -172,14 +264,16 @@ def _controller_names(cgroup: Path, filename: str) -> set[str]:
 
 
 def _supervisor_parent(cgroup: Path) -> Path | None:
-    """Recognize only a leaf this process family created during this lifetime."""
+    """Recognize a leaf proved by this process family or its live CLI ancestor."""
     if cgroup.name != "supervisor":
         return None
     parent = cgroup.parent
     created_parent = _CGROUP_LEAF_PATTERN_CREATED_PARENT
     creator_pid = _CGROUP_LEAF_PATTERN_CREATOR_PID
-    if (created_parent is None or creator_pid is None
-            or parent != created_parent or cgroup != created_parent / "supervisor"):
+    local_proof = created_parent is not None or creator_pid is not None
+    if local_proof and (created_parent is None or creator_pid is None
+                        or parent != created_parent
+                        or cgroup != created_parent / "supervisor"):
         return None
     try:
         if (parent.resolve() == _cgroup_mount_root()
@@ -192,7 +286,10 @@ def _supervisor_parent(cgroup: Path) -> Path | None:
         if not available or not available.issubset(enabled):
             return None
         members = _read_cgroup_pids(cgroup)
-        owned, foreign = _owned_cgroup_pids(members, root_pid=creator_pid)
+        owned, foreign = _owned_cgroup_pids(
+            members,
+            root_pid=creator_pid if local_proof else os.getpid(),
+            require_stateframe_root=not local_proof)
         if os.getpid() in owned and not foreign:
             return parent
     except (OSError, RuntimeError, ValueError):

@@ -354,9 +354,57 @@ class ProcessTable:
             raise
         return int(fields[1]) * os.sysconf("SC_PAGE_SIZE")
 
+    def page_table_bytes(self, row: ProcessIdentity) -> int:
+        """Return a live Linux process's page-table allocation from procfs."""
+        if sys.platform != "linux":
+            return 0
+        current = self.identity(row.pid)
+        if current is None or current.start != row.start or current.zombie:
+            return 0
+        try:
+            status = (Path("/proc") / str(row.pid) / "status").read_text(
+                encoding="ascii", errors="replace")
+        except FileNotFoundError:
+            return 0
+        except OSError as error:
+            if isinstance(error, ProcessLookupError) or error.errno == errno.ESRCH:
+                return 0
+            raise
+
+        current = self.identity(row.pid)
+        if current is None or current.start != row.start or current.zombie:
+            return 0
+
+        has_rss = False
+        for line in status.splitlines():
+            name, separator, value = line.partition(":")
+            if name == "VmRSS" and separator:
+                has_rss = True
+            if name != "VmPTE" or not separator:
+                continue
+            fields = value.split()
+            if len(fields) != 2 or fields[1] != "kB":
+                raise RuntimeError("cannot measure execution descendant page-table memory")
+            try:
+                kibibytes = int(fields[0], 10)
+            except ValueError as error:
+                raise RuntimeError(
+                    "cannot measure execution descendant page-table memory") from error
+            if kibibytes < 0:
+                raise RuntimeError("cannot measure execution descendant page-table memory")
+            return kibibytes * 1024
+        if not has_rss:
+            # Linux omits all Vm* fields for tasks without an address space.
+            return 0
+        raise RuntimeError("Linux process status omits VmPTE")
+
+    def accounted_memory_bytes(self, row: ProcessIdentity) -> int:
+        """Return RSS plus page-table memory for one tracked process."""
+        return self.resident_bytes(row) + self.page_table_bytes(row)
+
     def resident_memory_limit_breach(self, live: list[ProcessIdentity], memory_bytes: int) -> str:
-        """Return the shared aggregate-RSS breach reason for one launch unit."""
-        if sum(self.resident_bytes(row) for row in live) > memory_bytes:
+        """Return the shared aggregate memory breach reason for one launch unit."""
+        if sum(self.accounted_memory_bytes(row) for row in live) > memory_bytes:
             return "aggregate resident-memory limit exceeded"
         return ""
 

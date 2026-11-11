@@ -134,6 +134,121 @@ def cgroup_tree(monkeypatch, tmp_path):
     sf_launch._reset_cgroup_leaf_pattern_state()
 
 
+def _fake_stateframe_scope_processes(monkeypatch, script_path: Path, *, foreign=False):
+    cli_pid, engine_pid, helper_pid, sibling_helper_pid, foreign_pid = (
+        2_001_001, 2_001_002, 2_001_003, 2_001_004, 2_001_005)
+    uid = os.getuid()
+    details = {
+        cli_pid: (1, uid),
+        engine_pid: (cli_pid, uid),
+        helper_pid: (engine_pid, uid),
+        sibling_helper_pid: (engine_pid, uid),
+        foreign_pid: (1, uid),
+    }
+    argv = {
+        cli_pid: ("/usr/bin/python3", str(script_path), "run"),
+        engine_pid: ("python", "-I", "engine.py"),
+        helper_pid: ("python", "-I", "sf_launch.py"),
+        sibling_helper_pid: ("python", "-I", "outer_checks.py"),
+        foreign_pid: ("unrelated",),
+    }
+    script_path.write_text("from stateframe.cli import main\n")
+    monkeypatch.setattr(sf_launch.os, "getpid", lambda: helper_pid)
+    monkeypatch.setattr(sf_launch, "_process_details", details.__getitem__)
+    monkeypatch.setattr(sf_launch, "_process_argv", argv.__getitem__)
+    members = [cli_pid, engine_pid, helper_pid, sibling_helper_pid]
+    if foreign:
+        members.append(foreign_pid)
+    return members, helper_pid, foreign_pid
+
+
+def test_stateframe_scope_owns_cli_engine_and_helper_processes(
+        monkeypatch, cgroup_tree):
+    root = cgroup_tree
+    members, helper_pid, _foreign_pid = _fake_stateframe_scope_processes(
+        monkeypatch, root.parent / "stateframe")
+    (root / "cgroup.procs").write_text("\n".join(map(str, members)))
+
+    group = sf_launch._command_cgroup("stateframe-scope", 8, memory_bytes=LIMIT)
+
+    assert group == root / f"stateframe-{helper_pid}-stateframe-scope"
+    assert set((root / "supervisor" / "cgroup.procs").read_text().split()) == {
+        str(pid) for pid in members}
+    assert (root / "cgroup.procs").read_text() == ""
+    assert (group / "memory.max").read_text() == str(LIMIT)
+    assert sf_launch._cgroup_leaf_pattern_status() == "applied"
+
+
+def test_foreign_scope_member_forces_memory_fallback(monkeypatch, cgroup_tree):
+    root = cgroup_tree
+    members, helper_pid, foreign_pid = _fake_stateframe_scope_processes(
+        monkeypatch, root.parent / "stateframe", foreign=True)
+    (root / "cgroup.subtree_control").write_text("pids")
+    (root / "cgroup.procs").write_text("\n".join(map(str, members)))
+
+    group = sf_launch._command_cgroup("foreign-stateframe-scope", 8,
+                                      memory_bytes=LIMIT)
+
+    assert group == root / f"stateframe-{helper_pid}-foreign-stateframe-scope"
+    assert not (root / "supervisor").exists()
+    assert set((root / "cgroup.procs").read_text().split()) == {
+        str(pid) for pid in members}
+    assert str(foreign_pid) in (root / "cgroup.procs").read_text().split()
+    assert (group / "pids.max").read_text() == "16"
+    assert not (group / "memory.max").exists()
+    assert sf_launch._cgroup_leaf_pattern_status() == "failed:foreign_process"
+
+
+def test_similarly_named_script_does_not_claim_scope_ownership(
+        monkeypatch, cgroup_tree):
+    root = cgroup_tree
+    script = root.parent / "stateframe"
+    members, helper_pid, _foreign_pid = _fake_stateframe_scope_processes(
+        monkeypatch, script)
+    script.write_text("def main():\n    return 0\n")
+    (root / "cgroup.subtree_control").write_text("pids")
+    (root / "cgroup.procs").write_text("\n".join(map(str, members)))
+
+    group = sf_launch._command_cgroup("impostor-stateframe", 8,
+                                      memory_bytes=LIMIT)
+
+    assert group == root / f"stateframe-{helper_pid}-impostor-stateframe"
+    assert not (root / "supervisor").exists()
+    assert (group / "pids.max").read_text() == "16"
+    assert not (group / "memory.max").exists()
+    assert sf_launch._cgroup_leaf_pattern_status() == "failed:foreign_process"
+
+
+@pytest.mark.parametrize("foreign", [False, True])
+def test_fresh_helper_reproves_supervisor_ownership_from_cli_ancestry(
+        monkeypatch, cgroup_tree, foreign):
+    root = cgroup_tree
+    members, helper_pid, _foreign_pid = _fake_stateframe_scope_processes(
+        monkeypatch, root.parent / "stateframe", foreign=foreign)
+    supervisor = root / "supervisor"
+    (root / "cgroup.subtree_control").write_text("memory pids")
+    supervisor.mkdir()
+    supervisor_members = members
+    (supervisor / "cgroup.procs").write_text(
+        "\n".join(map(str, supervisor_members)))
+    (root / "cgroup.procs").write_text("")
+    monkeypatch.setattr(sf_launch, "_current_cgroup", lambda: supervisor)
+    # A separately executed launcher has no process-local creator proof.
+    sf_launch._reset_cgroup_leaf_pattern_state()
+
+    group = sf_launch._command_cgroup("fresh-helper", 8, memory_bytes=LIMIT)
+
+    if foreign:
+        assert group is None
+        assert (supervisor / "cgroup.procs").read_text().split() == list(
+            map(str, supervisor_members))
+        assert sf_launch._cgroup_leaf_pattern_status() == "failed:supervisor_foreign"
+    else:
+        assert group == root / f"stateframe-{helper_pid}-fresh-helper"
+        assert (group / "memory.max").read_text() == str(LIMIT)
+        assert sf_launch._cgroup_leaf_pattern_status() == "applied"
+
+
 def test_leaf_pattern_moves_process_and_sets_sibling_memory_and_pids_limits(
         cgroup_tree):
     root = cgroup_tree

@@ -1,6 +1,7 @@
 """Linux child processes prove memory limits and large virtual reservations."""
 from __future__ import annotations
 
+import mmap
 import os
 from pathlib import Path
 import signal
@@ -17,6 +18,8 @@ import sf_launch
 pytestmark = pytest.mark.skipif(sys.platform != "linux", reason="Linux memory policy")
 LIMIT = 64 << 20
 SHARED_MAPPING_LIMIT = 32 << 20
+PAGE_TABLE_MAPPING_BYTES = 20 << 30
+PAGE_TABLE_TOUCH_BYTES = 2 << 20
 
 
 def _memory_cgroup(memory_bytes: int = LIMIT):
@@ -269,6 +272,48 @@ print('under-budget-ok')
     assert _text(result.completed.stdout).strip() == "under-budget-ok"
     assert result.memory_limit_killed is False
     assert result.memory_limit_mechanism == "rlimit_data+rss_supervisor"
+
+
+def test_fallback_supervisor_counts_page_tables_for_read_only_mapping(tmp_path, monkeypatch):
+    if not hasattr(mmap, "MAP_NORESERVE"):
+        pytest.skip("anonymous MAP_NORESERVE mappings are unavailable")
+    if not hasattr(mmap.mmap, "madvise") or not hasattr(mmap, "MADV_NOHUGEPAGE"):
+        pytest.skip("disabling transparent huge pages for the mapping is unavailable")
+    try:
+        status = Path("/proc/self/status").read_text(encoding="ascii")
+    except OSError:
+        pytest.skip("procfs process status is unavailable")
+    if not any(line.startswith("VmPTE:") for line in status.splitlines()):
+        pytest.skip("procfs does not report VmPTE")
+
+    script = f"""import mmap, time
+size = {PAGE_TABLE_MAPPING_BYTES}
+try:
+    mapping = mmap.mmap(-1, size,
+                        flags=mmap.MAP_PRIVATE | mmap.MAP_ANONYMOUS | mmap.MAP_NORESERVE,
+                        prot=mmap.PROT_READ)
+except (OSError, OverflowError, ValueError) as error:
+    print('unsupported-mapping:' + type(error).__name__, flush=True)
+    raise SystemExit(77)
+try:
+    mapping.madvise(mmap.MADV_NOHUGEPAGE)
+except (OSError, ValueError) as error:
+    print('unsupported-madvise:' + type(error).__name__, flush=True)
+    raise SystemExit(77)
+for offset in range(0, size, {PAGE_TABLE_TOUCH_BYTES}):
+    mapping[offset]
+time.sleep(2)
+"""
+    result = _run_supervised(
+        script, tmp_path, monkeypatch, memory_bytes=32 << 20,
+        file_bytes=1 << 20,
+    )
+
+    if result.completed.returncode == 77:
+        pytest.skip(_text(result.completed.stdout).strip() or "large mapping is unsupported")
+    assert result.completed.returncode == -signal.SIGKILL
+    assert result.memory_limit_killed is True
+    assert result.memory_limit_reason == "aggregate resident-memory limit exceeded"
 
 
 def test_sandboxed_popen_supervises_rlimit_data_fallback_directly(tmp_path, monkeypatch):

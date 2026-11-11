@@ -315,6 +315,80 @@ def test_procfs_resident_bytes_treats_esrch_as_gone(monkeypatch, gone_error):
     assert table.resident_bytes(row) == 0
 
 
+def test_procfs_page_table_bytes_reads_vmpte_in_kib(monkeypatch):
+    row = ProcessIdentity(123, 1, 123, 123, (10, 0), False)
+    table = tracker.ProcessTable()
+    monkeypatch.setattr(table, "identity", lambda _pid: row)
+
+    def read_status(self, **_kwargs):
+        assert self == Path("/proc/123/status")
+        return "Name:\tprobe\nVmRSS:\t 4096 kB\nVmPTE:\t  17 kB\n"
+
+    monkeypatch.setattr(Path, "read_text", read_status)
+    assert table.page_table_bytes(row) == 17 * 1024
+
+
+def test_procfs_page_table_bytes_ignores_pid_reuse_during_status_read(monkeypatch):
+    row = ProcessIdentity(123, 1, 123, 123, (10, 0), False)
+    replacement = ProcessIdentity(123, 1, 123, 123, (11, 0), False)
+    table = tracker.ProcessTable()
+    identities = iter((row, replacement))
+    monkeypatch.setattr(table, "identity", lambda _pid: next(identities))
+    monkeypatch.setattr(Path, "read_text", lambda self, **_kwargs: "Name:\tprobe\n")
+
+    assert table.page_table_bytes(row) == 0
+
+
+def test_procfs_page_table_bytes_allows_task_without_address_space(monkeypatch):
+    row = ProcessIdentity(123, 1, 123, 123, (10, 0), False)
+    table = tracker.ProcessTable()
+    monkeypatch.setattr(table, "identity", lambda _pid: row)
+    monkeypatch.setattr(Path, "read_text", lambda self, **_kwargs: "Name:\tprobe\n")
+
+    assert table.page_table_bytes(row) == 0
+
+
+@pytest.mark.parametrize(
+    "status",
+    ["Name:\tprobe\nVmRSS:\t 0 kB\n", "VmPTE:\t 17 bytes\n", "VmPTE:\t -1 kB\n"],
+)
+def test_procfs_page_table_bytes_rejects_missing_or_invalid_vmpte(monkeypatch, status):
+    row = ProcessIdentity(123, 1, 123, 123, (10, 0), False)
+    table = tracker.ProcessTable()
+    monkeypatch.setattr(table, "identity", lambda _pid: row)
+    monkeypatch.setattr(Path, "read_text", lambda self, **_kwargs: status)
+
+    with pytest.raises(RuntimeError, match="page-table memory|VmPTE"):
+        table.page_table_bytes(row)
+
+
+def test_aggregate_memory_breach_counts_rss_and_vmpte_for_every_process(monkeypatch):
+    rows = [
+        ProcessIdentity(pid, 1, pid, pid, (pid, 0), False)
+        for pid in (123, 124)
+    ]
+    table = tracker.ProcessTable()
+    rss_calls = []
+    pte_calls = []
+
+    def resident_bytes(row):
+        rss_calls.append(row.pid)
+        return 6
+
+    def page_table_bytes(row):
+        pte_calls.append(row.pid)
+        return 10
+
+    monkeypatch.setattr(table, "resident_bytes", resident_bytes)
+    monkeypatch.setattr(table, "page_table_bytes", page_table_bytes)
+
+    assert table.resident_memory_limit_breach(rows, 31) == (
+        "aggregate resident-memory limit exceeded")
+    assert rss_calls == [123, 124]
+    assert pte_calls == [123, 124]
+    assert table.resident_memory_limit_breach(rows, 32) == ""
+
+
 @pytest.mark.parametrize(
     "gone_error",
     [ProcessLookupError(errno.ESRCH, "gone"), _ErrnoOSError(errno.ESRCH, "gone")],

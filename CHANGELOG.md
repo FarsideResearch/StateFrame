@@ -23,6 +23,9 @@
 - Internal names removed from shipped code: optional decoy tool schemas use neutral names, and DB-backed test runs name their databases `stateframe_test_react_*`. Default requests are unchanged.
 - Removed private project, contributor, host, and measurement labels from shipped prose; added a source/test leak guard.
 - Docs: Clarified hosted endpoint retries, redirect credential safety, test directory targets, text replacement, repository map caching, and tokenizer limits.
+- Linux fallback memory checks now count page-table allocations as well as resident process memory, keeping large read-only mappings within the configured budget.
+- Fixed: an interrupted check now cleans up its supervised child processes and reports the original interruption instead of stopping during cleanup.
+- Fixed: StateFrame now enforces Linux memory limits when launched in a delegated systemd scope, while safely falling back if unrelated processes share that scope.
 
 ## 0.4.40 (2026-11-10)
 

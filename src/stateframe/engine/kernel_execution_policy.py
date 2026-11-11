@@ -352,7 +352,7 @@ class _ProgressTrackingProcessTable:
 
 
 class _ResidentMemorySupervisor:
-    """Reuse process-table RSS accounting to enforce an RLIMIT_DATA fallback."""
+    """Reuse process-table RSS and page-table accounting for the RLIMIT_DATA fallback."""
 
     def __init__(self, process: subprocess.Popen[bytes], memory_bytes: int):
         self.process = process
