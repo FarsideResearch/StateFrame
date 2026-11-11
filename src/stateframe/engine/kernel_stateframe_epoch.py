@@ -35,7 +35,8 @@ import json
 import os
 from collections.abc import Callable, Mapping, Sequence
 
-from kernel_stateframe_f4 import CLAUSE_HEADER, HANDOFF_HEADER, STATE_HEADER, state_message
+from kernel_stateframe_f4 import (CLAUSE_HEADER, HANDOFF_HEADER, STATE_HEADER,
+                                  escape_state_marker_data, state_message)
 
 
 MODE_ENV = "STATEFRAME_FRAME_EPOCH"
@@ -51,7 +52,7 @@ STRUCTURAL_CHANGE_FIELDS = ("stable_messages", "tools")
 ROLLOVER_REASONS = ("structural_change", "exchange_rewritten", "delta_budget", "headroom")
 _VISIBLE_STATE_KEYS = ("schema", "revision", "state")
 _NON_STABLE_PREFIXES = (
-    STATE_HEADER, HANDOFF_HEADER, CLAUSE_HEADER,
+    HANDOFF_HEADER, CLAUSE_HEADER,
     "[Working source:", "[Current source:", "CURRENT_SOURCE ",
     "[Observed source:", "[Retained source:", "[Source content:",
 )
@@ -97,7 +98,7 @@ def _tokens(messages: Sequence[Mapping[str, object]]) -> int:
 
 
 def _copy_messages(messages: Sequence[Mapping[str, object]] | None) -> list[dict]:
-    return [copy.deepcopy(dict(message)) for message in (messages or ())
+    return [escape_state_marker_data(message) for message in (messages or ())
             if isinstance(message, Mapping)]
 
 
@@ -121,11 +122,12 @@ def stable_prefix_messages(prefix: Sequence[Mapping[str, object]],
     Sources are last so a source change (an edit) rolls the epoch while the system/ticket
     bytes before it stay a reusable common prefix.
     """
-    result = [copy.deepcopy(dict(message)) for message in prefix
+    result = [escape_state_marker_data(message) for message in prefix
               if isinstance(message, Mapping)
               and not str(message.get("content") or "").startswith(_NON_STABLE_PREFIXES)]
-    result.extend({"role": "user", "content": str(item.get("content", ""))}
-                  for item in source_messages if isinstance(item, Mapping))
+    result.extend(escape_state_marker_data(
+        {"role": "user", "content": str(item.get("content", ""))})
+                   for item in source_messages if isinstance(item, Mapping))
     return result
 
 
@@ -344,7 +346,7 @@ class FrameEpoch:
         payload = _visible_payload(snapshot)
         message = state_message(payload)
         blocks = _copy_messages(snapshot_blocks)
-        pairs = [(copy.deepcopy(dict(pair[0])), copy.deepcopy(dict(pair[1])))
+        pairs = [(escape_state_marker_data(pair[0]), escape_state_marker_data(pair[1]))
                  for pair in (exchanges or ()) if valid_pair(pair)]
         tools_digest = _digest(tools)
         tail = _copy_messages(tail_messages)

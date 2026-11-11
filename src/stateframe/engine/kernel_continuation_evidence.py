@@ -46,6 +46,7 @@ RUN_TEST_RESULT_CLASSES = {
     "RED": "settled_applied",
     "FAIL_WITH_WITNESS": "settled_applied",
     "HARNESS_ERROR": "settled_not_applied",
+    "REFUSED_PREDISPATCH": "settled_not_applied",
     "SELECTOR_ERROR": "settled_not_applied",
     "NO_TESTS": "settled_not_applied",
     # An unstructured runner result is deliberately not guessed as a completed

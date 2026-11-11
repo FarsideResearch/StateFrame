@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.4.40 (2026-11-10)
+
+- Hosted request metering: the byte-fallback cold estimate now has a raise-only density floor computed from the decoded content (digits, base64/hex runs, dense code, punctuation, non-ASCII), so long numbers, base64, hex and dense JSON or code are no longer underestimated on endpoints without exact tokenization; ordinary prose estimates are unchanged.
+- Tests: a guard now checks every terminal authority error against stale, missing and fresh freshness facts, so a completion receipt can never be accepted while its freshness is unknown.
+- Plain-loop request composition escapes marker-leading assistant, tool, and repository text without mutating stored history or changing marker-free requests.
+- A run no longer stops when a model reply or a file begins with StateFrame's state marker; such text is kept as data.
+- Fixed: A test selector refused before dispatch now returns its refusal to the model and lets the run continue, instead of stopping with CONTINUATION_BLOCKED.
+
 ## 0.4.39 (2026-11-10)
 
 - Completion-owner route alignment, final-surface binding, and terminal-menu authority now preserve request-contract errors and journal typed unavailability once while retaining their established fallbacks.

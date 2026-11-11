@@ -71,6 +71,63 @@ FALLBACK_SAFETY_MARGIN = 0.10
 # metadata. Keep this conservative rejection bound in diagnostics; admission
 # uses the calibrated count plus the independent serialized-byte envelope.
 FALLBACK_MAX_TOKENS_PER_WIRE_BYTE = 2
+
+
+def _density_floor_tokens(body: Mapping[str, object], template_reserve: int) -> int:
+    """Estimate dense decoded prompt content with conservative class weights.
+
+    The fixed-point sum is ceil((115*digits + 95*mixed long base64/hex
+    characters + 100*letters in 1-2 character identifiers + 15*other ASCII
+    letters + 70*punctuation/symbols + 5*whitespace + 100*non-ASCII)/100),
+    plus the existing template reserve. An unmerged digit can cost 1.15 tokens
+    per character and a short identifier one; long mixed alphanumeric runs
+    approach 0.95; structural punctuation costs more than ordinary word letters.
+    Weights were selected against the pre-recorded calibration halves of
+    Qwen3.6, DeepSeek-V4 and Qwen3 request corpora. All calibration requests
+    remained below the old cold estimate, so ordinary prompts keep its cost.
+    This is a conservative estimate on those vocabularies, not a tokenizer
+    theorem for arbitrary future vocabularies.
+    """
+    content = _tokenization_content(body)
+    weighted = 0
+    index = 0
+    length = len(content)
+    while index < length:
+        char = content[index]
+        if char.isascii() and (char.isalnum() or char in "+/="):
+            end = index + 1
+            while end < length and content[end].isascii() and (
+                    content[end].isalnum() or content[end] in "+/="):
+                end += 1
+            run = content[index:end]
+            if (len(run) >= 32 and any(c.isdigit() for c in run)
+                    and any(c.isalpha() for c in run)):
+                weighted += 95 * len(run)
+            else:
+                cursor = index
+                while cursor < end:
+                    first = content[cursor]
+                    if first.isalpha():
+                        stop = cursor + 1
+                        while stop < end and content[stop].isascii() and content[stop].isalpha():
+                            stop += 1
+                        weighted += (100 if stop - cursor <= 2 else 15) * (stop - cursor)
+                    elif first.isdigit():
+                        stop = cursor + 1
+                        while stop < end and content[stop].isascii() and content[stop].isdigit():
+                            stop += 1
+                        weighted += 115 * (stop - cursor)
+                    else:
+                        stop = cursor + 1
+                        weighted += 70
+                    cursor = stop
+            index = end
+        else:
+            weighted += 5 if char.isspace() else (70 if char.isascii() else 100)
+            index += 1
+    return (weighted + 99) // 100 + template_reserve
+
+
 _TOKENIZER_URL_ENV = (
     "LLAMA_CPP_TOKENIZE_URL", "LLAMA_CPP_BASE_URL", "A3B_ENDPOINT",
     "A3B_BASE_URL", "OPENAI_API_BASE", "OPENAI_BASE_URL",
@@ -847,7 +904,10 @@ class RequestTokenMeter:
         # otherwise even the irreducible 58 KB benchmark request cannot fit.
         size = _wire_bytes(body) if wire_bytes is None else wire_bytes
         ratio, _margin = self._fallback_ratio()
-        estimated = math.ceil(size / ratio) + self.template_overhead_tokens
+        estimated = max(
+            math.ceil(size / ratio) + self.template_overhead_tokens,
+            _density_floor_tokens(body, self.template_overhead_tokens),
+        )
         self._last_fallback_rejection_bound = (
             FALLBACK_MAX_TOKENS_PER_WIRE_BYTE * size + self.template_overhead_tokens
         )

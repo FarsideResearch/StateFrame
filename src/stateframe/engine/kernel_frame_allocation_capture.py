@@ -45,7 +45,9 @@ def calibrated_estimate(body: Mapping[str, object], meter: object) -> int:
             and all(type(value) is int and value > 0 for value in pair)):
         tokens, measured_chars = pair
         return math.ceil(chars * tokens / measured_chars) + overhead
-    return math.ceil(chars / _DEFAULT_CHARS_PER_TOKEN) + overhead
+    from kernel_request_diet import _density_floor_tokens
+    return max(math.ceil(chars / _DEFAULT_CHARS_PER_TOKEN) + overhead,
+               _density_floor_tokens(body, overhead))
 
 
 def measured_request_tokens(body: Mapping[str, object], meter: object) -> int:

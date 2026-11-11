@@ -18,6 +18,7 @@ from pathlib import PurePosixPath
 from kernel_context import token_estimate
 from kernel_stateframe_envelope import STATE_HEADER, serialize_stateframe_payload
 from kernel_evictfix_mode import enabled as evictfix_enabled
+from kernel_stateframe_marker import escape_state_marker_data
 
 
 MODE_ENV = "STATEFRAME_F4"
@@ -1849,9 +1850,13 @@ def frame_bytes(messages: Sequence[Mapping[str, object]]) -> bytes:
 MODEL_VISIBLE_STATE_KEYS = ("schema", "revision", "state")
 
 
-def state_message(state: Mapping[str, object]) -> dict[str, str]:
+def state_message(state: Mapping[str, object]) -> dict[str, object]:
     visible = {key: state[key] for key in MODEL_VISIBLE_STATE_KEYS if key in state}
-    return {"role": "user", "content": serialize_stateframe_payload(visible)}
+    message = {"role": "user", "content": serialize_stateframe_payload(visible)}
+    if isinstance(visible.get("state"), Mapping) and "framefit5" in visible["state"]:
+        # Internal provenance for the FrameFit5 source transcript, removed at composition.
+        message["_stateframe_host_state"] = True
+    return message
 
 
 def _append_verbatim_turns(
@@ -1887,7 +1892,7 @@ def compose_messages(*, prefix: Sequence[Mapping[str, object]], path: str, worki
     messages: list[dict] = []
     for message in prefix:
         content = str(message.get("content") or "")
-        if content.startswith((STATE_HEADER, HANDOFF_HEADER, CLAUSE_HEADER,
+        if content.startswith((HANDOFF_HEADER, CLAUSE_HEADER,
                                _reasoning_anchor_header(),
                                _reasoning_ledger_header(),
                                 "[Working source:", "[Paged source:", "[Current source:", "CURRENT_SOURCE ",
@@ -1915,7 +1920,8 @@ def compose_messages(*, prefix: Sequence[Mapping[str, object]], path: str, worki
             messages.append({"role": "user", "content": notice})
     if ledger_block:  # [reasoning-ledger patch] one user message, only when non-empty
         messages.append({"role": "user", "content": str(ledger_block)})
-    messages.append(state_message(state))
+    host_state = state_message(state)
+    messages.append(host_state)
     messages.append({
         "role": str(handoff.get("role", "user")),
         "content": str(handoff.get("content", "")),
@@ -1923,8 +1929,14 @@ def compose_messages(*, prefix: Sequence[Mapping[str, object]], path: str, worki
     for pair in exchanges:
         if isinstance(pair, Sequence) and len(pair) == 2:
             messages.extend(copy.deepcopy(dict(item)) for item in pair if isinstance(item, Mapping))
-    ordered = [dict(message) for message in order_f4_messages(messages)]
-    return _append_verbatim_turns(ordered, verbatim_turns)
+    ordered = order_f4_messages(messages)
+    composed = _append_verbatim_turns(ordered, verbatim_turns)
+    return [escape_state_marker_data(
+        message, host_state=message is host_state,
+        preserve_host_provenance=(message is host_state
+                                  and message.get("_stateframe_host_state") is True),
+    )
+            for message in composed]
 
 
 def latest_complete_tool_exchange(

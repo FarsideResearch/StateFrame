@@ -8,7 +8,9 @@ import os
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path, PurePosixPath
 
-from kernel_stateframe_f4 import HANDOFF_HEADER, latest_complete_tool_exchange
+from kernel_stateframe_f4 import (
+    HANDOFF_HEADER, escape_state_marker_data, latest_complete_tool_exchange,
+)
 from kernel_stateframe_envelope import STATE_HEADER, serialize_stateframe_payload
 from kernel_greenfact import GREENFACT_TEXT
 from kernel_wire_stability import VOLATILE_TAIL_MARKER
@@ -224,9 +226,8 @@ def _task_and_latest_turn(
         if message.get("role") != "user" or not index_safe_message(message):
             continue
         content = message.get("content")
-        if isinstance(content, str) and (
-                content.startswith(STATE_HEADER + "\n")
-                or content.startswith(HANDOFF_HEADER)):
+        if message.get("_stateframe_host_state") is True or (
+                isinstance(content, str) and content.startswith(HANDOFF_HEADER)):
             continue
         regenerated = _strip_regenerated_tail_fact(message)
         if regenerated is not None:
@@ -355,13 +356,8 @@ def _prior_user_context(
         # A replay may contain the previous generated envelope. Its typed
         # state has its own authority; nesting it as user prose duplicates
         # owner pins and makes historical host bytes part of the minimum.
-        if str(message.get("content") or "").startswith(STATE_HEADER + "\n"):
-            try:
-                _state_payload(message)
-            except FrameFit5Error:
-                pass  # Marker-like original prose remains opaque user input.
-            else:
-                continue
+        if message.get("_stateframe_host_state") is True:
+            continue
         content_value = message.get("content")
         if not isinstance(content_value, str):
             raise FrameFit5Error("prior user context is not plain text")
@@ -1298,7 +1294,7 @@ def _prepared_current_source_messages(
             continue
         content = message.get("content")
         if (not isinstance(content, str)
-                or content.startswith(STATE_HEADER + "\n")
+                or message.get("_stateframe_host_state") is True
                 or section_name(message, index) != "file_excerpts"):
             continue
         identity = source_identity(message)
@@ -1348,6 +1344,15 @@ def _restore_live_hypotheses(
     }
 
 
+def _wire_messages(
+        messages: Sequence[Mapping[str, object]],
+        host_state: Mapping[str, object] | None = None,
+) -> list[dict[str, object]]:
+    """Apply the shared escape to every final-request message in one place."""
+    return [escape_state_marker_data(message, host_state=message is host_state)
+            for message in messages]
+
+
 def _allocated_task_suffix_exchange(
         layout: Mapping[str, object],
         task_message: Mapping[str, object] | None,
@@ -1364,8 +1369,6 @@ def _allocated_task_suffix_exchange(
     if task_message is not None:
         if (not isinstance(task_message, Mapping) or task_message.get("role") != "user"
                 or not index_safe_message(task_message)
-                or (isinstance(task_message.get("content"), str)
-                    and str(task_message.get("content")).startswith(STATE_HEADER + "\n"))
                 or dict(task_message) != task):
             raise FrameFit5Error("captured frame-only task changed after allocation")
 
@@ -1415,8 +1418,7 @@ def _allocated_prefix_messages(
             raise FrameFit5Error("frame-only allocation contains an invalid prefix message")
         content = raw_message.get("content")
         if (isinstance(content, str)
-                and (content.startswith(STATE_HEADER + "\n")
-                     or content.startswith(HANDOFF_HEADER)
+                and (content.startswith(HANDOFF_HEADER)
                      or _is_volatile_tail_message(raw_message))):
             raise FrameFit5Error("frame-only allocation prefix contains a reserved message")
         if location in by_location:
@@ -1463,16 +1465,16 @@ def _compose_allocated_frame_only(
     )
     prefix_start = len(systems) + 2
     prefix = _allocated_prefix_messages(layout, prefix_start, suffix_start)
-    result = [
+    result = _wire_messages([
         *[copy.deepcopy(dict(message)) for message in systems],
         task,
-        copy.deepcopy(dict(state_block)),
+        state_block,
         *prefix,
         *suffix,
         *exchange,
         {"role": "user", "content": VOLATILE_TAIL_MARKER},
-    ]
-    _validate_allocated_composition(result, exchange)
+    ], state_block)
+    _validate_allocated_composition(result, _wire_messages(exchange))
     return result
 
 
@@ -1495,11 +1497,8 @@ def compose_frame_only(
     if frame_request_allocation is None:
         task, newest, _task_index, _last_action_index = _task_and_latest_turn(source_messages)
         if isinstance(task_message, Mapping):
-            task_content = task_message.get("content")
             if (task_message.get("role") != "user"
-                    or not index_safe_message(task_message)
-                    or (isinstance(task_content, str)
-                        and task_content.startswith(STATE_HEADER + "\n"))):
+                    or not index_safe_message(task_message)):
                 raise FrameFit5Error("captured FrameFit5 task message is invalid")
             task = copy.deepcopy(dict(task_message))
     state_blocks = [message for message in prepared
@@ -1568,27 +1567,24 @@ def compose_frame_only(
     latest_exchange = latest_complete_tool_exchange(source_messages)
     if latest_exchange is None:
         raise FrameFit5Error("latest assistant tool-call exchange is incomplete or mismatched")
-    task_is_state_frame = (
-        task.get("role") == "user"
-        and isinstance(task.get("content"), str)
-        and str(task.get("content")).startswith(STATE_HEADER + "\n")
-    )
+    task_is_state_frame = task.get("_stateframe_host_state") is True
     task_messages = [] if task_is_state_frame else [task]
     from kernel_skills import service as skills_service
     skills = skills_service()
     skill_messages = skills.messages() if skills is not None else []
-    result = [
+    result = _wire_messages([
         *systems, *task_messages, state_block, *skill_messages, *current_sources, *source_notices,
         *host_context_panels, *newest,
         *(copy.deepcopy(dict(message)) for message in latest_exchange),
         {"role": "user", "content": VOLATILE_TAIL_MARKER},
-    ]
+    ], state_block)
+    wire_exchange = _wire_messages(latest_exchange)
     action_messages = [message for message in result
                        if message.get("role") in {"assistant", "tool"}]
-    if action_messages != list(latest_exchange):
+    if action_messages != wire_exchange:
         raise FrameFit5Error("frame-only projection retained messages outside the newest tool exchange")
-    if (len(result) < len(latest_exchange) + 1
-            or result[-len(latest_exchange) - 1:-1] != list(latest_exchange)
+    if (len(result) < len(wire_exchange) + 1
+            or result[-len(wire_exchange) - 1:-1] != wire_exchange
             or not _is_volatile_tail_message(result[-1])):
         raise FrameFit5Error("frame-only projection must place one volatile tail after its newest exchange")
     if any(str(message.get("content") or "").startswith(HANDOFF_HEADER) for message in result):

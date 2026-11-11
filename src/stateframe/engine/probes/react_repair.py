@@ -5523,6 +5523,13 @@ def run_tests_for_selectors(root: pathlib.Path, fn: str, selectors: Sequence[str
         # No aggregate exit: a refused selector never ran, so no verdict exists.
         return (refused[0].split("\n", 1)[-1].splitlines()[0] + "\n" +
                 "\n\n".join(observations)), tuple(codes)
+    predispatch_refused = [obs for obs in observations if obs.split("\n", 1)[-1].startswith(
+        "[selector] REFUSED_PREDISPATCH")]
+    if predispatch_refused:
+        # Keep the typed refusal at the top so the receipt producer does not
+        # mistake an unrun selector for an unstructured test result.
+        return (predispatch_refused[0].split("\n", 1)[-1].splitlines()[0] + "\n" +
+                "\n\n".join(observations)), tuple(codes)
     if all(code == 0 for code in codes):
         aggregate = 0
     elif any(code == 1 for code in codes):
