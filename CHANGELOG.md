@@ -10,6 +10,13 @@
 
 ## 0.4.42 (2026-11-11)
 
+- Mutation helpers now start with an empty session keyring and cannot read or create kernel keys through keyring system calls.
+- Mutation file grants now treat bracketed names literally and keep single-star patterns within one directory, preventing unintended reads and edits.
+- Supervisor shutdown continues cleanup after a stop timeout; mutation files are removed only after process exit is verified, and a later close retries unfinished cleanup.
+- Input snapshots now refuse files changed while being read, even when the file size stays the same.
+- Refused mutation calls no longer keep copies of smoke inputs or other temporary input snapshots after their launch budget is exhausted.
+- Mutation edits now refuse a write if its parent directory moves or is replaced before the file is changed.
+- Failed mutation input snapshots now remove partial files and report the original disk error, even if cleanup also fails.
 - Mutation helpers now get their full running time after sandbox startup; a stalled startup is stopped separately with a clear refusal.
 - Expanded the mutation guide with the complete CLI surface, refusal codes and enforced limits, and added a Linux quickstart that exercises a shipped helper.
 - Mutations 0.5.0 hardening: host-owned mem/wall/cpu ceilings, truncated output counts as overflow, fresh survivor snapshot with Z/X/x terminal, broker CA symlink targets bound read-only, broker connects to the vetted address directly, and fail-closed resume after mutation interruption.

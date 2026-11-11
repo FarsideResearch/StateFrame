@@ -219,6 +219,18 @@ def _read_json_file(path: Path, limit: int) -> dict[str, object]:
     return document
 
 
+def _remove_snapshot_root(root: Path) -> None:
+    for path in root.iterdir():
+        path.unlink()
+    root.rmdir()
+
+
+def _remove_smoke_snapshots(fixtures: list[dict]) -> None:
+    roots = {path.parent for fixture in fixtures for path in fixture["inputs"].values()}
+    for root in roots:
+        _remove_snapshot_root(root)
+
+
 class MutationBudgetError(ValueError):
     pass
 
@@ -462,23 +474,8 @@ class MutationRuntime:
         return proposal if self._record_prebuilt_proposal(proposal) else None
 
     def _launch(self, spec):
-        if __package__:
-            from .kernel_mutate_policy import Budget
-        else:
-            from kernel_mutate_policy import Budget
-
-        state = Budget().fold(self.journal.events())
+        reservations = self._check_launch_budget(spec.role, spec.limits)
         token = spec.launch
-        reservations = (("invocations", 1), ("broker_fetches", 1),
-                        ("broker_wall_s", spec.limits.wall_s),
-                        ("broker_cpu_s", spec.limits.cpu_s)) if spec.role == "broker" else (
-            ("invocations", 1), ("payload_wall_s", spec.limits.wall_s),
-            ("payload_cpu_s", spec.limits.cpu_s))
-        if state.disabled or any(amount > state.remaining()[name] for name, amount in reservations):
-            name = next((name for name, amount in reservations
-                         if amount > state.remaining()[name]), reservations[0][0])
-            self.journal.append("BUDGET_EXHAUSTED", name=name)
-            raise MutationBudgetError(name)
         for name, amount in reservations:
             self.journal.append("BUDGET_RESERVE", name=name, amount=amount,
                                 id=token + ":" + name)
@@ -494,6 +491,25 @@ class MutationRuntime:
                 self.journal.append("BUDGET_SETTLE", id=token + ":" + name,
                                     amount=max(0, measured))
         return outcome
+
+    def _check_launch_budget(self, role, limits):
+        if __package__:
+            from .kernel_mutate_policy import Budget
+        else:
+            from kernel_mutate_policy import Budget
+
+        state = Budget().fold(self.journal.events())
+        reservations = (("invocations", 1), ("broker_fetches", 1),
+                        ("broker_wall_s", limits.wall_s),
+                        ("broker_cpu_s", limits.cpu_s)) if role == "broker" else (
+            ("invocations", 1), ("payload_wall_s", limits.wall_s),
+            ("payload_cpu_s", limits.cpu_s))
+        if state.disabled or any(amount > state.remaining()[name] for name, amount in reservations):
+            name = next((name for name, amount in reservations
+                         if amount > state.remaining()[name]), reservations[0][0])
+            self.journal.append("BUDGET_EXHAUSTED", name=name)
+            raise MutationBudgetError(name)
+        return reservations
 
     def _broker_fetch(self, request: dict, call_id: str):
         if __package__:
@@ -594,82 +610,92 @@ class MutationRuntime:
         requests = args.get("inputs", default_inputs)
         if not isinstance(requests, list):
             return _refuse("BAD_ARGUMENTS", "inputs must be a list")
+        limits = manifest["limits"]
+        launch_limits = MutationLimits(limits["wall_s"], limits["cpu_s"], int(limits["mem_mb"]))
+        self._check_launch_budget("payload", launch_limits)
         executor = self._ensure_executor()
-        fixtures = (self._admit_smoke_fixtures(manifest, executor.root)
-                    if name in self.ready else None)
         staged = stage_unit(files, manifest, executor.root, fixture_root=fixture_root)
         binding = _binding()
         grants = hashlib.sha256(json.dumps(self.policy.__dict__, sort_keys=True).encode()).hexdigest()
-        admission = admit(staged, self, runtime_closure_digest=binding["closure_digest"],
-                          sdk_digest=binding["sdk_digest"], policy_version="mutation/1",
-                          grants_digest=grants, call=call_id, fixtures=fixtures)
+        fixtures = (self._admit_smoke_fixtures(manifest, executor.root)
+                    if name in self.ready else None)
+        try:
+            admission = admit(staged, self, runtime_closure_digest=binding["closure_digest"],
+                              sdk_digest=binding["sdk_digest"], policy_version="mutation/1",
+                              grants_digest=grants, call=call_id, fixtures=fixtures)
+        finally:
+            if fixtures is not None:
+                _remove_smoke_snapshots(fixtures)
         if record_evidence:
             self.journal.append("ADMISSION", call=call_id, admission_digest=admission.admission_digest,
                                 source_digest=staged.source_digest)
+        snapshot_root = None
         if snapshots is None:
+            snapshot_root = executor.root / "in" / uuid.uuid4().hex
             snapshots = admit_inputs(self.repo, requests, self.policy,
-                                     snapshot_root=executor.root / "in" / uuid.uuid4().hex,
+                                     snapshot_root=snapshot_root,
                                      ordinary_read_globs=self.ordinary_read_globs)
-        payload = dict(args["input"])
-        if manifest["name"] == "sqlite_peek" and "in0" in snapshots.facts:
-            payload["wal_present"] = snapshots.facts["in0"]["wal_present"]
-        limits = manifest["limits"]
-        call = call_id
-        responses = []
-        response_files = {}
-        for phase in range(4):
-            launch = uuid.uuid4().hex
-            doc = build_stdin_doc(wire=1, call=call, launch=launch, phase=phase,
-                                  role="payload", input=payload,
-                                  inputs=list(snapshots.descriptors), responses=responses,
-                                  grants=requires, max_fetch=4 if requires["network"] else 0)
-            spec = LaunchSpec("payload", call, launch, staged.dir, snapshots.files,
-                              response_files, doc,
-                              MutationLimits(limits["wall_s"], limits["cpu_s"],
-                                             int(limits["mem_mb"])))
-            outcome = self._launch(spec)
-            if not outcome.cleanup.ok:
-                raise MutationContainmentError("payload cleanup is unverified")
-            if outcome.exit_code != 0 or outcome.timed_out or outcome.stdout_overflow:
-                if __package__:
-                    from .kernel_mutate_build import execution_failure_detail
-                else:
-                    from kernel_mutate_build import execution_failure_detail
-                return _refuse("EXECUTION", _safe_detail(
-                    execution_failure_detail(outcome, "payload", call) or "payload did not complete"))
-            frame = parse_stdout(outcome.stdout, call=call,
-                                 output_schema=manifest["output_schema"], phase=phase,
-                                 recorded_keys=[row["key"] for row in responses])
-            if frame.kind != "need":
-                break
-            if not requires["network"]:
-                return _refuse("GRANT", "unit requested an ungranted fetch")
-            for request in frame.fetch:
-                response, path = self._broker_fetch(request, call_id)
-                responses.append(response)
-                response_files[path.name] = path
-        else:
-            return _refuse("PROTOCOL", "payload exceeded phase limit")
-        if frame.kind != "result":
-            return _refuse("PROTOCOL", "payload did not return a terminal result")
-        if record_evidence:
-            self.journal.append("TERMINAL", call=call_id, frame_b64=base64.b64encode(outcome.stdout).decode(),
-                                exit_code=0, stdout_overflow=False, timed_out=False,
-                                output_schema=manifest["output_schema"])
-            self.journal.append("CLEANUP_VERIFIED", call=call_id)
-        if frame.edits:
-            if not requires["writes"] or not getattr(self.policy, "write_globs", ()):
-                return _refuse("GRANT", "edit proposals are not granted")
-            try:
-                self.apply_edit_proposals(call_id, list(frame.edits), cleanup_ok=outcome.cleanup.ok)
-            except (ValueError, OSError) as error:
-                return _refuse("EDIT", str(error)[:160])
-        reply = json.dumps(frame.result, sort_keys=True, ensure_ascii=False)
-        if len(reply.encode()) > 64 << 10:
-            return _refuse("BUDGET", "observation output exceeds limit")
-        return self.render_observation(unit=name, revision=f"r{manifest['revision']}",
-                                       result=frame.result, source_digest=staged.source_digest,
-                                       input_value=args)
+        try:
+            payload = dict(args["input"])
+            if manifest["name"] == "sqlite_peek" and "in0" in snapshots.facts:
+                payload["wal_present"] = snapshots.facts["in0"]["wal_present"]
+            call = call_id
+            responses = []
+            response_files = {}
+            for phase in range(4):
+                launch = uuid.uuid4().hex
+                doc = build_stdin_doc(wire=1, call=call, launch=launch, phase=phase,
+                                      role="payload", input=payload,
+                                      inputs=list(snapshots.descriptors), responses=responses,
+                                      grants=requires, max_fetch=4 if requires["network"] else 0)
+                spec = LaunchSpec("payload", call, launch, staged.dir, snapshots.files,
+                                  response_files, doc, launch_limits)
+                outcome = self._launch(spec)
+                if not outcome.cleanup.ok:
+                    raise MutationContainmentError("payload cleanup is unverified")
+                if outcome.exit_code != 0 or outcome.timed_out or outcome.stdout_overflow:
+                    if __package__:
+                        from .kernel_mutate_build import execution_failure_detail
+                    else:
+                        from kernel_mutate_build import execution_failure_detail
+                    return _refuse("EXECUTION", _safe_detail(
+                        execution_failure_detail(outcome, "payload", call) or "payload did not complete"))
+                frame = parse_stdout(outcome.stdout, call=call,
+                                     output_schema=manifest["output_schema"], phase=phase,
+                                     recorded_keys=[row["key"] for row in responses])
+                if frame.kind != "need":
+                    break
+                if not requires["network"]:
+                    return _refuse("GRANT", "unit requested an ungranted fetch")
+                for request in frame.fetch:
+                    response, path = self._broker_fetch(request, call_id)
+                    responses.append(response)
+                    response_files[path.name] = path
+            else:
+                return _refuse("PROTOCOL", "payload exceeded phase limit")
+            if frame.kind != "result":
+                return _refuse("PROTOCOL", "payload did not return a terminal result")
+            if record_evidence:
+                self.journal.append("TERMINAL", call=call_id, frame_b64=base64.b64encode(outcome.stdout).decode(),
+                                    exit_code=0, stdout_overflow=False, timed_out=False,
+                                    output_schema=manifest["output_schema"])
+                self.journal.append("CLEANUP_VERIFIED", call=call_id)
+            if frame.edits:
+                if not requires["writes"] or not getattr(self.policy, "write_globs", ()):
+                    return _refuse("GRANT", "edit proposals are not granted")
+                try:
+                    self.apply_edit_proposals(call_id, list(frame.edits), cleanup_ok=outcome.cleanup.ok)
+                except (ValueError, OSError) as error:
+                    return _refuse("EDIT", str(error)[:160])
+            reply = json.dumps(frame.result, sort_keys=True, ensure_ascii=False)
+            if len(reply.encode()) > 64 << 10:
+                return _refuse("BUDGET", "observation output exceeds limit")
+            return self.render_observation(unit=name, revision=f"r{manifest['revision']}",
+                                           result=frame.result, source_digest=staged.source_digest,
+                                           input_value=args)
+        finally:
+            if snapshot_root is not None:
+                _remove_snapshot_root(snapshot_root)
 
     def _submit(self, args: dict[str, object], call_id: str) -> str:
         if __package__:
@@ -760,6 +786,7 @@ class MutationRuntime:
         executor = self._ensure_executor()
         fixtures = self._admit_smoke_fixtures(manifest, executor.root)
         self.journal.append("BUDGET_ADMISSION", id=call_id, scope=name, charges=charges)
+        admitted = False
         try:
             staged = stage_unit(files, manifest, executor.root)
             binding = _binding()
@@ -767,10 +794,14 @@ class MutationRuntime:
             admission = admit(staged, self, runtime_closure_digest=binding["closure_digest"],
                               sdk_digest=binding["sdk_digest"], policy_version="mutation/1",
                               grants_digest=grants, call=call_id, fixtures=fixtures)
+            admitted = True
         except BuildError as error:
             refusal = self._with_repair(_admission_refusal(error))
             self.episode["diagnostic"] = error.detail
             return refusal
+        finally:
+            if not admitted:
+                _remove_smoke_snapshots(fixtures)
         source_blob = self.journal.put_blob(json.dumps({"manifest": manifest,
             "files": {key: base64.b64encode(value).decode() for key, value in files.items()}},
             sort_keys=True).encode())

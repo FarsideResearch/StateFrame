@@ -254,7 +254,7 @@ def main() -> int:
                 raise RuntimeError("mutation boot requires one native thread")
             sys.path.insert(0, str(boot_path))
             from sf_launch import install_syscall_filter
-            install_syscall_filter(network_none=True, post_init=True)
+            install_syscall_filter(network_none=True, post_init=True, deny_keyring=True)
         elif sys.platform == "darwin":
             import sysconfig
             stdlib = sysconfig.get_path("stdlib")

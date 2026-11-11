@@ -3,14 +3,47 @@ from __future__ import annotations
 
 import fnmatch
 import os
+import stat
+import sys
 from dataclasses import dataclass
 from pathlib import Path
-import stat
-
 
 _SECRET = (".env*", "*.pem", "*.key", "id_*", "*.p12", "*credential*",
            "*secret*", ".netrc", ".npmrc", ".pypirc")
 _EXCLUDED_DIRS = {".git", ".stateframe"}
+
+
+def scope_path_matches(path: str, pattern: str) -> bool:
+    """Match a grant path; only a complete ** segment may span directories."""
+    if not any(char in pattern for char in "*?"):
+        return path == pattern
+
+    segments = pattern.split("/")
+    states = {0}
+
+    def skip_double_star(indices: set[int]) -> set[int]:
+        expanded = set(indices)
+        for index in range(len(segments)):
+            if index in expanded and segments[index] == "**" and index + 1 < len(segments):
+                expanded.add(index + 1)
+        return expanded
+
+    states = skip_double_star(states)
+    for part in path.split("/"):
+        following = set()
+        for index in states:
+            if index == len(segments):
+                continue
+            segment = segments[index]
+            if segment == "**":
+                following.add(index)
+                following.add(index + 1)
+            elif fnmatch.fnmatchcase(part, segment.replace("[", "[[]")):
+                following.add(index + 1)
+        states = skip_double_star(following)
+        if not states:
+            return False
+    return len(segments) in states
 
 
 @dataclass(frozen=True)
@@ -18,6 +51,16 @@ class InputSnapshot:
     files: dict[str, Path]
     descriptors: tuple[dict[str, object], ...]
     facts: dict[str, dict[str, bool]]
+
+
+def _close_preserving_error(fd: int) -> None:
+    primary = sys.exception()
+    try:
+        os.close(fd)
+    except OSError as cleanup_error:
+        if primary is None:
+            raise
+        primary.add_note(f"snapshot cleanup close failed: errno={cleanup_error.errno}")
 
 
 def _parts(value: str) -> tuple[str, ...]:
@@ -55,10 +98,10 @@ def _admitted_parts(path: str, policy: object,
                     ordinary_read_globs: tuple[str, ...] | None) -> tuple[str, ...]:
     parts = _parts(path)
     globs = getattr(policy, "read_globs", ())
-    if globs and not any(fnmatch.fnmatchcase(path, pattern) for pattern in globs):
+    if globs and not any(scope_path_matches(path, pattern) for pattern in globs):
         raise ValueError("input path exceeds mutation read grant")
     if ordinary_read_globs is not None and not any(
-            fnmatch.fnmatchcase(path, pattern) for pattern in ordinary_read_globs):
+            scope_path_matches(path, pattern) for pattern in ordinary_read_globs):
         raise ValueError("input path exceeds ordinary read scope")
     return parts
 
@@ -98,6 +141,7 @@ def admit_inputs(repo: Path, requests: list[object], policy: object, *, snapshot
     facts: dict[str, dict[str, bool]] = {}
     total = 0
     current_path = None
+    snapshot_io_failed = False
     try:
         for index, request in enumerate(requests):
             current_path = request if isinstance(request, str) else (
@@ -119,6 +163,8 @@ def admit_inputs(repo: Path, requests: list[object], policy: object, *, snapshot
                 info = os.fstat(fd)
                 if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_size > 4 << 20:
                     raise ValueError("input must be a bounded, singly linked regular file")
+                before = (info.st_dev, info.st_ino, info.st_size,
+                          info.st_mtime_ns, info.st_ctime_ns)
                 offset = max(0, info.st_size - tail) if tail is not None else 0
                 os.lseek(fd, offset, os.SEEK_SET)
                 data = bytearray()
@@ -126,7 +172,9 @@ def admit_inputs(repo: Path, requests: list[object], policy: object, *, snapshot
                     data.extend(block)
                     if len(data) > 4 << 20:
                         raise ValueError("input changed beyond the size cap")
-                if os.fstat(fd).st_size != info.st_size:
+                after = os.fstat(fd)
+                if before != (after.st_dev, after.st_ino, after.st_size,
+                              after.st_mtime_ns, after.st_ctime_ns):
                     raise ValueError("input changed during snapshot")
             finally:
                 os.close(fd)
@@ -136,14 +184,17 @@ def admit_inputs(repo: Path, requests: list[object], policy: object, *, snapshot
             ident = input_id_for(index)
             target = root / ident
             out = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o400)
+            files[ident] = target
             try:
                 view = memoryview(data)
                 while view:
                     view = view[os.write(out, view):]
                 os.fsync(out)
+            except OSError:
+                snapshot_io_failed = True
+                raise
             finally:
-                os.close(out)
-            files[ident] = target
+                _close_preserving_error(out)
             descriptors.append({"id": ident, "path": "/in/" + ident,
                                 "bytes": len(data), "name": parts[-1]})
             wal_present = False
@@ -161,15 +212,25 @@ def admit_inputs(repo: Path, requests: list[object], policy: object, *, snapshot
         dir_fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
         try:
             os.fsync(dir_fd)
+        except OSError:
+            snapshot_io_failed = True
+            raise
         finally:
-            os.close(dir_fd)
+            _close_preserving_error(dir_fd)
         return InputSnapshot(files, tuple(descriptors), facts)
     except BaseException as error:
         for path in files.values():
-            path.unlink(missing_ok=True)
-        root.rmdir()
-        if current_path is not None and isinstance(error, (OSError, ValueError)):
+            try:
+                path.unlink(missing_ok=True)
+            except OSError as cleanup_error:
+                error.add_note(f"snapshot cleanup unlink failed: errno={cleanup_error.errno}")
+        try:
+            root.rmdir()
+        except OSError as cleanup_error:
+            error.add_note(f"snapshot cleanup rmdir failed: errno={cleanup_error.errno}")
+        if (not snapshot_io_failed and current_path is not None
+                and isinstance(error, (OSError, ValueError))):
             raise ValueError(f"{current_path!r}: {error}") from error
         raise
     finally:
-        os.close(root_fd)
+        _close_preserving_error(root_fd)

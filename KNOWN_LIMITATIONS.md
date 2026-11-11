@@ -208,6 +208,10 @@ Remote endpoints are rejected by default. An explicit override can enable them a
 
 Internal identifiers keep development names (profile keys, module filenames, schema IDs).
 
+## Mutation edits and concurrent host writers
+
+Mutation edits use root-relative `openat2(RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS | RESOLVE_NO_MAGICLINKS)` on Linux and revalidate parents around replacement. Nevertheless, a same-user host writer can relocate a parent between validation and `renameat2`: the fd follows the directory, and rename has no beneath-root constraint. Private staging moves with its parent; exchange/no-replace flags protect entries, not ancestry. Locks require cooperation, file leases do not prevent directory renames, and inotify/fanotify move notifications cannot veto them. Detected relocation refuses the edit and attempts inverse operations through retained fds, validating directory identity and entry inodes/bytes; interference produces an indeterminate result and preserves undo evidence. Compensation must access the relocated object to undo the write. Transient bytes remain observable, host writers can race compensation/cleanup or move directories away and back between checks, and process death can interrupt rollback. The isolated payload cannot perform these host renames. Strict containment requires exclusive, cooperating host access. See Linux [openat2](https://man7.org/linux/man-pages/man2/openat2.2.html) and [renameat2](https://man7.org/linux/man-pages/man2/rename.2.html).
+
 ## Editing files during a run
 
 If files in the working copy change while a request is being prepared (for example, you edit a file mid-run), the engine refuses that request rather than send stale content. Avoid editing the working copy during a run.

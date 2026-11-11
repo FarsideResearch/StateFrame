@@ -16,6 +16,12 @@ from contextlib import contextmanager
 from pathlib import Path
 
 _NPROC_HEADROOM = 128
+# add_key, request_key, keyctl on supported Linux architectures.
+_KEYRING_SYSCALLS = {
+    "x86_64": (248, 249, 250),
+    "aarch64": (217, 218, 219),
+    "arm64": (217, 218, 219),
+}
 _CGROUP_LEAF_PATTERN_LOCK = threading.RLock()
 _CGROUP_LEAF_PATTERN_INITIALIZED = False
 _CGROUP_LEAF_PATTERN_ORIGIN: Path | None = None
@@ -710,7 +716,20 @@ def _set_relative_nproc_limit(ceiling: int) -> None:
     resource.setrlimit(resource.RLIMIT_NPROC, (new_soft, bound))
 
 
-def install_syscall_filter(*, network_none: bool, post_init: bool = False) -> None:
+def _join_empty_session_keyring() -> None:
+    """Detach a mutation child from inherited session keys before seccomp."""
+    machine = platform.machine()
+    if machine not in _KEYRING_SYSCALLS:
+        raise RuntimeError(f"session keyring isolation is unsupported on {machine}")
+    libc = ctypes.CDLL(None, use_errno=True)
+    libc.syscall.restype = ctypes.c_long
+    # KEYCTL_JOIN_SESSION_KEYRING with a null name creates an anonymous keyring.
+    if libc.syscall(_KEYRING_SYSCALLS[machine][2], 1, ctypes.c_void_p()) == -1:
+        raise OSError(ctypes.get_errno(), "cannot isolate session keyring")
+
+
+def install_syscall_filter(*, network_none: bool, post_init: bool = False,
+                           deny_keyring: bool = False) -> None:
     """Linux bwrap raises lo even with --unshare-net; deny socket creation too.
 
     Every target is denied cross-process memory/fd access to the trusted
@@ -730,6 +749,8 @@ def install_syscall_filter(*, network_none: bool, post_init: bool = False) -> No
         creation_calls = (220, 435, 221, 281)
     else:
         raise RuntimeError(f"execution seccomp is unsupported on {machine}")
+    if deny_keyring:
+        calls += _KEYRING_SYSCALLS[machine]
     if network_none:
         calls += network_calls
     if post_init:
@@ -857,9 +878,15 @@ def main() -> int:
             if not command:
                 raise ValueError("cgroup-enter requires a wrapped command")
             _exec_wrapped(command, os.environ)
-        if len(sys.argv) >= 4 and sys.argv[1] in {"--network-none", "--process-filter"}:
+        if len(sys.argv) >= 4 and sys.argv[1] in {
+                "--network-none", "--process-filter",
+                "--mutation-network-none", "--mutation-process-filter"}:
             environment = json.loads(sys.argv[2])
-            install_syscall_filter(network_none=sys.argv[1] == "--network-none")
+            if sys.argv[1].startswith("--mutation-"):
+                _join_empty_session_keyring()
+            install_syscall_filter(
+                network_none=sys.argv[1] in {"--network-none", "--mutation-network-none"},
+                deny_keyring=sys.argv[1].startswith("--mutation-"))
             _exec_wrapped(sys.argv[3:], environment)
         if len(sys.argv) == 3 and sys.argv[1] == "--fd":
             with os.fdopen(int(sys.argv[2]), "rb") as stream:

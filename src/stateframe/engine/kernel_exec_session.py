@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import base64
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import errno
 import json
 import math
@@ -575,23 +575,98 @@ class ExecSession:
     def close(self) -> None:
         if self._closed:
             return
-        report = None
-        try:
-            report = self.stop_all()
-            if self._process is not None:
-                self._rpc({"op": "close", "grace": 0})
-        finally:
-            self._closed = True
-            self._close_owner_write_end()
-            released = self._await_control_eof() if self._process is not None else True
-            if self._control is not None:
-                self._control.close()
-            if self._process is not None:
-                self._await_supervisor_exit(released)
-            if self._log is not None:
-                self._log.close()
-        if report is not None and not report.ok:
-            raise ExecSessionError(f"execution cleanup failed: {report.detail}")
+        errors: list[BaseException] = []
+
+        def attempt(action) -> bool:
+            try:
+                action()
+                return True
+            except BaseException as error:
+                errors.append(error)
+                return False
+
+        stop_error: BaseException | None = None
+        if (self._control is not None and not getattr(self, "_close_control_done", False)
+                and not getattr(self, "_close_stop_done", False)):
+            try:
+                report = self.stop_all()
+                if report.ok:
+                    self._close_stop_done = True
+                else:
+                    stop_error = ExecSessionError(f"execution cleanup failed: {report.detail}")
+            except BaseException as error:
+                stop_error = error
+        if stop_error is not None:
+            self._close_force_kill = True
+        if (self._process is not None and self._control is not None
+                and not getattr(self, "_close_control_done", False)
+                and not getattr(self, "_close_rpc_done", False) and stop_error is None):
+            if attempt(lambda: self._rpc({"op": "close", "grace": 0})):
+                self._close_rpc_done = True
+        attempt(self._close_owner_write_end)
+        released = True
+        if (self._process is not None and self._control is not None
+                and not getattr(self, "_close_control_done", False)
+                and not getattr(self, "_close_force_kill", False)
+                and getattr(self, "_close_stop_done", False)):
+            # Control-socket EOF is the supervisor's evidence that its cleanup finished.
+            released = self._await_control_eof()
+        if self._control is not None and not getattr(self, "_close_control_done", False):
+            if attempt(self._control.close):
+                self._close_control_done = True
+        if self._process is not None and not getattr(self, "_close_process_reaped", False):
+            try:
+                if (not getattr(self, "_close_force_kill", False)
+                        and getattr(self, "_close_stop_done", False)):
+                    # Load-scaled: a fixed short wait SIGKILLed healthy supervisors that were
+                    # merely slow to exit, taking their whole sandbox with them (exit 137).
+                    self._process.wait(timeout=rpc_timeout_seconds())
+                    self._close_process_reaped = True
+                else:
+                    # A refused or lost control reply cannot attest to descendants.
+                    # Verify the whole launch unit before allowing artifact removal.
+                    survivors = kill_launch_unit(
+                        self._process, deadline_seconds=5,
+                        launch_identity=recorded_launch_identity(self._process))
+                    if survivors:
+                        raise ExecSessionError(
+                            "execution supervisor did not terminate after cleanup; survivors "
+                            + ", ".join(map(str, survivors)))
+                    self._close_process_reaped = True
+                    self._close_stop_done = True
+            except subprocess.TimeoutExpired:
+                # Alive and unresponsive after the load-scaled wait: kill the whole launch
+                # unit, since the outer bwrap can leave its supervisor alive during setup.
+                self._close_force_kill = True
+                state = ("closed its control socket but did not exit" if released
+                         else "stopped answering and did not exit")
+                try:
+                    survivors = kill_launch_unit(
+                        self._process, deadline_seconds=5,
+                        launch_identity=recorded_launch_identity(self._process))
+                    detail = f"; survivors {', '.join(map(str, survivors))}" if survivors else ""
+                    errors.append(ExecSessionError(
+                        f"execution supervisor {state} within {rpc_timeout_seconds():g} s after cleanup"
+                        + detail))
+                    if not survivors:
+                        self._close_process_reaped = True
+                except BaseException as error:
+                    errors.append(error)
+            except BaseException as error:
+                errors.append(error)
+        if self._process is not None and not getattr(self, "_close_pidfd_done", False):
+            finalizer = getattr(self._process, "_stateframe_pidfd_finalizer", None)
+            if finalizer is not None:
+                if attempt(finalizer):
+                    self._close_pidfd_done = True
+                    identity = recorded_launch_identity(self._process)
+                    if identity is not None and identity.pidfd is not None:
+                        self._process._stateframe_launch_identity = replace(identity, pidfd=None)
+        if self._log is not None and not self._log.closed:
+            attempt(self._log.close)
+        if errors:
+            raise errors[0]
+        self._closed = True
 
     def _await_control_eof(self) -> bool:
         """Wait, load-scaled, for the supervisor to close its control socket.
@@ -613,35 +688,6 @@ class ExecSession:
                 continue
             except OSError:
                 return True
-
-    def _await_supervisor_exit(self, released: bool) -> None:
-        """Reap the supervisor; kill its launch unit only if it is alive and unresponsive.
-
-        A fixed short wait here SIGKILLed healthy supervisors that were merely slow to exit on
-        a loaded host, and the kernel then killed every process in their sandbox (exit 137).
-        """
-        seconds = rpc_timeout_seconds()
-        try:
-            # After EOF the exit is underway; without it the supervisor gets one more bound.
-            self._process.wait(timeout=seconds)
-            if (self._initial_capability is not None
-                    and self._initial_capability.purpose in {"mutation", "mutation_broker"}):
-                finalizer = getattr(self._process, "_stateframe_pidfd_finalizer", None)
-                if finalizer is not None:
-                    finalizer()
-            return
-        except subprocess.TimeoutExpired:
-            pass
-        # Kill the whole launch unit: the outer bwrap alone can leave a
-        # supervisor that is still setting up its sandbox alive.
-        survivors = kill_launch_unit(
-            self._process, deadline_seconds=5,
-            launch_identity=recorded_launch_identity(self._process))
-        detail = f"; survivors {', '.join(map(str, survivors))}" if survivors else ""
-        state = ("closed its control socket but did not exit" if released
-                 else "stopped answering and did not exit")
-        raise ExecSessionError(
-            f"execution supervisor {state} within {seconds:g} s after cleanup" + detail)
 
     def __enter__(self):
         return self

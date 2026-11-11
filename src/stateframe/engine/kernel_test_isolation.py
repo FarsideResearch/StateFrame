@@ -571,8 +571,9 @@ def _mutation_command(command, cap, executable: str, mounts: dict, shared_namesp
                          ("ctl", "/sf/ctl"), ("in", "/in"), ("resp", "/resp")):
         arguments += ["--ro-bind", str(roots[name]), target]
     arguments += ["--remount-ro", "/"]
-    inner = [os.path.realpath(sys.executable), "-I", "/sf/boot/sf_launch.py",
-             "--network-none" if cap.network == "none" else "--process-filter",
+    # The wrapper must skip site startup: it joins a fresh keyring only after Python starts.
+    inner = [os.path.realpath(sys.executable), "-I", "-S", "/sf/boot/sf_launch.py",
+             "--mutation-network-none" if cap.network == "none" else "--mutation-process-filter",
              json.dumps(dict(cap.env), separators=(",", ":")), *command]
     arguments += ["--chdir", "/sf/unit" if cap.purpose == "mutation" else "/",
                   "--", *inner]

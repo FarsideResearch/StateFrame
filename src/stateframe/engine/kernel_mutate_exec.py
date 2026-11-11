@@ -718,29 +718,75 @@ class MutationExecutor:
     def close(self) -> CleanupReport:
         if self._closed:
             return CleanupReport(True, 0, (), "")
-        self._closed = True
+        # Stage bytes can still be in use until the supervisor and its children are gone.
+        # Retain artifacts on unverified shutdown, but never retain the owned ledger fd.
+        stop_failure: BaseException | None = None
         try:
-            try:
-                report = self._session.stop_all(0)
-            finally:
-                self._session.close()
-            if not report.ok:
-                raise MutationContainmentError(report.detail)
-            for path in (self._session_dir, self._boot):
-                _remove_tree(path)
-            if self._stage.is_dir():
-                for child in self._stage.iterdir():
-                    if not re.fullmatch(r"[0-9a-f]{32}", child.name):
-                        raise MutationContainmentError("unexpected mutation stage at close")
-                    _remove_tree(child)
-                _remove_tree(self._stage)
-            return report
-        except MutationContainmentError:
-            raise
+            if not hasattr(self, "_close_report"):
+                if not getattr(self._session, "_close_control_done", False):
+                    try:
+                        report = self._session.stop_all(0)
+                    except BaseException as error:
+                        stop_failure = error
+                        report = None
+                    if report is not None and report.ok:
+                        self._close_report = report
+                    elif report is not None:
+                        stop_failure = MutationContainmentError(report.detail)
+            self._session.close()
+            if stop_failure is not None:
+                raise stop_failure
+            if not hasattr(self, "_close_report"):
+                # ExecSession.close verified the launch unit even though the
+                # control channel was closed by a prior cleanup attempt.
+                self._close_report = CleanupReport(True, 0, (), "supervisor exit verified")
         except BaseException as error:
+            if self._ledger is not None and not self._ledger.closed:
+                try:
+                    self._ledger.close()
+                except BaseException as ledger_error:
+                    raise MutationContainmentError(
+                        f"mutation ledger close failed: {ledger_error}") from error
+            if isinstance(error, MutationContainmentError):
+                raise
+            raise MutationContainmentError(
+                f"mutation executor cleanup failed: {error}") from error
+
+        errors: list[BaseException] = []
+
+        def attempt(action) -> None:
+            try:
+                action()
+            except BaseException as error:
+                errors.append(error)
+
+        for path in (self._session_dir, self._boot):
+            def remove_if_present(path: Path = path) -> None:
+                if path.exists() or path.is_symlink():
+                    _remove_tree(path)
+
+            attempt(remove_if_present)
+
+        def sweep_stage() -> None:
+            if not self._stage.is_dir():
+                return
+            for child in self._stage.iterdir():
+                if not re.fullmatch(r"[0-9a-f]{32}", child.name):
+                    raise MutationContainmentError("unexpected mutation stage at close")
+                attempt(lambda child=child: _remove_tree(child))
+            if not any(self._stage.iterdir()):
+                _remove_tree(self._stage)
+
+        attempt(sweep_stage)
+        if not self._ledger.closed:
+            attempt(self._ledger.close)
+        if errors:
+            error = errors[0]
+            if isinstance(error, MutationContainmentError):
+                raise error
             raise MutationContainmentError(f"mutation executor cleanup failed: {error}") from error
-        finally:
-            self._ledger.close()
+        self._closed = True
+        return self._close_report
 
     def __enter__(self):
         return self
