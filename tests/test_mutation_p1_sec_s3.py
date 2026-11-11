@@ -19,12 +19,21 @@ def test_supervisor_stop_timeout_retains_artifacts_until_reaped(tmp_path, monkey
     class Process:
         _stateframe_pidfd_finalizer = staticmethod(finalizer)
 
+        def poll(self):
+            return None
+
         def wait(self, timeout):
             events.append("wait")
             if events.count("wait") == 1:
                 raise subprocess.TimeoutExpired("supervisor", timeout)
 
     class Control:
+        def settimeout(self, timeout):
+            pass
+
+        def recv(self, size):
+            return b""
+
         def close(self):
             events.append("control")
 
@@ -128,10 +137,19 @@ def test_failed_close_rpc_does_not_poison_verified_retry(tmp_path):
     events = []
 
     class Process:
+        def poll(self):
+            return None
+
         def wait(self, timeout):
             events.append("wait")
 
     class Control:
+        def settimeout(self, timeout):
+            pass
+
+        def recv(self, size):
+            return b""
+
         def close(self):
             events.append("control closed")
 

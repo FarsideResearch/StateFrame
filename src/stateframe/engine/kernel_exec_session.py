@@ -644,12 +644,13 @@ class ExecSession:
                     survivors = kill_launch_unit(
                         self._process, deadline_seconds=5,
                         launch_identity=recorded_launch_identity(self._process))
+                    # Killing a supervisor is always reported; without survivors a later
+                    # close finds it reaped and can finish removing artifacts.
+                    self._close_process_reaped = not survivors
                     detail = f"; survivors {', '.join(map(str, survivors))}" if survivors else ""
-                    errors.append(ExecSessionError(
-                        f"execution supervisor {state} within {rpc_timeout_seconds():g} s after cleanup"
-                        + detail))
-                    if not survivors:
-                        self._close_process_reaped = True
+                    raise ExecSessionError(
+                        f"execution supervisor did not terminate after cleanup: it {state} within "
+                        f"{rpc_timeout_seconds():g} s" + detail)
                 except BaseException as error:
                     errors.append(error)
             except BaseException as error:
