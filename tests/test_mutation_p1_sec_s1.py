@@ -106,7 +106,7 @@ def test_mutation_command_selects_keyring_isolating_wrapper(
 def test_mutation_launch_joins_keyring_before_filter_and_exec(
         monkeypatch, mode, network_none):
     events = []
-    monkeypatch.setattr(sys, "argv", ["sf_launch.py", mode, "{}", "/bin/true"])
+    monkeypatch.setattr(sys, "argv", ["sf_launch.py", mode, "{}", "true"])
     monkeypatch.setattr(sf_launch, "_join_empty_session_keyring",
                         lambda: events.append("join"), raising=False)
     monkeypatch.setattr(sf_launch, "install_syscall_filter",
@@ -120,7 +120,7 @@ def test_mutation_launch_joins_keyring_before_filter_and_exec(
 
 
 def test_mutation_launch_refuses_when_keyring_join_fails(monkeypatch, capsys):
-    monkeypatch.setattr(sys, "argv", ["sf_launch.py", "--mutation-network-none", "{}", "/bin/true"])
+    monkeypatch.setattr(sys, "argv", ["sf_launch.py", "--mutation-network-none", "{}", "true"])
 
     def refuse():
         raise OSError(errno.EPERM, "cannot isolate session keyring")
