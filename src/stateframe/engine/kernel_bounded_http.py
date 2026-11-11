@@ -73,7 +73,9 @@ class BoundedTransportError(ConnectionError):
 
     def __init__(self, *, error_type: str, http_status: int | None,
                  relay_error: str | None, server_error: str | None = None,
-                 error_detail: str | None = None) -> None:
+                 error_detail: str | None = None,
+                 pre_response_failure: bool = False,
+                 response_bytes_received: bool = False) -> None:
         suffix = f" HTTP {http_status}" if http_status is not None else ""
         detail_suffix = f": {error_detail}" if error_detail else ""
         super().__init__(f"bounded HTTP child failed: {error_type}{suffix}{detail_suffix}")
@@ -83,6 +85,8 @@ class BoundedTransportError(ConnectionError):
         self.error_detail = error_detail
         # Redacted, <= 2 KB provider error text (see safe_server_error).
         self.server_error = server_error
+        self.pre_response_failure = pre_response_failure
+        self.response_bytes_received = response_bytes_received
 
 
 SERVER_ERROR_BYTES = 2048
@@ -706,13 +710,18 @@ def _child_transport_error(diagnostic: bytes, key: str, endpoint: str) -> Except
     if kind == "TimeoutError":
         # The child's own absolute deadline can fire just before the parent's: same typed error
         # either way (kernel_measurement classifies both by error_type "TimeoutError").
-        return TimeoutError("HTTP absolute deadline exceeded")
+        error = TimeoutError("HTTP absolute deadline exceeded")
+        error.pre_response_failure = failure.get("pre_response_failure") is True
+        error.response_bytes_received = failure.get("response_bytes_received") is True
+        return error
     return BoundedTransportError(
         error_type=kind,
         http_status=status if type(status) is int and 100 <= status <= 599 else None,
         relay_error=relay_error,
         server_error=server_error,
         error_detail=error_detail,
+        pre_response_failure=failure.get("pre_response_failure") is True,
+        response_bytes_received=failure.get("response_bytes_received") is True,
     )
 
 
@@ -1062,7 +1071,13 @@ class _AbortiveConnectionMixin:
             if remaining <= 0 or not select.select([active_socket], [], [], remaining)[0]:
                 raise TimeoutError("HTTP absolute deadline exceeded before response")
             arrived_at = time.monotonic()
-            if self._tracker.first_response_at is None:
+            # A reset or EOF also makes select readable. For plain HTTP, peek so
+            # only an actual response byte can authorize the pre-response retry.
+            if not isinstance(active_socket, ssl.SSLSocket):
+                first_byte = active_socket.recv(1, socket.MSG_PEEK)
+            else:
+                first_byte = None  # TLS cannot safely peek; fail closed on ambiguity.
+            if first_byte is None or first_byte:
                 self._tracker.first_response_at = arrived_at
             if arrived_at >= response_deadline:
                 response_deadline = arrived_at + self._tracker.socket_timeout
@@ -1306,6 +1321,18 @@ def _child() -> None:
         if len(attempts) > 1:
             error.transport_attempts = attempts
         error.first_response_at = tracker.first_response_at
+        reason = error.reason if isinstance(error, urllib.error.URLError) else error
+        error.pre_response_failure = (
+            tracker.first_response_at is None
+            and all(attempt["http_status"] is None for attempt in attempts)
+            and isinstance(reason, (ConnectionRefusedError, ConnectionResetError,
+                                    ConnectionAbortedError, TimeoutError,
+                                    http.client.RemoteDisconnected))
+        )
+        error.response_bytes_received = (
+            tracker.first_response_at is not None
+            or any(attempt["http_status"] is not None for attempt in attempts)
+        )
         raise
     finally:
         if not response_complete:
@@ -1361,6 +1388,10 @@ if __name__ == "__main__":
                                      "server_error": server_error
                                      if isinstance(server_error, str) else None,
                                       "first_response_at": getattr(error, "first_response_at", None),
+                                     "pre_response_failure": getattr(
+                                         error, "pre_response_failure", False) is True,
+                                     "response_bytes_received": getattr(
+                                         error, "response_bytes_received", False) is True,
                                       **({"bytes_sent": error.bytes_sent,
                                           "bytes_total": error.bytes_total,
                                           "seconds_stalled": error.seconds_stalled}

@@ -101,7 +101,8 @@ def test_shell_setting_reaches_the_engine_spec(monkeypatch, name):
         monkeypatch.delenv(other, raising=False)
     # Numeric settings have no choice list; any in-range number exercises the path.
     choices = runner.OPT_IN_SWITCHES[name]
-    value = choices[0] if choices else "120"
+    value = choices[0] if choices else (
+        "0.5" if name == "STATEFRAME_TRANSPORT_BACKOFF_S" else "120")
     monkeypatch.setenv(name, value)
     assert runner.resolve_opt_in_switches()[name] == value
 

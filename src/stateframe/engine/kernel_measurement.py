@@ -2486,6 +2486,12 @@ def _transport_retryable(exc: BaseException, *, elapsed_ns: int,
         return True
     if transport_class == "contract":
         return False
+    if (http_status is None
+            and getattr(exc, "response_bytes_received", False) is True):
+        return False
+    if (http_status is None
+            and getattr(exc, "pre_response_failure", False) is True):
+        return True
     if relay_error == "relay_ttft_timeout":
         # The relay has reset the upstream before any SSE data arrived, so this is
         # safe to retry even though the first-token deadline itself was long.
@@ -2510,6 +2516,30 @@ def _transport_retryable(exc: BaseException, *, elapsed_ns: int,
                           "RemoteDisconnected"}
         or isinstance(exc, (ConnectionResetError, ConnectionAbortedError, BrokenPipeError))
     )
+
+
+TRANSPORT_MAX_ATTEMPTS_ENV = "STATEFRAME_TRANSPORT_MAX_ATTEMPTS"
+TRANSPORT_BACKOFF_ENV = "STATEFRAME_TRANSPORT_BACKOFF_S"
+
+
+def _transport_retry_settings(default_attempts: int) -> tuple[int, float | None]:
+    """Validate optional per-run limits without changing the shipped retry policy."""
+    attempts = default_attempts
+    raw_attempts = os.environ.get(TRANSPORT_MAX_ATTEMPTS_ENV)
+    if raw_attempts is not None:
+        if raw_attempts not in {"1", "2", "3", "4", "5"}:
+            raise ValueError(f"{TRANSPORT_MAX_ATTEMPTS_ENV} must be an integer from 1 to 5")
+        attempts = int(raw_attempts)
+    backoff = None
+    raw_backoff = os.environ.get(TRANSPORT_BACKOFF_ENV)
+    if raw_backoff is not None:
+        try:
+            backoff = float(raw_backoff)
+        except ValueError as error:
+            raise ValueError(f"{TRANSPORT_BACKOFF_ENV} must be finite and between 0 and 60") from error
+        if not math.isfinite(backoff) or not 0 <= backoff <= 60:
+            raise ValueError(f"{TRANSPORT_BACKOFF_ENV} must be finite and between 0 and 60")
+    return attempts, backoff
 
 
 def backend_accounting(response: Mapping[str, object], *,
@@ -3196,10 +3226,12 @@ class RequestCapture:
         if transport_attempt_limit is not None and (
                 type(transport_attempt_limit) is not int or transport_attempt_limit < 1):
             raise ValueError("transport_attempt_limit must be a positive integer")
+        configured_attempts, configured_backoff = _transport_retry_settings(
+            POLICY.transport_attempts)
         ordinary_attempt_limit = min(
-            POLICY.transport_attempts,
+            configured_attempts,
             transport_attempt_limit if transport_attempt_limit is not None
-            else POLICY.transport_attempts,
+            else configured_attempts,
         )
         per_request_timeout_active = per_request_timeout_seconds() is not None
         ttft_retry_budget_on = ttft_retry_budget_enabled()
@@ -3929,6 +3961,8 @@ class RequestCapture:
                 if model_format_failure:
                     transport_class = "model_format"
                 liveness_lost = is_provider_liveness_timeout_error(exc)
+                response_bytes_received = getattr(
+                    exc, "response_bytes_received", False) is True
                 submission_state = getattr(exc, "submission_state", "unknown")
                 if not isinstance(submission_state, str) or not submission_state:
                     submission_state = "unknown"
@@ -3943,6 +3977,7 @@ class RequestCapture:
                 response_already_received = self._durable_response_received()
                 request_timed_out = (
                     per_request_timeout_active
+                    and not response_bytes_received
                     and not liveness_lost
                     and error_type != "SendStallTimeout"
                     and relay_error not in {"downstream_disconnect", "upstream_timeout"}
@@ -4010,7 +4045,8 @@ class RequestCapture:
                     _ttft_retry_delay_seconds(int(ttft_retry_index))
                     if ttft_retry and ttft_retry_index is not None
                     else 0.0 if request_timed_out or relay_error == "relay_ttft_timeout"
-                    else POLICY.transport_delay(ordinary_attempt_count)
+                    else (configured_backoff if configured_backoff is not None
+                          else POLICY.transport_delay(ordinary_attempt_count))
                 )
                 retry_deadline = deadline
                 if ttft_retry_deadline is not None:

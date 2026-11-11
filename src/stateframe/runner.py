@@ -524,6 +524,8 @@ OPT_IN_SWITCHES = {
     "STATEFRAME_STABLE_WIRE_HEADROOM": (),  # retained, not-current source window tokens per epoch
     "STATEFRAME_QUEUE_WAIT_MAX_S": (),  # finite positive seconds; a profile may set it too
     "STATEFRAME_SEND_STALL_S": (),  # 10-600 seconds without request-body progress
+    "STATEFRAME_TRANSPORT_MAX_ATTEMPTS": ("1", "2", "3", "4", "5"),
+    "STATEFRAME_TRANSPORT_BACKOFF_S": (),  # finite seconds between 0 and 60
     "STATEFRAME_FL_CHECKPOINT_CAPTURE": ("on", "off"),  # opt-in settled-boundary observer capture
 }
 # Accepted aliases -> the engine's own value (EVICTFIX "off" is sent as "legacy").
@@ -555,14 +557,19 @@ def resolve_opt_in_switches(engine_dir: Path = ENGINE_DIR) -> dict[str, str]:
                 raise RunError(f"{name} is set, but this engine does not support it; unset it to run")
             chosen[name] = str(value)
             continue
-        if name in {"STATEFRAME_QUEUE_WAIT_MAX_S", "STATEFRAME_SEND_STALL_S"}:
+        if name in {"STATEFRAME_QUEUE_WAIT_MAX_S", "STATEFRAME_SEND_STALL_S",
+                    "STATEFRAME_TRANSPORT_BACKOFF_S"}:
             try:
                 seconds = float(raw)
             except ValueError as error:
                 raise RunError(f"{name} must be finite and in its supported range") from error
-            if (not math.isfinite(seconds) or
-                    (not 10 <= seconds <= 600 if name == "STATEFRAME_SEND_STALL_S"
-                     else seconds <= 0)):
+            if name == "STATEFRAME_SEND_STALL_S":
+                valid = 10 <= seconds <= 600
+            elif name == "STATEFRAME_TRANSPORT_BACKOFF_S":
+                valid = 0 <= seconds <= 60
+            else:
+                valid = seconds > 0
+            if not math.isfinite(seconds) or not valid:
                 raise RunError(f"{name} must be finite and in its supported range")
             if name not in engine_switches(engine_dir):
                 raise RunError(f"{name} is set, but this engine does not support it; unset it to run")
