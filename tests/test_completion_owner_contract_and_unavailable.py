@@ -233,6 +233,25 @@ def test_owner_presentation_rebind_refuses_changed_owner_proof(changed_field):
     presentation.validate(previous)
 
 
+@pytest.mark.parametrize("removed_field", [
+    "budget_wire_digest", "evidence_pin_wire_digest",
+])
+def test_owner_presentation_rebind_refuses_removed_owner_proof(removed_field):
+    previous = {
+        "budget_wire_digest": owner._digest("saved limits"),
+        "evidence_pin_wire_digest": owner._digest(["saved pin"]),
+    }
+    presentation = OwnerPresentation(
+        hashlib.sha256(freeze(previous)).hexdigest(), "saved limits", "saved pin",
+    )
+    current = dict(previous)
+    del current[removed_field]
+
+    with pytest.raises(RequestSealError, match="removed from rebound contract"):
+        presentation.rebind(previous, current)
+    presentation.validate(previous)
+
+
 def test_owner_presentation_rebind_refuses_unrelated_previous_contract():
     presentation = OwnerPresentation(
         hashlib.sha256(freeze({"route": "edit"})).hexdigest(), None, None,
