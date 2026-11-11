@@ -87,7 +87,7 @@ def _parity_launchers(tmp_path):
     ("brief_to_report", "Write the report the brief asks for."),
 ])
 def test_switch_off_bytes_match_base_release(tmp_path, baseline_checkout, example, task):
-    # Immediate base (explicit pin, origin/main, nearest remote ancestor, then release).
+    # Immediate base (explicit pin, origin/main, nearest remote ancestor, first parent, then release).
     baseline = baseline_checkout
     assert (baseline / "src/stateframe/engine/ENGINE_SOURCE.json").is_file()
     repo = tmp_path / "repo"

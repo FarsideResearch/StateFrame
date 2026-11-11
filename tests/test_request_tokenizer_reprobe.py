@@ -161,6 +161,7 @@ def _schema_meter_startup_digest() -> str:
         check=True,
         env=environment,
         text=True,
+        timeout=30 * timeout_scale(),
     )
     digest = result.stdout.strip()
     if re.fullmatch(r"[0-9a-f]{64}", digest) is None:
@@ -751,6 +752,34 @@ def _remove_proven_intake_addition(current_wire: bytes, baseline_wire: bytes) ->
     )
 
 
+def _normalize_immediate_base_intake(current_wire: bytes, baseline_wire: bytes) -> bytes:
+    """Keep an existing intake block; prove the addition only for older baselines."""
+    marker = "[NAVBASICS intake orientation]"
+    baseline_task = json.loads(baseline_wire)["messages"][1]["content"]
+    if marker in baseline_task:
+        current_task = json.loads(current_wire)["messages"][1]["content"]
+        assert baseline_task.count(marker) == current_task.count(marker) == 1
+        return current_wire
+    return _remove_proven_intake_addition(current_wire, baseline_wire)
+
+
+def test_intake_normalizer_keeps_existing_base_wire_and_detects_other_changes():
+    task = "Task: example\n\n[NAVBASICS intake orientation]\nschema=navbasics-intake-orientation/1\n"
+    wire = json.dumps({
+        "model": "scripted", "messages": [
+            {"role": "system", "content": "instructions"},
+            {"role": "user", "content": task},
+        ],
+    }).encode("utf-8")
+    changed = wire.replace(b'"model": "scripted"', b'"model": "altered"')
+    assert _normalize_immediate_base_intake(wire, wire) == wire
+    assert _normalize_immediate_base_intake(changed, wire) == changed
+    assert _masked_wire_sha256(changed) != _masked_wire_sha256(wire)
+    missing_intake = wire.replace(b"[NAVBASICS intake orientation]", b"[missing intake orientation]")
+    with pytest.raises(AssertionError):
+        _normalize_immediate_base_intake(missing_intake, wire)
+
+
 @pytest.mark.host_sandbox
 def test_healthy_measurement_preserves_baseline_request_bytes(baseline_checkout):
     body = _body("wire identity")
@@ -776,8 +805,8 @@ def test_healthy_measurement_preserves_baseline_request_bytes(baseline_checkout)
     assert json.dumps(body, ensure_ascii=False, separators=(",", ":")).encode("utf-8") == expected
     assert "tokenize_reprobe_status" not in meter.journal_fields("tokenize")
 
-    # Compare against the immediate base release in this same environment (shared discovery:
-    # SF_TEST_BASELINE_IMMEDIATE, else the merge base / nearest ancestor release), never a pin.
+    # Compare against the immediate base in this same environment (shared discovery:
+    # explicit pin, merge base, nearest remote ancestor, then first parent).
     baseline_tree = baseline_checkout
     with sandbox_visible_temp_dir() as scratch:
         scratch_root = Path(scratch)
@@ -813,24 +842,22 @@ def test_healthy_measurement_preserves_baseline_request_bytes(baseline_checkout)
     changed_body[flip_at] ^= 1
     assert _masked_wire_sha256(bytes(changed_body)) != computed_masked_hashes[0]
 
-    # The current release now includes a repository intake block that the
-    # immediate base silently omitted. Require that insertion and its task
-    # digest to be the only byte differences in requests 1-2.
-    assert computed_masked_hashes != baseline_masked_hashes
+    # An older base may lack the intake block. Prove that sole addition and its
+    # derived digest; if the base already has it, compare the masked wire directly.
     normalized_bodies = tuple(
-        _remove_proven_intake_addition(current, baseline)
+        _normalize_immediate_base_intake(current, baseline)
         for current, baseline in zip(request_bodies, baseline_bodies)
     )
     normalized_hashes = tuple(_masked_wire_sha256(wire) for wire in normalized_bodies)
     assert normalized_hashes == baseline_masked_hashes, (
         f"masked request SHA-256s differ from the immediate base {baseline_tree} "
-        "after the proven intake addition for requests 1-2: "
+        "after baseline-aware intake normalization for requests 1-2: "
         f"current={normalized_hashes!r}; baseline={baseline_masked_hashes!r}; "
         f"whole-request countdown-copy counts={countdown_copy_counts!r}"
     )
 
     changed_current_hashes = (
-        _masked_wire_sha256(_remove_proven_intake_addition(
+        _masked_wire_sha256(_normalize_immediate_base_intake(
             bytes(changed_body), baseline_bodies[0],
         )),
         *normalized_hashes[1:2],

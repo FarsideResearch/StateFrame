@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 
 from tools.pinned_tree import pinned_tree
+from tools.sandbox_temp import timeout_scale
 
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
@@ -26,7 +27,10 @@ def _git_text(*arguments: str) -> str | None:
             capture_output=True,
             text=True,
             check=False,
+            timeout=30 * timeout_scale(),
         )
+    except subprocess.TimeoutExpired:
+        pytest.fail(f"local git baseline lookup timed out: {arguments[0]}", pytrace=False)
     except OSError:
         return None
     return result.stdout.strip() if result.returncode == 0 else None
@@ -65,6 +69,13 @@ def _immediate_base_release() -> str:
     remote_base = _nearest_remote_ancestor(head)
     if remote_base is not None:
         return remote_base
+
+    # A normal clone of a branch-only local repository retains only the checked-out
+    # branch's tip as a remote ref. Its first parent is the same immediate ancestor
+    # that the source repository's remote refs would select for a one-commit branch.
+    parent = _git_text("rev-parse", "--verify", "HEAD^1^{commit}")
+    if parent is not None and parent != head:
+        return parent
 
     history = _git_text("log", "--format=%H%x09%s", "HEAD")
     if history is not None:

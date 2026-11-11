@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import subprocess
+
 import pytest
 
 from tools import immediate_baseline
@@ -41,6 +43,32 @@ def test_release_fallback_remains_when_no_remote_ancestor(monkeypatch: pytest.Mo
         ("log", "--format=%H%x09%s", "HEAD"): f"{HEAD}\twork\n{RELEASE}\tRelease 0.4.39",
     })
     assert immediate_baseline._immediate_base_release() == RELEASE
+
+
+def test_branch_only_clone_uses_parent_before_old_release(monkeypatch: pytest.MonkeyPatch) -> None:
+    _answers(monkeypatch, {
+        ("rev-parse", "--verify", "HEAD^{commit}"): HEAD,
+        ("for-each-ref", "--format=%(objectname)", "refs/remotes"): HEAD,
+        ("rev-parse", "--verify", "HEAD^1^{commit}"): BASE,
+        ("log", "--format=%H%x09%s", "HEAD"): f"{RELEASE}\tRelease 0.4.39",
+    })
+    assert immediate_baseline._immediate_base_release() == BASE
+
+
+def test_local_git_timeout_fails_instead_of_using_stale_release(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SF_TEST_TIMEOUT_SCALE", "4")
+    seen = []
+
+    def expired(*args, **kwargs):
+        seen.append((args, kwargs))
+        raise subprocess.TimeoutExpired(args[0], kwargs["timeout"])
+
+    monkeypatch.setattr(immediate_baseline.subprocess, "run", expired)
+    with pytest.raises(pytest.fail.Exception, match="local git baseline lookup timed out"):
+        immediate_baseline._git_text("rev-parse", "HEAD")
+    assert seen[0][1]["timeout"] == 120
 
 
 def test_origin_main_retains_priority(monkeypatch: pytest.MonkeyPatch) -> None:

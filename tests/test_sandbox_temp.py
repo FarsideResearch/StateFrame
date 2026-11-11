@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import subprocess
 import tempfile
 from pathlib import Path
 
@@ -57,3 +58,17 @@ def test_timeout_scale_rejects_invalid_values(monkeypatch, raw):
 def test_timeout_scale_uses_environment(monkeypatch):
     monkeypatch.setenv("SF_TEST_TIMEOUT_SCALE", "4")
     assert timeout_scale() == 4.0
+
+
+def test_pinned_tree_local_command_has_scaled_timeout(monkeypatch):
+    monkeypatch.setenv("SF_TEST_TIMEOUT_SCALE", "4")
+    seen = []
+
+    def expired(*args, **kwargs):
+        seen.append(kwargs["timeout"])
+        raise subprocess.TimeoutExpired(args[0], kwargs["timeout"])
+
+    monkeypatch.setattr(pinned_tree_module.subprocess, "run", expired)
+    with pytest.raises(pytest.fail.Exception, match="local pinned-tree command timed out"):
+        pinned_tree_module._run_local(["git", "archive"])
+    assert seen == [480]
