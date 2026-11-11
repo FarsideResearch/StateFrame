@@ -29,6 +29,11 @@ from stateframe.profiles import load
 from scripts import checkpoint_restore_probe
 
 
+@pytest.fixture(autouse=True)
+def _legacy_direct_engine_checkpoint(monkeypatch):
+    monkeypatch.setenv("STATEFRAME_CHECKPOINT_LEGACY_DIRECT_ENGINE", "1")
+
+
 def test_checkpoint_defaults_on_and_off_opts_out(monkeypatch):
     monkeypatch.delenv("STATEFRAME_CHECKPOINT", raising=False)
     assert live_checkpoint.mode() == "save"

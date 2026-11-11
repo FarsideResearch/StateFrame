@@ -2,6 +2,12 @@
 
 StateFrame keeps run records needed for inspect and resume in each run directory. The engine's authoritative model exchanges remain under `wire/`; retention never changes those files.
 
+## Installation home
+
+`STATEFRAME_HOME` selects the installation home, defaulting to `~/.stateframe`. Keep it outside the run directory and repository; a home inside either tree, including through a symlink, is refused before the run starts. The installation home may contain run directories. StateFrame pins the home directory and `identity.key` at startup, verifies that pin before checkpointing or publishing exports, and refuses missing or replaced identities with `STATEFRAME_HOME_IDENTITY_CHANGED`. The identity key is excluded from checkpoints, exported patches and request bundles even when no provider API key is configured.
+
+Direct engine integrations without a runner spec must explicitly set `STATEFRAME_CHECKPOINT_LEGACY_DIRECT_ENGINE=1` to use legacy checkpoint fixtures. This setting never relaxes a runner startup pin or disables byte protection for an existing installation key.
+
 ## What a run stores
 
 - `wire/` contains the exact requests and responses exchanged with the model. It is never compacted by finish-time cleanup or `stateframe gc`.

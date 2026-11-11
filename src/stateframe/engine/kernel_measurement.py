@@ -59,6 +59,92 @@ from kernel_launch_identity_cost import (
 
 REQUEST_FINAL_WIRE_PREPARED_SCHEMA = "stateframe-request-final-wire-prepared/1"
 REQUEST_BODY_SCHEMA = "stateframe-request-body/1"
+_PROBE_DESTINATION_SCHEMA = "stateframe-probe-destination/1"
+_PRIMARY_API_KEY_ENV_SETTING = "STATEFRAME_PRIMARY_API_KEY_ENV"
+
+
+def _probe_credential_env_name(value: object) -> str | None:
+    """Accept environment-variable names only; never persist arbitrary setting values."""
+    if not isinstance(value, str) or not value:
+        return None
+    first = value[0]
+    if not ("A" <= first <= "Z" or "a" <= first <= "z" or first == "_"):
+        return None
+    if any(not ("A" <= char <= "Z" or "a" <= char <= "z"
+                or "0" <= char <= "9" or char == "_") for char in value[1:]):
+        return None
+    return value
+
+
+def _record_probe_destination_provenance(capture: object, endpoint: str) -> None:
+    """Record physical destination identity and credential variable name on each send."""
+    provenance: dict[str, object]
+    try:
+        from kernel_frame_routes import Route as FrameRoute
+
+        frame_route = getattr(capture, "frame_route", None)
+        if (_frame_routes.ROUTES_ACTIVE and isinstance(frame_route, FrameRoute)
+                and getattr(capture, "model_router_applied", False) is not True):
+            settings = frame_route.settings
+            credential_env = _probe_credential_env_name(
+                settings.get("api_key_env") if isinstance(settings, Mapping) else None)
+            provenance = {
+                "schema": _PROBE_DESTINATION_SCHEMA,
+                "source": "frame_route",
+                "route_name": getattr(frame_route, "role", None),
+                "endpoint": endpoint,
+                "credential_source": "env" if credential_env else "unavailable",
+                "credential_env": credential_env,
+            }
+        else:
+            decision = getattr(capture, "model_router_decision", None)
+            selected = getattr(decision, "endpoint", None)
+            if getattr(capture, "model_router_applied", False) is True:
+                selected_env = getattr(selected, "api_key_env", None)
+                credential_env = _probe_credential_env_name(selected_env)
+                if selected_env:
+                    credential_source = "env" if credential_env else "unavailable"
+                elif (getattr(selected, "inherit_api_key", False)
+                      or getattr(selected, "url", None) is None):
+                    credential_env = _probe_credential_env_name(
+                        os.environ.get(_PRIMARY_API_KEY_ENV_SETTING))
+                    credential_source = "primary" if credential_env else "unavailable"
+                elif getattr(selected, "allow_empty_key", False):
+                    credential_env = None
+                    credential_source = "empty"
+                else:
+                    credential_env = None
+                    credential_source = "unavailable"
+                provenance = {
+                    "schema": _PROBE_DESTINATION_SCHEMA,
+                    "source": "model_router",
+                    "provider_id": getattr(selected, "name", None),
+                    "endpoint": endpoint,
+                    "credential_source": credential_source,
+                    "credential_env": credential_env,
+                }
+            else:
+                credential_env = _probe_credential_env_name(
+                    os.environ.get(_PRIMARY_API_KEY_ENV_SETTING))
+                provenance = {
+                    "schema": _PROBE_DESTINATION_SCHEMA,
+                    "source": "primary",
+                    "endpoint": endpoint,
+                    "credential_source": "env" if credential_env else "unavailable",
+                    "credential_env": credential_env,
+                }
+    except Exception:  # noqa: BLE001 - metadata failure must not suppress the physical request
+        provenance = {
+            "schema": _PROBE_DESTINATION_SCHEMA,
+            "source": "unavailable",
+            "endpoint": endpoint,
+            "credential_source": "unavailable",
+            "credential_env": None,
+        }
+    try:
+        setattr(capture, "_provider_probe_provenance", provenance)
+    except (AttributeError, TypeError):
+        pass
 
 
 def _journal_safe_fields(payload):
@@ -3979,7 +4065,8 @@ class RequestCapture:
             try:
                 from kernel_bounded_http import queue_wait_max_seconds
                 # Recovery uses the destination actually submitted, including a routed key.
-                # Keep this transient and out of the journal and model request.
+                # Keep its key transient, but retain its credential-free provenance in captures.
+                _record_probe_destination_provenance(self, endpoint)
                 self._provider_probe_destination = (endpoint, key)
                 raw_response = _request_bytes_for_capture(
                     self, wire, endpoint, key, deadline=attempt_deadline,

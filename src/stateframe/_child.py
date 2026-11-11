@@ -85,6 +85,7 @@ def _start_resumed_deadline() -> None:
     resume_sandbox_deadline(float(seconds))
     emit("resume_time_left_started", seconds_left=float(seconds))
 CHECKPOINT_RESTORE_ENV = "STATEFRAME_CHECKPOINT_RESTORE"
+RUNNER_HOME_IDENTITY_ENV = "STATEFRAME_RUNNER_HOME_IDENTITY"
 
 ENGINE_PREFIXES = ("DS_", "KERNEL_", "STATEFRAME_", "REACT_", "PILOT_", "UNIT_PLAN_")
 LOG_PREFIX = "[sf]"
@@ -155,9 +156,21 @@ def install_environment(spec: dict) -> None:
             del os.environ[key]
     os.environ.pop("SF_PROMPT_CACHE_PIN_DEGRADED_REASON", None)
     os.environ.update({str(k): str(v) for k, v in spec["environment"].items()})
+    # Legacy fixture authority is never available to runner-created children.
+    os.environ.pop("STATEFRAME_CHECKPOINT_LEGACY_DIRECT_ENGINE", None)
+    os.environ.pop(RUNNER_HOME_IDENTITY_ENV, None)
     if checkpoint_off:
         os.environ["STATEFRAME_CHECKPOINT"] = "off"
     os.environ.update(routed_keys)
+
+
+def _install_primary_api_key_env(spec: dict) -> None:
+    """Expose the run's primary credential variable name to checkpoint provenance."""
+    name = spec.get("api_key_env")
+    if isinstance(name, str) and name:
+        os.environ["STATEFRAME_PRIMARY_API_KEY_ENV"] = name
+    else:
+        os.environ.pop("STATEFRAME_PRIMARY_API_KEY_ENV", None)
 
 
 def _selected_resume_checkpoint(resume: dict | None) -> dict | None:
@@ -1069,6 +1082,7 @@ def main(argv: list[str]) -> int:
     if len(argv) != 2:
         print("usage: _child.py <run-dir>", file=sys.stderr)
         return 2
+    startup_home_identity = os.environ.pop(RUNNER_HOME_IDENTITY_ENV, None)
     run = Path(argv[1]).resolve(strict=True)
     watch_parent()
     lock = hold_engine_lock(run)  # noqa: F841 - held until exit
@@ -1093,6 +1107,7 @@ def main(argv: list[str]) -> int:
     install_environment(spec)
     # Keep all engine urlopen calls direct, including those outside the primary transport.
     _install_direct_opener()
+    _install_primary_api_key_env(spec)
     if checkpoint is not None:
         os.environ[CHECKPOINT_RESTORE_ENV] = str(checkpoint["dir"])
     install_run_identity(spec.get("run_identity_seed"))  # before any engine import
@@ -1131,6 +1146,18 @@ def main(argv: list[str]) -> int:
     except Exception:  # noqa: BLE001 - repo map AST is optional; the engine falls back to its text scan
         pass
     sys.path.insert(0, str(engine))
+    try:
+        import kernel_checkpoint
+    except ImportError:
+        pass  # An older engine may not ship checkpoint support.
+    else:
+        kernel_checkpoint.configure_runner_home_identity_pin(startup_home_identity)
+        try:
+            # Register the installation key before any model/tool activity, including no-key runs.
+            kernel_checkpoint.verify_stateframe_home_identity(run)
+        except kernel_checkpoint.CheckpointError:
+            emit("engine_error", error="CheckpointError", detail="STATEFRAME_HOME_IDENTITY_CHANGED")
+            return 1
     routed_endpoints = None
     if spec.get("routes") is not None:
         import kernel_frame_routes

@@ -38,6 +38,8 @@ PRIMITIVE_TESTS = {
     "test_hook_driver.py",
     "test_process_signal_authority.py",
     "test_checkpoint_live_probe.py",
+    # Exercises a forked checkpoint writer directly; the only raw signal is timeout cleanup.
+    "test_checkpoint_writer_reason_redaction.py",
     "test_checkpoint_kill_barrier.py",
     "test_exec_session.py",
     "test_exec_supervisor_parent_death.py",  # launches the supervisor primitive directly, not a StateFrame run

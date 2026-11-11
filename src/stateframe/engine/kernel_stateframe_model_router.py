@@ -1622,6 +1622,64 @@ def _output_reservation(body: Mapping[str, object]) -> int:
     return max(reservations, default=0)
 
 
+def _record_probe_destination_provenance(capture: object, *, selected: EndpointConfig,
+                                        effective_endpoint: str,
+                                        incoming_endpoint: str, applied: bool) -> None:
+    """Keep only destination identity and live credential source on a capture."""
+    from kernel_frame_routes import ROUTES_ACTIVE, Route as FrameRoute
+
+    primary_credential_env = os.environ.get("STATEFRAME_PRIMARY_API_KEY_ENV") or None
+    frame_route = getattr(capture, "frame_route", None)
+    if ROUTES_ACTIVE and isinstance(frame_route, FrameRoute):
+        settings = frame_route.settings
+        credential_env = settings.get("api_key_env")
+        provenance = {
+            "schema": "stateframe-probe-destination/1",
+            "source": "frame_route",
+            "route_name": frame_route.role,
+            "endpoint": frame_route.endpoint,
+            "credential_source": (
+                "env" if isinstance(credential_env, str) and credential_env
+                else "unavailable"),
+            "credential_env": (
+                credential_env if isinstance(credential_env, str) and credential_env
+                else None),
+        }
+    elif applied:
+        credential_env = selected.api_key_env
+        if isinstance(credential_env, str) and credential_env:
+            credential_source = "env"
+        elif (effective_endpoint != incoming_endpoint and selected.inherit_api_key):
+            credential_source = "primary" if primary_credential_env else "unavailable"
+            credential_env = primary_credential_env
+        elif effective_endpoint != incoming_endpoint and selected.allow_empty_key:
+            credential_source = "empty"
+            credential_env = None
+        elif effective_endpoint == incoming_endpoint:
+            credential_source = "primary" if primary_credential_env else "unavailable"
+            credential_env = primary_credential_env
+        else:
+            credential_source = "unavailable"
+            credential_env = None
+        provenance = {
+            "schema": "stateframe-probe-destination/1",
+            "source": "model_router",
+            "provider_id": selected.name,
+            "endpoint": effective_endpoint,
+            "credential_source": credential_source,
+            "credential_env": credential_env,
+        }
+    else:
+        provenance = {
+            "schema": "stateframe-probe-destination/1",
+            "source": "primary",
+            "endpoint": effective_endpoint,
+            "credential_source": "env" if primary_credential_env else "unavailable",
+            "credential_env": primary_credential_env,
+        }
+    setattr(capture, "_provider_probe_provenance", provenance)
+
+
 def _request_input_capacity(endpoint: EndpointConfig, body: Mapping[str, object],
                             host_capacity: int | None = None) -> int | None:
     capacity = endpoint.context_tokens
@@ -2313,6 +2371,10 @@ class ModelRouter:
         setattr(capture, "model_router_effective_model_id", actual_model)
         setattr(capture, "model_router_selected_endpoint", selected.name)
         setattr(capture, "model_router_applied", applied)
+        _record_probe_destination_provenance(
+            capture, selected=selected, effective_endpoint=effective_endpoint,
+            incoming_endpoint=endpoint, applied=applied,
+        )
         self._emit(
             CALL_EVENT,
             request_id=getattr(capture, "request_id", None),

@@ -368,22 +368,30 @@ def test_in_place_apply_receipt_is_durable_before_summary_publication(tmp_path, 
     monkeypatch.setattr(Path, "write_text", watch_write_text)
     monkeypatch.setattr(os, "replace", watch_replace)
 
+    monkeypatch.setenv("STATEFRAME_HOME", str(tmp_path / "stateframe-home"))
     options = runner.RunOptions(
-        repo=tmp_path,
+        repo=tmp_path / "repo",
+        run_dir=run_dir,
         task="exercise in-place receipt ordering",
         endpoint=SimpleNamespace(public=lambda: {"model": "test"}),
         runner_kind="generic",
         in_place=True,
         profile=runner.profiles.DEFAULT,
     )
+    identity = runner._capture_stateframe_home_identity(options)
     work = workcopy.WorkCopy(original=tmp_path / "repo", copy=tmp_path / "copy",
                              baseline={"src.py": "before"})
     spec = {
+        "repo": str(options.repo),
+        "environment": {"STATEFRAME_HOME": str(tmp_path / "stateframe-home")},
+        "stateframe_home_identity": identity,
         "public_row": {"entry": {"path": "src.py"}, "files": ["src.py"]},
         "engine_source": {},
         "runner_kind": "generic",
         "protect_tests": "all",
     }
+
+    (run_dir / "spec.json").write_text(json.dumps(spec), encoding="utf-8")
 
     monkeypatch.setattr(runner, "_remaining", lambda _options: None)
     monkeypatch.setattr(runner, "drive", lambda *_args, **_kwargs: 0)
@@ -394,7 +402,12 @@ def test_in_place_apply_receipt_is_durable_before_summary_publication(tmp_path, 
     monkeypatch.setattr(runner, "_dropped_existing_candidate_paths", lambda *_args: [])
     monkeypatch.setattr(runner.workcopy, "apply_files", lambda *_args, **_kwargs: ["src.py"])
     monkeypatch.setattr(runner, "candidate_digest", lambda _root: "sha256:candidate")
-    monkeypatch.setattr(runner.workcopy, "unified_diff", lambda _work: "diff --git a/src.py b/src.py\n")
+    def safe_diff(_work, *, scan_bytes):
+        assert callable(scan_bytes), "final.diff must retain the source-byte guard"
+        scan_bytes(b"safe fixture content")
+        return "diff --git a/src.py b/src.py\n"
+
+    monkeypatch.setattr(runner.workcopy, "unified_diff", safe_diff)
     monkeypatch.setattr(runner, "summarize", lambda *_args: {
         "cached_share_display": "cache summary",
         "engine_terminal": {"result": "SUBMITTED"},
@@ -415,3 +428,4 @@ def test_in_place_apply_receipt_is_durable_before_summary_publication(tmp_path, 
 
     assert summary_publications, "summary was not durably published"
     assert_receipt_precedes_summary()
+    assert (run_dir / "final.diff").read_bytes() == b"diff --git a/src.py b/src.py\n"

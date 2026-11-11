@@ -27,6 +27,9 @@ from .request_records import PACK_NAME as REQUEST_PACK_NAME
 from .request_records import request_pack_size, seal_request_records
 
 
+_STARTUP_HOME_IDENTITY_UNSET = object()
+
+
 ARTIFACTS = ("env", "checkpoints", "measurement_journals", "blobs", "requests")
 _DIST_NAME = re.compile(r"[-_.]+")
 _BLOB_HEADER = struct.Struct(">4sI32s")
@@ -367,9 +370,15 @@ def seal_measurements(run_dir: str | os.PathLike[str], *, printer=print) -> None
                     f"{type(error).__name__}: {error}")
 
 
-def seal_requests(run_dir: str | os.PathLike[str], *, printer=print) -> None:
+def seal_requests(
+        run_dir: str | os.PathLike[str], *, printer=print,
+        startup_home_identity: object = _STARTUP_HOME_IDENTITY_UNSET,
+) -> None:
     try:
-        seal_request_records(run_dir)
+        if startup_home_identity is _STARTUP_HOME_IDENTITY_UNSET:
+            seal_request_records(run_dir)
+        else:
+            seal_request_records(run_dir, startup_home_identity=startup_home_identity)
     except Exception as error:
         printer(f"warning: preflight requests were not sealed: {type(error).__name__}: {error}")
 

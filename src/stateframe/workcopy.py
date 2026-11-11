@@ -17,6 +17,7 @@ import stat
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Callable
 
 # Never copied: VCS metadata, environments, caches, build output.
 IGNORE_DIRS = {".git", ".hg", ".svn", "__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache",
@@ -141,12 +142,23 @@ def changed_files(work: WorkCopy) -> dict[str, str]:
     return dict(sorted(changes.items()))
 
 
-def unified_diff(work: WorkCopy) -> str:
-    """Diff of the copy against the original repository's bytes at run start."""
+def unified_diff(work: WorkCopy, *, scan_bytes: Callable[[bytes], object] | None = None) -> str:
+    """Diff of the copy against the original repository's bytes at run start.
+
+    When `scan_bytes` is given, each changed path and both sides' exact bytes are scanned
+    before any formatting happens.
+    """
     chunks = []
     for rel, kind in changed_files(work).items():
-        before = _read_original(work, rel) if kind != "added" else ""
-        after = (work.copy / rel).read_text(encoding="utf-8", errors="replace") if kind != "deleted" else ""
+        if scan_bytes is not None:
+            scan_bytes(os.fsencode(rel))
+        before_bytes = _read_original_bytes(work, rel) if kind != "added" else b""
+        after_bytes = (work.copy / rel).read_bytes() if kind != "deleted" else b""
+        if scan_bytes is not None:
+            scan_bytes(before_bytes)
+            scan_bytes(after_bytes)
+        before = before_bytes.decode("utf-8", errors="replace")
+        after = after_bytes.decode("utf-8", errors="replace")
         chunks.extend(difflib.unified_diff(
             before.splitlines(keepends=True), after.splitlines(keepends=True),
             fromfile=f"a/{rel}" if kind != "added" else "/dev/null",
@@ -156,14 +168,19 @@ def unified_diff(work: WorkCopy) -> str:
     return "".join(chunks)
 
 
-def _read_original(work: WorkCopy, rel: str) -> str:
-    """Baseline text, from the immutable start snapshot when there is one (else the original,
+def _read_original_bytes(work: WorkCopy, rel: str) -> bytes:
+    """Baseline bytes, from the immutable start snapshot when there is one (else the original,
     which must still hash to its baseline)."""
     path = (work.snapshot if work.snapshot is not None else work.original) / rel
     data = path.read_bytes() if path.is_file() else b""
     if _sha(data) != work.baseline.get(rel):
         raise WorkCopyError(f"original {rel} changed during the run; diff would be wrong")
-    return data.decode("utf-8", errors="replace")
+    return data
+
+
+def _read_original(work: WorkCopy, rel: str) -> str:
+    """Baseline text of `_read_original_bytes`."""
+    return _read_original_bytes(work, rel).decode("utf-8", errors="replace")
 
 
 def apply_files(work: WorkCopy, files: dict[str, bytes | None], *, declared: set[str]) -> list[str]:

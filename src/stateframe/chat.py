@@ -160,7 +160,8 @@ class Session:
             record.result = str(summary.get("engine_result"))
             record.tests_passed = record.check_outcome == "pass"
             record.files = list(summary.get("files_changed") or [])
-            record.diff = (run_dir / "final.diff").read_text()
+            if not summary.get("final_diff_error"):
+                record.diff = (run_dir / "final.diff").read_text()
             if record.runtime_outcome == "hook_containment":
                 self._stopped = True
             if (record.files and succeeded(summary)

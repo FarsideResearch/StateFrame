@@ -169,6 +169,28 @@ def test_finish_run_storage_calls_all_sealers_and_cleanup_is_best_effort(tmp_pat
     assert capsys.readouterr().out.count("warning:") >= 4
 
 
+def test_finish_run_storage_passes_startup_identity_to_request_sealer(tmp_path, monkeypatch):
+    from stateframe import storage_gc
+
+    identity = {
+        "realpath": str(tmp_path / "stateframe-home"),
+        "home_st_dev": 1,
+        "home_st_ino": 2,
+        "key_st_dev": 3,
+        "key_st_ino": 4,
+    }
+    received = {}
+    monkeypatch.setattr(resume, "run_finished_for_good", lambda _run: True)
+    monkeypatch.setattr(runner, "clean_finished_checkpoints", lambda *_args, **_kwargs: 0)
+    monkeypatch.setattr(runner, "clean_finished_run_env", lambda *_args, **_kwargs: 0)
+    monkeypatch.setattr(storage_gc, "seal_measurements", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(storage_gc, "seal_requests", lambda *_args, **kwargs: received.update(kwargs))
+
+    runner.finish_run_storage(tmp_path, startup_home_identity=identity)
+
+    assert received["startup_home_identity"] == identity
+
+
 def test_checkpoint_cleanup_failure_is_reported_and_does_not_change_result(tmp_path, monkeypatch, capsys):
     run = tmp_path / "run"
     checkpoint = run / "checkpoints/0001/state.pkl"

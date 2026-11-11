@@ -18,6 +18,11 @@ from stateframe.engine import kernel_checkpoint as checkpoint
 SIGNING_KEY = b"checkpoint-codec-test-key-0123456789abcdef"
 
 
+@pytest.fixture(autouse=True)
+def _legacy_direct_engine_checkpoint(monkeypatch):
+    monkeypatch.setenv("STATEFRAME_CHECKPOINT_LEGACY_DIRECT_ENGINE", "1")
+
+
 def _signed_meta(raw: bytes, stored: bytes, *, codec="zlib1", state_bytes: int | None = None) -> dict:
     meta = {
         "schema": checkpoint.SCHEMA,

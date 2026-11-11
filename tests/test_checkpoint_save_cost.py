@@ -131,7 +131,8 @@ TURNS = 6
 
 
 def _child(action: str, run: Path, spec: str = "none") -> subprocess.CompletedProcess:
-    env = dict(os.environ, PYTHONPATH=os.pathsep.join(
+    # The child saves outside a runner, so it has no spec.json identity record to verify.
+    env = dict(os.environ, STATEFRAME_CHECKPOINT_LEGACY_DIRECT_ENGINE="1", PYTHONPATH=os.pathsep.join(
         [str(Path(checkpoint.__file__).parents[2]), str(CHILD.parent.parent)]))
     return subprocess.run([sys.executable, str(CHILD), action, str(run), str(TURNS), spec],
                           env=env, capture_output=True, text=True, timeout=120)
@@ -198,3 +199,42 @@ def test_object_link_limit_falls_back_to_a_private_copy(tmp_path, monkeypatch):
     assert refused, "the object-store link path was not exercised"
     assert (second / "d0" / "f0.py").read_bytes() == b"changed\n"
     assert (second / "d0" / "f0.py").stat().st_mtime_ns == target.stat().st_mtime_ns
+
+
+@posix_only
+def test_copy_tree_applies_home_exclusions_and_still_dedups_through_object_store(tmp_path):
+    run, home = tmp_path / "env", tmp_path / "env" / "home"
+    _tree(run, directories=1, files=2)
+    home.mkdir()
+    (home / "identity.key").write_bytes(b"installation-key-material")
+    (run / "link").symlink_to(home / "identity.key")
+    objects = tmp_path / "objects"
+    first, second = tmp_path / "first", tmp_path / "second"
+    checkpoint._copy_tree(run, first, None, set(), objects=objects, home=home,
+                          home_subtree=home, excluded=set())
+    checkpoint._copy_tree(run, second, first, set(), objects=objects, home=home,
+                          home_subtree=home, excluded=set())
+    for snapshot in (first, second):
+        assert not (snapshot / "home").exists()  # boundary filter wins over the storage path
+        assert not (snapshot / "link").exists() and not (snapshot / "link").is_symlink()
+        assert (snapshot / "d0" / "f0.py").read_bytes() == b"0-0\n" * 50
+
+
+@posix_only
+def test_copy_tree_unchanged_file_is_rescanned_only_after_a_new_secret(tmp_path, monkeypatch):
+    monkeypatch.setattr(checkpoint, "_SECRETS", [])
+    monkeypatch.setattr(checkpoint, "_SECRET_GENERATION", 0)
+    monkeypatch.setattr(checkpoint, "_VERIFIED_POOL_IDENTITIES", set())
+    run = tmp_path / "env"
+    _tree(run, directories=1, files=2)
+    first, second, third = tmp_path / "first", tmp_path / "second", tmp_path / "third"
+    checkpoint._copy_tree(run, first, None, set())
+    scans = []
+    real = checkpoint._check_snapshot_file
+    monkeypatch.setattr(checkpoint, "_check_snapshot_file", lambda *a, **k: scans.append(a[0]) or real(*a, **k))
+    checkpoint._copy_tree(run, second, first, set())
+    assert scans == []  # captured clean once under this secret set: linked without another read
+    checkpoint.register_secret(b"0-1\n" * 3)  # a secret that appears inside f1.py
+    with pytest.raises(checkpoint.CheckpointError):
+        checkpoint._copy_tree(run, third, second, set())
+    assert scans  # the generation bump invalidated the memo, so the file was read again

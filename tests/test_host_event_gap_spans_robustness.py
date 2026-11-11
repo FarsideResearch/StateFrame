@@ -12,6 +12,11 @@ import kernel_measurement
 from kernel_continuation_journal import ContinuationJournal
 
 
+@pytest.fixture(autouse=True)
+def _legacy_direct_engine_checkpoint(monkeypatch):
+    monkeypatch.setenv("STATEFRAME_CHECKPOINT_LEGACY_DIRECT_ENGINE", "1")
+
+
 _GAP_SPAN = "vacuity_verdict_to_tokenlab_ledger"
 _BEFORE_NS = 11
 _EXECUTION_NS = 100

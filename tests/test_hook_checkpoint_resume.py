@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import hashlib
+import io
 import json
+import lzma
 import os
 import re
 import signal
@@ -10,7 +13,9 @@ import subprocess
 import sys
 import threading
 import time
+import tarfile
 import types
+import zlib
 from collections import Counter
 from pathlib import Path
 from types import SimpleNamespace
@@ -24,6 +29,9 @@ from kernel_hook_wiring import HookWiring
 from kernel_hooks import create_bundle, load_hook_files
 from kernel_checkpoint import SKIP_RUN_ENTRIES, _restore_files
 from stateframe import _child, resume
+from stateframe.request_records import PACK_NAME as REQUEST_PACK_NAME
+from stateframe.request_records import list_request_records, seal_request_records
+from stateframe.engine import kernel_journal_store
 from stateframe.scripted_endpoint import Script, ScriptStepUnavailable, serve
 from fixtures.process_signals import (record_identity, signal_run_owned, signal_run_verified,
                                       wait_for_checkpoint_saved)
@@ -31,6 +39,11 @@ from engine_run import run_monitored, start_monitored
 
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+@pytest.fixture(autouse=True)
+def _legacy_direct_engine_checkpoint(monkeypatch):
+    monkeypatch.setenv("STATEFRAME_CHECKPOINT_LEGACY_DIRECT_ENGINE", "1")
 
 
 def _rows(path: Path) -> list[dict]:
@@ -484,5 +497,256 @@ def test_checkpoint_resume_matches_uninterrupted_control(
             signal_run_owned(run, process, signal.SIGKILL, deadline=time.monotonic(),
                              what="hook resume cleanup", require_checkpoint_saved=False)
             process.communicate(timeout=scaled(10))
+        server.shutdown()
+        server.server_close()
+
+
+@pytest.mark.host_sandbox
+def test_keyed_run_saves_secret_free_checkpoints_and_resumes_from_latest(
+        tmp_path: Path) -> None:
+    key = "CKPTW_LOCAL_DUMMY_KEY_123456789"
+    repo = _repo(tmp_path)
+    launcher = _launcher(tmp_path)
+    home = tmp_path / "isolated-home"
+    state_home = home / ".stateframe"
+    state_home.mkdir(parents=True)
+    environment = {**os.environ,
+                   "PYTHONPATH": os.pathsep.join((
+                       str(ROOT / "src"), str(ROOT / "src/stateframe/engine"))),
+                   "HOME": str(home),
+                   "LAB_KEY": key}
+    environment["STATEFRAME_HOME"] = str(state_home)
+    seed = subprocess.run(
+        [sys.executable, "-c", (
+            "from stateframe.engine.kernel_request_auth_identity import _installation_secret; "
+            "_installation_secret()"
+        )],
+        env=environment, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    if seed.returncode:
+        pytest.fail("could not initialize the isolated identity key")
+    steps = _steps("no_hooks")
+    steps.insert(-1, {"tool": "git_commit", "required": True,
+                      "arguments": {"message": "Record the value correction"}})
+    document = {
+        "model": "scripted",
+        "steps": steps,
+        "tokenize": {"mode": "ok"},
+        "chat": {"require_key": key},
+    }
+    script = InterruptAfterActions(document, 2)
+    server = serve(script)
+    run = tmp_path / "keyed-run"
+    process = None
+
+    def output_without_key(result) -> str:
+        return (result.stdout + result.stderr).replace(key, "[redacted]")
+
+    def secret_marker_rows() -> tuple[tuple[str, bytes], ...]:
+        key_path = state_home / "identity.key"
+        if not key_path.is_file():
+            pytest.fail("the keyed run did not create its isolated identity.key")
+        identity_secret = key_path.read_bytes()
+        if len(identity_secret) != 32:
+            pytest.fail(f"identity.key length was {len(identity_secret)}, expected 32")
+        identity_hash = hashlib.sha256(identity_secret).hexdigest()
+        return (
+            ("raw identity bytes", identity_secret),
+            ("identity hex", identity_secret.hex().encode("ascii")),
+            ("identity sha256", identity_hash.encode("ascii")),
+        )
+
+    def artifact_payloads(path: Path) -> list[bytes]:
+        raw = path.read_bytes()
+        payloads = [raw]
+        for decoder in (zlib.decompress, lzma.decompress):
+            try:
+                decoded = decoder(raw)
+            except (OSError, EOFError, lzma.LZMAError, zlib.error):
+                continue
+            if decoded != raw:
+                payloads.append(decoded)
+        for candidate in tuple(payloads):
+            try:
+                with tarfile.open(fileobj=io.BytesIO(candidate), mode="r:*") as archive:
+                    for member in archive:
+                        if member.isfile():
+                            source = archive.extractfile(member)
+                            if source is not None:
+                                with source:
+                                    payloads.append(source.read())
+            except (OSError, EOFError, tarfile.TarError):
+                pass
+        if path.name == "pack-0001.sfpk":
+            records, _valid_end = kernel_journal_store._scan_blob_pack(path)
+            for blob_hash in records:
+                packed = kernel_journal_store._read_packed_blob(path.parent, blob_hash, records)
+                payloads.append(packed)
+                try:
+                    payloads.append(zlib.decompress(packed))
+                except zlib.error:
+                    pass
+        return payloads
+
+    def assert_artifact_tree_has_no_identity_markers(
+            roots: tuple[Path, ...], marker_rows: tuple[tuple[str, bytes], ...],
+            identity_sha256_prefix: str) -> None:
+        for root in roots:
+            if root.is_file() or root.is_symlink():
+                paths = [root]
+            elif root.is_dir():
+                paths = root.rglob("*")
+            else:
+                continue
+            for path in paths:
+                if not path.is_file():
+                    continue
+                for payload in artifact_payloads(path):
+                    for marker_name, marker in marker_rows:
+                        if marker in payload:
+                            pytest.fail(
+                                f"{marker_name} found in {path.name}; identity key length=32, "
+                                f"sha256={identity_sha256_prefix}"
+                            )
+
+    def assert_checkpoint_bytes_are_secret_free() -> None:
+        checkpoint_root = run / "checkpoints"
+        pickle_files = [path for path in checkpoint_root.rglob("*")
+                        if path.is_file() and (
+                            path.name == kernel_checkpoint.STATE_FILE
+                            or path.name.endswith(".pkl")
+                            or path.name.endswith(kernel_checkpoint.CHUNK_SUFFIX))]
+        assert pickle_files, "no pickled checkpoint files were found"
+        request_key = key.encode()
+        request_key_sha256 = hashlib.sha256(request_key).hexdigest()[:12]
+        for path in pickle_files:
+            data = path.read_bytes()
+            if request_key in data:
+                pytest.fail(
+                    f"registered request key found in {path.relative_to(run)} "
+                    f"(length={len(request_key)}, sha256={request_key_sha256})"
+                )
+            if path.name.endswith(kernel_checkpoint.CHUNK_SUFFIX):
+                if request_key in zlib.decompress(data):
+                    pytest.fail(
+                        f"registered request key found in decoded {path.relative_to(run)} "
+                        f"(length={len(request_key)}, sha256={request_key_sha256})"
+                    )
+
+    try:
+        profile = json.loads((ROOT / "src/stateframe/profiles/r2hc3.json").read_text())
+        profile["switches"]["STATEFRAME_CHECKPOINT_EVERY"] = "1"
+        profile["switches"]["STATEFRAME_GIT_COMMIT"] = "on"
+        profile_path = tmp_path / "keyed-checkpoint-profile.json"
+        profile_path.write_text(json.dumps(profile))
+        command = [
+            sys.executable, str(launcher), "run", "--repo", str(repo),
+            "--task", "Inspect and update VALUE.", "--endpoint",
+            f"http://127.0.0.1:{server.server_port}/v1", "--model", "scripted",
+            "--run-dir", str(run), "--test-python", sys.executable,
+            "--api-key-env", "LAB_KEY", "--max-turns", "8", "--shell", "off",
+            "--keep-checkpoints", "--profile", str(profile_path), "--quiet",
+        ]
+        process = start_monitored(
+            command, env=environment, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, run_dir=run, expected_seconds=600,
+            step="keyed checkpoint resume", watch_paths=(run / "checkpoints",),
+        )
+        while not script.waiting.wait(0.2):
+            if process.poll() is not None:
+                result = process.communicate()
+                pytest.fail("keyed run stopped before the interruption point: "
+                            + output_without_key(SimpleNamespace(stdout=result[0], stderr=result[1])))
+
+        events_path = run / "checkpoints/events.jsonl"
+        deadline = time.monotonic() + 90
+        saved_steps = set()
+        while time.monotonic() < deadline:
+            events = _rows(events_path) if events_path.exists() else []
+            saved_steps = {row.get("step") for row in events
+                           if row.get("event") == "checkpoint_saved"}
+            if {1, 2} <= saved_steps:
+                break
+            failures = [row for row in events if row.get("event") == "checkpoint_failed"]
+            if failures:
+                pytest.fail("keyed checkpoint writer failed: "
+                            + str(failures[-1].get("error", "unknown failure")).replace(
+                                key, "[redacted]"))
+            if process.poll() is not None:
+                result = process.communicate()
+                pytest.fail("keyed run exited before saving checkpoints: "
+                            + output_without_key(SimpleNamespace(stdout=result[0], stderr=result[1])))
+            time.sleep(0.05)
+        assert {1, 2} <= saved_steps, "checkpoints at steps 1 and 2 were not both saved"
+        assert script.chat_authorization_present and all(script.chat_authorized)
+        latest_name = (run / "checkpoints/LATEST").read_text().strip()
+        latest_meta = json.loads(
+            (run / "checkpoints" / latest_name / kernel_checkpoint.META_FILE).read_text())
+        assert latest_meta["step"] == 2
+        assert_checkpoint_bytes_are_secret_free()
+
+        child_pids = subprocess.check_output(
+            ["pgrep", "-P", str(process.pid)], text=True,
+        ).split()
+        assert len(child_pids) == 1, child_pids
+        child = int(child_pids[0])
+        identity = record_identity(child, launched_after=0, command_fragment="_child.py")
+        signal_run_verified(
+            run, child, identity, signal.SIGKILL,
+            deadline=deadline, what="keyed checkpoint resume",
+        )
+        script.release.set()
+        assert script.interrupted.wait(10)
+        process.communicate(timeout=90)
+
+        resumed = run_monitored(
+            [sys.executable, "-m", "stateframe", "resume", str(run),
+             "--endpoint", f"http://127.0.0.1:{server.server_port}/v1",
+             "--api-key-env", "LAB_KEY", "--keep-checkpoints"],
+            env=environment, capture_output=True, text=True, expected_seconds=240,
+        )
+        if resumed.returncode != 0:
+            pytest.fail(output_without_key(resumed))
+        script.assert_consumed()
+
+        spec = json.loads((run / "spec.json").read_text())
+        restored = [row for row in _rows(events_path)
+                    if row.get("event") == "checkpoint_restored"]
+        assert restored and restored[-1].get("step") == latest_meta["step"]
+        assert Path(spec["resume"]["checkpoint"]["dir"]).resolve() == (
+            run / "checkpoints" / latest_name).resolve()
+        assert not any(row.get("event") in {"checkpoint_failed", "checkpoint_disabled"}
+                       for row in _rows(events_path))
+        assert script.chat_authorized and all(script.chat_authorized)
+        assert_checkpoint_bytes_are_secret_free()
+        request_key = key.encode()
+        request_key_sha256 = hashlib.sha256(request_key).hexdigest()[:12]
+        if request_key in (run / "engine.log").read_bytes():
+            pytest.fail(
+                f"registered request key found in engine.log "
+                f"(length={len(request_key)}, sha256={request_key_sha256})"
+            )
+
+        marker_rows = secret_marker_rows()
+        identity_sha256_prefix = hashlib.sha256(marker_rows[0][1]).hexdigest()[:12]
+        seal_request_records(run)
+        if list_request_records(run) and not (run / REQUEST_PACK_NAME).is_file():
+            pytest.fail("run request bundle was not published")
+        exported_patches = sorted((run / "commits").rglob("*.patch"))
+        if not exported_patches:
+            pytest.fail("run did not export its git_commit patch series")
+        if not (run / "final.diff").is_file():
+            pytest.fail("run did not export final.diff")
+        assert_artifact_tree_has_no_identity_markers(
+            (run,), marker_rows, identity_sha256_prefix,
+        )
+    finally:
+        if process is not None and process.poll() is None:
+            signal_run_owned(
+                run, process, signal.SIGKILL, deadline=time.monotonic(),
+                what="keyed checkpoint test cleanup", require_checkpoint_saved=False,
+            )
+            process.communicate(timeout=10)
+        script.release.set()
         server.shutdown()
         server.server_close()

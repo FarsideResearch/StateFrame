@@ -406,14 +406,18 @@ def _mutation_platform_refusal(args: argparse.Namespace) -> str | None:
 
 
 def _print_summary(summary: dict) -> None:
-    diff = Path(summary["run_dir"], "final.diff").read_text()
+    diff_error = summary.get("final_diff_error")
+    diff = None if diff_error else Path(summary["run_dir"], "final.diff").read_text()
     print()
     if summary.get("runtime_outcome") == "hook_containment" and summary.get("applied_in_place"):
         title = "=== final diff (applied before HOOK_CONTAINMENT) ==="
     else:
         title = "=== final diff ===" if summary.get("succeeded") else "=== partial diff (not promoted) ==="
     print(title)
-    print(diff if diff else "(no changes)")
+    if diff_error:
+        print(f"final.diff export refused: {diff_error}")
+    else:
+        print(diff if diff else "(no changes)")
     before, after = summary["tests_before"], summary["tests_after"]
     print("=== tests ===" if summary.get("check_source") == "tests" else "=== checks ===")
     print(f"before: {'PASS' if before['passed'] else 'FAIL' if before['passed'] is False else 'NOT RUN'}  after: "

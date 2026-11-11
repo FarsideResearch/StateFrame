@@ -37,12 +37,18 @@ import re
 import shutil
 import stat
 import sys
+import tempfile
 import threading
 import time
 import types
 import weakref
 import zlib
 from pathlib import Path
+
+if __package__:
+    from .kernel_secret_scan import SecretScanner
+else:
+    from kernel_secret_scan import SecretScanner
 
 SCHEMA = "stateframe-engine-checkpoint/1"
 MODE_ENV = "STATEFRAME_CHECKPOINT"
@@ -65,9 +71,39 @@ SKIP_RUN_ENTRIES = frozenset({"checkpoints", "attempts", "parent", ".engine.lock
                               "engine.log", "checkpoint-refused.json", "tool-tape.jsonl",
                               "hook-tape.jsonl", "hook-bundle", "hooks", "hook-scratch"})
 
+# Keep writer diagnostics independent of the mutable errno.errorcode table and exception text.
+_OS_ERROR_NAMES = types.MappingProxyType({
+    1: "EPERM",
+    2: "ENOENT",
+    5: "EIO",
+    13: "EACCES",
+    28: "ENOSPC",
+    30: "EROFS",
+})
+_WRITER_FAILURE_REASONS = frozenset({
+    "checkpoint refused: registered secret in checkpoint",
+    "checkpoint refused: registered secret in state",
+    "STATEFRAME_HOME_IDENTITY_CHANGED",
+    "checkpoint refused",
+    "checkpoint write failed: os error",
+    "checkpoint write failed: EPERM",
+    "checkpoint write failed: ENOENT",
+    "checkpoint write failed: EIO",
+    "checkpoint write failed: EACCES",
+    "checkpoint write failed: ENOSPC",
+    "checkpoint write failed: EROFS",
+    "checkpoint write failed: memory error",
+    "checkpoint serialization failed",
+    "unexpected writer error",
+})
+
 
 class CheckpointError(RuntimeError):
     """A snapshot could not be taken or restored faithfully."""
+
+
+class _StateFileSecretError(CheckpointError):
+    """Marker for secret bytes rejected while scanning captured files."""
 
 
 class RestoreRefused(BaseException):
@@ -233,6 +269,18 @@ DROP_GLOBALS = {
         "fallback binding salt is process-local and regenerated after restore",
     ("kernel_request_auth_identity", "_AUTH_BINDING_SECRET_LOCK"):
         "process-local lock protecting auth binding secret cache",
+    ("engine.kernel_request_auth_identity", "_AUTH_BINDING_SECRET_CACHE"):
+        "installation keys are reloaded from StateFrame home after restore",
+    ("engine.kernel_request_auth_identity", "_AUTH_BINDING_FALLBACK_SECRET"):
+        "fallback binding salt is process-local and regenerated after restore",
+    ("engine.kernel_request_auth_identity", "_AUTH_BINDING_SECRET_LOCK"):
+        "process-local lock protecting auth binding secret cache",
+    ("stateframe.engine.kernel_request_auth_identity", "_AUTH_BINDING_SECRET_CACHE"):
+        "installation keys are reloaded from StateFrame home after restore",
+    ("stateframe.engine.kernel_request_auth_identity", "_AUTH_BINDING_FALLBACK_SECRET"):
+        "fallback binding salt is process-local and regenerated after restore",
+    ("stateframe.engine.kernel_request_auth_identity", "_AUTH_BINDING_SECRET_LOCK"):
+        "process-local lock protecting auth binding secret cache",
 }
 # Host configuration the product child sets on the engine before work() runs. The new process's
 # host sets them again (possibly to new values: a raised --max-turns), and KEY is a credential that
@@ -267,9 +315,22 @@ DROP_ATTRS = {
         "_http_ssl_context", "_http_ssl_context_lock",
         "_count_key_last",
     }),
+    # Provider recovery reads the current host API/KEY when this transient destination is
+    # absent, so a restored capture never needs the physical request's credential.
+    ("kernel_measurement", "RequestCapture"): frozenset({"_provider_probe_destination"}),
 }
 _OWN_MODULE = __name__
 _SECRETS: list[bytes] = []
+_SECRET_CHECKPOINT_ERROR = "a registered secret would be written into the checkpoint"
+_SECRET_GENERATION = 0
+_VERIFIED_POOL_IDENTITIES: set[tuple[int, int, int, int, int, int, str]] = set()
+LEGACY_DIRECT_ENGINE_ENV = "STATEFRAME_CHECKPOINT_LEGACY_DIRECT_ENGINE"
+_HOME_IDENTITY_UNSET = object()
+_RUNNER_HOME_IDENTITY_CONFIGURED = False
+_RUNNER_HOME_IDENTITY_PIN: dict[str, int | str] | None = None
+_HOME_IDENTITY_FIELDS = frozenset({
+    "realpath", "home_st_dev", "home_st_ino", "key_st_dev", "key_st_ino", "key_st_ctime_ns",
+})
 
 
 _SIGNING_KEY: list[bytes] = []
@@ -282,8 +343,7 @@ def register_signing_key(key: bytes) -> None:
     if not isinstance(key, bytes) or len(key) < 32:
         raise ValueError("checkpoint signing key must be at least 32 bytes")
     _SIGNING_KEY[:] = [key]
-    _SECRETS.append(key)
-    _SECRETS.append(key.hex().encode())
+    register_secret(key)
 
 
 def _signature(meta: dict, state_sha256: str) -> str:
@@ -364,15 +424,278 @@ def _owned_private(path: Path) -> bool:
             and not info.st_mode & (stat_module.S_IWGRP | stat_module.S_IWOTH))
 
 
-def register_secret(value: str) -> None:
-    """A value (an API key) that must never appear in a checkpoint; a save that contains it fails."""
+def register_secret(value: str | bytes) -> None:
+    """Register text credentials or raw installation bytes with the checkpoint byte guard."""
+    global _SECRET_GENERATION
     if isinstance(value, str) and len(value) >= 8:
-        _SECRETS.append(value.encode("utf-8"))
+        candidates = (value.encode("utf-8"),)
+    elif isinstance(value, bytes) and len(value) >= 8:
+        candidates = (value, value.hex().encode("ascii"))
+    else:
+        return
+    added = False
+    for candidate in candidates:
+        if candidate not in _SECRETS:
+            _SECRETS.append(candidate)
+            added = True
+    if added:
+        _SECRET_GENERATION += 1
+        _VERIFIED_POOL_IDENTITIES.clear()
+
+
+# Structural bundle traversal keeps its own parse budget. The lexical byte
+# scanner has no encoded-string size limit and carries state across every read.
+_SECRET_JSON_MAX_DEPTH = 8
+_SECRET_JSON_MAX_BYTES = 1 << 20
+
+
+def _check_registered_secrets(
+        data: bytes, tail: SecretScanner | None = None, *, final: bool = True,
+        failure_type: type[CheckpointError] = CheckpointError) -> SecretScanner:
+    """Use one shared scanner for objects, files, state writes and export bytes.
+
+    Streaming callers pass final=False and carry the returned scanner until EOF.
+    One-shot callers also flush incomplete escapes, including lone surrogates.
+    """
+    scanner = tail if isinstance(tail, SecretScanner) else SecretScanner(
+        _SECRETS, stages=_SECRET_JSON_MAX_DEPTH)
+    if scanner.feed(data) or (final and scanner.finish()):
+        raise failure_type(_SECRET_CHECKPOINT_ERROR)
+    return scanner
+
+
+def _valid_home_identity(value: object) -> bool:
+    if type(value) is not dict or set(value) != _HOME_IDENTITY_FIELDS:
+        return False
+    if not isinstance(value.get("realpath"), str) or not Path(value["realpath"]).is_absolute():
+        return False
+    return all(type(value.get(key)) is int and value[key] >= 0
+               for key in _HOME_IDENTITY_FIELDS - {"realpath"})
+
+
+def configure_runner_home_identity_pin(serialized_identity: str | None) -> None:
+    """Bind this child to the runner's startup pin, independently of the live run spec."""
+    global _RUNNER_HOME_IDENTITY_CONFIGURED, _RUNNER_HOME_IDENTITY_PIN
+    _RUNNER_HOME_IDENTITY_CONFIGURED = True
+    _RUNNER_HOME_IDENTITY_PIN = None
+    if not isinstance(serialized_identity, str):
+        return
+    try:
+        identity = json.loads(serialized_identity)
+    except (ValueError, TypeError):
+        return
+    if _valid_home_identity(identity):
+        _RUNNER_HOME_IDENTITY_PIN = dict(identity)
+
+
+def _register_legacy_home_secret() -> None:
+    """Legacy pin opt-in never opts an existing installation key out of byte protection."""
+    if __package__:
+        from .kernel_request_auth_identity import _installation_home, protected_home_identity
+    else:
+        from kernel_request_auth_identity import _installation_home, protected_home_identity
+    try:
+        home = _installation_home()
+    except (OSError, ValueError, RuntimeError):
+        return  # A direct-engine fixture need not have an installation home.
+    try:
+        os.lstat(home / "identity.key")
+    except FileNotFoundError:
+        return
+    except OSError as error:
+        raise CheckpointError("STATEFRAME_HOME_IDENTITY_CHANGED") from error
+    try:
+        protected_home_identity(home)
+    except (OSError, ValueError, RuntimeError) as error:
+        raise CheckpointError("STATEFRAME_HOME_IDENTITY_CHANGED") from error
+
+
+def _snapshot_file_cache_key(info: os.stat_result, generation: int, digest: str
+                             ) -> tuple[int, int, int, int, int, int, str]:
+    return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns,
+            generation, digest)
+
+
+def _snapshot_home_identity(
+        run_dir: Path, *, expected_identity: object = _HOME_IDENTITY_UNSET,
+        allow_legacy: bool = False,
+) -> dict[str, int | str] | None:
+    """Verify live metadata against the runner's immutable startup pin."""
+    runner_bound = expected_identity is not _HOME_IDENTITY_UNSET
+    if runner_bound:
+        startup_identity = expected_identity
+    elif _RUNNER_HOME_IDENTITY_CONFIGURED:
+        runner_bound = True
+        startup_identity = _RUNNER_HOME_IDENTITY_PIN
+    else:
+        startup_identity = None
+    if runner_bound and not _valid_home_identity(startup_identity):
+        raise CheckpointError("STATEFRAME_HOME_IDENTITY_CHANGED")
+
+    spec_path = run_dir / "spec.json"
+    try:
+        spec = json.loads(spec_path.read_text(encoding="utf-8"))
+    except FileNotFoundError as error:
+        if (not runner_bound and (allow_legacy
+                or os.environ.get(LEGACY_DIRECT_ENGINE_ENV, "").strip() == "1")):
+            _register_legacy_home_secret()
+            return None
+        raise CheckpointError("STATEFRAME_HOME_IDENTITY_CHANGED") from error
+    except (OSError, ValueError, TypeError) as error:
+        raise CheckpointError("STATEFRAME_HOME_IDENTITY_CHANGED") from error
+    if not isinstance(spec, dict):
+        raise CheckpointError("STATEFRAME_HOME_IDENTITY_CHANGED")
+    try:
+        recorded_identity = recorded_home_identity(spec)
+    except ValueError as error:
+        raise CheckpointError("STATEFRAME_HOME_IDENTITY_CHANGED") from error
+    environment = spec.get("environment")
+    selected_home = environment.get("STATEFRAME_HOME") if isinstance(environment, dict) else None
+    if (allow_legacy and not runner_bound and "stateframe_home_identity" not in spec
+            and (not isinstance(environment, dict)
+                 or "STATEFRAME_RUNNER_HOME_IDENTITY" not in environment)):
+        _register_legacy_home_secret()
+        return None
+    if (not _valid_home_identity(recorded_identity)
+            or not isinstance(selected_home, str) or not selected_home):
+        raise CheckpointError("STATEFRAME_HOME_IDENTITY_CHANGED")
+    try:
+        if __package__:
+            from .kernel_request_auth_identity import protected_home_identity
+        else:
+            from kernel_request_auth_identity import protected_home_identity
+
+        expected = startup_identity if runner_bound else recorded_identity
+        if runner_bound and (recorded_identity != expected
+                             or os.path.realpath(selected_home) != expected["realpath"]):
+            raise ValueError("live HOME pin differs from startup")
+        # This also registers identity.key with the byte guard when there is no API key.
+        current = protected_home_identity(Path(expected["realpath"]))
+        repo = Path(spec["repo"])
+        home = Path(str(current["realpath"]))
+        run_root = _real_path(run_dir)
+        repo_root = _real_path(repo)
+        if (_path_within(home, run_root) or _path_within(home, repo_root)
+                or current != expected):
+            raise ValueError("protected home changed")
+        return expected
+    except Exception as error:
+        raise CheckpointError("STATEFRAME_HOME_IDENTITY_CHANGED") from error
+
+
+def recorded_home_identity(spec: dict[str, object]) -> object:
+    """Read the persisted pin without adding to the public run-spec key surface.
+
+    Accept the original top-level representation for interrupted HOME-era runs.
+    Conflicting representations are corruption, never an opportunity to choose a pin.
+    """
+    identity = spec.get("stateframe_home_identity")
+    environment = spec.get("environment")
+    if isinstance(environment, dict) and "STATEFRAME_RUNNER_HOME_IDENTITY" in environment:
+        serialized = environment["STATEFRAME_RUNNER_HOME_IDENTITY"]
+        if not isinstance(serialized, str):
+            raise ValueError("invalid recorded HOME identity")
+        persisted = json.loads(serialized)
+        if "stateframe_home_identity" in spec and identity != persisted:
+            raise ValueError("conflicting recorded HOME identities")
+        identity = persisted
+        if not _valid_home_identity(identity):
+            raise ValueError("invalid recorded HOME identity")
+    elif "stateframe_home_identity" in spec and not _valid_home_identity(identity):
+        raise ValueError("invalid recorded HOME identity")
+    return identity
+
+
+def _check_snapshot_file(path: Path, *, digest_hint: str | None = None,
+                         cache_verified: bool = True,
+                         force_scan: bool = False) -> tuple[int, str]:
+    """Reject secret-bearing captured files, streaming with overlap across read chunks."""
+    try:
+        before = os.lstat(path)
+    except OSError as error:
+        raise CheckpointError("run file changed during checkpoint capture") from error
+    if not stat.S_ISREG(before.st_mode):
+        return before.st_size, ""
+
+    identity = _STATE.get("protected_home_identity")
+    if isinstance(identity, dict) and (
+            before.st_dev, before.st_ino) == (
+                identity.get("key_st_dev"), identity.get("key_st_ino")):
+        raise _StateFileSecretError(_SECRET_CHECKPOINT_ERROR)
+
+    generation = _SECRET_GENERATION
+    if digest_hint and cache_verified and not force_scan:
+        cached = _snapshot_file_cache_key(before, generation, digest_hint)
+        if cached in _VERIFIED_POOL_IDENTITIES:
+            return before.st_size, digest_hint
+
+    descriptor = None
+    try:
+        descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+                             | getattr(os, "O_CLOEXEC", 0))
+        opened = os.fstat(descriptor)
+        if (not stat.S_ISREG(opened.st_mode)
+                or (opened.st_dev, opened.st_ino, opened.st_size, opened.st_mtime_ns,
+                    opened.st_ctime_ns) != (
+                        before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns,
+                        before.st_ctime_ns)):
+            raise CheckpointError("run file changed during checkpoint capture")
+        digest = hashlib.sha256()
+        tail = None
+        while True:
+            block = os.read(descriptor, 1 << 20)
+            if not block:
+                break
+            tail = _check_registered_secrets(
+                block, tail, final=False, failure_type=_StateFileSecretError)
+            digest.update(block)
+        _check_registered_secrets(b"", tail, failure_type=_StateFileSecretError)
+        after = os.fstat(descriptor)
+        if (after.st_size, after.st_mtime_ns, after.st_ctime_ns) != (
+                opened.st_size, opened.st_mtime_ns, opened.st_ctime_ns):
+            raise CheckpointError("run file changed during checkpoint capture")
+        value = digest.hexdigest()
+        if digest_hint is not None and value != digest_hint:
+            raise CheckpointError("pooled file changed during checkpoint capture")
+        if _snapshot_file_cache_key(os.lstat(path), generation, value) != (
+                _snapshot_file_cache_key(opened, generation, value)):
+            raise CheckpointError("run file changed during checkpoint capture")
+        if cache_verified:
+            _VERIFIED_POOL_IDENTITIES.add(_snapshot_file_cache_key(opened, generation, value))
+        return opened.st_size, value
+    except OSError as error:
+        raise CheckpointError("run file could not be scanned for registered secrets") from error
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+
+
+def check_registered_secret_file(path: str | os.PathLike[str]) -> str:
+    """Stream-scan a file at an export boundary and return its SHA-256 digest."""
+    return _check_snapshot_file(Path(path))[1]
+
+
+def verify_stateframe_home_identity(
+        run_dir: str | os.PathLike[str], *, expected_identity: object = _HOME_IDENTITY_UNSET,
+        allow_legacy: bool = False,
+) -> None:
+    """Fail closed if a run's protected home identity moved or entered a protected tree."""
+    _verify_stateframe_home_identity(
+        Path(run_dir), expected_identity=expected_identity, allow_legacy=allow_legacy)
+
+
+def _verify_stateframe_home_identity(
+        run_dir: Path, *, expected_identity: object = _HOME_IDENTITY_UNSET,
+        allow_legacy: bool = False,
+) -> dict[str, int | str] | None:
+    return _snapshot_home_identity(
+        run_dir, expected_identity=expected_identity, allow_legacy=allow_legacy)
 
 
 def _module_state(name: str, module: types.ModuleType) -> dict[str, object]:
     out = {}
-    if name == _OWN_MODULE:
+    if name in {_OWN_MODULE, "kernel_checkpoint", "engine.kernel_checkpoint",
+                "stateframe.engine.kernel_checkpoint"}:
         return out
     for key, value in list(vars(module).items()):
         if key.startswith("__") and key.endswith("__"):
@@ -680,7 +1003,10 @@ CACHE_DIR = "journal-cache"
 # Chunks are zlib level 1 (written by the background writer, so no engine pause): the records are
 # JSON-like dicts and compress ~4.6x (T2 live @55 sends: 338 -> 74 MB). sha256 covers the stored bytes.
 CHUNK_SUFFIX = ".zpkl"
-_SAVE: dict = {}  # one dump: {"root", "index" (prior chunk index), "index_out", "ids", "load_root", "tables"}
+ARTIFACT_STAGE_DIR = "artifacts"
+ARTIFACT_TRANSACTION_FILE = ".artifact-transaction.json"
+_SAVE: dict = {}  # one dump: roots, prior/output indexes, persistent IDs, and restore tables
+_PERSISTENT_ID_ATOMS = (str, bytes, int, float, bool, type(None))
 
 
 class _ListRef:
@@ -703,7 +1029,7 @@ def _chunk_dict(key: str, mapping: dict):
     if type(mapping) is not dict:
         return None
     pairs = list(mapping.items())
-    ref = _chunk_list(key, pairs, guard=pairs[-1][0] if pairs else None, values=True)
+    ref = _chunk_list(key, pairs, guard=lambda pair: pair[0], values=True)
     return None if ref is None else _DictRef(ref.key, ref.length)
 
 
@@ -863,8 +1189,9 @@ def _load_journal_chunk(part: dict) -> list:
 def _chunk_list(key: str, items: list, *, guard=None, values: bool = False, journal: Path | None = None):
     """Store ``items`` incrementally under ``key``; returns a _ListRef, or None to pickle inline.
 
-    ``guard`` (dict mode: the last key) is recorded per chunk; when the item at the end of the
-    covered prefix is no longer what was stored there, the lineage restarts from scratch.
+    ``guard`` returns a stable value for the last list item and is recorded per chunk; when the
+    item at the end of the covered prefix no longer matches, the lineage restarts from scratch.
+    Dict mode guards the last key. A length check catches truncation before any chunks are reused.
 
     ``journal``: the items mirror that append-only JSONL file line for line (the continuation
     journal's record cache). A chunk then stores, per record, only the dict key order needed to
@@ -878,9 +1205,22 @@ def _chunk_list(key: str, items: list, *, guard=None, values: bool = False, jour
     covered = chunks[-1][2] if chunks else 0
     if len(items) < covered:  # the owner rebuilt the list: start the lineage again
         chunks, covered = [], 0
-    if values and covered and (len(chunks[-1]) < 5 or items[covered - 1][0] != chunks[-1][4]):
-        chunks, covered = [], 0  # the dict's covered prefix changed: rewrite it
+    check_guard = (lambda pair: pair[0]) if values else guard
+    if check_guard is not None and covered:
+        if len(chunks[-1]) < 5:
+            chunks, covered = [], 0
+        else:
+            try:
+                matches = _same(check_guard(items[covered - 1]), chunks[-1][4])
+            except Exception:  # noqa: BLE001 - an unverifiable index stays inline
+                return None
+            if not matches:
+                chunks, covered = [], 0  # the covered prefix changed: rewrite it
     if len(items) > covered:
+        try:
+            tail_guard = check_guard(items[-1]) if check_guard is not None else None
+        except Exception:  # noqa: BLE001 - an unverifiable index stays inline
+            return None
         payload, end_offset = items[covered:], None
         if journal is not None:
             start = (chunks[-1][4] if chunks and len(chunks[-1]) > 4
@@ -891,11 +1231,17 @@ def _chunk_list(key: str, items: list, *, guard=None, values: bool = False, jour
                 payload = {"journal": str(journal), "offset": start, "end": end_offset, "sha": sha,
                            "blobs": blob_shas, "entries": entries}
         try:
-            blob = zlib.compress(pickle.dumps(payload, protocol=5), 1)
+            raw = pickle.dumps(payload, protocol=5)
         except Exception:  # noqa: BLE001 - an item that is not a plain value: keep the list inline
             return None
-        name = f"{key}-{covered:07d}-{len(items):07d}-{os.getpid()}{CHUNK_SUFFIX}"
-        folder = root / CACHE_DIR
+        _check_registered_secrets(raw)
+        try:
+            blob = zlib.compress(raw, 1)
+        except Exception:  # noqa: BLE001 - an item that is not a plain value: keep the list inline
+            return None
+        name = f"{key}-{covered:07d}-{len(items):07d}-{os.getpid()}-{os.urandom(8).hex()}{CHUNK_SUFFIX}"
+        artifact_root = _SAVE.get("artifact_root", root)
+        folder = Path(artifact_root) / CACHE_DIR
         _private_dir(folder)
         temporary = folder / f".{name}.tmp"
         with os.fdopen(os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "wb") as stream:
@@ -904,13 +1250,16 @@ def _chunk_list(key: str, items: list, *, guard=None, values: bool = False, jour
             os.fsync(stream.fileno())
         os.replace(temporary, folder / name)
         row = (name, covered, len(items), hashlib.sha256(blob).hexdigest())
-        chunks.append(row + ((items[-1][0],) if values else (end_offset,) if end_offset is not None else ()))
+        stored_guard = tail_guard if check_guard is not None else end_offset
+        chunks.append(row + ((stored_guard,) if stored_guard is not None else ()))
     _SAVE.setdefault("index_out", {})[key] = [list(row) for row in chunks]
     ids = _SAVE.setdefault("ids", {})
     for position, item in enumerate(items):
         if values:  # a dict: its VALUES are referenced elsewhere (receipts -> same event objects)
-            ids.setdefault(id(item[1]), (key, position, 1))
-        else:
+            value = item[1]
+            if type(value) not in _PERSISTENT_ID_ATOMS:
+                ids.setdefault(id(value), (key, position, 1))
+        elif type(item) not in _PERSISTENT_ID_ATOMS:
             ids.setdefault(id(item), (key, position))
     return _ListRef(key, len(items))
 
@@ -973,19 +1322,90 @@ def _journal_state(obj) -> dict:
                       journal=Path(path) if path else None)
     if ref is not None:
         state["_record_cache"] = ref
+    for name, kind in (("_record_hashes", "journal-hashes"), ("_record_offsets", "journal-offsets")):
+        values = state.get(name)
+        ref = _chunk_list(_stable_key(kind, _journal_key(obj)), values, guard=lambda item: item)
+        if ref is not None:
+            state[name] = ref
     return state
 
 
 def _timeline_state(obj):
-    """TimelineIndex: _events as an append-only list keyed by its session id."""
+    """TimelineIndex: append-only events and event positions keyed by its session id."""
     reduced = obj.__reduce_ex__(5)
     state = dict(reduced[2]) if len(reduced) > 2 and isinstance(reduced[2], dict) else None
     if state is None:
         return NotImplemented
-    ref = _chunk_list(_stable_key("timeline", state.get("session_id")), state.get("_events"))
+    key = _stable_key("timeline", state.get("session_id"))
+    changed = False
+    events = state.get("_events")
+    ref = _chunk_list(key, events, guard=_chunk_item_guard) if type(events) is list else None
+    if ref is not None:
+        state["_events"] = ref
+        changed = True
+    positions = state.get("_position_by_id")
+    ref = _chunk_dict(_stable_key("timeline-position", key), positions) if type(positions) is dict else None
+    if ref is not None:
+        state["_position_by_id"] = ref
+        from kernel_history_spool import EventLookup
+        lookup = state.get("_by_id")
+        if isinstance(lookup, EventLookup) and lookup.positions is positions:
+            # EventLookup's reducer otherwise serializes a second full copy of
+            # the same position map. Share this stand-in so restore also keeps
+            # the original alias between both timeline fields.
+            state["_by_id"] = EventLookup(lookup.events, ref)
+        changed = True
+    if not changed:
+        return NotImplemented
+    return (reduced[0], reduced[1], state) + tuple(reduced[3:])
+
+
+def _chunk_item_guard(item) -> str:
+    """Small stable guard for the last immutable record in an append-only list."""
+    return hashlib.sha256(pickle.dumps(item, protocol=5)).hexdigest()
+
+
+def _generated_artifact_state(obj):
+    reduced = obj.__reduce_ex__(5)
+    state = dict(reduced[2]) if len(reduced) > 2 and isinstance(reduced[2], dict) else None
+    if state is None:
+        return NotImplemented
+    ref = _chunk_dict(_stable_key("generated-artifacts", state.get("run_id")), state.get("_events"))
     if ref is None:
         return NotImplemented
     state["_events"] = ref
+    return (reduced[0], reduced[1], state) + tuple(reduced[3:])
+
+
+def _world_knowledge_state(obj):
+    reduced = obj.__reduce_ex__(5)
+    state = dict(reduced[2]) if len(reduced) > 2 and isinstance(reduced[2], dict) else None
+    if state is None:
+        return NotImplemented
+    scope = json.dumps(state.get("scope", {}), sort_keys=True, separators=(",", ":"))
+    key = _stable_key("world-knowledge-events", _SAVE.get("root"), scope)
+    events = state.get("_events")
+    ref = _chunk_list(key, events, guard=_chunk_item_guard) if type(events) is list else None
+    if ref is None:
+        return NotImplemented
+    state["_events"] = ref
+    return (reduced[0], reduced[1], state) + tuple(reduced[3:])
+
+
+def _recall_state(obj):
+    reduced = obj.__reduce_ex__(5)
+    state = dict(reduced[2]) if len(reduced) > 2 and isinstance(reduced[2], dict) else None
+    if state is None:
+        return NotImplemented
+    items = state.get("_items")
+    if type(items) is not list or not items:
+        return NotImplemented
+    first = items[0].get("id", "") if type(items[0]) is dict else ""
+    key = _stable_key("recall-items", _SAVE.get("root"), first)
+    ref = _chunk_list(key, items, guard=_chunk_item_guard)
+    if ref is None:
+        return NotImplemented
+    state["_items"] = ref
     return (reduced[0], reduced[1], state) + tuple(reduced[3:])
 
 
@@ -1047,6 +1467,9 @@ def _restore_evidence_state(obj, state):
 CHUNKED_TYPES = {
     ("kernel_timeline", "TimelineIndex"): _timeline_state,
     ("kernel_continuation_evidence", "HostEvidence"): _evidence_state,
+    ("kernel_generated_artifacts", "GeneratedArtifactIndex"): _generated_artifact_state,
+    ("detreason.world_knowledge", "WorldKnowledgeStore"): _world_knowledge_state,
+    ("kernel_recall", "RecallStore"): _recall_state,
 }
 
 
@@ -1471,28 +1894,46 @@ def _process_bound_path(root) -> str:
     return "not found"
 
 
-def _failure_detail(error: BaseException) -> str:
-    """Error, its object-path note and the innermost traceback frames for checkpoint_failed."""
-    import traceback
-    notes = " | ".join(getattr(error, "__notes__", ()) or ())
-    frames = traceback.extract_tb(error.__traceback__)[-3:]
-    where = " <- ".join(f"{Path(frame.filename).name}:{frame.lineno}" for frame in reversed(frames))
-    detail = f"{type(error).__name__}: {str(error)[:300]}"
-    return detail + (f" [{notes[:600]}]" if notes else "") + (f" at {where}" if where else "")
+def _failure_reason(error: BaseException) -> str:
+    """Return an allowlisted writer code without exposing exception-controlled text."""
+    try:
+        if type(error) is _StateFileSecretError:
+            return "checkpoint refused: registered secret in state"
+        if type(error) is CheckpointError:
+            args = BaseException.args.__get__(error, BaseException)
+            if type(args) is tuple and len(args) == 1 and type(args[0]) is str:
+                if args[0] == _SECRET_CHECKPOINT_ERROR:
+                    return "checkpoint refused: registered secret in checkpoint"
+                if args[0] == "STATEFRAME_HOME_IDENTITY_CHANGED":
+                    return "STATEFRAME_HOME_IDENTITY_CHANGED"
+            return "checkpoint refused"
+        if isinstance(error, OSError):
+            try:
+                number = object.__getattribute__(error, "errno")
+            except BaseException:
+                return "checkpoint write failed: os error"
+            name = _OS_ERROR_NAMES.get(number) if type(number) is int else None
+            return f"checkpoint write failed: {name or 'os error'}"
+        if isinstance(error, MemoryError):
+            return "checkpoint write failed: memory error"
+        if type(error) is pickle.PicklingError:
+            return "checkpoint serialization failed"
+    except BaseException:
+        pass
+    return "unexpected writer error"
 
 
 class _StateWriter:
-    """Compress pickle writes while retaining raw and stored digests plus the secret overlap."""
+    """Compress pickle writes while retaining digests and incremental secret state."""
 
-    __slots__ = ("stream", "digest", "count", "tail", "overlap", "compressor",
+    __slots__ = ("stream", "digest", "count", "tail", "compressor",
                  "stored_digest", "stored_count")
 
     def __init__(self, stream):
         self.stream = stream
         self.digest = hashlib.sha256()
         self.count = 0
-        self.tail = b""
-        self.overlap = max((len(secret) for secret in _SECRETS), default=0) - 1
+        self.tail = None
         self.compressor = zlib.compressobj(level=1)
         self.stored_digest = hashlib.sha256()
         self.stored_count = 0
@@ -1509,16 +1950,14 @@ class _StateWriter:
     def write(self, chunk: bytes) -> int:
         if len(chunk) > MAX_STATE_BYTES - self.count:
             raise CheckpointError(f"checkpoint raw state exceeds the {MAX_STATE_BYTES}-byte limit")
-        window = self.tail + chunk
-        if any(secret in window for secret in _SECRETS):
-            raise CheckpointError("a registered secret would be written into the checkpoint")
+        self.tail = _check_registered_secrets(chunk, self.tail, final=False)
         self.digest.update(chunk)
         self.count += len(chunk)
         self._write_stored(self.compressor.compress(chunk))
-        self.tail = window[-self.overlap:] if self.overlap > 0 else b""
         return len(chunk)
 
     def finish(self) -> None:
+        _check_registered_secrets(b"", self.tail)
         self._write_stored(self.compressor.flush())
 
 
@@ -1702,8 +2141,8 @@ _BIG_FILE = 4 << 20
 # Journal blob stores (worker/measurement-runs/<run>/blobs) are write-once and content-addressed
 # (kernel_measurement._write_journal_blob: temp file + os.link, never rewritten) and grow by
 # thousands of files per run. Re-cloning them every save made the file phase grow with run length
-# (0.41 s at 101 sends). They go to one pool per run instead: each save hard-links only the NEW
-# blobs into checkpoints/blob-pool and records the name list; a restore links them back.
+# (0.41 s at 101 sends). They go to one pool per run instead: each save copies only the NEW
+# blobs into the private checkpoints/blob-pool and records the name list; a restore copies them back.
 POOL_DIR = "blob-pool"
 MANIFEST_FILE = "blobs.json"
 # Pool store -> {name: (size, digest)}. Pooled files are write-once; their identity is
@@ -1720,6 +2159,292 @@ def _pool_identity(path: Path) -> tuple[int, str]:
         for block in iter(lambda: stream.read(1 << 20), b""):
             digest.update(block)
     return info.st_size, digest.hexdigest()
+
+
+def _capture_snapshot_file(
+        source: Path, target: Path, *, known: tuple[int, str] | None = None,
+        new_pool_files: list[Path] | None = None, prefer_clone: bool = False,
+) -> tuple[tuple[int, str], bool]:
+    """Capture and scan a private file before atomically publishing it to a snapshot."""
+    _check_registered_secrets(os.fsencode(source), failure_type=_StateFileSecretError)
+    try:
+        source_info = os.lstat(source)
+    except OSError as error:
+        raise CheckpointError("run file changed during checkpoint capture") from error
+    if not stat.S_ISREG(source_info.st_mode):
+        raise CheckpointError("snapshot source is not a regular run file")
+
+    protected_identity = _STATE.get("protected_home_identity")
+    if isinstance(protected_identity, dict) and (
+            source_info.st_dev, source_info.st_ino) == (
+                protected_identity.get("key_st_dev"), protected_identity.get("key_st_ino")):
+        raise _StateFileSecretError(_SECRET_CHECKPOINT_ERROR)
+
+    generation = _SECRET_GENERATION
+    target_info = None
+    try:
+        target_info = os.lstat(target)
+    except FileNotFoundError:
+        pass
+    except OSError as error:
+        raise CheckpointError("snapshot file could not be inspected") from error
+    if new_pool_files is not None and known is not None and target_info is not None:
+        source_cached = (_snapshot_file_cache_key(source_info, generation, known[1])
+                         in _VERIFIED_POOL_IDENTITIES)
+        target_cached = (stat.S_ISREG(target_info.st_mode)
+                         and _snapshot_file_cache_key(target_info, generation, known[1])
+                         in _VERIFIED_POOL_IDENTITIES)
+        if (known[0] == source_info.st_size and source_cached and target_cached
+                and target_info.st_size == known[0]
+                and (target_info.st_dev, target_info.st_ino)
+                != (source_info.st_dev, source_info.st_ino)):
+            return known, False
+
+    staged_target = None
+    artifact_root = _SAVE.get("artifact_root")
+    pool_root = _SAVE.get("pool_root")
+    if (new_pool_files is not None and isinstance(artifact_root, Path)
+            and isinstance(pool_root, Path)):
+        try:
+            staged_target = artifact_root / POOL_DIR / target.relative_to(pool_root)
+        except ValueError as error:
+            raise CheckpointError("pooled file is outside its checkpoint store") from error
+        _private_dir(staged_target.parent)
+    else:
+        target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    capture_target = staged_target or target
+    source_fd = None
+    temporary_fd = None
+    temporary_path = None
+
+    def stable_signature(info: os.stat_result) -> tuple[int, int, int, int, int]:
+        return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+
+    try:
+        source_fd = os.open(source, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+                            | getattr(os, "O_CLOEXEC", 0))
+        opened = os.fstat(source_fd)
+        if (not stat.S_ISREG(opened.st_mode)
+                or stable_signature(opened) != stable_signature(source_info)):
+            raise CheckpointError("run file changed during checkpoint capture")
+        temporary_fd, temporary_name = tempfile.mkstemp(
+            prefix=".capture-", dir=capture_target.parent)
+        temporary_path = Path(temporary_name)
+        os.close(temporary_fd)
+        temporary_fd = None
+        temporary_path.unlink()
+
+        cloned = (sys.platform == "darwin" and (prefer_clone or opened.st_size >= _BIG_FILE)
+                  and _clonefile(source, temporary_path))
+        copied = 0
+        if not cloned:
+            if temporary_path.exists():
+                temporary_path.unlink()
+            temporary_fd = os.open(
+                temporary_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            with os.fdopen(temporary_fd, "wb") as output:
+                temporary_fd = None
+                while True:
+                    block = os.read(source_fd, 1 << 20)
+                    if not block:
+                        break
+                    output.write(block)
+                    copied += len(block)
+                os.fchmod(output.fileno(), stat.S_IMODE(opened.st_mode))
+                output.flush()
+                os.fsync(output.fileno())
+        else:
+            copied = opened.st_size
+            os.chmod(temporary_path, stat.S_IMODE(opened.st_mode), follow_symlinks=False)
+        after_copy = os.fstat(source_fd)
+        path_after_copy = os.lstat(source)
+        if (copied != opened.st_size
+                or stable_signature(after_copy) != stable_signature(opened)
+                or stable_signature(path_after_copy) != stable_signature(opened)):
+            raise CheckpointError("run file changed during checkpoint capture")
+        os.utime(temporary_path, ns=(opened.st_atime_ns, opened.st_mtime_ns),
+                 follow_symlinks=False)
+        captured_before = os.lstat(temporary_path)
+
+        while True:
+            scan_generation = _SECRET_GENERATION
+            identity = _check_snapshot_file(
+                temporary_path, digest_hint=known[1] if known is not None else None,
+                cache_verified=False)
+            if scan_generation == _SECRET_GENERATION:
+                break
+        captured_after = os.lstat(temporary_path)
+        if (captured_before.st_dev, captured_before.st_ino, captured_before.st_size,
+                captured_before.st_mtime_ns, captured_before.st_ctime_ns) != (
+                captured_after.st_dev, captured_after.st_ino, captured_after.st_size,
+                captured_after.st_mtime_ns, captured_after.st_ctime_ns):
+            raise CheckpointError("captured file changed before checkpoint publication")
+        if known is not None and known != identity:
+            raise CheckpointError("pooled file identity changed during checkpoint capture")
+
+        current_target = None
+        try:
+            current_target = os.lstat(target)
+        except FileNotFoundError:
+            pass
+        except OSError as error:
+            raise CheckpointError("snapshot file could not be inspected") from error
+        if new_pool_files is not None and current_target is not None and stat.S_ISREG(
+                current_target.st_mode):
+            expected_digest = known[1] if known is not None else identity[1]
+            if (_snapshot_file_cache_key(current_target, _SECRET_GENERATION, expected_digest)
+                    not in _VERIFIED_POOL_IDENTITIES):
+                target_identity = _check_snapshot_file(target, digest_hint=expected_digest)
+                if known is not None and target_identity != known:
+                    raise CheckpointError("pooled file identity changed during checkpoint capture")
+        target_shares_source = (
+            current_target is not None
+            and (current_target.st_dev, current_target.st_ino)
+            == (source_info.st_dev, source_info.st_ino)
+        )
+        if staged_target is not None and target_shares_source:
+            # A transaction cannot replace a shared artifact used by older checkpoints.
+            # Refuse the unsafe alias rather than let publication reuse its matching bytes.
+            raise CheckpointError("checkpoint artifact identity conflict")
+        replace_target = (new_pool_files is None or current_target is None
+                          or not stat.S_ISREG(current_target.st_mode) or target_shares_source)
+        if replace_target:
+            os.replace(temporary_path, capture_target)
+            temporary_path = None
+            if new_pool_files is not None:
+                new_pool_files.append(capture_target)
+        else:
+            temporary_path.unlink()
+            temporary_path = None
+
+        if new_pool_files is not None and scan_generation == _SECRET_GENERATION:
+            _VERIFIED_POOL_IDENTITIES.add(
+                _snapshot_file_cache_key(source_info, scan_generation, identity[1]))
+            verified_target = capture_target if replace_target else target
+            target_after_publish = os.lstat(verified_target)
+            _VERIFIED_POOL_IDENTITIES.add(
+                _snapshot_file_cache_key(target_after_publish, scan_generation, identity[1]))
+        return identity, cloned
+    except OSError as error:
+        raise CheckpointError("run file could not be captured for checkpoint") from error
+    finally:
+        if source_fd is not None:
+            os.close(source_fd)
+        if temporary_fd is not None:
+            os.close(temporary_fd)
+        if temporary_path is not None:
+            try:
+                temporary_path.unlink()
+            except OSError:
+                pass
+
+
+def _real_path(path: Path) -> Path:
+    return Path(os.path.realpath(os.fspath(path)))
+
+
+def _path_within(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+        return True
+    except ValueError:
+        return False
+
+
+def _snapshot_home_exclusions(run_dir: Path) -> tuple[Path | None, Path | None, set[Path]]:
+    """Find StateFrame-home paths to omit from a run-file snapshot, resolving symlinks first."""
+    try:
+        if __package__:
+            from .kernel_request_auth_identity import _installation_home
+        else:
+            from kernel_request_auth_identity import _installation_home
+
+        identity = _STATE.get("protected_home_identity")
+        home = (_real_path(Path(str(identity["realpath"]))) if _valid_home_identity(identity)
+                else _real_path(_installation_home()))
+    except (OSError, ValueError):
+        return None, None, set()
+
+    run_root = _real_path(run_dir)
+    home_subtree = home if _path_within(home, run_root) else None
+    excluded: set[Path] = set()
+    if home_subtree is not None:
+        excluded.add(home_subtree)
+
+    for name in sorted(os.listdir(run_dir)):
+        if name in SKIP_RUN_ENTRIES:
+            continue
+        source = run_dir / name
+        if source.is_symlink():
+            if _path_within(_real_path(source), home):
+                excluded.add(Path(os.path.abspath(source)))
+            continue
+        if not source.is_dir():
+            continue
+        pending = [source]
+        while pending:
+            current = pending.pop()
+            if home_subtree is not None and _path_within(_real_path(current), home_subtree):
+                excluded.add(Path(os.path.abspath(current)))
+                continue
+            try:
+                with os.scandir(current) as scan:
+                    children = list(scan)
+            except OSError as error:
+                raise CheckpointError(
+                    "could not inspect run files for StateFrame home exclusions"
+                ) from error
+            for entry in children:
+                path = Path(entry.path)
+                try:
+                    is_symlink = entry.is_symlink()
+                    is_directory = not is_symlink and entry.is_dir(follow_symlinks=False)
+                except OSError as error:
+                    raise CheckpointError(
+                        "could not inspect run files for StateFrame home exclusions"
+                    ) from error
+                if is_symlink:
+                    if _path_within(_real_path(path), home):
+                        excluded.add(Path(os.path.abspath(path)))
+                elif is_directory:
+                    pending.append(path)
+    return home, home_subtree, excluded
+
+
+def _snapshot_path_excluded(path: Path, home: Path | None, home_subtree: Path | None,
+                            excluded: set[Path], is_symlink: bool | None = None) -> bool:
+    """True when ``path`` is inside the home boundary; ``is_symlink`` lets a scandir caller skip the lstat."""
+    _check_registered_secrets(os.fsencode(path), failure_type=_StateFileSecretError)
+    linked = path.is_symlink() if is_symlink is None else is_symlink
+    if linked:
+        _check_registered_secrets(os.fsencode(os.readlink(path)), failure_type=_StateFileSecretError)
+    absolute = Path(os.path.abspath(path))
+    if absolute in excluded:
+        return True
+    if home_subtree is not None and _path_within(_real_path(path), home_subtree):
+        return True
+    return linked and home is not None and _path_within(_real_path(path), home)
+
+
+def _capture_snapshot_symlink(source: Path, target: Path, home: Path | None) -> None:
+    """Validate the captured link text, then publish those same bytes without rereading the source."""
+    link = os.readlink(source)
+    _check_registered_secrets(os.fsencode(source), failure_type=_StateFileSecretError)
+    _check_registered_secrets(os.fsencode(link), failure_type=_StateFileSecretError)
+    if home is not None and _path_within(_real_path(source.parent / link), home):
+        raise CheckpointError("STATEFRAME_HOME_IDENTITY_CHANGED")
+    os.symlink(link, target)
+
+
+def _tree_has_home_exclusions(source: Path, home_subtree: Path | None,
+                              excluded: set[Path]) -> bool:
+    source_absolute = Path(os.path.abspath(source))
+    source_real = _real_path(source)
+    if home_subtree is not None and (
+            _path_within(home_subtree, source_real) or _path_within(source_real, home_subtree)):
+        return True
+    return any(_path_within(path, source_absolute) or _path_within(source_absolute, path)
+               for path in excluded)
 
 
 # Other write-once directories, one or more new files per model send: the product's wire/, requests/
@@ -1758,31 +2483,58 @@ def _snapshot_appended_file(source: Path, target: Path, relative: str, root: Pat
         if digest.hexdigest() != last[3]:
             rows, covered = [], 0
     if size > covered:
-        folder = root / CACHE_DIR
+        artifact_root = _SAVE.get("artifact_root", root)
+        folder = Path(artifact_root) / CACHE_DIR
         _private_dir(folder)
         name = f"file-{_stable_key(relative)}-{seq:08d}-{os.getpid()}{CHUNK_SUFFIX}"
         temporary = folder / f".{name}.tmp"
         raw_digest, stored_digest = hashlib.sha256(), hashlib.sha256()
         compressor = zlib.compressobj(1)
-        with source.open("rb") as source_stream, os.fdopen(
-                os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "wb") as output:
-            source_stream.seek(covered)
-            remaining = size - covered
-            while remaining:
-                block = source_stream.read(min(1 << 20, remaining))
-                if not block:
-                    raise CheckpointError(f"audit journal {relative} shrank during snapshot")
-                remaining -= len(block)
-                raw_digest.update(block)
-                encoded = compressor.compress(block)
+        secret_tail = None
+        temporary_created = False
+        try:
+            descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            temporary_created = True
+            with os.fdopen(descriptor, "wb") as output, source.open("rb") as source_stream:
+                if _SECRETS:
+                    # Rebuild decoder state from the complete committed prefix.
+                    # No finite raw overlap covers arbitrarily expanded escapes.
+                    prefix_remaining = covered
+                    while prefix_remaining:
+                        prefix = source_stream.read(min(1 << 20, prefix_remaining))
+                        if not prefix:
+                            raise CheckpointError(f"audit journal {relative} shrank during snapshot")
+                        prefix_remaining -= len(prefix)
+                        secret_tail = _check_registered_secrets(prefix, secret_tail, final=False)
+                else:
+                    source_stream.seek(covered)
+                remaining = size - covered
+                while remaining:
+                    block = source_stream.read(min(1 << 20, remaining))
+                    if not block:
+                        raise CheckpointError(f"audit journal {relative} shrank during snapshot")
+                    remaining -= len(block)
+                    secret_tail = _check_registered_secrets(
+                        block, secret_tail, final=False)
+                    raw_digest.update(block)
+                    encoded = compressor.compress(block)
+                    output.write(encoded)
+                    stored_digest.update(encoded)
+                _check_registered_secrets(b"", secret_tail)
+                encoded = compressor.flush()
                 output.write(encoded)
                 stored_digest.update(encoded)
-            encoded = compressor.flush()
-            output.write(encoded)
-            stored_digest.update(encoded)
-            output.flush()
-            os.fsync(output.fileno())
-        os.replace(temporary, folder / name)
+                output.flush()
+                os.fsync(output.fileno())
+            os.replace(temporary, folder / name)
+            temporary_created = False
+        except BaseException:
+            if temporary_created:
+                try:
+                    temporary.unlink()
+                except OSError:
+                    pass
+            raise
         rows.append([name, covered, size, raw_digest.hexdigest(), stored_digest.hexdigest()])
     target.touch()
     shutil.copystat(source, target)
@@ -1792,16 +2544,30 @@ def _snapshot_appended_file(source: Path, target: Path, relative: str, root: Pat
 
 def _snapshot_tree(source: Path, target: Path, relative: str, pool: Path, manifests: dict,
                    new_pool_files: list[Path], file_chunks: dict | None = None,
-                   previous_files: dict | None = None, seq: int = 0) -> None:
+                   previous_files: dict | None = None, seq: int = 0, *,
+                   home: Path | None = None, home_subtree: Path | None = None,
+                   excluded: set[Path] | None = None) -> None:
     """Clone ``source`` into ``target`` with as few clonefile calls as possible, pooling write-once dirs."""
-    if file_chunks is not None and _snapshot_appended_file(
-            source, target, relative, pool.parent,
-            (previous_files or {}).get(relative, ()), file_chunks, seq):
+    excluded = excluded or set()
+    if _snapshot_path_excluded(source, home, home_subtree, excluded):
+        return
+    if source.is_dir() and not source.is_symlink() and _tree_has_home_exclusions(
+            source, home_subtree, excluded):
+        target.mkdir()
+        with os.scandir(source) as scan:
+            entries = sorted(scan, key=lambda entry: entry.name)
+        for entry in entries:
+            child = Path(entry.path)
+            if not _snapshot_path_excluded(child, home, home_subtree, excluded):
+                _snapshot_tree(child, target / entry.name, f"{relative}/{entry.name}", pool,
+                               manifests, new_pool_files, file_chunks, previous_files, seq,
+                               home=home, home_subtree=home_subtree, excluded=excluded)
+        shutil.copystat(source, target, follow_symlinks=False)
         return
     entries = list(os.scandir(source)) if _is_pooled(relative) and source.is_dir() else None
     if entries is not None and all(entry.is_file(follow_symlinks=False) for entry in entries):
         names = sorted(entry.name for entry in entries)
-        target.mkdir()  # present (empty) in the copy; the restore links the pooled files back in
+        target.mkdir()  # present (empty) in the copy; restore copies the pooled files back in
         store = pool / relative.replace("/", "__")
         known = _POOL_KNOWN.get(str(store))
         if known is None:  # first save of this process: adopt what an earlier process pooled
@@ -1809,23 +2575,36 @@ def _snapshot_tree(source: Path, target: Path, relative: str, pool: Path, manife
             known = _POOL_KNOWN.setdefault(str(store), {
                 name: _pool_identity(store / name) for name in os.listdir(store)})
         for name in names:
-            if name not in known or not (store / name).is_file():
-                identity = _pool_identity(source / name)
-                try:
-                    os.link(source / name, store / name)
-                except FileExistsError:
-                    identity = _pool_identity(store / name)
-                else:
-                    new_pool_files.append(store / name)
-                known[name] = identity
+            cached = known.get(name)
+            identity, _cloned = _capture_snapshot_file(
+                source / name, store / name, known=cached, new_pool_files=new_pool_files)
+            if cached is not None and cached != identity:
+                raise CheckpointError("pooled file identity changed during checkpoint capture")
+            known[name] = identity
         manifests[relative] = [[name, known[name][0]] for name in names]
         return
-    if relative in ("worker", "worker/measurement-runs") or (
-            relative.startswith("worker/measurement-runs/") and relative.count("/") == 2):
+    if source.is_dir() and not source.is_symlink():
         target.mkdir()
-        for entry in os.scandir(source):
-            _snapshot_tree(Path(entry.path), target / entry.name, f"{relative}/{entry.name}", pool,
-                           manifests, new_pool_files, file_chunks, previous_files, seq)
+        with os.scandir(source) as scan:
+            children = sorted(scan, key=lambda entry: entry.name)
+        for entry in children:
+            child = Path(entry.path)
+            if _snapshot_path_excluded(child, home, home_subtree, excluded):
+                continue
+            _snapshot_tree(child, target / entry.name, f"{relative}/{entry.name}", pool,
+                           manifests, new_pool_files, file_chunks, previous_files, seq,
+                           home=home, home_subtree=home_subtree, excluded=excluded)
+        shutil.copystat(source, target, follow_symlinks=False)
+        return
+    if file_chunks is not None and _snapshot_appended_file(
+            source, target, relative, pool.parent,
+            (previous_files or {}).get(relative, ()), file_chunks, seq):
+        return
+    if source.is_file() and not source.is_symlink():
+        _capture_snapshot_file(source, target)
+        return
+    if source.is_symlink():
+        _capture_snapshot_symlink(source, target, home)
         return
     if not _clonefile(source, target):
         _clone(source, target)
@@ -1861,9 +2640,16 @@ def _store_object(path: str, info: os.stat_result, objects: Path, counter: list[
     return str(final)
 
 
+def _copy_scan_key(info: os.stat_result, generation: int) -> tuple[int, int, int, int, int, int, str]:
+    """Verified-scan memo key for an environment file seen by ``_copy_tree`` (no digest is computed)."""
+    return _snapshot_file_cache_key(info, generation, "")
+
+
 def _copy_tree(source: Path, target: Path, previous: Path | None,
                durable_inodes: set[tuple[int, int]], *, seed: Path | None = None,
-               objects: Path | None = None) -> dict[str, int]:
+               objects: Path | None = None,
+               home: Path | None = None, home_subtree: Path | None = None,
+               excluded: set[Path] | None = None) -> dict[str, int]:
     """Copy ``source`` to ``target``; a file unchanged since the previous checkpoint is hard-linked.
 
     Checkpoint copies are never modified after they are written, so linking to one is safe; a file
@@ -1872,6 +2658,13 @@ def _copy_tree(source: Path, target: Path, previous: Path | None,
     when possible; other changed files go through the content-addressed ``objects`` store when one
     is given, else they are copied. One lstat per unchanged file (scandir types are free).
     """
+    if objects is None:
+        objects = _SAVE.get("snapshot_objects")
+    if home is None and home_subtree is None and excluded is None:
+        # Keep the original copy-hook call contract while carrying the save's
+        # boundary filters through wrappers that only forward the seed option.
+        home, home_subtree, excluded = _SAVE.get("snapshot_exclusions", (None, None, None))
+    excluded = excluded or set()
     counts = {"linked": 0, "copied": 0, "cloned": 0}
     counter = [0]
     if previous is None:
@@ -1881,6 +2674,11 @@ def _copy_tree(source: Path, target: Path, previous: Path | None,
     prev_root = None if previous is None else os.fspath(previous)
     seed_root = None if seed is None else os.fspath(seed)
     pending = [""]
+    if home is not None or home_subtree is not None or excluded:
+        if _snapshot_path_excluded(source, home, home_subtree, excluded):
+            return counts
+    else:
+        _check_registered_secrets(os.fsencode(source), failure_type=_StateFileSecretError)
     while pending:
         rel = pending.pop()
         directory = os.path.join(src_root, rel) if rel else src_root
@@ -1896,14 +2694,22 @@ def _copy_tree(source: Path, target: Path, previous: Path | None,
             name = entry.name
             path = entry.path
             destination = os.path.join(out_dir, name)
-            if entry.is_symlink():
-                os.symlink(os.readlink(path), destination)
+            is_link = entry.is_symlink()  # scandir caches the type: no extra lstat per entry
+            if _snapshot_path_excluded(Path(path), home, home_subtree, excluded, is_link):
+                continue
+            if is_link:
+                _capture_snapshot_symlink(Path(path), Path(destination), home)
                 continue
             if entry.is_dir(follow_symlinks=False):
                 pending.append(os.path.join(rel, name) if rel else name)
                 continue
             info = entry.stat(follow_symlinks=False)
             relpath = os.path.join(rel, name) if rel else name
+            # A file whose (inode, size, mtime, ctime) was already scanned under the current secret
+            # set is not read again; any newly registered secret bumps the generation and misses.
+            generation = _SECRET_GENERATION
+            scan_key = _copy_scan_key(info, generation)
+            scanned = scan_key in _VERIFIED_POOL_IDENTITIES
             if seed_root is not None and not info.st_mode & 0o222:
                 try:
                     seed_info = os.stat(os.path.join(seed_root, relpath))
@@ -1911,9 +2717,9 @@ def _copy_tree(source: Path, target: Path, previous: Path | None,
                     seed_info = None
                 if (seed_info is not None and info.st_dev == seed_info.st_dev
                         and info.st_ino == seed_info.st_ino and stat.S_ISREG(seed_info.st_mode)):
-                    os.link(path, destination)
-                    durable_inodes.add((info.st_dev, info.st_ino))
-                    counts["linked"] += 1
+                    _identity, cloned = _capture_snapshot_file(
+                        Path(path), Path(destination), prefer_clone=True)
+                    counts["cloned" if cloned else "copied"] += 1
                     continue
             if old_dir is not None:
                 old = os.path.join(old_dir, name)
@@ -1921,7 +2727,14 @@ def _copy_tree(source: Path, target: Path, previous: Path | None,
                     prior = os.lstat(old)
                 except OSError:
                     prior = None
-                if prior is not None and prior.st_size == info.st_size and prior.st_mtime_ns == info.st_mtime_ns:
+                if (prior is not None and stat.S_ISREG(prior.st_mode)
+                        and (prior.st_dev, prior.st_ino) != (info.st_dev, info.st_ino)
+                        and prior.st_size == info.st_size
+                        and prior.st_mtime_ns == info.st_mtime_ns):
+                    if not scanned:
+                        _check_snapshot_file(Path(path))
+                        if generation == _SECRET_GENERATION:
+                            _VERIFIED_POOL_IDENTITIES.add(scan_key)
                     os.link(old, destination)
                     durable_inodes.add((prior.st_dev, prior.st_ino))
                     counts["linked"] += 1
@@ -1933,25 +2746,40 @@ def _copy_tree(source: Path, target: Path, previous: Path | None,
                     seed_info = None
                 if (seed_info is not None and stat.S_ISREG(seed_info.st_mode)
                         and seed_info.st_size == info.st_size
-                        and seed_info.st_mtime_ns == info.st_mtime_ns
-                        and _clonefile(Path(path), Path(destination))):
-                    counts["cloned"] += 1
+                        and seed_info.st_mtime_ns == info.st_mtime_ns):
+                    _identity, cloned = _capture_snapshot_file(
+                        Path(path), Path(destination), prefer_clone=True)
+                    counts["cloned" if cloned else "copied"] += 1
                     continue
             if info.st_size >= _BIG_FILE and darwin:
-                if _clonefile(Path(path), Path(destination)):
-                    counts["cloned"] += 1
-                    continue
+                _identity, cloned = _capture_snapshot_file(Path(path), Path(destination))
+                counts["cloned" if cloned else "copied"] += 1
+                continue
             if objects is not None and stat.S_ISREG(info.st_mode):
+                # Scan before storing, then require the source to be unchanged across both steps so
+                # the stored bytes are the bytes that were scanned for registered secrets.
+                if not scanned:
+                    _check_snapshot_file(Path(path))
+                stored = _store_object(path, info, objects, counter)
+                after = os.lstat(path)
+                if (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns,
+                        after.st_ctime_ns) != (info.st_dev, info.st_ino, info.st_size,
+                                               info.st_mtime_ns, info.st_ctime_ns):
+                    raise CheckpointError("run file changed during checkpoint capture")
+                if generation == _SECRET_GENERATION:
+                    _VERIFIED_POOL_IDENTITIES.add(scan_key)
                 try:
-                    os.link(_store_object(path, info, objects, counter), destination)
+                    os.link(stored, destination)
                 except OSError as error:
                     # Identical tiny files (empty __init__.py) share one object inode and can
                     # reach the filesystem link limit; a private copy is always correct.
                     if error.errno != errno.EMLINK:
                         raise
-                    shutil.copy2(path, destination, follow_symlinks=False)
+                    _identity, cloned = _capture_snapshot_file(Path(path), Path(destination))
             else:
-                shutil.copy2(path, destination, follow_symlinks=False)
+                _identity, cloned = _capture_snapshot_file(Path(path), Path(destination))
+            if generation == _SECRET_GENERATION:
+                _VERIFIED_POOL_IDENTITIES.add(scan_key)
             counts["copied"] += 1
     return counts
 
@@ -2030,20 +2858,249 @@ def _fsync_snapshot(root: Path, new_pool_files: list[Path],
 
 
 def _unpublished_pool_files(previous: Path | None, root: Path,
-                            manifests: dict[str, list]) -> list[Path]:
-    """Pool links absent from the last published snapshot may be left by a failed writer."""
+                            manifests: dict[str, list],
+                            staged_files: list[Path] | None = None) -> list[Path]:
+    """Return pre-existing pool files that need an fsync before a snapshot references them."""
     try:
         old = json.loads((previous / MANIFEST_FILE).read_text()) if previous is not None else {}
     except (OSError, ValueError):
         old = {}
     if not isinstance(old, dict):
         old = {}
+    staged_targets = set()
+    artifact_root = _SAVE.get("artifact_root")
+    if isinstance(artifact_root, Path):
+        staged_pool_root = artifact_root / POOL_DIR
+        for path in staged_files or ():
+            try:
+                staged_targets.add(root / POOL_DIR / path.relative_to(staged_pool_root))
+            except ValueError:
+                continue
     files = []
     for relative, rows in manifests.items():
         old_names = {row[0] for row in old.get(relative, ())}
         store = root / POOL_DIR / relative.replace("/", "__")
-        files.extend(store / row[0] for row in rows if row[0] not in old_names)
+        files.extend(store / row[0] for row in rows
+                     if row[0] not in old_names and store / row[0] not in staged_targets)
     return files
+
+
+def _artifact_path(root: Path, relative: str) -> Path:
+    parts = Path(relative).parts
+    if (Path(relative).is_absolute() or not parts or parts[0] not in {POOL_DIR, CACHE_DIR}
+            or any(part in {"", ".", ".."} for part in parts)):
+        raise CheckpointError("invalid checkpoint artifact transaction")
+    return root.joinpath(*parts)
+
+
+def _write_artifact_transaction(tmp: Path, artifacts: list[str]) -> None:
+    marker = tmp / ARTIFACT_TRANSACTION_FILE
+    temporary = tmp / f"{ARTIFACT_TRANSACTION_FILE}.tmp"
+    staged_root = tmp / ARTIFACT_STAGE_DIR
+    entries = []
+    for relative in sorted(set(artifacts)):
+        source = _artifact_path(staged_root, relative)
+        info = source.lstat()
+        if not stat.S_ISREG(info.st_mode):
+            raise CheckpointError("checkpoint artifact staging contains a non-file")
+        entries.append({"path": relative, "device": info.st_dev, "inode": info.st_ino})
+    data = json.dumps({"artifacts": entries}, separators=(",", ":")).encode()
+    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(descriptor, "wb") as stream:
+        stream.write(data)
+        stream.flush()
+        os.fsync(stream.fileno())
+    os.replace(temporary, marker)
+    _fsync_dir(tmp)
+
+
+def _publish_staged_artifacts(root: Path, tmp: Path) -> None:
+    """Publish staged pool/chunk files only after the captured HOME identity was rechecked."""
+    staged_root = tmp / ARTIFACT_STAGE_DIR
+    if not staged_root.is_dir():
+        return
+    if staged_root.is_symlink():
+        raise CheckpointError("checkpoint artifact staging contains a symlink")
+
+    staged_files: list[tuple[str, Path]] = []
+    for directory, dirnames, filenames in os.walk(staged_root, followlinks=False):
+        current = Path(directory)
+        for name in dirnames:
+            if (current / name).is_symlink():
+                raise CheckpointError("checkpoint artifact staging contains a symlink")
+        for name in filenames:
+            source = current / name
+            if not stat.S_ISREG(source.lstat().st_mode):
+                raise CheckpointError("checkpoint artifact staging contains a non-file")
+            relative = source.relative_to(staged_root).as_posix()
+            target = _artifact_path(root, relative)
+            staged_files.append((relative, source))
+    staged_files.sort()
+    owned: list[str] = []
+    real_root = _real_path(root)
+    for relative, source in staged_files:
+        target = _artifact_path(root, relative)
+        if not _path_within(_real_path(target.parent), real_root):
+            raise CheckpointError("checkpoint artifact target is outside its store")
+        try:
+            target_info = target.lstat()
+        except FileNotFoundError:
+            owned.append(relative)
+            continue
+        if (not stat.S_ISREG(target_info.st_mode)
+                or _pool_identity(source) != _pool_identity(target)):
+            raise CheckpointError("checkpoint artifact identity conflict")
+
+    if owned:
+        _write_artifact_transaction(tmp, owned)
+    owned_set = set(owned)
+    published_dirs: set[Path] = set()
+    published_files: list[tuple[Path, tuple[int, str]]] = []
+    for relative, source in staged_files:
+        target = _artifact_path(root, relative)
+        known = _POOL_KNOWN.get(str(target.parent), {}).get(target.name)
+        expected = known if Path(relative).parts[0] == POOL_DIR and known is not None else (
+            _pool_identity(source))
+        published_files.append((target, expected))
+        if relative not in owned_set:
+            continue
+        _private_dir(target.parent)
+        if not _path_within(_real_path(target.parent), real_root):
+            raise CheckpointError("checkpoint artifact target is outside its store")
+        try:
+            os.link(source, target)
+        except FileExistsError:
+            target_info = target.lstat()
+            if (not stat.S_ISREG(target_info.st_mode)
+                    or _pool_identity(source) != _pool_identity(target)):
+                raise CheckpointError("checkpoint artifact identity conflict")
+            # A target created after the preflight is not owned by this transaction.
+            owned_set.remove(relative)
+            _write_artifact_transaction(tmp, sorted(owned_set))
+        published_dirs.add(target.parent)
+
+    for directory in published_dirs:
+        _fsync_dir(directory)
+    if published_dirs:
+        for directory in {path.parent for path in published_dirs}:
+            _fsync_dir(directory)
+        _fsync_dir(root)
+    shutil.rmtree(staged_root)
+    # Link changes invalidate staging identities. Hash and scan the published bytes
+    # from one fd; only that scan may cache the published inode under its digest.
+    for target, expected in published_files:
+        generation = _SECRET_GENERATION
+        identity = _check_snapshot_file(target, digest_hint=expected[1], force_scan=True)
+        if identity != expected:
+            raise CheckpointError("checkpoint artifact identity conflict")
+        if generation != _SECRET_GENERATION:
+            raise CheckpointError("STATEFRAME_HOME_IDENTITY_CHANGED")
+    if owned and not owned_set:
+        (tmp / ARTIFACT_TRANSACTION_FILE).unlink(missing_ok=True)
+        _fsync_dir(tmp)
+
+
+def _checkpoint_artifact_references(root: Path) -> set[str] | None:
+    """Return every shared artifact referenced by a complete checkpoint, or None if uncertain."""
+    referenced: set[str] = set()
+    # _checkpoints is a best-effort reader that skips unreadable metadata. Cleanup
+    # needs a complete reference set, so enumerate candidates without that filter.
+    checkpoints = []
+    try:
+        for path in root.iterdir():
+            if path.name.startswith(".") or path.name in {POOL_DIR, CACHE_DIR}:
+                continue
+            info = path.lstat()
+            if stat.S_ISLNK(info.st_mode):
+                return None
+            if stat.S_ISDIR(info.st_mode):
+                checkpoints.append(path)
+    except OSError:
+        return None
+    for checkpoint in checkpoints:
+        try:
+            meta = json.loads((checkpoint / META_FILE).read_text())
+        except (OSError, ValueError, RecursionError):
+            return None
+        if not isinstance(meta, dict):
+            return None
+        try:
+            manifest = json.loads((checkpoint / MANIFEST_FILE).read_text())
+        except FileNotFoundError:
+            if meta.get("blob_manifest_sha256") is not None:
+                return None
+            manifest = {}  # A legacy checkpoint had no pooled files to keep.
+        except (OSError, ValueError, RecursionError):
+            return None
+        if not isinstance(manifest, dict):
+            return None
+        chunks = meta.get("chunks", ())
+        if not isinstance(chunks, (list, tuple)):
+            return None
+        for name in chunks:
+            if type(name) is not str or Path(name).name != name or name in {"", ".", ".."}:
+                return None
+            referenced.add(f"{CACHE_DIR}/{name}")
+        for field in ("chunk_index", "file_chunks"):
+            indexes = meta.get(field, {})
+            if not isinstance(indexes, dict):
+                return None
+            for rows in indexes.values():
+                if not isinstance(rows, (list, tuple)):
+                    return None
+                for row in rows:
+                    if (not isinstance(row, (list, tuple)) or not row
+                            or type(row[0]) is not str or Path(row[0]).name != row[0]
+                            or row[0] in {"", ".", ".."}):
+                        return None
+                    referenced.add(f"{CACHE_DIR}/{row[0]}")
+        for relative, rows in manifest.items():
+            if (type(relative) is not str or Path(relative).is_absolute()
+                    or ".." in Path(relative).parts or not isinstance(rows, list)):
+                return None
+            store = relative.replace("/", "__")
+            for row in rows:
+                if (not isinstance(row, (list, tuple)) or not row or type(row[0]) is not str
+                        or Path(row[0]).name != row[0] or row[0] in {"", ".", ".."}):
+                    return None
+                referenced.add(f"{POOL_DIR}/{store}/{row[0]}")
+    return referenced
+
+
+def _cleanup_checkpoint_transaction(root: Path, tmp: Path) -> None:
+    """Remove only transaction-owned artifacts that no complete checkpoint references."""
+    marker = tmp / ARTIFACT_TRANSACTION_FILE
+    try:
+        document = json.loads(marker.read_text())
+        artifacts = document.get("artifacts") if isinstance(document, dict) else None
+        references = _checkpoint_artifact_references(root)
+        if isinstance(artifacts, list) and references is not None:
+            real_root = _real_path(root)
+            for entry in artifacts:
+                if not isinstance(entry, dict):
+                    continue
+                relative = entry.get("path")
+                device, inode = entry.get("device"), entry.get("inode")
+                if (type(relative) is not str or type(device) is not int
+                        or type(inode) is not int):
+                    continue
+                target = _artifact_path(root, relative)
+                if relative in references or not _path_within(_real_path(target.parent), real_root):
+                    continue
+                try:
+                    info = target.lstat()
+                except FileNotFoundError:
+                    continue
+                if ((info.st_dev, info.st_ino) == (device, inode)
+                        and (stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode))):
+                    target.unlink()
+    except (OSError, ValueError, TypeError, CheckpointError):
+        # A damaged ownership record is not authority to delete shared data.
+        pass
+    finally:
+        _POOL_KNOWN.clear()
+        _VERIFIED_POOL_IDENTITIES.clear()
+        shutil.rmtree(tmp, ignore_errors=True)
 
 
 def _record(run_dir: Path, **fields) -> None:
@@ -2070,11 +3127,18 @@ def _async_enabled() -> bool:
 def save(frame, step: int, run_dir: Path, *, background: bool = False) -> Path:
     """Write checkpoint ``<run>/checkpoints/<step>-<pid>`` atomically; returns its directory.
 
-    The in-memory capture and the run-file snapshot happen here, synchronously, at the step
-    boundary (the files are cloned copy-on-write). Pickling and writing can then run in a forked
+    The in-memory capture and run-file snapshot happen here, synchronously, at the step
+    boundary (pooled files are copied into private storage and scanned before publication).
+    Pickling and writing can then run in a forked
     child (``background``): it pickles its own copy-on-write image of the memory captured at this
     instant while the engine continues, and makes the checkpoint visible (LATEST) only when complete.
     """
+    _STATE["protected_home_identity"] = _verify_stateframe_home_identity(run_dir)
+    cache_run = os.path.realpath(run_dir)
+    if _STATE.get("verified_pool_cache_run") != cache_run:
+        _VERIFIED_POOL_IDENTITIES.clear()
+        _POOL_KNOWN.clear()
+        _STATE["verified_pool_cache_run"] = cache_run
     started = time.perf_counter()
     payload, ctx = collect(frame)
     collected = time.perf_counter()
@@ -2100,8 +3164,11 @@ def save(frame, step: int, run_dir: Path, *, background: bool = False) -> Path:
                               collected, background)
         except BaseException:
             if _STATE.get("child_tmp") != tmp:
-                shutil.rmtree(tmp, ignore_errors=True)
+                _cleanup_checkpoint_transaction(root, tmp)
             raise
+        finally:
+            _SAVE.clear()
+            _STATE.pop("protected_home_identity", None)
 
 
 def _seed_for_run(run_dir: Path) -> Path | None:
@@ -2137,14 +3204,32 @@ def _publish_checkpoint(root: Path, tmp: Path, final: Path, run_dir: Path) -> No
     _prune_chunks(root)
     _prune_pool(root, run_dir)
     _prune_objects(root)
+    marker = final / ARTIFACT_TRANSACTION_FILE
+    try:
+        marker.unlink()
+    except FileNotFoundError:
+        pass
+    else:
+        _fsync_dir(final)
 
 
 def _save_into(payload, ctx, step, run_dir, root, final, tmp, clocks, started, collected, background):
     """The rest of save(): snapshot the run files into ``tmp`` and write (here or in the writer)."""
+    _STATE["protected_home_identity"] = _verify_stateframe_home_identity(run_dir)
+    captured_secret_generation = _SECRET_GENERATION
+    _SAVE.clear()
+    _SAVE.update(artifact_root=tmp / ARTIFACT_STAGE_DIR, pool_root=root / POOL_DIR)
     (tmp / "run").mkdir()
     seq = _next_seq(root)  # ordering for pruning/LATEST (see _checkpoints), fixed before any fork
     _STATE["next_seq"] = seq + 1
-    entries = sorted(p.name for p in run_dir.iterdir() if p.name not in SKIP_RUN_ENTRIES)
+    home, home_subtree, excluded = _snapshot_home_exclusions(run_dir)
+    _SAVE["snapshot_exclusions"] = (home, home_subtree, excluded)
+    _SAVE["snapshot_objects"] = root / OBJECT_DIR
+    entries = sorted(
+        path.name for path in run_dir.iterdir()
+        if path.name not in SKIP_RUN_ENTRIES
+        and not _snapshot_path_excluded(path, home, home_subtree, excluded)
+    )
     previous = latest(run_dir)
     prior_meta = {}
     if previous is not None:
@@ -2161,26 +3246,36 @@ def _save_into(payload, ctx, step, run_dir, root, final, tmp, clocks, started, c
         source, destination = run_dir / name, tmp / "run" / name
         if (name == "worker" or name in POOLED_DIRS) and source.is_dir() and not source.is_symlink():
             _snapshot_tree(source, destination, name, root / POOL_DIR, manifests, new_pool_files,
-                           file_chunks, prior_meta.get("file_chunks", {}), seq)
+                           file_chunks, prior_meta.get("file_chunks", {}), seq,
+                           home=home, home_subtree=home_subtree, excluded=excluded)
             copied["cloned"] += 1
             continue
-        if _clonefile(source, destination):
-            copied["cloned"] += 1
+        if not source.is_dir() or source.is_symlink():
+            if source.is_symlink():
+                _capture_snapshot_symlink(source, destination, home)
+                continue
+            if source.is_file() and not source.is_symlink():
+                _identity, cloned = _capture_snapshot_file(source, destination)
+                copied["cloned" if cloned else "copied"] += 1
+                continue
+            if _clonefile(source, destination):
+                copied["cloned"] += 1
+                continue
+            _clone(source, destination)
             continue
         prior = previous / "run" / name if previous is not None else None
-        if source.is_dir() and not source.is_symlink():
-            seed = _seed_for_run(run_dir) if name == "env" else None
-            for key, value in _copy_tree(source, destination, prior, durable_inodes,
-                                         seed=seed, objects=root / OBJECT_DIR).items():
-                copied[key] += value
-        else:
-            _clone(source, destination)
+        seed = _seed_for_run(run_dir) if name == "env" else None
+        # Boundary filters and the object store ride in _SAVE, so wrappers that only forward
+        # ``seed`` keep the original copy-hook call contract.
+        for key, value in _copy_tree(source, destination, prior, durable_inodes,
+                                     seed=seed).items():
+            copied[key] += value
     manifest_bytes = json.dumps(manifests, sort_keys=True, separators=(",", ":")).encode()
     pool_sha256 = {
         f"{relative}/{name}": _POOL_KNOWN[str(root / POOL_DIR / relative.replace('/', '__'))][name][1]
         for relative, rows in manifests.items() for name, _size in rows
     }
-    new_pool_files.extend(_unpublished_pool_files(previous, root, manifests))
+    new_pool_files.extend(_unpublished_pool_files(previous, root, manifests, new_pool_files))
     with os.fdopen(os.open(tmp / MANIFEST_FILE, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "wb") as stream:
         stream.write(manifest_bytes)
     files_done = time.perf_counter()
@@ -2203,7 +3298,7 @@ def _save_into(payload, ctx, step, run_dir, root, final, tmp, clocks, started, c
         t0 = time.perf_counter()
         def dump(writer):
             _SAVE.clear()
-            _SAVE.update(root=root, index=prior_index)
+            _SAVE.update(root=root, index=prior_index, artifact_root=tmp / ARTIFACT_STAGE_DIR)
             try:
                 dump_to(writer, payload, ctx)
                 return dict(_SAVE.get("index_out", {}))
@@ -2242,6 +3337,14 @@ def _save_into(payload, ctx, step, run_dir, root, final, tmp, clocks, started, c
             _fsync_dir(root / CACHE_DIR)
         if (root / OBJECT_DIR).is_dir():
             _fsync_dir(root / OBJECT_DIR)
+        _STATE["protected_home_identity"] = _verify_stateframe_home_identity(run_dir)
+        if _SECRET_GENERATION != captured_secret_generation:
+            # A newly discovered key was absent from earlier scans, even on coarse-timestamp filesystems.
+            raise CheckpointError("STATEFRAME_HOME_IDENTITY_CHANGED")
+        _publish_staged_artifacts(root, tmp)
+        _STATE["protected_home_identity"] = _verify_stateframe_home_identity(run_dir)
+        if _SECRET_GENERATION != captured_secret_generation:
+            raise CheckpointError("STATEFRAME_HOME_IDENTITY_CHANGED")
         _publish_checkpoint(root, tmp, final, run_dir)
         return meta
 
@@ -2251,7 +3354,7 @@ def _save_into(payload, ctx, step, run_dir, root, final, tmp, clocks, started, c
         else:
             write()
     except BaseException:
-        shutil.rmtree(tmp, ignore_errors=True)
+        _cleanup_checkpoint_transaction(root, tmp)
         raise
     return final
 
@@ -2316,15 +3419,46 @@ def _reap() -> bool:
         return False
     _STATE["child"] = None
     tmp, _STATE["child_tmp"] = _STATE.get("child_tmp"), None
+    run_dir, step = _STATE.get("child_run_dir"), _STATE.get("child_step")
+    _STATE["child_run_dir"], _STATE["child_step"] = None, None
     if os.waitstatus_to_exitcode(status) != 0:
         if tmp is not None:
-            shutil.rmtree(tmp, ignore_errors=True)
+            with (tmp.parent / ".checkpoint.lock").open("a+b") as lock:
+                fcntl.flock(lock, fcntl.LOCK_EX)
+                _cleanup_checkpoint_transaction(tmp.parent, tmp)
             _sweep_stale(tmp.parent)
         _SCANS.clear()  # the writer may have failed on a stale scan: rescan at the next boundary
-        _note_failure(_STATE.get("child_run_dir"), "background writer failed")
+        reason = _writer_failure_reason(run_dir, step)
+        _note_failure(run_dir, reason)
     else:
         _STATE["consecutive_failed"] = 0
     return True
+
+
+def _writer_failure_reason(run_dir, step: object) -> str:
+    """Read an allowlisted writer code from its durable failure event."""
+    if run_dir is None or type(step) is not int:
+        return "unexpected writer error"
+    try:
+        from kernel_journal_store import open_journal
+
+        with open_journal(Path(run_dir) / "checkpoints") as stream:
+            lines = stream.readlines()
+    except Exception:  # noqa: BLE001 - a missing or unreadable event is a generic writer failure
+        return "unexpected writer error"
+    for line in reversed(lines):
+        try:
+            event = json.loads(line)
+        except ValueError:
+            continue
+        if (not isinstance(event, dict) or event.get("event") != "checkpoint_failed"
+                or event.get("step") != step or event.get("background") is not True):
+            continue
+        reason = event.get("failure_reason")
+        if type(reason) is str and reason in _WRITER_FAILURE_REASONS:
+            return reason
+        return "unexpected writer error"
+    return "unexpected writer error"
 
 
 def failure_summary() -> dict[str, object]:
@@ -2345,11 +3479,26 @@ def _note_failure(run_dir, reason: str) -> None:
               f"failed saves in a row ({reason}); resume will replay", file=sys.stderr, flush=True)
 
 
-_STALE = re.compile(r"\.(?:\d{4}-|LATEST\.)(\d+)(?:\.tmp)?$|\..*-(\d+)\.(?:z)?pkl\.tmp$")
+_STALE = re.compile(
+    r"\.(?:\d{4}-|LATEST\.)(\d+)(?:\.tmp)?$|\..*-(\d+)(?:-[0-9a-f]{16})?\.(?:z)?pkl\.tmp$"
+)
 
 
 def _sweep_stale(root: Path) -> int:
     """Remove temporaries left by checkpoint writers that no longer run; returns how many."""
+    try:
+        lock_stream = (root / ".checkpoint.lock").open("a+b")
+    except OSError:
+        return 0
+    with lock_stream:
+        try:
+            fcntl.flock(lock_stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return 0
+        return _sweep_stale_locked(root)
+
+
+def _sweep_stale_locked(root: Path) -> int:
     removed = 0
     for folder in (root, root / CACHE_DIR):
         try:
@@ -2364,6 +3513,7 @@ def _sweep_stale(root: Path) -> int:
             if pid == _STATE.get("child") or _pid_alive(pid):
                 continue
             if entry.is_dir(follow_symlinks=False):
+                _cleanup_checkpoint_transaction(root, Path(entry.path))
                 shutil.rmtree(entry.path, ignore_errors=True)
             else:
                 try:
@@ -2403,12 +3553,14 @@ def _fork_writer(run_dir: Path, step: int, final: Path, write, tmp: Path) -> Non
                     state_bytes=meta["state_bytes"], chunks=len(meta["chunks"]))
             code = 0
         except BaseException as error:  # noqa: BLE001 - recorded, then exit
-            shutil.rmtree(tmp, ignore_errors=True)
+            _cleanup_checkpoint_transaction(tmp.parent, tmp)
+            reason = _failure_reason(error)
             _record(run_dir, event="checkpoint_failed", step=step, background=True,
-                    error=_failure_detail(error))
+                    error=reason, failure_reason=reason)
         finally:
             os._exit(code)
     _STATE["child"], _STATE["child_tmp"], _STATE["child_run_dir"] = pid, tmp, run_dir
+    _STATE["child_step"] = step
     _STATE["fork_seconds"] = round(time.perf_counter() - forked, 3)
 
 
@@ -2549,7 +3701,16 @@ def _save_point(frame, step: int, poc, entered: float) -> None:
         gc_was_enabled = gc.isenabled()
         gc.disable()
         try:
-            target = save(frame, step, run_dir, background=background)
+            try:
+                target = save(frame, step, run_dir, background=background)
+            except BaseException as error:  # noqa: BLE001 - save failures never stop the engine run
+                if current == "save":
+                    _STATE["last_sends"] = previous_sends
+                reason = _failure_reason(error)
+                _record(run_dir, event="checkpoint_failed", step=step,
+                        error=reason, failure_reason=reason)
+                _note_failure(run_dir, reason)
+                return
         finally:
             if gc_was_enabled:
                 gc.enable()
@@ -2570,8 +3731,10 @@ def _save_point(frame, step: int, poc, entered: float) -> None:
     except Exception as error:  # noqa: BLE001 - fail open, never break the run
         if current == "save":
             _STATE["last_sends"] = previous_sends  # nothing was saved: the next boundary may retry
-        _record(run_dir, event="checkpoint_failed", step=step, error=_failure_detail(error))
-        _note_failure(run_dir, type(error).__name__)
+        reason = _failure_reason(error)
+        _record(run_dir, event="checkpoint_failed", step=step,
+                error=reason, failure_reason=reason)
+        _note_failure(run_dir, reason)
 
 
 # --------------------------------------------------------------------------- restore
@@ -2647,7 +3810,7 @@ def _prune_pool(root: Path, run_dir: Path) -> None:
     """Drop pooled files that no kept checkpoint lists and that the live run no longer has.
 
     A pooled file still present in the live directory is listed again by the next save, so it is
-    kept (it is a hard link: it costs no extra space). A file removed from the live run is freed
+    kept. A file removed from the live run is freed
     once no kept checkpoint names it, so the pool is bounded by the kept checkpoints plus the live run.
     """
     pool = root / POOL_DIR
@@ -2698,10 +3861,56 @@ def _validate(checkpoint: Path) -> tuple[dict, bytes]:
     for name in meta.get("entries", ()):
         if not (checkpoint / "run" / name).exists():
             raise CheckpointError(f"checkpoint run copy lacks {name}")
-    for name in meta.get("chunks", ()):
+    chunk_digests: dict[str, str] = {}
+
+    def add_chunk(name: object, digest: object) -> None:
+        if (not isinstance(name, str) or Path(name).name != name or not name.endswith(CHUNK_SUFFIX)
+                or not isinstance(digest, str) or len(digest) != 64
+                or any(character not in "0123456789abcdef" for character in digest)):
+            raise CheckpointError("checkpoint chunk metadata is invalid")
+        previous = chunk_digests.setdefault(name, digest)
+        if previous != digest:
+            raise CheckpointError(f"checkpoint chunk {name} has conflicting signed digests")
+
+    index = meta.get("chunk_index", {})
+    if not isinstance(index, dict):
+        raise CheckpointError("checkpoint chunk index metadata is invalid")
+    for rows in index.values():
+        if not isinstance(rows, list):
+            raise CheckpointError("checkpoint chunk index metadata is invalid")
+        for row in rows:
+            if not isinstance(row, list) or len(row) < 4:
+                raise CheckpointError("checkpoint chunk index metadata is invalid")
+            add_chunk(row[0], row[3])
+
+    file_chunks = meta.get("file_chunks", {})
+    if not isinstance(file_chunks, dict):
+        raise CheckpointError("checkpoint file chunk metadata is invalid")
+    for rows in file_chunks.values():
+        if not isinstance(rows, list):
+            raise CheckpointError("checkpoint file chunk metadata is invalid")
+        for row in rows:
+            if not isinstance(row, list) or len(row) != 5:
+                raise CheckpointError("checkpoint file chunk metadata is invalid")
+            add_chunk(row[0], row[4])
+
+    names = meta.get("chunks", [])
+    if (not isinstance(names, list) or any(not isinstance(name, str) for name in names)
+            or len(names) != len(set(names)) or set(names) != set(chunk_digests)):
+        raise CheckpointError("checkpoint chunk references do not match signed metadata")
+    for name in names:
         chunk = checkpoint.parent / CACHE_DIR / name
         if not chunk.is_file() or not _owned_private(chunk):
             raise CheckpointError(f"journal cache chunk {name} missing or not private")
+        digest = hashlib.sha256()
+        try:
+            with chunk.open("rb") as stream:
+                for block in iter(lambda: stream.read(1 << 20), b""):
+                    digest.update(block)
+        except OSError:
+            raise CheckpointError(f"journal cache chunk {name} missing or unreadable") from None
+        if digest.hexdigest() != chunk_digests[name]:
+            raise CheckpointError(f"journal cache chunk {name} checksum mismatch")
     return meta, raw
 
 
@@ -2731,9 +3940,9 @@ def _restore_files(checkpoint: Path, run_dir: Path, meta: dict) -> None:
             store = checkpoint.parent / POOL_DIR / relative.replace("/", "__")
             live = run_dir / relative
             live.mkdir(mode=0o700, parents=True, exist_ok=True)
-            for row in files:  # write-once files: a hard link IS the content
+            for row in files:
                 name = row[0]
-                os.link(store / name, live / name)
+                _clone(store / name, live / name)
     for relative, rows in meta.get("file_chunks", {}).items():
         if (not relative.startswith("worker/measurement-runs/")
                 or relative.count("/") != 3 or not relative.endswith("/events.jsonl")):

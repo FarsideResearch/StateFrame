@@ -71,8 +71,7 @@ def test_planted_session_without_lease_entry_fails_to_pickle(tmp_path, monkeypat
         # The failure report names where the process-bound object sits.
         assert kernel_checkpoint._process_bound_path(payload).startswith(
             "payload['frame']['_shell']<ShellHolder>.session<ExecSession>.")
-        detail = kernel_checkpoint._failure_detail(caught.value)
-        assert detail.startswith("TypeError: ") and " at " in detail
+        assert kernel_checkpoint._failure_reason(caught.value) == "unexpected writer error"
     finally:
         session.close()
 

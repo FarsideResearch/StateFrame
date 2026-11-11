@@ -569,6 +569,17 @@ def _record_checkpoint_refusal(root: Path, folder: Path, detail: str) -> None:
         print(f"checkpoint refusal could not be recorded: {error}", file=sys.stderr)
 
 
+def _register_checkpoint_signing_key(kernel_checkpoint) -> None:
+    """Load the install key into the host-side engine module before signature verification."""
+    if getattr(kernel_checkpoint, "_SIGNING_KEY", None):
+        return
+    from ._child import checkpoint_key
+
+    key = checkpoint_key()
+    if key is not None:
+        kernel_checkpoint.register_signing_key(key)
+
+
 def select_checkpoint(run: Path, tape: list[dict[str, object]], wire_dir: Path) -> dict[str, object] | None:
     """The newest intact engine checkpoint whose next request was recorded (so it can be verified).
 
@@ -610,12 +621,20 @@ def select_checkpoint(run: Path, tape: list[dict[str, object]], wire_dir: Path) 
         try:
             if meta.get("schema") != CHECKPOINT_SCHEMA or type(meta.get("sends")) is not int:
                 continue
+            # Cheap integrity check first so a truncated or altered state reports its checksum
+            # mismatch rather than a later authentication error.
             state = folder / "state.pkl"
             kernel_checkpoint.decode_state(state.read_bytes(), meta)
+            # Report an unusable pooled file before authentication so damaged old-layout
+            # checkpoints keep their actionable blob diagnostic. This inspection is read-only.
             blob_problem = _blob_integrity_problem(folder, meta)
             if blob_problem:
                 _record_checkpoint_refusal(root, folder, blob_problem)
                 continue
+            _register_checkpoint_signing_key(kernel_checkpoint)
+            # Signed state metadata and every referenced journal-cache chunk must verify
+            # before this checkpoint is offered to the restore path.
+            kernel_checkpoint.validate(folder)
         except kernel_checkpoint.CheckpointError as error:
             _record_checkpoint_refusal(root, folder, str(error))
             continue
