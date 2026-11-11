@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.4.42 (2026-11-11)
 
 - Fixed: on Linux, checks and exec-session commands that run Go or Node programs no longer die at startup. StateFrame no longer caps their virtual address space (`RLIMIT_AS`), which those runtimes reserve far beyond what they use. The memory budget itself is unchanged and still enforced. This removes the matching entry from `KNOWN_LIMITATIONS.md`.
 - Linux memory limits for checks and exec-session commands use cgroup v2 `memory.max` (with swap verified off) when StateFrame runs as the only process family in a delegated, writable cgroup: it moves itself into a `supervisor` child it creates, enables the `memory` and `pids` controllers on the parent and gives each command its own sibling group. In every other case, including a cgroup shared with a calling shell or a pipeline sibling, it falls back to `RLIMIT_DATA` plus the existing aggregate RSS supervisor, which also kills shared and memfd memory above the budget. The mechanism used is recorded in the run journal and private receipts only; request bytes are unchanged.
