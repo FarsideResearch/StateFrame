@@ -256,7 +256,7 @@
   "kernel_fivefix_control.py": "3c8da6a4ea47a63c58d1ddc88667090493510d6979918518ab0e25eae1335a90",
   "kernel_fl_checkpoint_capture.py": "5d24e2a295a148ba08d1c1b07b601946924a87fb278dfbf6a9e36b86ab0e1b6e",
   "kernel_fl_next_rules_r2.py": "d57109dbcae4ca230c053e0e5aeee15b2362b03e3f24febe9b825a59d03ae069",
-  "kernel_frame_allocation_capture.py": "eb4c1f0a634bd6457d8fd48fb8ce1412f12e56100b1d27188467ffbde1092a54",
+  "kernel_frame_allocation_capture.py": "0d5abbd2743c12f985437a7af698054b96c186124f565f14176fff546eec81b2",
   "kernel_frame_allocation_validation.py": "fd4c17f980c9f5bbeb4868535164ff9121cfc5e6bbd131c544c8bdf4917a9de3",
   "kernel_frame_budget.py": "8160878d66198ebc71e75788b9c2f742fc5fb53d897119235a4227bdad818b5b",
   "kernel_frame_clarity.py": "aee427607398a688693f439cd8ff483a74ea5a0d0e516f19818fea339753b1aa",
