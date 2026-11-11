@@ -12,6 +12,8 @@ When the current cgroup is delegated and writable, and contains only StateFrame'
 
 Any other process in the cgroup prevents the leaf pattern. This includes an ancestor such as the calling shell and a sibling such as `tee` in a pipeline. StateFrame leaves that cgroup layout alone and uses `RLIMIT_DATA` for heap and private mappings plus sampled RSS supervision for shared mappings and `memfd` memory. The hard cgroup memory limit is available only when StateFrame is the only process family in a delegated cgroup and setup succeeds, for example when started directly with `systemd-run --user --scope -p Delegate=yes stateframe ...`. Under the fallback, memory can exceed the budget briefly between samples.
 
+Under the fallback, post-exit memory verification has no wall-clock cap. If a procfs read never returns (a kernel-level hang), finishing that check waits for it instead of failing the check.
+
 ## Environment seed storage
 
 The `STATEFRAME_ENV_SEED_MAX_GB` cap is soft: the newest seed and seeds in use can keep the store above it. On Linux, a seed whose files are still hard-linked into a run environment cannot be evicted until that run is removed with `stateframe gc`.
@@ -228,4 +230,3 @@ There is no step limit by default either. Pass `--max-turns N` to stop after N m
 ## License
 
 StateFrame is licensed under the GNU Affero General Public License v3.0 only (AGPL-3.0-only), or under a separate commercial license from Farside Research LLC (see COMMERCIAL-LICENSE.md). Third-party dependencies keep their own licenses; see THIRD_PARTY_LICENSES.md.
-- Post-exit memory verification has no wall-clock cap. If a procfs read never returns (a kernel-level hang), completing that check waits with it instead of failing it. Severity: low.
