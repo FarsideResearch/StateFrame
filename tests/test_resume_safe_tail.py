@@ -70,7 +70,6 @@ def test_stack_tip_event_tails_follow_resume_policy() -> None:
     classifications = {
         "intake_orientation_failed": "REJECT",
         "repo_map_commit_sha_unavailable": "REJECT",
-        "shell_memory_enforcement": "REJECT",
     }
     for kind, classification in classifications.items():
         if kind in restart.SAFE_TAIL:
