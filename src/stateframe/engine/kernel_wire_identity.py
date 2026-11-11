@@ -131,6 +131,7 @@ def seeded_content_wire_id(seed: object, kind: str, step: object,
 WIRE_AUDIT_ONLY_FIELDS = frozenset({
     "memory_limit_mechanism", "memory_limit_killed", "memory_limit_reason",
     "cgroup_leaf_pattern", "memory_limit_samples_skipped", "memory_limit_sample_skip_reason",
+    "memory_limit_stop_cause",
 })
 
 

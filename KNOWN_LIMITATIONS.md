@@ -228,3 +228,4 @@ There is no step limit by default either. Pass `--max-turns N` to stop after N m
 ## License
 
 StateFrame is licensed under the GNU Affero General Public License v3.0 only (AGPL-3.0-only), or under a separate commercial license from Farside Research LLC (see COMMERCIAL-LICENSE.md). Third-party dependencies keep their own licenses; see THIRD_PARTY_LICENSES.md.
+- Post-exit memory verification has no wall-clock cap. If a procfs read never returns (a kernel-level hang), completing that check waits with it instead of failing it. Severity: low.

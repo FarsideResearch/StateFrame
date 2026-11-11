@@ -57,7 +57,7 @@ def test_body_exception_kills_live_child_before_bounded_cleanup(monkeypatch):
     assert process.returncode == -signal.SIGKILL
     assert all(stream is None or stream.closed
                for stream in (process.stdin, process.stdout, process.stderr))
-    assert elapsed < policy.RSS_FINISH_MAX_WAIT_SECONDS
+    assert elapsed < 15.0
 
     kill_index = next(index for index, item in enumerate(events) if item[0] == "kill")
     finish_index = next(index for index, item in enumerate(events) if item[0] == "finish")

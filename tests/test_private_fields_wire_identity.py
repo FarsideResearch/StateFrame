@@ -545,6 +545,7 @@ def test_private_fields_do_not_change_check_wire_identity(monkeypatch):
         "memory_limit_mechanism", "memory_limit_killed",
         "memory_limit_reason", "cgroup_leaf_pattern",
         "memory_limit_samples_skipped", "memory_limit_sample_skip_reason",
+        "memory_limit_stop_cause",
     }
     assert set(kernel_wire_identity.WIRE_AUDIT_ONLY_FIELDS) <= fields
     assert {"_stateframe_memo_generation", "_receipt_identity_content"} <= fields

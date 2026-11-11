@@ -693,7 +693,7 @@ def test_finish_waits_for_blocked_refresh_after_leader_exit(monkeypatch):
     assert not supervisor._thread.is_alive()
 
 
-def test_finish_fails_at_hard_cap_while_supervisor_work_is_stuck(monkeypatch):
+def test_finish_waits_out_stuck_supervisor_work_without_a_wall_clock_cap(monkeypatch):
     refresh_started = threading.Event()
     release_refresh = threading.Event()
 
@@ -719,23 +719,21 @@ def test_finish_fails_at_hard_cap_while_supervisor_work_is_stuck(monkeypatch):
         def resident_memory_limit_breach(_live, _memory_bytes):
             return ""
 
-    monkeypatch.setattr(policy, "RSS_FINISH_MAX_WAIT_SECONDS", 0.25)
     supervisor = _empty_family_supervisor(monkeypatch, Table())
     supervisor.start()
     assert refresh_started.wait(2), "supervisor never entered member refresh"
+    # Slow procfs under memory pressure is not a failure: completion waits for the
+    # supervisor's own verdict instead of failing on a wall-clock cap.
+    timer = threading.Timer(1.0, release_refresh.set)
+    timer.start()
     started = time.monotonic()
     try:
-        assert not supervisor.finish(timeout=0.1)
-        assert time.monotonic() - started < 1.0
-        assert supervisor.finish_error is not None
-        assert supervisor.finish_error.startswith(
-            "resident-memory supervisor post-exit verification timed out after ")
-        assert "(work active " in supervisor.finish_error
-        assert "; last progress " in supervisor.finish_error
-        assert "scan active 0.00s; last completed scan 0.00s; maximum wait 0.25s)" in (
-            supervisor.finish_error)
+        assert supervisor.finish(timeout=0.1)
+        assert time.monotonic() - started >= 0.8
+        assert supervisor.finish_error is None
     finally:
         release_refresh.set()
+        timer.cancel()
         supervisor._thread.join(timeout=2)
     assert not supervisor._thread.is_alive()
 
@@ -761,5 +759,5 @@ def test_finish_fails_quickly_when_supervisor_thread_is_dead(monkeypatch):
     assert time.monotonic() - started < 0.5
     assert supervisor.finish_error == (
         "resident-memory supervisor thread exited before post-exit verification "
-        "completed (scan active 0.00s; last completed scan 0.00s; maximum wait 15s)"
+        "completed (scan active 0.00s; last completed scan 0.00s)"
     )

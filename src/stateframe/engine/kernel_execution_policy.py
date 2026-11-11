@@ -50,12 +50,11 @@ MAX_PROFILE_OUTPUT_BYTES = 16 * 1024
 CGROUP_CLEANUP_ATTEMPTS = 40
 CGROUP_CLEANUP_INTERVAL_SECONDS = 0.025
 FULL_PROCESS_SCAN_INTERVAL_SECONDS = 1.0
-# A live check's procfs sample can race process exit or a torn read. Skip such
-# samples; only a sample failure that persists this long stops the check.
-PROCFS_SAMPLE_RACE_MAX_SECONDS = 5.0
+# A procfs sample can race process exit or return a torn read, and under memory
+# pressure it can be slow. Such a sample is skipped and taken again. Only this many
+# consecutive failed samples (a count, never elapsed time) prove procfs unreadable.
+PROCFS_SAMPLE_MAX_CONSECUTIVE_FAILURES = 500
 _PROCFS_RACE_ERRNOS = frozenset({errno.ESRCH, errno.ENOENT})
-RSS_FINISH_IDLE_SECONDS = 2.0
-RSS_FINISH_MAX_WAIT_SECONDS = 15.0
 _Result = TypeVar("_Result")
 _PROFILE_FD_ENV = "STATEFRAME_TEST_RUN_SPANS_FD"
 _LOGGER = logging.getLogger(__name__)
@@ -113,6 +112,7 @@ class PolicyResult:
     cgroup_leaf_pattern: str | None = None
     memory_limit_samples_skipped: int = 0
     memory_limit_sample_skip_reason: str | None = None
+    memory_limit_stop_cause: str | None = None
 
 
 def policy_read_grants(result: object) -> SandboxReadGrants | None:
@@ -397,7 +397,7 @@ class _ResidentMemorySupervisor:
         self._busy_since: float | None = None
         self._last_progress_at = time.monotonic()
         self._stopped = threading.Event()
-        self._race_since: float | None = None
+        self._failed_samples = 0
         self._leader_exit_processed = threading.Event()
         self._completion_lock = threading.Lock()
         self._completion_verified = False
@@ -511,20 +511,9 @@ class _ResidentMemorySupervisor:
         scan_active = max(0.0, now - scan_started_at) if scan_started_at is not None else 0.0
         return busy_for, progress_age, scan_active, last_scan_duration, busy_since is not None
 
-    def _finish_timeout_reason(self, started: float, now: float) -> str:
-        busy_for, progress_age, scan_active, last_scan_duration, _busy = (
-            self._finish_diagnostics(now))
-        return (
-            "resident-memory supervisor post-exit verification timed out "
-            f"after {now - started:.2f}s "
-            f"(work active {busy_for:.2f}s; last progress {progress_age:.2f}s ago; "
-            f"scan active {scan_active:.2f}s; "
-            f"last completed scan {last_scan_duration:.2f}s; "
-            f"maximum wait {RSS_FINISH_MAX_WAIT_SECONDS:g}s)"
-        )
-
     def _finish_failure(self, reason: str) -> bool:
         self.finish_error = reason
+        self._record_stop_cause(reason)
         self._stopped.set()
         if self._thread.ident is not None:
             self._thread.join(0)
@@ -559,6 +548,16 @@ class _ResidentMemorySupervisor:
             message = message[:497] + "..."
         self.error = f"{context} ({type(error).__name__}: {message})"
         self._error_cause = error
+        self._record_stop_cause(self.error)
+
+    def _record_stop_cause(self, reason: str) -> None:
+        """Name a supervisor-side stop in the receipt so it is never an anonymous kill."""
+        if getattr(self.process, "memory_limit_stop_cause", None) == "memory_limit":
+            return
+        try:
+            self.process.memory_limit_stop_cause = f"supervisor_error: {reason}"
+        except (AttributeError, TypeError):
+            pass
 
     def finish(self, timeout: float = 2.0, *, wait_for_post_exit: bool = True) -> bool:
         if not wait_for_post_exit:
@@ -570,11 +569,10 @@ class _ResidentMemorySupervisor:
             self._thread.join(max(0.0, timeout))
             return self._finish_verified_result()
 
-        started = time.monotonic()
-        max_deadline = started + max(0.0, RSS_FINISH_MAX_WAIT_SECONDS)
-        idle_seconds = max(0.0, RSS_FINISH_IDLE_SECONDS)
+        # Wait for the supervisor's own post-exit scan. There is no wall-clock cap:
+        # under memory pressure a scan can be slow, and a slow scan is not a failure.
+        # The supervisor loop always ends, either verified or with a recorded error.
         while not self._leader_exit_processed.is_set():
-            now = time.monotonic()
             if not self._thread.is_alive():
                 if self._leader_exit_processed.is_set():
                     break
@@ -582,38 +580,16 @@ class _ResidentMemorySupervisor:
                     return self._finish_failure(
                         f"resident-memory supervisor recorded an error: {self.error}")
                 _busy_for, _progress_age, scan_active, last_scan_duration, _busy = (
-                    self._finish_diagnostics(now))
+                    self._finish_diagnostics(time.monotonic()))
                 return self._finish_failure(
                     "resident-memory supervisor thread exited before post-exit verification "
                     f"completed (scan active {scan_active:.2f}s; "
-                    f"last completed scan {last_scan_duration:.2f}s; "
-                    f"maximum wait {RSS_FINISH_MAX_WAIT_SECONDS:g}s)"
+                    f"last completed scan {last_scan_duration:.2f}s)"
                 )
-
-            busy_for, progress_age, scan_active, last_scan_duration, busy = (
-                self._finish_diagnostics(now))
-            if now >= max_deadline:
-                return self._finish_failure(self._finish_timeout_reason(started, now))
-            if not busy and progress_age >= idle_seconds:
-                return self._finish_failure(
-                    "resident-memory supervisor post-exit verification stalled "
-                    f"after {progress_age:.2f}s without progress while idle "
-                    f"(work active {busy_for:.2f}s; scan active {scan_active:.2f}s; "
-                    f"last completed scan {last_scan_duration:.2f}s; "
-                    f"maximum wait {RSS_FINISH_MAX_WAIT_SECONDS:g}s)"
-                )
-
-            wait_for = min(0.05, max_deadline - now)
-            if not busy:
-                wait_for = min(wait_for, max(0.0, idle_seconds - progress_age))
-            self._leader_exit_processed.wait(wait_for)
+            self._leader_exit_processed.wait(0.05)
         self._stopped.set()
-        remaining = max_deadline - time.monotonic()
         if self._thread.ident is not None:
-            self._thread.join(max(0.0, remaining))
-        if self._thread.is_alive():
-            return self._finish_failure(
-                self._finish_timeout_reason(started, time.monotonic()))
+            self._thread.join()
         return self._finish_verified_result()
 
     def _snapshot(self) -> dict[int, ProcessIdentity]:
@@ -670,24 +646,17 @@ class _ResidentMemorySupervisor:
         finally:
             self._end_work(tracked)
 
-    def _leader_gone(self) -> bool:
-        return self.process.returncode is not None or self._leader_reaped_event.is_set()
+    def _skip_raced_sample(self, error: BaseException) -> bool:
+        """Treat a raced or torn procfs sample as unreadable, never as a breach.
 
-    def _skip_raced_sample(self, error: BaseException, *, leader_exited: bool) -> bool:
-        """Treat a procfs race on a live check as an unreadable sample, not a breach.
-
-        Only a positive over-budget measurement may kill a check. Post-exit
-        containment scans keep failing closed, and a sample failure that
-        persists past PROCFS_SAMPLE_RACE_MAX_SECONDS is no longer a race.
+        Only a positive over-budget measurement may kill a check. A non-race
+        OS error, or PROCFS_SAMPLE_MAX_CONSECUTIVE_FAILURES failed samples in a
+        row, is a supervisor error instead.
         """
-        if leader_exited:
-            return False
         if isinstance(error, OSError) and error.errno not in _PROCFS_RACE_ERRNOS:
             return False
-        now = time.monotonic()
-        if self._race_since is None:
-            self._race_since = now
-        elif now - self._race_since > PROCFS_SAMPLE_RACE_MAX_SECONDS:
+        self._failed_samples += 1
+        if self._failed_samples > PROCFS_SAMPLE_MAX_CONSECUTIVE_FAILURES:
             return False
         skipped = int(getattr(self.process, "memory_limit_samples_skipped", 0) or 0) + 1
         self.process.memory_limit_samples_skipped = skipped
@@ -727,14 +696,15 @@ class _ResidentMemorySupervisor:
                             live, self.memory_bytes)
                         post_exit_scan_completed = leader_exited
                 except (OSError, RuntimeError, ValueError, IndexError) as error:
-                    if self._skip_raced_sample(error, leader_exited=self._leader_gone()):
+                    if self._skip_raced_sample(error):
                         self._stopped.wait(0.02)
                         continue
                     self._record_error(error)
                     self._stop_launch_unit()
                     return
-                self._race_since = None
+                self._failed_samples = 0
                 if breach:
+                    self.process.memory_limit_stop_cause = "memory_limit"
                     self.process.memory_limit_killed = True
                     self.process.memory_limit_reason = breach
                     self._stop_launch_unit()
@@ -932,6 +902,7 @@ def sandboxed_popen(command: Sequence[object], root: str | os.PathLike[str], *,
         process.memory_limit_reason = None
         process.memory_limit_samples_skipped = 0
         process.memory_limit_sample_skip_reason = None
+        process.memory_limit_stop_cause = None
         try:
             supervisor = _ResidentMemorySupervisor(process, memory_bytes)
             process._stateframe_memory_supervisor = supervisor
@@ -1440,6 +1411,7 @@ def run_sandboxed(command: Sequence[object], root: str | os.PathLike[str], *,
         cgroup_leaf_pattern=_cgroup_leaf_pattern_status(),
         memory_limit_samples_skipped=int(getattr(process, "memory_limit_samples_skipped", 0) or 0),
         memory_limit_sample_skip_reason=getattr(process, "memory_limit_sample_skip_reason", None),
+        memory_limit_stop_cause=getattr(process, "memory_limit_stop_cause", None),
     )
 
 

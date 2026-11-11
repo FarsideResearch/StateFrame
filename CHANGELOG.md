@@ -10,7 +10,7 @@
 - Fixed: an interrupted check now cleans up its supervised child processes and reports the original interruption instead of stopping during cleanup.
 - Fixed: StateFrame now enforces Linux memory limits when launched in a delegated systemd scope, while safely falling back if unrelated processes share that scope.
 - Checkpoint resume stays fail-closed for journal tails that contain a memory-enforcement kill, since restore does not replay that supervisor result.
-- The memory supervisor no longer kills a healthy check when a process exits or its status is unreadable mid-sample. It skips that sample and measures again, kills only on a measured over-budget reading, and records skipped samples in the check's execution record. A sample failure that lasts longer than five seconds still stops the check.
+- The memory supervisor no longer kills or fails a healthy check because of timing. A process exiting mid-sample, a torn status read, or slow process accounting under memory pressure now skips that sample and measures again. Post-exit verification waits for the supervisor's verdict instead of failing after 15 seconds. A check is killed for memory only on a measured over-budget reading, and the execution record now names why a check was stopped (`memory_limit` or `supervisor_error`) along with any skipped samples.
 
 ## 0.4.41 (2026-11-11)
 
