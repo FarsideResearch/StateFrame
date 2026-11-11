@@ -231,7 +231,7 @@ Measured live on Qwen3.6-35B-A3B served by llama.cpp (one server, 8 slots), acro
 
 ### Prompt cache: recommended llama.cpp server settings
 
-For hybrid models such as Qwen3.6-35B-A3B, llama.cpp reuses the prompt cache only up to its last saved checkpoint, not up to the longest matching prefix. Start the server with `-cms 256 -cram 0` (keep `--ctx-checkpoints 32`). In a replay of four recorded runs of one task against one llama.cpp build b11044 server, these settings raised the cached share of prompt tokens by 2.7 to 8.6 points over the same server with `--ctx-checkpoints 32` alone; with the default spacing only the system and tool head (about 5,900 tokens) was reused. `-cms 1024` gained less (1.5 to 7.2 points).
+For hybrid models such as Qwen3.6-35B-A3B, llama.cpp reuses the prompt cache only up to its last saved checkpoint, not up to the longest matching prefix. Start the server with `-cms 256 -cram 0` (keep `--ctx-checkpoints 32`). In a replay of four recorded runs of one task against one llama.cpp build b11044 server, these settings raised the cached share of prompt tokens by 2.7 to 8.6 points over the same server with `--ctx-checkpoints 32` alone; with the default spacing only the system and tool head (about 5,900 tokens) was reused. `-cms 1024` gained less (1.5 to 7.2 points). The server's `/props` does not report these settings, so StateFrame cannot check them for you: if the cached share of later requests stays near the size of the system and tool head, the server is probably still on the default checkpoint spacing.
 
 ### Closing check: requirement recheck
 
