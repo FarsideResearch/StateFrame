@@ -50,6 +50,8 @@ A profile that sets `STATEFRAME_SEND_STALL_S` or `STATEFRAME_QUEUE_WAIT_MAX_S` i
 
 The engine has a **33,344-token prompt budget** and requires a model server context slot that supports **65,536 tokens**. The slot is server capacity, not a recommendation for cache RAM. Set cache RAM sized to your machine. These are the sizes we built and measured with: a single 48 GB GPU (RTX A6000 class) running Qwen3.6-35B-A3B, a mixture-of-experts model (35B total, about 3B active per token), 4-bit UD-Q4_K_XL, under llama.cpp, with one server sharing a 262,144-token cache across 4 slots (`-np 4 -c 262144 --kv-unified`), so 65,536 tokens per run. A stock 24 GB card was not tested. They are the defaults; both can be changed (see Context size in docs/guide/running.md). Only the default 65,536-token slot is measured on long runs; other sizes (32,768 and 131,072 included) are tested on short scripted runs only.
 
+A resume can rebuild an in-flight request differently when the tokenizer endpoint was unreachable in the stopped attempt and answers again during the resume. Tokenizer answers are not part of the run record, so the resumed request may be fitted with exact counts where the original used byte estimates. The changed request is then sent live, and the run continues.
+
 Large tasks or repositories can require more state and source context than fits. In that case, the engine may stop before completing the task.
 
 - Very long tasks (roughly 25 or more model turns) and larger multi-file changes (around 10 files or more) can stop with a refusal when the task state no longer fits the prompt budget. Nothing is lost: the partial result is saved.
