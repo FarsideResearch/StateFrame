@@ -873,6 +873,16 @@ DOCUMENTED_REJECT.update({
     if classification == "REJECT"
 })
 DOCUMENTED_REJECT.update({
+    "intake_orientation_failed": (
+        "The failure omits orientation from the first request, so replay can rebuild different request bytes."
+    ),
+    "repo_map_commit_sha_unavailable": (
+        "A transient HEAD lookup failure is not guaranteed to recur during checkpoint replay."
+    ),
+    "shell_memory_enforcement": (
+        "Memory enforcement can kill a command and alter its observation or effects; "
+        "restore does not replay that supervisor result."
+    ),
     "completion_owner_unavailable": (
         "Completion-owner fallbacks can retain stale request-contract or menu authority after checkpoint."
     ),

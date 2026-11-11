@@ -64,3 +64,27 @@ def test_evidence_failure_tails_follow_resume_policy() -> None:
             assert isinstance(rejection, str), kind
             assert kind in rejection, kind
             assert restart.DOCUMENTED_REJECT[kind] in rejection, kind
+
+
+def test_stack_tip_event_tails_follow_resume_policy() -> None:
+    classifications = {
+        "intake_orientation_failed": "REJECT",
+        "repo_map_commit_sha_unavailable": "REJECT",
+        "shell_memory_enforcement": "REJECT",
+    }
+    for kind, classification in classifications.items():
+        if kind in restart.SAFE_TAIL:
+            actual = "SAFE_TAIL"
+        elif kind in restart.DOCUMENTED_REJECT:
+            actual = "REJECT"
+        else:
+            actual = "UNCLASSIFIED"
+        assert actual == classification, kind
+        rejection = restart.resume_tail_rejection_reason([{"kind": kind}])
+        if actual == "SAFE_TAIL":
+            assert rejection is None, kind
+        else:
+            assert actual == "REJECT", kind
+            assert isinstance(rejection, str), kind
+            assert kind in rejection, kind
+            assert restart.DOCUMENTED_REJECT[kind] in rejection, kind
