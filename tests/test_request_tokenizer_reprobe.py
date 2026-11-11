@@ -169,7 +169,6 @@ def test_slow_burst_recovers_once_with_recorded_event_sequence(monkeypatch):
     monkeypatch.setattr(request_diet, "TOKENIZE_REQUEST_TIMEOUT_CAP_SECONDS", TOKENIZE_TIMEOUT_SECONDS)
     monkeypatch.setattr(request_diet, "TOKENIZE_QUEUEING_TIMEOUT_SECONDS", TOKENIZE_TIMEOUT_SECONDS)
     monkeypatch.setattr(request_diet, "TOKENIZE_REPROBE_AFTER_REQUESTS", 2)
-    monkeypatch.setattr(request_diet, "TOKENIZE_REPROBE_AFTER_SECONDS", 3600.0)
     script = {
         "model": "allocation-replay-model",
         "turns": [{"message": {"role": "assistant", "content": "done"}}],
@@ -209,7 +208,6 @@ def test_slow_burst_recovers_once_with_recorded_event_sequence(monkeypatch):
 
 def test_reprobe_is_limited_to_one_attempt_per_request(monkeypatch):
     monkeypatch.setattr(request_diet, "TOKENIZE_REPROBE_AFTER_REQUESTS", 1)
-    monkeypatch.setattr(request_diet, "TOKENIZE_REPROBE_AFTER_SECONDS", 3600.0)
     calls = 0
 
     def unavailable(_content: str) -> object:
@@ -431,7 +429,6 @@ def test_permanent_tokenizer_outage_replay_submits_with_bounded_probes(tmp_path)
         tokenize_slow_calls=tuple(range(1, 512)),
         tokenize_timeout_s=TOKENIZE_TIMEOUT_SECONDS,
         tokenize_reprobe_after_requests=probe_interval,
-        tokenize_reprobe_after_s=3600.0,
     )
 
     assert outcome.engine_result == "SUBMITTED", (
@@ -687,3 +684,32 @@ def test_healthy_measurement_preserves_baseline_request_bytes(tmp_path, baseline
     assert changed_current_hashes != baseline_masked_hashes, (
         "baseline-relative masked comparison accepted a one-byte change in current request 0001"
     )
+
+
+def test_reprobe_schedule_ignores_wall_time(monkeypatch):
+    # A resumed run rebuilds earlier requests in moments, while the original
+    # attempt waited on the model between them. Probe timing must depend only
+    # on the request sequence, or the rebuilt request is measured differently.
+    monkeypatch.setattr(request_diet, "TOKENIZE_REPROBE_AFTER_REQUESTS", 5)
+    calls = 0
+
+    def unavailable(_content: str) -> object:
+        nonlocal calls
+        calls += 1
+        raise TimeoutError("scripted tokenizer deadline")
+
+    def run(gap_s: float) -> list[tuple[str, str | None]]:
+        nonlocal calls
+        calls = 0
+        clock = [1_000.0]
+        monkeypatch.setattr(request_diet.time, "monotonic", lambda: clock[0])
+        meter = request_diet.RequestTokenMeter(tokenizer=unavailable, template_overhead_tokens=0)
+        observed = []
+        for index in range(1, 4):
+            meter.begin_request(f"request-{index}")
+            method = meter.measure(_body(f"request {index}"))[1]
+            observed.append((method, meter.journal_fields(method).get("tokenize_reprobe_status")))
+            clock[0] += gap_s
+        return observed + [("calls", str(calls))]
+
+    assert run(gap_s=0.0) == run(gap_s=600.0)

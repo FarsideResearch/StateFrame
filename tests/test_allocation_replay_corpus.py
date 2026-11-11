@@ -247,7 +247,6 @@ def _engine_timeout_argv(engine_seconds: int | float) -> tuple[str, str]:
 def _short_tokenize_timeout_engine_python(
         tmp_path: Path, timeout_s: float, *,
         reprobe_after_requests: int | None = None,
-        reprobe_after_s: float | None = None,
 ) -> Path:
     wrapper = tmp_path / "python-with-short-tokenize-timeout"
     bootstrap = "\n".join((
@@ -265,8 +264,6 @@ def _short_tokenize_timeout_engine_python(
         f"request_diet.TOKENIZE_QUEUEING_TIMEOUT_SECONDS = {timeout_s!r}",
         *([f"request_diet.TOKENIZE_REPROBE_AFTER_REQUESTS = {reprobe_after_requests!r}"]
           if reprobe_after_requests is not None else []),
-        *([f"request_diet.TOKENIZE_REPROBE_AFTER_SECONDS = {reprobe_after_s!r}"]
-          if reprobe_after_s is not None else []),
         "raise SystemExit(host.main([str(child), str(run)]))",
     ))
     wrapper.write_text(
@@ -369,7 +366,6 @@ def _run_case(
         tokenize_slow_calls: tuple[int, ...] = (),
         tokenize_timeout_s: float | None = None,
         tokenize_reprobe_after_requests: int | None = None,
-        tokenize_reprobe_after_s: float | None = None,
         props_available: bool | None = None,
         stop_after_provider_requests: int | None = None,
         source_root: Path | None = None,
@@ -450,7 +446,6 @@ def _run_case(
                 _short_tokenize_timeout_engine_python(
                     tmp_path, tokenize_timeout_s,
                     reprobe_after_requests=tokenize_reprobe_after_requests,
-                    reprobe_after_s=tokenize_reprobe_after_s,
                 )
             )))
         elif stop_after_provider_requests is not None:

@@ -56,10 +56,10 @@ TOKENIZE_RELAY_RTT_SECONDS = 0.15
 TOKENIZE_RELAY_LOAD_MARGIN = 3.0
 TOKENIZE_SLOW_SECONDS = 1.0  # Telemetry only: never discard a valid count.
 TOKENIZE_MAX_CONSECUTIVE_FAILURES = 3
-# Probes only at a later request boundary: five requests avoid noisy retries,
-# while the 30-second wall bound limits recovery delay on sparse workloads.
+# Probes only at a later request boundary, after five requests. The schedule
+# counts requests, never wall time: a resumed run rebuilds earlier requests
+# faster than they first ran and must measure them the same way.
 TOKENIZE_REPROBE_AFTER_REQUESTS = 5
-TOKENIZE_REPROBE_AFTER_SECONDS = 30.0
 TEMPLATE_OVERHEAD_TOKENS = 1_148
 TEMPLATE_OVERHEAD_EVIDENCE = (
     "calibration-batch-927 request d402be5a823d4026a7d6b6066403fe84: "
@@ -554,7 +554,6 @@ class RequestTokenMeter:
         self._reprobe_active = False
         self._reprobe_attempts = 0
         self._reprobe_requests_since_attempt = 0
-        self._reprobe_last_attempt_at: float | None = None
         self._reprobe_ready_requests: set[str] = set()
         self._reprobe_attempted_requests: set[str] = set()
         self._reprobe_status: str | None = None
@@ -647,12 +646,7 @@ class RequestTokenMeter:
             # Keep the last classified failure visible while waiting for a probe.
             self._fallback_pending = True
             self._reprobe_requests_since_attempt += 1
-            time_due = (
-                self._reprobe_last_attempt_at is not None
-                and time.monotonic() - self._reprobe_last_attempt_at >= TOKENIZE_REPROBE_AFTER_SECONDS
-            )
-            if (self._reprobe_requests_since_attempt >= TOKENIZE_REPROBE_AFTER_REQUESTS
-                    or time_due):
+            if self._reprobe_requests_since_attempt >= TOKENIZE_REPROBE_AFTER_REQUESTS:
                 self._reprobe_ready_requests.add(request_id)
                 self._reprobe_status = "due"
                 self._reprobe_status_by_request[request_id] = "due"
@@ -690,14 +684,12 @@ class RequestTokenMeter:
         self._reprobe_attempted_requests.add(self._request_id)
         self._reprobe_status_by_request[self._request_id] = "probing"
         self._reprobe_requests_since_attempt = 0
-        self._reprobe_last_attempt_at = time.monotonic()
         self._reprobe_attempts += 1
         self._reprobe_status = "probing"
 
     def _start_reprobe_schedule(self) -> None:
         self._reprobe_active = True
         self._reprobe_requests_since_attempt = 0
-        self._reprobe_last_attempt_at = time.monotonic()
         self._reprobe_status = "waiting"
         if self._request_id is not None:
             self._reprobe_status_by_request[self._request_id] = "waiting"
@@ -706,7 +698,6 @@ class RequestTokenMeter:
         self._availability = "unavailable"
         # The probe loop already recorded the concrete failure reason.
         self._reprobe_status = "failed"
-        self._reprobe_last_attempt_at = time.monotonic()
         self._reprobe_requests_since_attempt = 0
         if self._request_id is not None:
             self._reprobe_status_by_request[self._request_id] = "failed"
