@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- A native tool-call batch now prepares once per model response: queued sibling actions settle their step, receipts, live state and lineage through a lean boundary instead of rendering a full request whose body was discarded. The request actually sent is byte-identical; the discarded `request_prepared`, `history_decision`, `selection_decision`, `exposure_composition` and `tokens_row6_delivery_audit` records for queued siblings are no longer journaled.
+
 ## 0.5.13 (2026-11-12)
 
 - Fixed: runs on repositories with empty source files (any language, with or without a parser installed, in LEAN mode too) no longer stop partway through with `final cache layout source proof failed` once a request outgrows its byte cap; an empty file is proven by its revision alone, is never put on the deferred-read list, and a file emptied by an edit mid-run is handled the same way.

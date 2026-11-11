@@ -21957,6 +21957,124 @@ class StateFrameRuntime:
             "finding": continuation.completion_finding(),
         })
 
+    def prepare_queued_native_action(self, messages: Sequence[dict], *,
+                                     uncapped: Sequence[dict],
+                                     tools: object) -> PreparedRequest:
+        """Settle a queued sibling without rendering a body that cannot be sent.
+
+        NativeToolBatch.next needs a capture for the action's identity and
+        journal lineage. The provider request that admitted the batch already
+        fixed its tool contract; no model-facing projection is consumed here.
+        """
+        batch = getattr(self, "native_batch", None)
+        if batch is None or not batch.pending:
+            raise ValueError("queued native action requires a pending batch")
+        from kernel_lean import enabled as lean_enabled
+        lean_on = lean_enabled()
+        # State a full prepare would have advanced even though its body is discarded:
+        # wire-string hygiene feeds the state readers below (pure, no re-journaling),
+        # queued advisory cards are consumed by this boundary, and memory isolation
+        # keeps its blocked/rejected counters.
+        from kernel_wire_string_hygiene import sanitize_messages
+        same_view = messages is uncapped
+        messages, _ = sanitize_messages(messages)
+        uncapped = messages if same_view else sanitize_messages(uncapped)[0]
+        from kernel_terminal_policy import deliver_pending_advisories
+        deliver_pending_advisories(self, messages, uncapped)
+        if self.memory_isolation is not None and not lean_on:
+            messages, uncapped = self.memory_isolation.prepare(messages, uncapped)
+        f4_on = not lean_on and (
+            getattr(self, "stateframe_f4_mode", "off") == "on"
+            or getattr(self, "_hybrid_crossed", False))
+        if not lean_on:
+            self._record_passive_retention_capture(self._active_capture)
+        if (self._active_capture is not None
+                and self._active_capture.response_event_id is not None):
+            self._last_capture = self._active_capture
+        if not lean_on and (f4_on or getattr(self, "stateframe_hybrid_mode", "off") == "on"):
+            self._f4_record_real_exchanges(uncapped)
+        if not lean_on and self.self_plan_state is not None and self._last_capture is not None:
+            previous_frame = getattr(self._last_capture, "self_plan_frame", None)
+            if isinstance(previous_frame, Mapping):
+                self.self_plan_state.observe(
+                    previous_frame,
+                    getattr(self._last_capture, "response_reasoning_content", ""))
+        if not lean_on and self.unified_lifecycle is not None and self._last_capture is not None:
+            if ((getattr(self._last_capture, "output_cap_hit", False)
+                 or getattr(self._last_capture, "finish_reason", None) == "length")
+                    and not getattr(self._last_capture, "unified_cap_noted", False)):
+                self.unified_lifecycle.note_output_cap()
+                self._last_capture.unified_cap_noted = True
+        self._deliver_auto_verify(messages, uncapped)
+        self.close_step(uncapped)
+        self._deliver_auto_verify(messages, uncapped)
+        if self.projector_kind == "rich":
+            from kernel_live_projection import LiveProjection
+            binding = self.binding()
+            if self.live_projection is None:
+                public_brief = str(uncapped[1].get("content", "")) if len(uncapped) > 1 else ""
+                path = self._target_relative()
+                from kernel_public_evidence import materialized_public_check_paths
+                declared_checks = materialized_public_check_paths(
+                    Path(self.owner.root), getattr(self.owner, "task_row", {}))
+                if declared_checks is not None and not set(declared_checks).issubset(
+                        getattr(self.owner, "f2p_ids", ())):
+                    raise ValueError("declared public checks missing from live selector handoff")
+                self.live_projection = LiveProjection(
+                    task_id=self.owner.task_id, symbol=self.owner.fn, path=path,
+                    brief=public_brief, selectors=(
+                        self.required_public_selectors()
+                        if getattr(self.owner, "task_row", {}).get("runner_kind") == "generic"
+                        else [selector for selector in getattr(self.owner, "f2p_ids", ())
+                              if (Path(self.owner.root) / selector.split("::")[0]).is_file()]),
+                    binding=binding)
+            stored = self.live_projection.update(
+                list(uncapped), getattr(self.owner, "trace", []),
+                getattr(self.owner, "current_step", 0), binding, self.test_receipts)
+            from kernel_nit_reconciliation import reconcile as reconcile_nit
+            reconcile_nit(self, stored)
+            self.journal.emit("rich_state_committed", state=stored, state_hash=digest(stored))
+        if self.continuation is not None:
+            self._continuation_request_tools = tuple(tools) if isinstance(tools, (list, tuple)) else ()
+        continuation_outcome = self._prepare_continuation_boundary(uncapped)
+        if continuation_outcome is not None:
+            return continuation_outcome
+        frame_result = self._frame()
+        from kernel_obligation_assess import UnavailableEvidence
+        if isinstance(frame_result, UnavailableEvidence):
+            return _unavailable_frame_request(self, frame_result.reason_code)
+        frame, working, path = frame_result
+        self._sync_work_carry(frame, path)
+        self.prepared_binding = self.binding()
+        self._configure_probe_gate(frame, working, uncapped)
+        f4_on = not lean_on and (
+            getattr(self, "stateframe_f4_mode", "off") == "on"
+            or getattr(self, "_hybrid_crossed", False))
+        if self.latest_exchange_mode != "off" and not f4_on:
+            from kernel_latest_exchange import LatestExchange
+            self.latest_exchange = _apply_latest_exchange_reasoning(
+                LatestExchange(
+                    mode=self.latest_exchange_mode, messages=(), pair_digest=None,
+                    omission_reason="queued_native_action_without_provider_request"),
+                self.latest_exchange_reasoning_mode)
+        elif f4_on:
+            self.latest_exchange = None
+        capture = _prepare_request_capture(self)
+        capture.completion_owner_runtime = self
+        capture.stateframe_f4_mode = "on" if f4_on else "off"
+        if getattr(self, "stateframe_passive_retention_mode", "off") == "on":
+            capture.passive_retention_context = self._passive_retention_context(
+                frame, path, self.prepared_binding)
+            capture.passive_retention_recorded = False
+        self._bind_long_horizon_capture(
+            capture, presentation="frame" if f4_on else "history", messages=uncapped)
+        self.current_request_id = capture.request_id
+        self.owner.current_request_id = capture.request_id
+        self._active_capture = capture
+        selected_tools = (tuple(copy.deepcopy(tools))
+                          if isinstance(tools, (list, tuple)) else None)
+        return PreparedRequest((), capture, tools=selected_tools)
+
     @_reprepare_on_source_change
     @_host_phase("prepare")
     def prepare(self, messages: Sequence[dict], *, uncapped: Sequence[dict],

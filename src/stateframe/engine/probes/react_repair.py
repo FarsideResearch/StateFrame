@@ -8368,7 +8368,10 @@ def work(d, *, resume=None):
             if _provider_request and callable(_prepare_host_inputs):
                 msgs = _prepare_host_inputs(msgs)
                 _uncapped_messages = _prepare_host_inputs(_uncapped_messages)
-            if _provider_request and _request_host_text_preparer is not None:
+            if not _provider_request:
+                _prepared = measurement.prepare_queued_native_action(
+                    msgs, uncapped=_uncapped_messages, tools=_request_tools)
+            elif _request_host_text_preparer is not None:
                 _prepared = measurement.prepare(
                     msgs, uncapped=_uncapped_messages,
                     tools=_request_tools, provider_request=True,
