@@ -821,7 +821,7 @@ def test_pid_namespace_provision_probe_reports_unavailable_when_command_fails(mo
     assert len(calls) == 1
     command, options = calls[0]
     assert "--pid" in command and "--fork" in command
-    assert options["timeout"] == 3.0
+    assert options["timeout"] == scaled(3.0)
 
 
 def test_planted_controls_reject_unqualified_runs(tmp_path):
