@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Fixed: checks and startup probes no longer die with exit 137 on a loaded host because StateFrame killed its own slow sandbox. Session cleanup now waits for the supervisor to finish, and kills it only if it is still running and has stopped answering after a load-scaled wait. A child that outlives its parent process is matched to its job before the session is stopped as an escape. A startup probe killed by cleanup is retried and reported as host load, not as a broken interpreter.
+
 ## 0.4.42 (2026-11-11)
 
 - Fixed: on Linux, checks and exec-session commands that run Go or Node programs no longer die at startup. StateFrame no longer caps their virtual address space (`RLIMIT_AS`), which those runtimes reserve far beyond what they use. The memory budget itself is unchanged and still enforced. This removes the matching entry from `KNOWN_LIMITATIONS.md`.

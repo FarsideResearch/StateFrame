@@ -382,6 +382,15 @@ def _startup_probe_seconds() -> float:
     return seconds
 
 
+def _probe_stopped_by_host(result: object) -> bool:
+    """A wall timeout, or a SIGKILL our own cleanup delivered: load, never a broken interpreter."""
+    if getattr(result, "timed_out", False):
+        return True
+    cleanup = getattr(result, "cleanup", None)
+    return (getattr(result, "exit_code", None) in (137, -9)
+            and int(getattr(cleanup, "killed", 0) or 0) > 0)
+
+
 def _startup_probe(python: str, code: str, *, label: str) -> bytes:
     """Contain interpreter startup itself, before importing any project packages.
 
@@ -401,7 +410,7 @@ def _startup_probe(python: str, code: str, *, label: str) -> bytes:
                                                      timeout=wall)
         except (OSError, ExecSessionError, ValueError) as error:
             raise RunError(f"{label} startup probe could not run safely: {error}") from error
-        if not result.timed_out:
+        if not _probe_stopped_by_host(result):
             break
     else:
         raise RunError(f"{label} startup probe timed out under load: it did not finish within "

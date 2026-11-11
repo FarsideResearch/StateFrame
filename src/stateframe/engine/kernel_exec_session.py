@@ -292,6 +292,10 @@ class ExecSession:
             return
         if sys.platform.startswith("linux") and os.getuid() == 0:
             raise ExecSessionError("Linux execution requires a non-root host UID")
+        if threading.current_thread() is not threading.main_thread():
+            # bwrap --die-with-parent fires when the forking THREAD exits, which would
+            # SIGKILL this session's whole sandbox the moment a worker thread finished.
+            raise ExecSessionError("an execution session must be started from the main thread")
         self._sandboxed = cap.sandboxed
         bwrap_executable = None
         if cap.sandboxed and self.backend == "bwrap":
@@ -481,23 +485,60 @@ class ExecSession:
         finally:
             self._closed = True
             self._close_owner_write_end()
+            released = self._await_control_eof() if self._process is not None else True
             if self._control is not None:
                 self._control.close()
             if self._process is not None:
-                try:
-                    self._process.wait(timeout=5)
-                except subprocess.TimeoutExpired:
-                    # Kill the whole launch unit: the outer bwrap alone can leave a
-                    # supervisor that is still setting up its sandbox alive.
-                    survivors = kill_launch_unit(
-                        self._process, deadline_seconds=5,
-                        launch_identity=recorded_launch_identity(self._process))
-                    detail = f"; survivors {', '.join(map(str, survivors))}" if survivors else ""
-                    raise ExecSessionError("execution supervisor did not terminate after cleanup" + detail)
+                self._await_supervisor_exit(released)
             if self._log is not None:
                 self._log.close()
         if report is not None and not report.ok:
             raise ExecSessionError(f"execution cleanup failed: {report.detail}")
+
+    def _await_control_eof(self) -> bool:
+        """Wait, load-scaled, for the supervisor to close its control socket.
+
+        EOF is positive evidence that the supervisor finished its cleanup and is exiting.
+        """
+        if self._control is None:
+            return True
+        deadline = time.monotonic() + rpc_timeout_seconds()
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0 or self._process.poll() is not None:
+                return self._process.poll() is not None
+            try:
+                self._control.settimeout(min(remaining, 0.5))
+                if not self._control.recv(65536):
+                    return True
+            except socket.timeout:
+                continue
+            except OSError:
+                return True
+
+    def _await_supervisor_exit(self, released: bool) -> None:
+        """Reap the supervisor; kill its launch unit only if it is alive and unresponsive.
+
+        A fixed short wait here SIGKILLed healthy supervisors that were merely slow to exit on
+        a loaded host, and the kernel then killed every process in their sandbox (exit 137).
+        """
+        seconds = rpc_timeout_seconds()
+        try:
+            # After EOF the exit is underway; without it the supervisor gets one more bound.
+            self._process.wait(timeout=seconds)
+            return
+        except subprocess.TimeoutExpired:
+            pass
+        # Kill the whole launch unit: the outer bwrap alone can leave a
+        # supervisor that is still setting up its sandbox alive.
+        survivors = kill_launch_unit(
+            self._process, deadline_seconds=5,
+            launch_identity=recorded_launch_identity(self._process))
+        detail = f"; survivors {', '.join(map(str, survivors))}" if survivors else ""
+        state = ("closed its control socket but did not exit" if released
+                 else "stopped answering and did not exit")
+        raise ExecSessionError(
+            f"execution supervisor {state} within {seconds:g} s after cleanup" + detail)
 
     def __enter__(self):
         return self
