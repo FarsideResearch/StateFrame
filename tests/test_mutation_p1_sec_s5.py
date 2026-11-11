@@ -102,3 +102,38 @@ def test_refused_mutation_submit_removes_smoke_snapshots(tmp_path, monkeypatch):
     reply = runtime._submit({"manifest": manifest, "files": {"main.py": ""}}, "call")
     assert reply.startswith("REFUSED MUTATION_ADMISSION")
     assert not list((root / "in").iterdir())
+
+
+def test_bound_input_survives_launch_failure_but_budget_refusal_leaves_none(tmp_path, monkeypatch):
+    import kernel_mutate_build
+    from kernel_mutate_runtime import MutationBudgetError
+
+    runtime, root, _journal = _smoke_snapshot_runtime(tmp_path, monkeypatch)
+    monkeypatch.setattr(kernel_mutate_build, "admit", lambda *_a, **_k:
+                        SimpleNamespace(admission_digest="sha256:admitted"))
+    runtime.ready["reader"]["manifest"]["smoke"] = []
+    seen = []
+
+    class ReachedLaunch(Exception):
+        pass
+
+    def stop(spec):
+        seen.append(spec)
+        raise ReachedLaunch
+
+    runtime._launch = stop
+    with pytest.raises(ReachedLaunch):
+        runtime._use("reader", {"input": {}, "inputs": ["sample.txt"]}, "call")
+    assert seen[0].inputs["in0"].read_bytes() == b"smoke input\n"
+
+    def exhaust(spec):
+        raise MutationBudgetError("invocations")
+
+    for child in list((root / "in").iterdir()):
+        for f in child.iterdir():
+            f.unlink()
+        child.rmdir()
+    runtime._launch = exhaust
+    with pytest.raises(MutationBudgetError):
+        runtime._use("reader", {"input": {}, "inputs": ["sample.txt"]}, "call2")
+    assert not list((root / "in").iterdir())

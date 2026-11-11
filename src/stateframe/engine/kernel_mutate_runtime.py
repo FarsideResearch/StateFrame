@@ -635,6 +635,7 @@ class MutationRuntime:
             snapshots = admit_inputs(self.repo, requests, self.policy,
                                      snapshot_root=snapshot_root,
                                      ordinary_read_globs=self.ordinary_read_globs)
+        keep_snapshot = False
         try:
             payload = dict(args["input"])
             if manifest["name"] == "sqlite_peek" and "in0" in snapshots.facts:
@@ -693,8 +694,13 @@ class MutationRuntime:
             return self.render_observation(unit=name, revision=f"r{manifest['revision']}",
                                            result=frame.result, source_digest=staged.source_digest,
                                            input_value=args)
+        except BaseException as error:
+            # A budget refusal leaves no snapshot; any other raise keeps the bound input
+            # for the caller that owns the launch, which is torn down with the executor root.
+            keep_snapshot = not isinstance(error, MutationBudgetError)
+            raise
         finally:
-            if snapshot_root is not None:
+            if snapshot_root is not None and not keep_snapshot:
                 _remove_snapshot_root(snapshot_root)
 
     def _submit(self, args: dict[str, object], call_id: str) -> str:
