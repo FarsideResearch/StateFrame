@@ -21,6 +21,7 @@ from engine_run import (
     EngineRunTimeout,
     deadline_windows,
     run_monitored,
+    sandbox_test_python,
     start_monitored,
 )
 from fixtures.process_signals import signal_run_owned
@@ -39,6 +40,53 @@ def _child(tmp_path: Path, body: str) -> Path:
     path = tmp_path / "child.py"
     path.write_text(body)
     return path
+
+
+def test_sandbox_test_python_uses_direct_venv_link_and_removes_it(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(engine_run.sys, "platform", "linux")
+    venv = tmp_path / "venv"
+    bin_dir = venv / "bin"
+    bin_dir.mkdir(parents=True)
+    (venv / "pyvenv.cfg").write_text("home = /usr/bin\n")
+    target = bin_dir / "python-real"
+    target.write_text("interpreter\n")
+    (bin_dir / "python3").symlink_to(target.name)
+    executable = bin_dir / "python"
+    executable.symlink_to("python3")
+
+    with sandbox_test_python(executable) as test_python:
+        link = Path(test_python)
+        assert link.parent == bin_dir
+        assert link.name.startswith("stateframe-check-python-")
+        assert link.is_symlink()
+        assert link.readlink() == target
+
+    assert not link.exists()
+    assert not link.is_symlink()
+
+
+@pytest.mark.parametrize("venv", [False, True], ids=["non-venv-symlink", "venv-regular-file"])
+def test_sandbox_test_python_passes_through_resolved_path(
+    tmp_path: Path, venv: bool,
+) -> None:
+    directory = tmp_path / ("venv/bin" if venv else "bin")
+    directory.mkdir(parents=True)
+    if venv:
+        (directory.parent / "pyvenv.cfg").write_text("home = /usr/bin\n")
+    target = directory / "python-real"
+    target.write_text("interpreter\n")
+    executable = directory / "python"
+    if venv:
+        executable.write_text("interpreter\n")
+        expected = executable.resolve(strict=True)
+    else:
+        executable.symlink_to(target.name)
+        expected = directory.resolve(strict=True) / executable.name
+
+    with sandbox_test_python(executable) as test_python:
+        assert test_python == str(expected)
 
 
 def test_slow_progress_beats_old_fixed_limit_and_preserves_result(tmp_path):

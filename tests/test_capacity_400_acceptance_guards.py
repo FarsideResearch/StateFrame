@@ -12,7 +12,7 @@ from pathlib import Path
 import pytest
 
 from _journal import measurement_events
-from engine_run import run_monitored
+from engine_run import run_monitored, sandbox_test_python
 from test_capacity_400_acceptance import (
     CAPACITY_ERROR, ROOT, CapacityEndpoint, Case, _assert_base_terminal, _run_case,
 )
@@ -89,14 +89,15 @@ def _run_degenerating_case(work: Path) -> Case:
         "PYTHONHASHSEED": "0",
         "STATEFRAME_DEGENERATION_GUARD": "on",
     })
-    with DegenerationEndpoint() as endpoint:
+    with (DegenerationEndpoint() as endpoint,
+          sandbox_test_python(sys.executable) as test_python):
         process = run_monitored(
             [sys.executable, "-B", "-m", "stateframe", "run",
              "--repo", str(repo), "--task", "Fix app.py so VALUE is 7.",
              "--endpoint", endpoint.url, "--model", "capacity-mock",
              "--run-dir", str(run), "--max-turns", "1",
              "--test-cmd", "python3 -m pytest -q tests/test_app.py",
-             "--runner-kind", "pytest", "--test-python", sys.executable,
+             "--runner-kind", "pytest", "--test-python", test_python,
              "--target", "app.py", "--edit", "app.py", "--shell", "off",
              "--no-project-hooks", "--no-instructions", "--timeout", "180",  # declared re-freeze (chief 13:04): at load ~100 on 32 CPUs the no-retry control took 106 s and the retry 117 s; 45 s failed the control too
              "--quiet", "--json"],
@@ -136,7 +137,8 @@ def test_response_format_schema_400_is_not_capacity(tmp_path: Path) -> None:
     assert isinstance(body, dict)
     # If the classifier is wrong, keep the same provider rejection on the
     # extra send so the run terminates promptly and exposes the retry count.
-    case = _run_case(tmp_path, (body, body))
+    with sandbox_test_python(sys.executable) as test_python:
+        case = _run_case(tmp_path, (body, body), test_python=test_python)
     assert len(case.requests) == 1, (len(case.requests), case.summary, case.output)
     assert not any(event.get("kind") in {"capacity_retry", "provider_transport_retry"}
                    for event in case.events), case.events

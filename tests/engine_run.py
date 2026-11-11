@@ -5,10 +5,13 @@ import math
 import os
 import signal
 import subprocess
+import sys
 import tempfile
 import time
+import uuid
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Callable, IO, Sequence
+from typing import Callable, IO, Iterator, Sequence
 from _timeouts import scaled
 
 # Match the previous generic run_case limit when a caller has no measurement.
@@ -30,6 +33,28 @@ OUTPUT_TAIL_BYTES = 256 * 1024
 # Keep caller-probe evidence useful without embedding an unbounded object repr.
 PROBE_VALUE_PREVIEW_CHARS = 200
 _PROBE_UNSET = object()
+
+
+@contextmanager
+def sandbox_test_python(executable: str | os.PathLike[str]) -> Iterator[str]:
+    """Expose a venv Python without aliases or intermediate links hidden by bwrap."""
+    path = Path(executable)
+    selected = path.parent.resolve(strict=True) / path.name
+    if (sys.platform != "linux" or not selected.is_symlink()
+            or not (selected.parent.parent / "pyvenv.cfg").is_file()):
+        yield str(selected)
+        return
+    # The gate's bin/python -> python3 -> /opt/... chain crosses an unmounted
+    # directory. A direct link keeps the venv prefix and points at the mounted
+    # base interpreter. A unique name lets xdist workers use one gate venv.
+    target = selected.resolve(strict=True)
+    link = selected.with_name(f"stateframe-check-python-{uuid.uuid4().hex}")
+    link.symlink_to(target)
+    try:
+        yield str(link)
+    finally:
+        if link.is_symlink() and link.readlink() == target:
+            link.unlink()
 
 
 class EngineRunTimeout(AssertionError):

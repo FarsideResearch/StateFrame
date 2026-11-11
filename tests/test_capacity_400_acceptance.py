@@ -134,6 +134,7 @@ def _run_case(
     errors: tuple[dict[str, object], ...],
     *,
     task: str = "Fix app.py so VALUE is 7.",
+    test_python: str | None = None,
 ) -> Case:
     repo = work / "repo"
     repo.mkdir(parents=True)
@@ -162,7 +163,7 @@ def _run_case(
              "--run-dir", str(run), "--max-turns", "1",
              "--test-cmd", "python3 -m pytest -q tests/test_app.py",
              "--runner-kind", "pytest",
-             "--test-python", sys.executable, "--target", "app.py",
+             "--test-python", test_python or sys.executable, "--target", "app.py",
              "--edit", "app.py", "--shell", "off",
              "--no-project-hooks", "--no-instructions", "--timeout", "180",  # declared re-freeze (chief 13:04): at load ~100 on 32 CPUs the no-retry control took 106 s and the retry 117 s; 45 s failed the control too
              "--quiet", "--json"],
