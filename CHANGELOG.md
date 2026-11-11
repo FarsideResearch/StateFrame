@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Final tool-surface rebinding now carries owner presentation only when its saved continuation limits and evidence pin still match the rebound contract. Tokenizer replay tests use compact tapes to avoid an unrelated capacity stop; healthy parity still compares exact request bytes after proving the current intake orientation and its task digest are the only additions to the immediate base.
 - Fixed Linux sandbox parity, tokenizer replay, and security tests with a shared-memory pytest basetemp by keeping sandbox-visible fixtures on disk and pinning the scripted provider dialect; probe test budgets now honor `SF_TEST_TIMEOUT_SCALE`.
 ## 0.6.6 (2026-11-13)
 

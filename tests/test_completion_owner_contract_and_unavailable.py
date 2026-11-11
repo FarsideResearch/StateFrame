@@ -1,6 +1,7 @@
 """Completion-owner fallback boundaries preserve contracts and typed gaps."""
 from __future__ import annotations
 
+import hashlib
 from types import SimpleNamespace
 
 import pytest
@@ -9,6 +10,7 @@ import kernel_agent_tools
 import kernel_completion_owner as owner
 from kernel_completion_owner import RequestActionContractError
 from kernel_stateframe_runtime import StateFrameRuntime
+from kernel_request_seal import OwnerPresentation, RequestSealError, freeze
 
 
 def _journal():
@@ -193,6 +195,51 @@ def test_final_surface_revision_rebind_records_unavailability_and_keeps_legacy_c
         "error_type": "RuntimeError",
     })]
     assert "private detail" not in repr(events)
+
+
+def test_final_surface_rebinds_owner_presentation_with_its_contract():
+    runtime, _events = _journal()
+    capture, surface = _bind_inputs()
+    original_contract = capture.request_action_contract
+    presentation = OwnerPresentation(
+        hashlib.sha256(freeze(original_contract)).hexdigest(), None, None,
+    )
+    capture.owner_presentation = presentation
+
+    assert owner.bind_final_tool_surface(runtime, capture, surface, messages=[])
+
+    assert capture.request_action_contract != original_contract
+    capture.owner_presentation.validate(capture.request_action_contract)
+    with pytest.raises(RequestSealError, match="another contract"):
+        presentation.validate(capture.request_action_contract)
+
+
+@pytest.mark.parametrize("changed_field", [
+    "budget_wire_digest", "evidence_pin_wire_digest",
+])
+def test_owner_presentation_rebind_refuses_changed_owner_proof(changed_field):
+    previous = {
+        "budget_wire_digest": owner._digest("saved limits"),
+        "evidence_pin_wire_digest": owner._digest(["saved pin"]),
+    }
+    presentation = OwnerPresentation(
+        hashlib.sha256(freeze(previous)).hexdigest(), "saved limits", "saved pin",
+    )
+    current = dict(previous)
+    current[changed_field] = owner._digest("different owner proof")
+
+    with pytest.raises(RequestSealError, match="differ.* from rebound contract"):
+        presentation.rebind(previous, current)
+    presentation.validate(previous)
+
+
+def test_owner_presentation_rebind_refuses_unrelated_previous_contract():
+    presentation = OwnerPresentation(
+        hashlib.sha256(freeze({"route": "edit"})).hexdigest(), None, None,
+    )
+
+    with pytest.raises(RequestSealError, match="another contract"):
+        presentation.rebind({"route": "submit"}, {"route": "submit"})
 
 
 def test_final_surface_binding_records_typed_unavailability_once(monkeypatch):

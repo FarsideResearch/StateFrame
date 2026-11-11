@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -13,6 +14,8 @@ from time import monotonic
 import pytest
 
 from _stateframe_home import isolated_stateframe_home
+from _journal import measurement_events
+from engine_run import run_monitored
 import kernel_agent_schemas
 import kernel_provider_dialect as provider_dialect
 import kernel_request_diet as request_diet
@@ -421,18 +424,137 @@ def test_tool_schema_meter_records_one_initial_retry_group(monkeypatch):
     assert all(result["method"] == "calibrated_bytes" for result in results.values())
 
 
+def _run_compact_edit_replay(
+        scratch: Path, *, probe_interval: int | None = None,
+        request_limit: int | None = None, source_root: Path | None = None,
+) -> corpus.ReplayOutcome:
+    # The allocation corpus's first turn reads five full files. Under the current
+    # conservative outage estimate its next mandatory body honestly exceeds the
+    # prompt ceiling, so it cannot exercise reprobes or submission. Use the
+    # shipped small edit script to keep the complete run inside that ceiling.
+    root = Path(__file__).resolve().parents[1]
+    repo = scratch / "repo"
+    shutil.copytree(root / "examples" / "discount_bug", repo)
+    steps = json.loads((root / "examples" / "discount_bug.script.json").read_text())[
+        "steps"
+    ]
+    assert [step["tool"] for step in steps] == [
+        "read", "str_replace", "run_tests", "done",
+    ]
+    if request_limit is not None:
+        assert probe_interval is None
+        steps = [
+            {"tool": "read", "arguments": {"path": f"note-{index}.txt"}}
+            for index in range(1, 7)
+        ]
+        for index in range(1, 7):
+            (repo / f"note-{index}.txt").write_text(
+                f"Reference note {index}.\n", encoding="utf-8",
+            )
+    else:
+        assert probe_interval is not None
+    turns = [{"message": {
+        "role": "assistant", "content": "",
+        "tool_calls": [{
+            "id": f"call_{index}", "type": "function",
+            "function": {
+                "name": step["tool"],
+                "arguments": json.dumps(step["arguments"]),
+            },
+        }],
+    }} for index, step in enumerate(steps, start=1)]
+    script = {"model": "allocation-replay-model", "turns": turns}
+    if probe_interval is not None:
+        script.update({
+            "tokenize_delay_s": TOKENIZE_DELAY_SECONDS,
+            "tokenize_slow_calls": list(range(1, 512)),
+        })
+    source_root = source_root or corpus._source_root()
+    stateframe_home = scratch / "stateframe-home"
+    stateframe_home.mkdir()
+    environment = {
+        key: value for key, value in os.environ.items()
+        if not key.startswith("STATEFRAME_")
+    }
+    environment.update({
+        "STATEFRAME_HOME": str(stateframe_home),
+        "PYTHONPATH": os.pathsep.join((
+            str(source_root), str(source_root / "stateframe" / "engine"),
+        )),
+        "PYTHONDONTWRITEBYTECODE": "1",
+        "PYTHONHASHSEED": "0",
+    })
+    if request_limit is not None:
+        environment["STATEFRAME_FINAL_CACHE_LAYOUT"] = "off"
+    run_dir = scratch / "run"
+    engine_timeout = int(240 * timeout_scale())
+    if request_limit is not None:
+        wrapper = corpus._request_capped_engine_python(
+            scratch, request_limit,
+            extra_bootstrap=(
+                f"import os\nos.environ[{provider_dialect.PROVIDER_OVERRIDE_ENV!r}] = "
+                f"{provider_dialect.LLAMA_CPP!r}"
+            ),
+        )
+    else:
+        wrapper = corpus._short_tokenize_timeout_engine_python(
+            scratch, TOKENIZE_TIMEOUT_SECONDS,
+            reprobe_after_requests=probe_interval,
+        )
+    started = monotonic()
+    with TapeServer(script) as endpoint:
+        process = run_monitored(
+            [
+                sys.executable, "-m", "stateframe", "run", "--repo", str(repo),
+                "--task", "Fix the pricing code so the tests pass.",
+                "--endpoint", endpoint.url, "--model", "allocation-replay-model",
+                "--run-dir", str(run_dir), "--test-python", sys.executable,
+                "--shell-read", str(source_root), "--slot", "1", "--max-turns", "20",
+                "--timeout", str(engine_timeout), "--quiet", "--python", str(wrapper),
+            ],
+            expected_seconds=engine_timeout + 60,
+            run_dir=run_dir, step="bounded tokenizer outage replay",
+            env=environment, progress_probe=lambda: endpoint.request_count,
+        )
+        endpoint_requests = endpoint.request_count
+        served_steps = endpoint.served_steps
+        total_steps = endpoint.total_steps
+        terminal_served = endpoint.terminal_served
+        tokenize_request_count = endpoint.tokenize_request_count
+        tokenize_request_log = endpoint.tokenize_request_log
+        delayed_tokenize_calls = endpoint.delayed_tokenize_calls
+
+    summary_path = run_dir / "summary.json"
+    summary = json.loads(summary_path.read_text()) if summary_path.is_file() else None
+    engine_log_path = run_dir / "engine.log"
+    engine_log = engine_log_path.read_text(errors="replace") if engine_log_path.is_file() else ""
+    sends_path = run_dir / "sends.jsonl"
+    sends = (
+        tuple(json.loads(line) for line in sends_path.read_text().splitlines() if line.strip())
+        if sends_path.is_file() else ()
+    )
+    return corpus.ReplayOutcome(
+        case_id="discount-bug-compact-replay", returncode=process.returncode,
+        engine_result=summary.get("engine_result") if isinstance(summary, dict) else None,
+        summary=summary, engine_log=engine_log,
+        stdout=process.stdout, stderr=process.stderr,
+        elapsed_seconds=monotonic() - started,
+        endpoint_requests=endpoint_requests, served_steps=served_steps,
+        total_steps=total_steps, terminal_served=terminal_served,
+        tokenize_request_count=tokenize_request_count,
+        delayed_tokenize_calls=delayed_tokenize_calls,
+        tokenize_request_log=tokenize_request_log,
+        measurement_events=tuple(measurement_events(run_dir)),
+        request_hashes=tuple(str(send["request_sha256"]) for send in sends),
+        request_bytes=tuple(int(send["request_bytes"]) for send in sends),
+    )
+
+
 @pytest.mark.host_sandbox
 def test_permanent_tokenizer_outage_replay_submits_with_bounded_probes():
     probe_interval = 2
     with sandbox_visible_temp_dir() as scratch:
-        outcome = corpus._run_case(
-            Path(scratch),
-            "factory-a-econ-flat-r1",
-            tokenize_delay_s=TOKENIZE_DELAY_SECONDS,
-            tokenize_slow_calls=tuple(range(1, 512)),
-            tokenize_timeout_s=TOKENIZE_TIMEOUT_SECONDS,
-            tokenize_reprobe_after_requests=probe_interval,
-        )
+        outcome = _run_compact_edit_replay(Path(scratch), probe_interval=probe_interval)
 
     assert outcome.engine_result == "SUBMITTED", (
         f"result={outcome.engine_result!r}; exit={outcome.returncode}; "
@@ -549,25 +671,11 @@ def test_permanent_tokenizer_outage_replay_submits_with_bounded_probes():
 
 
 def _capture_clean_meter_request_bodies(
-        tmp_path: Path, *, request_limit: int = 6, source_root: Path | None = None,
+        tmp_path: Path, *, request_limit: int = 6,
+        source_root: Path | None = None,
 ) -> tuple[bytes, ...]:
-    # v0.4.0 changes default request order; the 0.3.30 byte oracle uses plain order.
-    # Stop at the needed request count instead of replaying all 41 tape turns.
-    # Each clean-meter request costs ~71 s of engine-side prep on Linux (measured on e62db60:
-    # 34 sends in 2422 s; journal attribution by prior contributor: public_test_verdict_fact_normalized,
-    # code_bookmark_activation_decision, continuation_transition), so the full replay ran past
-    # the engine deadline before submitting. Current capture compares requests 1-6.
-    outcome = corpus._run_case(
-        tmp_path,
-        "clean-meter-22file-r1",
-        props_available=False,
-        stop_after_provider_requests=request_limit,
-        source_root=source_root,
-        extra_bootstrap=(
-            f"import os\nos.environ[{provider_dialect.PROVIDER_OVERRIDE_ENV!r}] = "
-            f"{provider_dialect.LLAMA_CPP!r}"
-        ),
-        final_cache_layout="off",
+    outcome = _run_compact_edit_replay(
+        tmp_path, request_limit=request_limit, source_root=source_root,
     )
     assert outcome.engine_result == "RUN_INCOMPLETE", (
         f"capture stop result={outcome.engine_result!r}; exit={outcome.returncode}; "
@@ -602,6 +710,45 @@ def _clean_meter_fingerprints(request_bodies):
         )
         masked_hashes.append(_masked_wire_sha256(wire_body))
     return tuple(masked_hashes), countdown_copy_counts
+
+
+def _remove_proven_intake_addition(current_wire: bytes, baseline_wire: bytes) -> bytes:
+    """Remove only the current release's intake block and its derived task digest."""
+    current = json.loads(current_wire)
+    baseline = json.loads(baseline_wire)
+    current_task = current["messages"][1]["content"]
+    baseline_task = baseline["messages"][1]["content"]
+    marker = "[NAVBASICS intake orientation]"
+    assert marker not in baseline_task
+    assert current_task.count(marker) == 1
+    insertion_start = current_task.index(marker)
+    assert baseline_task.startswith(current_task[:insertion_start])
+    suffix = baseline_task[insertion_start:]
+    assert suffix and current_task.endswith(suffix)
+    addition = current_task[insertion_start:len(current_task) - len(suffix)]
+    assert addition.startswith(marker + "\nschema=navbasics-intake-orientation/1\n")
+    assert "Repository root: ." in addition
+    assert addition.endswith("\n\n")
+
+    current_digest = hashlib.sha256(current_task.encode("utf-8")).hexdigest()
+    baseline_digest = hashlib.sha256(baseline_task.encode("utf-8")).hexdigest()
+    for body, expected_digest in ((current, current_digest), (baseline, baseline_digest)):
+        frame_messages = [
+            message["content"] for message in body["messages"]
+            if isinstance(message.get("content"), str)
+            and message["content"].startswith("[StateFrame]\n")
+        ]
+        assert len(frame_messages) == 1
+        frame = json.loads(frame_messages[0].split("\n", 1)[1])
+        assert frame["state"]["framefit5"]["task"]["sha256"] == expected_digest
+
+    encoded_current = json.dumps(current_task).encode("utf-8")
+    encoded_baseline = json.dumps(baseline_task).encode("utf-8")
+    assert current_wire.count(encoded_current) == 1
+    assert current_wire.count(current_digest.encode("ascii")) == 1
+    return current_wire.replace(encoded_current, encoded_baseline, 1).replace(
+        current_digest.encode("ascii"), baseline_digest.encode("ascii"), 1,
+    )
 
 
 @pytest.mark.host_sandbox
@@ -644,12 +791,8 @@ def test_healthy_measurement_preserves_baseline_request_bytes(baseline_checkout)
         request_bodies = _capture_clean_meter_request_bodies(scratch_root)
     baseline_masked_hashes, baseline_copy_counts = _clean_meter_fingerprints(baseline_bodies)
     computed_masked_hashes, countdown_copy_counts = _clean_meter_fingerprints(request_bodies)
-    # REQUESTS 3-6 ARE NOT COMPARED HERE ON PURPOSE. Whole-request countdown copies depend on
-    # that turn's frame layout, and requests 3+ sit in the callsite-census timing region (see
-    # below), which varies by host: the release image gives (2, 2, 2, 1, 1, 2) and a host
-    # Python 3.14 venv gave (2, 2, 2, 2, 2, 2) for the same code. So only requests 1-2 are
-    # compared, against the base release in this environment. Every request, 1-6, still has
-    # exactly one active-frame countdown (checked in _clean_meter_fingerprints).
+    # Every one of the six current requests has exactly one active-frame
+    # countdown; only requests 1-2 have an immediate-base byte oracle.
     assert countdown_copy_counts[:2] == baseline_copy_counts[:2], (
         f"whole-request countdown-copy counts for requests 1-2: current={countdown_copy_counts!r}; "
         f"baseline={baseline_copy_counts!r}"
@@ -670,20 +813,27 @@ def test_healthy_measurement_preserves_baseline_request_bytes(baseline_checkout)
     changed_body[flip_at] ^= 1
     assert _masked_wire_sha256(bytes(changed_body)) != computed_masked_hashes[0]
 
-    # Compare requests 1-2 only: a callsite census at step 12 fires depending on run timing
-    # and changes request 3+ bytes (a determinism leak). The timing finding is tracked with
-    # the test-runner maintenance notes.
-    # Full masked identity is checked by ident_pair.sh.
-    assert computed_masked_hashes[:2] == baseline_masked_hashes, (
+    # The current release now includes a repository intake block that the
+    # immediate base silently omitted. Require that insertion and its task
+    # digest to be the only byte differences in requests 1-2.
+    assert computed_masked_hashes != baseline_masked_hashes
+    normalized_bodies = tuple(
+        _remove_proven_intake_addition(current, baseline)
+        for current, baseline in zip(request_bodies, baseline_bodies)
+    )
+    normalized_hashes = tuple(_masked_wire_sha256(wire) for wire in normalized_bodies)
+    assert normalized_hashes == baseline_masked_hashes, (
         f"masked request SHA-256s differ from the immediate base {baseline_tree} "
-        "for requests 1-2: "
-        f"current={computed_masked_hashes[:2]!r}; baseline={baseline_masked_hashes!r}; "
+        "after the proven intake addition for requests 1-2: "
+        f"current={normalized_hashes!r}; baseline={baseline_masked_hashes!r}; "
         f"whole-request countdown-copy counts={countdown_copy_counts!r}"
     )
 
     changed_current_hashes = (
-        _masked_wire_sha256(bytes(changed_body)),
-        *computed_masked_hashes[1:2],
+        _masked_wire_sha256(_remove_proven_intake_addition(
+            bytes(changed_body), baseline_bodies[0],
+        )),
+        *normalized_hashes[1:2],
     )
     assert changed_current_hashes != baseline_masked_hashes, (
         "baseline-relative masked comparison accepted a one-byte change in current request 0001"
