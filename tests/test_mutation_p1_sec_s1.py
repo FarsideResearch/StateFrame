@@ -9,6 +9,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from _portable import TRUE
+
 import sf_launch
 
 
@@ -92,7 +94,7 @@ def test_mutation_command_selects_keyring_isolating_wrapper(
     monkeypatch.setattr(isolation, "_bwrap_userns_guard_supported", lambda _name: False)
 
     command, _environment = isolation.capability_command(
-        ["/bin/true"], capability, platform_backend="bwrap", mutation_mounts=mounts)
+        [TRUE], capability, platform_backend="bwrap", mutation_mounts=mounts)
     inner = command[command.index("--") + 1:]
     assert inner[:4] == [str(Path(sys.executable).resolve()), "-I", "-S",
                          "/sf/boot/sf_launch.py"]
@@ -106,7 +108,7 @@ def test_mutation_command_selects_keyring_isolating_wrapper(
 def test_mutation_launch_joins_keyring_before_filter_and_exec(
         monkeypatch, mode, network_none):
     events = []
-    monkeypatch.setattr(sys, "argv", ["sf_launch.py", mode, "{}", "true"])
+    monkeypatch.setattr(sys, "argv", ["sf_launch.py", mode, "{}", TRUE])
     monkeypatch.setattr(sf_launch, "_join_empty_session_keyring",
                         lambda: events.append("join"), raising=False)
     monkeypatch.setattr(sf_launch, "install_syscall_filter",
@@ -120,7 +122,7 @@ def test_mutation_launch_joins_keyring_before_filter_and_exec(
 
 
 def test_mutation_launch_refuses_when_keyring_join_fails(monkeypatch, capsys):
-    monkeypatch.setattr(sys, "argv", ["sf_launch.py", "--mutation-network-none", "{}", "true"])
+    monkeypatch.setattr(sys, "argv", ["sf_launch.py", "--mutation-network-none", "{}", TRUE])
 
     def refuse():
         raise OSError(errno.EPERM, "cannot isolate session keyring")
