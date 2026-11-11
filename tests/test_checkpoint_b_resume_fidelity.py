@@ -16,6 +16,7 @@ from pathlib import Path
 
 import pytest
 
+from _timeouts import scaled
 from fixtures.process_signals import record_identity, signal_run_owned, signal_run_verified
 from stateframe.scripted_endpoint import Script, ScriptStepUnavailable, serve
 
@@ -76,7 +77,7 @@ class PauseAfterActions(Script):
             else:
                 raise AssertionError("test endpoint received an unexpected third target request")
             waiting.set()
-            if not release.wait(180):
+            if not release.wait(scaled(180)):
                 raise TimeoutError("test did not release the paused scripted reply")
             interrupted.set()
             raise ScriptStepUnavailable("request interrupted before a response")
@@ -288,13 +289,13 @@ def _run_control(example: str, repo: Path, run_dir: Path,
                 what="checkpoint B control cleanup", require_checkpoint_saved=False,
             )
             try:
-                process.communicate(timeout=30)
+                process.communicate(timeout=scaled(30))
             except subprocess.TimeoutExpired:
                 signal_run_owned(
                     run_dir, process, signal.SIGKILL, deadline=time.monotonic(),
                     what="checkpoint B control cleanup", require_checkpoint_saved=False,
                 )
-                process.communicate(timeout=10)
+                process.communicate(timeout=scaled(10))
         script.release.set()
         server.shutdown()
         server.server_close()
@@ -344,7 +345,7 @@ def _wait_for_checkpoint(run_dir: Path, process: subprocess.Popen[str],
         if saved is not None:
             return saved
         if process.poll() is not None:
-            stdout, stderr = process.communicate(timeout=10)
+            stdout, stderr = process.communicate(timeout=scaled(10))
             raise AssertionError(
                 f"run stopped before saving checkpoint at send {sends}:\n{stdout}{stderr}"
             )
@@ -357,7 +358,7 @@ def _wait_for_pause(event: threading.Event, process: subprocess.Popen[str],
     deadline = time.monotonic() + timeout
     while not event.wait(0.2):
         if process.poll() is not None:
-            stdout, stderr = process.communicate(timeout=10)
+            stdout, stderr = process.communicate(timeout=scaled(10))
             raise AssertionError(f"{label} stopped before its target request:\n{stdout}{stderr}")
         if time.monotonic() >= deadline:
             raise AssertionError(f"{label} did not reach its target request within {timeout} seconds")
@@ -419,8 +420,8 @@ def _run_interrupted(example: str, repo: Path, run_dir: Path, launcher: Path,
             deadline=time.monotonic() + 180, what="checkpoint B first-attempt interruption",
         )
         script.release.set()
-        assert script.interrupted.wait(10), "scripted endpoint did not release the interrupted call"
-        process.communicate(timeout=90)
+        assert script.interrupted.wait(scaled(10)), "scripted endpoint did not release the interrupted call"
+        process.communicate(timeout=scaled(90))
         _wait_pid_gone(engine_pid)
 
         resume_process = subprocess.Popen(
@@ -461,8 +462,8 @@ def _run_interrupted(example: str, repo: Path, run_dir: Path, launcher: Path,
             deadline=time.monotonic() + 180, what="checkpoint B resumed-attempt interruption",
         )
         script.resumed_release.set()
-        assert script.resumed_interrupted.wait(10), "resumed endpoint call did not release"
-        resume_process.communicate(timeout=90)
+        assert script.resumed_interrupted.wait(scaled(10)), "resumed endpoint call did not release"
+        resume_process.communicate(timeout=scaled(90))
         _wait_pid_gone(resume_pid)
         return InterruptedRun(run_dir, pending, requests[NEXT_REQUEST],
                               checkpoint_dir, checkpoint_meta)
@@ -491,13 +492,13 @@ def _run_interrupted(example: str, repo: Path, run_dir: Path, launcher: Path,
                 what="checkpoint B resumed-run cleanup", require_checkpoint_saved=False,
             )
             try:
-                resume_process.communicate(timeout=30)
+                resume_process.communicate(timeout=scaled(30))
             except subprocess.TimeoutExpired:
                 signal_run_owned(
                     run_dir, resume_process, signal.SIGKILL, deadline=time.monotonic(),
                     what="checkpoint B resumed-run cleanup", require_checkpoint_saved=False,
                 )
-                resume_process.communicate(timeout=10)
+                resume_process.communicate(timeout=scaled(10))
         if process is not None and process.poll() is None:
             if engine_pid is None:
                 try:
@@ -522,13 +523,13 @@ def _run_interrupted(example: str, repo: Path, run_dir: Path, launcher: Path,
                 what="checkpoint B first-run cleanup", require_checkpoint_saved=False,
             )
             try:
-                process.communicate(timeout=30)
+                process.communicate(timeout=scaled(30))
             except subprocess.TimeoutExpired:
                 signal_run_owned(
                     run_dir, process, signal.SIGKILL, deadline=time.monotonic(),
                     what="checkpoint B first-run cleanup", require_checkpoint_saved=False,
                 )
-                process.communicate(timeout=10)
+                process.communicate(timeout=scaled(10))
         script.release.set()
         script.resumed_release.set()
         server.shutdown()

@@ -649,7 +649,7 @@ def test_keyed_run_saves_secret_free_checkpoints_and_resumes_from_latest(
         ]
         process = start_monitored(
             command, env=environment, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            text=True, run_dir=run, expected_seconds=600,
+            text=True, run_dir=run, expected_seconds=scaled(600),
             step="keyed checkpoint resume", watch_paths=(run / "checkpoints",),
         )
         while not script.waiting.wait(0.2):
@@ -696,14 +696,14 @@ def test_keyed_run_saves_secret_free_checkpoints_and_resumes_from_latest(
             deadline=deadline, what="keyed checkpoint resume",
         )
         script.release.set()
-        assert script.interrupted.wait(10)
-        process.communicate(timeout=90)
+        assert script.interrupted.wait(scaled(10))
+        process.communicate(timeout=scaled(90))
 
         resumed = run_monitored(
             [sys.executable, "-m", "stateframe", "resume", str(run),
              "--endpoint", f"http://127.0.0.1:{server.server_port}/v1",
              "--api-key-env", "LAB_KEY", "--keep-checkpoints"],
-            env=environment, capture_output=True, text=True, expected_seconds=240,
+            env=environment, capture_output=True, text=True, expected_seconds=scaled(240),
         )
         if resumed.returncode != 0:
             pytest.fail(output_without_key(resumed))
@@ -746,7 +746,7 @@ def test_keyed_run_saves_secret_free_checkpoints_and_resumes_from_latest(
                 run, process, signal.SIGKILL, deadline=time.monotonic(),
                 what="keyed checkpoint test cleanup", require_checkpoint_saved=False,
             )
-            process.communicate(timeout=10)
+            process.communicate(timeout=scaled(10))
         script.release.set()
         server.shutdown()
         server.server_close()

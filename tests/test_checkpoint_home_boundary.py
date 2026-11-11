@@ -9,6 +9,7 @@ import sys
 
 import pytest
 
+from _timeouts import scaled
 from stateframe import runner, scripted_endpoint
 from stateframe.endpoint import Endpoint
 import stateframe.engine.kernel_request_auth_identity as auth_identity
@@ -675,7 +676,7 @@ def test_home_guard_runs_with_only_stdlib_and_engine_on_import_path(tmp_path):
         "assert 'stateframe' not in sys.modules",
     ])
     result = subprocess.run([sys.executable, "-I", "-S", "-c", code],
-                            capture_output=True, text=True, timeout=30)
+                            capture_output=True, text=True, timeout=scaled(30))
     assert result.returncode == 0, result.stderr
 
 

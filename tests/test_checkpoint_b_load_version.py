@@ -14,6 +14,7 @@ from pathlib import Path
 
 import pytest
 
+from _timeouts import scaled
 from fixtures.process_signals import record_identity, signal_run_owned, signal_run_verified
 import kernel_checkpoint
 from stateframe import resume
@@ -73,7 +74,7 @@ def _start_pause_server(home: Path, script: Path, marker: Path, pidfile: Path):
     ready, _, _ = select.select([process.stdout], [], [], 15)
     if not ready:
         _stop_pause_server(process, pidfile)
-        stdout, stderr = process.communicate(timeout=5)
+        stdout, stderr = process.communicate(timeout=scaled(5))
         raise AssertionError(f"scripted endpoint did not start: {stdout} {stderr}")
     url = process.stdout.readline().strip()
     assert url.startswith("http://127.0.0.1:") and url.endswith("/v1"), url
@@ -87,12 +88,12 @@ def _stop_pause_server(server: subprocess.Popen[str], pidfile: Path) -> None:
     assert pid == server.pid, "server pidfile must contain the actual launched PID"
     try:
         server.terminate()
-        server.wait(timeout=5)
+        server.wait(timeout=scaled(5))
     except subprocess.TimeoutExpired:
         server.kill()
-        server.wait(timeout=5)
+        server.wait(timeout=scaled(5))
     except ProcessLookupError:
-        server.wait(timeout=5)
+        server.wait(timeout=scaled(5))
 
 
 def _engine_child(parent_pid: int) -> int:
@@ -112,7 +113,7 @@ def _wait_for_checkpoint(marker: Path, run_dir: Path, process: subprocess.Popen[
     pointer = run_dir / "checkpoints" / "LATEST"
     while time.monotonic() < deadline and (not marker.is_file() or not pointer.is_file()):
         if process.poll() is not None:
-            stdout, stderr = process.communicate(timeout=5)
+            stdout, stderr = process.communicate(timeout=scaled(5))
             raise AssertionError(f"producer exited before checkpoint/pause: {stdout} {stderr}")
         time.sleep(0.05)
     assert marker.is_file(), "scripted run did not reach its paused request"
@@ -162,7 +163,7 @@ def _interrupted_checkpoint(tmp_path: Path, producer: str):
             run_dir, child_pid, identity, signal.SIGKILL,
             deadline=time.monotonic() + 180, what="checkpoint B load-version interruption",
         )
-        runner.communicate(timeout=40)
+        runner.communicate(timeout=scaled(40))
         runner = None
         keep_server = True
         summary_path = run_dir / "summary.json"
@@ -175,11 +176,11 @@ def _interrupted_checkpoint(tmp_path: Path, producer: str):
                 run_dir, runner, signal.SIGKILL, deadline=time.monotonic(),
                 what="checkpoint B load-version cleanup", require_checkpoint_saved=False,
             )
-            runner.wait(timeout=5)
+            runner.wait(timeout=scaled(5))
         if not keep_server:
             _stop_pause_server(server, server_pidfile)
             if server.poll() is None:
-                server.wait(timeout=5)
+                server.wait(timeout=scaled(5))
 
 
 @pytest.mark.parametrize("producer", ("a", "base"), ids=("from-a", "from-0.3.30"))
@@ -199,7 +200,7 @@ def test_old_checkpoint_refuses_by_engine_release_without_restore(
             [PYTHON, "-m", "stateframe", "resume", str(run_dir), "--endpoint", url,
              "--model", "scripted", "--quiet", "--keep-checkpoints"],
             capture_output=True, text=True, env=_environment(ROOT, home, checkpoint_every=999),
-            timeout=240, check=False,
+            timeout=scaled(240), check=False,
         )
         output = resumed.stdout + resumed.stderr
         assert resumed.returncode != 0, output
