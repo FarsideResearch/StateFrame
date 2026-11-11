@@ -4,6 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from _timeouts import scaled
 from kernel_agent_tools import AgentTools
 from kernel_custom_tools import CustomToolSet, load_tool_files
 from kernel_exec_session import CleanupReport, ExecResult
@@ -277,7 +278,8 @@ def test_git_contract_adapter_runs_sanitized_history(host):
     hub.bind()
     def run_git(argv, cap, *, cwd):
         process.calls.append((argv, cap))
-        result = subprocess.run(argv, env=dict(cap.env), cwd=cwd, capture_output=True, timeout=5)
+        result = subprocess.run(argv, env=dict(cap.env), cwd=cwd, capture_output=True,
+                                timeout=scaled(5))
         return ExecResult(result.returncode, False, result.stdout + result.stderr, False,
                           len(result.stdout + result.stderr), .01, CleanupReport(True, 0, (), "ok"))
     process.run = run_git

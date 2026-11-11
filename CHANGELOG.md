@@ -27,6 +27,7 @@
 - Unified stop now records a reason and refuses to build a completion snapshot when public verdict, declared path, owner root, or binding evidence cannot be read; invalid paths outside the owner root remain filtered. The three tracked HIGH completion-policy swallow entries were retired; the MED ledger entry remains tracked.
 - Check receipts now surface failures in live or pinned revision resolution, execution context and mode reads, execution ID allocation, and malformed outcome fields instead of presenting fallback evidence as current. The six matching silent-swallow baseline entries were retired; the remaining medium-risk entries stay tracked.
 - Fixed: unavailable frame evidence now creates a terminal request capture before stopping preparation, preserving the distinct source-replan request identity and avoiding an unbound capture error.
+- Tests: one SF_TEST_TIMEOUT_SCALE knob (default 1.0) scales the suite's subprocess and wait timeouts so loaded hosts do not fail tests by timing out.
 
 ## 0.4.38 (2026-11-05)
 

@@ -17,6 +17,8 @@ from collections.abc import Mapping
 
 import pytest
 
+from _timeouts import scaled
+
 from kernel_continuation_journal import ContinuationJournal, JournalError
 
 
@@ -36,7 +38,7 @@ def _external_replace(path) -> None:
         check=True,
         capture_output=True,
         text=True,
-        timeout=10,
+        timeout=scaled(10),
     )
 
 
@@ -258,14 +260,14 @@ def test_coverage_snapshots_are_atomic_during_concurrent_reads(tmp_path):
                     snapshot = getattr(visible, "_state", None)
                 if snapshot is not None:
                     captured.set()
-                    if not release.wait(5):
+                    if not release.wait(scaled(5)):
                         raise TimeoutError("snapshot reader was not released")
                     snapshot_result.append(_coverage_signature(snapshot))
                     return
 
                 sequence = visible.sequence
                 captured.set()
-                if not release.wait(5):
+                if not release.wait(scaled(5)):
                     raise TimeoutError("legacy snapshot reader was not released")
                 # The sleeps make the multi-field read model the concurrent consumer
                 # window called out in the review; the barrier guarantees a swap here.
@@ -284,10 +286,10 @@ def test_coverage_snapshots_are_atomic_during_concurrent_reads(tmp_path):
         _adopt_coverage_state(index, _clone_coverage_index(staged_a))
         reader = threading.Thread(target=capture_during_replace, name="coverage-snapshot-reader")
         reader.start()
-        assert captured.wait(3)
+        assert captured.wait(scaled(3))
         _adopt_coverage_state(index, _clone_coverage_index(staged_b))
         release.set()
-        reader.join(5)
+        reader.join(scaled(5))
         assert not reader.is_alive()
         assert not snapshot_errors
         assert snapshot_result == [signature_a]
@@ -335,13 +337,13 @@ def test_coverage_snapshots_are_atomic_during_concurrent_reads(tmp_path):
 
         hammer = threading.Thread(target=hammer_coverage_reads, name="coverage-read-hammer")
         hammer.start()
-        assert hammer_ready.wait(3)
+        assert hammer_ready.wait(scaled(3))
         for iteration in range(100):
             source = staged_a if iteration % 2 else staged_b
             _adopt_coverage_state(index, _clone_coverage_index(source))
             time.sleep(0)
         stop.set()
-        hammer.join(5)
+        hammer.join(scaled(5))
         assert not hammer.is_alive()
         assert problems == []
     finally:
@@ -372,14 +374,14 @@ def test_bind_index_is_not_exposed_during_replay_scan(tmp_path, monkeypatch):
             yield row
             if position == 0:
                 scan_paused.set()
-                if not scan_release.wait(5):
+                if not scan_release.wait(scaled(5)):
                     raise TimeoutError("coverage scan was not released")
 
     def observe_bind_constructor(self, *args, **kwargs):
         original_init(self, *args, **kwargs)
         if threading.current_thread().name == "coverage-bind-writer":
             bind_constructed.set()
-            if not bind_constructor_release.wait(5):
+            if not bind_constructor_release.wait(scaled(5)):
                 raise TimeoutError("coverage bind constructor was not released")
 
     monkeypatch.setattr(journal, "records", pause_scan)
@@ -405,9 +407,9 @@ def test_bind_index_is_not_exposed_during_replay_scan(tmp_path, monkeypatch):
     bind_thread = threading.Thread(target=bind_during_scan, name="coverage-bind-writer")
     try:
         scan_thread.start()
-        assert scan_paused.wait(3)
+        assert scan_paused.wait(scaled(3))
         bind_thread.start()
-        assert bind_started.wait(3)
+        assert bind_started.wait(scaled(3))
         # The constructor pauses after returning to bind_index. A correct binder
         # holds publication behind the journal scan and keeps the registry empty.
         time.sleep(0.05)
@@ -419,9 +421,9 @@ def test_bind_index_is_not_exposed_during_replay_scan(tmp_path, monkeypatch):
         bind_constructor_release.set()
         scan_release.set()
         if scan_thread.is_alive():
-            scan_thread.join(5)
+            scan_thread.join(scaled(5))
         if bind_thread.is_alive():
-            bind_thread.join(5)
+            bind_thread.join(scaled(5))
         journal.close()
 
     assert not scan_thread.is_alive()

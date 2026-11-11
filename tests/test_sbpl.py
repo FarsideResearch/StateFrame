@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pytest
 
+from _timeouts import scaled
 from kernel_sbpl import sbpl_path_regex, sbpl_regex_literal, sbpl_string
 from kernel_test_isolation import _darwin_xcrun_filter
 from protected_tree_guard import guarded_command
@@ -59,7 +60,7 @@ def seatbelt():
     true_executable = shutil.which("true")
     assert true_executable is not None, "true executable is unavailable"
     probe = subprocess.run([executable, "-p", "(version 1) (allow default)",
-                            true_executable], capture_output=True, text=True, timeout=10)
+                            true_executable], capture_output=True, text=True, timeout=scaled(10))
     if probe.returncode != 0:
         pytest.fail(f"sandbox-exec capability probe failed (exit {probe.returncode}): "
                     f"{probe.stderr.strip()}")
@@ -68,7 +69,7 @@ def seatbelt():
 
 def _touch(command: list[str], path: Path) -> subprocess.CompletedProcess[str]:
     return subprocess.run([*command, "/usr/bin/touch", str(path)],
-                          capture_output=True, text=True, timeout=10)
+                          capture_output=True, text=True, timeout=scaled(10))
 
 
 @pytest.mark.host_sandbox

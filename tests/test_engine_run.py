@@ -13,6 +13,7 @@ from pathlib import Path
 
 import pytest
 
+from _timeouts import scaled
 import engine_run
 from engine_run import (
     GROUP_VERIFY_SECONDS,
@@ -137,7 +138,7 @@ Path(sys.argv[1]).write_text(str(grandchild.pid), encoding="utf-8")
         process_group_id = process.process_group_id
         group_gone = False
         try:
-            assert process.wait(timeout=5) == 0
+            assert process.wait(timeout=scaled(5)) == 0
             assert marker.is_file()
             original_killpg(process_group_id, 0)
             process.started_at -= process.hard_ceiling
@@ -175,7 +176,7 @@ def test_signal_owned_uses_monitored_process_group(monkeypatch, tmp_path):
         signal_run_owned(tmp_path / "run", process, signal.SIGKILL,
                          deadline=time.monotonic(), what="monitored group signal",
                          require_checkpoint_saved=False, group=True)
-        process.communicate(timeout=5)
+        process.communicate(timeout=scaled(5))
 
     assert group_signals == [(process_group_id, signal.SIGKILL)]
     assert process.returncode == -signal.SIGKILL
@@ -198,7 +199,7 @@ def test_signal_run_owned_signals_only_monitored_runner(monkeypatch, tmp_path):
         signal_run_owned(tmp_path / "run", process, signal.SIGKILL,
                          deadline=time.monotonic(), what="monitored runner signal",
                          require_checkpoint_saved=False)
-        process.communicate(timeout=5)
+        process.communicate(timeout=scaled(5))
 
     # Signal 0 is the fixture's liveness probe; it does not deliver a signal.
     assert signalled == [(process.pid, signal.SIGKILL)]
@@ -292,7 +293,7 @@ time.sleep(60)
                     original_killpg(process.process_group_id, signal.SIGKILL)
                 except ProcessLookupError:
                     pass
-                process._process.wait(timeout=5)
+                process._process.wait(timeout=scaled(5))
 
     elapsed = time.monotonic() - started
     assert attempted_signals.count(signal.SIGTERM) >= 1

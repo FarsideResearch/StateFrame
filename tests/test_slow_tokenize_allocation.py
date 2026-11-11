@@ -6,6 +6,7 @@ from urllib.request import Request, urlopen
 
 import pytest
 
+from _timeouts import scaled
 from tests import test_allocation_replay_corpus as corpus
 from tests.tape_server import TapeServer
 
@@ -33,7 +34,7 @@ def test_tape_server_delays_only_configured_tokenize_calls():
                 data=json.dumps({"content": "small request"}).encode("utf-8"),
                 headers={"Content-Type": "application/json"},
             )
-            with urlopen(request, timeout=2) as response:
+            with urlopen(request, timeout=scaled(2)) as response:
                 assert json.loads(response.read())["tokens"]
 
     assert endpoint.tokenize_request_count == 3

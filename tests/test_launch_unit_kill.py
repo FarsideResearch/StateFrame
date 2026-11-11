@@ -17,6 +17,7 @@ import threading
 import time
 from pathlib import Path
 
+from _timeouts import scaled
 import pytest
 
 import kernel_exec_tracker as tracker
@@ -86,7 +87,7 @@ def test_cleanup_leaves_no_family_member(name, kind):
     process, child = _launch(kind)
     try:
         result = CLEANUPS[name](process)
-        deadline = time.monotonic() + 2
+        deadline = time.monotonic() + scaled(2)
         while _alive(child) and time.monotonic() < deadline:
             time.sleep(.02)
         # INVERTED ASSERTION: this test previously asserted that on darwin a setsid child

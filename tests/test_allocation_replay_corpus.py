@@ -18,6 +18,7 @@ import pytest
 
 from _journal import measurement_events
 from _stateframe_home import isolated_stateframe_home
+from _timeouts import scaled
 from engine_run import EngineRunTimeout, run_monitored
 from tests.tape_server import TapeServer
 
@@ -237,8 +238,10 @@ def _engine_and_parent_timeouts(total_steps: int) -> tuple[int, int]:
     return engine_seconds, parent_seconds
 
 
-def _engine_timeout_argv(engine_seconds: int) -> tuple[str, str]:
-    return "--timeout", str(engine_seconds)
+def _engine_timeout_argv(engine_seconds: int | float) -> tuple[str, str]:
+    seconds = float(engine_seconds)
+    value = str(int(seconds)) if seconds.is_integer() else str(seconds)
+    return "--timeout", value
 
 
 def _short_tokenize_timeout_engine_python(
@@ -354,7 +357,7 @@ def test_request_capped_engine_python_runs_extra_bootstrap_before_main(tmp_path)
     child = _source_root() / "stateframe" / "_child.py"
     result = subprocess.run(
         [str(wrapper), "-B", str(child), str(tmp_path / "unused-run")],
-        capture_output=True, text=True, timeout=15, check=False,
+        capture_output=True, text=True, timeout=scaled(15), check=False,
     )
     assert result.returncode == 0, result.stderr
     assert marker.read_text(encoding="ascii") == "ready"
@@ -428,6 +431,8 @@ def _run_case(
     started = time.monotonic()
     with TapeServer(tape_script) as endpoint:
         engine_timeout, parent_timeout = _engine_and_parent_timeouts(endpoint.total_steps)
+        engine_timeout = scaled(engine_timeout)
+        parent_timeout = scaled(parent_timeout)
         command = [
             sys.executable, "-m", "stateframe", "run", "--repo", str(repo), "--task", task,
             "--endpoint", endpoint.url,
@@ -589,7 +594,7 @@ def test_every_corpus_file_has_neutral_model_and_no_host_identity():
 def test_tape_server_reads_a_gzip_script_and_keeps_neutral_model_id():
     tape_path = CASE_FILES[0] / "script.json.gz"
     with TapeServer(tape_path) as endpoint:
-        with urlopen(f"{endpoint.url}/models", timeout=2) as response:
+        with urlopen(f"{endpoint.url}/models", timeout=scaled(2)) as response:
             payload = json.load(response)
     assert payload["data"][0]["id"] == "allocation-replay-model"
 
@@ -701,7 +706,7 @@ def _request_tape_turn(endpoint_url: str) -> dict[str, object]:
         data=body,
         headers={"Content-Type": "application/json"},
     )
-    with urlopen(request, timeout=2) as response:
+    with urlopen(request, timeout=scaled(2)) as response:
         payload = json.load(response)
     return payload["choices"][0]["message"]
 

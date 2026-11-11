@@ -13,6 +13,8 @@ from pathlib import Path
 
 import pytest
 
+from _timeouts import scaled
+
 
 ROOT = Path(__file__).resolve().parents[1]
 # Direct script targets of -I launchers in request_bytes, outer_checks.run,
@@ -42,7 +44,7 @@ def _run(argv: list[str], *, cwd: Path, input_data: bytes | None = None) -> subp
     env.pop("PYTHONHOME", None)
     return subprocess.run(argv, cwd=cwd, env=env, input=input_data,
                           stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                          timeout=60, check=False)
+                          timeout=scaled(60), check=False)
 
 
 @pytest.mark.host_sandbox
@@ -108,8 +110,8 @@ def test_installed_wheel_direct_isolated_children(tmp_path):
         wire = b'{"model":"test","messages":[]}'
         packet = json.dumps({"wire": wire.decode(),
                              "endpoint": f"http://127.0.0.1:{server.server_port}/v1/chat/completions",
-                             "key": "", "deadline": time.monotonic() + 30,
-                             "socket_timeout": 5, "gzip": False}).encode()
+                             "key": "", "deadline": time.monotonic() + scaled(30),
+                             "socket_timeout": scaled(5), "gzip": False}).encode()
         result = _run([str(python), "-I", "-B", str(engine / "kernel_bounded_http.py"),
                        "--http-child"], cwd=tmp_path, input_data=packet)
         assert result.returncode == 0, result.stderr.decode(errors="replace")
@@ -118,4 +120,4 @@ def test_installed_wheel_direct_isolated_children(tmp_path):
     finally:
         server.shutdown()
         server.server_close()
-        thread.join(timeout=5)
+        thread.join(timeout=scaled(5))

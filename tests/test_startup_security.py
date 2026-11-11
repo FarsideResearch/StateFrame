@@ -6,6 +6,7 @@ import sys
 
 import pytest
 
+from _timeouts import scaled
 from stateframe import runner
 from stateframe.engine.kernel_exec_session import CleanupReport, ExecResult, ExecSessionError
 from stateframe.engine.kernel_safe_probe import ProbeCleanupError
@@ -83,7 +84,7 @@ def test_startup_hooks_cannot_write_or_connect_and_repo_pytest_is_not_imported(
     with socket.socket() as server:
         server.bind(('127.0.0.1', 0))
         server.listen()
-        with socket.create_connection(server.getsockname(), timeout=1):
+        with socket.create_connection(server.getsockname(), timeout=scaled(1)):
             connection, _ = server.accept()
             connection.close()
         attack = f'''import builtins, os, socket
@@ -96,7 +97,7 @@ for path in [Path({str(outside)!r}), Path({str(repo / 'repo-write')!r})]:
     except OSError:
         blocked += 1
 try:
-    socket.create_connection(('127.0.0.1', {server.getsockname()[1]}), timeout=1).close()
+    socket.create_connection(('127.0.0.1', {server.getsockname()[1]}), timeout={scaled(1):g}).close()
 except OSError:
     blocked += 1
 Path(os.environ['HOME'], 'scratch-proof').write_text('allowed')

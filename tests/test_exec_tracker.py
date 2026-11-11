@@ -4,6 +4,7 @@ import subprocess
 import sys
 from types import SimpleNamespace
 
+from _timeouts import scaled
 import kernel_exec_tracker as tracker
 from kernel_exec_tracker import Descendants, ProcessTable
 from fixtures.process_signals import signal_owned
@@ -41,4 +42,4 @@ def test_signal_permission_failure_preserves_live_member(tmp_path, monkeypatch):
         assert any(row.pid == process.pid for row in family.update(table.snapshot()))
     finally:
         signal_owned(process, signal.SIGKILL)
-        process.wait(timeout=3)
+        process.wait(timeout=scaled(3))

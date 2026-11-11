@@ -7,6 +7,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
 
+from _timeouts import scaled
 from ._support import Endpoint, PYTHON, ROOT, environment, read_requests
 from engine_run import run_monitored
 
@@ -66,4 +67,4 @@ def test_profile_proxy_does_not_receive_model_requests(tmp_path):
     finally:
         proxy.shutdown()
         proxy.server_close()
-        thread.join(timeout=5)
+        thread.join(timeout=scaled(5))

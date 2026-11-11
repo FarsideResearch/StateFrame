@@ -17,6 +17,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from _timeouts import scaled
+
 import kernel_checkpoint
 from kernel_hook_wiring import HookWiring
 from kernel_hooks import create_bundle, load_hook_files
@@ -257,7 +259,7 @@ class InterruptAfterActions(Script):
     def next_call(self, offered):
         if self.position == self.count and not self.interrupted.is_set():
             self.waiting.set()
-            if not self.release.wait(60):
+            if not self.release.wait(scaled(60)):
                 raise TimeoutError("interrupted request was not released")
             self.interrupted.set()
             raise ScriptStepUnavailable("request interrupted before a response")
@@ -343,7 +345,7 @@ def test_checkpoint_resume_matches_uninterrupted_control(
         ]
         process = start_monitored(command, env=environment, stdout=subprocess.PIPE,
                                   stderr=subprocess.PIPE, text=True, run_dir=run,
-                                  expected_seconds=600, step="checkpoint resume interrupted run",
+                                  expected_seconds=scaled(600), step="checkpoint resume interrupted run",
                                   watch_paths=(run / "checkpoints",))
         while not script.waiting.wait(0.5):
             if process.poll() is not None:
@@ -364,7 +366,7 @@ def test_checkpoint_resume_matches_uninterrupted_control(
             assert any(record["event"] == "pre_tool" and record["executed"] for record in old_records)
             assert any(record["event"] == "post_tool" and record["executed"] for record in old_records)
         checkpoint_events_path = run / "checkpoints/events.jsonl"
-        checkpoint_deadline = time.monotonic() + 120
+        checkpoint_deadline = time.monotonic() + scaled(120)
         wait_for_checkpoint_saved(run, deadline=checkpoint_deadline,
                                   what="hook checkpoint resume")
         if variant == "hooks_after_first_edit":
@@ -380,8 +382,8 @@ def test_checkpoint_resume_matches_uninterrupted_control(
         signal_run_verified(run, child, identity, signal.SIGKILL, deadline=checkpoint_deadline,
                             what="hook checkpoint resume")
         script.release.set()
-        assert script.interrupted.wait(10)
-        process.communicate(timeout=90)
+        assert script.interrupted.wait(scaled(10))
+        process.communicate(timeout=scaled(90))
 
         control_script = Script(document)
         control_server = serve(control_script)
@@ -394,7 +396,7 @@ def test_checkpoint_resume_matches_uninterrupted_control(
             )] = f"http://127.0.0.1:{control_server.server_port}/v1"
             result = run_monitored(control_command, env=environment, run_dir=control,
                                    step="uninterrupted checkpoint control",
-                                   capture_output=True, text=True, expected_seconds=240)
+                                   capture_output=True, text=True, expected_seconds=scaled(240))
             assert result.returncode == 0, result.stdout + result.stderr
             control_script.assert_consumed()
         finally:
@@ -407,7 +409,7 @@ def test_checkpoint_resume_matches_uninterrupted_control(
             [sys.executable, "-m", "stateframe", "resume", str(run),
              "--endpoint", f"http://127.0.0.1:{server.server_port}/v1",
              "--keep-checkpoints"],
-            env=environment, capture_output=True, text=True, expected_seconds=240,
+            env=environment, capture_output=True, text=True, expected_seconds=scaled(240),
         )
         if resumed.returncode != 0:
             expected = script.steps[script.position - 1] if script.position else None
@@ -481,6 +483,6 @@ def test_checkpoint_resume_matches_uninterrupted_control(
             # Failure cleanup may precede any completed checkpoint.
             signal_run_owned(run, process, signal.SIGKILL, deadline=time.monotonic(),
                              what="hook resume cleanup", require_checkpoint_saved=False)
-            process.communicate(timeout=10)
+            process.communicate(timeout=scaled(10))
         server.shutdown()
         server.server_close()

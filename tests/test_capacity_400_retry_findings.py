@@ -8,6 +8,7 @@ import sys
 import time
 
 import pytest
+from _timeouts import scaled
 
 
 ENGINE = Path(__file__).resolve().parents[1] / "src" / "stateframe" / "engine"
@@ -103,8 +104,8 @@ def test_ordinary_timeout_retry_still_calls_sleep_zero(monkeypatch, tmp_path: Pa
     capture = kernel_measurement.RequestCapture(journal, 1, "snapshot")
     with pytest.raises(kernel_measurement.HarnessTransportError):
         capture._send_transport_with_retries(
-            body, wire, ENDPOINT, "", admission=None, socket_timeout=2,
-            deadline=time.monotonic() + 10, wall_timeout=2,
+            body, wire, ENDPOINT, "", admission=None, socket_timeout=scaled(2),
+            deadline=time.monotonic() + scaled(10), wall_timeout=scaled(2),
             backend_identity={}, request_extensions={}, transport_attempt_limit=2)
     assert sends == [1, 1]
     assert sleeps == [0.0]

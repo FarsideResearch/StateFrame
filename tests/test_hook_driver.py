@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 
+from _timeouts import scaled
 from kernel_hooks import parse_outcome
 import kernel_hook_driver as driver
 
@@ -29,7 +30,7 @@ def test_driver_runs_when_it_is_the_only_mounted_file(tmp_path):
         [sys._base_executable, "-I", str(isolated_driver)],
         input=json.dumps(request).encode(),
         capture_output=True,
-        timeout=7,
+        timeout=scaled(7),
         check=False,
     )
     assert result.returncode == 0, result.stderr.decode(errors="replace")
@@ -51,13 +52,13 @@ def test_group_signal_uses_only_own_unreaped_child(monkeypatch):
         assert driver._stop_group(process) is True
         assert targets == [(process.pid, signal.SIGKILL)]
         process.kill()
-        process.wait(timeout=2)
+        process.wait(timeout=scaled(2))
         assert driver._stop_group(process) is False
         assert targets == [(process.pid, signal.SIGKILL)]
     finally:
         if process.returncode is None:
             process.kill()
-        process.wait(timeout=2)
+        process.wait(timeout=scaled(2))
 
 
 
@@ -72,7 +73,7 @@ def invoke(argv, *, payload=b"{}", timeout=2):
         [sys.executable, "-I", str(DRIVER)],
         input=json.dumps(request).encode(),
         capture_output=True,
-        timeout=timeout + 5,
+        timeout=timeout + scaled(5),
         check=True,
     )
     assert process.stderr == b""
@@ -145,7 +146,7 @@ def test_signal_and_maximum_timeout():
         [sys.executable, "-I", str(DRIVER)],
         input=json.dumps(request).encode(),
         capture_output=True,
-        timeout=5,
+        timeout=scaled(5),
         check=True,
     )
     assert json.loads(result.stdout)["exit_code"] == 0

@@ -6,6 +6,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
 
+from _timeouts import scaled
 from stateframe.engine.kernel_web_fetch import WebPolicy, fetch, handle_web_call, public_address
 
 
@@ -129,7 +130,7 @@ def server():
     finally:
         httpd.shutdown()
         httpd.server_close()
-        thread.join(timeout=2)
+        thread.join(timeout=scaled(2))
 
 
 @pytest.mark.host_sandbox

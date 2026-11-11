@@ -11,6 +11,7 @@ from pathlib import Path
 import pytest
 
 from ._support import Endpoint, PYTHON, copy_repo, environment, read_requests, run_case
+from _timeouts import scaled
 from fixtures.process_signals import record_identity, signal_run_owned, signal_run_verified
 from engine_run import run_monitored, start_monitored
 
@@ -148,12 +149,12 @@ def test_changed_skill_refuses_resume_before_attempt_archive(tmp_path):
              "--endpoint", endpoint.url, "--model", "scripted", "--run-dir", str(run_dir),
              "--test-python", PYTHON, "--test-cmd", "python -m unittest discover -s tests -q",
              "--max-turns", "1", "--skill", str(selected), "--quiet"],
-            capture_output=True, text=True, env=environment(), expected_seconds=240, check=False)
+            capture_output=True, text=True, env=environment(), expected_seconds=scaled(240), check=False)
     assert read_requests(run_dir), first.stdout + first.stderr
     before = sorted(run_dir.glob("attempt-*"))
     (selected / "SKILL.md").write_text((selected / "SKILL.md").read_text() + "changed\n")
     refused = run_monitored([PYTHON, "-m", "stateframe", "resume", str(run_dir), "--max-turns", "5"],
-                             capture_output=True, text=True, env=environment(), expected_seconds=30, check=False)
+                             capture_output=True, text=True, env=environment(), expected_seconds=scaled(30), check=False)
     assert refused.returncode == 2
     assert "skill edit-app changed since the run started (SKILL.md digest" in refused.stderr
     assert sorted(run_dir.glob("attempt-*")) == before
@@ -173,7 +174,7 @@ def test_unchanged_skill_resume_rebuilds_loaded_body(tmp_path, first_mode, resum
     runner = None
     try:
         assert endpoint.stdout is not None
-        ready, _, _ = select.select([endpoint.stdout], [], [], 15)
+        ready, _, _ = select.select([endpoint.stdout], [], [], scaled(15))
         assert ready
         url = endpoint.stdout.readline().strip()
         launched_after = time.time()
@@ -183,9 +184,9 @@ def test_unchanged_skill_resume_rebuilds_loaded_body(tmp_path, first_mode, resum
              "--test-python", PYTHON, "--test-cmd", "python -m unittest discover -s tests -q",
              "--max-turns", "8", "--skill", str(selected), "--quiet"],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=environment(),
-            start_new_session=True, run_dir=run_dir, expected_seconds=600,
+            start_new_session=True, run_dir=run_dir, expected_seconds=scaled(600),
              step="interrupted skill resume run")
-        deadline = time.monotonic() + 600
+        deadline = time.monotonic() + scaled(600)
         while not marker.exists():
             if runner.poll() is not None:
                 stdout, stderr = runner.communicate()
@@ -206,22 +207,22 @@ def test_unchanged_skill_resume_rebuilds_loaded_body(tmp_path, first_mode, resum
         identity = record_identity(child, launched_after=launched_after, command_fragment="_child.py")
         signal_run_verified(run_dir, child, identity, signal.SIGKILL, deadline=deadline,
                             what="skill replay interruption")
-        runner.communicate(timeout=30)
+        runner.communicate(timeout=scaled(30))
     finally:
         if runner is not None and runner.poll() is None:
             # Failure cleanup may run before a checkpoint exists.
             signal_run_owned(run_dir, runner, signal.SIGKILL, deadline=time.monotonic(),
                              what="skill replay cleanup", require_checkpoint_saved=False)
-            runner.wait(timeout=5)
+            runner.wait(timeout=scaled(5))
         if endpoint.poll() is None:
             endpoint.terminate()
-            endpoint.wait(timeout=5)
+            endpoint.wait(timeout=scaled(5))
     remaining = script(tmp_path, standard_steps()[1:], tokenize_mode=resume_mode)
     with Endpoint(remaining) as endpoint:
         resumed = run_monitored(
             [PYTHON, "-m", "stateframe", "resume", str(run_dir),
              "--endpoint", endpoint.url, "--model", "scripted", "--quiet"],
-            capture_output=True, text=True, env=environment(), expected_seconds=240, check=False)
+            capture_output=True, text=True, env=environment(), expected_seconds=scaled(240), check=False)
     assert resumed.returncode == 0, resumed.stdout + resumed.stderr
     replayed = read_requests(run_dir)
     replayed_next = json.loads((run_dir / "wire/0002.request.json").read_bytes())
@@ -266,14 +267,14 @@ def test_limit_change_requires_external_consent_with_or_without_skills(tmp_path,
              "--endpoint", endpoint.url, "--model", "scripted", "--run-dir", str(run_dir),
              "--test-python", PYTHON, "--test-cmd", "python -m unittest discover -s tests -q",
              "--max-turns", "1", "--shell-network", "full", "--quiet", *flags],
-            capture_output=True, text=True, env=environment(), expected_seconds=240, check=False)
+            capture_output=True, text=True, env=environment(), expected_seconds=scaled(240), check=False)
     assert len(read_requests(run_dir)) == 1, first.stdout + first.stderr
     old_tape = (run_dir / "tool-tape.jsonl").read_bytes()
     assert any(row["replay_class"] == "external" for row in
                (json.loads(line) for line in old_tape.splitlines()) if row["kind"] == "intent")
     refused = run_monitored(
         [PYTHON, "-m", "stateframe", "resume", str(run_dir), "--max-turns", "8", "--quiet"],
-        capture_output=True, text=True, env=environment(), expected_seconds=30, check=False)
+        capture_output=True, text=True, env=environment(), expected_seconds=scaled(30), check=False)
     assert refused.returncode == 2
     assert "--replay-external" in refused.stderr
     assert not (run_dir / "attempts").exists()
@@ -282,7 +283,7 @@ def test_limit_change_requires_external_consent_with_or_without_skills(tmp_path,
         approved = run_monitored(
             [PYTHON, "-m", "stateframe", "resume", str(run_dir), "--max-turns", "8",
              "--endpoint", endpoint.url, "--model", "scripted", "--replay-external", "--quiet"],
-            capture_output=True, text=True, env=environment(), expected_seconds=240, check=False)
+            capture_output=True, text=True, env=environment(), expected_seconds=scaled(240), check=False)
     assert approved.returncode == 0, approved.stdout + approved.stderr
     spec = json.loads((run_dir / "spec.json").read_text())
     assert spec["resume"]["restart_live"] is True
@@ -305,13 +306,13 @@ def test_changed_step_limit_restarts_skill_run_live(tmp_path):
              "--endpoint", endpoint.url, "--model", "scripted", "--run-dir", str(run_dir),
              "--test-python", PYTHON, "--test-cmd", "python -m unittest discover -s tests -q",
              "--max-turns", "1", "--skill", str(selected), "--quiet"],
-            capture_output=True, text=True, env=environment(), expected_seconds=240, check=False)
+            capture_output=True, text=True, env=environment(), expected_seconds=scaled(240), check=False)
     assert len(read_requests(run_dir)) == 1, first.stdout + first.stderr
     with Endpoint(calls) as endpoint:
         resumed = run_monitored(
             [PYTHON, "-m", "stateframe", "resume", str(run_dir), "--max-turns", "8",
              "--endpoint", endpoint.url, "--model", "scripted", "--quiet"],
-            capture_output=True, text=True, env=environment(), expected_seconds=240, check=False)
+            capture_output=True, text=True, env=environment(), expected_seconds=scaled(240), check=False)
     assert resumed.returncode == 0, resumed.stdout + resumed.stderr
     summary = json.loads((run_dir / "summary.json").read_text())
     assert summary["succeeded"] is True
@@ -378,7 +379,7 @@ def test_changed_skill_command_executable_refuses_call(tmp_path):
     runner = None
     try:
         assert server.stdout is not None
-        ready, _, _ = select.select([server.stdout], [], [], 15)
+        ready, _, _ = select.select([server.stdout], [], [], scaled(15))
         assert ready
         url = server.stdout.readline().strip()
         runner = start_monitored(
@@ -387,7 +388,7 @@ def test_changed_skill_command_executable_refuses_call(tmp_path):
              "--test-python", PYTHON, "--test-cmd", "python -m unittest discover -s tests -q",
              "--max-turns", "8", "--skill", str(selected), "--trust-skill-tools", "--quiet"],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=environment(),
-            run_dir=run_dir, expected_seconds=180, step="skill command mutation run")
+            run_dir=run_dir, expected_seconds=scaled(180), step="skill command mutation run")
         while not marker.exists():
             if runner.poll() is not None:
                 out, err = runner.communicate()
@@ -402,7 +403,7 @@ def test_changed_skill_command_executable_refuses_call(tmp_path):
             # Failure cleanup may run before a checkpoint exists.
             signal_run_owned(run_dir, runner, signal.SIGKILL, deadline=time.monotonic(),
                              what="trusted skill cleanup", require_checkpoint_saved=False)
-            runner.wait(timeout=5)
+            runner.wait(timeout=scaled(5))
         if server.poll() is None:
             server.terminate()
-            server.wait(timeout=5)
+            server.wait(timeout=scaled(5))

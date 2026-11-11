@@ -12,6 +12,7 @@ from pathlib import Path
 
 import pytest
 
+from _timeouts import scaled
 from fixtures.process_signals import signal_run_owned, wait_for_checkpoint_saved
 
 
@@ -185,16 +186,16 @@ def test_delayed_complete_save_precedes_signal(tmp_path: Path) -> None:
     ))
     try:
         started = time.monotonic()
-        signal_run_owned(run, child, signal.SIGKILL, deadline=started + 4,
+        signal_run_owned(run, child, signal.SIGKILL, deadline=started + scaled(4),
                          what="delayed writer")
-        assert child.wait(timeout=5) == -signal.SIGKILL
+        assert child.wait(timeout=scaled(5)) == -signal.SIGKILL
         assert marker.read_text() == "complete"
         assert time.monotonic() - started >= 1.4
         assert json.loads(events.read_text()) == {"event": "checkpoint_saved"}
     finally:
         if child.poll() is None:
             child.kill()
-            child.wait(timeout=5)
+            child.wait(timeout=scaled(5))
 
 
 def test_missing_save_fails_without_signalling(tmp_path: Path) -> None:
@@ -213,7 +214,7 @@ def test_missing_save_fails_without_signalling(tmp_path: Path) -> None:
     finally:
         if child.poll() is None:
             child.kill()
-            child.wait(timeout=5)
+            child.wait(timeout=scaled(5))
 
 
 def test_torn_save_line_is_not_counted(tmp_path: Path) -> None:
@@ -244,9 +245,9 @@ def test_explicit_opt_out_signals_before_first_save(tmp_path: Path) -> None:
     try:
         signal_run_owned(run, child, signal.SIGKILL, deadline=time.monotonic(),
                          what="pre-checkpoint interruption", require_checkpoint_saved=False)
-        assert child.wait(timeout=5) == -signal.SIGKILL
+        assert child.wait(timeout=scaled(5)) == -signal.SIGKILL
         assert not (run / "checkpoints" / "events.jsonl").exists()
     finally:
         if child.poll() is None:
             child.kill()
-            child.wait(timeout=5)
+            child.wait(timeout=scaled(5))

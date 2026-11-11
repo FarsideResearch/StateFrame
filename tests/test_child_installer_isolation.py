@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from _timeouts import scaled
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -21,5 +22,5 @@ def test_routed_recorder_then_http_gzip_recorder_in_one_process():
         "tests/test_routes_cli.py::test_three_resumes_skip_unproven_pending_through_chained_endpoint_and_model_moves",
         "tests/test_http_gzip.py::test_wire_recorder_normal_record_keeps_022_shape",
     ]
-    result = subprocess.run(command, cwd=ROOT, capture_output=True, text=True, timeout=120)
+    result = subprocess.run(command, cwd=ROOT, capture_output=True, text=True, timeout=scaled(120))
     assert result.returncode == 0, result.stdout + result.stderr

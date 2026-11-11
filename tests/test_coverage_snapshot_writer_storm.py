@@ -6,6 +6,7 @@ import time
 
 import pytest
 
+from _timeouts import scaled
 from kernel_continuation_journal import ContinuationJournal
 import kernel_stateframe_call_coverage as coverage
 
@@ -102,13 +103,13 @@ def test_snapshots_stay_consistent_during_concurrent_commits_and_rebuilds(tmp_pa
 
         def writer(worker):
             try:
-                if not start_writers.wait(5):
+                if not start_writers.wait(scaled(5)):
                     raise TimeoutError("writer start was not released")
                 for ordinal in range(10):
                     with writer_lock:
                         writer_active.set()
                         try:
-                            if worker == 0 and ordinal == 0 and not reader_saw_writer.wait(5):
+                            if worker == 0 and ordinal == 0 and not reader_saw_writer.wait(scaled(5)):
                                 raise TimeoutError("reader did not overlap the writer storm")
                             _commit(index, f"call-{worker}-{ordinal}", expected_proofs, expected_lock)
                         finally:
@@ -122,7 +123,7 @@ def test_snapshots_stay_consistent_during_concurrent_commits_and_rebuilds(tmp_pa
             local_overlaps = 0
             previous_sequence = baseline_sequence
             try:
-                readers_ready.wait(timeout=5)
+                readers_ready.wait(timeout=scaled(5))
                 while not start_writers.is_set():
                     time.sleep(0)
                 for _ in range(2_000):
@@ -157,7 +158,7 @@ def test_snapshots_stay_consistent_during_concurrent_commits_and_rebuilds(tmp_pa
                    for n in range(3)]
         for thread in readers:
             thread.start()
-        readers_ready.wait(timeout=5)
+        readers_ready.wait(timeout=scaled(5))
 
         writers = [threading.Thread(target=writer, args=(n,), name=f"coverage-writer-{n}", daemon=True)
                    for n in range(3)]
@@ -165,10 +166,10 @@ def test_snapshots_stay_consistent_during_concurrent_commits_and_rebuilds(tmp_pa
             thread.start()
         start_writers.set()
         for thread in writers:
-            thread.join(timeout=30)
+            thread.join(timeout=scaled(30))
         writers_done.set()
         for thread in readers:
-            thread.join(timeout=15)
+            thread.join(timeout=scaled(15))
 
         assert all(not thread.is_alive() for thread in writers + readers)
         assert errors == []
@@ -206,7 +207,7 @@ def test_unlocked_snapshot_control_exposes_mixed_replay_publication(tmp_path, mo
         def unlocked_snapshot(instance):
             sequence = instance.sequence
             captured.set()
-            if not release.wait(5):
+            if not release.wait(scaled(5)):
                 raise TimeoutError("unlocked snapshot control was not released")
             return coverage._CoverageSnapshot(
                 sequence=sequence,
@@ -227,10 +228,10 @@ def test_unlocked_snapshot_control_exposes_mixed_replay_publication(tmp_path, mo
 
         reader = threading.Thread(target=read_snapshot, name="unlocked-snapshot-control", daemon=True)
         reader.start()
-        assert captured.wait(3)
+        assert captured.wait(scaled(3))
         index._replace_state_from(new_state)
         release.set()
-        reader.join(timeout=5)
+        reader.join(timeout=scaled(5))
 
         assert not reader.is_alive()
         assert errors == []

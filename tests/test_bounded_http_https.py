@@ -13,6 +13,7 @@ import pytest
 
 from stateframe import _child
 from stateframe.engine import kernel_bounded_http as http
+from _timeouts import scaled
 
 
 BODY = b'{"tls":"verified"}'
@@ -21,7 +22,8 @@ pytestmark = pytest.mark.host_sandbox
 
 
 def _openssl(*args: str) -> None:
-    subprocess.run(["openssl", *args], check=True, capture_output=True, text=True, timeout=20)
+    subprocess.run(
+        ["openssl", *args], check=True, capture_output=True, text=True, timeout=scaled(20))
 
 
 # Every extension is explicit: Python 3.13+ default contexts set VERIFY_X509_STRICT, which needs
@@ -49,7 +51,7 @@ authorityKeyIdentifier = keyid,issuer
 
 def _key_identifiers(cert) -> tuple[bool, bool]:
     text = subprocess.run(["openssl", "x509", "-in", str(cert), "-noout", "-text"],
-                          check=True, capture_output=True, text=True, timeout=20).stdout
+                          check=True, capture_output=True, text=True, timeout=scaled(20)).stdout
     return "Subject Key Identifier" in text, "Authority Key Identifier" in text
 
 
@@ -120,12 +122,12 @@ def https_server(request, certificates):
     finally:
         server.shutdown()
         server.server_close()
-        thread.join(timeout=5)
+        thread.join(timeout=scaled(5))
 
 
 def _send(endpoint: str):
-    return http.request_bytes(WIRE, endpoint, "", deadline=time.monotonic() + 10,
-                              socket_timeout=5)
+    return http.request_bytes(WIRE, endpoint, "", deadline=time.monotonic() + scaled(10),
+                              socket_timeout=scaled(5))
 
 
 def test_default_handler_effective_context_verifies_host_and_ca():
@@ -204,8 +206,8 @@ def test_verification_reason_reaches_wire_error_and_send_event(
     try:
         _child.install_wire_recorder(tmp_path, https_server)
         with pytest.raises(child_http.BoundedTransportError) as failure:
-            child_http.request_bytes(WIRE, https_server, "", deadline=time.monotonic() + 10,
-                                     socket_timeout=5)
+            child_http.request_bytes(WIRE, https_server, "", deadline=time.monotonic() + scaled(10),
+                                     socket_timeout=scaled(5))
     finally:
         child_http.request_bytes = original
     detail = failure.value.error_detail

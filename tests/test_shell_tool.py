@@ -1,6 +1,7 @@
 """Foreground orchestration with only the process boundary substituted."""
 
 import pytest
+from _timeouts import scaled
 
 from kernel_exec_session import CleanupReport, ExecResult
 from kernel_shell_tool import ShellTool, request_confirmation
@@ -263,14 +264,14 @@ def test_confirmation_channel_noninteractive_declines(tmp_path):
 
     result = []
     thread = threading.Thread(target=lambda: result.append(
-        request_confirmation(tmp_path, "call-1", "echo hi", timeout=2)))
+        request_confirmation(tmp_path, "call-1", "echo hi", timeout=scaled(2))))
     thread.start()
     import time
-    deadline = time.monotonic() + 1
+    deadline = time.monotonic() + scaled(1)
     while not (tmp_path / "shell-ask.json").exists() and time.monotonic() < deadline:
         time.sleep(0.01)
     answer_pending(tmp_path)
-    thread.join(3)
+    thread.join(scaled(3))
     assert not thread.is_alive() and result == [False]
     assert not (tmp_path / "shell-ask.json").exists()
 
@@ -469,7 +470,7 @@ def test_host_provision_disables_run_env_on_unknown_executable_pth(tmp_path, cap
     from stateframe.shell_host import provision
 
     source = tmp_path / "project-env"
-    subprocess.run([sys.executable, "-m", "venv", str(source)], check=True, timeout=120)
+    subprocess.run([sys.executable, "-m", "venv", str(source)], check=True, timeout=scaled(120))
     site = next(source.glob("lib/python*/site-packages"))
     (site / "unknown.pth").write_text("import unknown_hook; unknown_hook.install()\n")
     run = tmp_path / "run"

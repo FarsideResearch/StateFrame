@@ -16,6 +16,7 @@ from threading import Lock, Thread
 
 import pytest
 
+from _timeouts import scaled
 from _journal import measurement_events
 from engine_run import run_monitored
 from stateframe.scripted_endpoint import Script, make_handler
@@ -112,7 +113,7 @@ class CapacityEndpoint:
     def __exit__(self, *_exc: object) -> None:
         self.server.shutdown()
         self.server.server_close()
-        self.thread.join(timeout=2)
+        self.thread.join(timeout=scaled(2))
 
     @property
     def url(self) -> str:

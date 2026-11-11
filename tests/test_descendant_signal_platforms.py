@@ -9,6 +9,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from _timeouts import scaled
 from stateframe.engine import kernel_exec_tracker as tracker
 from stateframe.engine.kernel_exec_tracker import ContainmentUnverified, Descendants, ProcessIdentity
 from kernel_exec_supervisor import ManagedProcess
@@ -297,7 +298,7 @@ def test_real_macos_setsid_child_is_killed(tmp_path):
         row = table.identity(child.pid)
         family = Descendants(child.pid, table)
         assert family.signal([row], signal.SIGKILL) == {child.pid}
-        assert child.wait(timeout=5) == -signal.SIGKILL
+        assert child.wait(timeout=scaled(5)) == -signal.SIGKILL
     finally:
         if child.poll() is None:
             child.kill()
@@ -319,7 +320,7 @@ def test_real_macos_setsid_child_falls_back_when_kernel_symbol_is_missing(monkey
         family = Descendants(child.pid, table)
         assert family.signal([row], signal.SIGKILL) == {child.pid}
         assert family.signal_paths == {child.pid: tracker.MAC_FALLBACK_SIGNAL_PATH}
-        assert child.wait(timeout=5) == -signal.SIGKILL
+        assert child.wait(timeout=scaled(5)) == -signal.SIGKILL
     finally:
         if child.poll() is None:
             child.kill()

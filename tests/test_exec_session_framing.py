@@ -8,6 +8,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from _timeouts import scaled
 import kernel_exec_session
 from kernel_exec_session import ExecSession, ExecSessionError
 from kernel_exec_supervisor import Supervisor
@@ -18,8 +19,8 @@ from stateframe.endpoint import Endpoint
 def control(tmp_path):
     session = ExecSession(tmp_path)
     client, server = socket.socketpair()
-    client.settimeout(0.2)
-    server.settimeout(2)
+    client.settimeout(scaled(0.2))
+    server.settimeout(scaled(2))
     session._control = client
     yield session, server
     client.close()
@@ -44,7 +45,7 @@ def test_late_reply_after_timeout_does_not_poison_next_rpc(control):
 
     def supervisor():
         first = _request(peer)
-        assert release_first.wait(2)
+        assert release_first.wait(scaled(2))
         _reply(peer, first["rid"], value="late")
         second = _request(peer)
         _reply(peer, second["rid"], value="current")
@@ -56,11 +57,11 @@ def test_late_reply_after_timeout_does_not_poison_next_rpc(control):
         with pytest.raises(ExecSessionError, match="execution supervisor did not answer within"):
             session._rpc({"op": "first"})
         release_first.set()
-        session._control.settimeout(1)
+        session._control.settimeout(scaled(1))
         assert session._rpc({"op": "second"})["value"] == "current"
     finally:
         release_first.set()
-        thread.join(timeout=2)
+        thread.join(timeout=scaled(2))
     assert not thread.is_alive()
 
 

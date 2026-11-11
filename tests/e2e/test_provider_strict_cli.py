@@ -11,6 +11,7 @@ from threading import Thread
 
 import pytest
 
+from _timeouts import scaled
 from _journal import measurement_events
 from engine_run import run_monitored
 from stateframe.scripted_endpoint import Script, make_handler, serve
@@ -181,7 +182,7 @@ def test_slots_proof_honors_automatic_pin_when_props_is_missing(tmp_path):
             pytest.skip("sandbox-exec blocks engine startup; rerun this test on the host")
     finally:
         server.shutdown()
-        thread.join(timeout=2)
+        thread.join(timeout=scaled(2))
         server.server_close()
 
     assert process.returncode == 0, output
@@ -314,7 +315,7 @@ def test_operator_override_is_visible_when_props_is_unavailable(tmp_path):
             pytest.skip("sandbox-exec blocks engine startup; rerun this test on the host")
     finally:
         server.shutdown()
-        thread.join(timeout=2)
+        thread.join(timeout=scaled(2))
         server.server_close()
 
     first_line = process.stdout.splitlines()[0] if process.stdout.splitlines() else ""

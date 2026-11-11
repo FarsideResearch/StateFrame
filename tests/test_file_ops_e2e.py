@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 
+from _timeouts import scaled
 from stateframe.request_records import list_request_records, read_request_record
 from engine_run import run_monitored
 
@@ -39,7 +40,7 @@ def _run(tmp_path, fixture, script, *, edit=()):
             "--quiet", *edit,
         ]
         result = run_monitored(command, capture_output=True, text=True, env=environment,
-                               expected_seconds=240, run_dir=run_dir, check=False)
+                               expected_seconds=scaled(240), run_dir=run_dir, check=False)
         summary = json.loads((run_dir / "summary.json").read_text())
         assert result.returncode == 0, result.stdout + result.stderr + str(summary)
         assert summary["succeeded"] is True, summary
@@ -47,10 +48,10 @@ def _run(tmp_path, fixture, script, *, edit=()):
     finally:
         endpoint.terminate()
         try:
-            endpoint.wait(timeout=5)
+            endpoint.wait(timeout=scaled(5))
         except subprocess.TimeoutExpired:
             endpoint.kill()
-            endpoint.wait(timeout=5)
+            endpoint.wait(timeout=scaled(5))
 
 
 @pytest.mark.host_sandbox
@@ -123,14 +124,14 @@ def test_existing_discount_demo(tmp_path):
             "--task", "Fix the pricing code so the tests pass.",
             "--endpoint", url, "--model", "scripted", "--run-dir", str(run_dir),
             "--test-python", sys.executable, "--max-turns", "16", "--quiet",
-        ], capture_output=True, text=True, env=environment, expected_seconds=240, check=False)
+        ], capture_output=True, text=True, env=environment, expected_seconds=scaled(240), check=False)
         summary = json.loads((run_dir / "summary.json").read_text())
         assert result.returncode == 0, result.stdout + result.stderr + str(summary)
         assert summary["succeeded"] is True
     finally:
         endpoint.terminate()
         try:
-            endpoint.wait(timeout=5)
+            endpoint.wait(timeout=scaled(5))
         except subprocess.TimeoutExpired:
             endpoint.kill()
-            endpoint.wait(timeout=5)
+            endpoint.wait(timeout=scaled(5))

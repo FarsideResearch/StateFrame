@@ -148,7 +148,7 @@ def main() -> int:
         finally:
             ctypes.CDLL = original_cdll
             if process is not None and process.poll() is None:
-                process.wait(timeout=35.0)
+                process.wait(timeout=adapter.scaled(35.0))
 
 
 if __name__ == "__main__":

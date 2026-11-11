@@ -4,6 +4,7 @@ import sys
 
 import pytest
 
+from _timeouts import scaled
 from kernel_mcp_tools import McpError, _schema, discover, load_mcp_files, run_driver, result_text, validate_arguments
 
 SERVER = r'''#!/usr/bin/env python3
@@ -84,7 +85,7 @@ def config(tmp_path, server, **changes):
     return load_mcp_files([path], shell_network="loopback")
 
 
-def driver(server, mode, operation="list", *, timeout=15, **args):
+def driver(server, mode, operation="list", *, timeout=scaled(15), **args):
     # A sandboxed interpreter start can take over a second on a loaded Linux host;
     # only the deliberate hang case uses a short deadline.
     workspace = server.parent / "workspace"

@@ -13,6 +13,8 @@ from stateframe.scripted_endpoint import Script, make_handler
 from http.server import ThreadingHTTPServer
 from threading import Thread
 
+from _timeouts import scaled
+
 
 def test_config_init_writes_inactive_file_and_refuses_overwrite(tmp_path, capsys):
     path = tmp_path / "nested" / "routes.toml"
@@ -61,7 +63,7 @@ def servers():
     finally:
         for server, thread in active:
             server.shutdown()
-            thread.join(timeout=2)
+            thread.join(timeout=scaled(2))
             server.server_close()
 
 
@@ -295,7 +297,7 @@ def test_route_capacity_refusal_names_role(servers):
             runner._probe_routes(options, lambda *_: None)
     finally:
         server.shutdown()
-        thread.join(timeout=2)
+        thread.join(timeout=scaled(2))
         server.server_close()
 
 
@@ -371,7 +373,7 @@ def test_proven_llama_auto_route_refuses_when_every_slot_is_busy():
             runner._probe_routes(options, lambda *_: None)
     finally:
         server.shutdown()
-        thread.join(timeout=2)
+        thread.join(timeout=scaled(2))
         server.server_close()
 
 
@@ -543,7 +545,7 @@ def test_resume_run_skips_unproven_pending_across_endpoint_moves_and_refusal(tmp
 
         def physical(url):
             with urlopen(Request(url + "/chat/completions", data=request,
-                                 headers={"Content-Type": "application/json"}), timeout=5) as reply:
+                                 headers={"Content-Type": "application/json"}), timeout=scaled(5)) as reply:
                 return reply.read()
 
         first_response = physical(original)
@@ -592,7 +594,7 @@ def test_resume_run_skips_unproven_pending_across_endpoint_moves_and_refusal(tmp
     finally:
         for server, thread in active:
             server.shutdown()
-            thread.join(timeout=2)
+            thread.join(timeout=scaled(2))
             server.server_close()
 
 
@@ -635,8 +637,8 @@ def test_three_resumes_skip_unproven_pending_through_chained_endpoint_and_model_
 
         def send(body, url, model):
             return kernel_bounded_http.request_bytes(
-                body, url + "/chat/completions", "", deadline=time.monotonic() + 15,
-                socket_timeout=5, route_meta=route(url, model))
+                body, url + "/chat/completions", "", deadline=time.monotonic() + scaled(15),
+                socket_timeout=scaled(5), route_meta=route(url, model))
 
         def pending(wire, number, body, url, model):
             stem = wire / f"{number:04d}"
@@ -693,7 +695,7 @@ def test_three_resumes_skip_unproven_pending_through_chained_endpoint_and_model_
     finally:
         for server, thread in active:
             server.shutdown()
-            thread.join(timeout=2)
+            thread.join(timeout=scaled(2))
             server.server_close()
 
 

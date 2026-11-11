@@ -7,6 +7,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+from _timeouts import scaled
 import serial_lane_plugin
 
 
@@ -22,7 +23,7 @@ def _run_checker(ledger: Path) -> subprocess.CompletedProcess[str]:
         capture_output=True,
         text=True,
         env=env,
-        timeout=10,
+        timeout=scaled(10),
     )
 
 

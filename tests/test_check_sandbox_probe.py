@@ -12,6 +12,7 @@ import tempfile
 
 import pytest
 
+from _timeouts import scaled
 import kernel_test_isolation as isolation
 from stateframe import runner
 from stateframe.engine import kernel_test_isolation as runner_isolation
@@ -25,7 +26,7 @@ def _require_working_sandbox(tmp_path: Path) -> None:
         argv, env = isolation.isolated_command(
             [sys.executable, "-I", "-B", "-c", "pass"], tmp_path, dict(os.environ))
         result = subprocess.run(argv, cwd=tmp_path, env=env, capture_output=True,
-                                text=True, timeout=30, check=False)
+                                text=True, timeout=scaled(30), check=False)
     except (RuntimeError, OSError, subprocess.TimeoutExpired):
         pytest.skip("check sandbox is unavailable on this host")
     if result.returncode != 0:
@@ -94,7 +95,7 @@ def test_check_sandbox_probe_executes_shell_python_wrapper(tmp_path):
         [str(wrapper), "-I", "-B", "-c", "pass"], tmp_path, dict(os.environ),
         selected_python=str(wrapper))
     result = subprocess.run(command, cwd=tmp_path, env=env, capture_output=True,
-                            text=True, timeout=30, check=False)
+                            text=True, timeout=scaled(30), check=False)
     assert result.returncode == 0, result.stderr
 
 
@@ -105,7 +106,7 @@ def _assert_probe_and_runner_startup(repo: Path, python: Path, monkeypatch) -> N
             [str(python), "-I", "-B", "-c", "pass"], Path(directory), dict(os.environ),
             selected_python=str(python))
         result = subprocess.run(command, cwd=directory, env=env, capture_output=True,
-                                text=True, timeout=30, check=False)
+                                text=True, timeout=scaled(30), check=False)
         assert result.returncode == 0, result.stderr
     checked = []
     actual_probe = runner_isolation.check_sandbox_exec_denial

@@ -8,6 +8,7 @@ from pathlib import Path, PurePosixPath
 
 import pytest
 
+from _timeouts import scaled
 from _stateframe_home import isolated_stateframe_home
 
 
@@ -66,7 +67,7 @@ def _assert_e2e_collection(root: Path) -> tuple[str, ...]:
         env=environment,
         capture_output=True,
         text=True,
-        timeout=120,
+        timeout=scaled(120),
         check=False,
     )
     node_ids = tuple(

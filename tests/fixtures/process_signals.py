@@ -15,6 +15,8 @@ import subprocess
 import sys
 import time
 
+from _timeouts import scaled
+
 import kernel_pid_liveness
 from engine_run import EngineProcess
 
@@ -107,7 +109,7 @@ def _process_identity(pid: int) -> ProcessIdentity:
     _require_live(pid)
     result = subprocess.run(
         ["ps", "-ww", "-p", str(pid), "-o", "lstart=", "-o", "command="],
-        capture_output=True, text=True, check=False, timeout=5,
+        capture_output=True, text=True, check=False, timeout=scaled(5),
         env={**os.environ, "LC_ALL": "C"},
     )
     if result.returncode != 0 or not result.stdout.strip():

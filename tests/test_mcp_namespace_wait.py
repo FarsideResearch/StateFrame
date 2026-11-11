@@ -9,6 +9,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from _timeouts import scaled
+
 import kernel_mcp_driver as driver
 from kernel_exec_session import ExecSessionError
 from kernel_exec_tracker import LaunchIdentity, ProcessIdentity
@@ -50,7 +52,7 @@ def test_slow_process_table_still_finds_the_private_namespace(monkeypatch):
     monkeypatch.setattr(driver, "_host_load", lambda: (0.0, 4), raising=False)
     monitor = _monitor(monkeypatch, sample_seconds=.6)
     try:
-        monitor.require_namespace(time.monotonic() + 30)
+        monitor.require_namespace(time.monotonic() + scaled(30))
         assert monitor.namespace == "private"
     finally:
         monitor.stop()
@@ -62,7 +64,7 @@ def test_wait_is_bounded_when_no_private_namespace_appears(monkeypatch):
     started = time.monotonic()
     try:
         with pytest.raises(ExecSessionError, match="private MCP PID namespace"):
-            monitor.require_namespace(time.monotonic() + 30)
+            monitor.require_namespace(time.monotonic() + scaled(30))
         assert time.monotonic() - started < 2
     finally:
         monitor.stop()
@@ -86,7 +88,7 @@ def test_exited_server_fails_without_waiting_out_the_bound(monkeypatch):
     started = time.monotonic()
     try:
         with pytest.raises(ExecSessionError):
-            monitor.require_namespace(time.monotonic() + 30)
+            monitor.require_namespace(time.monotonic() + scaled(30))
         assert time.monotonic() - started < 2
     finally:
         monitor.stop()
@@ -102,5 +104,5 @@ def test_non_linux_hosts_do_not_wait(monkeypatch):
     monitor = SimpleNamespace(namespace=None)
     monkeypatch.setattr(driver, "sys", SimpleNamespace(platform="darwin"))
     started = time.monotonic()
-    driver._ContainmentMonitor.require_namespace(monitor, time.monotonic() + 30)
+    driver._ContainmentMonitor.require_namespace(monitor, time.monotonic() + scaled(30))
     assert time.monotonic() - started < .1

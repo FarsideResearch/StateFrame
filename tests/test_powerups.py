@@ -11,6 +11,8 @@ from pathlib import Path
 
 import pytest
 
+from _timeouts import scaled
+
 from _portable import TRUE
 
 from stateframe import powerup_state, powerups
@@ -967,7 +969,7 @@ def test_test_gate_caps_check_output():
         [sys.executable, str(script), "--run", command],
         capture_output=True,
         text=True,
-        timeout=15,
+        timeout=scaled(15),
     )
     assert outcome.returncode == 2
     assert "output limit" in outcome.stderr

@@ -8,6 +8,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
 
+from _timeouts import scaled
 import kernel_request_diet
 from kernel_request_diet import RequestTokenMeter, _http_tokenize, resolve_tokenize_url
 from stateframe.scripted_endpoint import Script, serve
@@ -97,7 +98,7 @@ def test_meter_constructor_auth_survives_a_thread_handoff():
 
         thread = threading.Thread(target=measure)
         thread.start()
-        thread.join(timeout=5)
+        thread.join(timeout=scaled(5))
         assert not thread.is_alive(), "tokenizer measurement did not finish"
         assert result and result[0][0] == "ok", result
         count, method = result[0][1]

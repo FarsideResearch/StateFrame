@@ -10,6 +10,8 @@ from pathlib import Path
 
 import pytest
 
+from _timeouts import scaled
+
 from stateframe.scripted_endpoint import Script, serve
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -78,7 +80,7 @@ def test_feature_off_raw_request_parity(tmp_path):
             env=env,
             capture_output=True,
             text=True,
-            timeout=600,
+            timeout=scaled(600),
         )
         assert result.returncode == 0, result.stdout + result.stderr
         script.assert_consumed()

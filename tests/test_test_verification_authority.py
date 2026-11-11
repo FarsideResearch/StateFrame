@@ -11,6 +11,7 @@ from pathlib import Path
 
 import pytest
 
+from _timeouts import scaled
 from stateframe.test_runners import declared_test_evidence, verification_evidence_for_tests
 
 
@@ -269,7 +270,7 @@ class TestVerificationAuthority(unittest.TestCase):
                 "const assert = require('node:assert/strict');\n"
                 "test('works', () => assert.equal(1, 1));\n")
             run = subprocess.run(["node", "--test", "sample.test.cjs"], cwd=repo,
-                                 capture_output=True, text=True, check=False, timeout=30)
+                                 capture_output=True, text=True, check=False, timeout=scaled(30))
             self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
             self.assertEqual(verification_evidence_for_tests(
                 "tests", "generic", ("node", "--test", "sample.test.cjs"), run.stdout,

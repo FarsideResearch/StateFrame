@@ -6,6 +6,7 @@ import socket
 
 import pytest
 
+from _timeouts import scaled
 from ._support import FIXTURES, run_case
 
 
@@ -38,7 +39,7 @@ def test_u12_done_stops_running_job(tmp_path):
     case.assert_reply("started job j1:")
     assert case.summary is not None
     with pytest.raises(OSError):
-        with socket.create_connection(("127.0.0.1", port), timeout=1):
+        with socket.create_connection(("127.0.0.1", port), timeout=scaled(1)):
             pass
 
 

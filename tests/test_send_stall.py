@@ -15,6 +15,7 @@ import time
 
 import pytest
 
+from _timeouts import scaled
 from stateframe import runner
 from stateframe.engine import kernel_bounded_http
 
@@ -65,10 +66,10 @@ def upload_server(*, stall_first: bool = False, stall_second: bool = False,
             probe_started.set()
             if probe_waits_for_second_post:
                 # Hold the probe open until the resend is on the wire, however slow the host.
-                second_post.wait(10)
+                second_post.wait(scaled(10))
             if probe_waits_for_body:
                 # Keep the probe in flight until the whole body has arrived.
-                body_done.wait(10)
+                body_done.wait(scaled(10))
             self.send_response(200)
             self.send_header("Content-Length", "2")
             self.end_headers()
@@ -81,11 +82,11 @@ def upload_server(*, stall_first: bool = False, stall_second: bool = False,
             size = int(self.headers["Content-Length"])
             if (stall_first and self.post_index == 0) or (stall_second and self.post_index == 1):
                 received.append(self.rfile.read(STALL_PREFIX))
-                stopped.wait(20)
+                stopped.wait(scaled(20))
                 return
             if post_waits_for_probe:
                 # Read the body only once a probe is in flight, so it completes during the probe.
-                probe_started.wait(10)
+                probe_started.wait(scaled(10))
             data = bytearray()
             while len(data) < size:
                 chunk = self.rfile.read(min(65536, size - len(data)))
@@ -101,7 +102,7 @@ def upload_server(*, stall_first: bool = False, stall_second: bool = False,
                 while time.monotonic() <= respond_after[0] and not stopped.is_set():
                     stopped.wait(0.01)
             if refuse_gzip and self.post_index == 0:
-                if not probe_started.wait(5):
+                if not probe_started.wait(scaled(5)):
                     return
                 self.send_response(415)
                 self.send_header("Content-Length", "0")
@@ -118,7 +119,7 @@ def upload_server(*, stall_first: bool = False, stall_second: bool = False,
     class Server(ThreadingHTTPServer):
         def process_request(self, request, client_address):
             # Peek the method on the serve thread so POST ordinals follow accept order.
-            request.settimeout(10)
+            request.settimeout(scaled(10))
             try:
                 head = request.recv(4, socket.MSG_PEEK)
             except OSError:
@@ -138,7 +139,7 @@ def upload_server(*, stall_first: bool = False, stall_second: bool = False,
         stopped.set()
         server.shutdown()
         server.server_close()
-        thread.join(timeout=5)
+        thread.join(timeout=scaled(5))
 
 
 @pytest.mark.host_sandbox

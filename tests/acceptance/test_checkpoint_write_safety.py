@@ -16,6 +16,7 @@ from pathlib import Path
 import pytest
 
 from _journal import measurement_journal_paths
+from _timeouts import scaled
 from ._support import Endpoint, FIXTURES, PYTHON, ROOT, copy_repo, environment, run_case
 from fixtures.process_signals import record_identity, signal_run_owned, signal_run_verified
 from engine_run import EngineProcess, run_monitored, start_monitored
@@ -244,14 +245,15 @@ def _engine_child(parent_pid: int) -> int:
 
 
 def _wait_pid_gone(pid: int, timeout: float = 40) -> None:
-    deadline = time.monotonic() + timeout
+    wait_seconds = scaled(timeout)
+    deadline = time.monotonic() + wait_seconds
     while time.monotonic() < deadline:
         probe = subprocess.run(("ps", "-p", str(pid), "-o", "pid="),
                                capture_output=True, text=True, check=False)
         if probe.returncode != 0 or not probe.stdout.strip():
             return
         time.sleep(0.05)
-    raise AssertionError(f"pid {pid} was still present after {timeout} seconds")
+    raise AssertionError(f"pid {pid} was still present after {wait_seconds:g} seconds")
 
 
 def _stop_paused_run(run_dir: Path, runner: EngineProcess, engine_pid: int,
@@ -279,16 +281,16 @@ def _stop_paused_run(run_dir: Path, runner: EngineProcess, engine_pid: int,
                                  what="mid-save run cleanup", require_checkpoint_saved=False)
             except ProcessLookupError:
                 pass
-        runner.communicate(timeout=40)
+        runner.communicate(timeout=scaled(40))
     _wait_pid_gone(runner.pid)
 
 
 def _wait_for(path: Path, process: EngineProcess, timeout: float = 600,
               run_dir: Path | None = None) -> None:
-    deadline = time.monotonic() + timeout
+    deadline = time.monotonic() + scaled(timeout)
     while not path.exists() and time.monotonic() < deadline:
         if process.poll() is not None:
-            out, err = process.communicate(timeout=5)
+            out, err = process.communicate(timeout=scaled(5))
             error = path.parent / "sitecustomize-error"
             trace = path.parent / "checkpoint-save-trace.jsonl"
             journals = ([(str(journal), journal.stat().st_size)
@@ -359,7 +361,7 @@ def test_killed_second_save_restores_previous_complete_journal(
                 command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
                 env=_fault_environment(tmp_path, marker, mode,
                                         checkpoint_every=2 if mode == "journal" else 1),
-                run_dir=run_dir, expected_seconds=600,
+                run_dir=run_dir, expected_seconds=scaled(600),
                 step="paused second checkpoint save", watch_paths=(run_dir / "checkpoints",))
             if mode == "env":
                 _wait_for(run_dir / "env-seed.json", runner)
@@ -415,7 +417,7 @@ def test_killed_second_save_restores_previous_complete_journal(
                 capture_output=True, text=True,
                 env=_fault_environment(tmp_path, marker, "observe_restore", restored_journal,
                                        checkpoint_every=2 if mode == "journal" else 1),
-                expected_seconds=240, check=False)
+                expected_seconds=scaled(240), check=False)
             assert resumed.returncode == 0, resumed.stdout + resumed.stderr
             _assert_injection_ok(tmp_path, minimum_saves=2)
             assert json.loads((run_dir / "summary.json").read_text())["succeeded"] is True
@@ -450,7 +452,7 @@ def test_killed_second_save_restores_previous_complete_journal(
                                          require_checkpoint_saved=False)
                     except ProcessLookupError:
                         pass
-                runner.communicate(timeout=40)
+                runner.communicate(timeout=scaled(40))
                 _wait_pid_gone(runner.pid)
 
 
@@ -474,7 +476,7 @@ def test_killed_writer_leaves_no_published_partial_checkpoint_and_replays(tmp_pa
             _run_command(launcher, repo, run_dir, url),
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
             env=_fault_environment(tmp_path, writer_marker, "pause"), run_dir=run_dir,
-            expected_seconds=600, step="interrupted checkpoint writer run",
+            expected_seconds=scaled(600), step="interrupted checkpoint writer run",
             watch_paths=(run_dir / "checkpoints",),
         )
         _wait_for(writer_marker, runner)
@@ -499,13 +501,13 @@ def test_killed_writer_leaves_no_published_partial_checkpoint_and_replays(tmp_pa
         except ProcessLookupError:
             pass
         writer_pid = None
-        runner.communicate(timeout=40)
+        runner.communicate(timeout=scaled(40))
         assert not pointer.exists()
         assert list((run_dir / "checkpoints").glob(".*.tmp"))
         resumed = run_monitored(
             [PYTHON, "-m", "stateframe", "resume", str(run_dir), "--endpoint", url,
              "--model", "scripted", "--quiet"], capture_output=True, text=True,
-            env=environment(), expected_seconds=240, check=False)
+            env=environment(), expected_seconds=scaled(240), check=False)
         assert resumed.returncode == 0, resumed.stdout + resumed.stderr
         assert json.loads((run_dir / "summary.json").read_text())["succeeded"] is True
         assert _wire(run_dir)[1] == _wire(control.run_dir)[1]
@@ -515,7 +517,7 @@ def test_killed_writer_leaves_no_published_partial_checkpoint_and_replays(tmp_pa
             # Failure cleanup must also work when the writer has not saved.
             signal_run_owned(run_dir, runner, signal.SIGKILL, deadline=time.monotonic(),
                              what="mid-save run cleanup", require_checkpoint_saved=False)
-            runner.wait(timeout=5)
+            runner.wait(timeout=scaled(5))
         if writer_pid is not None:
             try:
                 writer_identity = record_identity(writer_pid, launched_after=0,
@@ -528,7 +530,7 @@ def test_killed_writer_leaves_no_published_partial_checkpoint_and_replays(tmp_pa
                 pass
         if endpoint.poll() is None:
             endpoint.terminate()
-            endpoint.wait(timeout=5)
+            endpoint.wait(timeout=scaled(5))
 
 
 @pytest.mark.parametrize("damage", ("truncate", "flip"))
@@ -553,10 +555,10 @@ def test_corrupt_state_refuses_restore_and_replays(tmp_path: Path, damage: str) 
         resumed = run_monitored(
             [PYTHON, "-m", "stateframe", "resume", str(run_dir), "--endpoint", url,
              "--model", "scripted", "--quiet"], capture_output=True, text=True,
-            env=environment(), expected_seconds=240, check=False)
+            env=environment(), expected_seconds=scaled(240), check=False)
     finally:
         endpoint.terminate()
-        endpoint.wait(timeout=5)
+        endpoint.wait(timeout=scaled(5))
     assert resumed.returncode == 0, resumed.stdout + resumed.stderr
     assert json.loads((run_dir / "summary.json").read_text())["succeeded"] is True
     assert _wire(run_dir)[1] == _wire(control.run_dir)[1]
@@ -578,13 +580,13 @@ def test_writer_enospc_does_not_block_next_request(tmp_path: Path) -> None:
             _run_command(launcher, repo, run_dir, endpoint.url),
             capture_output=True, text=True,
             env=_fault_environment(tmp_path, marker, "enospc"),
-            expected_seconds=240, run_dir=run_dir, check=False,
+            expected_seconds=scaled(240), run_dir=run_dir, check=False,
         )
     assert process.returncode == 0, process.stdout + process.stderr
     assert json.loads((run_dir / "summary.json").read_text())["succeeded"] is True
     _assert_injection_ok(tmp_path, minimum_saves=1)
     assert marker.is_file()
-    deadline = time.monotonic() + 5
+    deadline = time.monotonic() + scaled(5)
     while not any(row.get("event") == "checkpoint_failed" for row in _events(run_dir)) \
             and time.monotonic() < deadline:
         time.sleep(0.05)

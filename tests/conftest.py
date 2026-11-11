@@ -19,6 +19,7 @@ collect_ignore_glob = ["e2e/*/*", "fixtures/*"]  # top-level e2e test modules re
 for path in (ROOT / "tests", ROOT / "src", ROOT / "src" / "stateframe" / "engine"):
     sys.path.insert(0, str(path))
 
+from _timeouts import scaled  # noqa: E402
 import serial_lane_plugin  # noqa: E402 -- pytest adds tests/ to sys.path when importing the root conftest
 
 pytest_plugins = ("must_run_plugin", "_orphan_guard")
@@ -260,7 +261,7 @@ def clean_test_environment(tmp_path):
     """Real pytest and pip, with no ambient editable installs or startup hooks."""
     def create(destination):
         subprocess.run([sys.executable, "-I", "-m", "venv", str(destination)],
-                       check=True, capture_output=True, timeout=60)
+                       check=True, capture_output=True, timeout=scaled(60))
         site = next(destination.glob("lib/python*/site-packages"))
         # Copy only installed distribution files. In particular, do not inherit
         # the host's editable StateFrame .pth or grant its source tree authority.

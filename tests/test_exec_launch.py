@@ -7,6 +7,7 @@ import sys
 
 import pytest
 
+from _timeouts import scaled
 from _portable import TRUE
 
 from kernel_exec_capability import ExecLimits
@@ -53,7 +54,7 @@ def launch(tmp_path, argv, env=None, stdin=None):
             "memory_supervised": True}
     return subprocess.run([sys.executable, "-I", str(LAUNCH), json.dumps(spec)],
                           input=stdin, stdin=subprocess.DEVNULL if stdin is None else None,
-                          capture_output=True, timeout=10)
+                          capture_output=True, timeout=scaled(10))
 
 
 def test_launcher_complete_environment(tmp_path):
@@ -114,7 +115,7 @@ else: raise SystemExit("descriptor leaked")
             "env": {}, "limits": asdict(ExecLimits()), "memory_supervised": True}
     try:
         result = subprocess.run([sys.executable, "-I", str(LAUNCH), json.dumps(spec)],
-                                pass_fds=(descriptor,), capture_output=True, timeout=5)
+                                pass_fds=(descriptor,), capture_output=True, timeout=scaled(5))
         assert result.returncode == 0 and result.stdout == b"closed\n", result.stderr
     finally:
         os.close(descriptor)
@@ -127,7 +128,7 @@ def test_launcher_file_limit(tmp_path):
     spec = {"argv": [sys.executable, "-I", str(script)], "cwd": str(tmp_path),
             "env": {}, "limits": limits, "memory_supervised": True}
     result = subprocess.run([sys.executable, "-I", str(LAUNCH), json.dumps(spec)],
-                            capture_output=True, timeout=5)
+                            capture_output=True, timeout=scaled(5))
     assert result.returncode != 0
     assert (tmp_path / "large").stat().st_size <= 65536
 
@@ -137,6 +138,6 @@ def test_macos_launcher_requires_memory_supervision(tmp_path):
         pytest.skip("macOS only")
     spec = {"argv": [TRUE], "cwd": str(tmp_path), "env": {}, "limits": asdict(ExecLimits())}
     result = subprocess.run([sys.executable, "-I", str(LAUNCH), json.dumps(spec)],
-                            capture_output=True, timeout=5)
+                            capture_output=True, timeout=scaled(5))
     assert result.returncode == 125
     assert b"supervised resident-memory accounting" in result.stderr

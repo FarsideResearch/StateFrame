@@ -11,6 +11,7 @@ import uuid
 
 import pytest
 
+from _timeouts import scaled
 from kernel_exec_capability import shell_capability
 from kernel_exec_session import ExecSession
 
@@ -65,10 +66,10 @@ def test_network_policy_blocks_outbound(setup, network):
     root, cap = setup
     cap = replace(cap, network=network)
     with ExecSession(root / "run") as session:
-        result = run_python(session, cap, "network.py", '''import socket
+        result = run_python(session, cap, "network.py", f'''import socket
 try:
     s = socket.socket()
-    s.settimeout(0.5)
+    s.settimeout({scaled(0.5):g})
     s.connect(("1.1.1.1", 443))
 except OSError: print("denied")
 else: raise SystemExit("outbound connected")
@@ -79,13 +80,13 @@ else: raise SystemExit("outbound connected")
 def test_none_blocks_loopback(setup):
     root, cap = setup
     with ExecSession(root / "run") as session:
-        result = run_python(session, cap, "loop.py", '''import socket
+        result = run_python(session, cap, "loop.py", f'''import socket
 try:
     server = socket.socket()
     server.bind(("127.0.0.1", 0))
     server.listen()
     client = socket.socket()
-    client.settimeout(0.2)
+    client.settimeout({scaled(0.2):g})
     client.connect(server.getsockname())
 except OSError: print("denied")
 else: raise SystemExit("loopback connected")
@@ -109,17 +110,17 @@ conn.close()
     with ExecSession(root / "run") as session:
         job = session.spawn([PYTHON, "-I", str(server)], replace(cap, purpose="job"))
         data = b""
-        deadline = time.monotonic() + 5
+        deadline = time.monotonic() + scaled(5)
         while b"\n" not in data and time.monotonic() < deadline:
             data += job.read_available()
             time.sleep(0.02)
         port = int(data.strip())
         result = run_python(session, cap, "client.py", f'''import socket
-s = socket.create_connection(("127.0.0.1", {port}), timeout=1)
+s = socket.create_connection(("127.0.0.1", {port}), timeout={scaled(1):g})
 print(s.recv(100).decode())
 ''')
         assert result.exit_code == 0 and result.output == b"session-connected\n", result.output
-        assert job.wait(2) == 0
+        assert job.wait(scaled(2)) == 0
 
 
 @pytest.mark.parametrize("purpose", ["shell", "job", "custom_tool"])
@@ -179,7 +180,7 @@ def _run_planted_xcrun_probe(cap, code):
     from kernel_test_isolation import capability_command
 
     argv, env = capability_command([PYTHON, '-I', '-c', code], cap)
-    return subprocess.run(argv, cwd=cap.workspace, env=env, capture_output=True, timeout=15)
+    return subprocess.run(argv, cwd=cap.workspace, env=env, capture_output=True, timeout=scaled(15))
 
 
 @pytest.mark.skipif(sys.platform != "darwin", reason="macOS developer-tool shims")

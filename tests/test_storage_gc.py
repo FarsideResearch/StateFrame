@@ -9,6 +9,7 @@ import sys
 import time
 from pathlib import Path
 
+from _timeouts import scaled
 from stateframe import storage_gc
 from stateframe.resume import hold_run_lock
 
@@ -447,7 +448,7 @@ def test_gc_cap_skips_in_use_seed(tmp_path, monkeypatch):
     finally:
         process.stdin.write("x")
         process.stdin.flush()
-        process.communicate(timeout=10)
+        process.communicate(timeout=scaled(10))
 
 
 def test_gc_of_explicit_roots_never_prunes_seeds_other_runs_may_use(tmp_path, monkeypatch, capsys):

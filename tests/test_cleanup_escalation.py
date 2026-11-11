@@ -10,6 +10,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from _timeouts import scaled
 import capability_host_capacity as capacity
 import capability_release_runner as release
 import kernel_environment_state as environment
@@ -61,7 +62,7 @@ def _dispose(process, child):
         pass
     if process.returncode is None:
         process.kill()
-    process.wait(timeout=2)
+    process.wait(timeout=scaled(2))
     process.stdout.close()
     process.stderr.close()
 
@@ -88,7 +89,7 @@ def test_term_exits_leader_but_kill_reaches_child(tmp_path, caller, monkeypatch)
             record = jobs.JobRecord("J1", time.time(), expected_s=30)
             owner._jobs["J1"] = jobs._ManagedJob(record, process, time.monotonic(), b"", time.monotonic)
             owner.job_kill("J1")
-        until = time.monotonic() + 2
+        until = time.monotonic() + scaled(2)
         while _alive(child) and time.monotonic() < until:
             time.sleep(.01)
         assert not _alive(child), f"{caller} reaped the leader before KILL reached child {child}"
@@ -115,7 +116,7 @@ def test_closed_pipes_live_leader_is_timeout(collector):
     finally:
         if process.returncode is None:
             process.kill()
-        process.wait(timeout=2)
+        process.wait(timeout=scaled(2))
         process.stdout.close()
         process.stderr.close()
 
@@ -133,9 +134,9 @@ def test_missing_process_row_retains_spawn_session_authority():
         identity = tracker.capture_launch_identity(process, MissingTable(), session_leader=True)
         assert identity is not None
         assert tracker.signal_launch_group(process, identity, signal.SIGKILL, table=MissingTable())
-        process.wait(timeout=2)
+        process.wait(timeout=scaled(2))
         assert process.returncode == -signal.SIGKILL
-        until = time.monotonic() + 2
+        until = time.monotonic() + scaled(2)
         while _alive(child) and time.monotonic() < until:
             time.sleep(.01)
         assert not _alive(child)
@@ -152,7 +153,7 @@ def test_missing_launch_authority_reports_unknown_containment():
     finally:
         if process.returncode is None:
             process.kill()
-        process.wait(timeout=2)
+        process.wait(timeout=scaled(2))
 
 
 def test_environment_cleanup_deadline_uses_real_clock(tmp_path, monkeypatch):
@@ -166,9 +167,9 @@ def test_environment_cleanup_deadline_uses_real_clock(tmp_path, monkeypatch):
         monkeypatch.setattr(owner, "refresh", lambda: ())
         thread = threading.Thread(target=owner.cleanup, kwargs={"grace_seconds": .1}, daemon=True)
         thread.start()
-        thread.join(timeout=5)
+        thread.join(timeout=scaled(5))
         assert not thread.is_alive(), "cleanup waited on a frozen observation clock"
-        until = time.monotonic() + 2
+        until = time.monotonic() + scaled(2)
         while _alive(child) and time.monotonic() < until:
             time.sleep(.01)
         assert not _alive(child)

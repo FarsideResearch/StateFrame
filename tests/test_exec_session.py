@@ -11,6 +11,7 @@ from pathlib import Path
 
 import pytest
 
+from _timeouts import scaled
 from kernel_exec_capability import shell_capability
 from kernel_exec_session import ExecSession
 from kernel_exec_capability import executable_read_roots
@@ -45,7 +46,7 @@ def script(cap, text):
 
 
 def _wait_for_stable_file(path, *, stable_seconds=0.4, timeout=8.0):
-    deadline = time.monotonic() + timeout
+    deadline = time.monotonic() + scaled(timeout)
     previous_size = path.stat().st_size
     unchanged_since = time.monotonic()
     while time.monotonic() < deadline:
@@ -63,7 +64,7 @@ def _wait_until_gone(identity, timeout=5.0):
     from kernel_exec_tracker import ProcessTable
 
     table = ProcessTable()
-    deadline = time.monotonic() + timeout
+    deadline = time.monotonic() + scaled(timeout)
     while time.monotonic() < deadline:
         current = table.identity(identity.pid)
         if current is None or current.start != identity.start or current.zombie:
@@ -152,7 +153,7 @@ def test_spawn_read_wait_stop_and_leader_independent_cleanup(setup, sandboxed):
     with ExecSession(run) as session:
         job = session.spawn(command, cap)
         output = b""
-        deadline = time.monotonic() + 5
+        deadline = time.monotonic() + scaled(5)
         while b"READY" not in output and time.monotonic() < deadline:
             output += job.read_available()
             time.sleep(0.02)
@@ -308,7 +309,7 @@ if unrelated == 0:
     while not unrelated_stop.exists():
         time.sleep(0.01)
     os._exit(0)
-deadline = time.monotonic() + 5
+deadline = time.monotonic() + {scaled(5):g}
 while not unrelated_ready.exists() and time.monotonic() < deadline:
     time.sleep(0.01)
 if not unrelated_ready.exists():
@@ -344,11 +345,11 @@ time.sleep(30)
             pids["unrelated"], launched_after=owner_started_at, command_fragment=owner.name)
         unrelated_binding = retain_signal_binding(unrelated_identity)
         signal_owned(process, signal.SIGKILL)
-        process.wait(timeout=3)
+        process.wait(timeout=scaled(3))
         current_unrelated = table.identity(unrelated.pid)
         assert current_unrelated is not None and current_unrelated.start == unrelated.start
         assert not current_unrelated.zombie, "unrelated fork child should remain alive through owner exit"
-        deadline = time.monotonic() + 5
+        deadline = time.monotonic() + scaled(5)
         while time.monotonic() < deadline:
             alive = []
             for identity in identities:
@@ -363,7 +364,7 @@ time.sleep(30)
     finally:
         if process.poll() is None:
             signal_owned(process, signal.SIGKILL)
-            process.wait(timeout=3)
+            process.wait(timeout=scaled(3))
         unrelated_stop.touch(exist_ok=True)
         if unrelated_binding is not None:
             try:
@@ -390,14 +391,14 @@ def test_owner_pipe_eof_stops_job_while_forked_child_holds_control_socket(setup,
         if bwrap is None:
             pytest.skip("Linux owner-pipe control requires bwrap")
         try:
-            help_result = subprocess.run([bwrap, "--help"], capture_output=True, timeout=5, check=False)
+            help_result = subprocess.run([bwrap, "--help"], capture_output=True, timeout=scaled(5), check=False)
             help_text = (help_result.stdout + help_result.stderr).decode("utf-8", errors="replace")
             if "--as-pid-1" not in help_text or "--sync-fd" not in help_text:
                 pytest.skip("Linux owner-pipe control requires bwrap --as-pid-1 and --sync-fd")
             probe = subprocess.run(
                 [bwrap, "--unshare-all", "--ro-bind", "/", "/", "--proc", "/proc",
                  "--dev", "/dev", "--", sys.executable, "-I", "-c", "pass"],
-                capture_output=True, timeout=5, check=False,
+                capture_output=True, timeout=scaled(5), check=False,
             )
         except (OSError, subprocess.TimeoutExpired) as error:
             pytest.skip(f"Linux bwrap namespace probe could not run: {type(error).__name__}")
@@ -446,7 +447,7 @@ cap = capability_from_dict(json.loads({json.dumps(child_cap.as_dict())!r}))
 session = ExecSession(run_dir)
 job = session.spawn([{sys.executable!r}, "-I", "-c", {job_source!r}, str(heartbeat)], cap,
                     cwd=workspace)
-deadline = time.monotonic() + 8
+deadline = time.monotonic() + {scaled(8):g}
 while not heartbeat.exists() and time.monotonic() < deadline:
     time.sleep(.01)
 if not heartbeat.exists():
@@ -471,7 +472,7 @@ Path({str(owner_ready)!r}).write_text(json.dumps({{
 }}), encoding="utf-8")
 if {linux_bwrap!r}:
     # EOF can reap the supervisor before the parent records its signal identity.
-    deadline = time.monotonic() + 10
+    deadline = time.monotonic() + {scaled(10):g}
     while not identities_bound.is_file() and time.monotonic() < deadline:
         time.sleep(.02)
     if not identities_bound.is_file():
@@ -494,7 +495,7 @@ time.sleep(60)
     holder_binding = None
     supervisor_binding = None
     try:
-        deadline = time.monotonic() + 10
+        deadline = time.monotonic() + scaled(10)
         while not owner_ready.is_file() and time.monotonic() < deadline:
             if process.poll() is not None:
                 raise AssertionError(f"owner exited before creating {owner_ready.name}: {process.returncode}")
@@ -515,18 +516,18 @@ time.sleep(60)
 
         if linux_bwrap:
             identities_bound.write_text("bound", encoding="ascii")
-            deadline = time.monotonic() + 5
+            deadline = time.monotonic() + scaled(5)
             while not pipe_closed.is_file() and time.monotonic() < deadline:
                 time.sleep(.02)
             assert pipe_closed.is_file(), "owner did not close its lifetime-pipe writer"
             assert process.poll() is None, "owner must remain alive to isolate the pipe signal"
         else:
             signal_owned(process, signal.SIGKILL)
-            process.wait(timeout=5)
+            process.wait(timeout=scaled(5))
 
         assert _wait_for_stable_file(heartbeat), "owner-pipe EOF did not stop the supervised job"
         holder_confirm.write_text("verify", encoding="ascii")
-        deadline = time.monotonic() + 5
+        deadline = time.monotonic() + scaled(5)
         while not socket_held.is_file() and time.monotonic() < deadline:
             time.sleep(.02)
         assert socket_held.is_file(), "forked child did not retain its control-socket descriptor"
@@ -534,7 +535,7 @@ time.sleep(60)
         assert (current_holder is not None and current_holder.start == holder_identity.start
                 and not current_holder.zombie), "socket holder must still be alive after job cleanup"
 
-        deadline = time.monotonic() + 5
+        deadline = time.monotonic() + scaled(5)
         while time.monotonic() < deadline:
             current_supervisor = table.identity(supervisor_identity.pid)
             if (current_supervisor is None or current_supervisor.start != supervisor_identity.start
@@ -549,7 +550,7 @@ time.sleep(60)
         release_holder.touch(exist_ok=True)
         if process.poll() is None:
             signal_owned(process, signal.SIGKILL)
-            process.wait(timeout=5)
+            process.wait(timeout=scaled(5))
         for binding in (holder_binding, supervisor_binding):
             if binding is None:
                 continue

@@ -12,6 +12,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from _timeouts import scaled
+
 from kernel_continuation_journal import ContinuationJournal, JournalError
 
 
@@ -32,7 +34,7 @@ def _external_append(path) -> None:
         check=True,
         capture_output=True,
         text=True,
-        timeout=10,
+        timeout=scaled(10),
     )
 
 

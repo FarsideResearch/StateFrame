@@ -18,6 +18,7 @@ if str(TESTS_ROOT) not in sys.path:
     sys.path.insert(0, str(TESTS_ROOT))
 
 from engine_run import run_monitored  # noqa: E402
+from _timeouts import scaled  # noqa: E402
 
 
 @dataclass(frozen=True)
@@ -80,7 +81,7 @@ def sweep(source: Path, work: Path, *, cases: tuple[ExampleCommand, ...] | None 
     build = run_monitored(
         [sys.executable, "-m", "pip", "wheel", "--no-deps", "--no-build-isolation",
          "--wheel-dir", str(wheel_dir), str(source)],
-        capture_output=True, text=True, expected_seconds=180,
+        capture_output=True, text=True, expected_seconds=scaled(180),
         step="build StateFrame wheel", watch_paths=(wheel_dir,),
     )
     if build.returncode:
@@ -91,7 +92,7 @@ def sweep(source: Path, work: Path, *, cases: tuple[ExampleCommand, ...] | None 
     environment_dir = work / "venv"
     virtualenv = run_monitored(
         [sys.executable, "-m", "venv", str(environment_dir)],
-        capture_output=True, text=True, expected_seconds=180,
+        capture_output=True, text=True, expected_seconds=scaled(180),
         step="create StateFrame example virtual environment",
         watch_paths=(environment_dir,),
     )
@@ -102,7 +103,7 @@ def sweep(source: Path, work: Path, *, cases: tuple[ExampleCommand, ...] | None 
     for arguments in (("--no-deps", str(wheels[0])), ("-r", str(source / "requirements.txt"))):
         install = run_monitored(
             [str(python), "-m", "pip", "install", *arguments],
-            capture_output=True, text=True, expected_seconds=180,
+            capture_output=True, text=True, expected_seconds=scaled(180),
             step="install StateFrame example environment", watch_paths=(executable,),
         )
         if install.returncode:
@@ -121,7 +122,7 @@ def sweep(source: Path, work: Path, *, cases: tuple[ExampleCommand, ...] | None 
             stderr=subprocess.PIPE, text=True,
         )
         try:
-            ready, _, _ = select.select([server.stdout], [], [], 20)
+            ready, _, _ = select.select([server.stdout], [], [], scaled(20))
             if not ready:
                 raise AssertionError(f"endpoint did not start for {case.label}")
             endpoint = server.stdout.readline().strip()
@@ -133,7 +134,7 @@ def sweep(source: Path, work: Path, *, cases: tuple[ExampleCommand, ...] | None 
             process = run_monitored(
                 [str(executable), *argv, "--endpoint", endpoint, "--model", "scripted",
                  "--run-dir", str(run_dir)], cwd=source, env=environment,
-                capture_output=True, text=True, expected_seconds=300,
+                capture_output=True, text=True, expected_seconds=scaled(300),
                 run_dir=run_dir, step=case.label,
             )
             summary_path = run_dir / "summary.json"
@@ -147,7 +148,7 @@ def sweep(source: Path, work: Path, *, cases: tuple[ExampleCommand, ...] | None 
         finally:
             server.terminate()
             try:
-                server.wait(timeout=5)
+                server.wait(timeout=scaled(5))
             except subprocess.TimeoutExpired:
                 server.kill()
                 server.wait()

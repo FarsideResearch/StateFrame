@@ -13,6 +13,7 @@ from pathlib import Path
 
 import pytest
 
+from _timeouts import scaled
 import kernel_pid_liveness
 from fixtures import process_signals
 
@@ -68,7 +69,7 @@ def live_child():
     finally:
         if child.poll() is None:
             child.kill()
-        child.wait(timeout=5)
+        child.wait(timeout=scaled(5))
 
 
 @pytest.mark.parametrize("identity_check", ["record", "inspect"])
@@ -197,7 +198,7 @@ def test_multiprocessing_signal_uses_verified_live_child(live_child):
     process = _MultiprocessingHandle(live_child.pid)
     process_signals.signal_multiprocessing_owned(process, signal.SIGTERM)
 
-    assert live_child.wait(timeout=5) == -signal.SIGTERM
+    assert live_child.wait(timeout=scaled(5)) == -signal.SIGTERM
 
 
 def test_multiprocessing_signal_refuses_unstarted_process():

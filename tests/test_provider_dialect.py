@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from _timeouts import scaled
 from _journal import journal_bytes
 import kernel_provider_dialect as dialect
 import kernel_request_diet
@@ -218,10 +219,10 @@ def test_scripted_endpoint_emulates_llama_props_and_optional_slots():
     server = serve(Script({"model": "scripted", "steps": [], "slots": [65536]}))
     origin = f"http://127.0.0.1:{server.server_port}"
     try:
-        with urllib.request.urlopen(origin + "/props", timeout=2) as response:
+        with urllib.request.urlopen(origin + "/props", timeout=scaled(2)) as response:
             assert response.status == 200
             props = json.loads(response.read())
-        with urllib.request.urlopen(origin + "/slots", timeout=2) as response:
+        with urllib.request.urlopen(origin + "/slots", timeout=scaled(2)) as response:
             slots = json.loads(response.read())
     finally:
         server.shutdown()
@@ -257,11 +258,11 @@ def test_bundled_identity_scripts_prove_llama_without_slots_or_cache_pin(example
     server = serve(script)
     origin = f"http://127.0.0.1:{server.server_port}"
     try:
-        with urllib.request.urlopen(origin + "/props", timeout=2) as response:
+        with urllib.request.urlopen(origin + "/props", timeout=scaled(2)) as response:
             assert response.status == 200
             props = json.loads(response.read())
         with pytest.raises(urllib.error.HTTPError) as error:
-            urllib.request.urlopen(origin + "/slots", timeout=2)
+            urllib.request.urlopen(origin + "/slots", timeout=scaled(2))
         capabilities = capabilities_for(origin + "/v1", "", cache={})
         options = runner.RunOptions(
             repo=None, task="task", endpoint=Endpoint(origin + "/v1", "scripted"),

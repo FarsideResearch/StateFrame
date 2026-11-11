@@ -12,6 +12,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from _timeouts import scaled
 from kernel_read_lockout import append_frame_line
 from kernel_read_exec import dispatch_live_read, execute_read, record_serialized_read_pages
 from kernel_request_tool_surface import _apply_request_tool_floor, _request_tool_floor_schemas
@@ -511,7 +512,7 @@ os._exit(0)
     subprocess.run([sys.executable, "-c", child,
                     str(Path(__file__).resolve().parents[1] / "src/stateframe/engine"),
                     str(tmp_path), str(journal_parent), str(marker)],
-                   check=True, timeout=20, env=os.environ.copy())
+                   check=True, timeout=scaled(20), env=os.environ.copy())
     saved = json.loads(marker.read_text())
     journal = ContinuationJournal.resume(
         Path(saved["path"]), task_id="page-restart", manifest={"origin": "fixture"},

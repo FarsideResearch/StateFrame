@@ -15,6 +15,7 @@ import time
 
 import pytest
 
+from _timeouts import scaled
 from kernel_exec_capability import shell_capability
 from kernel_exec_tracker import ProcessTable
 from fixtures.process_signals import (
@@ -29,7 +30,7 @@ pytestmark = pytest.mark.host_sandbox
 
 
 def _read_reply(control: socket.socket, buffer: bytearray, timeout: float = 5.0) -> dict:
-    deadline = time.monotonic() + timeout
+    deadline = time.monotonic() + scaled(timeout)
     while b"\n" not in buffer:
         remaining = deadline - time.monotonic()
         if remaining <= 0 or not select.select([control], [], [], max(0.0, remaining))[0]:
@@ -76,7 +77,7 @@ child.wait()
     replies = bytearray()
     try:
         assert intermediate.stdout is not None
-        if not select.select([intermediate.stdout], [], [], 5)[0]:
+        if not select.select([intermediate.stdout], [], [], scaled(5))[0]:
             raise AssertionError("intermediate did not report the supervisor pid")
         supervisor_pid = int(intermediate.stdout.readline())
         supervisor_identity = record_identity(
@@ -85,21 +86,21 @@ child.wait()
         supervisor_binding = retain_signal_binding(supervisor_identity)
         # The control and owner channels survive the wrapper boundary.
         assert intermediate.pid != os.getpid()
-        control.settimeout(3)
+        control.settimeout(scaled(3))
 
         control.sendall(b'{"op":"all","rid":1}\n')
         assert _read_reply(control, replies) == {"jobs": {}, "rid": 1}
 
         control.sendall(b'{"op":"close","grace":0,"rid":2}\n')
         assert _read_reply(control, replies) == {"jobs": {}, "rid": 2}
-        intermediate.wait(timeout=5)
+        intermediate.wait(timeout=scaled(5))
     finally:
         control.close()
         os.close(owner_write)
         owner_write = -1
         if intermediate.poll() is None:
             try:
-                intermediate.wait(timeout=3)
+                intermediate.wait(timeout=scaled(3))
             except subprocess.TimeoutExpired:
                 if supervisor_binding is not None:
                     try:
@@ -109,10 +110,10 @@ child.wait()
                 if intermediate.poll() is None:
                     signal_owned(intermediate, signal.SIGTERM)
                 try:
-                    intermediate.wait(timeout=3)
+                    intermediate.wait(timeout=scaled(3))
                 except subprocess.TimeoutExpired:
                     signal_owned(intermediate, signal.SIGKILL)
-                    intermediate.wait(timeout=3)
+                    intermediate.wait(timeout=scaled(3))
         if intermediate.stdout is not None:
             intermediate.stdout.close()
         if intermediate.stderr is not None:
@@ -206,7 +207,7 @@ def _wait_gone(pid: int, timeout: float = 5.0) -> None:
     original = table.identity(pid)
     if original is None or original.zombie:
         return
-    deadline = time.monotonic() + timeout
+    deadline = time.monotonic() + scaled(timeout)
     while time.monotonic() < deadline:
         current = table.identity(pid)
         if current is None or current.start != original.start or current.zombie:
@@ -222,7 +223,7 @@ def test_short_lived_wrapper_exits_before_init_and_owner_eof_stops_job(tmp_path)
     supervisor_pid = None
     job_pid = None
     try:
-        assert wrapper.wait(timeout=5) == 0
+        assert wrapper.wait(timeout=scaled(5)) == 0
         supervisor_pid = int(pid_file.read_text(encoding="ascii"))
         _, job_pid, _ = _start_test_job(control, replies, workspace)
         os.close(owner_write)
@@ -235,7 +236,7 @@ def test_short_lived_wrapper_exits_before_init_and_owner_eof_stops_job(tmp_path)
             os.close(owner_write)
         if wrapper.poll() is None:
             wrapper.kill()
-            wrapper.wait(timeout=5)
+            wrapper.wait(timeout=scaled(5))
         if job_pid is not None:
             _wait_gone(job_pid)
         if supervisor_pid is not None:
@@ -249,7 +250,7 @@ def test_wrapper_exit_after_init_does_not_stop_live_owner_session(tmp_path):
     supervisor_pid = None
     job_pid = None
     try:
-        deadline = time.monotonic() + 5
+        deadline = time.monotonic() + scaled(5)
         while not pid_file.is_file() and time.monotonic() < deadline:
             time.sleep(0.01)
         supervisor_pid = int(pid_file.read_text(encoding="ascii"))
@@ -257,7 +258,7 @@ def test_wrapper_exit_after_init_does_not_stop_live_owner_session(tmp_path):
         os.write(release_write, b"x")
         os.close(release_write)
         release_write = -1
-        assert wrapper.wait(timeout=5) == 0
+        assert wrapper.wait(timeout=scaled(5)) == 0
         status = _rpc(control, replies, next_rid, op="status", id="j1")
         assert status["finished"] is False
         assert status["exit_code"] is None
@@ -275,7 +276,7 @@ def test_wrapper_exit_after_init_does_not_stop_live_owner_session(tmp_path):
             os.close(release_write)
         if wrapper.poll() is None:
             wrapper.kill()
-            wrapper.wait(timeout=5)
+            wrapper.wait(timeout=scaled(5))
         if job_pid is not None:
             _wait_gone(job_pid)
         if supervisor_pid is not None:

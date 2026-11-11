@@ -10,6 +10,7 @@ from pathlib import Path
 
 import pytest
 
+from _timeouts import scaled
 from stateframe.request_records import list_request_records, read_request_record
 from stateframe.scripted_endpoint import Script, serve
 from tools.compare_no_mcp_requests import write_launcher
@@ -37,7 +38,7 @@ def _capture(repo: Path, run: Path, launcher: Path, script_path: Path,
              "--run-env", "--max-turns", "32", "--quiet"],
             # One capture took 186 s solo and timed out at 300 s under concurrent Linux gate load
             # (11-04); 900 s keeps headroom without letting a hung capture run unbounded.
-            env=environment, capture_output=True, text=True, timeout=900)
+            env=environment, capture_output=True, text=True, timeout=scaled(900))
         # Parity concerns request bytes, not the example's check outcome under this interpreter.
         assert result.returncode in (0, 1), result.stdout + result.stderr
         script.assert_consumed()

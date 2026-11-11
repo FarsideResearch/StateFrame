@@ -22,6 +22,8 @@ from urllib import error, request
 from urllib.parse import urlsplit
 
 import pytest
+
+from _timeouts import scaled
 from acceptance._support import assert_tree_imports, tree_python
 
 from _journal import measurement_events
@@ -154,16 +156,16 @@ def _assert_automatic_idle_pin(run: Path, requests: list[bytes]) -> None:
 
 
 def _assert_parity_endpoint_shape(origin: str, slots: list[int] | None) -> None:
-    with request.urlopen(origin + "/props", timeout=2) as response:
+    with request.urlopen(origin + "/props", timeout=scaled(2)) as response:
         props = json.load(response)
     assert props["default_generation_settings"]["n_ctx"] == 65536
     assert props["model_path"] == "scripted-endpoint"
     if slots is None:
         with pytest.raises(error.HTTPError) as missing:
-            request.urlopen(origin + "/slots", timeout=2)
+            request.urlopen(origin + "/slots", timeout=scaled(2))
         assert missing.value.code == 404
     else:
-        with request.urlopen(origin + "/slots", timeout=2) as response:
+        with request.urlopen(origin + "/slots", timeout=scaled(2)) as response:
             actual = json.load(response)
         assert actual == [{"id": index, "n_ctx": size, "is_processing": False}
                           for index, size in enumerate(slots)]
@@ -409,7 +411,7 @@ def _run_checkout(
             "--quiet",
         ]
         result = subprocess.run(
-            command, env=environment, capture_output=True, text=True, timeout=240
+            command, env=environment, capture_output=True, text=True, timeout=scaled(240)
         )
         assert result.returncode == 0, result.stdout + result.stderr
         script.assert_consumed()
@@ -581,7 +583,7 @@ def _resume_checkout(checkout: Path, repo: Path, run: Path, launcher: Path,
         def next_call(self, offered):
             if self.position == 2 and not self.release.is_set():
                 self.waiting.set()
-                if not self.release.wait(60):
+                if not self.release.wait(scaled(60)):
                     raise TimeoutError("interrupted request was not released")
                 raise ScriptStepUnavailable("request interrupted before a response")
             return super().next_call(offered)
@@ -605,7 +607,7 @@ def _resume_checkout(checkout: Path, repo: Path, run: Path, launcher: Path,
     try:
         process = subprocess.Popen(command, env=environment, stdout=subprocess.PIPE,
                                    stderr=subprocess.PIPE, text=True)
-        assert script.waiting.wait(600), "first attempt did not reach the third request"
+        assert script.waiting.wait(scaled(600)), "first attempt did not reach the third request"
         original = [path.read_bytes() for path in sorted((run / "wire").glob("*.request.json"))
                     if path.with_name(path.name.replace(".request.", ".response.")).exists()]
         assert len(original) == 2
@@ -614,9 +616,9 @@ def _resume_checkout(checkout: Path, repo: Path, run: Path, launcher: Path,
         child = int(children[0])
         identity = record_identity(child, launched_after=0, command_fragment="_child.py")
         signal_run_verified(run, child, identity, signal.SIGKILL,
-                            deadline=time.monotonic() + 120, what="hook wiring parity")
+                            deadline=time.monotonic() + scaled(120), what="hook wiring parity")
         script.release.set()
-        process.communicate(timeout=90)
+        process.communicate(timeout=scaled(90))
         resumed_trace = trace.with_name(f"{trace.stem}-resume.json")
         resumed = subprocess.run(
             [python, str(launcher), str(wrapper), str(resumed_trace), "resume", str(run),
@@ -624,7 +626,7 @@ def _resume_checkout(checkout: Path, repo: Path, run: Path, launcher: Path,
             env=environment,
             capture_output=True,
             text=True,
-            timeout=240,
+            timeout=scaled(240),
         )
         assert resumed.returncode == 0, resumed.stdout + resumed.stderr
         script.assert_consumed()
@@ -642,7 +644,7 @@ def _resume_checkout(checkout: Path, repo: Path, run: Path, launcher: Path,
             # Failure cleanup may precede the first checkpoint.
             signal_run_owned(run, process, signal.SIGKILL, deadline=time.monotonic(),
                              what="hook parity cleanup", require_checkpoint_saved=False)
-            process.communicate(timeout=10)
+            process.communicate(timeout=scaled(10))
         server.shutdown()
         server.server_close()
 

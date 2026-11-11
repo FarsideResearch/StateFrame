@@ -8,12 +8,13 @@ import zipfile
 import pytest
 from pathlib import Path
 
+from _timeouts import scaled
 from kernel_run_env import create_run_env, env_identity, RunEnvError
 from stateframe.runner import RunOptions, _tests_python, use_run_env_python
 
 
 def command(*args: str) -> str:
-    result = subprocess.run(args, capture_output=True, text=True, check=True, timeout=120)
+    result = subprocess.run(args, capture_output=True, text=True, check=True, timeout=scaled(120))
     return result.stdout.strip()
 
 

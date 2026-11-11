@@ -9,6 +9,8 @@ from pathlib import Path
 
 import pytest
 
+from _timeouts import scaled
+
 from kernel_execution_policy import sandboxed_popen
 
 
@@ -21,7 +23,7 @@ def _run_in_check_sandbox(command: list[str], root: Path) -> tuple[int, bytes, b
         command, root, env={"PATH": os.environ.get("PATH", os.defpath)}, generic_check=True
     )
     try:
-        stdout, stderr = process.communicate(timeout=30)
+        stdout, stderr = process.communicate(timeout=scaled(30))
     except subprocess.TimeoutExpired:
         process.kill()
         process.communicate()

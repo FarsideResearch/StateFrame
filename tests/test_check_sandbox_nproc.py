@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pytest
 
+from _timeouts import scaled
 import kernel_execution_policy as policy
 from kernel_exec_capability import shell_capability
 from kernel_exec_capability import ExecLimits
@@ -44,19 +45,19 @@ def busy_same_uid():
          "sys.stdin.buffer.read(1)\n"],
         stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     try:
-        ready, _, _ = select.select([helper.stdout], [], [], 10)
+        ready, _, _ = select.select([helper.stdout], [], [], scaled(10))
         assert ready, "same-uid thread helper did not start"
         assert helper.stdout.readline() == b"ready\n", helper.stderr.read() if helper.poll() is not None else ""
         assert len(os.listdir(f"/proc/{helper.pid}/task")) >= 401
         yield helper
     finally:
         helper.terminate()
-        helper.communicate(timeout=10)
+        helper.communicate(timeout=scaled(10))
 
 
 def test_check_sandbox_starts_with_many_user_threads(tmp_path, busy_same_uid):
     assert busy_same_uid.poll() is None
-    result = policy.run_sandboxed(["/bin/sh", "-c", "echo ok"], tmp_path, timeout=60)
+    result = policy.run_sandboxed(["/bin/sh", "-c", "echo ok"], tmp_path, timeout=scaled(60))
     assert result.completed.returncode == 0, result.completed.stderr
     assert "ok" in result.completed.stdout
     for name in ("workspace", "env", "home", "run"):
@@ -75,12 +76,12 @@ def test_check_sandbox_still_bounds_new_processes(tmp_path, busy_same_uid, monke
     script = ("import os,sys\nn=0\ntry:\n    for _ in range(400):\n        if os.fork()==0:\n"
               "            import time; time.sleep(5); os._exit(0)\n        n+=1\nexcept OSError:\n"
               "    print('bounded', n)\n    sys.exit(0)\nprint('unbounded', n)\n")
-    result = policy.run_sandboxed([sys.executable, "-c", script], tmp_path, timeout=60, nproc=64)
+    result = policy.run_sandboxed([sys.executable, "-c", script], tmp_path, timeout=scaled(60), nproc=64)
     marker, count = result.completed.stdout.strip().split()
     assert busy_same_uid.poll() is None
     assert marker == "bounded" and 0 < int(count) <= 64 + _NPROC_HEADROOM, (
         result.completed.stdout + result.completed.stderr)
-    normal = policy.run_sandboxed(["/bin/sh", "-c", "echo ok"], tmp_path, timeout=60)
+    normal = policy.run_sandboxed(["/bin/sh", "-c", "echo ok"], tmp_path, timeout=scaled(60))
     assert normal.completed.returncode == 0 and normal.completed.stdout.strip() == "ok", normal
 
 
@@ -101,6 +102,6 @@ def test_launcher_relative_limit_bounds_threads_without_cgroup(tmp_path):
     spec = {"argv": [sys.executable, "-c", THREAD_STORM_SCRIPT], "cwd": str(tmp_path), "env": {},
             "limits": asdict(ExecLimits(nproc=8)), "memory_supervised": True}
     result = subprocess.run([sys.executable, "-I", str(launcher), json.dumps(spec)],
-                            capture_output=True, text=True, timeout=10)
+                            capture_output=True, text=True, timeout=scaled(10))
     marker, count = result.stdout.strip().split()
     assert result.returncode == 0 and marker == "bounded" and 0 < int(count) < 200, result

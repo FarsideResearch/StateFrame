@@ -14,6 +14,7 @@ import sys
 import pytest
 
 from _guard_scan_cache import source_tree_signature
+from _timeouts import scaled
 
 import kernel_safe_paths as safe_paths
 
@@ -142,7 +143,7 @@ def test_flat_engine_child_and_skills_import_shared_home_helper(tmp_path):
     child_env.pop("PYTHONPATH", None)
     child_env.pop("PYTHONHOME", None)
     result = subprocess.run([sys.executable, "-I", "-c", script], cwd=tmp_path, env=child_env,
-                            capture_output=True, text=True, timeout=30, check=False)
+                            capture_output=True, text=True, timeout=scaled(30), check=False)
     assert result.returncode == 0, result.stdout + result.stderr
 
 

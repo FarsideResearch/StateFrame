@@ -9,9 +9,10 @@ import tempfile
 import time
 from pathlib import Path
 from typing import Callable, IO, Sequence
+from _timeouts import scaled
 
 # Match the previous generic run_case limit when a caller has no measurement.
-DEFAULT_EXPECTED_SECONDS = 240.0
+DEFAULT_EXPECTED_SECONDS = scaled(240.0)
 # Ten polls per second catches durable events while keeping filesystem work modest.
 POLL_INTERVAL_SECONDS = 0.1
 # Cap load scaling so a pathological shared host cannot create an unbounded deadline.
@@ -19,9 +20,9 @@ MAX_LOAD_FACTOR = 4.0
 # Allow three measured windows for a run that keeps progressing, while bounding it.
 HARD_CEILING_MULTIPLIER = 3.0
 # Give a child one second to shut down cleanly before escalating to SIGKILL.
-TERMINATE_GRACE_SECONDS = 1.0
+TERMINATE_GRACE_SECONDS = scaled(1.0)
 # Allow time for process reaping and then verify the whole process group is gone.
-GROUP_VERIFY_SECONDS = 3.0
+GROUP_VERIFY_SECONDS = scaled(3.0)
 # Match the diagnostic tail requested by the lane brief.
 OUTPUT_TAIL_LINES = 40
 # Bound diagnostic reads even if a child emits one enormous line or a huge log.

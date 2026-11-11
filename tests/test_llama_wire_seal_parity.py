@@ -11,6 +11,8 @@ from pathlib import Path
 
 import pytest
 
+from _timeouts import scaled
+
 from _journal import measurement_events
 from tests.test_final_cache_layout_host import _parity_launchers
 from tests.tools.pinned_tree import pinned_tree
@@ -51,7 +53,7 @@ def test_bundled_llama_wire_matches_30ce267_and_its_seal(
                  "--task", task, "--endpoint", f"http://127.0.0.1:{server.server_port}/v1",
                  "--model", "scripted", "--run-dir", str(run), "--test-python", sys.executable,
                  "--max-turns", "16", "--quiet"],
-                env=environment, capture_output=True, text=True, timeout=600, check=False)
+                env=environment, capture_output=True, text=True, timeout=scaled(600), check=False)
             assert process.returncode == 0, process.stdout + process.stderr
             script.assert_consumed()
             wires = [path.read_bytes() for path in sorted((run / "wire").glob("*.request.json"))]

@@ -7,6 +7,7 @@ import subprocess
 
 import pytest
 
+from _timeouts import scaled
 import kernel_shell_state
 from kernel_exec_session import CleanupReport, ExecResult
 from kernel_shell_tool import ShellTool
@@ -23,7 +24,7 @@ class RealProcess:
 
     def run(self, argv, cap, *, cwd):
         self.calls.append((argv, cap, cwd))
-        done = subprocess.run(argv, cwd=cwd, env=dict(cap.env), capture_output=True, timeout=30)
+        done = subprocess.run(argv, cwd=cwd, env=dict(cap.env), capture_output=True, timeout=scaled(30))
         output = done.stdout + done.stderr
         return ExecResult(done.returncode, False, output, False, len(output), 0.01,
                           CleanupReport(True, 0, (), "test cleanup"))

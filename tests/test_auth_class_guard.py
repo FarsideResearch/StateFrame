@@ -12,6 +12,7 @@ from urllib.parse import urlsplit
 import pytest
 
 from _class_guard_scanners import ALLOWLIST, scan_auth_requests
+from _timeouts import scaled
 
 
 pytestmark = pytest.mark.host_sandbox
@@ -93,7 +94,7 @@ def _start_server(required_authorization: str = f"Bearer {_KEY}"):
 def _stop_server(server: _KeyedHTTPServer, thread: threading.Thread) -> None:
     server.shutdown()
     server.server_close()
-    thread.join(timeout=5)
+    thread.join(timeout=scaled(5))
     assert not thread.is_alive(), "auth guard HTTP server did not stop"
 
 
@@ -144,11 +145,11 @@ def test_keyed_public_model_server_entrypoints_send_the_configured_key(monkeypat
         monkeypatch.setattr(kernel_context_capacity, "_cache", {})
         assert kernel_context_capacity.probe_n_ctx(endpoint_url, _KEY) == 8192
 
-        assert provider_health_ok(endpoint_url, _KEY, time.monotonic() + 5)
+        assert provider_health_ok(endpoint_url, _KEY, time.monotonic() + scaled(5))
         assert provider_health_ok(
             f"http://localhost:{server.server_port}/v1/chat/completions",
             _KEY,
-            time.monotonic() + 5,
+            time.monotonic() + scaled(5),
         )
 
         meter = RequestTokenMeter(
@@ -196,15 +197,16 @@ def test_keyed_public_model_server_entrypoints_send_the_configured_key(monkeypat
 
         bounded_response = request_bytes(
             json.dumps(_BODY).encode(), endpoint_url, _KEY,
-            deadline=time.monotonic() + 10, socket_timeout=3, liveness_timeout=3,
+            deadline=time.monotonic() + scaled(10),
+            socket_timeout=scaled(3), liveness_timeout=scaled(3),
         )
         assert json.loads(bounded_response)["choices"]
 
-        plain_response = http_provider(endpoint_url, _KEY)(_BODY, 5)
+        plain_response = http_provider(endpoint_url, _KEY)(_BODY, scaled(5))
         assert plain_response["choices"]
-        assert _post(_BODY, endpoint_url, timeout=5)["choices"]
-        assert ask("guard", url=endpoint_url, timeout=5).ok
-        assert LlamaSensor(endpoint_url, margin_probe=False, timeout=5).answer(
+        assert _post(_BODY, endpoint_url, timeout=scaled(5))["choices"]
+        assert ask("guard", url=endpoint_url, timeout=scaled(5)).ok
+        assert LlamaSensor(endpoint_url, margin_probe=False, timeout=scaled(5)).answer(
             Atom("a", "supported")).value == "TRUE"
 
         expected_paths = {
@@ -313,7 +315,8 @@ def test_bounded_transport_keeps_the_blank_bearer_header() -> None:
     try:
         response = request_bytes(
             b'{"messages":[]}', base + "/v1/chat/completions", "",
-            deadline=time.monotonic() + 10, socket_timeout=3, liveness_timeout=3,
+            deadline=time.monotonic() + scaled(10),
+            socket_timeout=scaled(3), liveness_timeout=scaled(3),
         )
         assert json.loads(response)["choices"]
         chat_requests = [record for record in server.requests
