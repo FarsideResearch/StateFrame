@@ -1,0 +1,8 @@
+{
+ "call": {
+  "args": "{\"manifest\": {\"schema\": \"stateframe-mutation-unit/1\", \"name\": \"events_reader\", \"revision\": 1, \"parent\": null, \"entry\": \"main.py\", \"summary\": \"Decodes events.b64 and returns records, count_by_type, total_by_type\", \"kind\": \"reader\", \"input_schema\": {\"type\": \"object\", \"properties\": {\"input_id\": {\"type\": \"string\"}}, \"required\": [\"input_id\"]}, \"output_schema\": {\"type\": \"object\"}, \"requires\": {\"network\": false, \"writes\": false}, \"smoke\": [{\"input\": {\"input_id\": \"in0\"}, \"inputs\": [\"path/of/a/sample/file\"], \"expect\": {}}], \"limits\": {\"wall_s\": 10, \"cpu_s\": 5, \"mem_mb\": 256}}, \"files\": {\"main.py\": \"import base64\\nimport struct\\nimport zlib\\nfrom pathlib import Path\\n\\ndef handle(input, ctx):\\n    raw = base64.b64decode(Path('.').read_text())\\n    version, type_count, record_count = struct.unpack('<HHI', raw[4:12])\\n    body = zlib.decompress(raw[12:])\\n    names = {}\\n    offset = 0\\n    for _ in range(type_count):\\n        code, name = struct.unpack_from('<H12s', body, offset)\\n        names[code] = name.rstrip(b'\\\\0').decode()\\n        offset += 14\\n    totals, counts = {}, {}\\n    for _ in range(record_count):\\n        _id, code, amount, _channel = struct.unpack_from('<IHd8s', body, offset)\\n        offset += 22\\n        name = names[code]\\n        totals[name] = round(totals.get(name, 0.0) + amount, 2)\\n        counts[name] = counts.get(name, 0) + 1\\n    return {'records': record_count, 'count_by_type': counts, 'total_by_type': totals}\\n\"}}",
+  "id": "events_reader",
+  "op": "submit"
+ },
+ "source": "live Qwen3.6-35B-A3B run, mutate submit call (args only)"
+}

@@ -1,0 +1,13 @@
+{
+  "schema": "stateframe-mutation-prebuilt/1",
+  "units": {
+    "archive_list": "sha256:3cac0c52f814d88ef2fd3b757f709cf70b9d30d2e54cee728d9ccf1d6c2581ad",
+    "file_facts": "sha256:688343e509a368c0ca50a4bb9d062fbb0f32b1f18d45b1a838af99a5822a405c",
+    "html_extract": "sha256:15d79e7918b73f026a79b70193a8953b352213d5214cdeb31e04fdead1071011",
+    "log_watch": "sha256:d2619d9e525162e5ead6ad8fc59d690be0469c7d362130f39345131893d46a2f",
+    "snapshot_diff": "sha256:bbf2de249e5c155f6c5dbd4810364f4a1f5226a83d8d9df591b6d9cad5422519",
+    "sqlite_peek": "sha256:21b1b89cbcd59d11636baf80e236e3740f60f54ea8a3b4c784cbf9b294f186b5",
+    "structured_peek": "sha256:a135e4347795704ce07032ad7aec91edf6bd9fe73f8ece394517615824b63e05",
+    "text_grep_struct": "sha256:a677f17515970da38f79164720ab339cf8bc11ff224f7a65da782490822487ff"
+  }
+}

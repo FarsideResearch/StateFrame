@@ -11,6 +11,7 @@ import resource
 import stat
 import sys
 import threading
+import time
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -301,7 +302,7 @@ def _set_cgroup_controllers(cgroup: Path, controllers: set[str], enabled: bool) 
 
 
 @contextmanager
-def _cgroup_leaf_pattern_process_lock(cgroup: Path):
+def _cgroup_leaf_pattern_process_lock(cgroup: Path, *, timeout: float = 10.0):
     """Serialize leaf setup across launcher processes sharing this cgroup."""
     if not sys.platform.startswith("linux"):
         yield
@@ -313,8 +314,17 @@ def _cgroup_leaf_pattern_process_lock(cgroup: Path):
                          os.O_RDONLY | getattr(os, "O_CLOEXEC", 0))
     locked = False
     try:
-        fcntl.flock(descriptor, fcntl.LOCK_EX)
-        locked = True
+        deadline = time.monotonic() + timeout
+        while not locked:
+            try:
+                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                locked = True
+            except OSError as error:
+                if error.errno not in {errno.EACCES, errno.EAGAIN, errno.EWOULDBLOCK}:
+                    raise
+                if time.monotonic() >= deadline:
+                    raise TimeoutError("cgroup leaf setup lock timed out") from error
+                time.sleep(min(0.05, max(0.0, deadline - time.monotonic())))
         yield
     finally:
         if locked:
@@ -700,7 +710,7 @@ def _set_relative_nproc_limit(ceiling: int) -> None:
     resource.setrlimit(resource.RLIMIT_NPROC, (new_soft, bound))
 
 
-def install_syscall_filter(*, network_none: bool) -> None:
+def install_syscall_filter(*, network_none: bool, post_init: bool = False) -> None:
     """Linux bwrap raises lo even with --unshare-net; deny socket creation too.
 
     Every target is denied cross-process memory/fd access to the trusted
@@ -712,14 +722,18 @@ def install_syscall_filter(*, network_none: bool) -> None:
         arch = 0xC000003E
         calls = (101, 310, 311, 438)  # ptrace, process_vm_*, pidfd_getfd
         network_calls = (41, 42, 43, 49, 50, 53, 288, 425, 426, 427)
+        creation_calls = (56, 435, 57, 58, 59, 322)
     elif machine in {"aarch64", "arm64"}:
         arch = 0xC00000B7
         calls = (117, 270, 271, 438)
         network_calls = (198, 199, 200, 201, 202, 203, 242, 425, 426, 427)
+        creation_calls = (220, 435, 221, 281)
     else:
         raise RuntimeError(f"execution seccomp is unsupported on {machine}")
     if network_none:
         calls += network_calls
+    if post_init:
+        calls += creation_calls
 
     class Filter(ctypes.Structure):
         _fields_ = [("code", ctypes.c_ushort), ("jt", ctypes.c_ubyte),

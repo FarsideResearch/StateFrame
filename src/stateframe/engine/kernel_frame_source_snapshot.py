@@ -21,12 +21,12 @@ def _current_window(root: Path, path: str, start: int, end: int,
         WINDOW_CONTENT_MARKER, _safe_framefit_path, _render_ranges,
         project_source_window,
     )
-    from kernel_stateframe_headcarry import _read_source
+    from kernel_stateframe_headcarry import _read_optional_source
 
     if (_safe_framefit_path(path) != path or not frame_source_path_allowed(path)
             or not 1 <= start <= end):
         return None
-    raw = _read_source(root, path)
+    raw = _read_optional_source(root, path)
     if raw is None or "sha256:" + hashlib.sha256(raw).hexdigest() != revision:
         return None
     try:
@@ -201,9 +201,9 @@ def _refreshed_edit_window(root: Path, path: str, start: int, end: int,
                            row: Mapping[str, object],
                            edit: Mapping[str, object]) -> tuple[str, str] | None:
     """Refresh the previously read span only after a verified applied edit."""
-    from kernel_stateframe_headcarry import _read_source
+    from kernel_stateframe_headcarry import _read_optional_source
 
-    raw = _read_source(root, path)
+    raw = _read_optional_source(root, path)
     if raw is None:
         return None
     try:
@@ -315,8 +315,8 @@ def recent_editable_read_windows(runtime: object, frame: Mapping[str, object]) -
                       "content": content, "source_chars": len(exact)}
             from kernel_code_bookmarks import SMALL_FILE_MAX_BYTES, SMALL_FILE_MAX_LINES, enabled
             if enabled():
-                from kernel_stateframe_headcarry import _read_source
-                raw = _read_source(root, path)
+                from kernel_stateframe_headcarry import _read_optional_source
+                raw = _read_optional_source(root, path)
                 if raw is not None and len(raw) <= SMALL_FILE_MAX_BYTES:
                     total = len(raw.splitlines(keepends=True))
                     if 0 < total <= SMALL_FILE_MAX_LINES and (start, end) != (1, total):
@@ -343,7 +343,7 @@ def editable_product_windows(runtime: object, frame: Mapping[str, object],
     from kernel_read_reuse_visibility import editable_read_paths
     from kernel_request_source_window import _safe_framefit_path
     from kernel_stateframe_framefit5 import _workspace_root
-    from kernel_stateframe_headcarry import _read_source
+    from kernel_stateframe_headcarry import _read_optional_source
 
     if not bookmarks_enabled():
         return [], []
@@ -364,7 +364,7 @@ def editable_product_windows(runtime: object, frame: Mapping[str, object],
              if isinstance(row, Mapping)}
     available = []
     for path in editable:
-        raw = _read_source(root, path)
+        raw = _read_optional_source(root, path)
         if raw is None or not raw or len(raw) > 512_000:
             continue
         try:
@@ -415,7 +415,7 @@ def public_check_source_windows(runtime: object, state: Mapping[str, object]) ->
         project_source_window,
     )
     from kernel_stateframe_framefit5 import _workspace_root
-    from kernel_stateframe_headcarry import _read_source
+    from kernel_stateframe_headcarry import _read_optional_source
 
     contract = state.get("completion_contract")
     if isinstance(contract, Mapping):
@@ -447,7 +447,7 @@ def public_check_source_windows(runtime: object, state: Mapping[str, object]) ->
             continue
         seen.add(path)
         read, read_start, read_end = matching
-        raw = _read_source(root, path)
+        raw = _read_optional_source(root, path)
         if raw is None:
             continue
         try:
@@ -958,7 +958,7 @@ def frame_source_snapshot(
     from kernel_request_source_window import _safe_framefit_path, source_revision
     from kernel_public_localization import public_path
     from kernel_stateframe_framefit5 import _workspace_root
-    from kernel_stateframe_headcarry import _read_source
+    from kernel_stateframe_headcarry import _read_optional_source
 
     sources = {
         str(path): row["content"]
@@ -999,7 +999,7 @@ def frame_source_snapshot(
             sources[path] = snapshots[path]
         # Existing source reader rejects symlinks and confines reads to root.
         # Even a complete cache is not evidence that workspace bytes stayed put.
-        raw = _read_source(root, path)
+        raw = _read_optional_source(root, path)
         try:
             source = raw.decode("utf-8") if raw is not None else None
         except UnicodeError:

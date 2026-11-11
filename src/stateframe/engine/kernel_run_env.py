@@ -85,8 +85,22 @@ def _mapped_path(value: str, source_repo: Path | None, workspace: Path,
     return value
 
 
+def _stateframe_source_root(path: Path) -> Path | None:
+    if path.name == "stateframe" and path.parent.name == "src":
+        source_root = path.parent
+    elif path.name == "src":
+        source_root = path
+    else:
+        return None
+    if ((source_root / "stateframe" / "__init__.py").is_file()
+            and (source_root.parent / "pyproject.toml").is_file()):
+        return source_root
+    return None
+
+
 def _external_root(value: str, source_repo: Path | None, source_env: Path,
-                   authorized_roots: tuple[Path, ...] = ()) -> Path | None:
+                   authorized_roots: tuple[Path, ...] = (), *,
+                   allow_source_tree: bool = False) -> Path | None:
     path = Path(value).resolve()
     if path.is_relative_to(source_env) or (source_repo is not None and path.is_relative_to(source_repo)):
         return None
@@ -95,16 +109,21 @@ def _external_root(value: str, source_repo: Path | None, source_env: Path,
         raise RunEnvError("import metadata cannot grant the home directory or its ancestors")
     # Metadata requests imports; only independent host policy grants reads.
     # Validate even missing paths so a later install cannot activate a grant.
-    if not any(path == root or (root.is_dir() and path.is_relative_to(root))
-               for root in authorized_roots):
+    granted = any(path == root or (root.is_dir() and path.is_relative_to(root))
+                  for root in authorized_roots)
+    source_root = _stateframe_source_root(path) if allow_source_tree else None
+    if not granted and source_root is None:
         raise RunEnvError(f"external import path lacks host read authorization: {path}; "
                           "use --shell-read to authorize it")
+    if source_root is not None:
+        return source_root if source_root.exists() else None
     return path if path.exists() else None
 
 
 def _rewrite_finder(path: Path, source_repo: Path | None, workspace: Path,
                     source_env: Path, destination: Path,
-                    authorized_roots: tuple[Path, ...] = ()) -> set[Path]:
+                    authorized_roots: tuple[Path, ...] = (), *,
+                    allow_source_tree: bool = False) -> set[Path]:
     if path.is_symlink() or not path.is_file():
         raise RunEnvError(f"editable finder cannot be safely cloned: {path.name}")
     original = _import_text(path)
@@ -148,7 +167,8 @@ def _rewrite_finder(path: Path, source_repo: Path | None, workspace: Path,
                     raise RunEnvError(f"invalid editable finder paths: {path.name}")
                 if not Path(child.value).is_absolute():
                     continue
-                external = _external_root(child.value, source_repo, source_env, authorized_roots)
+                external = _external_root(child.value, source_repo, source_env, authorized_roots,
+                                          allow_source_tree=allow_source_tree)
                 if external is not None:
                     roots.add(external)
                 replacement = _mapped_path(child.value, source_repo, workspace,
@@ -168,7 +188,8 @@ def _rewrite_finder(path: Path, source_repo: Path | None, workspace: Path,
 
 
 def _relocate(source: Path, destination: Path, source_repo: Path | None,
-              workspace: Path, authorized_roots: tuple[Path, ...] = ()) -> tuple[Path, ...]:
+              workspace: Path, authorized_roots: tuple[Path, ...] = (), *,
+              allow_source_tree: bool = False) -> tuple[Path, ...]:
     config = destination / "pyvenv.cfg"
     if not config.is_file():
         raise RunEnvError(f"cloned environment has no pyvenv.cfg: {destination}")
@@ -187,7 +208,8 @@ def _relocate(source: Path, destination: Path, source_repo: Path | None,
                 match = _FINDER_IMPORT.fullmatch(value) if path.suffix == ".pth" else None
                 if match:
                     roots.update(_rewrite_finder(site / (match.group(1) + ".py"),
-                                                 source_repo, workspace, source, destination, authorized_roots))
+                                                 source_repo, workspace, source, destination, authorized_roots,
+                                                 allow_source_tree=allow_source_tree))
                     revised.append(line)
                 elif not value or value.startswith("#") or value == _SETUPTOOLS_SHIM:
                     revised.append(line)
@@ -197,7 +219,8 @@ def _relocate(source: Path, destination: Path, source_repo: Path | None,
                     # Relative entries are interpreted from the source site before copying.
                     original_site = source / site.relative_to(destination)
                     old_target = (original_site / value).resolve()
-                    external = _external_root(str(old_target), source_repo, source, authorized_roots)
+                    external = _external_root(str(old_target), source_repo, source, authorized_roots,
+                                              allow_source_tree=allow_source_tree)
                     if external is not None:
                         roots.add(external)
                     mapped = _mapped_path(str(old_target), source_repo, workspace,
@@ -273,7 +296,8 @@ def relocation_roots(interpreter: Path, root: Path,
 
 
 def create_run_env(run_dir: Path, test_python: Path, *, source_repo: Path | None = None,
-                   authorized_read_roots: tuple[Path, ...] = ()) -> RunEnv:
+                   authorized_read_roots: tuple[Path, ...] = (),
+                   allow_source_tree: bool = False) -> RunEnv:
     root = Path(run_dir).absolute() / "env"
     interpreter = Path(test_python).absolute()
     source = interpreter.parent.parent if interpreter.parent.name == "bin" else None
@@ -312,7 +336,8 @@ def create_run_env(run_dir: Path, test_python: Path, *, source_repo: Path | None
             else:
                 raise RunEnvError("STATEFRAME_ENV_SEED must be auto or copy")
             authorized = relocation_roots(interpreter, root, authorized_read_roots)
-            external_roots = _relocate(source.resolve(), root, source_repo, workspace, authorized)
+            external_roots = _relocate(source.resolve(), root, source_repo, workspace, authorized,
+                                       allow_source_tree=allow_source_tree)
             kind: Literal["clone", "system-site"] = "clone"
         else:
             root.mkdir()

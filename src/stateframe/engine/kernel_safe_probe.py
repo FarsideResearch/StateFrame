@@ -34,6 +34,7 @@ def run_probe(argv: Sequence[str], workspace: Path, *, timeout: float = 10,
         cap = shell_capability(
             workspace=workspace, run_env_dir=environment, scratch_home=home,
             network="none", writable=False,
+            include_path_executable_roots=False,
             extra_read_roots=(*executable_read_roots(executable),
                               *map(Path, _interpreter_roots(executable)), *read_roots))
         child_env = dict(cap.env)

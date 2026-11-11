@@ -29,6 +29,10 @@ Hooks are user configuration, not new model-callable engine tools. Use `statefra
 
 To keep a skill, command tools, hooks and an MCP definition together and switch them on per user, profile, project or run, package them as a powerup. The host expands it into the same loaders at run start, so no engine change is needed. See the [powerups guide](powerups.md) and `examples/powerups/`.
 
+## Promote a mutation unit
+
+Mutation units use a separate isolated-unit attachment contract. Promotion packages a retained unit as a disabled powerup and requires powerups' `attach_units` runtime registration. Until that runtime is present, `stateframe mutations promote UNIT` refuses. Do not convert an isolated unit into a shell command. See [Mutation units](mutations.md#retention-promotion-and-hooks).
+
 ## Tests
 
 - The package does not ship its own test suite. Test your changes with pytest in your checkout, and use the pieces below.

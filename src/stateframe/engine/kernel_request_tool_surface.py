@@ -450,6 +450,11 @@ def author_final_tool_surface(
             return None
     if runtime is None or side_call:
         return None
+    if os.environ.get("STATEFRAME_MUTATIONS", "off") in {"prebuilt", "authored"}:
+        from kernel_mutate_runtime import service as mutation_service
+        _mutations = mutation_service()
+        if _mutations is not None:
+            bind_current_surface = True
     try:
         from kernel_done_is_submit_authority import (
             candidate_exists as done_candidate_exists,
@@ -641,6 +646,16 @@ def author_final_tool_surface(
             final_tools = prepare_stable_tools(capture, runtime, final_tools, body)
         from kernel_read_lockout import filter_tools as filter_locked_reads
         final_tools = filter_locked_reads(runtime, final_tools)
+        if os.environ.get("STATEFRAME_MUTATIONS", "off") in {"prebuilt", "authored"}:
+            from kernel_mutate_runtime import schema_for_level, service as mutation_service
+            if "mutate" not in _tool_names(final_tools):
+                final_tools = [*final_tools, schema_for_level(os.environ["STATEFRAME_MUTATIONS"])]
+            _mutations = mutation_service()
+            if _mutations is not None and _mutations.episode is not None:
+                from kernel_mutate_projection import authoring_tools
+                final_tools = authoring_tools(final_tools, runtime)
+                if "mutate" not in _tool_names(final_tools):
+                    raise _SurfaceUnavailable("mutation_authoring_tool_missing")
         names = _tool_names(final_tools)
         if (not names or any(not name for name in names)
                 or len(names) != len(set(names))):

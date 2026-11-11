@@ -29,7 +29,7 @@ SDIST_DOCS = frozenset({f"docs/guide/{name}.md" for name in (
     "concepts", "request-lifecycle", "code-map", "running", "extending", "troubleshooting", "design")})
 SDIST_DOCS = SDIST_DOCS | {"docs/assets/stateframe-banner.webp"}  # README banner (relative link)
 # The installer verifies the bundled wheels with this standalone helper.
-SDIST_SCRIPTS = frozenset({"scripts/build_wheelhouse.py"})
+SDIST_SCRIPTS = frozenset({"scripts/build_wheelhouse.py", "scripts/installed_smoke.sh"})
 # Product regression tests belong to the maintainer tree, not an installed release.
 SDIST_TESTS: frozenset[str] = frozenset()
 SDIST_WHEELHOUSE = frozenset({
@@ -53,6 +53,11 @@ SDIST_FILES = (SDIST_TOP_LEVEL | SDIST_DOCS | SDIST_SCRIPTS | SDIST_TESTS | SDIS
                | {"_build/sf_backend.py", "src/stateframe/THIRD_PARTY_LICENSES.md"})
 
 
+def _is_prebuilt_fixture(relative: Path) -> bool:
+    parts = relative.parts
+    return len(parts) >= 3 and parts[0] == "mutations_prebuilt" and "fixtures" in parts[1:-1]
+
+
 def _sdist_includes(relative: Path) -> bool:
     if relative.parts[:2] == ("bench", "lab"):
         return False
@@ -62,7 +67,8 @@ def _sdist_includes(relative: Path) -> bool:
     if name in SDIST_FILES:
         return True
     if relative.parts[:2] == ("src", "stateframe"):
-        return relative.suffix in {".py", ".json"}
+        package_relative = Path(*relative.parts[2:])
+        return relative.suffix in {".py", ".json"} or _is_prebuilt_fixture(package_relative)
     return False
 
 
@@ -105,8 +111,11 @@ def _package_files() -> list[tuple[str, bytes]]:
     out = []
     for path in sorted(PACKAGE.rglob("*")):
         # THIRD_PARTY_LICENSES.md ships in the package so NOTICE's pointer is true for a plain wheel install.
-        if path.is_file() and not SKIP_PARTS & set(path.parts) and (
-                path.suffix in {".py", ".json"} or path.relative_to(PACKAGE).as_posix() == "THIRD_PARTY_LICENSES.md"):
+        relative = path.relative_to(PACKAGE)
+        if (path.is_file() and not SKIP_PARTS & set(path.parts)
+                and (path.suffix in {".py", ".json"}
+                     or relative.as_posix() == "THIRD_PARTY_LICENSES.md"
+                     or _is_prebuilt_fixture(relative))):
             out.append((path.relative_to(SRC).as_posix(), path.read_bytes()))
     return out
 

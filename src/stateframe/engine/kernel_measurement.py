@@ -3875,6 +3875,20 @@ class RequestCapture:
             started = time.perf_counter_ns()
             self._assert_wire_string_hygiene(wire)
             guard_physical_send(self, getattr(self, "_wire_truth_runtime", None), body, wire)
+            if os.environ.get("STATEFRAME_MUTATIONS", "off") in {"prebuilt", "authored"}:
+                from kernel_mutate_runtime import service as mutation_service
+                _mutations = mutation_service()
+                if _mutations is not None and _mutations.episode is not None:
+                    from kernel_mutate_projection import require_authoring_surface
+                    require_authoring_surface(self)
+                    from kernel_tool_tape import replay_mode_active
+                    from kernel_mutate_projection import reserve_send
+                    if not reserve_send(_mutations, self.request_id,
+                                        getattr(_mutations, "attempt", 1), attempt + 1,
+                                        replay=replay_mode_active()):
+                        from kernel_mutate_projection import MutationSendRefused
+                        receipt = _mutations.fail_episode("MUTATION_BUDGET physical authoring sends exhausted")
+                        raise MutationSendRefused(receipt)
             try:
                 from kernel_bounded_http import queue_wait_max_seconds
                 # Recovery uses the destination actually submitted, including a routed key.

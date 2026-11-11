@@ -26,6 +26,8 @@ Every action the engine runs (a read, an edit, a test run) produces a host-recor
 
 Shell and workspace-writing custom tools produce effect receipts for authorized file changes. These changes invalidate earlier reads and checks; forbidden effects are restored before the next request. Executable-bit changes are refused and restored because the sealed result does not carry them. Reconciliation stops without promoting effects beyond 16 MiB per file, 256 MiB of regular-file data or 20,000 entries. Job states and bounded new output appear in a sequenced `jobs` section. Opaque shell, Git and web output is not source-read or check evidence. See [Agent tools](tools.md).
 
+Mutation unit output is also an untrusted observation. It cannot satisfy a test, check, completion requirement or done gate. A unit may propose an edit only under a separate write grant; the host validates and records the effect. See [Mutation units](mutations.md).
+
 ## Behavior is controlled by code
 
 The engine owns the tool menu, the guards, the decision that a task is done, the test requirements and exactly what the model sees each turn. The model cannot step outside those rails. You change behavior the way you change software: with profiles and switches that are versioned and testable (see [running.md](running.md)). Many switches ship disabled by default; they are still part of the engine. The shipped product profile uses the composed loop; lean mode is unsupported, and the plain loop refuses Git, web, custom commands and background jobs before execution.

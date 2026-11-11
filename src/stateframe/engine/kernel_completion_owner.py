@@ -5787,6 +5787,8 @@ def _empty_tool_route(runtime: object) -> tuple[str, str | None]:
 
 def _contract_route(runtime: object, messages: object, tool_names: Sequence[str], *,
                     provider_request: bool) -> tuple[str, str | None]:
+    if _mutation_authoring_active() and "mutate" in tool_names:
+        return "repair", None
     outcome = str(getattr(runtime, "system_outcome", "") or "")
     if outcome in _HOST_STOP_OUTCOMES and not tool_names:
         return "host-stop", None
@@ -5810,6 +5812,14 @@ def _contract_route(runtime: object, messages: object, tool_names: Sequence[str]
     if "run_tests" in tool_names and not {"edit", "str_replace", "work", "work_update"}.intersection(tool_names):
         return "verify", None
     return "repair", None
+
+
+def _mutation_authoring_active() -> bool:
+    if os.environ.get("STATEFRAME_MUTATIONS", "off") not in {"prebuilt", "authored"}:
+        return False
+    from kernel_mutate_runtime import service as mutation_service
+    mutations = mutation_service()
+    return mutations is not None and mutations.episode is not None
 
 
 def align_tools_to_completion_route(runtime: object, tools: Sequence[object]) -> list[object]:
@@ -6813,7 +6823,10 @@ def bind_final_tool_surface(
                 return False
             contract["route"] = route
             contract["host_stop"] = route == "host-stop"
-            contract["terminal_text"] = _contract_terminal_text(runtime) or route == "submit"
+            contract["terminal_text"] = (False if _mutation_authoring_active() else
+                                         _contract_terminal_text(runtime) or route == "submit")
+            if _mutation_authoring_active():
+                contract["terminal_line"] = None
 
         if not _bind_final_menu_owner_block(runtime, contract, schemas, request_id):
             return False

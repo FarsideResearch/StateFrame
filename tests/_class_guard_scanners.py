@@ -9,8 +9,10 @@ from typing import Iterable, Mapping
 
 
 ALLOWLIST = {
-    "src/stateframe/engine/kernel_web_fetch.py:fetch":
-        "Fetches user-selected web pages and does not call a model server.",
+    "src/stateframe/engine/kernel_web_fetch.py:fetch_raw":
+        ("Sends a bounded GET through vetted destinations with a bounded, validated caller-supplied Accept header; "
+         "it fetches user-selected page content "
+         "and does not invoke a model server."),
 }
 _UNSUPPORTED_HTTP_LIBRARIES = {"requests", "httpx", "aiohttp", "urllib3", "pycurl"}
 
@@ -570,3 +572,271 @@ def scan_unavailable_events(paths: Iterable[Path], *, root: Path) -> Unavailable
             else:
                 violations.append(site)
     return UnavailableScan(scanned, with_reason, tuple(violations))
+
+
+_RAW_FETCH_HEADERS = frozenset({"Host", "Accept", "Accept-Encoding", "User-Agent"})
+_BROKER_ENV = {
+    "LC_ALL": "C.UTF-8", "PYTHONDONTWRITEBYTECODE": "1",
+    "HOME": "/nonexistent", "TZ": "UTC",
+}
+
+
+def _function(tree: ast.AST, name: str) -> ast.FunctionDef | ast.AsyncFunctionDef | None:
+    matches = [node for node in ast.walk(tree)
+               if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == name]
+    return matches[0] if len(matches) == 1 else None
+
+
+def _import_modules(node: ast.AST) -> tuple[str, ...]:
+    if isinstance(node, ast.Import):
+        return tuple(alias.name for alias in node.names)
+    if isinstance(node, ast.ImportFrom) and node.module:
+        return (node.module,)
+    return ()
+
+
+def _is_kernel_bounded_http(module: str) -> bool:
+    return module == "kernel_bounded_http" or module.endswith(".kernel_bounded_http")
+
+
+def _resolved_reference(value: ast.AST, imports: Mapping[str, str],
+                        scope_nodes: list[ast.AST], before: int,
+                        seen: frozenset[str] = frozenset()) -> str:
+    """Resolve imported and local aliases without following arbitrary expressions."""
+    raw = _qualified_name(value)
+    first, _, tail = raw.partition(".")
+    if not first or first in seen:
+        return raw
+    assigned = _assigned_value(first, scope_nodes, before)
+    if isinstance(assigned, (ast.Name, ast.Attribute)):
+        base = _resolved_reference(assigned, imports, scope_nodes, assigned.lineno,
+                                   seen | {first})
+    else:
+        base = imports.get(first, first)
+    return base + ("." + tail if tail else "")
+
+
+def scan_fetch_raw_headers(source: str) -> tuple[str, ...]:
+    """Pin fetch_raw's caller surface and its literal outgoing header map."""
+    tree = ast.parse(source)
+    function = _function(tree, "fetch_raw")
+    if function is None:
+        return ("fetch_raw definition missing or ambiguous",)
+    violations = []
+    args = (*function.args.posonlyargs, *function.args.args, *function.args.kwonlyargs)
+    if (any("header" in argument.arg.lower() for argument in args)
+            or function.args.vararg or function.args.kwarg):
+        violations.append("fetch_raw accepts caller-controlled headers")
+    nodes = _scope_nodes(function, function)
+    requests = [node for node in nodes if isinstance(node, ast.Call)
+                and _qualified_name(node.func).rsplit(".", 1)[-1] == "request"]
+    if len(requests) != 1:
+        violations.append("fetch_raw must build one bounded request")
+    else:
+        headers = [item.value for item in requests[0].keywords if item.arg == "headers"]
+        if len(headers) != 1 or not isinstance(headers[0], ast.Dict):
+            violations.append("request headers must be a literal mapping")
+        else:
+            keys = [key.value for key in headers[0].keys
+                    if isinstance(key, ast.Constant) and isinstance(key.value, str)]
+            if (len(keys) != len(headers[0].keys) or len(keys) != len(_RAW_FETCH_HEADERS)
+                    or set(keys) != _RAW_FETCH_HEADERS):
+                violations.append("request header set differs from the fixed four headers")
+    return tuple(violations)
+
+
+def scan_fetch_raw_auth_boundary(source: str) -> tuple[str, ...]:
+    """Follow local calls from fetch_raw and forbid both model-auth sources."""
+    tree = ast.parse(source)
+    root = _function(tree, "fetch_raw")
+    if root is None:
+        return ("fetch_raw definition missing or ambiguous",)
+    imports = {
+        (alias.asname or alias.name.split(".", 1)[0]): alias.name
+        for node in ast.walk(tree) if isinstance(node, ast.Import) for alias in node.names
+    }
+    imports.update({
+        (alias.asname or alias.name): f"{node.module}.{alias.name}"
+        for node in ast.walk(tree) if isinstance(node, ast.ImportFrom) and node.module
+        for alias in node.names
+    })
+    parents: dict[ast.AST, ast.AST] = {}
+    for parent in ast.walk(tree):
+        for child in ast.iter_child_nodes(parent):
+            parents[child] = parent
+    module_scope = [node for node in ast.walk(tree) if _function_scope(node, parents) is None]
+    functions = {node.name: node for node in ast.walk(tree)
+                 if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))}
+    reachable: list[ast.FunctionDef | ast.AsyncFunctionDef] = []
+    pending = [root]
+    visited: set[int] = set()
+    while pending:
+        function = pending.pop()
+        if id(function) in visited:
+            continue
+        visited.add(id(function))
+        reachable.append(function)
+        pending.extend(node for node in ast.walk(function)
+                       if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+                       and node is not function)
+        for node in _scope_nodes(function, function):
+            if not isinstance(node, ast.Call):
+                continue
+            callee = _qualified_name(node.func).rsplit(".", 1)[-1]
+            if callee in functions:
+                pending.append(functions[callee])
+
+    violations = []
+    top_imports = [node for node in tree.body if isinstance(node, (ast.Import, ast.ImportFrom))]
+    if any(_is_kernel_bounded_http(module) for node in top_imports for module in _import_modules(node)):
+        violations.append("kernel_web_fetch imports kernel_bounded_http")
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Attribute) and node.attr == "_headers":
+            violations.append("kernel_web_fetch reads Endpoint._headers")
+            break
+        if isinstance(node, ast.Constant) and node.value == "_headers":
+            violations.append("kernel_web_fetch names Endpoint._headers")
+            break
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        scope = _function_scope(node, parents)
+        scope_nodes = module_scope if scope is None else _scope_nodes(scope, tree)
+        name = _resolved_reference(node.func, imports, scope_nodes, node.lineno)
+        short = name.rsplit(".", 1)[-1]
+        if short in {"__import__", "import_module"} and node.args:
+            target = node.args[0]
+            if (isinstance(target, ast.Constant) and isinstance(target.value, str)
+                    and _is_kernel_bounded_http(target.value)):
+                violations.append("kernel_web_fetch dynamically imports kernel_bounded_http")
+                break
+    for function in reachable:
+        for node in _scope_nodes(function, function):
+            if isinstance(node, (ast.Import, ast.ImportFrom)) and any(
+                    _is_kernel_bounded_http(module) for module in _import_modules(node)):
+                violations.append("fetch_raw call graph imports kernel_bounded_http")
+                break
+            if isinstance(node, ast.Call):
+                name = _qualified_name(node.func)
+                if _is_kernel_bounded_http(name) or "kernel_bounded_http." in name:
+                    violations.append("fetch_raw call graph calls kernel_bounded_http")
+                    break
+    return tuple(dict.fromkeys(violations))
+
+
+def scan_mutation_broker_environment(source: str) -> tuple[str, ...]:
+    """Pin the broker's exact child environment and its handoff to ExecCapability."""
+    tree = ast.parse(source)
+    violations = []
+    env_assignments = []
+    for node in tree.body:
+        if isinstance(node, ast.Assign) and any(
+                isinstance(target, ast.Name) and target.id == "_ENV" for target in node.targets):
+            env_assignments.append(node.value)
+        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name) and node.target.id == "_ENV":
+            env_assignments.append(node.value)
+    if len(env_assignments) != 1:
+        violations.append("broker environment definition missing or ambiguous")
+    else:
+        try:
+            environment = ast.literal_eval(env_assignments[0])
+        except (ValueError, TypeError):
+            environment = None
+        if environment != _BROKER_ENV:
+            violations.append("broker environment differs from its fixed allowlist")
+    env_stores = [node for node in ast.walk(tree) if isinstance(node, ast.Name)
+                  and node.id == "_ENV" and isinstance(node.ctx, ast.Store)]
+    env_targets = {id(node) for node in env_stores}
+    os_names = {alias.asname or alias.name.split(".", 1)[0]
+                for node in ast.walk(tree) if isinstance(node, ast.Import)
+                for alias in node.names if alias.name == "os"}
+    environ_names = {alias.asname or alias.name
+                     for node in ast.walk(tree) if isinstance(node, ast.ImportFrom)
+                     and node.module == "os" for alias in node.names
+                     if alias.name in {"environ", "getenv", "getenvb"}}
+    if any((isinstance(node, ast.Attribute) and node.attr in {"environ", "getenv", "getenvb"}
+            and isinstance(node.value, ast.Name) and node.value.id in os_names)
+           or (isinstance(node, ast.Name) and node.id in environ_names)
+           for node in ast.walk(tree)):
+        violations.append("broker environment reads ambient credentials through os.environ or getenv")
+    calls = [node for node in ast.walk(tree) if isinstance(node, ast.Call)
+             and _qualified_name(node.func).rsplit(".", 1)[-1] == "ExecCapability"]
+    if len(calls) != 1:
+        violations.append("broker environment handoff missing or ambiguous")
+    else:
+        call = calls[0]
+        environment = call.args[6] if len(call.args) > 6 else next(
+            (item.value for item in call.keywords if item.arg == "env"), None)
+        if not isinstance(environment, ast.Name) or environment.id != "_ENV":
+            violations.append("ExecCapability must receive the fixed broker environment")
+        allowed_env_refs = {id(environment)} if isinstance(environment, ast.Name) else set()
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Name) or node.id != "_ENV":
+                continue
+            if id(node) in env_targets or id(node) in allowed_env_refs:
+                continue
+            violations.append("broker fixed environment is read or mutated outside its handoff")
+            break
+    if len(env_stores) != 1:
+        violations.append("broker fixed environment is rebound")
+    return tuple(violations)
+
+
+def scan_provider_fetch_raw(source: str) -> tuple[str, ...]:
+    """Reject static and literal dynamic reachability to the raw user-web transport."""
+    tree = ast.parse(source)
+    violations = []
+    imports = {
+        (alias.asname or alias.name.split(".", 1)[0]): alias.name
+        for node in ast.walk(tree) if isinstance(node, ast.Import) for alias in node.names
+    }
+    imports.update({
+        (alias.asname or alias.name): f"{node.module}.{alias.name}"
+        for node in ast.walk(tree) if isinstance(node, ast.ImportFrom) and node.module
+        for alias in node.names
+    })
+    parents: dict[ast.AST, ast.AST] = {}
+    for parent in ast.walk(tree):
+        for child in ast.iter_child_nodes(parent):
+            parents[child] = parent
+    module_scope = [node for node in ast.walk(tree) if _function_scope(node, parents) is None]
+    for _ in range(len(module_scope)):
+        changed = False
+        for node in module_scope:
+            if not isinstance(node, (ast.Assign, ast.AnnAssign)) or not isinstance(
+                    node.value, (ast.Name, ast.Attribute)):
+                continue
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            resolved = _resolved_reference(node.value, imports, module_scope, node.lineno)
+            if not (resolved == "kernel_web_fetch.fetch_raw"
+                    or resolved.endswith(".kernel_web_fetch.fetch_raw")):
+                continue
+            for target in targets:
+                if isinstance(target, ast.Name) and imports.get(target.id) != resolved:
+                    imports[target.id] = resolved
+                    changed = True
+        if not changed:
+            break
+    for node in ast.walk(tree):
+        for module in _import_modules(node):
+            if module == "kernel_web_fetch" or module.endswith(".kernel_web_fetch"):
+                violations.append("provider imports kernel_web_fetch")
+                break
+        if not isinstance(node, ast.Call):
+            continue
+        scope = _function_scope(node, parents)
+        scope_nodes = module_scope if scope is None else _scope_nodes(scope, tree)
+        name = _resolved_reference(node.func, imports, scope_nodes, node.lineno)
+        short = name.rsplit(".", 1)[-1]
+        if short == "fetch_raw":
+            violations.append("provider calls fetch_raw")
+        elif short in {"__import__", "import_module"} and node.args:
+            target = node.args[0]
+            if isinstance(target, ast.Constant) and isinstance(target.value, str):
+                if target.value == "kernel_web_fetch" or target.value.endswith(".kernel_web_fetch"):
+                    violations.append("provider dynamically imports kernel_web_fetch")
+        elif short == "getattr" and len(node.args) > 1:
+            target = node.args[1]
+            if isinstance(target, ast.Constant) and target.value == "fetch_raw":
+                violations.append("provider resolves fetch_raw dynamically")
+    return tuple(dict.fromkeys(violations))

@@ -119,6 +119,19 @@ from kernel_tool_paths import (  # noqa: E402
 )
 from kernel_verdict import BLOCKED  # noqa: E402
 from kernel_tool_reply import tool_reply_for_call as _tool_reply_for_call  # noqa: E402
+if os.environ.get("STATEFRAME_MUTATIONS", "off") in {"prebuilt", "authored"}:
+    from contextvars import ContextVar
+
+    _mutation_reply_observer = ContextVar("mutation_reply_observer", default=None)
+    _base_mutation_tool_reply = _tool_reply_for_call
+
+    def _tool_reply_for_call(messages, call_id, observation, **kwargs):
+        reply = _base_mutation_tool_reply(messages, call_id, observation, **kwargs)
+        callback = _mutation_reply_observer.get()
+        if (os.environ.get("STATEFRAME_MUTATIONS", "off") in {"prebuilt", "authored"}
+                and callback is not None and isinstance(call_id, str) and call_id):
+            callback(messages, call_id)
+        return reply
 from kernel_silent_off_organs import (  # noqa: E402
     expectation_subject as _expectation_subject,
     observe_expectation_suite as _observe_expectation_suite,
@@ -147,6 +160,14 @@ from kernel_step_limits import (  # noqa: E402
 
 MAX_STEPS = parse_step_limit(os.environ.get("REACT_STEPS", str(DEFAULT_STEPS)))
 STEPS_UNBOUNDED = True  # product capability marker: REACT_STEPS=0 / MAX_STEPS=0 means unbounded
+
+
+def _mutation_turns_left(step: int) -> int:
+    """Turns a mutation frame may plan for; an unbounded run never runs short."""
+    left = remaining(parse_step_limit(MAX_STEPS), step)
+    return 99 if left is None else left
+
+
 # CPU budget for one public check, aligned with its 300 s wall timeout (recorded bound; the
 # policy default of 30 s RLIMIT_CPU SIGKILLed a 37 s check in prior run).  Bounded by the
 # execution policy's MAX_WALL_SECONDS.
@@ -721,6 +742,21 @@ def _source_snapshot(root: pathlib.Path, paths: Sequence[str]) -> dict[str, str 
     return snapshot
 
 
+def _seal_sources_preserving_binary(root: pathlib.Path,
+                                    sources: Mapping[str, str | None]) -> dict[str, str | bytes | None]:
+    """Preserve non-UTF-8 product bytes when sealing a candidate."""
+    candidate: dict[str, str | bytes | None] = dict(sources)
+    for path, source in sources.items():
+        if source is None:
+            continue
+        raw = (root / path).read_bytes()
+        try:
+            raw.decode("utf-8")
+        except UnicodeDecodeError:
+            candidate[path] = raw
+    return candidate
+
+
 def _authored_check_snapshots(
         root: pathlib.Path, runtime: object,
 ) -> tuple[dict[str, object], dict[str, object], str | None]:
@@ -867,10 +903,10 @@ def _capture_done_candidate_after_exception(
     if not current_sources:
         fallback_sources = values.get("final_sources")
         current_sources = fallback_sources if isinstance(fallback_sources, Mapping) else {}
-    source_map = {
+    source_map = _seal_sources_preserving_binary(root, {
         str(path): source for path, source in current_sources.items()
         if isinstance(path, str) and (isinstance(source, str) or source is None)
-    } if isinstance(current_sources, Mapping) else {}
+    }) if isinstance(current_sources, Mapping) and isinstance(root, pathlib.Path) else {}
     parent_sources: dict[str, str] = {}
     parent = getattr(fileset, "parent", None)
     if isinstance(parent, Mapping):
@@ -2651,6 +2687,10 @@ for _t in TOOLS:
         "type": "string",
         "description": "one line: what you expect this action to show or achieve, and "
                        "how it serves your current plan"}
+
+if os.environ.get("STATEFRAME_MUTATIONS", "off") in {"prebuilt", "authored"}:
+    from kernel_mutate_runtime import schema_for_level as _mutation_schema
+    TOOLS.append(_mutation_schema(os.environ["STATEFRAME_MUTATIONS"]))
 
 _PROBE_TOOL["function"]["parameters"].setdefault("properties", {})["why"] = {
     "type": "string",
@@ -7112,6 +7152,26 @@ def work(d, *, resume=None):
             multi_file=multifile, edit_contract=_edit_contract, workspace=continuation_workspace, resume=resume)
         measurement.run_limitations = run_limitations
         try:
+            if os.environ.get("STATEFRAME_MUTATIONS", "off") in {"prebuilt", "authored"}:
+                from kernel_mutate_projection import observe_tool_reply
+                from kernel_mutate_runtime import service as mutation_service
+
+                _mutation_runtime = mutation_service()
+                if _mutation_runtime is not None:
+                    _mutation_bridged_calls: set[str] = set()
+
+                    def _mutation_reply_callback(messages, call_id):
+                        try:
+                            turn_index = step + 1
+                        except UnboundLocalError:
+                            return
+                        observe_tool_reply(
+                            _mutation_runtime, measurement, messages, call_id, turn_index,
+                            seen=_mutation_bridged_calls,
+                            continue_turn=(not reached(parse_step_limit(MAX_STEPS), turn_index)
+                                           and not done_accepted(measurement)))
+
+                    _mutation_reply_observer.set(_mutation_reply_callback)
             if d.get("runner_kind") == "generic" and not d.get("test_command") and resume is None:
                 measurement._authored_check_parent_binding = measurement.binding()
             if isinstance(fixture_initial_src, str) and isinstance(target, pathlib.Path):
@@ -8741,6 +8801,18 @@ def work(d, *, resume=None):
                                                            "name": _name,
                                                            "arguments": _fn.get("arguments")
                                                            or "{}"}}]})
+                        if os.environ.get("STATEFRAME_MUTATIONS", "off") in {"prebuilt", "authored"}:
+                            from kernel_mutate_runtime import service as mutation_service
+                            _mutations = mutation_service()
+                            if _mutations is not None and _mutations.episode is not None:
+                                from kernel_mutate_projection import authoring_dispatch_allowed
+                                if not authoring_dispatch_allowed(
+                                        _name, getattr(measurement, "completion_owner_runtime", None),
+                                        _request_tools or ()):
+                                    _obs = "REFUSED MUTATION_FRAME action is unavailable in an authoring episode"
+                                    msgs.append(_tool_reply_for_call(msgs, tool_call_id, _obs))
+                                    measurement.observe(_name, _obs)
+                                    continue
                         if _agent_tools is not None and _name == "git" and not _agent_tools.offered("git"):
                             _obs = "REFUSED NOT_A_GIT_REPO: source is not a Git repository or Git is disabled"
                             bolt.receipt("git", "git", "unavailable", "REFUSED", _obs)
@@ -8779,6 +8851,41 @@ def work(d, *, resume=None):
                             )
                             measurement.observe(_name, _menu_refusal)
                             msgs.append(_tool_reply_for_call(msgs, tool_call_id, _menu_refusal))
+                            continue
+                        if (_name == "mutate"
+                                and os.environ.get("STATEFRAME_MUTATIONS", "off") in {"prebuilt", "authored"}):
+                            if _schema_errors or _args_parse_error:
+                                _obs = _render_contract_rejection(
+                                    _name, _schema_errors, binding_current=True)
+                            else:
+                                from kernel_mutate_runtime import service as mutation_service
+                                _mutations = mutation_service()
+                                _obs = (_mutations.dispatch(_args, tool_call_id,
+                                        remaining_turns=_mutation_turns_left(step))
+                                        if _mutations is not None else
+                                        "REFUSED MUTATION_UNAVAILABLE mutation runtime is not installed")
+                            if _mutations is not None and _mutations.edit_state(tool_call_id) == "COMMITTED":
+                                from kernel_mutate_projection import publish_mutation_edit_receipts
+                                _mutation_paths = publish_mutation_edit_receipts(
+                                    _mutations, tool_call_id, bolt, measurement)
+                                if _mutation_paths:
+                                    edits += len(_mutation_paths)
+                                    bolt.product_edits += len(_mutation_paths)
+                                    first_edit_step = step if first_edit_step is None else first_edit_step
+                                    _active_capture = getattr(measurement, "_active_capture", None)
+                                    _release_noread_after_applied_mutation(
+                                        measurement,
+                                        request_id=getattr(_active_capture, "request_id", None),
+                                        tool_name="edit", observation="mutation edit applied.",
+                                        batch_requested=False, batch_status=None,
+                                        batch_changed=True, single_str_replace_applied=False)
+                                    from kernel_rejection_template_restrict import release_after_product_mutation
+                                    release_after_product_mutation(
+                                        measurement,
+                                        request_id=getattr(_active_capture, "request_id", None),
+                                        tool_name="edit")
+                            msgs.append(_tool_reply_for_call(msgs, tool_call_id, _obs))
+                            measurement.observe(_name, _obs)
                             continue
                         # IDEALPATH is the typed owner for its own actions.  Route
                         # those calls before generic binding/legacy-contract gates;
@@ -9692,6 +9799,11 @@ def work(d, *, resume=None):
                     measurement.start_action("text", {})
                     msgs.append({"role": "assistant", "content": reply})
             except Exception as e:                              # noqa: BLE001
+                if os.environ.get("STATEFRAME_MUTATIONS", "off") in {"prebuilt", "authored"}:
+                    from kernel_mutate_projection import MutationSendRefused
+                    if isinstance(e, MutationSendRefused):
+                        msgs.append({"role": "user", "content": e.receipt})
+                        continue
                 if _hook_wiring_for_run is not None:
                     from kernel_hook_exec import HookContainmentError
                     if isinstance(e, HookContainmentError):
@@ -10833,9 +10945,9 @@ def work(d, *, resume=None):
                         from kernel_done_is_submit_authority import (
                             _ownerless_progress_tool_names, artifact_digest,
                         )
-                        _hook_sources = _source_snapshot(
+                        _hook_sources = _seal_sources_preserving_binary(root, _source_snapshot(
                             root, _product_source_paths(root, fileset, d) if multifile
-                            else (target.relative_to(root).as_posix(),))
+                            else (target.relative_to(root).as_posix(),)))
                         _hook_candidate_digest = artifact_digest(_hook_sources)
                         _hook_parent_sources = (fileset.parent if multifile else {
                             target.relative_to(root).as_posix(): str(d.get("parent_src") or "")})
@@ -13448,6 +13560,13 @@ def work(d, *, resume=None):
                 live.write(f"[{fn[:26]:28s} s{step + 1:02d}] {line[:70]:72s} "
                            f"-> {obs[:90].splitlines()[0] if obs.strip() else '(empty)'}\n")
                 live.flush()
+            if (not toolcall_mode and os.environ.get("STATEFRAME_MUTATIONS", "off")
+                    in {"prebuilt", "authored"} and _mutation_runtime is not None):
+                from kernel_mutate_projection import observe_committed_tool
+                observe_committed_tool(
+                    _mutation_runtime, measurement, line, step + 1,
+                    continue_turn=(not reached(parse_step_limit(MAX_STEPS), step + 1)
+                                   and not done_accepted(measurement)))
 
         if _hook_wiring_for_run is not None and _pending_hook_action is not None:
             _hook_name, _hook_args, _hook_call_id, _hook_toolcall = _pending_hook_action
@@ -13626,10 +13745,10 @@ def work(d, *, resume=None):
         if submission_pending(measurement):
             from kernel_done_is_submit_authority import submit_done
             try:
-                current_sources = {
+                current_sources = _seal_sources_preserving_binary(root, {
                     str(path): source for path, source in final_sources.items()
                     if isinstance(path, str) and (isinstance(source, str) or source is None)
-                }
+                })
                 if multifile:
                     parent_sources = dict(fileset.parent)
                 else:

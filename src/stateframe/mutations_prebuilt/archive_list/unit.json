@@ -1,0 +1,44 @@
+{
+  "schema": "stateframe-mutation-unit/1",
+  "name": "archive_list",
+  "revision": 1,
+  "parent": null,
+  "entry": "main.py",
+  "summary": "List ZIP or tar members and preview one bounded text member without extraction.",
+  "kind": "reader",
+  "formats": ["zip", "tar", "tar.bz2", "tar.gz", "tar.xz", "tbz", "tgz", "txz"],
+  "input_schema": {
+    "type": "object",
+    "properties": {
+      "input_id": {"type": "string", "maxLength": 64},
+      "member": {"type": "string", "maxLength": 255}
+    },
+    "required": ["input_id"],
+    "additionalProperties": false
+  },
+  "output_schema": {
+    "type": "object",
+    "properties": {
+      "members": {"type": "array", "items": {"type": "object", "properties": {
+        "name": {"type": "string"}, "size_bytes": {"type": "integer"},
+        "kind": {"type": "string"}, "unsafe_name": {"type": "boolean"}
+      }, "required": ["name", "size_bytes", "kind", "unsafe_name"], "additionalProperties": false}, "maxItems": 2000},
+      "bytes_declared": {"type": "integer"},
+      "selected_name": {"type": "string"},
+      "selected_text": {"type": "string", "maxLength": 65536},
+      "selected_truncated": {"type": "boolean"},
+      "error": {"type": "string"}
+    },
+    "required": ["members", "bytes_declared", "selected_name", "selected_text", "selected_truncated", "error"],
+    "additionalProperties": false
+  },
+  "requires": {"network": false, "writes": false},
+  "smoke": [{
+    "input": {"input_id": "in0", "member": "docs/readme.txt"},
+    "inputs": ["fixtures/sample.zip"],
+    "expect": {"error": "", "selected_name": "docs/readme.txt",
+               "selected_text": "sample archive\n",
+               "members": [{"name": "docs/readme.txt", "size_bytes": 15}]}
+  }],
+  "limits": {"wall_s": 10, "cpu_s": 5, "mem_mb": 256}
+}

@@ -126,6 +126,8 @@ def _add_task_arguments(command: argparse.ArgumentParser, *, for_run: bool = Fal
     if for_run:
         command.add_argument("--run-dir", type=Path,
                              help="where to keep the run (default: ~/.stateframe/runs/<repo>-<time>)")
+        command.add_argument("--allow-source-tree", action="store_true",
+                             help="authorize a StateFrame editable source tree used by --test-python")
     if for_run:
         command.add_argument("--in-place", action="store_true",
                              help="apply the saved candidate after a completed submission and passing checks")
@@ -174,10 +176,31 @@ def _add_task_arguments(command: argparse.ArgumentParser, *, for_run: bool = Fal
     command.add_argument("--shell-sandbox", choices=("on", "off"), default="on")
     for flag in ("run-env", "git-tool", "web"):
         command.add_argument("--" + flag, action=argparse.BooleanOptionalAction, default=None)
+    _add_mutation_arguments(command)
     if for_run:
         command.add_argument("--quiet", action="store_true", help="no live turn log")
     if for_run:
         command.add_argument("--json", action="store_true", help="print the summary as JSON")
+
+
+def _add_mutation_arguments(command: argparse.ArgumentParser) -> None:
+    """Keep run and chat mutation grants explicit and off unless selected."""
+    command.add_argument("--mutations", choices=("off", "prebuilt", "authored"), default=None,
+                         help="mutation units (default: STATEFRAME_MUTATIONS or off)")
+    command.add_argument("--mutation-network", choices=("none", "public-web"), default="none",
+                         help="host fetch grant for mutation units (default: none)")
+    command.add_argument("--mutation-domain", action="append", default=[], metavar="DOMAIN",
+                         help="public-web domain allowed to mutation units (repeatable)")
+    command.add_argument("--mutation-write", action="append", default=[], metavar="GLOB",
+                         help="repository path glob mutation units may propose edits for (repeatable)")
+    command.add_argument("--mutation-read", action="append", default=[], metavar="GLOB",
+                         help="repository path glob mutation units may read (repeatable)")
+    command.add_argument("--mutation-retain", choices=("run", "project", "user"), default="run",
+                         help="default retention scope for mutation units (default: run)")
+    command.add_argument("--mutation-audit", choices=("source", "digest"), default="source",
+                         help="retain source or digest-only audit records (default: source)")
+    command.add_argument("--mutation-hook", action="append", default=[], metavar="UNIT:EVENT",
+                         help="attach a retained observing mutation to post_tool or session_end")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -271,6 +294,8 @@ def build_parser() -> argparse.ArgumentParser:
     trust_cmd.add_argument("--remove", action="store_true", help="withdraw trust for this repository hook file")
     from .powerups_cli import register as register_powerups
     register_powerups(commands)
+    from . import mutations_cli
+    mutations_cli.register(commands)
     return parser
 
 
@@ -312,6 +337,7 @@ def _run_options(args: argparse.Namespace, endpoint: Endpoint) -> RunOptions:
                       python_explicit=args.python is not None, test_python=args.test_python,
                       slot=args.slot, keep_checkpoints=args.keep_checkpoints,
                       keep_run_env=getattr(args, "keep_run_env", False),
+                      allow_source_tree=getattr(args, "allow_source_tree", False),
                       timeout_s=args.timeout,
                       quiet=getattr(args, "quiet", False) or getattr(args, "json", False),
                       tool_settings=settings, skills=tuple(args.skill),
@@ -325,7 +351,46 @@ def _run_options(args: argparse.Namespace, endpoint: Endpoint) -> RunOptions:
                       no_powerups=args.no_powerups,
                       no_project_hooks=args.no_project_hooks,
                       hooks_repo=args.repo.resolve(),
-                      route_cli=args.route, routes_file=args.routes)
+                      route_cli=args.route, routes_file=args.routes,
+                      mutations=args.mutations,
+                       mutation_network=args.mutation_network,
+                       mutation_domains=args.mutation_domain,
+                       mutation_write=args.mutation_write,
+                       mutation_read=args.mutation_read,
+                       mutation_retain=args.mutation_retain,
+                      mutation_audit=args.mutation_audit,
+                      mutation_hooks=args.mutation_hook)
+
+
+def _mutation_platform_refusal(args: argparse.Namespace) -> str | None:
+    """Refuse requested mutation work before run or chat state can be created."""
+    if sys.platform == "linux":
+        return None
+
+    if args.command in {"run", "chat"}:
+        if args.mutations is not None:
+            level = args.mutations
+        elif "STATEFRAME_MUTATIONS" in os.environ:
+            level = os.environ["STATEFRAME_MUTATIONS"]
+        else:
+            level = profiles.load(args.profile).get("STATEFRAME_MUTATIONS", "off")
+        requested = str(level).strip().lower() != "off" or bool(args.mutation_hook)
+    elif args.command == "resume":
+        try:
+            spec = json.loads((args.run_dir / "spec.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            spec = {}
+        from .mutate_host import spec_requests_mutations
+
+        requested = isinstance(spec, dict) and spec_requests_mutations(spec)
+    else:
+        return None
+
+    if not requested:
+        return None
+    from .mutate_host import mutation_platform_error
+
+    return mutation_platform_error(sys.platform, requested=True)
 
 
 def _print_summary(summary: dict) -> None:
@@ -456,6 +521,13 @@ def main(argv: list[str] | None = None) -> int:
         pass
     args = build_parser().parse_args(argv)
     try:
+        refusal = _mutation_platform_refusal(args)
+        if refusal is not None:
+            print(f"stateframe: refused: {refusal}", file=sys.stderr)
+            return 2
+        if args.command == "mutations":
+            from . import mutations_cli
+            return mutations_cli.dispatch(args)
         if args.command == "inspect":
             if args.send is None:
                 print(overview(args.run_dir.resolve()))

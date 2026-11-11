@@ -29,6 +29,17 @@ This example uses a local server. For a hosted OpenAI-compatible endpoint, set `
 
 For an optional closing check based on the task's own sentences, set `STATEFRAME_REQUIREMENT_RECHECK=on` in the shell before starting StateFrame. It is off by default. See [the running guide](docs/guide/running.md#closing-check-requirement-recheck) for when the check applies and its measured results.
 
+Mutation helpers are optional and off by default, and currently require Linux. From the package directory, run the sandbox selftest, then ask the shipped `file_facts` helper to inspect a bundled file without granting network or write access:
+
+```bash
+stateframe mutations selftest
+stateframe run --repo examples/discount_bug \
+  --task "Use the file_facts helper to report the size and line count of shop/pricing.py." \
+  --mutations prebuilt --mutation-read 'shop/pricing.py'
+```
+
+`authored` also lets a run submit helper units for sandboxed validation. Network and write access need separate `--mutation-network` and `--mutation-write` grants. See the [mutation units guide](docs/guide/mutations.md) for the available controls and limits.
+
 ## llama.cpp server on another machine: co-locate the tokenizer
 
 The engine counts tokens many times per turn, by default on the model server. If that server is remote,

@@ -1,0 +1,44 @@
+{
+  "schema": "stateframe-mutation-unit/1",
+  "name": "structured_peek",
+  "revision": 1,
+  "parent": null,
+  "entry": "main.py",
+  "summary": "Preview bounded CSV, TSV, JSON, JSONL, TOML, or INI structure.",
+  "kind": "reader",
+  "formats": ["csv", "tsv", "json", "jsonl", "toml", "ini"],
+  "input_schema": {
+    "type": "object",
+    "properties": {
+      "input_id": {"type": "string", "maxLength": 64},
+      "format": {"type": "string", "enum": ["csv", "tsv", "json", "jsonl", "toml", "ini"]}
+    },
+    "required": ["input_id", "format"],
+    "additionalProperties": false
+  },
+  "output_schema": {
+    "type": "object",
+    "properties": {
+      "format": {"type": "string"},
+      "columns": {"type": "array", "items": {"type": "string"}, "maxItems": 100},
+      "rows": {"type": "array", "items": {"type": "array", "items": {"type": "string"}, "maxItems": 100}, "maxItems": 20},
+      "row_count": {"type": "integer"},
+      "top_level_type": {"type": "string"},
+      "error": {"type": "string"},
+      "error_line": {"type": "integer"},
+      "error_column": {"type": "integer"},
+      "truncated": {"type": "boolean"}
+    },
+    "required": ["format", "columns", "rows", "row_count", "top_level_type", "error", "error_line", "error_column", "truncated"],
+    "additionalProperties": false
+  },
+  "requires": {"network": false, "writes": false},
+  "smoke": [{
+    "input": {"input_id": "in0", "format": "csv"},
+    "inputs": ["fixtures/sample.csv"],
+    "expect": {"format": "csv", "columns": ["name", "score"],
+               "rows": [["Ada", "10"], ["Lin", "9"]], "row_count": 2,
+               "top_level_type": "table", "error": ""}
+  }],
+  "limits": {"wall_s": 10, "cpu_s": 5, "mem_mb": 256}
+}

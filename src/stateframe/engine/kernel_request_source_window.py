@@ -2635,8 +2635,13 @@ def bound_runtime_sources(
         editable = editable_product_paths(runtime)
         if isinstance(editable, UnavailableEvidence):
             return editable
+        mutations = None
+        if os.environ.get("STATEFRAME_MUTATIONS", "off") in {"prebuilt", "authored"}:
+            from kernel_mutate_runtime import service as mutation_service
+            mutations = mutation_service()
         if (not Path(target).exists() and isinstance(roots, (list, tuple))
-                and path.split("/", 1)[0] in roots and not editable):
+                and path.split("/", 1)[0] in roots
+                and (not editable or mutations is not None)):
             ticket = _ticket_text(runtime)
             if ticket:
                 plan = build_source_closure(Path(root), (), ticket).as_dict()

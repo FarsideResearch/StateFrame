@@ -21,12 +21,14 @@ import uuid
 
 if __package__:
     from .kernel_exec_capability import ExecCapability
-    from .kernel_exec_tracker import capture_launch_identity, kill_launch_unit, recorded_launch_identity
+    from .kernel_exec_tracker import (ProcessTable, capture_launch_identity, kill_launch_unit,
+                                      process_cmdline_digest, recorded_launch_identity)
     from .kernel_test_isolation import sandbox_executable
     from .sf_launch import _current_cgroup
 else:
     from kernel_exec_capability import ExecCapability
-    from kernel_exec_tracker import capture_launch_identity, kill_launch_unit, recorded_launch_identity
+    from kernel_exec_tracker import (ProcessTable, capture_launch_identity, kill_launch_unit,
+                                     process_cmdline_digest, recorded_launch_identity)
     from kernel_test_isolation import sandbox_executable
     from sf_launch import _current_cgroup
 
@@ -173,12 +175,67 @@ def rpc_timeout_seconds() -> float:
     return base * min(8.0, max(1.0, load / cpus))
 
 
+def _host_mutation_identity(identity: dict, *, launcher=None) -> dict:
+    """Translate the supervisor PID namespace's child identity to a host PID."""
+    if not sys.platform.startswith("linux"):
+        return identity
+    expected_cmdline = identity.get("cmdline_sha256")
+    if (not isinstance(expected_cmdline, str) or len(expected_cmdline) != 64
+            or any(char not in "0123456789abcdef" for char in expected_cmdline)):
+        raise ExecSessionError("mutation command identity could not be proven")
+    table = ProcessTable()
+    def matching(rows):
+        candidates = []
+        for row in rows:
+            if list(row.start) != identity.get("start") or row.zombie:
+                continue
+            try:
+                namespace = table.pid_namespace(row.pid)
+            except OSError:
+                # Another user's process can share the start tick; it cannot be our payload.
+                continue
+            if namespace != identity.get("ns"):
+                continue
+            try:
+                if process_cmdline_digest(row.pid) != expected_cmdline:
+                    continue
+            except (OSError, RuntimeError, ValueError):
+                continue
+            try:
+                status = (Path("/proc") / str(row.pid) / "status").read_text()
+                line = next(line for line in status.splitlines() if line.startswith("NSpid:"))
+                namespace_pids = [int(value) for value in line.split()[1:]]
+            except (OSError, StopIteration, ValueError):
+                continue
+            if identity.get("pid") in namespace_pids[1:]:
+                candidates.append((row, namespace_pids))
+        return candidates
+
+    candidates = []
+    if launcher is not None:
+        recorded = recorded_launch_identity(launcher)
+        root = table.identity(launcher.pid) if recorded is not None else None
+        if root is not None and root.start == recorded.start and not root.zombie:
+            # The supervised child is in this verified tree. Avoid an expensive host-wide
+            # procfs scan while a short-lived mutation is waiting for identity registration.
+            candidates = matching(table.refresh_members({root.pid: root}).values())
+    if not candidates:
+        candidates = matching(table.snapshot().values())
+    if len(candidates) != 1:
+        raise ExecSessionError("mutation host PID identity could not be proven")
+    row, namespace_pids = candidates[0]
+    return {**identity, "pid": row.pid, "pgid": row.pgid, "sid": row.sid,
+            "ns_pid": identity["pid"], "pid_ns_pid": namespace_pids[-1]}
+
+
 class JobHandle:
     def __init__(self, ident: str, session: ExecSession,
                  memory_limit_mechanism: str | None = None,
-                 cgroup_leaf_pattern: str | None = None):
+                 cgroup_leaf_pattern: str | None = None,
+                 identity: dict | None = None):
         self.id = ident
         self._session = session
+        self.identity = identity
         self.lost_bytes = 0
         self.memory_limit_mechanism = memory_limit_mechanism
         self.cgroup_leaf_pattern = cgroup_leaf_pattern
@@ -263,12 +320,16 @@ class ExecSession:
         self._write_envelope: tuple[Path, ...] = ()
         self._handles: list[JobHandle] = []
         self._initial_capability: ExecCapability | None = None
+        self._network_envelope: str | None = None
+        self._read_envelope: tuple[Path, ...] = ()
 
     def configure(self, capability: ExecCapability) -> None:
         """Pin the run namespace envelope before any purpose launches a command."""
         if self._process is not None or self._initial_capability is not None:
             raise ExecSessionError("execution session authority is already configured")
         self._initial_capability = capability
+        self._network_envelope = capability.network
+        self._read_envelope = (*capability.read_roots, capability.workspace)
 
     def startup_diagnostics(self) -> str:
         """Describe only retained execution-process state and the private supervisor log."""
@@ -282,6 +343,20 @@ class ExecSession:
     def _start(self, cap: ExecCapability) -> None:
         if self._closed:
             raise ExecSessionError("execution session is closed")
+        mutation_session = (cap.purpose in {"mutation", "mutation_broker"}
+                            or (self._initial_capability is not None
+                                and self._initial_capability.purpose in {"mutation", "mutation_broker"}))
+        if mutation_session and self._network_envelope is None:
+            self._network_envelope = cap.network
+            self._read_envelope = (*cap.read_roots, cap.workspace)
+        elif mutation_session:
+            levels = {"none": 0, "loopback": 1, "full": 2}
+            if levels[cap.network] > levels[self._network_envelope]:
+                raise ExecSessionError("network authority exceeds configured session envelope")
+            requested = (*cap.read_roots, cap.workspace)
+            if any(not any(p == root or root in p.parents for root in self._read_envelope)
+                   for p in requested):
+                raise ExecSessionError("read authority exceeds configured session envelope")
         if self._process is not None:
             if cap.sandboxed != self._sandboxed:
                 raise ExecSessionError("cannot mix host and sandboxed execution in one session")
@@ -406,7 +481,8 @@ class ExecSession:
                 raise self._supervisor_error(
                     f"execution supervisor communication failed: {error}") from error
 
-    def _spawn(self, argv, cap, *, cwd=None, stdin=None) -> JobHandle:
+    def _spawn(self, argv, cap, *, cwd=None, stdin=None, mounts=None,
+               armable_wall_s=None) -> JobHandle:
         if isinstance(argv, (str, bytes)):
             raise TypeError("argv must be a sequence, not shell text")
         with self._lock:
@@ -414,9 +490,17 @@ class ExecSession:
             self._start(cap)
             value = self._rpc({"op": "start", "argv": list(argv), "cap": cap.as_dict(),
                                "cwd": str(cwd) if cwd is not None else None,
-                               "stdin": base64.b64encode(stdin).decode() if stdin is not None else None})
+                               "stdin": base64.b64encode(stdin).decode() if stdin is not None else None,
+                               **({"mounts": mounts} if mounts is not None else {}),
+                               **({"armable_wall_s": armable_wall_s}
+                                  if armable_wall_s is not None else {})})
+            identity = value.get("identity")
+            if identity is not None and cap.purpose in {"mutation", "mutation_broker"}:
+                launcher = getattr(self, "_process", None)
+                identity = (_host_mutation_identity(identity, launcher=launcher)
+                            if launcher is not None else _host_mutation_identity(identity))
             handle = JobHandle(value["id"], self, value.get("memory_limit_mechanism"),
-                               value.get("cgroup_leaf_pattern"))
+                               value.get("cgroup_leaf_pattern"), identity)
             self._handles.append(handle)
             return handle
 
@@ -430,15 +514,29 @@ class ExecSession:
     def run(self, argv: Sequence[str], cap: ExecCapability, *, stdin: bytes | None = None,
             cwd: Path | None = None) -> ExecResult:
         handle = self._spawn(argv, cap, cwd=cwd, stdin=stdin)
+        return self._collect(handle, cap)
+
+    def _collect(self, handle: JobHandle, cap: ExecCapability, *, on_first_byte=None,
+                 on_timeout=None) -> ExecResult:
         head = bytearray()
         tail = bytearray()
         half = cap.limits.output_bytes // 2
         total_received = 0
         lost = 0
+        saw_output = False
+        saw_timeout = False
         try:
             while True:
                 status = handle._status(True)
+                if status["timed_out"] and not saw_timeout:
+                    saw_timeout = True
+                    if on_timeout is not None:
+                        on_timeout(status.get("timeout_at"))
                 chunk = base64.b64decode(status["output"])
+                if chunk and not saw_output:
+                    saw_output = True
+                    if on_first_byte is not None:
+                        on_first_byte()
                 lost += status["lost_bytes"]
                 total_received += len(chunk)
                 need = max(0, half - len(head))
@@ -452,7 +550,7 @@ class ExecSession:
                                       status["output_total_bytes"], status["wall_seconds"],
                                       _cleanup(status["cleanup"]),
                                       status.get("memory_limit_mechanism"),
-                                      handle.cgroup_leaf_pattern)
+                                      getattr(handle, "cgroup_leaf_pattern", None))
                 time.sleep(0.01)
         except BaseException:
             handle.stop(0.1)
@@ -526,6 +624,11 @@ class ExecSession:
         try:
             # After EOF the exit is underway; without it the supervisor gets one more bound.
             self._process.wait(timeout=seconds)
+            if (self._initial_capability is not None
+                    and self._initial_capability.purpose in {"mutation", "mutation_broker"}):
+                finalizer = getattr(self._process, "_stateframe_pidfd_finalizer", None)
+                if finalizer is not None:
+                    finalizer()
             return
         except subprocess.TimeoutExpired:
             pass

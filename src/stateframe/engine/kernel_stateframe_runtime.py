@@ -12053,6 +12053,12 @@ class StateFrameRuntime:
         selected = project_menu(self._base_tool_menu(tools, messages))
         from kernel_read_lockout import project as project_read_lockout
         selected = project_read_lockout(self, selected)
+        if os.environ.get("STATEFRAME_MUTATIONS", "off") in {"prebuilt", "authored"}:
+            mutation_tool = next((tool for tool in tools
+                                  if tool.get("function", {}).get("name") == "mutate"), None)
+            if mutation_tool is not None and all(
+                    tool.get("function", {}).get("name") != "mutate" for tool in selected):
+                selected.append(mutation_tool)
         self.completion_menu = tuple(tool["function"]["name"] for tool in selected)
         return selected
 
@@ -19724,6 +19730,34 @@ class StateFrameRuntime:
     def _view(self, prefix: Sequence[dict], frame: dict, working: str,
               path: str, tools: object, *, provider_request: bool = True
         ) -> tuple[ViewPlan | RenderOverflow, dict[str, dict]]:
+        if os.environ.get("STATEFRAME_MUTATIONS", "off") in {"prebuilt", "authored"}:
+            from kernel_mutate_runtime import service as mutation_service
+            _mutations = mutation_service()
+            if _mutations is not None:
+                if _mutations.episode is not None:
+                    if _mutations.expire_episode() is None:
+                        if getattr(self, "stateframe_f4_mode", "off") != "on":
+                            from kernel_mutate_projection import authoring_plan
+                            return authoring_plan(self, tools)
+                from kernel_mutate_projection import panel as mutation_panel
+                row = getattr(getattr(self, "owner", None), "task_row", {})
+                task_parts = []
+                if isinstance(row, Mapping):
+                    original_task = row.get("msg", "")
+                    if isinstance(original_task, str) and original_task.strip():
+                        task_parts.append(original_task)
+                latest_ask = getattr(self, "last_user_ask", None)
+                if callable(latest_ask):
+                    try:
+                        ask = latest_ask()
+                    except (OSError, TypeError, ValueError):
+                        ask = None
+                    current_step = ask.get("content") if isinstance(ask, Mapping) else None
+                    if (isinstance(current_step, str) and current_step.strip()
+                            and current_step not in task_parts):
+                        task_parts.append(current_step)
+                task = "\n".join(task_parts)
+                prefix = [*prefix, {"role": "system", "content": mutation_panel(_mutations, task=task)}]
         self._evictfix_operational_source_content = None
         if (getattr(self, "stateframe_f4_mode", "off") == "on"
                 or getattr(self, "_hybrid_crossed", False)):
