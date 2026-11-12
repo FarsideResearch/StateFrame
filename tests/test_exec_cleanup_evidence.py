@@ -5,10 +5,12 @@ to exit on a loaded host, and the kernel then killed their whole sandbox (exit 1
 supervisor also killed a session when a reparented grandchild had not been recorded yet.
 """
 import os
+import signal
 import socket
 import subprocess
 import sys
 import threading
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -17,6 +19,7 @@ import kernel_exec_session as session_module
 from kernel_exec_session import CleanupReport, ExecSession, ExecSessionError
 from kernel_exec_supervisor import Supervisor
 from kernel_exec_tracker import ProcessIdentity, capture_launch_identity
+from fixtures.process_signals import signal_run_owned
 
 
 def _session(process, control):
@@ -50,7 +53,7 @@ def test_slow_supervisor_exit_after_eof_is_waited_for_not_killed(monkeypatch):
     assert process.returncode == 0
 
 
-def test_unresponsive_live_supervisor_is_killed_and_reported(monkeypatch):
+def test_unresponsive_live_supervisor_is_killed_and_reported(monkeypatch, tmp_path):
     monkeypatch.setenv("STATEFRAME_EXEC_RPC_SECONDS", "1")
     monkeypatch.setattr(session_module, "_host_load", lambda: (0.0, os.cpu_count() or 1))
     ours, theirs = socket.socketpair()
@@ -62,7 +65,9 @@ def test_unresponsive_live_supervisor_is_killed_and_reported(monkeypatch):
     finally:
         theirs.close()
         if process.poll() is None:
-            process.kill()
+            # Failure cleanup of a plain sleeper; there is no run checkpoint to wait for.
+            signal_run_owned(tmp_path, process, signal.SIGKILL, deadline=time.monotonic(),
+                             what="cleanup evidence sleeper", require_checkpoint_saved=False)
             process.wait()
 
 
