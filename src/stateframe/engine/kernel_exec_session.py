@@ -6,6 +6,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass, replace
 import errno
 import json
+import logging
 import math
 import os
 from pathlib import Path
@@ -173,6 +174,65 @@ def rpc_timeout_seconds() -> float:
         base = 15.0
     load, cpus = _host_load()
     return base * min(8.0, max(1.0, load / cpus))
+
+
+logger = logging.getLogger(__name__)
+# close() samples a slow supervisor this often; it is killed only after a load-scaled run of
+# samples in which its launch unit showed no progress at all.
+CLOSE_SAMPLE_SECONDS = 0.5
+
+
+def _launch_unit_progress(process, table: ProcessTable) -> tuple | None:
+    """Fingerprint of a live supervisor's launch unit, or None when it cannot be read.
+
+    CPU ticks, the member set and the zombie count all move while cleanup is working. A
+    vanished or unreadable process is unknown, never evidence of a stall.
+    """
+    pid = getattr(process, "pid", None)
+    if not isinstance(pid, int):
+        return None
+    try:
+        root = table.identity(pid)
+        recorded = recorded_launch_identity(process)
+        if (root is None or root.zombie
+                or (recorded is not None and recorded.start is not None
+                    and recorded.start != root.start)):
+            return None
+        members = table.refresh_members({pid: root})
+        ticks = [table.cpu_ticks(row) for row in members.values()]
+    except (OSError, RuntimeError, ValueError, IndexError):
+        return None
+    if pid not in members:
+        return None
+    return (sum(tick or 0 for tick in ticks),
+            frozenset((row.pid, row.start) for row in members.values()),
+            sum(row.zombie for row in members.values()))
+
+
+def _await_supervisor_progress(process) -> tuple[int, tuple] | None:
+    """Wait for the supervisor to exit while its launch unit keeps making progress.
+
+    Returns None once it is reaped, or (samples, fingerprint) when it made no progress for a
+    load-scaled run of samples. Elapsed time alone never ends the wait.
+    """
+    table = ProcessTable()
+    previous = None
+    stalled = 0
+    while True:
+        try:
+            process.wait(timeout=CLOSE_SAMPLE_SECONDS)
+            return None
+        except subprocess.TimeoutExpired:
+            pass
+        current = _launch_unit_progress(process, table)
+        if current is None or current != previous:
+            stalled = 0
+        else:
+            stalled += 1
+            window = max(2, math.ceil(rpc_timeout_seconds() / CLOSE_SAMPLE_SECONDS))
+            if stalled >= window:
+                return stalled, current
+        previous = current
 
 
 def _host_mutation_identity(identity: dict, *, launcher=None) -> dict:
@@ -619,18 +679,21 @@ class ExecSession:
             try:
                 verified = (not getattr(self, "_close_force_kill", False)
                             and getattr(self, "_close_stop_done", False))
-                # Every path first gives the supervisor a load-scaled chance to exit on its
-                # own: with the control socket closed it stops its jobs and exits. A fixed
-                # short wait, or an immediate kill after a slow stop, SIGKILLed healthy
-                # sandboxes on a loaded host (exit 137). A retry after a kill only
-                # re-verifies the launch unit.
+                # Every path first lets the supervisor exit on its own: with the control
+                # socket closed it stops its jobs and exits. It is killed only when its launch
+                # unit shows no progress; an elapsed-time kill SIGKILLed healthy sandboxes
+                # on a loaded host (exit 137). A retry after a kill only re-verifies the unit.
                 exited = getattr(self, "_close_unit_killed", False)
+                stall = None
                 if not exited:
-                    try:
-                        self._process.wait(timeout=rpc_timeout_seconds())
-                        exited = True
-                    except subprocess.TimeoutExpired:
-                        exited = False
+                    stall = _await_supervisor_progress(self._process)
+                    exited = stall is None
+                    if stall is not None:
+                        samples, (ticks, members, _zombies) = stall
+                        logger.warning(
+                            "[stateframe] execution supervisor %s made no progress for %d "
+                            "samples (cpu ticks %d, members %d); killing launch unit",
+                            getattr(self._process, "pid", "?"), samples, ticks, len(members))
                 if verified and exited:
                     self._close_process_reaped = True
                 else:
@@ -651,9 +714,12 @@ class ExecSession:
                         state = ("closed its control socket but did not exit" if released
                                  else "stopped answering and did not exit")
                         detail = f"; survivors {', '.join(map(str, survivors))}" if survivors else ""
+                        stalled = (f" and made no progress for "
+                                   f"{stall[0] * CLOSE_SAMPLE_SECONDS:g} s"
+                                   if stall is not None else "")
                         raise ExecSessionError(
-                            f"execution supervisor did not terminate after cleanup: it {state} "
-                            f"within {rpc_timeout_seconds():g} s" + detail)
+                            f"execution supervisor did not terminate after cleanup: it {state}"
+                            + stalled + detail)
             except BaseException as error:
                 errors.append(error)
         if self._process is not None and not getattr(self, "_close_pidfd_done", False):
