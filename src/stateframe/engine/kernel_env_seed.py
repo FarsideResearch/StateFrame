@@ -66,8 +66,58 @@ def _source_digest(root: Path) -> str:
     return tree_digest("stateframe.env_seed_source/1", entries)
 
 
+def _tree_fingerprint(root: Path) -> list:
+    """Cheap stat-only fingerprint: entry count, total size, newest mtime and ctime (no reads)."""
+    count = total = newest_m = newest_c = 0
+    for directory, dirs, names in os.walk(root):
+        for name in [*dirs, *names]:
+            info = (Path(directory) / name).lstat()
+            count += 1
+            total += info.st_size
+            newest_m = max(newest_m, info.st_mtime_ns)
+            newest_c = max(newest_c, info.st_ctime_ns)
+        info = os.lstat(directory)
+        newest_m = max(newest_m, info.st_mtime_ns)
+        newest_c = max(newest_c, info.st_ctime_ns)
+    return [count, total, newest_m, newest_c]
+
+
+_DIGEST_CACHE_ENTRIES = 16
+
+
+def _cached_source_digest(root: Path, cache_file: Path | None) -> str:
+    """_source_digest memoized on disk, keyed by (root, file count, size, newest mtime/ctime)."""
+    if cache_file is None:
+        return _source_digest(root)
+    key = str(root.resolve())
+    fingerprint = _tree_fingerprint(root)
+    try:
+        entries = json.loads(cache_file.read_text())
+        hit = entries[key]
+        if hit["fingerprint"] == fingerprint and re.fullmatch(r"[0-9a-f]{64}", hit["digest"]):
+            return hit["digest"]
+    except (OSError, ValueError, KeyError, TypeError):
+        entries = {}
+    if not isinstance(entries, dict):
+        entries = {}
+    digest = _source_digest(root)
+    # A file edited mid-walk must not be cached under the earlier fingerprint.
+    if _tree_fingerprint(root) == fingerprint:
+        entries.pop(key, None)
+        entries[key] = {"fingerprint": fingerprint, "digest": digest}
+        entries = dict(list(entries.items())[-_DIGEST_CACHE_ENTRIES:])
+        temporary = cache_file.with_name(f".{cache_file.name}.{os.getpid()}.{time.time_ns()}.tmp")
+        try:
+            cache_file.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            temporary.write_text(json.dumps(entries, sort_keys=True))
+            os.replace(temporary, cache_file)
+        except OSError:
+            temporary.unlink(missing_ok=True)  # Caching is best effort.
+    return digest
+
+
 def _key_inputs(source: Path, interpreter: Path, source_repo: Path | None,
-                authorized_roots: tuple[Path, ...]) -> dict:
+                authorized_roots: tuple[Path, ...], digest_cache: Path | None = None) -> dict:
     config = {}
     for line in (source / "pyvenv.cfg").read_text().splitlines():
         if "=" in line:
@@ -98,7 +148,7 @@ def _key_inputs(source: Path, interpreter: Path, source_repo: Path | None,
         "relocation": {"source": str(source.resolve()),
                        "source_repo": str(source_repo) if source_repo is not None else None,
                        "authorized_roots": sorted(str(path) for path in authorized_roots),
-                       "source_sha256": _source_digest(source)},
+                       "source_sha256": _cached_source_digest(source, digest_cache)},
     }
 
 
@@ -488,8 +538,6 @@ def clone(source: Path, destination: Path, interpreter: Path, source_repo: Path 
           authorized_roots: tuple[Path, ...], *,
           event: Callable[[dict], None] | None = None) -> Path:
     """Build or verify one seed under a per-key lock, then clone it into a new run env."""
-    inputs = _key_inputs(source, interpreter, source_repo, authorized_roots)
-    key = hashlib.sha256(json.dumps(inputs, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
     configured = os.environ.get("STATEFRAME_HOME")
     if configured:
         home = Path(configured)
@@ -498,6 +546,9 @@ def clone(source: Path, destination: Path, interpreter: Path, source_repo: Path 
         if user_home is None:
             raise OSError("cannot find the StateFrame home: set HOME or STATEFRAME_HOME")
         home = user_home / ".stateframe"
+    inputs = _key_inputs(source, interpreter, source_repo, authorized_roots,
+                         home / "cache" / "env-seed-source-digest.json")
+    key = hashlib.sha256(json.dumps(inputs, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
     store = home / "env-seeds"
     store.mkdir(mode=0o700, parents=True, exist_ok=True)
     seed = store / key
