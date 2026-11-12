@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.5.9 (2026-11-12)
 
 - Docs: the quickstart now recommends `--ctx-checkpoints 32 -cms 256 -cram 0` for llama.cpp, matching the prompt cache guide, and the guide explains how to tell when a server is still on the default checkpoint spacing.
 
