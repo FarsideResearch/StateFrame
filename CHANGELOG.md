@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.5.11 (2026-11-12)
 
 - Turn timing now attributes overlapping spans with a sweep-line, preserving the existing timing event and host span output while avoiding quadratic work as span counts grow.
 
