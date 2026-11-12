@@ -19,6 +19,7 @@ FLAG_SITES = {
     "engine/kernel_exec_session.py::ExecSession._start",
     "engine/kernel_test_isolation.py::capability_command",
     "engine/kernel_test_isolation.py::isolated_command",
+    "engine/kernel_test_isolation.py::_mutation_command",
     "engine/protected_tree_guard.py::guarded_command",
 }
 

@@ -47,11 +47,12 @@ def snapshot_optional_inputs(
     from kernel_stateframe_headcarry import (
         _import_targets,
         _module_head,
-        _read_source,
+        _read_optional_source,
         _requested_paths,
         headcarry_owed_reads_enabled,
         owed_read_rows,
     )
+    from kernel_obligation_assess import UnavailableEvidence
 
     sites = frame.get("open_sites")
     if not isinstance(sites, list):
@@ -69,15 +70,18 @@ def snapshot_optional_inputs(
     primary, roles = _requested_paths(sites, edits, owed_reads)
     dependencies: dict[str, str] = {}
     for path in primary:
-        raw = _read_source(root, path)
+        raw = _read_optional_source(root, path)
         dependencies[path] = (
             "sha256:" + hashlib.sha256(raw).hexdigest()
             if raw is not None
             else "UNAVAILABLE"
         )
         if raw is not None:
-            for dependency in _import_targets(root, path, raw):
-                source = _read_source(root, dependency)
+            targets = _import_targets(root, path, raw)
+            if isinstance(targets, UnavailableEvidence):
+                raise FrameAllocationReplanNeeded("optional dependency unavailable")
+            for dependency in targets:
+                source = _read_optional_source(root, dependency)
                 dependencies[dependency] = (
                     "sha256:" + hashlib.sha256(source).hexdigest()
                     if source is not None
@@ -92,7 +96,7 @@ def snapshot_optional_inputs(
             raise FrameAllocationReplanNeeded(
                 "head is outside the current dependency inventory"
             )
-        raw = _read_source(root, path)
+        raw = _read_optional_source(root, path)
         whole_file = (roles.get(path) == "owed_read" and row.get("source_kind") == "owed_read")
         minimum_end = len(raw.splitlines(keepends=True)) if (raw is not None and whole_file) else 0
         fresh = (_module_head(root, path, raw, minimum_end=minimum_end)
@@ -198,10 +202,10 @@ def selection_from_frame(
 def validate_optional_dependencies(optional: Mapping[str, object], *, root: Path | None) -> None:
     """Check retained and omitted dependency revisions without rendering."""
     if root is not None:
-        from kernel_stateframe_headcarry import _read_source
+        from kernel_stateframe_headcarry import _read_optional_source
 
         for path, revision in optional.get("dependency_revisions", {}).items():
-            raw = _read_source(root, path)
+            raw = _read_optional_source(root, path)
             current = (
                 "sha256:" + hashlib.sha256(raw).hexdigest()
                 if raw is not None

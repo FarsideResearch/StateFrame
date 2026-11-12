@@ -146,3 +146,7 @@ Shell, job, Git, web and custom calls have durable intent and completion records
 | External | Full-network shell, host-mode shell, custom tools marked `external` | Refuse automatic replay. `stateframe resume <run-dir> --replay-external` explicitly repeats them, then applies the local comparison. Repetition can repeat an outside effect. |
 
 An intent without completion means the operation may have happened; resume refuses and asks for reconciliation and a new run. Tool divergence refuses resume, including checkpoint fallback. A shell-enabled resume restores the run environment from a checkpoint when one qualifies and otherwise replays from the start. Live jobs make checkpoints ineligible. The menu, tool schemas, job section, effects and newest exchange all count against the same request budget. Execution reply delivery shrinks against the measured whole request, while the original taped observation remains on disk. If the required minimum will not fit, StateFrame refuses the request rather than silently dropping authoritative state.
+
+## Mutation units
+
+`mutate` runs bounded helper units through a dedicated single-process sandbox. Payloads have no network or writable filesystem. Public web fetches and repository writes are separate host grants; a unit can request a fetch or propose an edit, but the host validates and applies authorized effects. Mutation output is an untrusted observation and never counts as source-read or check evidence. See [Mutation units](mutations.md) for the catalog, grants, budgets and replay behavior.

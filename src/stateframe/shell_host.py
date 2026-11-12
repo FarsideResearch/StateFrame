@@ -34,6 +34,8 @@ def provision(options, run_dir: Path, spec: dict) -> None:
     from .runner import use_run_env_python
 
     settings = options.tool_settings
+    if getattr(options, "allow_source_tree", False):
+        spec["allow_source_tree"] = True
     if "shell_path_dirs" not in spec:
         spec["shell_path_dirs"], spec["shell_read_roots"] = path_authority()
         spec["shell_read_roots"] = sorted(set(spec["shell_read_roots"]) |
@@ -43,7 +45,8 @@ def provision(options, run_dir: Path, spec: dict) -> None:
         try:
             environment = create_run_env(
                 run_dir, Path(source), source_repo=Path(spec["repo"]),
-                authorized_read_roots=tuple(Path(path).resolve(strict=True) for path in settings.shell_read))
+                authorized_read_roots=tuple(Path(path).resolve(strict=True) for path in settings.shell_read),
+                allow_source_tree=getattr(options, "allow_source_tree", False))
         except RunEnvError as error:
             print(f"run environment off: {error}; dependency installs will not persist for checks")
             settings = replace(settings, run_env=False)

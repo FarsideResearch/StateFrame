@@ -967,6 +967,23 @@ def register_host_state(*, required: bool, secret: str = "") -> None:
         kernel_checkpoint.register_secret(secret)
 
 
+def _finish_mutation_runtime(mutation_runtime, result: dict, status: int, emit_event):
+    """Finish an enabled mutation runtime without turning host refusal into run failure."""
+    try:
+        try:
+            mutation_runtime.invoke_hook(event="session_end", facts={"result": result.get("result")})
+        finally:
+            mutation_runtime.close()
+    except BaseException as error:
+        code = getattr(type(error), "code", None)
+        if code == "MUTATION_PLATFORM_UNQUALIFIED":
+            emit_event("mutation_refused", code=code, detail=str(error)[:300])
+        else:
+            emit_event("engine_error", error=type(error).__name__, detail=str(error)[:300])
+            result, status = {"result": "MUTATION_CONTAINMENT", "error": str(error)[:300]}, 1
+    return result, status
+
+
 def main(argv: list[str]) -> int:
     if len(argv) != 2:
         print("usage: _child.py <run-dir>", file=sys.stderr)
@@ -1070,7 +1087,8 @@ def main(argv: list[str]) -> int:
                 raise ToolSettingsError("host tool settings file differs from the run spec")
             builtin_names = frozenset(("grep", "list_files", "read", "edit", "str_replace", "insert_before",
                 "authored_check", "file_create", "run_tests", "read_check_receipt", "recall", "done",
-                "shell", "job_wait", "job_output", "job_stop", "file_delete", "file_move", "git", "web_fetch", "git_commit", "git_branch", "skill_load"))
+                "shell", "job_wait", "job_output", "job_stop", "file_delete", "file_move", "git", "web_fetch", "git_commit", "git_branch", "skill_load",
+                *(("mutate",) if "mutations" in spec else ())))
             custom = load_tool_files([Path(item["path"]) for item in settings.tools_files],
                                      builtin_names=builtin_names, shell_network=settings.shell_network)
             if custom.digest != spec.get("custom_tools_digest"):
@@ -1111,7 +1129,14 @@ def main(argv: list[str]) -> int:
     signal.signal(signal.SIGTERM, terminate_shell_run)
     started = time.monotonic()
     result: object = None
+    mutation_runtime = None
     try:
+        if "mutations" in spec:
+            if __package__:
+                from . import mutate_host
+            else:
+                import mutate_host
+            mutation_runtime = mutate_host.start(spec, run)
         if settings is not None:
             configure_shell(run, settings, spec, session)
             from kernel_shell_tool import service as shell_service
@@ -1181,6 +1206,8 @@ def main(argv: list[str]) -> int:
         result = {"result": kind, "error": type(error).__name__}
         status = 1
     finally:
+        if mutation_runtime is not None:
+            result, status = _finish_mutation_runtime(mutation_runtime, result, status, emit)
         if hook_wiring is not None:
             try:
                 hook_wiring.close()

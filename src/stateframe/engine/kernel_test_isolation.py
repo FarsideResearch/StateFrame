@@ -495,8 +495,93 @@ def _uncovered_mounts(mounts: dict[Path, str], mount_points: frozenset[Path] | N
     return kept
 
 
+def _mutation_command(command, cap, executable: str, mounts: dict, shared_namespace: bool):
+    """Build the payload namespace from only the qualified runtime and staged files."""
+    required = {"boot", "unit", "ctl", "in", "resp"}
+    if not isinstance(mounts, dict) or set(mounts) - {"hide"} != required:
+        raise ValueError("mutation mounts must name boot, unit, ctl, in and resp")
+    hide = mounts.get("hide", [])
+    if (not isinstance(hide, list) or len(hide) > 256
+            or any(not isinstance(path, str) or not os.path.isabs(path) for path in hide)):
+        raise ValueError("mutation hidden paths are invalid")
+    roots = {name: Path(mounts[name]).resolve(strict=True) for name in required}
+    if any(not root.is_dir() for root in roots.values()):
+        raise ValueError("mutation mounts must be directories")
+    if cap.workspace_writable or cap.write_roots:
+        raise ValueError("mutation command cannot have writable roots")
+    if cap.purpose == "mutation" and cap.network != "none":
+        raise ValueError("mutation payload must have no network")
+    if cap.purpose == "mutation_broker" and cap.network != "full":
+        raise ValueError("mutation broker requires full network")
+    allowed = (*cap.read_roots, cap.workspace)
+    if any(not any(root == admitted or admitted in root.parents for admitted in allowed)
+           for root in roots.values()):
+        raise ValueError("mutation mount lacks read authority")
+    arguments = [executable, "--die-with-parent", "--new-session", "--as-pid-1"]
+    if shared_namespace:
+        arguments += ["--unshare-user", "--unshare-ipc", "--unshare-uts", "--unshare-pid"]
+        if cap.network == "none":
+            arguments += ["--unshare-net"]
+    else:
+        arguments += ["--unshare-all"]
+        if cap.network == "full":
+            arguments += ["--share-net"]
+    if _bwrap_userns_guard_supported(executable):
+        if not shared_namespace:
+            arguments += ["--unshare-user"]
+        arguments += ["--disable-userns", "--assert-userns-disabled"]
+    arguments += ["--cap-drop", "ALL", "--proc", "/proc", "--remount-ro", "/proc",
+                  "--dir", "/dev",
+                  "--dev-bind", "/dev/null", "/dev/null",
+                  "--dev-bind", "/dev/urandom", "/dev/urandom"]
+    for link in ("/bin", "/sbin", "/lib", "/lib32", "/lib64", "/libx32"):
+        if os.path.islink(link):
+            arguments += ["--symlink", os.readlink(link), link]
+    if os.path.isfile("/etc/ld.so.cache"):
+        arguments += ["--ro-bind", "/etc/ld.so.cache", "/etc/ld.so.cache"]
+    if __package__:
+        from .kernel_exec_capability import executable_symlinks
+    else:
+        from kernel_exec_capability import executable_symlinks
+    links = executable_symlinks(tuple(cap.read_roots))
+    for root in sorted({path.resolve(strict=True) for path in cap.read_roots},
+                       key=lambda path: (len(path.parts), str(path))):
+        if root not in roots.values():
+            arguments += ["--ro-bind", str(root), str(root)]
+    system_links = {Path(path) for path in ("/bin", "/sbin", "/lib", "/lib32", "/lib64", "/libx32")
+                    if os.path.islink(path)}
+    for path, target in sorted(links.items(), key=lambda item: (len(item[0].parts), str(item[0]))):
+        if path not in system_links:
+            arguments += ["--symlink", target, str(path)]
+    # Mask parts of a bound root (site-packages, unloadable extensions) instead of binding the
+    # root entry by entry: a few hundred binds cost about a second per launch.
+    bound = [root for root in (path.resolve(strict=True) for path in cap.read_roots)
+             if root.is_dir() and root not in roots.values()]
+    for raw in sorted(set(hide)):
+        path = Path(raw)
+        if path.resolve(strict=True) != path or not any(root in path.parents for root in bound):
+            raise ValueError("mutation hidden path lacks a bound parent")
+        if path.is_dir():
+            arguments += ["--tmpfs", raw, "--remount-ro", raw]
+        elif path.is_file():
+            arguments += ["--ro-bind", "/dev/null", raw]
+        else:
+            raise ValueError("mutation hidden path must be a file or directory")
+    for name, target in (("boot", "/sf/boot"), ("unit", "/sf/unit"),
+                         ("ctl", "/sf/ctl"), ("in", "/in"), ("resp", "/resp")):
+        arguments += ["--ro-bind", str(roots[name]), target]
+    arguments += ["--remount-ro", "/"]
+    # The wrapper must skip site startup: it joins a fresh keyring only after Python starts.
+    inner = [os.path.realpath(sys.executable), "-I", "-S", "/sf/boot/sf_launch.py",
+             "--mutation-network-none" if cap.network == "none" else "--mutation-process-filter",
+             json.dumps(dict(cap.env), separators=(",", ":")), *command]
+    arguments += ["--chdir", "/sf/unit" if cap.purpose == "mutation" else "/",
+                  "--", *inner]
+    return arguments, dict(cap.env)
+
+
 def capability_command(command, cap, *, platform_backend=None, shared_namespace=False,
-                       single_process=False, private_pid_unit=False):
+                       single_process=False, private_pid_unit=False, mutation_mounts=None):
     """Build a shell/job boundary from explicit authority, never host test policy.
 
     shared_namespace is private to the Linux session supervisor: keep its PID/net
@@ -508,6 +593,16 @@ def capability_command(command, cap, *, platform_backend=None, shared_namespace=
     selected = platform_backend or ("sandbox-exec" if platform.system() == "Darwin" else "bwrap")
     if selected not in {"sandbox-exec", "bwrap"}:
         raise ValueError("execution backend must be sandbox-exec or bwrap")
+    if cap.purpose in {"mutation", "mutation_broker"}:
+        if selected == "sandbox-exec":
+            # The mutation boot applies its final sandbox before importing unit code.
+            if mutation_mounts is None:
+                raise ValueError("mutation mounts are required")
+            return list(command), dict(cap.env)
+        executable = sandbox_executable("bwrap")
+        if executable is None:
+            raise RuntimeError("mutation execution requires bwrap")
+        return _mutation_command(command, cap, executable, mutation_mounts, shared_namespace)
     executable = sandbox_executable(selected)
     if executable is None:
         raise RuntimeError(f"execution capability requires {selected}; no unsandboxed fallback")

@@ -138,6 +138,13 @@ def _run_scripted(tmp_path: Path, *, strict: bool, steps: list[dict[str, object]
             "args=sys.argv[1:]\n"
             "if len(args) >= 3 and args[0] == '-B' and os.path.basename(args[1]) == '_child.py':\n"
             f"    os.execv(real_python, [real_python, '-B', '-c', {bootstrap!r}, *args[1:]])\n"
+            # Linux launches the child as `-B -c <bootstrap> stateframe._child` with the
+            # child and run paths inside the bootstrap's sys.argv literal.
+            "if len(args) == 4 and args[:2] == ['-B', '-c'] and args[3] == 'stateframe._child':\n"
+            "    import ast,re\n"
+            "    child,run=ast.literal_eval(re.search(r'sys\\.argv=(\\[.*?\\]);',args[2]).group(1))\n"
+            "    os.chdir(run)\n"
+            f"    os.execv(real_python, [real_python, '-B', '-c', {bootstrap!r}, child, run])\n"
             "os.execv(real_python, [real_python, *args])\n", encoding="utf-8")
         wrapper.chmod(0o755)
         process = run_monitored(

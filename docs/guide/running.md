@@ -26,11 +26,13 @@
 - `--max-turns N`, `--timeout S`: optional caps; by default there are none.
 - `STATEFRAME_QUEUE_WAIT_MAX_S` (environment or profile): finite positive cap in seconds for a silent request whose selected endpoint keeps answering `/slots` or `/health`. Default 1800 seconds, shortened by the run deadline. The ordinary per-request cap resumes once a response starts. Queue waits are journaled and summarized with one warning line.
 - `STATEFRAME_SEND_STALL_S` (environment or profile): maximum time with no request-body bytes sent, from 10 to 600 seconds; default 90. A stalled upload is aborted and can retry on a new connection under the ordinary transport policy. Queue-wait extension starts only after the full body is sent. Each send stall records sent and total bytes, stalled seconds, and the endpoint origin without credentials.
+- `--mutations off|prebuilt|authored` plus `--mutation-network`, repeatable `--mutation-domain`, `--mutation-read`, `--mutation-write` and `--mutation-hook UNIT:EVENT`, `--mutation-retain` and `--mutation-audit`: opt into sandboxed mutation units and their separate grants. They are off by default. See [Mutation units](mutations.md).
 - `--test-env KEY=VALUE`: environment for your tests (not for engine settings).
 - `--pytest-plugins installed`: let pytest load installed plugins.
 - `--shell off|read-only|standard|unrestricted` (default `standard`): command policy. `--shell-network none|loopback|full` defaults to `loopback`.
 - `--shell-ask` / `--no-shell-ask`: confirmation for commands outside the inspection and user allow sets. Default off for `run`, on for `chat`.
 - `--shell-allow PROGRAM`, `--shell-deny PROGRAM`, `--shell-read PATH`: repeatable program and readable-root settings.
+- `--allow-source-tree` (run): authorize a StateFrame editable source tree found in the `--test-python` environment. StateFrame validates the `src/stateframe` layout and adds that tree as a read-only shell root for the run.
 - `--shell-sandbox on|off` (default `on`): `off` requires `--shell unrestricted`, prints a host-access warning and is recorded as host authorization.
 - `--run-env` / `--no-run-env`: run-local dependency environment; default on when shell is enabled, otherwise off.
 - `STATEFRAME_ENV_SEED_MAX_GB` (environment): soft limit for the shared environment seed store in decimal GB, default 10. Set it to `0` for unbounded storage. Eviction removes old seeds after a successful clone or during `stateframe gc`; rehydration rebuilds from the recorded distributions instead of copying when its seed is gone.

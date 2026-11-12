@@ -25,6 +25,16 @@ REVIEWED = {
     # Host namespace (held by this process) and the server namespace (held by namespace_handle).
     "engine/kernel_mcp_driver.py::_ContainmentMonitor.__init__",
     "engine/kernel_mcp_driver.py::_ContainmentMonitor._sample",
+    # Mutation launch identity: the namespace is one fact beside PID, start tick, boot id and
+    # argv digest, never a membership test; a reused inode alone cannot match a record.
+    "engine/kernel_exec_supervisor.py::Supervisor.start",
+    "engine/kernel_exec_supervisor.py::Supervisor._wait_for_final_exec",
+    "engine/kernel_mutate_exec.py::MutationExecutor._write_owner",
+    "engine/kernel_exec_session.py::_host_mutation_identity.matching",
+    # Re-verified after the pidfd pins the recorded task, with start tick and argv digest.
+    "engine/kernel_mutate_sweep.py::_kill_recorded",
+    # Diagnostic text only; never compared.
+    "engine/kernel_exec_supervisor.py::ManagedProcess.tick",
 }
 
 

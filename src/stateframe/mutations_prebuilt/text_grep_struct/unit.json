@@ -1,0 +1,39 @@
+{
+  "schema": "stateframe-mutation-unit/1",
+  "name": "text_grep_struct",
+  "revision": 1,
+  "parent": null,
+  "entry": "main.py",
+  "summary": "Find matches for a bounded safe-regex subset with line and column using a hard step budget.",
+  "kind": "reader",
+  "formats": ["log"],
+  "input_schema": {
+    "type": "object",
+    "properties": {
+      "input_id": {"type": "string", "maxLength": 64},
+      "pattern": {"type": "string", "maxLength": 256}
+    },
+    "required": ["input_id", "pattern"],
+    "additionalProperties": false
+  },
+  "output_schema": {
+    "type": "object",
+    "properties": {
+      "matches": {"type": "array", "items": {"type": "object", "properties": {
+        "line": {"type": "integer"}, "column": {"type": "integer"},
+        "match": {"type": "string", "maxLength": 256}
+      }, "required": ["line", "column", "match"], "additionalProperties": false}, "maxItems": 100},
+      "steps": {"type": "integer"}, "step_limit": {"type": "integer"},
+      "error": {"type": "string"}
+    },
+    "required": ["matches", "steps", "step_limit", "error"],
+    "additionalProperties": false
+  },
+  "requires": {"network": false, "writes": false},
+  "smoke": [{
+    "input": {"input_id": "in0", "pattern": "ERROR"},
+    "inputs": ["fixtures/sample.log"],
+    "expect": {"error": "", "matches": [{"line": 2, "column": 1, "match": "ERROR"}]}
+  }],
+  "limits": {"wall_s": 10, "cpu_s": 5, "mem_mb": 256}
+}

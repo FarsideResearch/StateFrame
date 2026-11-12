@@ -46,10 +46,22 @@ PRIMITIVE_TESTS = {
     "test_cgroup_leaf_pattern.py",
 }
 
+# Reviewed exceptions are tied to the exact source call, not the whole test file.
+REVIEWED_RAW_SIGNALS = {
+    ("test_mutation_linux_regressions.py", "_stop_process_group", 329, 8,
+     "os.killpg(process.pid, signal.SIGTERM)"): "Test-harness process-group cleanup.",
+    ("test_mutation_linux_regressions.py", "_stop_process_group", 333, 12,
+     "os.killpg(process.pid, signal.SIGKILL)"): "Test-harness process-group cleanup.",
+    ("test_mutation_linux_regressions.py", "_interrupt_and_resume", 380, 8,
+     "os.kill(sender_pid, signal.SIGKILL)"): "The interrupt is the behaviour under test.",
+}
+
 
 def _raw_run_signals(source: str, relative: Path) -> list[tuple[int, str]]:
     """Find direct signals in run tests, including imported aliases."""
     tree = ast.parse(source)
+    parents = {child: parent for parent in ast.walk(tree)
+               for child in ast.iter_child_nodes(parent)}
     os_names = {"os"}
     signal_modules = set()
     raw_names = {"signal_verified", "signal_owned"}
@@ -95,7 +107,13 @@ def _raw_run_signals(source: str, relative: Path) -> list[tuple[int, str]]:
                          and func.value.value.id == "self" and func.value.attr == "process")
             raw |= not endpoint
         if raw:
-            violations.append((node.lineno, ast.unparse(node)))
+            call = ast.unparse(node)
+            parent = parents.get(node)
+            while parent is not None and not isinstance(parent, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                parent = parents.get(parent)
+            function = parent.name if parent is not None else None
+            if (relative.as_posix(), function, node.lineno, node.col_offset, call) not in REVIEWED_RAW_SIGNALS:
+                violations.append((node.lineno, call))
     return violations
 
 
@@ -148,6 +166,25 @@ def test_orphan_guard_primitive_exemptions_are_path_exact(tmp_path: Path) -> Non
 
 def test_group_existence_probe_is_not_a_run_kill() -> None:
     assert not _raw_run_signals("import os\nos.killpg(pgid, 0)\n", Path("test_engine_run.py"))
+
+
+@pytest.mark.parametrize("function,line,column,call", (
+    ("_stop_process_group", 329, 8, "os.killpg(process.pid, signal.SIGTERM)"),
+    ("_stop_process_group", 333, 12, "os.killpg(process.pid, signal.SIGKILL)"),
+    ("_interrupt_and_resume", 380, 8, "os.kill(sender_pid, signal.SIGKILL)"),
+))
+def test_reviewed_raw_signals_are_call_site_exact(function: str, line: int,
+                                                  column: int, call: str) -> None:
+    source = (f"import os, signal\ndef {function}(process, sender_pid):\n"
+              + "\n" * (line - 3) + f"{' ' * column}{call}\n")
+    path = Path("test_mutation_linux_regressions.py")
+    assert _raw_run_signals(source, path) == []
+    assert _raw_run_signals(source, Path("other.py")) == [(line, call)]
+    assert _raw_run_signals(source.replace(f"def {function}", "def other"), path) == [(line, call)]
+    assert _raw_run_signals("\n" + source, path) == [(line + 1, call)]
+    duplicate = source.replace(f"{' ' * column}{call}\n",
+                               f"{' ' * column}{call}; {call}\n")
+    assert _raw_run_signals(duplicate, path) == [(line, call)]
 
 
 @pytest.mark.parametrize("source", (

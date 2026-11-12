@@ -28,6 +28,20 @@ Each point says whether it is **measured** (we have the number) or **by design**
 
 Details: [ARCHITECTURE.md](ARCHITECTURE.md), [KNOWN_LIMITATIONS.md](KNOWN_LIMITATIONS.md).
 
+## Mutations
+
+Mutation units are small Python helpers with declared JSON inputs and outputs. They run in a sandbox and return untrusted observations for the model. They help with bounded jobs such as reading a structured file or comparing snapshots, without repeating a long sequence of tool calls.
+
+For a repository with `data/events.csv`, make the shipped `structured_peek` helper available for CSV inspection:
+
+```bash
+stateframe run --repo ~/code/shop \
+  --task "Inspect data/events.csv and report its columns and row count." \
+  --mutations prebuilt
+```
+
+`structured_peek` handles CSV, TSV, JSON, JSONL, TOML and INI, and needs no network or write grant. The `authored` level also lets the model submit helpers for validation and smoke checks. Mutations are off by default. Public web fetches need `--mutation-network public-web` and `--shell-network full`; unit-proposed repository edits need `--mutation-write GLOB`. Mutation execution currently requires Linux. See the [mutation units guide](docs/guide/mutations.md) for the catalog, grants and sandbox limits.
+
 ## Coming next
 
 Upcoming, not in this release:

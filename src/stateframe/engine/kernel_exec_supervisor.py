@@ -4,7 +4,9 @@ from __future__ import annotations
 import base64
 from dataclasses import asdict
 import fcntl
+import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import selectors
@@ -19,7 +21,7 @@ import time
 # -I deliberately ignores ambient PYTHONPATH and the working directory.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from kernel_exec_capability import capability_from_dict
-from kernel_exec_tracker import Descendants, ProcessTable
+from kernel_exec_tracker import Descendants, ProcessTable, process_cmdline_digest
 from kernel_execution_policy import (
     FULL_PROCESS_SCAN_INTERVAL_SECONDS,
     _remove_command_cgroup,
@@ -33,20 +35,33 @@ from sf_launch import (
 )
 
 
+def _read_memory_join_result(fd: int, *, timeout: float = 10.0) -> bytes:
+    """Wait only a bounded time for the pre-bwrap launcher to report its cgroup join."""
+    with selectors.DefaultSelector() as selector:
+        selector.register(fd, selectors.EVENT_READ)
+        if not selector.select(timeout):
+            raise RuntimeError("command memory join result timed out")
+    return os.read(fd, 1)
+
+
 class ManagedProcess:
     def __init__(self, ident, process, collector, cap, table, cgroup=None,
-                 memory_limit_mechanism=None):
+                 memory_limit_mechanism=None, armable_wall_s=None):
         self.id = ident
         self.process = process
         self.collector = collector
         self.cap = cap
         self.family = Descendants(process.pid, table)
         self.started = time.monotonic()
+        self.armable_wall_s = armable_wall_s
+        self.armed = armable_wall_s is None
+        self.wall_seconds = cap.limits.wall_seconds
         self.stop_at = None
         self.kill_at = None
         self.term_sent: set[int] = set()
         self.killed: set[int] = set()
         self.timed_out = False
+        self.timeout_at = None
         self.cleanup = None
         self.eof = False
         self.cursor = 0
@@ -60,6 +75,7 @@ class ManagedProcess:
         self.post_exit_scan_complete = False
         self.cgroup = cgroup
         self.memory_limit_mechanism = memory_limit_mechanism
+        self.output_overflow = False
 
     def remove_cgroup(self) -> bool:
         if self.cgroup is None:
@@ -88,6 +104,10 @@ class ManagedProcess:
                 self.eof = True
                 self.process.stdout.close()
                 self.stop(0)
+        if self.cap.limits.kill_on_output and self.collector.total_bytes > self.cap.limits.output_bytes:
+            self.output_overflow = True
+            self.limit_detail = "output byte limit exceeded"
+            self.stop(0)
         live = self.family.update(rows)
         breach = self.family.table.limit_breach(live, self.cap.limits)
         if breach:
@@ -102,14 +122,26 @@ class ManagedProcess:
                 self.leader_reaped = True
                 self.post_exit_scan_pending = True
             self.stop(0.1)
-        if now - self.started >= self.cap.limits.wall_seconds and self.stop_at is None:
+        if self.armed and now - self.started >= self.wall_seconds and self.stop_at is None:
             self.timed_out = True
+            self.timeout_at = now
             self.stop(0.1)
         if self.stop_at is not None:
             fresh = [p for p in live if p.pid not in self.term_sent]
             self.term_sent |= self.family.signal(fresh, signal.SIGTERM)
             if now >= self.kill_at:
                 self.killed |= self.family.signal(live, signal.SIGKILL)
+            try:
+                # Signalling and reaping can change liveness within this tick.
+                live = self.family.update(self.family.table.snapshot())
+                if getattr(self, "post_exit_scan_pending", False):
+                    self.post_exit_scan_pending = False
+                    self.post_exit_scan_complete = True
+            except (OSError, RuntimeError, ValueError):
+                if now > self.kill_at + 2:
+                    self.complete(False, tuple(sorted(p.pid for p in live)),
+                                  "descendant liveness unverified after signaling")
+                return
             if (not live and self.process.poll() is not None
                     and self.post_exit_scan_complete):
                 # No producers remain. Drain the finite pipe fully before publishing exit.
@@ -123,7 +155,19 @@ class ManagedProcess:
                 elif now > self.kill_at + 2:
                     self.complete(False, (), "output pipe held by untracked descendant")
             elif now > self.kill_at + 2:
-                self.complete(False, tuple(p.pid for p in live), "descendants survived SIGKILL")
+                details = []
+                for row in live[:8]:
+                    try:
+                        namespace = self.family.table.pid_namespace(row.pid) or "unknown"
+                    except (OSError, AttributeError):
+                        namespace = "unknown"
+                    details.append(
+                        f"{row.pid}(ppid={row.ppid},pgid={row.pgid},sid={row.sid},pidns={namespace})")
+                suffix = f"; {len(live) - len(details)} more" if len(live) > len(details) else ""
+                detail = "descendants survived SIGKILL"
+                if details:
+                    detail += ": " + "; ".join(details) + suffix
+                self.complete(False, tuple(p.pid for p in live), detail[:600])
 
     def complete(self, ok, survivors, detail=""):
         if survivors and self.family.signal_errors:
@@ -154,12 +198,17 @@ class ManagedProcess:
         lost = 0
         if consume:
             output, self.cursor, lost = self.collector.read_since(self.cursor)
-        return {"exit_code": self.exit_code if self.cleanup is not None else None,
+        value = {"exit_code": self.exit_code if self.cleanup is not None else None,
                 "finished": self.cleanup is not None, "cleanup": self.cleanup,
                 "timed_out": self.timed_out, "output": base64.b64encode(output).decode(),
                 "memory_limit_mechanism": self.memory_limit_mechanism,
                 "output_total_bytes": self.collector.total_bytes,
                 "lost_bytes": lost, "wall_seconds": (self.ended or time.monotonic()) - self.started}
+        if self.cap.limits.kill_on_output:
+            value["output_overflow"] = self.output_overflow
+        if self.timeout_at is not None:
+            value["timeout_at"] = self.timeout_at
+        return value
 
 
 class Supervisor:
@@ -238,6 +287,39 @@ class Supervisor:
         argv = request["argv"]
         if not isinstance(argv, list) or not argv or any(not isinstance(v, str) or "\0" in v for v in argv):
             raise ValueError("argv must be a nonempty sequence of strings without NUL")
+        mutation = cap.purpose in {"mutation", "mutation_broker"}
+        armable_wall_s = request.get("armable_wall_s")
+        if armable_wall_s is not None:
+            if (cap.purpose not in {"mutation", "mutation_broker"}
+                    or type(armable_wall_s) not in {int, float}
+                    or not math.isfinite(armable_wall_s)
+                    or not 0 < armable_wall_s <= cap.limits.wall_seconds):
+                raise ValueError("invalid mutation arm budget")
+        cwd = (Path("/sf/unit") if mutation and cap.purpose == "mutation" and self.backend == "bwrap"
+               else Path("/") if mutation and self.backend == "bwrap"
+               else Path(request.get("cwd") or cap.workspace).resolve(strict=True))
+        limits = asdict(cap.limits)
+        if not cap.limits.kill_on_output:
+            del limits["kill_on_output"]
+        shared_namespace = self.namespace_network != "host"
+        bwrap_starts_session = (
+            self.backend == "bwrap" and cap.sandboxed
+            and (mutation or not shared_namespace)
+        )
+        spec = {"argv": argv, "cwd": str(cwd), "env": dict(cap.env), "limits": limits,
+                "memory_supervised": True, "new_session": False}
+        # Popen or bwrap starts the session; sf_launch must not call setsid a second time.
+        # Keep reparented descendants in that launch session so cleanup can still find them.
+        # The launcher is stdlib-only and isolated (-I): exec the real interpreter, not a venv
+        # symlink, so the sandbox only has to admit the resolved runtime roots.
+        if mutation and self.backend == "bwrap":
+            launcher_path = "/sf/boot/sf_launch.py"
+        elif mutation:
+            launcher_path = str(Path(request["mounts"]["boot"]) / "sf_launch.py")
+        else:
+            launcher_path = str(Path(__file__).with_name("sf_launch.py").resolve())
+        launch = [os.path.realpath(sys.executable), "-I", launcher_path,
+                  json.dumps(spec, separators=(",", ":"))]
         self.next_id += 1
         ident = f"j{self.next_id}"
         cgroup = (_command_cgroup(ident, cap.limits.nproc,
@@ -248,6 +330,17 @@ class Supervisor:
         launch_memory_mechanism = (
             "supervised_rss" if sys.platform == "darwin" else
             "cgroup_memory_max" if cgroup_memory_configured else "rlimit_data")
+        spec["memory_limit_mechanism"] = launch_memory_mechanism
+        launch[-1] = json.dumps(spec, separators=(",", ":"))
+        command, environment = capability_command(
+            launch, cap, platform_backend=self.backend,
+            shared_namespace=shared_namespace,
+            mutation_mounts=request.get("mounts") if mutation else None)
+        if private_loopback:
+            # A custom tool may narrow a full-network run. Keep the supervised
+            # PID namespace, but give this command a disconnected loopback netns.
+            command.insert(1, "--unshare-net")
+        final_command = tuple(command)
         memory_mechanism = launch_memory_mechanism
         memory_reader = memory_writer = None
         collector = None
@@ -256,22 +349,6 @@ class Supervisor:
             if cgroup_memory_configured:
                 memory_reader, memory_writer = os.pipe()
                 os.set_inheritable(memory_writer, True)
-            cwd = Path(request.get("cwd") or cap.workspace).resolve(strict=True)
-            spec = {"argv": argv, "cwd": str(cwd), "env": dict(cap.env),
-                    "limits": asdict(cap.limits), "memory_supervised": True,
-                    "memory_limit_mechanism": launch_memory_mechanism}
-            # The launcher is stdlib-only and isolated (-I): exec the real interpreter, not a venv
-            # symlink, so the sandbox only has to admit the resolved runtime roots.
-            launch = [os.path.realpath(sys.executable), "-I",
-                      str(Path(__file__).with_name("sf_launch.py").resolve()),
-                      json.dumps(spec, separators=(",", ":"))]
-            command, environment = capability_command(
-                launch, cap, platform_backend=self.backend,
-                shared_namespace=self.namespace_network != "host")
-            if private_loopback:
-                # A custom tool may narrow a full-network run. Keep the supervised
-                # PID namespace, but give this command a disconnected loopback netns.
-                command.insert(1, "--unshare-net")
             collector = JobOutputCollector(self.directory / f"{ident}.output", capacity=1 << 20)
             pass_fds = ()
             if cgroup is not None:
@@ -283,18 +360,34 @@ class Supervisor:
                     enter.extend(("--memory-result-fd", str(memory_writer)))
                     pass_fds = (memory_writer,)
                 command = [*enter, "--", *command]
-            with tempfile.TemporaryFile(dir=self.directory) as input_file:
-                supplied = request.get("stdin")
-                if supplied is not None:
-                    input_file.write(base64.b64decode(supplied, validate=True))
-                    input_file.seek(0)
-                process = subprocess.Popen(command, stdin=input_file if supplied is not None else subprocess.DEVNULL,
-                                           stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                                           env=environment, close_fds=True, pass_fds=pass_fds)
+            supplied = request.get("stdin")
+            if mutation and supplied is not None:
+                fd, staged = tempfile.mkstemp(prefix="mutation-stdin-", dir=self.directory)
+                try:
+                    with os.fdopen(fd, "wb") as stream:
+                        stream.write(base64.b64decode(supplied, validate=True))
+                        stream.flush()
+                        os.fsync(stream.fileno())
+                    with open(staged, "rb") as input_file:
+                        process = subprocess.Popen(command, stdin=input_file, stdout=subprocess.PIPE,
+                                                   stderr=subprocess.DEVNULL, env=environment, close_fds=True,
+                                                   pass_fds=pass_fds,
+                                                   start_new_session=not bwrap_starts_session)
+                finally:
+                    os.unlink(staged)
+            else:
+                with tempfile.TemporaryFile(dir=self.directory) as input_file:
+                    if supplied is not None:
+                        input_file.write(base64.b64decode(supplied, validate=True))
+                        input_file.seek(0)
+                    process = subprocess.Popen(command, stdin=input_file if supplied is not None else subprocess.DEVNULL,
+                                               stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                               env=environment, close_fds=True, pass_fds=pass_fds,
+                                               start_new_session=not bwrap_starts_session)
             if memory_writer is not None:
                 os.close(memory_writer)
                 memory_writer = None
-                marker = os.read(memory_reader, 1)
+                marker = _read_memory_join_result(memory_reader)
                 os.close(memory_reader)
                 memory_reader = None
                 reported = {b"C": "cgroup_memory_max", b"D": "rlimit_data"}.get(marker)
@@ -311,6 +404,8 @@ class Supervisor:
                     process.wait(timeout=2)
                 except (OSError, subprocess.TimeoutExpired):
                     pass
+                if process.stdout is not None:
+                    process.stdout.close()
             for fd in (memory_reader, memory_writer):
                 if fd is not None:
                     try:
@@ -323,15 +418,104 @@ class Supervisor:
                 _remove_command_cgroup(cgroup)
             raise
         job = ManagedProcess(ident, process, collector, cap, self.table, cgroup,
-                             memory_limit_mechanism=memory_mechanism)
+                             memory_limit_mechanism=memory_mechanism,
+                             armable_wall_s=armable_wall_s)
         self.jobs[ident] = job
+        if mutation:
+            if request.get("_mutation_fault") == "after_spawn_before_identity":
+                if sys.platform == "linux":
+                    self._wait_for_final_exec(process, final_command)
+                os._exit(97)
+            namespace = None
+            command_digest = None
+            if sys.platform == "linux":
+                try:
+                    row, namespace, command_digest = self._wait_for_final_exec(process, final_command)
+                except (OSError, RuntimeError, ValueError) as error:
+                    job.stop(0)
+                    raise RuntimeError("mutation launch final-exec identity unavailable") from error
+            else:
+                row = self.table.identity(process.pid)
+            if row is None:
+                job.stop(0)
+                raise RuntimeError("mutation launch identity unavailable")
+            try:
+                boot_id = Path("/proc/sys/kernel/random/boot_id").read_text().strip()
+            except OSError:
+                boot_id = ""
+            identity = {"pid": row.pid, "start": list(row.start), "birth": list(row.start),
+                        "boot_id": boot_id, "pgid": row.pgid, "sid": row.sid,
+                        "ns": namespace if sys.platform == "linux" else self.table.pid_namespace(row.pid)}
+            if sys.platform == "linux":
+                # The launcher and final sandbox share a PID, but not a command line.
+                identity["cmdline_sha256"] = command_digest
+                if not identity["ns"]:
+                    job.stop(0)
+                    raise RuntimeError("mutation launch PID namespace identity unavailable")
+            return {"id": ident, "identity": identity,
+                    "memory_limit_mechanism": memory_mechanism,
+                    "cgroup_leaf_pattern": _cgroup_leaf_pattern_status()}
         return {"id": ident, "memory_limit_mechanism": memory_mechanism,
                 "cgroup_leaf_pattern": _cgroup_leaf_pattern_status()}
+
+    def _wait_for_final_exec(self, process, final_command):
+        """Wait until the supervised PID exposes the argv that will be identity-pinned."""
+        expected = hashlib.sha256(
+            b"\0".join(os.fsencode(value) for value in final_command) + b"\0").hexdigest()
+        initial = self.table.identity(process.pid)
+        if initial is None:
+            raise RuntimeError("mutation launch identity unavailable")
+        deadline = time.monotonic() + 10.0
+        last_error = None
+        while time.monotonic() < deadline:
+            # Do not poll Popen here: poll() reaps the leader and releases its PID for reuse.
+            row = self.table.identity(process.pid)
+            if row is None or row.start != initial.start or row.zombie:
+                raise RuntimeError("mutation launch exited before its final exec identity")
+            try:
+                command_digest = process_cmdline_digest(row.pid)
+                if command_digest == expected:
+                    namespace = self.table.pid_namespace(row.pid)
+                    confirmed = self.table.identity(row.pid)
+                    if (namespace and confirmed is not None and not confirmed.zombie
+                            and confirmed.start == row.start
+                            and self.table.pid_namespace(row.pid) == namespace
+                            and process_cmdline_digest(row.pid) == expected):
+                        return confirmed, namespace, expected
+            except (OSError, RuntimeError, ValueError) as error:
+                # /proc can be transiently empty while exec replaces the launcher image.
+                last_error = error
+            time.sleep(0.01)
+        raise RuntimeError("mutation launch command line did not reach its final exec") from last_error
 
     def dispatch(self, request):
         op = request["op"]
         if op == "start":
             return self.start(request)
+        if op == "arm":
+            job = self.jobs[request["id"]]
+            if job.armed or job.cleanup is not None or job.stop_at is not None:
+                raise ValueError("mutation cannot be armed")
+            deadline = request.get("deadline")
+            if deadline is not None and (type(deadline) not in (int, float)
+                                         or not math.isfinite(deadline)):
+                raise ValueError("invalid mutation hook trigger deadline")
+            now = time.monotonic()
+            ready_at = request.get("ready_at", now)
+            if (type(ready_at) not in (int, float) or not math.isfinite(ready_at)
+                    or ready_at > now):
+                raise ValueError("invalid mutation hook readiness time")
+            job.started = ready_at
+            remaining = (job.armable_wall_s if deadline is None else
+                         min(job.armable_wall_s, deadline - job.started))
+            job.wall_seconds = max(0.0, remaining)
+            job.armed = True
+            expired = remaining <= 0 or now >= job.started + job.wall_seconds
+            if expired:
+                job.timed_out = True
+                job.timeout_at = now
+                job.stop(0)
+            return {"started": job.started, "expired": expired}
         if op in {"status", "stop"}:
             job = self.jobs[request["id"]]
             if op == "stop":

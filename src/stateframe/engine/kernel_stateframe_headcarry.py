@@ -193,10 +193,12 @@ def _safe_relative_path(value: object) -> str | None:
     return path.as_posix()
 
 
-def _read_source(root: Path, relative_path: str, *, journal: object = None) -> bytes | None | UnavailableEvidence:
+def _read_source(root: Path, relative_path: str, *, journal: object = None,
+                 required: bool = True) -> bytes | None | UnavailableEvidence:
     from kernel_stateframe_action_ledger import _read_open_site_file_bytes
 
-    safe = _safe_regular_file(root, relative_path, journal=journal, required=True)
+    safe = _safe_regular_file(root, relative_path, journal=journal,
+                              required=required)
     if isinstance(safe, UnavailableEvidence):
         return safe
     if not safe:
@@ -206,6 +208,12 @@ def _read_source(root: Path, relative_path: str, *, journal: object = None) -> b
     except (OSError, RuntimeError, ValueError):
         return _unavailable_evidence(journal, "HEADCARRY_SOURCE_UNAVAILABLE",
                                      producer="kernel_stateframe_headcarry")
+
+
+def _read_optional_source(root: Path, relative_path: str) -> bytes | None:
+    """Read a best-effort source; callers must retire or replan on absence."""
+    raw = _read_source(root, relative_path)
+    return raw if isinstance(raw, bytes) else None
 
 
 def _safe_regular_file(root: Path, relative_path: str, *, journal: object = None,
@@ -520,7 +528,10 @@ def render_headcarry(
     first_reference: dict[str, int] = {}
     reference_order = 0
     for path in primary:
-        raw = _read_source(root, path, journal=journal)
+        # Edit receipts can outlive a generated or removed file; only live sites
+        # and owed reads require the path to exist for this request.
+        raw = _read_source(root, path, journal=journal,
+                           required=roles[path] != "applied_edit")
         if isinstance(raw, UnavailableEvidence):
             return raw
         if raw is None:
@@ -539,7 +550,8 @@ def render_headcarry(
     current_heads: list[dict[str, object]] = []
     deduplicated = 0
     for path in ordered_paths:
-        raw = _read_source(root, path, journal=journal)
+        raw = _read_source(root, path, journal=journal,
+                           required=roles.get(path) != "applied_edit")
         if isinstance(raw, UnavailableEvidence):
             return raw
         if raw is not None and roles.get(path) == "owed_read":

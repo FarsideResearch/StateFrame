@@ -1,0 +1,42 @@
+{
+  "schema": "stateframe-mutation-unit/1",
+  "name": "sqlite_peek",
+  "revision": 1,
+  "parent": null,
+  "entry": "main.py",
+  "summary": "Read SQLite schema and up to twenty rows per table from the main-file snapshot.",
+  "kind": "reader",
+  "formats": ["db", "sqlite", "sqlite3"],
+  "input_schema": {
+    "type": "object",
+    "properties": {
+      "input_id": {"type": "string", "maxLength": 64},
+      "wal_present": {"type": "boolean"}
+    },
+    "required": ["input_id"],
+    "additionalProperties": false
+  },
+  "output_schema": {
+    "type": "object",
+    "properties": {
+      "tables": {"type": "array", "items": {"type": "object", "properties": {
+        "name": {"type": "string"},
+        "columns": {"type": "array", "items": {"type": "string"}, "maxItems": 100},
+        "rows": {"type": "array", "items": {"type": "array", "items": {"type": "string"}, "maxItems": 100}, "maxItems": 20}
+      }, "required": ["name", "columns", "rows"], "additionalProperties": false}, "maxItems": 50},
+      "wal_present": {"type": "boolean"},
+      "error": {"type": "string"}
+    },
+    "required": ["tables", "wal_present", "error"],
+    "additionalProperties": false
+  },
+  "requires": {"network": false, "writes": false},
+  "smoke": [{
+    "input": {"input_id": "in0"},
+    "inputs": ["fixtures/sample.sqlite"],
+    "expect": {"error": "", "wal_present": false,
+               "tables": [{"name": "items", "columns": ["id", "label"],
+                           "rows": [["1", "sample"]]}]}
+  }],
+  "limits": {"wall_s": 10, "cpu_s": 5, "mem_mb": 256}
+}

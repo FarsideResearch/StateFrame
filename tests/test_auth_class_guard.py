@@ -1,6 +1,7 @@
 """Model-server transports must attach their configured bearer credential."""
 from __future__ import annotations
 
+import ast
 import json
 import re
 import threading
@@ -11,7 +12,14 @@ from urllib.parse import urlsplit
 
 import pytest
 
-from _class_guard_scanners import ALLOWLIST, scan_auth_requests
+from _class_guard_scanners import (
+    ALLOWLIST,
+    scan_auth_requests,
+    scan_fetch_raw_auth_boundary,
+    scan_fetch_raw_headers,
+    scan_mutation_broker_environment,
+    scan_provider_fetch_raw,
+)
 from _timeouts import scaled
 
 
@@ -113,6 +121,119 @@ def test_auth_source_scan_classifies_every_outbound_http_site() -> None:
     assert report.allowlisted == len(ALLOWLIST)
     assert all(reason.strip() and "\n" not in reason for reason in ALLOWLIST.values())
     assert not report.violations, "unclassified outbound HTTP sites:\n" + "\n".join(report.violations)
+
+
+def _auth_provider_sources(root: Path) -> tuple[Path, ...]:
+    guard = ast.parse(Path(__file__).read_text(encoding="utf-8"))
+    entrypoint = next(node for node in guard.body if isinstance(node, ast.FunctionDef)
+                      and node.name == "test_keyed_public_model_server_entrypoints_send_the_configured_key")
+    modules = set()
+    for node in ast.walk(entrypoint):
+        if isinstance(node, ast.Import):
+            modules.update(alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            modules.add(node.module)
+    sources = set()
+    for module in modules:
+        if module.startswith("stateframe."):
+            path = root / "src/stateframe" / Path(*module.removeprefix("stateframe.").split(".")).with_suffix(".py")
+        else:
+            path = root / "src/stateframe/engine" / Path(*module.split(".")).with_suffix(".py")
+        assert path.is_file(), f"auth guarded provider module is missing: {module}"
+        sources.add(path)
+    return tuple(sorted(sources))
+
+
+def test_fetch_raw_headers_are_fixed_with_planted_control() -> None:
+    root = Path(__file__).resolve().parents[1]
+    source = (root / "src/stateframe/engine/kernel_web_fetch.py").read_text(encoding="utf-8")
+    assert not scan_fetch_raw_headers(source)
+
+    planted = '''
+def fetch_raw(url, policy, *, headers=None):
+    conn.request("GET", url, headers={
+        "Host": "example.test", "Accept": "text/plain",
+        "Accept-Encoding": "gzip", "User-Agent": "StateFrame/1",
+        "Authorization": "Bearer planted",
+    })
+'''
+    violations = scan_fetch_raw_headers(planted)
+    assert violations and any("caller-controlled" in item for item in violations)
+    assert any("header set" in item for item in violations)
+    variadic = '''
+def fetch_raw(url, policy, *header_values):
+    return send_request(url, header_values)
+'''
+    assert any("caller-controlled" in item for item in scan_fetch_raw_headers(variadic))
+
+
+def test_fetch_raw_call_graph_cannot_read_auth_sources_with_planted_controls() -> None:
+    root = Path(__file__).resolve().parents[1]
+    source = (root / "src/stateframe/engine/kernel_web_fetch.py").read_text(encoding="utf-8")
+    assert not scan_fetch_raw_auth_boundary(source)
+
+    endpoint_control = '''
+def fetch_raw(endpoint):
+    return _read_transport(endpoint)
+def _read_transport(endpoint):
+    return endpoint._headers
+'''
+    assert any("_headers" in item for item in scan_fetch_raw_auth_boundary(endpoint_control))
+    bounded_http_control = '''
+def fetch_raw(url):
+    return _send(url)
+def _send(url):
+    from kernel_bounded_http import request_bytes
+    return request_bytes(url)
+'''
+    assert any("kernel_bounded_http" in item
+               for item in scan_fetch_raw_auth_boundary(bounded_http_control))
+    dynamic_control = '''
+bounded = __import__("kernel_bounded_http")
+def fetch_raw(url):
+    return bounded.request_bytes(url)
+'''
+    assert any("kernel_bounded_http" in item
+               for item in scan_fetch_raw_auth_boundary(dynamic_control))
+
+
+def test_mutation_broker_environment_is_fixed_with_planted_controls() -> None:
+    root = Path(__file__).resolve().parents[1]
+    source = (root / "src/stateframe/engine/kernel_mutate_exec.py").read_text(encoding="utf-8")
+    assert not scan_mutation_broker_environment(source)
+
+    planted = source.replace('"HOME": "/nonexistent", "TZ": "UTC"}',
+                             '"HOME": "/nonexistent", "TZ": "UTC", "API_TOKEN": "planted"}', 1)
+    assert planted != source
+    assert any("fixed allowlist" in item for item in scan_mutation_broker_environment(planted))
+    ambient = source.replace(", _ENV, limits)",
+                           ", {**os.environ, **_ENV}, limits)", 1)
+    assert ambient != source
+    assert any("os.environ" in item for item in scan_mutation_broker_environment(ambient))
+
+
+def test_provider_modules_cannot_reach_raw_web_fetch_with_planted_control() -> None:
+    root = Path(__file__).resolve().parents[1]
+    sources = _auth_provider_sources(root)
+    violations = [(path, scan_provider_fetch_raw(path.read_text(encoding="utf-8")))
+                  for path in sources]
+    assert all(not result for _path, result in violations), violations
+
+    planted = '''
+from kernel_web_fetch import fetch_raw as raw_fetch
+def ask(url):
+    fetch = raw_fetch
+    return fetch(url, None, max_bytes=1)
+'''
+    violations = scan_provider_fetch_raw(planted)
+    assert violations and any("calls fetch_raw" in item for item in violations)
+    dynamic = '''
+import importlib as loader
+def ask(url):
+    module = loader.import_module("stateframe.engine.kernel_web_fetch")
+    return getattr(module, "fetch_raw")(url, None, max_bytes=1)
+'''
+    assert scan_provider_fetch_raw(dynamic)
 
 
 def test_keyed_public_model_server_entrypoints_send_the_configured_key(monkeypatch) -> None:

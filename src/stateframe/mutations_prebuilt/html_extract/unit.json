@@ -1,0 +1,35 @@
+{
+  "schema": "stateframe-mutation-unit/1",
+  "name": "html_extract",
+  "revision": 1,
+  "parent": null,
+  "entry": "main.py",
+  "summary": "Fetch HTML through the host broker and extract bounded readable text, links, and tables.",
+  "kind": "reader",
+  "input_schema": {
+    "type": "object",
+    "properties": {"url": {"type": "string", "maxLength": 2048}},
+    "required": ["url"],
+    "additionalProperties": false
+  },
+  "output_schema": {
+    "type": "object",
+    "properties": {
+      "title": {"type": "string", "maxLength": 2048},
+      "text": {"type": "string", "maxLength": 65536},
+      "links": {"type": "array", "items": {"type": "string", "maxLength": 2048}, "maxItems": 200},
+      "tables": {"type": "array", "items": {"type": "array", "items": {"type": "array", "items": {"type": "string"}, "maxItems": 32}, "maxItems": 200}, "maxItems": 10},
+      "truncated": {"type": "boolean"}, "error": {"type": "string"}
+    },
+    "required": ["title", "text", "links", "tables", "truncated", "error"],
+    "additionalProperties": false
+  },
+  "requires": {"network": true, "writes": false},
+  "smoke": [{
+    "input": {"url": "https://example.test/page"},
+    "inputs": [],
+    "responses": [{"url": "https://example.test/page", "body": "fixtures/sample.html"}],
+    "expect": {"title": "Sample", "links": ["https://example.test/docs"], "error": ""}
+  }],
+  "limits": {"wall_s": 10, "cpu_s": 5, "mem_mb": 256}
+}

@@ -38,6 +38,18 @@ class WebResult:
     refusal: str | None
 
 
+@dataclass(frozen=True)
+class RawResult:
+    status: int | None
+    headers: dict[str, str]
+    final_url: str | None
+    redirects: tuple[str, ...]
+    body: bytes
+    error: str | None
+    transferred_bytes: int = 0
+    refusal: str | None = None
+
+
 class WebRefusal(ValueError):
     pass
 
@@ -146,9 +158,9 @@ def _addresses(host: str, port: int, resolver: Callable, policy: WebPolicy,
 
 
 class _PinnedHTTP(http.client.HTTPConnection):
-    def __init__(self, host: str, port: int, address: str, deadline: float):
+    def __init__(self, host: str, port: int, addresses: list[tuple[int, str]], deadline: float):
         super().__init__(host, port)
-        self._address = address
+        self._addresses = addresses
         self._deadline = deadline
         self.transport: socket.socket | None = None
 
@@ -158,8 +170,27 @@ class _PinnedHTTP(http.client.HTTPConnection):
             raise TimeoutError("web fetch total deadline exceeded")
         return remaining
 
+    def _connect_socket(self) -> socket.socket:
+        last_error = None
+        for index, (family, address) in enumerate(self._addresses):
+            remaining = self._remaining()
+            timeout = remaining / (len(self._addresses) - index)
+            sock = None
+            try:
+                sock = socket.socket(family, socket.SOCK_STREAM)
+                sock.settimeout(timeout)
+                sock.connect((address, self.port))
+                return sock
+            except OSError as error:
+                if sock is not None:
+                    sock.close()
+                last_error = error
+        if last_error is not None:
+            raise last_error
+        raise TimeoutError("web fetch total deadline exceeded")
+
     def connect(self) -> None:
-        raw = socket.create_connection((self._address, self.port), self._remaining())
+        raw = self._connect_socket()
         self.transport = raw
         self.sock = _DeadlineSocket(raw, self._deadline)
 
@@ -199,12 +230,12 @@ class _DeadlineSocket:
 
 
 class _PinnedHTTPS(_PinnedHTTP, http.client.HTTPSConnection):
-    def __init__(self, host: str, port: int, address: str, deadline: float):
-        _PinnedHTTP.__init__(self, host, port, address, deadline)
+    def __init__(self, host: str, port: int, addresses: list[tuple[int, str]], deadline: float):
+        _PinnedHTTP.__init__(self, host, port, addresses, deadline)
         self._context = ssl.create_default_context()
 
     def connect(self) -> None:
-        raw = socket.create_connection((self._address, self.port), self._remaining())
+        raw = self._connect_socket()
         try:
             secured = self._context.wrap_socket(raw, server_hostname=self.host)
         except BaseException:
@@ -297,23 +328,70 @@ def _read_body(response: http.client.HTTPResponse, connection: _PinnedHTTP,
     return b"".join(chunks), raw_total
 
 
-def fetch(url: str, policy: WebPolicy, *, resolver: Callable = socket.getaddrinfo) -> WebResult:
-    """Fetch without proxy environment use; policy refusals are typed results."""
+def _raw_error_code(reason: str) -> str:
+    lowered = reason.lower()
+    if "non-public address" in lowered:
+        return "non_public_address"
+    if "allow list" in lowered:
+        return "domain_not_allowed"
+    if "response body exceeds" in lowered:
+        return "response_too_large"
+    if "decoded response exceeds" in lowered:
+        return "decoded_response_too_large"
+    if "compressed response" in lowered:
+        return "invalid_compressed_response"
+    if "content encoding" in lowered:
+        return "unsupported_content_encoding"
+    if "deadline" in lowered or "timed out" in lowered:
+        return "deadline_exceeded"
+    if "redirect" in lowered:
+        return "redirect_refused"
+    if "dns" in lowered:
+        return "dns_error"
+    if lowered.startswith(("invalid url", "url ")):
+        return "invalid_url"
+    return "transport_error"
+
+
+def fetch_raw(url: str, policy: WebPolicy, *, accept: str | None = None,
+              max_bytes: int, reject_non_text: bool = False,
+              broker_role: bool = False,
+              resolver: Callable = socket.getaddrinfo) -> RawResult:
+    """Fetch a bounded decoded body while retaining vetted transport metadata.
+
+    When enabled, reject non-text content types after headers and before reading the body.
+    Only the mutation broker retries multiple vetted addresses.
+    """
     started = time.monotonic()
     deadline = started + policy.deadline
     current = url
+    redirects: list[str] = []
+    status: int | None = None
+    headers: dict[str, str] = {}
+    transferred_bytes = 0
+    if isinstance(max_bytes, bool) or not isinstance(max_bytes, int) or max_bytes < 0:
+        reason = "response byte limit must be a non-negative integer"
+        return RawResult(None, {}, None, (), b"", "invalid_limit", refusal=reason)
+    bounded_policy = WebPolicy(
+        policy.allow_domains, max_body=min(policy.max_body, max_bytes),
+        max_decoded=min(policy.max_decoded, max_bytes), deadline=policy.deadline,
+        max_chars=policy.max_chars, allowed_ports=policy.allowed_ports,
+        allow_private_for_tests=policy.allow_private_for_tests)
+    accept_header = ("text/html,text/plain,application/json,application/xml,text/*"
+                     if accept is None else accept)
     try:
         for redirect_count in range(6):
             scheme, host, port, path = _parse_url(current, policy)
             addresses = _addresses(host, port, resolver, policy, deadline)
-            # Every answer is vetted before any connection. Use only the first vetted IP.
-            _, address = addresses[0]
+            # Vet every answer; only the mutation broker retries pinned addresses.
+            if not broker_role:
+                addresses = addresses[:1]
             cls = _PinnedHTTPS if scheme == "https" else _PinnedHTTP
-            conn = cls(host, port, address, deadline)
+            conn = cls(host, port, addresses, deadline)
             try:
                 default_port = 443 if scheme == "https" else 80
                 conn.request("GET", path, headers={"Host": host if port == default_port else f"{host}:{port}",
-                                                  "Accept": "text/html,text/plain,application/json,application/xml,text/*",
+                                                  "Accept": accept_header,
                                                   "Accept-Encoding": "gzip, deflate", "User-Agent": "StateFrame/1"})
                 response = conn.getresponse()
                 status = response.status
@@ -324,37 +402,76 @@ def fetch(url: str, policy: WebPolicy, *, resolver: Callable = socket.getaddrinf
                     if redirect_count == 5:
                         raise WebRefusal("too many redirects (maximum 5)")
                     current = urljoin(current, location)
+                    redirects.append(current)
+                    status = None
+                    headers = {}
                     continue
-                content_type_header = response.getheader("Content-Type", "")
-                content_type = content_type_header.split(";", 1)[0].strip().lower()
-                if not (content_type.startswith("text/") or content_type in {"application/json", "application/xml", "application/xhtml+xml"}):
-                    raise WebRefusal(f"content type is not readable text: {content_type or '(missing)'}")
-                body, raw_total = _read_body(response, conn, policy,
+                normalized: dict[str, list[str]] = {}
+                for name, value in response.getheaders():
+                    normalized.setdefault(name.lower(), []).append(value.strip())
+                headers = {name: ", ".join(values) for name, values in normalized.items()}
+                if reject_non_text:
+                    content_type_header = response.getheader("Content-Type", "")
+                    content_type = content_type_header.split(";", 1)[0].strip().lower()
+                    if not (content_type.startswith("text/") or content_type in {
+                            "application/json", "application/xml", "application/xhtml+xml"}):
+                        raise WebRefusal(
+                            f"content type is not readable text: {content_type or '(missing)'}")
+                body, transferred_bytes = _read_body(response, conn, bounded_policy,
                                              response.getheader("Content-Encoding", "identity").lower().strip())
-                charset = "utf-8"
-                for parameter in content_type_header.split(";")[1:]:
-                    key, _, value = parameter.strip().partition("=")
-                    if key.lower() == "charset" and value:
-                        charset = value.strip().strip('"')
-                try:
-                    decoded = body.decode(charset, errors="replace")
-                except LookupError as exc:
-                    raise WebRefusal(f"unsupported charset: {charset}") from exc
-                if content_type in {"text/html", "application/xhtml+xml"}:
-                    parser = _ReadableHTML(current)
-                    parser.feed(decoded)
-                    decoded = parser.text()
-                shown = decoded[:policy.max_chars]
-                note = (f"\n[truncated to {policy.max_chars} characters; {len(body)} decoded bytes, "
-                        f"{raw_total} transferred bytes]" if len(decoded) > policy.max_chars else
-                        f"\n[{len(body)} decoded bytes, {raw_total} transferred bytes]")
-                text = f"UNTRUSTED EXTERNAL CONTENT from {current}\n{shown}{note}\nEND UNTRUSTED EXTERNAL CONTENT"
-                return WebResult(True, status, current, content_type, text, raw_total, None)
+                return RawResult(status, headers, current, tuple(redirects), body, None,
+                                 transferred_bytes)
             finally:
                 conn.close()
                 if conn.transport is not None:
                     conn.transport.close()
         raise WebRefusal("too many redirects")
+    except (WebRefusal, ValueError, OSError, TimeoutError, http.client.HTTPException, ssl.SSLError) as exc:
+        reason = str(exc) or type(exc).__name__
+        return RawResult(status, headers, current, tuple(redirects), b"",
+                         _raw_error_code(reason), transferred_bytes, reason)
+
+
+def fetch(url: str, policy: WebPolicy, *, resolver: Callable = socket.getaddrinfo) -> WebResult:
+    """Fetch without proxy environment use; policy refusals are typed results."""
+    # fetch_raw caps both body limits with max_bytes; keep the WebPolicy limits intact.
+    raw = fetch_raw(
+        url, policy,
+        accept="text/html,text/plain,application/json,application/xml,text/*",
+        max_bytes=max(policy.max_body, policy.max_decoded),
+        reject_non_text=True, resolver=resolver)
+    if raw.error == "redirect_refused":
+        return WebResult(False, None, None, None, "", 0,
+                         raw.refusal or raw.error)
+    if raw.error is not None:
+        return WebResult(False, None, None, None, "", 0,
+                         raw.refusal or raw.error)
+    if raw.status is None:
+        return WebResult(False, None, None, None, "", 0, "invalid web response")
+    content_type_header = raw.headers.get("content-type", "")
+    content_type = content_type_header.split(";", 1)[0].strip().lower()
+    try:
+        charset = "utf-8"
+        for parameter in content_type_header.split(";")[1:]:
+            key, _, value = parameter.strip().partition("=")
+            if key.lower() == "charset" and value:
+                charset = value.strip().strip('"')
+        try:
+            decoded = raw.body.decode(charset, errors="replace")
+        except LookupError as exc:
+            raise WebRefusal(f"unsupported charset: {charset}") from exc
+        if content_type in {"text/html", "application/xhtml+xml"}:
+            parser = _ReadableHTML(raw.final_url or url)
+            parser.feed(decoded)
+            decoded = parser.text()
+        shown = decoded[:policy.max_chars]
+        note = (f"\n[truncated to {policy.max_chars} characters; {len(raw.body)} decoded bytes, "
+                f"{raw.transferred_bytes} transferred bytes]" if len(decoded) > policy.max_chars else
+                f"\n[{len(raw.body)} decoded bytes, {raw.transferred_bytes} transferred bytes]")
+        text = (f"UNTRUSTED EXTERNAL CONTENT from {raw.final_url}\n{shown}{note}\n"
+                "END UNTRUSTED EXTERNAL CONTENT")
+        return WebResult(True, raw.status, raw.final_url, content_type, text,
+                         raw.transferred_bytes, None)
     except (WebRefusal, ValueError, OSError, TimeoutError, http.client.HTTPException, ssl.SSLError) as exc:
         reason = str(exc) or type(exc).__name__
         return WebResult(False, None, None, None, "", 0, reason)

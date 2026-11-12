@@ -200,7 +200,9 @@ def test_prompt_submit_refusal_exits_two_without_starting_child(tmp_path):
         f"#!{sys.executable}\n"
         "import os, sys\n"
         f"sentinel = {str(child_started)!r}\n"
-        "if any(argument.endswith('_child.py') for argument in sys.argv[1:]):\n"
+        # Linux launches the child as `-B -c <bootstrap> stateframe._child`.
+        "if any(argument.endswith('_child.py') or argument == 'stateframe._child'\n"
+        "       for argument in sys.argv[1:]):\n"
         "    with open(sentinel, 'w', encoding='utf-8') as marker:\n"
         "        marker.write('started')\n"
         f"os.execv({sys.executable!r}, [{sys.executable!r}, *sys.argv[1:]])\n",

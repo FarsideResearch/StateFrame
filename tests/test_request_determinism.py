@@ -88,6 +88,30 @@ RANDOM_CALL_ALLOWLIST = {
             2, "Creates host profiling/runtime IDs; provider request IDs use content_wire_id."
         ),
     },
+    "src/stateframe/engine/kernel_mutate_build.py": {
+        "uuid.uuid4": (
+            2, "Names a fallback offline call and one-shot launch; live calls bind to tool IDs."
+        ),
+    },
+    "src/stateframe/engine/kernel_mutate_edits.py": {
+        "uuid.uuid4": (1, "Names an exclusive temporary edit file, never a provider request ID."),
+    },
+    "src/stateframe/engine/kernel_mutate_exec.py": {
+        "uuid.uuid4": (1, "Creates a private launch nonce for child release, never a provider request ID."),
+    },
+    "src/stateframe/engine/kernel_mutate_hooks.py": {
+        "uuid.uuid4": (
+            2, "Names a standalone trigger fallback and private launch; live triggers bind to call IDs."
+        ),
+    },
+    "src/stateframe/engine/kernel_mutate_qualify.py": {
+        "uuid.uuid4": (2, "Names a self-test launch and atomic qualification file outside requests."),
+    },
+    "src/stateframe/engine/kernel_mutate_runtime.py": {
+        "uuid.uuid4": (
+            6, "Names isolated launch and input snapshots; the visible watch ID uses the run-seeded UUID stream."
+        ),
+    },
     "src/stateframe/engine/kernel_request_auth_identity.py": {
         "secrets.token_bytes": (
             2, "Creates installation HMAC secrets (identity.key and fallback); only the HMAC enters tokenizer_identity metadata, never request bytes."
@@ -298,6 +322,10 @@ WIRE_ID_FIELDS_BY_SCOPE = {
     },
 }
 WIRE_ID_SOURCE_ALLOWLIST = {
+    ("src/stateframe/engine/kernel_mutate_exec.py", "MutationExecutor.run",
+     "handle", "uuid.uuid4"): (
+        2, "Local JobHandle is a supervisor control object; its private nonce never enters a provider wire ID."
+    ),
     ("src/stateframe/engine/kernel_test_run_spans.py", "TestRunProfile.__init__",
      "execution_id", "uuid.uuid4"): (
         1, "Only standalone profiles without an audit journal use this fallback; live request IDs use content_wire_id."

@@ -25,6 +25,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from . import outcomes, profiles, replay_tape, workcopy
+from .engine.kernel_safe_paths import safe_expanduser, safe_home
 from .engine.kernel_tool_tape import ToolTape, ToolTapeError
 from .storage_gc import _write_json_atomic
 
@@ -288,6 +289,9 @@ def _tool_safety(run: Path, spec: dict, *, replay_external: bool) -> list[dict[s
         tape = ToolTape(run)
     except (OSError, ValueError, ToolTapeError) as error:
         raise ResumeRefused(f"tool tape is damaged: {error}") from error
+    if "mutations" in spec:
+        _reconcile_mutations(run, replay_external=replay_external)
+        tape = ToolTape(run)
     pending = tape.pending()
     if pending:
         calls = ", ".join(item.call_id for item in pending)
@@ -322,6 +326,136 @@ def _tool_safety(run: Path, spec: dict, *, replay_external: bool) -> list[dict[s
         names = ", ".join(f"{item['call_id']} ({item['tool']})" for item in external)
         raise ResumeRefused(f"external operation {names} requires --replay-external")
     return external
+
+
+def _reconcile_mutations(run: Path, *, replay_external: bool = False) -> None:
+    """Validate and settle mutation intents before the ordinary pending-intent guard."""
+    from .engine.kernel_mutate_records import Journal, reconcile
+
+    if _lock_holder(run / ENGINE_LOCK) is not None:
+        raise ResumeRefused("mutation evidence cannot be reconciled while the engine is running")
+    try:
+        spec = json.loads((run / "spec.json").read_text())
+        seed = spec["run_identity_seed"]
+        if not isinstance(seed, str) or len(seed) != 32 or any(c not in "0123456789abcdef" for c in seed):
+            raise ValueError("invalid run identity seed")
+        configured_home = (spec.get("environment", {}).get("STATEFRAME_HOME") or
+                           os.environ.get("STATEFRAME_HOME"))
+        if configured_home:
+            home = safe_expanduser(Path(configured_home))
+        else:
+            user_home = safe_home()
+            if user_home is None:
+                raise ValueError("cannot determine home directory; set HOME or STATEFRAME_HOME")
+            home = user_home / ".stateframe"
+        ledger_path = home / "rt" / "mutations" / seed / "launches.jsonl"
+        try:
+            fd = os.open(ledger_path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        except FileNotFoundError:
+            ledger_rows = []
+        else:
+            try:
+                info = os.fstat(fd)
+                if not stat.S_ISREG(info.st_mode) or info.st_size > 8 << 20:
+                    raise ValueError("mutation launch ledger is not a bounded regular file")
+                with os.fdopen(fd, "rb", closefd=False) as source:
+                    ledger_rows = [json.loads(line) for line in source.read((8 << 20) + 1).splitlines()]
+            finally:
+                os.close(fd)
+    except (OSError, ValueError, KeyError, TypeError) as error:
+        raise ResumeRefused(f"mutation launch ledger is damaged: {error}") from error
+    try:
+        tape = ToolTape(run)
+        journal = Journal(run)
+        rows = []
+        tape_path = run / "tool-tape.jsonl"
+        if tape_path.exists():
+            fd = os.open(tape_path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+            try:
+                info = os.fstat(fd)
+                if not stat.S_ISREG(info.st_mode) or info.st_size > 8 << 20:
+                    raise ValueError("mutation tool tape is not a bounded regular file")
+                with os.fdopen(fd, "rb", closefd=False) as source:
+                    rows = [json.loads(line) for line in source.read((8 << 20) + 1).splitlines()]
+            finally:
+                os.close(fd)
+        result = reconcile(rows, journal, ledger_rows, replay_external=replay_external)
+    except (OSError, ValueError, ToolTapeError) as error:
+        raise ResumeRefused(f"mutation evidence is damaged: {error}") from error
+    if result.refuse:
+        raise ResumeRefused(str(result.refuse))
+    if any(action.kind == "cleanup" for action in result.actions):
+        from .engine.kernel_mutate_sweep import sweep
+
+        runtime_parent = ledger_path.parent.parent
+        swept = sweep(runtime_parent, run_locks=lambda name: name != seed)
+        if seed in swept.unresolved or (runtime_parent / seed).exists():
+            raise ResumeRefused("MUTATION_CONTAINMENT: interrupted mutation cleanup is unverified")
+        # The ledger is ephemeral ownership evidence. The verified sweep removes it;
+        # durable journal and tape rows still decide the interrupted observation.
+        result = reconcile(rows, journal, [], replay_external=replay_external)
+        if result.refuse or any(action.kind == "cleanup" for action in result.actions):
+            raise ResumeRefused(str(result.refuse or "MUTATION_CONTAINMENT: cleanup evidence persists"))
+    for action in result.actions:
+        if action.kind == "serve":
+            continue
+        if action.kind == "interrupt_watch":
+            journal.append("WATCH_TICK_INTERRUPTED", invocation_id=action.call_id,
+                           parent_turn_id=action.detail)
+            watch_record = tape.lookup(action.call_id)
+            if watch_record is not None and not watch_record.completed:
+                tape.complete(call_id=action.call_id, exit_code=None,
+                              observation="REFUSED MUTATION_INTERRUPTED watch tick interrupted on resume",
+                              post_manifest_digest=watch_record.pre_manifest_digest,
+                              env_identity=watch_record.env_identity)
+            continue
+        if action.kind == "interrupt_hook":
+            journal.append("HOOK_TRIGGER_INTERRUPTED", invocation_id=action.call_id)
+            hook_record = tape.lookup(action.call_id)
+            if hook_record is not None and not hook_record.completed:
+                tape.complete(call_id=action.call_id, exit_code=None, observation="",
+                              post_manifest_digest=hook_record.pre_manifest_digest,
+                              env_identity=hook_record.env_identity)
+            continue
+        if action.kind in ("recover_effect", "verify_effect"):
+            from types import SimpleNamespace
+            from .engine.kernel_mutate_edits import MutationEdits
+
+            workspace = run / "workspace"
+            if not workspace.is_dir() or workspace.is_symlink():
+                raise ResumeRefused("MUTATION_EFFECT_INDETERMINATE: workspace is unavailable")
+            editor = MutationEdits(SimpleNamespace(repo=workspace, journal=journal))
+            try:
+                editor.recover(action.call_id, allow_rollforward=action.kind == "recover_effect")
+            except (OSError, ValueError) as error:
+                raise ResumeRefused(f"MUTATION_EFFECT_INDETERMINATE: {error}") from error
+            action = type(action)("complete", action.call_id, "recovered local effect",
+                                  action.attempt, action.evidence["terminal"])
+        if action.kind not in ("interrupt", "complete", "complete_metadata"):
+            raise ResumeRefused(f"mutation reconciliation needs {action.kind} for {action.call_id}")
+        record = tape.lookup(action.call_id)
+        if record is None or record.completed:
+            raise ResumeRefused("mutation reconciliation tape state differs")
+        if action.kind == "interrupt":
+            observation = "REFUSED MUTATION_INTERRUPTED pending mutation was interrupted on resume"
+            journal.append("INTERRUPTED", call=action.call_id, observation=observation)
+        elif action.kind == "complete_metadata":
+            observation = f"mutation {action.detail} recovered from durable evidence"
+        else:
+            from .engine.kernel_mutate_wire import parse_stdout
+            import base64
+            terminal = action.evidence
+            if not isinstance(terminal, dict) or not isinstance(terminal.get("frame_b64"), str):
+                raise ResumeRefused("mutation terminal evidence is missing")
+            frame = parse_stdout(base64.b64decode(terminal["frame_b64"], validate=True),
+                                 call=action.call_id, output_schema=terminal.get("output_schema"))
+            if frame.kind != "result":
+                observation = "REFUSED MUTATION_EXECUTION recorded mutation failed"
+            else:
+                observation = ("[untrusted mutation observation recovered - sha256:recorded "
+                               "in:sha256:recorded]\n" + json.dumps(frame.result, sort_keys=True))
+        tape.complete(call_id=action.call_id, exit_code=None, observation=observation,
+                      post_manifest_digest="mutation-runtime/1", env_identity="mutation-runtime/1")
 
 
 def assess(run: Path, *, max_turns: int | None = None, model: str | None = None,
@@ -666,5 +800,54 @@ def fresh_workcopy(run: Path, repo: Path) -> workcopy.WorkCopy:
     shutil.copytree(parent, run / "workspace", symlinks=False)
     baseline = {p.relative_to(parent).as_posix(): hashlib.sha256(p.read_bytes()).hexdigest()
                 for p in sorted(parent.rglob("*")) if p.is_file() and not p.is_symlink()}
-    return workcopy.WorkCopy(original=repo.resolve(), copy=run / "workspace", baseline=baseline,
+    work = workcopy.WorkCopy(original=repo.resolve(), copy=run / "workspace", baseline=baseline,
                              snapshot=parent)
+    _restore_committed_mutation_effects(run, work)
+    return work
+
+
+def _restore_committed_mutation_effects(run: Path, work: workcopy.WorkCopy) -> None:
+    """Restore journaled mutation edits into the fresh workspace used for replay."""
+    spec_path = run / "spec.json"
+    if not spec_path.is_file():
+        return
+    try:
+        spec = json.loads(spec_path.read_text())
+    except (OSError, ValueError) as error:
+        raise ResumeRefused(f"spec.json is damaged while restoring mutation effects: {error}") from error
+    if not isinstance(spec, dict) or "mutations" not in spec:
+        return
+
+    from .engine.kernel_mutate_records import Journal
+
+    journal = Journal(run)
+    restored: dict[str, bytes | None] = {}
+    for row in journal.events():
+        if row.get("kind") != "EFFECT_COMMITTED":
+            continue
+        files = row.get("files")
+        if not isinstance(files, list):
+            raise ResumeRefused("MUTATION_EFFECT_INDETERMINATE: committed file evidence is invalid")
+        for item in files:
+            if not isinstance(item, dict):
+                raise ResumeRefused("MUTATION_EFFECT_INDETERMINATE: committed file evidence is invalid")
+            path = item.get("path")
+            try:
+                workcopy._relative_parts(path)
+            except (TypeError, workcopy.WorkCopyError) as error:
+                raise ResumeRefused("MUTATION_EFFECT_INDETERMINATE: committed path is invalid") from error
+            digest = item.get("post_sha256")
+            blob = item.get("post_blob")
+            if digest is None:
+                if blob is not None:
+                    raise ResumeRefused("MUTATION_EFFECT_INDETERMINATE: deleted file evidence is invalid")
+                restored[path] = None
+            else:
+                if not isinstance(digest, str) or blob != digest:
+                    raise ResumeRefused("MUTATION_EFFECT_INDETERMINATE: committed blob reference is invalid")
+                data = journal.get_blob(blob)
+                if hashlib.sha256(data).hexdigest() != digest:
+                    raise ResumeRefused("MUTATION_EFFECT_INDETERMINATE: committed file digest differs")
+                restored[path] = data
+    if restored:
+        workcopy.apply_files(work, restored, declared=set(restored))

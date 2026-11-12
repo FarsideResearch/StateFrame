@@ -126,3 +126,7 @@ The macOS notification example calls `/usr/bin/osascript`. Linux desktop notific
 | `HOOK_BLOCKED` | The stop hook exceeded its block limit. Inspect its reason and the `blocks_so_far` value. The candidate is not applied. |
 | `HOOK_CONTAINMENT` | Cleanup or restoration could not be confirmed. The run is terminal and must be inspected before starting a new run. |
 | Resume says a hook may or may not have run | Its intent has no completion. Reconcile any outside effect and start a new run. |
+
+## Mutation hook attachments
+
+Retained mutation units may attach as observing hooks with repeatable `--mutation-hook UNIT:post_tool` or `--mutation-hook UNIT:session_end` at the authored level. They receive only limited host facts, run through the mutation executor and share its budgets, tape and cleanup rules. Their output adds at most 512 bytes to the mutation panel. They cannot gate a run, and a mutation invocation never triggers a mutation hook. See [Mutation units](mutations.md#retention-promotion-and-hooks).

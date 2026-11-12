@@ -1,0 +1,38 @@
+{
+  "schema": "stateframe-mutation-unit/1",
+  "name": "snapshot_diff",
+  "revision": 1,
+  "parent": null,
+  "entry": "main.py",
+  "summary": "Compare two bounded snapshots and return stable hashes plus changed lines.",
+  "kind": "reader",
+  "input_schema": {
+    "type": "object",
+    "properties": {
+      "left_id": {"type": "string", "maxLength": 64},
+      "right_id": {"type": "string", "maxLength": 64}
+    },
+    "required": ["left_id", "right_id"],
+    "additionalProperties": false
+  },
+  "output_schema": {
+    "type": "object",
+    "properties": {
+      "changed": {"type": "boolean"}, "left_bytes": {"type": "integer"},
+      "right_bytes": {"type": "integer"}, "left_sha256": {"type": "string"},
+      "right_sha256": {"type": "string"},
+      "added_lines": {"type": "array", "items": {"type": "string"}, "maxItems": 200},
+      "removed_lines": {"type": "array", "items": {"type": "string"}, "maxItems": 200},
+      "truncated": {"type": "boolean"}
+    },
+    "required": ["changed", "left_bytes", "right_bytes", "left_sha256", "right_sha256", "added_lines", "removed_lines", "truncated"],
+    "additionalProperties": false
+  },
+  "requires": {"network": false, "writes": false},
+  "smoke": [{
+    "input": {"left_id": "in0", "right_id": "in1"},
+    "inputs": ["fixtures/before.txt", "fixtures/after.txt"],
+    "expect": {"changed": true, "removed_lines": ["old"], "added_lines": ["new"]}
+  }],
+  "limits": {"wall_s": 10, "cpu_s": 5, "mem_mb": 256}
+}

@@ -118,6 +118,7 @@ class ExecLimits:
     nofile: int = 1024
     nproc: int = 256
     output_bytes: int = 256 << 10
+    kill_on_output: bool = False
 
     def __post_init__(self) -> None:
         for name in ("wall_seconds", "cpu_seconds"):
@@ -137,11 +138,13 @@ class ExecLimits:
             raise ValueError("nofile must be at least 16 for the launcher")
         if self.output_bytes > 4 << 20:
             raise ValueError("output_bytes exceeds maximum of 4 MiB")
+        if type(self.kill_on_output) is not bool:
+            raise TypeError("kill_on_output must be a boolean")
 
 
 @dataclass(frozen=True)
 class ExecCapability:
-    purpose: Literal["shell", "job", "git", "custom_tool", "probe", "hook"]
+    purpose: Literal["shell", "job", "git", "custom_tool", "probe", "hook", "mutation", "mutation_broker"]
     workspace: Path
     workspace_writable: bool
     read_roots: tuple[Path, ...]
@@ -152,7 +155,7 @@ class ExecCapability:
     sandboxed: bool = True
 
     def __post_init__(self) -> None:
-        if self.purpose not in {"shell", "job", "git", "custom_tool", "probe", "hook"}:
+        if self.purpose not in {"shell", "job", "git", "custom_tool", "probe", "hook", "mutation", "mutation_broker"}:
             raise ValueError("invalid execution purpose")
         if self.network not in {"none", "loopback", "full"}:
             raise ValueError("network must be none, loopback or full")
@@ -189,12 +192,15 @@ class ExecCapability:
                     raise ValueError("write root overlaps read-only workspace")
 
     def as_dict(self) -> dict:
+        limits = asdict(self.limits)
+        if not self.limits.kill_on_output:
+            del limits["kill_on_output"]
         return {"purpose": self.purpose, "workspace": str(self.workspace),
                 "workspace_writable": self.workspace_writable,
                 "read_roots": [str(p) for p in self.read_roots],
                 "write_roots": [str(p) for p in self.write_roots],
                 "network": self.network, "env": dict(self.env),
-                "limits": asdict(self.limits), "sandboxed": self.sandboxed}
+                "limits": limits, "sandboxed": self.sandboxed}
 
     def digest(self) -> str:
         data = json.dumps(self.as_dict(), sort_keys=True, separators=(",", ":"),
@@ -299,7 +305,10 @@ def _directory_executables(directory: Path) -> tuple[tuple, tuple[Path, ...]]:
 
 
 def shell_capability(*, workspace, run_env_dir, scratch_home, network, writable,
-                     extra_read_roots=(), path_dirs=()) -> ExecCapability:
+                     extra_read_roots=(), path_dirs=(),
+                     include_path_executable_roots=True) -> ExecCapability:
+    if type(include_path_executable_roots) is not bool:
+        raise TypeError("include_path_executable_roots must be a boolean")
     home = Path(scratch_home).resolve(strict=True)
     run_env = Path(run_env_dir).resolve(strict=True)
     paths = [run_env / "bin", *(Path(p).resolve(strict=True) for p in path_dirs),
@@ -333,7 +342,7 @@ def shell_capability(*, workspace, run_env_dir, scratch_home, network, writable,
     admitted = {root for path in roots for root in read_roots(Path(path))}
     run_roots = (run_env, home, Path(workspace).resolve(strict=True))
     for directory in dict.fromkeys(paths):
-        if not directory.is_dir():
+        if not include_path_executable_roots or not directory.is_dir():
             continue
         cacheable = not any(directory == root or root in directory.parents for root in run_roots)
         key, executables = _directory_executables(directory)

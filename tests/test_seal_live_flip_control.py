@@ -115,6 +115,11 @@ def _engine_python(tmp_path: Path, endpoint_url: str) -> Path:
         "args=sys.argv[1:]\n"
         "if len(args) >= 3 and args[0] == '-B' and os.path.basename(args[1]) == '_child.py':\n"
         f"    os.execv(real_python, [real_python, '-B', '-c', {bootstrap!r}, *args[1:]])\n"
+        "if len(args) == 4 and args[:2] == ['-B', '-c'] and args[3] == 'stateframe._child':\n"
+        "    import ast,re\n"
+        "    child,run=ast.literal_eval(re.search(r'sys\\.argv=(\\[.*?\\]);',args[2]).group(1))\n"
+        "    os.chdir(run)\n"
+        f"    os.execv(real_python, [real_python, '-B', '-c', {bootstrap!r}, child, run])\n"
         "os.execv(real_python, [real_python, *args])\n",
         encoding="utf-8",
     )

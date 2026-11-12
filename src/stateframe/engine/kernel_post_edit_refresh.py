@@ -56,9 +56,9 @@ def rebind_after_file_operation(runtime: object, source: str,
 
 
 def _current_source(root: Path, path: str, binding: Mapping[str, object]) -> tuple[str, str] | None:
-    from kernel_stateframe_headcarry import _read_source
+    from kernel_stateframe_headcarry import _read_optional_source
 
-    raw = _read_source(root, path)
+    raw = _read_optional_source(root, path)
     if raw is None:
         return None
     revision = "sha256:" + hashlib.sha256(raw).hexdigest()

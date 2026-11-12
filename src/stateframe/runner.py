@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import base64
+import binascii
 import hashlib
 import json
 import math
@@ -280,6 +281,15 @@ class RunOptions:
     _pytest_proven: str | None = field(default=None, init=False, repr=False)
     keep_checkpoints: bool = False  # --keep-checkpoints / STATEFRAME_KEEP_CHECKPOINTS=1
     keep_run_env: bool = False  # --keep-run-env / STATEFRAME_KEEP_RUN_ENV=on
+    allow_source_tree: bool = False
+    mutations: str | None = None
+    mutation_network: str = "none"
+    mutation_domains: list[str] = field(default_factory=list)
+    mutation_write: list[str] = field(default_factory=list)
+    mutation_read: list[str] = field(default_factory=list)
+    mutation_retain: str = "run"
+    mutation_audit: str = "source"
+    mutation_hooks: list[str] = field(default_factory=list)
     _context_tokens: int = field(default=65_536, init=False, repr=False)
     _prompt_budget: int = field(default=33_344, init=False, repr=False)
     _context_env: dict[str, str] = field(default_factory=dict, init=False, repr=False)
@@ -499,6 +509,7 @@ OPT_IN_SWITCHES = {
     "STATEFRAME_ENV_SEED": ("auto", "copy"),  # host-side run environment creation policy
     "STATEFRAME_ENV_SEED_MAX_GB": (),  # non-negative decimal GB; 0 disables seed eviction
     "STATEFRAME_KEEP_RUN_ENV": ("on", "off"),  # host-side finished-run retention policy
+    "STATEFRAME_MUTATIONS": ("off", "prebuilt", "authored"),
     "STATEFRAME_CACHE_LAYOUT": ("on", "off"),
     "STATEFRAME_EVICTFIX": ("on", "legacy"),
     "STATEFRAME_MICROGRAPH": ("on", "off"),  # experimental; the engine defaults to off
@@ -593,6 +604,42 @@ def resolve_opt_in_switches(engine_dir: Path = ENGINE_DIR) -> dict[str, str]:
         # The child environment is allowlisted from this spec, not inherited.
         chosen[name] = str(value)
     return chosen
+
+
+def mutation_spec_options(options: RunOptions | None, environment: dict[str, str]) -> dict | None:
+    """Keep L0 out of the run spec; CLI wins over environment and profile."""
+    level = (options.mutations if options is not None and options.mutations is not None
+             else environment.get("STATEFRAME_MUTATIONS", "off"))
+    if level not in ("off", "prebuilt", "authored"):
+        raise RunError("--mutations must be off, prebuilt or authored")
+    if level == "off":
+        return None
+    if options is None:
+        return {"level": level, "network": "none", "domains": [], "write_globs": [],
+                "read_globs": [], "retain": "run", "audit": "source", "shell_network": "none"}
+    if options.mutation_network not in ("none", "public-web"):
+        raise RunError("--mutation-network must be none or public-web")
+    if options.mutation_retain not in ("run", "project", "user"):
+        raise RunError("--mutation-retain must be run, project or user")
+    if options.mutation_audit not in ("source", "digest"):
+        raise RunError("--mutation-audit must be source or digest")
+    for item in options.mutation_hooks:
+        unit, separator, event = item.partition(":")
+        if not separator or not re.fullmatch(r"[a-z][a-z0-9_]{1,40}", unit) or event not in ("post_tool", "session_end"):
+            raise RunError("--mutation-hook must be UNIT:post_tool or UNIT:session_end")
+    return {"level": level, "network": options.mutation_network,
+            "domains": list(options.mutation_domains),
+            "write_globs": list(options.mutation_write),
+            "read_globs": list(options.mutation_read),
+            "retain": options.mutation_retain, "audit": options.mutation_audit,
+            "shell_network": options.tool_settings.shell_network,
+            **({"hooks": list(options.mutation_hooks)} if options.mutation_hooks else {})}
+
+
+def mutation_builtin_names(spec: dict) -> frozenset[str]:
+    options = spec.get("mutations")
+    return (frozenset({"mutate"}) if isinstance(options, dict)
+            and options.get("level") in {"prebuilt", "authored"} else frozenset())
 
 
 def resolve_exec_rpc_env() -> dict[str, str]:
@@ -1051,6 +1098,12 @@ def prepare(options: RunOptions, printer=print) -> tuple[Path, workcopy.WorkCopy
     builtin_names = frozenset(("grep", "list_files", "read", "edit", "str_replace", "insert_before",
         "authored_check", "file_create", "run_tests", "read_check_receipt", "recall", "done",
         "shell", "job_wait", "job_output", "job_stop", "file_delete", "file_move", "git", "web_fetch", "git_commit", "git_branch", "skill_load"))
+    mutation_environment = dict(environment)
+    if "STATEFRAME_MUTATIONS" in os.environ:
+        mutation_environment["STATEFRAME_MUTATIONS"] = os.environ["STATEFRAME_MUTATIONS"].strip().lower()
+    mutation_environment.update(options.extra_env)
+    mutation_options = mutation_spec_options(options, mutation_environment)
+    builtin_names |= mutation_builtin_names({"mutations": mutation_options})
     try:
         custom = load_tool_files([Path(item["path"]) for item in settings.tools_files],
                                  builtin_names=builtin_names, shell_network=settings.shell_network)
@@ -1170,6 +1223,10 @@ def prepare(options: RunOptions, printer=print) -> tuple[Path, workcopy.WorkCopy
     opt_in = resolve_opt_in_switches()
     environment.update(opt_in)
     environment.update(options.extra_env)
+    if mutation_options is not None:
+        environment["STATEFRAME_MUTATIONS"] = mutation_options["level"]
+    else:
+        environment.pop("STATEFRAME_MUTATIONS", None)
     # Host authority wins over every caller-supplied environment overlay.
     environment["STATEFRAME_TOOL_SETTINGS_FILE"] = str(settings_file)
     environment["STATEFRAME_SKILL_SETTINGS_FILE"] = str(skills_file)
@@ -1251,6 +1308,7 @@ def prepare(options: RunOptions, printer=print) -> tuple[Path, workcopy.WorkCopy
         "run_identity_seed": secrets.token_hex(16),
         "repo": str(options.repo.resolve()),
         "in_place": options.in_place,
+        **({"mutations": mutation_options} if mutation_options is not None else {}),
     }
     if powerup_selection.active or powerup_selection.skipped:
         spec["powerups"] = powerup_selection.record()
@@ -1893,7 +1951,25 @@ def drive(run: Path, options: RunOptions, printer=print) -> int:
         else:
             environment.pop("CAPABILITY_ATTEMPT_DEADLINE_MONOTONIC", None)
         _write_run_spec_atomic(run, spec)
-    command = [options.python, "-B", str(CHILD), str(run)]
+    # Keep the engine identity near the front of Linux argv: narrow `ps args`
+    # output can truncate the absolute _child.py path even though the child is direct.
+    # Start from the selected interpreter directory so Python retains venv discovery
+    # and sys.executable while argv stays short; then restore the engine's normal cwd/path.
+    if sys.platform == "linux":
+        python_executable = Path(os.path.abspath(options.python))
+        child_bootstrap = (
+            "'stateframe._child.py';import os,runpy,sys;"
+            f"sys.path[0]={str(CHILD.parent)!r};"
+            f"sys.argv=[{str(CHILD)!r},{str(run)!r}];"
+            f"os.chdir({str(run)!r});"
+            f"runpy.run_path({str(CHILD)!r},run_name='__main__')"
+        )
+        command = [f"./{python_executable.name}", "-B", "-c", child_bootstrap,
+                   "stateframe._child"]
+        child_cwd = python_executable.parent
+    else:
+        command = [str(options.python), "-B", str(CHILD), str(run)]
+        child_cwd = run
     log_path = run / "engine.log"
     checkpoint_warned: set[str] = set()
     if spec_path.exists() and environment.get("STATEFRAME_CHECKPOINT", "on").strip().lower() in {"off", "0"}:
@@ -1913,7 +1989,8 @@ def drive(run: Path, options: RunOptions, printer=print) -> int:
             seed = json.loads(spec_path.read_text())["environment"].get("PYTHONHASHSEED")
             if seed is not None:
                 child_env["PYTHONHASHSEED"] = str(seed)
-        process = subprocess.Popen(command, cwd=run, env=child_env, stdout=subprocess.PIPE,
+        process = subprocess.Popen(command, executable=options.python, cwd=child_cwd, env=child_env,
+                                   stdout=subprocess.PIPE,
                                    stderr=subprocess.STDOUT, text=True, bufsize=1,
                                    start_new_session=True)
         from .engine.kernel_exec_tracker import capture_launch_identity
@@ -2130,11 +2207,15 @@ def _artifact_digest(files: dict[str, bytes | None]) -> str | None:
     """Use the engine's source-map hash, distinct from the host-check tree hash."""
     from .engine.kernel_done_is_submit_authority import DoneCaptureError, artifact_digest
 
-    try:
-        sources = {name: data.decode("utf-8") if data is not None else None
-                   for name, data in files.items()}
-    except UnicodeError:
-        return None  # A binary partial capture cannot establish a textual DoneSeal.
+    sources = {}
+    for name, data in files.items():
+        if data is None:
+            sources[name] = None
+        else:
+            try:
+                sources[name] = data.decode("utf-8")
+            except UnicodeDecodeError:
+                sources[name] = data
     try:
         return artifact_digest(sources)
     except DoneCaptureError:
@@ -2166,17 +2247,32 @@ def final_candidate(run: Path) -> dict[str, bytes | None] | None:
         record = json.loads(path.read_text(encoding="utf-8"))
         writes = record.get("writes") if isinstance(record, dict) else None
         deletes = record.get("deletes") if isinstance(record, dict) else None
+        schema = record.get("schema") if isinstance(record, dict) else None
+        binary = record.get("binary_writes", {}) if isinstance(record, dict) else None
+        expected_keys = ({"schema", "artifact_digest", "writes", "deletes", "binary_writes"}
+                         if schema == "stateframe-done-artifact/3" else
+                         {"schema", "artifact_digest", "writes", "deletes"})
         if (not isinstance(record, dict)
-                or set(record) != {"schema", "artifact_digest", "writes", "deletes"}
-                or record.get("schema") != "stateframe-done-artifact/2"
+                or set(record) != expected_keys
+                or schema not in {"stateframe-done-artifact/2", "stateframe-done-artifact/3"}
                 or record.get("artifact_digest") != digest or not isinstance(writes, dict)
-                or not isinstance(deletes, list) or not (writes or deletes)
+                or not isinstance(deletes, list) or not (writes or deletes or binary)
+                or not isinstance(binary, dict)
+                or (schema == "stateframe-done-artifact/3" and not binary)
                 or not all(isinstance(k, str) and isinstance(v, str)
                            for k, v in writes.items())
+                or not all(isinstance(k, str) and isinstance(v, str)
+                           for k, v in binary.items())
                 or not all(isinstance(path, str) for path in deletes)
-                or deletes != sorted(set(deletes)) or set(writes) & set(deletes)):
+                or deletes != sorted(set(deletes))
+                or (set(writes) & set(deletes)) or (set(binary) & (set(writes) | set(deletes)))):
             raise RunError("malformed sealed candidate artifact")
         files = {name: source.encode("utf-8") for name, source in writes.items()}
+        try:
+            files.update({name: base64.b64decode(source, validate=True)
+                          for name, source in binary.items()})
+        except (ValueError, binascii.Error) as error:
+            raise RunError("malformed sealed candidate binary write") from error
         files.update({name: None for name in deletes})
         if _artifact_digest(files) != digest:
             raise RunError("candidate digest does not match submission seal; candidate remains partial")
@@ -2514,6 +2610,22 @@ def _step_limit_line(options: RunOptions) -> str:
 
 
 def run(options: RunOptions, printer=print) -> dict[str, object]:
+    if sys.platform != "linux":
+        if options.mutations is not None:
+            level = options.mutations
+        elif "STATEFRAME_MUTATIONS" in options.extra_env:
+            level = options.extra_env["STATEFRAME_MUTATIONS"]
+        elif "STATEFRAME_MUTATIONS" in os.environ:
+            level = os.environ["STATEFRAME_MUTATIONS"]
+        else:
+            level = profiles.load(options.profile).get("STATEFRAME_MUTATIONS", "off")
+        requested = str(level).strip().lower() != "off" or bool(options.mutation_hooks)
+        if requested:
+            from .mutate_host import mutation_platform_error
+
+            refusal = mutation_platform_error(sys.platform, requested=True)
+            if refusal is not None:
+                raise RunError(refusal)
     _validate_timeout(options.timeout_s)
     _startup_probe_seconds()
     started = time.monotonic()
@@ -2607,6 +2719,18 @@ def resume_run(run_dir: Path, *, endpoint: Endpoint | None = None, max_turns: in
     ``model`` continues under another model NAME the endpoint serves (the same weights listed differently,
     e.g. after moving servers); without it the run's own model name is required.
     """
+    if sys.platform != "linux":
+        try:
+            saved_spec = json.loads((Path(run_dir) / "spec.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            saved_spec = {}
+        if isinstance(saved_spec, dict):
+            from .mutate_host import mutation_platform_error, spec_requests_mutations
+
+            refusal = mutation_platform_error(
+                sys.platform, requested=spec_requests_mutations(saved_spec))
+            if refusal is not None:
+                raise resume_module.ResumeRefused(refusal)
     _validate_timeout(timeout_s)
     started = time.monotonic()
     run_dir = run_dir.resolve()
@@ -2648,6 +2772,7 @@ def resume_run(run_dir: Path, *, endpoint: Endpoint | None = None, max_turns: in
         builtin_names = frozenset(("grep", "list_files", "read", "edit", "str_replace", "insert_before",
             "authored_check", "file_create", "run_tests", "read_check_receipt", "recall", "done",
             "shell", "job_wait", "job_output", "job_stop", "file_delete", "file_move", "git", "web_fetch", "git_commit", "git_branch", "skill_load"))
+        builtin_names |= mutation_builtin_names(spec)
         for item in (*settings.tools_files, *settings.mcp_files):
             path = Path(item["path"])
             try:
@@ -2710,7 +2835,8 @@ def resume_run(run_dir: Path, *, endpoint: Endpoint | None = None, max_turns: in
         python=str((spec.get("capabilities") or {}).get("python") or sys.executable),
         timeout_s=timeout_s, quiet=quiet, test_env={k: environment[k] for k in keys if k in environment},
          pytest_plugins=environment.get("STATEFRAME_TASK_PYTEST_PLUGINS"),
-         keep_checkpoints=keep_checkpoints, keep_run_env=keep_run_env)
+         keep_checkpoints=keep_checkpoints, keep_run_env=keep_run_env,
+         allow_source_tree=bool(spec.get("allow_source_tree", False)))
     options.route_cli = route_cli or []
     options.routes_file = routes_file
     if "tool_settings" in spec:
@@ -2783,7 +2909,8 @@ def resume_run(run_dir: Path, *, endpoint: Endpoint | None = None, max_turns: in
             # environment, shell home and baseline), saves the execution session unstarted, and is
             # refused while a job is live; recorded exchanges after it replay through the tool tape.
             checkpoint_eligible = same_limits and not checkpoint_off
-            checkpoint_skip_reason = ("hooks_configured" if hooks_configured else
+            checkpoint_skip_reason = ("mutations_configured" if "mutations" in spec else
+                                      "hooks_configured" if hooks_configured else
                                       "routes_configured" if routes_configured else
                                       "edit_scope_widen" if widen_configured else None)
             checkpoint_skipped = checkpoint_eligible and checkpoint_skip_reason is not None
@@ -2832,7 +2959,10 @@ def resume_run(run_dir: Path, *, endpoint: Endpoint | None = None, max_turns: in
                         "and checked byte for byte, then the run continues live")
             else:
                 if checkpoint_skipped:
-                    if checkpoint_skip_reason == "hooks_configured":
+                    if checkpoint_skip_reason == "mutations_configured":
+                        printer("checkpoint: not restored because mutations are configured for this run; "
+                                "replaying the recorded exchanges instead")
+                    elif checkpoint_skip_reason == "hooks_configured":
                         printer("checkpoint: not restored because hooks are configured for this run; "
                                 "replaying the recorded exchanges instead")
                     elif checkpoint_skip_reason == "edit_scope_widen":

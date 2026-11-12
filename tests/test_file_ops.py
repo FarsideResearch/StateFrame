@@ -185,6 +185,40 @@ def test_sealed_candidate_transports_deletions(tmp_path, sources):
     assert "old.py" in overview(run)
 
 
+def test_sealed_candidate_preserves_binary_file_bytes(tmp_path):
+    run = tmp_path / "run"
+    directory = run / "worker" / "results" / "react_done_submissions"
+    binary = b"SQLite format 3\x00\xff\x80\x00"
+    stored = store_candidate(directory, "task", {"app.db": binary, "reader.py": "pass\n"})
+    digest = stored["artifact_digest"]
+    record = json.loads((directory / "task" / f"{digest[7:]}.json").read_text())
+    assert record["schema"] == "stateframe-done-artifact/3"
+    (run / "engine-result.json").write_text(json.dumps({
+        "result": {"result": "SUBMITTED", "submission": {
+            "stored": True, "seal_id": "sha256:" + "0" * 64,
+            "artifact_digest": digest}}}))
+    candidate = runner.final_candidate(run)
+    assert candidate == {"app.db": binary, "reader.py": b"pass\n"}
+    assert runner._artifact_digest(candidate) == digest
+
+
+def test_tampered_sealed_binary_write_is_refused(tmp_path):
+    run = tmp_path / "run"
+    directory = run / "worker" / "results" / "react_done_submissions"
+    stored = store_candidate(directory, "task", {"app.db": b"\x00\xff"})
+    digest = stored["artifact_digest"]
+    artifact = directory / "task" / f"{digest[7:]}.json"
+    record = json.loads(artifact.read_text())
+    record["binary_writes"]["app.db"] = "AAE="
+    artifact.write_text(json.dumps(record))
+    (run / "engine-result.json").write_text(json.dumps({
+        "result": {"result": "SUBMITTED", "submission": {
+            "stored": True, "seal_id": "sha256:" + "0" * 64,
+            "artifact_digest": digest}}}))
+    with pytest.raises(runner.RunError, match="digest does not match"):
+        runner.final_candidate(run)
+
+
 def test_tampered_sealed_deletion_refused(tmp_path):
     run = tmp_path / "run"
     directory = run / "worker" / "results" / "react_done_submissions"

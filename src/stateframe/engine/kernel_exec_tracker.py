@@ -10,6 +10,7 @@ from contextlib import nullcontext
 from dataclasses import dataclass
 import ctypes
 import errno
+import hashlib
 import logging
 import os
 from pathlib import Path
@@ -87,7 +88,7 @@ def capture_launch_identity(process, table: ProcessTable | None = None, *,
                 os.close(pidfd)
                 return None
             try:
-                weakref.finalize(process, os.close, pidfd)
+                process._stateframe_pidfd_finalizer = weakref.finalize(process, os.close, pidfd)
             except TypeError:
                 os.close(pidfd)
                 return None
@@ -331,7 +332,7 @@ class ProcessTable:
             return None
         fields = raw[raw.rfind(")") + 2:].split()
         return ProcessIdentity(pid, int(fields[1]), int(fields[2]), int(fields[3]),
-                               (int(fields[19]), 0), fields[0] == "Z")
+                               (int(fields[19]), 0), fields[0] in {"Z", "X", "x"})
 
     def resident_bytes(self, row: ProcessIdentity) -> int:
         current = self.identity(row.pid)
@@ -564,6 +565,26 @@ def _open_pid_namespace(pid: int) -> PinnedNamespace | None:
     except OSError:
         return None
     return PinnedNamespace(descriptor)
+
+
+def process_cmdline_digest(pid: int) -> str:
+    """Return a bounded digest of a Linux process's NUL-delimited argv."""
+    if sys.platform != "linux":
+        raise RuntimeError("process command identity is Linux-only")
+    fd = os.open(f"/proc/{pid}/cmdline", os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    try:
+        value = bytearray()
+        limit = 1 << 20
+        while len(value) <= limit:
+            block = os.read(fd, min(8192, limit + 1 - len(value)))
+            if not block:
+                break
+            value.extend(block)
+        if not value or len(value) > limit or not value.endswith(b"\0"):
+            raise ValueError("process command line is empty or exceeds its bound")
+        return hashlib.sha256(value).hexdigest()
+    finally:
+        os.close(fd)
 
 
 class Descendants:

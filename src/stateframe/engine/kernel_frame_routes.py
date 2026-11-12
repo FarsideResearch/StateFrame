@@ -168,6 +168,11 @@ def resolve(role: str, *, forced_by: str | None = None) -> Route:
 
 
 def role_for_request(revision: object = None, *, request_kind: str | None = None) -> str:
+    if os.environ.get("STATEFRAME_MUTATIONS", "off") in {"prebuilt", "authored"}:
+        from kernel_mutate_runtime import service as mutation_service
+        _mutations = mutation_service()
+        if _mutations is not None and _mutations.episode is not None:
+            return "edit"
     if request_kind == "decide2":
         return "decide2"
     if not LAST_CLOSED_ACTION:
