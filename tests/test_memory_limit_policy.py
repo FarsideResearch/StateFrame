@@ -802,6 +802,8 @@ def test_failed_cgroup_cleanup_is_reported_by_completion_path(
         managed.killed = set()
         managed.started = time.monotonic()
         managed.memory_limit_mechanism = "cgroup_memory_max"
+        managed.cap = SimpleNamespace(limits=SimpleNamespace(kill_on_output=False))
+        managed.timeout_at = None
 
         managed.complete(True, ())
         status = managed.status()
