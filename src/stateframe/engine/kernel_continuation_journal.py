@@ -11,6 +11,7 @@ import ast
 import contextvars
 import copy
 import fcntl
+import hashlib
 import io
 import inspect
 import json
@@ -45,6 +46,14 @@ RECORD_SUFFIX_CACHE_LIMIT = 16
 RECORD_SUFFIX_CACHE_BYTE_LIMIT = 1024 * 1024
 MAX_FRAMEFIT_RECEIPT_RECORDS = 1024
 MAX_FRAMEFIT_RECEIPT_FIELD_CHARS = 1024
+# Pure telemetry whose loss cannot change a resume decision, so its fsync may wait for the next durable
+# boundary. These kinds are in kernel_continuation_restart.DOCUMENTED_REJECT (a post-checkpoint tail row
+# of this kind makes resume refuse), so they are deferred only until the first continuation_worker_checkpoint
+# row exists in the journal: before one, restart has no checkpoint tail to classify. After it, every row
+# is fsynced before emit() returns. journal_observer_failed is never deferred (restart fail-closes on it).
+GROUP_COMMIT_ENV = "SF_JOURNAL_GROUP_COMMIT"
+BATCHABLE_TELEMETRY_KINDS = frozenset({"turn_timing", "action_envelope_metrics"})
+CHECKPOINT_KIND = "continuation_worker_checkpoint"
 FRAMEFIT5_JOURNAL_ORIGIN_ENV = "STATEFRAME_FRAMEFIT5_JOURNAL_ORIGIN"
 _HOST_EVENT_SPAN_PAIRS = (
     ("runtime_snapshot_to_organ_wiring", "runtime_mode_snapshot",
@@ -722,6 +731,9 @@ class ContinuationJournal(AuditJournal):
         self.path = path.absolute()
         self._lock = threading.RLock()
         self._fd: int | None = None
+        self._unsynced = False
+        self._checkpoint_seen = False
+        self.group_commit = os.environ.get(GROUP_COMMIT_ENV, "1") != "0"
         self._pid = os.getpid()
         self._poisoned = False
         # 10-08 (L126e 928/929 died at assert_owner with no cause): why the writer is unusable.
@@ -1016,6 +1028,8 @@ class ContinuationJournal(AuditJournal):
             first = None
             last = None
             for record in obj.records():
+                if record.get("kind") == CHECKPOINT_KIND:
+                    obj._checkpoint_seen = True
                 if first is None:
                     first = record
                 last = record
@@ -2194,9 +2208,17 @@ class ContinuationJournal(AuditJournal):
             with profile_host_span(self, "journal_blob_io"):
                 stored_record = externalize_journal_fields(
                     record, self.path, self._blob_cache)
-            stored_record["record_hash"] = digest(stored_record)
-            record["record_hash"] = stored_record["record_hash"]
-            line = canonical_bytes(stored_record) + b"\n"
+            # One canonical encode of the stored record: the hash covers the sorted members without
+            # record_hash, and the written line is the same member bytes with record_hash merged in
+            # sorted position (byte-identical to canonical_bytes of the finished record).
+            members = {key: canonical_bytes(value) for key, value in stored_record.items()}
+            hashed = b",".join(canonical_bytes(key) + b":" + members[key] for key in sorted(members))
+            record_hash = "sha256:" + hashlib.sha256(b"{" + hashed + b"}").hexdigest()
+            stored_record["record_hash"] = record_hash
+            members["record_hash"] = canonical_bytes(record_hash)
+            record["record_hash"] = record_hash
+            line = b"{" + b",".join(canonical_bytes(key) + b":" + members[key]
+                                   for key in sorted(members)) + b"}\n"
             if len(line) > MAX_RECORD_BYTES:
                 raise ValueError("journal record exceeds limit")
             try:
@@ -2208,7 +2230,15 @@ class ContinuationJournal(AuditJournal):
                         if count <= 0:
                             raise OSError("journal write made no progress")
                         view = view[count:]
-                    os.fsync(self._fd)
+                    if kind == CHECKPOINT_KIND:
+                        self._checkpoint_seen = True
+                    if (getattr(self, "group_commit", False) and kind in BATCHABLE_TELEMETRY_KINDS
+                            and not getattr(self, "_checkpoint_seen", True)):
+                        self._unsynced = True
+                    else:
+                        # Also covers every earlier unsynced telemetry row (one fsync per file).
+                        os.fsync(self._fd)
+                        self._unsynced = False
                 self._size += len(line)
                 self._sequence, self._head = record["sequence"], record["record_hash"]
                 if len(getattr(self, "_record_offsets", ())) == record["sequence"] - 1:
@@ -2341,8 +2371,16 @@ class ContinuationJournal(AuditJournal):
             self.assert_owner()
             return [self.emit(kind, **fields) for kind, fields in normalized]
 
+    def sync(self) -> None:
+        """Make every written row durable now (boundary hook; no-op when nothing is pending)."""
+        with self._lock:
+            if getattr(self, "_unsynced", False) and self._fd is not None and os.getpid() == self._pid:
+                os.fsync(self._fd)
+                self._unsynced = False
+
     def close(self) -> None:
         with self._lock:
+            sync_error: OSError | None = None
             if os.getpid() == self._pid:
                 try:
                     from kernel_host_cache import flush_journal_cache_summaries
@@ -2354,6 +2392,11 @@ class ContinuationJournal(AuditJournal):
             try:
                 if self._cold_start_root is not None:
                     self._finish_cold_start_host_spans()
+                try:
+                    self.sync()  # last rows (including close-time telemetry) durable before the fd goes
+                except OSError as error:
+                    sync_error = error
+                    self._poison("fsync failed while closing the journal")
                 if self._fd is not None:
                     # Closing an inherited fd must not explicitly unlock the parent's lease.
                     os.close(self._fd)
@@ -2365,6 +2408,8 @@ class ContinuationJournal(AuditJournal):
                     from mc_repo_intel_vendor.ts_dispatch import reset_outline_capability_listener
 
                     reset_outline_capability_listener(token)
+            if sync_error is not None:
+                raise sync_error
 
     def __enter__(self) -> ContinuationJournal:
         self.assert_owner()
