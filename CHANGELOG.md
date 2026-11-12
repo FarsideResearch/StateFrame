@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Fixed: runs on repositories containing empty source files (for example an empty __init__.py) no longer stop before the first request.
+
 ## 0.5.0 (2026-11-12)
 
 - Mutation helpers now start with an empty session keyring and cannot read or create kernel keys through keyring system calls.
