@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 from dataclasses import asdict
 from pathlib import Path
@@ -62,6 +63,9 @@ class _ContainmentMonitor:
         if sys.platform == "linux" and self.host_namespace is None:
             raise ExecSessionError("cannot identify host PID namespace for MCP supervision")
         self.namespace = None
+        # An open handle on the server's PID namespace keeps its inode from being reused by
+        # another sandbox while this monitor still compares namespaces by that inode.
+        self.namespace_handle = None
         self.namespace_ready = threading.Event()
         self.failure: tuple[str, str] | None = None
         self.launch_unit_terminated = False
@@ -76,6 +80,32 @@ class _ContainmentMonitor:
         self.thread.join(timeout=2)
         if self.thread.is_alive():
             raise ExecSessionError("MCP resource monitor did not stop")
+        self._release_namespace()
+
+    def _release_namespace(self):
+        handle, self.namespace_handle = self.namespace_handle, None
+        if handle is not None:
+            handle.close()
+
+    def _pin_namespace(self, pid: int, namespace: str) -> bool:
+        """Adopt a namespace only while holding it open, so its inode cannot be reused."""
+        handle = self.table.pin_pid_namespace(pid, namespace)
+        if handle is None:
+            return False
+        self.namespace_handle = handle
+        self.namespace = namespace
+        return True
+
+    def _foreign(self, row) -> bool:
+        """A process older than our server cannot live in its namespace: never adopt it."""
+        launched = getattr(self.launch_identity, "start", None)
+        if launched is None or row.start >= launched:
+            return False
+        logging.getLogger(__name__).error(
+            "MCP containment refused to adopt pid %d: it shares namespace %s but started "
+            "before the MCP server (pid %d); it belongs to another sandbox",
+            row.pid, self.namespace, self.process.pid)
+        return True
 
     def check(self):
         if self.failure is not None:
@@ -134,8 +164,8 @@ class _ContainmentMonitor:
             if self.namespace is None:
                 for row in family:
                     namespace = self.table.pid_namespace(row.pid)
-                    if namespace is not None and namespace != self.host_namespace:
-                        self.namespace = namespace
+                    if (namespace is not None and namespace != self.host_namespace
+                            and self._pin_namespace(row.pid, namespace)):
                         self.namespace_ready.set()
                         break
             if self.namespace is not None:
@@ -145,6 +175,8 @@ class _ContainmentMonitor:
                         continue
                     try:
                         if self.table.pid_namespace(row.pid) == self.namespace:
+                            if self._foreign(row):
+                                continue
                             live[row.pid] = row
                     except PermissionError:
                         # An unrelated user's process is not in our private unit.

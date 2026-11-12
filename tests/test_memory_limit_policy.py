@@ -157,6 +157,9 @@ def test_namespace_init_walk_counts_double_forked_setsid_memory(monkeypatch):
         def pid_namespace_inode(self, pid):
             return self.namespaces.get(pid)
 
+        def pin_pid_namespace_inode(self, pid, inode):
+            return SimpleNamespace(inode=inode, close=lambda: None)
+
         def resident_bytes(self, row):
             return self.resident.get(row.pid, 0)
 

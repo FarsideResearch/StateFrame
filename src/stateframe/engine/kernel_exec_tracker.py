@@ -10,6 +10,7 @@ from contextlib import nullcontext
 from dataclasses import dataclass
 import ctypes
 import errno
+import logging
 import os
 from pathlib import Path
 import signal
@@ -425,6 +426,28 @@ class ProcessTable:
             return None
 
     @staticmethod
+    def pin_pid_namespace(pid: int, namespace: str) -> PinnedNamespace | None:
+        """Hold ``pid``'s PID namespace open if it is still ``namespace`` (readlink form)."""
+        handle = _open_pid_namespace(pid)
+        if handle is not None and f"pid:[{handle.inode}]" != namespace:
+            handle.close()
+            return None
+        return handle
+
+    @staticmethod
+    def pin_pid_namespace_inode(pid: int, inode: int) -> PinnedNamespace | None:
+        """Hold ``pid``'s PID namespace open if its inode is still ``inode``.
+
+        A namespace inode is reused once the namespace dies; comparing by inode is only sound
+        while a handle like this keeps the namespace alive.
+        """
+        handle = _open_pid_namespace(pid)
+        if handle is not None and handle.inode != inode:
+            handle.close()
+            return None
+        return handle
+
+    @staticmethod
     def pid_namespace_inode(pid: int) -> int | None:
         """Return a process PID namespace inode for exact namespace membership checks."""
         if sys.platform != "linux":
@@ -520,6 +543,29 @@ class ProcessTable:
         return result
 
 
+class PinnedNamespace:
+    """An open handle on a PID namespace; close() releases it (also on garbage collection)."""
+
+    def __init__(self, descriptor: int):
+        self.descriptor: int | None = descriptor
+        self.inode = os.fstat(descriptor).st_ino
+        self._finalizer = weakref.finalize(self, os.close, descriptor)
+
+    def close(self) -> None:
+        self.descriptor = None
+        self._finalizer()
+
+
+def _open_pid_namespace(pid: int) -> PinnedNamespace | None:
+    if sys.platform != "linux":
+        return None
+    try:
+        descriptor = os.open(f"/proc/{pid}/ns/pid", os.O_RDONLY | os.O_CLOEXEC)
+    except OSError:
+        return None
+    return PinnedNamespace(descriptor)
+
+
 class Descendants:
     def __init__(self, leader: int, table: ProcessTable,
                  launch_identity: LaunchIdentity | None = None, *,
@@ -533,6 +579,8 @@ class Descendants:
         namespace_inode = getattr(table, "pid_namespace_inode", None)
         self.launch_namespace_inode = namespace_inode(leader) if namespace_inode else None
         self.private_pid_namespace_inode: int | None = None
+        # Holds the private namespace open so its inode cannot name another sandbox later.
+        self.private_pid_namespace_pin: PinnedNamespace | None = None
         # A leader PID cannot be reused until the leader is reaped, so a group or session named
         # by it is ours until then. Afterwards only processes born by the reap belong to it: a
         # reused PID's new group starts later. `reaped_bound` is the reap time when the caller
@@ -571,11 +619,25 @@ class Descendants:
                     continue
                 candidate = namespace_inode(row.pid)
                 if candidate is not None and candidate != self.launch_namespace_inode:
+                    pin = getattr(self.table, "pin_pid_namespace_inode", None)
+                    if pin is not None:
+                        handle = pin(row.pid, candidate)
+                        if handle is None:
+                            continue  # gone or already a different namespace
+                        self.private_pid_namespace_pin = handle
                     self.private_pid_namespace_inode = candidate
                     break
         if self.private_pid_namespace_inode is not None and namespace_inode is not None:
+            launched = self.launch_leader_start or getattr(self.members.get(self.leader), "start", None)
             for pid, row in rows.items():
                 if namespace_inode(pid) != self.private_pid_namespace_inode:
+                    continue
+                if launched is not None and row.start < launched and pid not in self.members:
+                    # Older than our launch: it cannot live in our namespace. Never adopt it.
+                    logging.getLogger(__name__).error(
+                        "refused to adopt pid %d into launch unit %d: it shares PID namespace "
+                        "inode %d but started before the launch", pid, self.leader,
+                        self.private_pid_namespace_inode)
                     continue
                 previous = self.members.get(pid)
                 if previous is None or previous.start == row.start:
