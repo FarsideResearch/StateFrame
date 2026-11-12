@@ -1,14 +1,6 @@
 # Changelog
 
-## 0.4.44 (2026-11-12)
-
-- Fixed: a sandbox monitor could kill another engine's new sandbox (its supervisor launcher then exited 137). Monitors recognised a sandbox's private PID namespace by its number, which the kernel reuses once that namespace ends. They now hold the namespace open while they compare by that number, and refuse, with an error log, any process older than the sandbox.
-
-## 0.4.43 (2026-11-11)
-
-- Fixed: checks and startup probes no longer die with exit 137 on a loaded host because StateFrame killed its own slow sandbox. Session cleanup now waits for the supervisor to finish, and kills it only if it is still running and has stopped answering after a load-scaled wait. A child that outlives its parent process is matched to its job before the session is stopped as an escape. A startup probe killed by cleanup is retried and reported as host load, not as a broken interpreter.
-
-## 0.4.42 (2026-11-11)
+## 0.5.0 (2026-11-12)
 
 - Mutation helpers now start with an empty session keyring and cannot read or create kernel keys through keyring system calls.
 - Mutation file grants now treat bracketed names literally and keep single-star patterns within one directory, preventing unintended reads and edits.
@@ -21,7 +13,7 @@
 - Expanded the mutation guide with the complete CLI surface, refusal codes and enforced limits, and added a Linux quickstart that exercises a shipped helper.
 - Mutations 0.5.0 hardening: host-owned mem/wall/cpu ceilings, truncated output counts as overflow, fresh survivor snapshot with Z/X/x terminal, broker CA symlink targets bound read-only, broker connects to the vetted address directly, and fail-closed resume after mutation interruption.
 - Mutations 0.5.0 Linux fixes: authorize test-environment StateFrame editable imports, preserve committed edits through replay, keep disabled hooks disabled after reattachment, retry validated addresses in the mutation broker only while ordinary fetch retains its first-vetted-address behavior and refusal text, bind the loader cache read-only, expose Python's compiled CA roots to the HTTPS broker, skip generic PATH executable scans for exact probes, keep managed probe descendants in a trackable launch session, and expose the direct engine identity early in argv while preserving selected interpreter and venv behavior.
-- 0.5.0 Mutations: add the opt-in prebuilt and authored mutation platform on 0.4.41, including Linux sandboxing, host-brokered public web access, packaging checks, and regression coverage.
+- 0.5.0 Mutations: add the opt-in prebuilt and authored mutation platform, including Linux sandboxing, host-brokered public web access, packaging checks, and regression coverage.
 - Fixed wheel and sdist packaging so installed prebuilt mutation units include their fixture files; the installed release gate now checks mutation selftest success on Linux and clean platform refusal elsewhere.
 - Mutation frames can propose one format-matched prebuilt reader for an admitted task input, with a schema-valid call and a deduplicated proposal event.
 - Linux launch identity is recorded after the final sandbox exec; proposed reader calls now include and validate the `in0` trigger binding through the engine use contract.
@@ -31,6 +23,16 @@
 - Every launch is registered before the helper may run. A run start or resume sweeps that run's existing runtime root, while `stateframe mutations prune` attempts cleanup across stale roots. Cleanup after a crash or power loss is attempted with recorded identity checks; roots whose process identity cannot be proved remain and are reported as unresolved. Interrupted-run recovery has not been demonstrated. Hard per-run budgets cover helper launches, CPU, wall time, bytes, fetches and edits.
 - New `stateframe mutations` commands: `list`, `show`, `enable-level`, `selftest`, `doctor`, `retain`, `remove`, `promote` and `prune`. Mutation execution is Linux-only in this release; macOS is planned. Non-Linux mutation requests and attachments are refused at startup, while `list`, `show` and `doctor` report the platform limit.
 - On Linux, a standard-library extension whose shared libraries are missing (for example `_tkinter` on `python:slim` images) is left out of the mutation sandbox and reported by `stateframe mutations selftest`, instead of making mutations unavailable on that host. A unit that imports it gets an error naming the extension and its missing libraries.
+
+## 0.4.44 (2026-11-12)
+
+- Fixed: a sandbox monitor could kill another engine's new sandbox (its supervisor launcher then exited 137). Monitors recognised a sandbox's private PID namespace by its number, which the kernel reuses once that namespace ends. They now hold the namespace open while they compare by that number, and refuse, with an error log, any process older than the sandbox.
+
+## 0.4.43 (2026-11-11)
+
+- Fixed: checks and startup probes no longer die with exit 137 on a loaded host because StateFrame killed its own slow sandbox. Session cleanup now waits for the supervisor to finish, and kills it only if it is still running and has stopped answering after a load-scaled wait. A child that outlives its parent process is matched to its job before the session is stopped as an escape. A startup probe killed by cleanup is retried and reported as host load, not as a broken interpreter.
+
+## 0.4.42 (2026-11-11)
 
 - Fixed: on Linux, checks and exec-session commands that run Go or Node programs no longer die at startup. StateFrame no longer caps their virtual address space (`RLIMIT_AS`), which those runtimes reserve far beyond what they use. The memory budget itself is unchanged and still enforced. This removes the matching entry from `KNOWN_LIMITATIONS.md`.
 - Linux memory limits for checks and exec-session commands use cgroup v2 `memory.max` (with swap verified off) when StateFrame runs as the only process family in a delegated, writable cgroup: it moves itself into a `supervisor` child it creates, enables the `memory` and `pids` controllers on the parent and gives each command its own sibling group. In every other case, including a cgroup shared with a calling shell or a pipeline sibling, it falls back to `RLIMIT_DATA` plus the existing aggregate RSS supervisor, which also kills shared and memfd memory above the budget. The mechanism used is recorded in the run journal and private receipts only; request bytes are unchanged.
