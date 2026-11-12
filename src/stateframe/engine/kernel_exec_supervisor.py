@@ -372,6 +372,49 @@ class Supervisor:
         if len(self.incoming) > 1 << 20:
             raise ValueError("execution control request exceeds 1 MiB")
 
+    def _unattributed(self, orphans):
+        """Return reparented children that still belong to no job after a fresh look.
+
+        An intermediate process can exit between two sweeps before its child was recorded, so
+        the child is reparented here with no recorded parent. Re-snapshot once and attribute it
+        by process group or session to a live job member before treating it as an escape.
+        """
+        if not orphans:
+            return []
+        rows = self.table.snapshot()
+        for job in self.jobs.values():
+            if job.cleanup is None:
+                job.family.update(rows)
+        own = (os.getpgrp(), os.getsid(0))
+        escaped = []
+        for row in orphans:
+            current = rows.get(row.pid)
+            if current is None or current.start != row.start or current.zombie:
+                continue  # gone, reused or exiting: nothing to contain
+            if not self._attribute_orphan(current, own):
+                escaped.append(current)
+        return escaped
+
+    def _attribute_orphan(self, row, own) -> bool:
+        for job in self.jobs.values():
+            if job.cleanup is not None:
+                continue
+            members = job.family.members
+            if row.pid in members:
+                return True
+            leader = members.get(job.family.leader)
+            if leader is None or row.start < leader.start:
+                continue
+            for member in members.values():
+                if member.pid == row.pid:
+                    continue
+                shares_group = row.pgid == member.pgid and row.pgid not in own
+                shares_session = row.sid == member.sid and row.sid not in own
+                if shares_group or shares_session:
+                    members[row.pid] = row
+                    return True
+        return False
+
     def serve(self):
         connected = True
         try:
@@ -383,6 +426,7 @@ class Supervisor:
                         if job.cleanup is None:
                             job.family.update(rows)
                     recorded = {pid for j in self.jobs.values() for pid in j.family.members}
+                    orphans = []
                     for row in rows.values():
                         if row.ppid != os.getpid() or row.pid in leaders:
                             continue
@@ -392,18 +436,20 @@ class Supervisor:
                             except ChildProcessError:
                                 pass
                         elif row.pid not in recorded:
-                            # A double-fork between sweeps cannot be attributed to
-                            # one command. Stop the entire session, fail closed.
-                            current = self.table.identity(row.pid)
-                            if current is not None and current.start == row.start:
-                                # serve() alone reaps this direct child; its PID stays
-                                # reserved until that waitpid, including after exit.
-                                os.kill(row.pid, signal.SIGKILL)
-                            for job in self.jobs.values():
-                                if job.cleanup is None:
-                                    job.containment_failed = True
-                                    job.limit_detail = "unattributed namespace descendant; session stopped"
-                                    job.stop(0)
+                            orphans.append(row)
+                    for row in self._unattributed(orphans):
+                        # A double-fork between sweeps cannot be attributed to
+                        # one command. Stop the entire session, fail closed.
+                        current = self.table.identity(row.pid)
+                        if current is not None and current.start == row.start:
+                            # serve() alone reaps this direct child; its PID stays
+                            # reserved until that waitpid, including after exit.
+                            os.kill(row.pid, signal.SIGKILL)
+                        for job in self.jobs.values():
+                            if job.cleanup is None:
+                                job.containment_failed = True
+                                job.limit_detail = "unattributed namespace descendant; session stopped"
+                                job.stop(0)
                 for job in self.jobs.values():
                     job.tick(rows)
                 if self.closing and all(j.cleanup is not None for j in self.jobs.values()) and not self.outgoing:

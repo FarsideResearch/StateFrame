@@ -100,3 +100,35 @@ def test_a_nonzero_exit_says_the_interpreter_is_broken(probes):
     script += [_result(exit_code=1, output=b"boom")]
     with pytest.raises(runner.RunError, match="interpreter is broken"):
         runner._startup_probe(sys.executable, "import sys", label="engine interpreter x")
+
+
+def _host_killed(killed=1):
+    result = _result(exit_code=137, output=b"")
+    result.cleanup = SimpleNamespace(killed=killed)
+    return result
+
+
+def test_probe_killed_by_cleanup_is_retried_not_called_broken(probes):
+    calls, script = probes
+    script += [_host_killed(), _result()]
+    assert runner._startup_probe(sys.executable, "import sys", label="engine interpreter x") == b"[3, 12, 0]"
+    assert len(calls) == 2
+
+
+def test_probe_killed_twice_by_cleanup_says_load_not_broken(probes):
+    calls, script = probes
+    script += [_host_killed(), _host_killed()]
+    with pytest.raises(runner.RunError) as error:
+        runner._startup_probe(sys.executable, "import pytest", label="test interpreter x")
+    message = str(error.value)
+    assert "timed out under load" in message
+    assert "broken" not in message
+    assert len(calls) == 2
+
+
+def test_probe_exit_137_without_host_kill_is_still_a_real_failure(probes):
+    calls, script = probes
+    script += [_host_killed(killed=0)]
+    with pytest.raises(runner.RunError, match="exit 137, not a timeout"):
+        runner._startup_probe(sys.executable, "import pytest", label="test interpreter x")
+    assert len(calls) == 1
