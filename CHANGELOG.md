@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.4.44 (2026-11-12)
 
 - Fixed: a sandbox monitor could kill another engine's new sandbox (its supervisor launcher then exited 137). Monitors recognised a sandbox's private PID namespace by its number, which the kernel reuses once that namespace ends. They now hold the namespace open while they compare by that number, and refuse, with an error log, any process older than the sandbox.
 
