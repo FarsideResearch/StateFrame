@@ -1,8 +1,9 @@
 # Changelog
 
-## Unreleased
+## 0.5.3 (2026-11-12)
 
 - Fixed: with `STATEFRAME_BOUNDARY_CHECKS=on`, a task whose public files include non-Python files such as `TASK.md` or `pyproject.toml` no longer loses its boundary checks to an "unsafe public boundary path" error. Those files are skipped as context; unsafe paths are still refused.
+
 ## 0.5.2 (2026-11-12)
 
 - Fixed: `STATEFRAME_STABLE_WIRE=on` no longer ends a run when a source window's metadata re-renders. When a file the model already read is shown again with the same lines but updated window details (such as who requested it), StateFrame starts a fresh cache layout. A window whose source lines changed without a new revision is still refused.
