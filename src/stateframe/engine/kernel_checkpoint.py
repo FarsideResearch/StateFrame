@@ -1095,7 +1095,10 @@ def _hydrate(value, journal: Path, blobs: dict, known: dict | None):
     Same result as kernel_measurement.resolve_journal_blob_refs (each use a fresh object), without its
     re-encoding checks: at save the rebuilt record is compared with the live one, and at restore every
     blob's stored bytes must match the sha256 the save recorded."""
-    from kernel_measurement import _blob_reference, _read_journal_blob
+    if __package__:
+        from .kernel_measurement import _blob_reference, _read_journal_blob
+    else:
+        from kernel_measurement import _blob_reference, _read_journal_blob
     try:
         reference = _blob_reference(value) if type(value) is dict and len(value) == 2 else None
     except ValueError:
@@ -1131,7 +1134,10 @@ def _journal_entries(journal: Path, offset: int, records: list):
     bytes, {blob hash: sha256 of its stored bytes}); None when the journal cannot cover them."""
     entries, shapes, blobs, lines = [], {}, {}, hashlib.sha256()
     try:
-        from kernel_measurement import open_journal
+        if __package__:
+            from .kernel_measurement import open_journal
+        else:
+            from kernel_measurement import open_journal
         with open_journal(journal, binary=True) as stream:
             stream.seek(offset)
             for record in records:
@@ -1154,7 +1160,10 @@ def _journal_entries(journal: Path, offset: int, records: list):
 def _journal_offset(journal: Path, lines: int):
     """Byte offset after the first ``lines`` lines (for a lineage started before journal backing)."""
     try:
-        from kernel_measurement import open_journal
+        if __package__:
+            from .kernel_measurement import open_journal
+        else:
+            from kernel_measurement import open_journal
         with open_journal(journal, binary=True) as stream:
             for _ in range(lines):
                 if not stream.readline().endswith(b"\n"):
@@ -1168,7 +1177,10 @@ def _load_journal_chunk(part: dict) -> list:
     """Rebuild a journal-backed chunk: its line bytes and every blob must hash as at the save."""
     journal = Path(part["journal"])
     try:
-        from kernel_measurement import open_journal
+        if __package__:
+            from .kernel_measurement import open_journal
+        else:
+            from kernel_measurement import open_journal
         with open_journal(journal, binary=True) as stream:
             stream.seek(part["offset"])
             data = stream.read(part["end"] - part["offset"])
@@ -1347,13 +1359,17 @@ def _timeline_state(obj):
     ref = _chunk_dict(_stable_key("timeline-position", key), positions) if type(positions) is dict else None
     if ref is not None:
         state["_position_by_id"] = ref
-        from kernel_history_spool import EventLookup
         lookup = state.get("_by_id")
-        if isinstance(lookup, EventLookup) and lookup.positions is positions:
+        # kernel_timeline builds its EventLookup from the flat child module, so a
+        # package-relative import here would name a different class object and
+        # isinstance would miss it. Match the alias by shape and rebuild with the
+        # instance's own class so restore keeps the original class identity.
+        if (type(lookup).__name__ == "EventLookup"
+                and getattr(lookup, "positions", None) is positions):
             # EventLookup's reducer otherwise serializes a second full copy of
             # the same position map. Share this stand-in so restore also keeps
             # the original alias between both timeline fields.
-            state["_by_id"] = EventLookup(lookup.events, ref)
+            state["_by_id"] = type(lookup)(lookup.events, ref)
         changed = True
     if not changed:
         return NotImplemented
@@ -1441,7 +1457,10 @@ def _evidence_state(obj):
     state = dict(reduced[2]) if len(reduced) > 2 and isinstance(reduced[2], dict) else None
     if state is None:
         return NotImplemented
-    from kernel_memfix_history import SpoolEventMap
+    if __package__:
+        from .kernel_memfix_history import SpoolEventMap
+    else:
+        from kernel_memfix_history import SpoolEventMap
     if isinstance(state.get("events"), SpoolEventMap):
         # Every other HostEvidence collection is a rebuildable index or a
         # bounded decoded view. The spool and receipt IDs are the authority.
@@ -1494,7 +1513,10 @@ def _rebuild_journal(obj, state):
     obj._warm_host_span_pause_counts = {}
     obj._warm_host_span_resume_counts = {}
     from collections import OrderedDict
-    from kernel_continuation_journal import MEMBOUND_ENV, RECORD_CACHE_LIMIT
+    if __package__:
+        from .kernel_continuation_journal import MEMBOUND_ENV, RECORD_CACHE_LIMIT
+    else:
+        from kernel_continuation_journal import MEMBOUND_ENV, RECORD_CACHE_LIMIT
     obj._records_since_cache = OrderedDict()
     obj._records_since_cache_bytes = 0
     obj._record_cache_limit = (None if os.environ.get(MEMBOUND_ENV, "bounded").lower() == "legacy"
@@ -1564,7 +1586,10 @@ def _rebuild_workspace(obj, state):
 
 
 def _restored_job_handle(ident, lost_bytes):
-    from kernel_exec_session import RestoredJobHandle
+    if __package__:
+        from .kernel_exec_session import RestoredJobHandle
+    else:
+        from kernel_exec_session import RestoredJobHandle
     return RestoredJobHandle(ident, lost_bytes)
 
 
@@ -2004,7 +2029,10 @@ def _cell_full(cell) -> bool:
 
 def probe(frame, step: int, out_dir: Path) -> dict:
     """Try to pickle every root; record sizes, time and the unpicklable leaves."""
-    from kernel_agent_tools import service as agent_tools_service
+    if __package__:
+        from .kernel_agent_tools import service as agent_tools_service
+    else:
+        from kernel_agent_tools import service as agent_tools_service
     host_tools = agent_tools_service()
     if host_tools is not None and any(job.state == "running" for job in host_tools.jobs.jobs.values()):
         raise CheckpointError("live background jobs are checkpoint-ineligible; resume uses observation replay")
@@ -3440,7 +3468,10 @@ def _writer_failure_reason(run_dir, step: object) -> str:
     if run_dir is None or type(step) is not int:
         return "unexpected writer error"
     try:
-        from kernel_journal_store import open_journal
+        if __package__:
+            from .kernel_journal_store import open_journal
+        else:
+            from kernel_journal_store import open_journal
 
         with open_journal(Path(run_dir) / "checkpoints") as stream:
             lines = stream.readlines()
@@ -3526,7 +3557,10 @@ def _sweep_stale_locked(root: Path) -> int:
 
 def _pid_alive(pid: int) -> bool:
     # A Linux zombie owner counts as dead, so its temp file is swept (kernel_pid_liveness).
-    from kernel_pid_liveness import pid_alive
+    if __package__:
+        from .kernel_pid_liveness import pid_alive
+    else:
+        from kernel_pid_liveness import pid_alive
     return pid_alive(pid)
 
 
