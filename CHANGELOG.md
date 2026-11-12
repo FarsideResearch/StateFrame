@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.5.4 (2026-11-12)
 
 - Session shutdown no longer kills a slow execution supervisor on elapsed time. It is killed only when its processes show no CPU progress and no member changes for a load-scaled window, and the kill is logged with the reason.
 
