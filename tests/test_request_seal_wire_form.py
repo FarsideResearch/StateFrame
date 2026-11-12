@@ -13,7 +13,7 @@ from types import SimpleNamespace
 import pytest
 
 from _journal import measurement_events
-from engine_run import run_monitored
+from engine_run import run_monitored, sandbox_test_python
 from kernel_final_wire_allocation import _finalize_provider_request_body
 from kernel_provider_dialect import ProviderCapabilities
 from kernel_request_measurement import RequestMeasurement
@@ -131,32 +131,33 @@ def _run_scripted(tmp_path: Path, *, strict: bool, steps: list[dict[str, object]
         "raise SystemExit(host.main([str(child), str(run)]))",
     ))
     try:
-        wrapper.write_text(
-            f"#!{sys.executable}\n"
-            "import os,sys\n"
-            f"real_python={sys.executable!r}\n"
-            "args=sys.argv[1:]\n"
-            "if len(args) >= 3 and args[0] == '-B' and os.path.basename(args[1]) == '_child.py':\n"
-            f"    os.execv(real_python, [real_python, '-B', '-c', {bootstrap!r}, *args[1:]])\n"
-            # Linux launches the child as `-B -c <bootstrap> stateframe._child` with the
-            # child and run paths inside the bootstrap's sys.argv literal.
-            "if len(args) == 4 and args[:2] == ['-B', '-c'] and args[3] == 'stateframe._child':\n"
-            "    import ast,re\n"
-            "    child,run=ast.literal_eval(re.search(r'sys\\.argv=(\\[.*?\\]);',args[2]).group(1))\n"
-            "    os.chdir(run)\n"
-            f"    os.execv(real_python, [real_python, '-B', '-c', {bootstrap!r}, child, run])\n"
-            "os.execv(real_python, [real_python, *args])\n", encoding="utf-8")
-        wrapper.chmod(0o755)
-        process = run_monitored(
-            [sys.executable, "-m", "stateframe", "run", "--repo", str(repo),
-             "--task", "Read app.py and tests/test_value.py; run the test and report VALUE.",
-             "--endpoint", f"http://127.0.0.1:{server.server_port}/v1",
-             "--model", script.model, "--run-dir", str(run), "--max-turns",
-             "32" if inject_allocation_replan else "12",
-             "--test-python", sys.executable, "--python", str(wrapper), "--quiet"],
-            cwd=ROOT, env=environment, capture_output=True, text=True,
-            expected_seconds=240, run_dir=run, check=False)
-        return process, run, script
+        with sandbox_test_python(sys.executable) as test_python:
+            wrapper.write_text(
+                f"#!{test_python}\n"
+                "import os,sys\n"
+                f"real_python={test_python!r}\n"
+                "args=sys.argv[1:]\n"
+                "if len(args) >= 3 and args[0] == '-B' and os.path.basename(args[1]) == '_child.py':\n"
+                f"    os.execv(real_python, [real_python, '-B', '-c', {bootstrap!r}, *args[1:]])\n"
+                # Linux launches the child as `-B -c <bootstrap> stateframe._child` with the
+                # child and run paths inside the bootstrap's sys.argv literal.
+                "if len(args) == 4 and args[:2] == ['-B', '-c'] and args[3] == 'stateframe._child':\n"
+                "    import ast,re\n"
+                "    child,run=ast.literal_eval(re.search(r'sys\\.argv=(\\[.*?\\]);',args[2]).group(1))\n"
+                "    os.chdir(run)\n"
+                f"    os.execv(real_python, [real_python, '-B', '-c', {bootstrap!r}, child, run])\n"
+                "os.execv(real_python, [real_python, *args])\n", encoding="utf-8")
+            wrapper.chmod(0o755)
+            process = run_monitored(
+                [sys.executable, "-m", "stateframe", "run", "--repo", str(repo),
+                 "--task", "Read app.py and tests/test_value.py; run the test and report VALUE.",
+                 "--endpoint", f"http://127.0.0.1:{server.server_port}/v1",
+                 "--model", script.model, "--run-dir", str(run), "--max-turns",
+                 "32" if inject_allocation_replan else "12",
+                 "--test-python", test_python, "--python", str(wrapper), "--quiet"],
+                cwd=ROOT, env=environment, capture_output=True, text=True,
+                expected_seconds=240, run_dir=run, check=False)
+            return process, run, script
     finally:
         try:
             server.shutdown()

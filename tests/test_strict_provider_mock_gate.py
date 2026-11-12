@@ -49,6 +49,7 @@ def test_strict_provider_charged_source_replan_sends_replacement(tmp_path: Path)
     traceback = run / "child-traceback.txt"
     if traceback.is_file():
         output += traceback.read_text(encoding="utf-8")
+    assert (run / "injected-replan").is_file(), output
     assert (run / "injected-replan").read_text() == "1", output
     assert process.returncode == 0, output
     events = measurement_events(run)
