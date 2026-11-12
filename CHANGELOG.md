@@ -1,5 +1,7 @@
 # Changelog
 
+## Unreleased
+
 ## 0.5.2 (2026-11-12)
 
 - Fixed: `STATEFRAME_STABLE_WIRE=on` no longer ends a run when a source window's metadata re-renders. When a file the model already read is shown again with the same lines but updated window details (such as who requested it), StateFrame starts a fresh cache layout. A window whose source lines changed without a new revision is still refused.
