@@ -136,7 +136,7 @@ def test_large_repo_prioritizes_failure_and_bookmarks_with_complete_coverage(tmp
     visible = [meta["path"] for message in fitted["messages"]
                if (meta := parse_model_source_window(message.get("content")))
                and meta.get("path") in paths]
-    assert visible[:2] == [failure, bookmark]
+    assert set(visible[:2]) == {failure, bookmark}  # Cache reuse needs stable order; priority still decides selection.
     assert len(json.dumps(fitted).encode()) <= ceiling
     coverage = next(message["content"] for message in fitted["messages"]
                     if str(message.get("content", "")).startswith("[Source coverage]\n"))

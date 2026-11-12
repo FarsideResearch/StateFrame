@@ -21,6 +21,7 @@ from kernel_evictfix_mode import enabled as evictfix_enabled
 
 
 _TOKEN_FIT_RESERVE = 64
+_FINAL_LAYOUT_MAX_EXTRA_ALLOCATION_PASSES = 2
 # The existing 922 capture measured 2.46 serialized bytes per prompt token.
 # For ASCII JSON this is the initial character ratio; exact tokenizer pairs
 # from this run replace it as soon as they exist.
@@ -299,6 +300,47 @@ def rebind_final_layout_trim(body: Mapping[str, object], meter: object,
     else:
         capture._frame_candidate_rejection_bound = None
     return tokens, method
+
+
+def _final_layout_trim_reached_target(
+        body: Mapping[str, object], meter: object, capture: object, *,
+        token_limit: int, byte_limit: int) -> bool:
+    """Check the plain body against both limits requested by a layout trim."""
+    wire = json.dumps(body).encode()
+    tokens, _method = final_request_tokens(
+        body, meter, capture, wire_bytes=len(wire),
+    )
+    return tokens <= token_limit and len(wire) <= byte_limit
+
+
+def _final_layout_reallocation_enabled() -> bool:
+    """Keep fitted-growth retries out of stable, page-log, and replay requests."""
+    if os.environ.get("STATEFRAME_FINAL_CACHE_LAYOUT", "on").strip().lower() != "on":
+        return False
+    from kernel_cache_layout_candidate import final_layout_mode
+    from kernel_stateframe_page_log import mode as page_log_mode
+    from kernel_stable_wire import mode as stable_wire_mode
+
+    candidate_module = sys.modules["kernel_cache_layout_candidate"]
+    return (
+        final_layout_mode() == "on"
+        and page_log_mode() == "off"
+        and stable_wire_mode() == "off"
+        and getattr(candidate_module, "_REPLAY_LAYOUT_DECISION_PROVIDER", None) is None
+        and getattr(candidate_module, "_REPLAY_STABLE_WIRE_DECISION_PROVIDER", None) is None
+    )
+
+
+def _next_final_layout_reserve(
+        *, retry_pass: int, current_reserve: int, measured_growth: int,
+        projected_tokens: int, token_ceiling: int) -> int | None:
+    """Return a strictly larger reserve for one of the two bounded retries."""
+    if retry_pass >= _FINAL_LAYOUT_MAX_EXTRA_ALLOCATION_PASSES:
+        return None
+    if projected_tokens <= token_ceiling:
+        return None
+    next_reserve = max(current_reserve, measured_growth, 0)
+    return next_reserve if next_reserve > current_reserve else None
 
 
 def _capture_carrier_roles(
@@ -733,6 +775,10 @@ def finalize_frame_candidate(
     body: Mapping[str, object],
     *,
     frame_counter: Callable[[Mapping[str, object]], int],
+    token_ceiling: int | None = None,
+    byte_ceiling: int | None = None,
+    _layout_retry_pass: int = 0,
+    _layout_reserve_floor: int = 0,
 ) -> dict[str, object]:
     """Fit a detached candidate; return a proposal without wire authorization."""
     from kernel_request_budget import (
@@ -754,6 +800,7 @@ def finalize_frame_candidate(
     from kernel_stateframe_envelope import STATE_HEADER
     from kernel_frame_optional_allocation import snapshot_optional_inputs
 
+    layout_reallocation_enabled = _final_layout_reallocation_enabled()
     candidate = copy.deepcopy(body)
     meter = _request_token_meter(runtime, capture)
     from kernel_context import FRAME_CEILING_TOKENS, token_estimate
@@ -830,13 +877,18 @@ def finalize_frame_candidate(
         if active is not None
         else ENDPOINT_PROMPT_TOKEN_BUDGET
     )
+    if token_ceiling is not None:
+        if type(token_ceiling) is not int or token_ceiling <= 0:
+            raise FrameRequestAllocationError("final token ceiling must be a positive integer")
+        token_limit = min(token_limit, token_ceiling)
     if capacity_retry_limits is not None:
         token_limit = min(token_limit, capacity_retry_limits.max_prompt_tokens)
+    token_ceiling = token_limit
     existing_counter = getattr(capture, "_frame_candidate_counter", None)
     if isinstance(existing_counter, FrozenRequestCounter):
         # A later body rewrite can trigger a second fit. Keep the first fit's
         # method and ratio, even if tokenizer availability has since changed.
-        final_request_tokens(candidate, meter, capture)
+        initial_count, initial_method = final_request_tokens(candidate, meter, capture)
     else:
         initial_count, initial_method = meter.measure(candidate)
         if initial_method == "calibrated_bytes":
@@ -857,9 +909,26 @@ def finalize_frame_candidate(
             limit = _lean_request_limits(candidate, FREE_STAGE, exact_tokenizer=True)[0]
         else:
             limit = estimated_byte_limit
+        if byte_ceiling is not None:
+            if type(byte_ceiling) is not int or byte_ceiling < 0:
+                raise FrameRequestAllocationError("final byte ceiling must be a nonnegative integer")
+            limit = min(limit, byte_ceiling)
         if capacity_retry_limits is not None:
             limit = min(limit, capacity_retry_limits.max_request_bytes)
         return min(limit, layout_byte_ceiling) if layout_byte_ceiling is not None else limit
+
+    layout_token_reserve = 0
+    if os.environ.get("STATEFRAME_FINAL_CACHE_LAYOUT", "on").strip().lower() == "on":
+        from kernel_cache_layout_candidate import measured_final_cache_layout_token_overhead
+
+        layout_token_reserve = measured_final_cache_layout_token_overhead(
+            candidate, meter, capture,
+            plain_tokens=initial_count, plain_method=initial_method,
+            byte_ceiling=request_byte_limit(initial_method),
+        )
+    if layout_reallocation_enabled:
+        layout_token_reserve = max(layout_token_reserve, _layout_reserve_floor)
+    token_limit = max(1, token_ceiling - layout_token_reserve)
 
     def effective_tokens() -> int:
         # Preserve the independent frame ceiling as well as endpoint capacity.
@@ -1028,6 +1097,9 @@ def finalize_frame_candidate(
     if not isinstance(plan, Mapping):
         raise FrameRequestAllocationError("final allocation lacks source obligations")
     plan = _copy_source_plan_snapshot(plan)
+    layout_retry_source_plan = (
+        _copy_source_plan_snapshot(plan) if layout_reallocation_enabled else None
+    )
     from kernel_frame_source_snapshot import frame_source_snapshot
     sources = frame_source_snapshot(runtime, plan)
     from kernel_completion_owner import _current_tool_admission
@@ -1195,6 +1267,8 @@ def finalize_frame_candidate(
             editable_paths=editable_product_paths,
             fits=source_windows_fit,
             candidate_nonfit=source_candidate_nonfit,
+            runtime=runtime,
+            persist_source_order=False,
         )
         contents = {message.get("content") for message in full_reads["messages"]
                     if isinstance(message, Mapping) and isinstance(message.get("content"), str)}
@@ -1269,6 +1343,8 @@ def finalize_frame_candidate(
                 editable_paths=editable_product_paths,
                 fits=source_windows_fit,
                 candidate_nonfit=source_candidate_nonfit,
+                runtime=runtime,
+                persist_source_order=False,
             )
             if without_excess_reads != candidate:
                 candidate = without_excess_reads
@@ -1294,6 +1370,8 @@ def finalize_frame_candidate(
                     editable_paths=editable_product_paths,
                     fits=source_windows_fit,
                     candidate_nonfit=source_candidate_nonfit,
+                    runtime=runtime,
+                    persist_source_order=False,
                 )
                 continue
         current = tuple(plan.get("deferred_paths", ()))
@@ -1412,6 +1490,8 @@ def finalize_frame_candidate(
                 editable_paths=editable_product_paths,
                 fits=source_windows_fit,
                 candidate_nonfit=source_candidate_nonfit,
+                runtime=runtime,
+                persist_source_order=False,
             )
             candidate_wire = json.dumps(candidate).encode()
             receipt = verify_final_source_delivery(
@@ -1475,7 +1555,7 @@ def finalize_frame_candidate(
     carry_final_request_tokens(candidate, capture, tokens)
     capture._frame_candidate_measurement = meter.bind_measurement(
         candidate, tokens=tokens, method=method, request_id=str(capture.request_id),
-        max_request_bytes=byte_limit, max_prompt_tokens=token_limit,
+        max_request_bytes=byte_limit, max_prompt_tokens=token_ceiling,
         **_prepared_measurement_wire(meter, candidate_wire),
     )
     # `plan` is already detached from its caller and remains the allocator's
@@ -1487,17 +1567,18 @@ def finalize_frame_candidate(
         # The snapshot helper returns fresh inputs when no allocation is active;
         # an active allocation's inputs remain separately detached from it.
         "optional_inputs": copy.deepcopy(optional) if active is not None else optional,
-        "byte_ceiling": byte_limit, "token_ceiling": token_limit,
+        "byte_ceiling": byte_limit, "token_ceiling": token_ceiling,
         "measurement_identity": method,
     }
-    # The final renderer measures projection overhead and can ask this existing
-    # allocator to trim optional source content once before the wire is sealed.
+    layout_renderer_inputs = capture._frame_candidate_inputs
+    # The final renderer can request a bounded full allocation retry before
+    # falling back to this candidate's optional-source trim callback.
     layout_enabled = os.environ.get("STATEFRAME_FINAL_CACHE_LAYOUT", "on").strip().lower() == "on"
     candidate_module = sys.modules.get("kernel_cache_layout_candidate")
     replay_decision_fn = getattr(candidate_module, "replay_final_layout_decision", None)
     replay_decision = replay_decision_fn() if callable(replay_decision_fn) else None
     if layout_enabled and replay_decision != "plain":
-        base_token_limit = token_limit
+        base_token_limit = token_ceiling
         base_byte_limit = byte_limit
         trim_used = False
 
@@ -1506,11 +1587,137 @@ def finalize_frame_candidate(
             if trim_used:
                 raise FrameRequestAllocationError("final layout reserve requested more than once")
             trim_used = True
-            token_limit = max(1, base_token_limit - max(0, token_reserve))
-            layout_byte_ceiling = max(1, base_byte_limit - max(0, byte_reserve))
+
+            if layout_reallocation_enabled:
+                from kernel_cache_layout_candidate import (
+                    FinalCacheLayoutProjectionError,
+                    _checked_final_cache_projection,
+                    _final_layout_reserve,
+                )
+
+                def measured_projection(value):
+                    try:
+                        projection = _checked_final_cache_projection(value)
+                    except FinalCacheLayoutProjectionError:
+                        return None
+                    plain_tokens, _plain_method = final_request_tokens(value, meter, capture)
+                    projected_tokens, _projected_method = final_request_tokens(
+                        projection, meter, capture,
+                    )
+                    return (
+                        plain_tokens, projected_tokens,
+                        len(json.dumps(projection).encode()),
+                    )
+
+                measurement = measured_projection(candidate)
+                if (measurement is not None
+                        and measurement[1] > base_token_limit):
+                    missing = object()
+                    capture_fields = (
+                        "_frame_candidate_inputs", "_frame_candidate_measurement",
+                        "_frame_candidate_counter", "_frame_candidate_fallback_fit",
+                        "_frame_candidate_rejection_bound", "_request_source_closure_override",
+                        "request_source_final_delivery", "request_budget_exceeded",
+                        "_code_bookmark_transition",
+                    )
+                    saved_capture = {
+                        name: getattr(capture, name, missing) for name in capture_fields
+                    }
+
+                    def restore_capture():
+                        for name, value in saved_capture.items():
+                            if value is missing:
+                                if hasattr(capture, name):
+                                    delattr(capture, name)
+                            else:
+                                setattr(capture, name, value)
+
+                    current_body = candidate
+                    current_inputs = layout_renderer_inputs
+                    current_reserve = max(layout_token_reserve, _layout_reserve_floor)
+                    retry_pass = _layout_retry_pass
+                    did_retry = False
+                    while measurement is not None:
+                        next_reserve = _next_final_layout_reserve(
+                            retry_pass=retry_pass,
+                            current_reserve=current_reserve,
+                            measured_growth=max(0, measurement[1] - measurement[0]),
+                            projected_tokens=measurement[1],
+                            token_ceiling=base_token_limit,
+                        )
+                        if next_reserve is None:
+                            break
+                        did_retry = True
+                        capture._request_source_closure_override = (
+                            _copy_source_plan_snapshot(layout_retry_source_plan)
+                        )
+                        try:
+                            current_body = finalize_frame_candidate(
+                                runtime, capture, body, frame_counter=frame_counter,
+                                _layout_retry_pass=retry_pass + 1,
+                                _layout_reserve_floor=next_reserve,
+                            )
+                        except FrameFit5ImpossibleMinimum:
+                            restore_capture()
+                            return False
+                        current_inputs = capture._frame_candidate_inputs
+                        current_reserve = next_reserve
+                        retry_pass += 1
+                        measurement = measured_projection(current_body)
+                        if measurement is None:
+                            restore_capture()
+                            return False
+                        if (measurement[1] <= base_token_limit
+                                and measurement[2] <= base_byte_limit):
+                            if not isinstance(candidate, dict):
+                                restore_capture()
+                                return False
+                            candidate.clear()
+                            candidate.update(current_body)
+                            current_inputs.pop("_final_layout_trim", None)
+                            layout_renderer_inputs.clear()
+                            layout_renderer_inputs.update(current_inputs)
+                            capture._frame_candidate_inputs = layout_renderer_inputs
+                            return True
+
+                    if did_retry:
+                        latest_trim = current_inputs.get("_final_layout_trim")
+                        if callable(latest_trim) and measurement is not None:
+                            _overflow_reserve, trim_bytes = _final_layout_reserve(
+                                measurement[1], base_token_limit,
+                                measurement[2], base_byte_limit,
+                            )
+                            trim_tokens = max(0, measurement[1] - measurement[0])
+                            if latest_trim(trim_tokens, trim_bytes):
+                                measurement = measured_projection(current_body)
+                                if (measurement is not None
+                                        and measurement[1] <= base_token_limit
+                                        and measurement[2] <= base_byte_limit
+                                        and isinstance(candidate, dict)):
+                                    candidate.clear()
+                                    candidate.update(current_body)
+                                    current_inputs.pop("_final_layout_trim", None)
+                                    layout_renderer_inputs.clear()
+                                    layout_renderer_inputs.update(current_inputs)
+                                    capture._frame_candidate_inputs = layout_renderer_inputs
+                                    return True
+                        restore_capture()
+                        return False
+
+            target_token_limit = max(1, base_token_limit - max(0, token_reserve))
+            target_byte_limit = max(1, base_byte_limit - max(0, byte_reserve))
+            token_limit = target_token_limit
+            layout_byte_ceiling = target_byte_limit
             try:
                 try:
                     trim_optional_candidate()
+                    if (layout_reallocation_enabled
+                            and not _final_layout_trim_reached_target(
+                                candidate, meter, capture,
+                                token_limit=target_token_limit,
+                                byte_limit=request_byte_limit(frozen_method()),
+                            )):
+                        return False
                 except FrameFit5ImpossibleMinimum:
                     return False
             finally:

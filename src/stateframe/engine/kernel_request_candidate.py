@@ -13,6 +13,7 @@ def runtime_authority_fields(runtime=None):
         ("_completion_owner_", "_greenlock_"))) if runtime is not None else ()
     stable_wire = (STATE_ATTR,) if enabled_for_replay() else ()
     return tuple(dict.fromkeys((*_RUNTIME_FIELDS, *dynamic, *stable_wire,
+            "_final_cache_source_order_state",
             "_completion_owner_request_contract_assertions",
             "_greenfact_rendered_request_revisions", "_greenfact_rendered_revisions",
             "_greenfact_skipped_revisions")))

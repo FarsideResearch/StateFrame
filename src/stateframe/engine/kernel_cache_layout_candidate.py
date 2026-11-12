@@ -19,12 +19,148 @@ FINAL_MODE_ENV = "STATEFRAME_FINAL_CACHE_LAYOUT"
 SOURCE_COVERAGE_PREFIX = "[Source coverage]"
 FINAL_LAYOUT_TOKEN_MARGIN = 16
 FINAL_LAYOUT_BYTE_MARGIN = 256
+FINAL_SOURCE_ORDER_STATE_ATTR = "_final_cache_source_order_state"
+FINAL_SOURCE_ORDER_STATE_SCHEMA = "stateframe-final-source-order/1"
 _REPLAY_LAYOUT_DECISION_PROVIDER: Callable[[], str | None] | None = None
 _REPLAY_STABLE_WIRE_DECISION_PROVIDER: Callable[[], str | None] | None = None
 
 
 class FinalCacheLayoutProjectionError(ValueError):
     """The default layout cannot represent this request without changing its meaning."""
+
+
+def validate_final_source_order_state(value: object) -> dict[str, object] | None:
+    """Validate JSON-safe append-only source-window order from a checkpoint."""
+    if value is None:
+        return None
+    if (not isinstance(value, Mapping)
+            or value.get("schema") != FINAL_SOURCE_ORDER_STATE_SCHEMA
+            or not isinstance(value.get("run_id"), str)
+            or len(value["run_id"]) > 512
+            or not isinstance(value.get("order"), list)
+            or len(value["order"]) > 20_000
+            or any(not isinstance(key, str) or not key or len(key) > 8_192
+                   for key in value["order"])
+            or len(value["order"]) != len(set(value["order"]))):
+        raise ValueError("final source-order checkpoint state is malformed")
+    return {"schema": FINAL_SOURCE_ORDER_STATE_SCHEMA,
+            "run_id": value["run_id"], "order": list(value["order"])}
+
+
+def _final_source_order_run_id(runtime: object) -> str:
+    journal = getattr(runtime, "journal", None)
+    run_id = getattr(journal, "run_id", None) or getattr(runtime, "run_id", None)
+    return run_id if isinstance(run_id, str) else ""
+
+
+def _source_window_order_key(content: object) -> str | None:
+    if not isinstance(content, str) or not content.startswith("[Current source:"):
+        return None
+    from kernel_request_source_window import parse_model_source_window, parse_window
+
+    metadata = parse_model_source_window(content) or parse_window(content)
+    if not isinstance(metadata, Mapping):
+        return None
+    path = metadata.get("path")
+    ranges = metadata.get("ranges")
+    if not isinstance(path, str) or not path or not isinstance(ranges, list) or not ranges:
+        return None
+    starts = []
+    for span in ranges:
+        if (not isinstance(span, Mapping)
+                or type(span.get("start_line")) is not int
+                or type(span.get("end_line")) is not int
+                or span["start_line"] <= 0
+                or span["end_line"] < span["start_line"]):
+            return None
+        starts.append(span["start_line"])
+    identity = {"path": path.replace("\\", "/"), "starts": starts}
+    return json.dumps(identity, ensure_ascii=False, sort_keys=True,
+                      separators=(",", ":"))
+
+
+def _order_final_source_windows(body: object, runtime: object,
+                                *, run_id: str | None = None
+                                ) -> tuple[object, dict[str, object] | None]:
+    """Keep delivered source order, append new windows, and drop evicted windows."""
+    if not isinstance(body, Mapping) or runtime is None:
+        return body, None
+    messages = body.get("messages")
+    if not isinstance(messages, list):
+        return body, None
+    current_run = _final_source_order_run_id(runtime) if run_id is None else run_id
+    try:
+        previous = validate_final_source_order_state(
+            getattr(runtime, FINAL_SOURCE_ORDER_STATE_ATTR, None))
+    except ValueError as error:
+        raise FinalCacheLayoutProjectionError(str(error)) from error
+    prior_order = (previous["order"] if previous is not None
+                   and previous["run_id"] == current_run else [])
+    prior_rank = {key: index for index, key in enumerate(prior_order)}
+
+    occurrences: dict[str, int] = {}
+    entries: list[tuple[int, str, str, dict[str, object]]] = []
+    for index, row in enumerate(messages):
+        if not isinstance(row, Mapping) or row.get("role") != "user":
+            continue
+        base_key = _source_window_order_key(row.get("content"))
+        if base_key is None:
+            continue
+        occurrence = occurrences.get(base_key, 0)
+        occurrences[base_key] = occurrence + 1
+        key = json.dumps([base_key, occurrence], ensure_ascii=False,
+                         separators=(",", ":"))
+        entries.append((index, key, base_key, dict(row)))
+
+    entries_by_key = {entry[1]: entry for entry in entries}
+    ordered = [entries_by_key[key] for key in prior_order if key in entries_by_key]
+    ordered.extend(entry for entry in entries if entry[1] not in prior_rank)
+    order = [key for _index, key, _base_key, _row in ordered]
+    next_state: dict[str, object] = {
+        "schema": FINAL_SOURCE_ORDER_STATE_SCHEMA,
+        "run_id": current_run,
+        "order": order,
+    }
+    if not entries or [key for _index, key, _base_key, _row in entries] == order:
+        return body, next_state
+    projected = copy.deepcopy(dict(body))
+    projected_messages = projected.get("messages")
+    if not isinstance(projected_messages, list):
+        return body, next_state
+    for (target_index, _key, _base_key, _row), (
+            _source_index, _source_key, _source_base_key, source_row) in zip(
+            entries, ordered):
+        projected_messages[target_index] = copy.deepcopy(source_row)
+    return projected, next_state
+
+
+def _persist_final_source_order_state(runtime: object,
+                                      state: Mapping[str, object] | None) -> None:
+    if runtime is None or state is None:
+        return
+    validated = validate_final_source_order_state(state)
+    setattr(runtime, FINAL_SOURCE_ORDER_STATE_ATTR, validated)
+
+
+def _ordered_failed_open_body(body: object, runtime: object,
+                              *, stable_wire_enabled: bool) -> object:
+    """Keep a default-layout fallback aligned with the order saved for this run."""
+    if stable_wire_enabled:
+        return body
+    try:
+        ordered, state = _order_final_source_windows(body, runtime)
+    except FinalCacheLayoutProjectionError:
+        return body
+    _persist_final_source_order_state(runtime, state)
+    return ordered
+
+
+def _final_source_order_enabled_for_fitting() -> bool:
+    """Keep replayed fitting aligned with live fitting outside stable wire."""
+    if final_layout_mode() != "on":
+        return False
+    from kernel_stable_wire import mode as stable_wire_mode
+    return stable_wire_mode() != "on"
 
 
 def final_layout_mode(environ=None):
@@ -143,6 +279,9 @@ def render_final_cache_candidate(capture, runtime, body, *, meter, inputs):
         _record_final_layout(capture, "plain")
         if stable_wire_enabled or stable_decision == "plain":
             _record_stable_wire(capture, "plain", "recorded_plain_layout")
+        if selected_layout == "on" and mode() == "off" and not stable_wire_enabled:
+            return _ordered_failed_open_body(
+                body, runtime, stable_wire_enabled=False)
         return body
     if decision is None and selected_layout == "off":
         _record_final_layout(capture, "plain")
@@ -169,7 +308,8 @@ def render_final_cache_candidate(capture, runtime, body, *, meter, inputs):
         fallback = _failed_open(capture, body, "cannot_project", error_type=type(error).__name__)
         if stable_wire_enabled:
             _record_stable_wire(capture, "plain", "final_layout_failed_open")
-        return fallback
+        return _ordered_failed_open_body(
+            fallback, runtime, stable_wire_enabled=stable_wire_enabled)
     if projected is not body:
         _record_final_layout(capture, "applied")
     return projected
@@ -386,14 +526,65 @@ def _checked_final_cache_projection(body):
         raise FinalCacheLayoutProjectionError(str(error)) from error
 
 
+def measured_final_cache_layout_token_overhead(
+        body, meter, capture, *, plain_tokens: int, plain_method: str,
+        byte_ceiling: int) -> int:
+    """Measure this candidate's final-layout token growth before frame fitting."""
+    if (type(plain_tokens) is not int or plain_tokens < 0
+            or type(byte_ceiling) is not int or byte_ceiling < 1
+            or plain_method not in {"tokenize", "calibrated_bytes"}):
+        return 0
+    if (final_layout_mode() != "on" or mode() != "off"
+            or _REPLAY_LAYOUT_DECISION_PROVIDER is not None
+            or _REPLAY_STABLE_WIRE_DECISION_PROVIDER is not None):
+        return 0
+    from kernel_stable_wire import mode as stable_wire_mode
+    if stable_wire_mode() != "off":
+        # Stable-wire fitting owns its retained-headroom projection and must
+        # keep its established prefix accounting unchanged.
+        return 0
+
+    try:
+        projected = _checked_final_cache_projection(body)
+    except FinalCacheLayoutProjectionError:
+        return 0
+    if _wire_size(projected) > byte_ceiling:
+        return 0
+    from kernel_frame_allocation_capture import final_request_tokens
+
+    projected_tokens, _method = final_request_tokens(projected, meter, capture)
+    return max(0, projected_tokens - plain_tokens)
+
+
 def _render_final_cache_layout(capture, runtime, body, *, meter, inputs,
                                replay_decision=None, trim_callback=None,
                                stable_wire_enabled=False, stable_replay_decision=None):
     from kernel_request_source_window import verify_final_source_delivery, source_delivery_satisfied
-    from kernel_frame_allocation_capture import final_request_tokens, carry_final_request_tokens
+    from kernel_frame_allocation_capture import (
+        FrozenRequestCounter, final_request_tokens, carry_final_request_tokens,
+    )
+    from kernel_frame_optional_allocation import identity
 
-    projected = _checked_final_cache_projection(body)
-    tokens, method = final_request_tokens(projected, meter, capture)
+    def admission_tokens(value):
+        tokens, method = final_request_tokens(value, meter, capture)
+        frozen = getattr(capture, "_frame_candidate_counter", None)
+        changed_exact = (isinstance(frozen, FrozenRequestCounter)
+                         and frozen.method == "tokenize"
+                         and identity(value) != frozen.body_digest)
+        if ((method == "calibrated_bytes" or changed_exact)
+                and getattr(meter, "measure_method", None) == "calibrated_bytes"):
+            current, current_method = meter.measure(value)
+            tokens = current if current_method == "tokenize" else max(tokens, current)
+        return tokens, method
+
+    order_state = None
+    ordered_body = body
+    if not stable_wire_enabled:
+        # Selection has already applied priority; retain delivered order and
+        # append newly selected windows for cache reuse.
+        ordered_body, order_state = _order_final_source_windows(body, runtime)
+    projected = _checked_final_cache_projection(ordered_body)
+    tokens, method = admission_tokens(projected)
     size = _wire_size(projected)
     if not stable_wire_enabled and replay_decision != "layout" and (
             tokens > inputs["token_ceiling"] or size > inputs["byte_ceiling"]):
@@ -406,22 +597,30 @@ def _render_final_cache_layout(capture, runtime, body, *, meter, inputs,
                 if isinstance(body, dict):
                     body.clear()
                     body.update(fitted_body)
-                return _failed_open(
+                fallback = _failed_open(
                     capture, body, "exceeds_measured_envelope", meter=method,
                     prompt_tokens=tokens, token_ceiling=inputs["token_ceiling"],
                     bytes=size, byte_ceiling=inputs["byte_ceiling"],
                     token_reserve=token_reserve, byte_reserve=byte_reserve,
                 )
-            projected = _checked_final_cache_projection(body)
-            tokens, method = final_request_tokens(projected, meter, capture)
+                return _ordered_failed_open_body(
+                    fallback, runtime, stable_wire_enabled=stable_wire_enabled)
+            ordered_body = body
+            order_state = None
+            if not stable_wire_enabled:
+                ordered_body, order_state = _order_final_source_windows(body, runtime)
+            projected = _checked_final_cache_projection(ordered_body)
+            tokens, method = admission_tokens(projected)
             size = _wire_size(projected)
         if tokens > inputs["token_ceiling"] or size > inputs["byte_ceiling"]:
-            return _failed_open(
+            fallback = _failed_open(
                 capture, body, "exceeds_measured_envelope", meter=method,
                 prompt_tokens=tokens, token_ceiling=inputs["token_ceiling"],
                 bytes=size, byte_ceiling=inputs["byte_ceiling"],
                 token_reserve=token_reserve, byte_reserve=byte_reserve,
             )
+            return _ordered_failed_open_body(
+                fallback, runtime, stable_wire_enabled=stable_wire_enabled)
     receipt = verify_final_source_delivery(
         inputs["source_plan"], projected["messages"], payload=projected,
         sources=inputs["sources"])
@@ -477,7 +676,7 @@ def _render_final_cache_layout(capture, runtime, body, *, meter, inputs,
         if result is projected:
             # Stable wire failed open to the final-layout body. The layout
             # fallback still owns any overflow in that body.
-            tokens, method = final_request_tokens(projected, meter, capture)
+            tokens, method = admission_tokens(projected)
             size = _wire_size(projected)
             if tokens > inputs["token_ceiling"] or size > inputs["byte_ceiling"]:
                 restore_plain()
@@ -486,7 +685,7 @@ def _render_final_cache_layout(capture, runtime, body, *, meter, inputs,
                     prompt_tokens=tokens, token_ceiling=inputs["token_ceiling"],
                     bytes=size, byte_ceiling=inputs["byte_ceiling"],
                 )
-        result_tokens, result_method = final_request_tokens(result, meter, capture)
+        result_tokens, result_method = admission_tokens(result)
         if (result_tokens > inputs["token_ceiling"]
                 or _wire_size(result) > inputs["byte_ceiling"]):
             restore_plain()
@@ -499,6 +698,8 @@ def _render_final_cache_layout(capture, runtime, body, *, meter, inputs,
         return result
     if stable_wire_enabled:
         _record_stable_wire(capture, "plain", "recorded_plain_wire")
+    else:
+        _persist_final_source_order_state(runtime, order_state)
     carry_final_request_tokens(projected, capture, tokens)
     return projected
 
