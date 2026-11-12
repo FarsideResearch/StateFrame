@@ -48,6 +48,31 @@ HOST_STATE: dict[str, dict] = {}
 _RESUMED_TIME: dict[str, object] = {}
 
 
+
+def recorded_stable_wire_decision(recorded: bytes | None) -> str | None:
+    """Stable-wire decision a replayed send must reproduce, from its recorded request.
+
+    A projection was "applied". A plain request is a stable-wire fallback ("plain")
+    only when stable wire is on for this run; otherwise stable wire never ran. Calling
+    it "plain" there switched replay onto the stable-wire path, which skips final
+    source ordering, so the first live request after replay laid out its source
+    windows differently from the request that was in flight.
+    """
+    if recorded is None:
+        return None
+    try:
+        request = json.loads(recorded)
+    except (ValueError, RecursionError):
+        return None
+    messages = request.get("messages") if isinstance(request, dict) else None
+    if not isinstance(messages, list):
+        return None
+    from kernel_stable_wire import is_stable_wire_projection, mode as stable_wire_mode
+    # Inspect recorded structure without consulting the replay decision provider.
+    if is_stable_wire_projection(messages, recorded=True):
+        return "applied"
+    return "plain" if stable_wire_mode() == "on" else None
+
 def _start_resumed_deadline() -> None:
     """Once replay is over, give the run the time it had left, counted from now (once)."""
     seconds = _RESUMED_TIME.get("seconds")
@@ -231,7 +256,7 @@ def install_wire_recorder(run: Path, chat_url: str, replayer: Replayer | None = 
         )
         from kernel_cache_layout_view import FINAL_LAYOUT_NAME
         from kernel_stateframe_final_message import AUTHORITY_OVERLAY_HEADER
-        from kernel_stable_wire import is_stable_wire_projection, recorded_window_layout
+        from kernel_stable_wire import recorded_window_layout
 
         def replay_layout_decision() -> str | None:
             recorded = replayer.request_for_layout_decision()
@@ -257,19 +282,7 @@ def install_wire_recorder(run: Path, chat_url: str, replayer: Replayer | None = 
         install_replay_layout_decision_provider(replay_layout_decision)
 
         def replay_stable_wire_decision() -> str | None:
-            recorded = replayer.request_for_layout_decision()
-            if recorded is None:
-                return None
-            try:
-                request = json.loads(recorded)
-            except (ValueError, RecursionError):
-                return None
-            messages = request.get("messages") if isinstance(request, dict) else None
-            if not isinstance(messages, list):
-                return None
-            # Inspect recorded structure without consulting this same decision
-            # provider again when today's stable-wire switch is off.
-            return "applied" if is_stable_wire_projection(messages, recorded=True) else "plain"
+            return recorded_stable_wire_decision(replayer.request_for_layout_decision())
 
         install_replay_stable_wire_decision_provider(replay_stable_wire_decision)
 

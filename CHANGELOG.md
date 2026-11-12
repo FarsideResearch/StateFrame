@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Resuming a run that did not use stable wire no longer reports an unfaithful resume after a file was moved or deleted. Replay treated every recorded request as a stable-wire fallback, which skipped source-window ordering, so the first request built live after replay listed its source windows in a different order from the one that was in flight.
+
 ## 0.6.8 (2026-11-13)
 
 - Fix: a broken engine install that cannot import the hypothesis projection now fails loudly instead of silently dropping the hypothesis block from the lean state frame.
