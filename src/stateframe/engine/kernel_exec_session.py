@@ -616,43 +616,43 @@ class ExecSession:
                 self._close_control_done = True
         if self._process is not None and not getattr(self, "_close_process_reaped", False):
             try:
-                if (not getattr(self, "_close_force_kill", False)
-                        and getattr(self, "_close_stop_done", False)):
-                    # Load-scaled: a fixed short wait SIGKILLed healthy supervisors that were
-                    # merely slow to exit, taking their whole sandbox with them (exit 137).
-                    self._process.wait(timeout=rpc_timeout_seconds())
+                verified = (not getattr(self, "_close_force_kill", False)
+                            and getattr(self, "_close_stop_done", False))
+                # Every path first gives the supervisor a load-scaled chance to exit on its
+                # own: with the control socket closed it stops its jobs and exits. A fixed
+                # short wait, or an immediate kill after a slow stop, SIGKILLed healthy
+                # sandboxes on a loaded host (exit 137). A retry after a kill only
+                # re-verifies the launch unit.
+                exited = getattr(self, "_close_unit_killed", False)
+                if not exited:
+                    try:
+                        self._process.wait(timeout=rpc_timeout_seconds())
+                        exited = True
+                    except subprocess.TimeoutExpired:
+                        exited = False
+                if verified and exited:
                     self._close_process_reaped = True
                 else:
-                    # A refused or lost control reply cannot attest to descendants.
-                    # Verify the whole launch unit before allowing artifact removal.
+                    # A refused or lost control reply cannot attest to descendants, and a
+                    # supervisor that did not exit is unresponsive: verify the whole launch
+                    # unit before allowing artifact removal.
+                    self._close_force_kill = True
                     survivors = kill_launch_unit(
                         self._process, deadline_seconds=5,
                         launch_identity=recorded_launch_identity(self._process))
-                    if survivors:
-                        raise ExecSessionError(
-                            "execution supervisor did not terminate after cleanup; survivors "
-                            + ", ".join(map(str, survivors)))
-                    self._close_process_reaped = True
-                    self._close_stop_done = True
-            except subprocess.TimeoutExpired:
-                # Alive and unresponsive after the load-scaled wait: kill the whole launch
-                # unit, since the outer bwrap can leave its supervisor alive during setup.
-                self._close_force_kill = True
-                state = ("closed its control socket but did not exit" if released
-                         else "stopped answering and did not exit")
-                try:
-                    survivors = kill_launch_unit(
-                        self._process, deadline_seconds=5,
-                        launch_identity=recorded_launch_identity(self._process))
-                    # Killing a supervisor is always reported; without survivors a later
-                    # close finds it reaped and can finish removing artifacts.
+                    self._close_unit_killed = True
                     self._close_process_reaped = not survivors
-                    detail = f"; survivors {', '.join(map(str, survivors))}" if survivors else ""
-                    raise ExecSessionError(
-                        f"execution supervisor did not terminate after cleanup: it {state} within "
-                        f"{rpc_timeout_seconds():g} s" + detail)
-                except BaseException as error:
-                    errors.append(error)
+                    if not survivors:
+                        self._close_stop_done = True
+                    if survivors or not exited:
+                        # Killing a live supervisor is always reported; without survivors a
+                        # later close finds it reaped and can finish removing artifacts.
+                        state = ("closed its control socket but did not exit" if released
+                                 else "stopped answering and did not exit")
+                        detail = f"; survivors {', '.join(map(str, survivors))}" if survivors else ""
+                        raise ExecSessionError(
+                            f"execution supervisor did not terminate after cleanup: it {state} "
+                            f"within {rpc_timeout_seconds():g} s" + detail)
             except BaseException as error:
                 errors.append(error)
         if self._process is not None and not getattr(self, "_close_pidfd_done", False):

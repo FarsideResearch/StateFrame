@@ -124,12 +124,13 @@ def test_failed_stop_rpc_releases_descriptors_for_retry(tmp_path, monkeypatch):
 
     with pytest.raises(ExecSessionError, match="survivors"):
         session.close()
-    assert events == ["owner closed", "control closed", "pidfd closed"]
+    # The supervisor gets its load-scaled exit wait before the launch unit is verified.
+    assert events == ["owner closed", "control closed", "wait", "pidfd closed"]
     assert session._process._stateframe_launch_identity.pidfd is None
     assert not session._closed and session._log.closed
 
     session.close()
-    assert events == ["owner closed", "control closed", "pidfd closed", "owner closed"]
+    assert events == ["owner closed", "control closed", "wait", "pidfd closed", "owner closed"]
     assert session._closed and session._log.closed
 
 
@@ -253,3 +254,41 @@ def test_survivor_report_retains_artifacts_but_closes_ledger(tmp_path):
 
     assert executor.close().ok
     assert executor._closed and not executor._stage.exists()
+
+
+def test_slow_stop_waits_for_supervisor_exit_before_verifying(tmp_path, monkeypatch):
+    """A stop that misses its deadline on a loaded host must not SIGKILL a supervisor
+    that is still exiting on its own; the launch unit is verified only after the wait."""
+    import kernel_exec_session as sessions
+
+    events = []
+
+    class Process:
+        def poll(self):
+            return None
+
+        def wait(self, timeout):
+            events.append(("wait", timeout))
+
+    class Control:
+        def close(self):
+            events.append("control closed")
+
+    session = object.__new__(ExecSession)
+    session._closed = False
+    session._process = Process()
+    session._control = Control()
+    session._log = (tmp_path / "supervisor.log").open("wb")
+    session._initial_capability = None
+    session._close_owner_write_end = lambda: None
+    session.stop_all = lambda *_args: CleanupReport(False, 0, (), "session cleanup deadline exceeded")
+    session._rpc = lambda request: events.append(request["op"])
+    monkeypatch.setattr(sessions, "rpc_timeout_seconds", lambda: 42.0)
+    monkeypatch.setattr(sessions, "recorded_launch_identity", lambda process: None)
+    monkeypatch.setattr(sessions, "kill_launch_unit",
+                        lambda *args, **kwargs: events.append("verify launch unit") or [])
+
+    session.close()
+
+    assert events == ["control closed", ("wait", 42.0), "verify launch unit"]
+    assert session._closed and session._log.closed
