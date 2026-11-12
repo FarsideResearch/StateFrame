@@ -1,7 +1,10 @@
 """Prove internal journal noise cannot move provider-visible request identities."""
 from __future__ import annotations
 
+import ast
 import json
+import os
+import re
 from pathlib import Path
 import sys
 
@@ -345,6 +348,15 @@ def test_wire_ids_ignore_one_internal_journal_event_before_request_two(
     original_popen = runner.subprocess.Popen
 
     def wrapped_popen(command, *args, **kwargs):
+        # Linux launches the child as `./python -B -c <bootstrap> stateframe._child`
+        # from the interpreter directory; map it back to `python -B <child> <run>`.
+        if (isinstance(command, (list, tuple)) and len(command) == 5
+                and list(command[1:3]) == ["-B", "-c"] and command[4] == "stateframe._child"):
+            child_path, run_path = ast.literal_eval(
+                re.search(r"sys\.argv=(\[.*?\]);", command[3]).group(1))
+            command = [os.path.join(kwargs.get("cwd") or ".", command[0]), "-B",
+                       child_path, run_path]
+            kwargs["cwd"] = run_path
         if (isinstance(command, (list, tuple)) and len(command) >= 4
                 and Path(str(command[2])).name == "_child.py"):
             marker = child_hook["marker"]
