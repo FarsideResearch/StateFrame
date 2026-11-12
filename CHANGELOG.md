@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Whole-request wire bytes, sorted character counts and canonical identity digests are memoized behind a structural guard, so an unchanged candidate body is serialized once per encoding instead of eight times per final allocation; request bytes are unchanged and any in-place edit forces a fresh serialization.
 ## 0.5.18 (2026-11-12)
 
 - The environment seed digest is cached on disk under the StateFrame cache directory, keyed by the source root, entry count, total size and newest mtime/ctime, so unchanged environments skip the full content hash on every run; any file change recomputes it and the post-copy integrity check still hashes in full.

@@ -13,6 +13,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 
 from kernel_frame_optional_allocation import identity, selection_from_frame
+from kernel_body_serialization_memo import canonical_digest, plain_wire, sorted_chars
 from kernel_frame_request_allocation import (
     FrameRequestAllocation,
     FrameRequestAllocationError,
@@ -107,7 +108,7 @@ def _source_candidate_nonfit(
 def _remember_exact_pair(body: Mapping[str, object], meter: object, tokens: int) -> None:
     overhead = getattr(meter, "template_overhead_tokens", 0)
     overhead = overhead if type(overhead) is int and overhead >= 0 else 0
-    chars = len(json.dumps(body, sort_keys=True, ensure_ascii=False))
+    chars = sorted_chars(body)
     core = max(1, tokens - overhead)
     if chars:
         prior = getattr(meter, "_evictfix_token_pair", None)
@@ -126,7 +127,11 @@ def _calibrated_ratio(meter: object) -> float:
 
 
 def _serialized_chars(body: Mapping[str, object]) -> int:
-    return len(json.dumps(body, sort_keys=True, ensure_ascii=False))
+    return sorted_chars(body)
+
+
+def _body_identity(body: Mapping[str, object]) -> str:
+    return canonical_digest(body, identity)
 
 
 def _copy_source_plan_snapshot(plan: Mapping[str, object]) -> dict[str, object]:
@@ -192,7 +197,7 @@ class FrozenRequestCounter:
                 tokens: int, method: str, request_id: str) -> FrozenRequestCounter:
         from kernel_frame_optional_allocation import identity
         return cls(method, tokens, _serialized_chars(body),
-                   _calibrated_ratio(meter), identity(body),
+                   _calibrated_ratio(meter), _body_identity(body),
                    meter.tokenizer_identity(body), request_id,
                    meter._request_id or request_id)
 
@@ -255,7 +260,7 @@ def final_request_tokens(body: Mapping[str, object], meter: object,
             capture._frame_candidate_counter = FrozenRequestCounter.capture(
                 body, meter, tokens, method, request_id)
         return tokens, method
-    if identity(body) == frozen.body_digest:
+    if _body_identity(body) == frozen.body_digest:
         return frozen.tokens, frozen.method
     if frozen.method == "tokenize":
         tokens, method = measure_body()
@@ -274,7 +279,7 @@ def carry_final_request_tokens(body: Mapping[str, object], capture: object,
     if isinstance(frozen, FrozenRequestCounter):
         capture._frame_candidate_counter = replace(
             frozen, tokens=tokens, chars=_serialized_chars(body),
-            body_digest=identity(body))
+            body_digest=_body_identity(body))
 
 
 def rebind_final_layout_trim(body: Mapping[str, object], meter: object,
@@ -1282,7 +1287,7 @@ def finalize_frame_candidate(
     # lose its retained read pages under pressure. The initial candidate may
     # also contain retained pages before any path is deferred.
     for _attempt in range(2 * len(plan.get("units", ())) + 3):
-        candidate_wire = json.dumps(candidate).encode()
+        candidate_wire = plain_wire(candidate)
         receipt = verify_final_source_delivery(
             plan,
             candidate["messages"],
