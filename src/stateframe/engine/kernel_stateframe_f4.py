@@ -18,6 +18,7 @@ from pathlib import PurePosixPath
 from kernel_context import token_estimate
 from kernel_stateframe_envelope import STATE_HEADER, serialize_stateframe_payload
 from kernel_evictfix_mode import enabled as evictfix_enabled
+from kernel_prompt_compact import short_id
 from kernel_stateframe_marker import escape_state_marker_data
 
 
@@ -251,6 +252,11 @@ def _revision(frame: Mapping[str, object], path: str | None = None) -> str:
             return str(value)
     envelope = _mapping(frame.get("host_envelope"))
     return str(envelope.get("revision") or "UNKNOWN")
+
+
+def frame_revision(frame: Mapping[str, object], path: str | None = None) -> str:
+    """The revision the F4 state and handoff report for ``frame`` (public alias)."""
+    return _revision(frame, path)
 
 
 def _status(value: object) -> str:
@@ -784,6 +790,17 @@ def _clip(value: object, maximum: int) -> str:
     return text[: max(0, maximum - 1)] + "…"
 
 
+def _stale_paths(slot: Mapping[str, object]) -> str:
+    paths = _strings(slot.get("invalidated_by"), limit=2)
+    # Keep the end of each path (the file name is what identifies the edit).
+    return ", ".join(p if len(p) <= 48 else "…" + p[-47:] for p in paths)
+
+
+def _stale_since(slot: Mapping[str, object], cap: int = 80) -> str:
+    paths = _stale_paths(slot)
+    return _clip(f"STALE since edit to {paths}" if paths else "STALE since a later edit", cap)
+
+
 def _handoff_text(slots: object, host: object, rationale: object, *, limits: tuple[int, ...],
                   work_carry: object = None) -> str:
     values = _slot_map(slots)
@@ -806,20 +823,36 @@ def _handoff_text(slots: object, host: object, rationale: object, *, limits: tup
     support = _strings(basis.get("support_refs"), limit=3)
     adverse = str(basis.get("adverse_ref") or "").strip()
     basis_sentence = str(basis.get("sentence") or "").strip()
+    basis_stale = str(basis.get("status") or "").lower() == "stale"
+    hypothesis_stale = str(hypothesis.get("status") or "").lower() == "stale"
+    if hypothesis_stale and str(hypothesis.get("text") or "").strip():
+        # Prefix, not suffix: a tight clip must never cut the marker away.
+        hypothesis_text = _stale_since(hypothesis, min(80, limits[0] // 3)) + "; recheck: " + hypothesis_text
     if basis_sentence:
         evidence = basis_sentence
+        # Model-authored basis: show the revision it was written against, never the
+        # current envelope revision (which would present it as freshly verified).
+        bound = str(basis.get("bound_revision") or "").strip()
+        revision_label = short_id(bound) if bound else "unknown"
     elif envelope.get("last_action") or envelope.get("last_result"):
         evidence = (f"host recorded {envelope.get('last_action', 'an action')} -> "
                     f"{envelope.get('last_result', 'a result')} on revision {revision}; "
                     "interpretation is not yet supplied")
+        revision_label = revision
     else:
         evidence = "not yet supplied; no decisive host evidence is recorded"
-    evidence += f" (revision {revision}"
+        revision_label = revision
+    evidence += f" (revision {revision_label}"
     if support:
         evidence += "; refs " + ", ".join(support)
     if adverse:
         evidence += "; adverse " + adverse
     evidence += ")"
+    if basis_stale and basis_sentence:
+        stale_refs = _strings(basis.get("stale_refs"), limit=3)
+        evidence = (_stale_since(basis, min(80, limits[1] // 3))
+                    + ("; stale refs " + ", ".join(stale_refs) if stale_refs else "")
+                    + "; recheck before relying on it: " + evidence)
     if rejected_row:
         rejected_text = (f"{rejected_row.get('text', 'not supplied')} "
                          f"({rejected_row.get('disposition', 'unclassified')})")
@@ -2068,7 +2101,7 @@ __all__ = [
     "CLAUSE_HEADER", "F4_PREDICATE_GLOSSARY", "HANDOFF_HEADER", "MAX_HANDOFF_TOKENS", "MODEL_VISIBLE_STATE_KEYS", "MIN_HANDOFF_TOKENS", "MODE_ENV", "SCHEMA",
     "KEEP_LATEST_BATCH_ENV", "MAX_RETAINED_PROVIDER_BATCHES", "STATE_HEADER",
     "RealExchangeLedger", "assert_f4_invariants", "compose_messages",
-    "enabled", "frame_bytes", "keep_latest_batch_enabled", "mode", "order_f4_messages",
+    "enabled", "frame_bytes", "frame_revision", "keep_latest_batch_enabled", "mode", "order_f4_messages",
     "order_messages", "project_f4_state", "provider_batch_id", "provider_call_ids",
     "latest_complete_tool_exchange", "public_checks_were_not_run",
     "render_f4_handoff", "state_message",

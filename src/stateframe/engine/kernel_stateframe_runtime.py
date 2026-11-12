@@ -6858,14 +6858,45 @@ class StateFrameRuntime:
             producer="stateframe_decision_continuity",
         )
 
+    def _decision_continuity_revision(self) -> str | None:
+        """F4 revision (same source as the F4 state/handoff) to stamp on model slots.
+
+        Prefers the recorded artifact revision, then the binding's product revision
+        (the fallback chain used at the S1 draft above).  Unavailable -> journal event.
+        """
+        value: object = None
+        try:
+            from kernel_stateframe_f4 import frame_revision
+            hashes = dict(getattr(self, "artifact_hashes", None) or {})
+            if hashes:
+                found = frame_revision({"artifact_revisions": hashes}, self._target_relative())
+                value = None if found == "UNKNOWN" else found
+            if not value:
+                binding = self.binding()
+                value = binding.get("product_revision") or binding.get("artifact")
+        except (AttributeError, KeyError, RuntimeError, TypeError, ValueError, OSError):
+            value = None
+        # A multi-part revision ("a|b", several artifacts and no target path) is not a
+        # single revision to bind to: treat it as unavailable.
+        if isinstance(value, str) and value.strip() and "|" not in value:
+            return value.strip()
+        self.journal.emit(
+            "decision_continuity_revision_unavailable",
+            step=getattr(self.owner, "current_step", None),
+            producer="stateframe_decision_continuity",
+        )
+        return None
+
     def ingest_decision_continuity_delta(self, delta: object) -> dict[str, object] | None:
         """Host-validate one action delta; invalid or dangling claims are non-fatal."""
         if self.decision_continuity is None:
             return None
+        bound_revision = self._decision_continuity_revision()
         result = self.decision_continuity.apply_delta(
             delta,
             existing_refs=self._decision_continuity_receipt_refs(),
             step=getattr(self.owner, "current_step", None),
+            revision=bound_revision,
         )
         if result.get("accepted"):
             self._decision_continuity_persist(reason="delta_accepted", result=result)
@@ -7004,8 +7035,15 @@ class StateFrameRuntime:
                 frame=frame,
                 assistant_statement=self._decision_continuity_assistant_statement(),
             )
+            # Only a slot-bearing projection on the slots store stamps revisions; do not
+            # pay the lookup (or journal an event) for legacy mode or slot-less refreshes.
+            from kernel_decision_continuity_slots import SlotDecisionContinuityStore
+            stamp = (isinstance(store, SlotDecisionContinuityStore)
+                     and isinstance(projection, Mapping)
+                     and isinstance(projection.get("slots"), Mapping))
             result = store.sync_organ_projection(
-                projection, existing_refs=self._decision_continuity_receipt_refs())
+                projection, existing_refs=self._decision_continuity_receipt_refs(),
+                revision=self._decision_continuity_revision() if stamp else None)
             if result.get("changed") or result.get("dropped_refs"):
                 self._decision_continuity_persist(
                     reason="organ_projection", result=result)

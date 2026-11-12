@@ -12,6 +12,7 @@ import json
 from collections.abc import Mapping, Sequence
 
 from kernel_context import token_estimate
+from kernel_prompt_compact import short_id
 
 
 SCHEMA = "stateframe-decision-continuity/slots/1"
@@ -54,6 +55,14 @@ def _work_carry_enabled() -> bool:
 def _clip(value: object, maximum: int) -> str:
     text = str(value or "").strip()
     return text if len(text) <= maximum else text[: max(0, maximum - 1)] + "…"
+
+
+def _bound_revision(value: object) -> str | None:
+    """Revision a slot was written against; absent when the host did not know one."""
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    return _clip(text, MAX_SCOPE) if text else None
 
 
 def _text(value: object, field: str, maximum: int, *, required: bool = True) -> str:
@@ -176,6 +185,8 @@ def _hypothesis(value: object, *, restored: bool = False) -> dict[str, object] |
     scope = raw.get("scope")
     if isinstance(scope, str) and scope.strip():
         result["scope"] = _clip(scope, MAX_SCOPE)
+    if restored and _bound_revision(raw.get("bound_revision")):
+        result["bound_revision"] = _bound_revision(raw.get("bound_revision"))
     if restored and str(raw.get("status", "")).lower() == "stale":
         result["status"] = "stale"
         invalidated = raw.get("invalidated_by")
@@ -202,6 +213,8 @@ def _basis(value: object, *, restored: bool = False) -> dict[str, object] | None
         "adverse_ref": adverse, "support_refs": support, "sentence": sentence,
         "status": "unverified",
     }
+    if restored and _bound_revision(raw.get("bound_revision")):
+        result["bound_revision"] = _bound_revision(raw.get("bound_revision"))
     if restored and str(raw.get("status", "")).lower() == "stale":
         result["status"] = "stale"
         stale = raw.get("stale_refs")
@@ -699,7 +712,10 @@ class SlotDecisionContinuityStore:
         return {"accepted": True, "invalidated_refs": []}
 
     def apply_delta(self, value: object, *, existing_refs: set[str] | Sequence[str] = (),
-                    step: int | None = None) -> dict[str, object]:
+                    step: int | None = None,
+                    revision: object = None) -> dict[str, object]:
+        """Apply a model delta.  ``revision`` is the F4 revision (the one the F4 state
+        and handoff report); it is stamped as ``bound_revision`` on written slots."""
         try:
             delta = normalize_delta(value)
         except SlotDecisionContinuityError as error:
@@ -714,11 +730,14 @@ class SlotDecisionContinuityStore:
         changed: list[str] = []
         dropped: list[str] = []
         next_slots = copy.deepcopy(self._slots)
-        if "hypothesis" in delta:
-            next_slots["hypothesis"] = copy.deepcopy(delta["hypothesis"])
-            changed.append("hypothesis")
+        # Stamp the revision the model was looking at so a later render never
+        # presents this claim as verified against a newer revision.
+        bound = _bound_revision(revision)
+        basis_fresh = False
         if "basis" in delta:
             basis = copy.deepcopy(delta["basis"])
+            current_basis = self._slots.get("basis")
+            resent_stale = False
             if isinstance(basis, Mapping):
                 kept = []
                 for ref in basis.get("support_refs", []):
@@ -732,8 +751,44 @@ class SlotDecisionContinuityStore:
                     adverse = None
                 basis["adverse_ref"] = adverse
                 basis["support_refs"] = kept[:MAX_SUPPORT_REFS]
+                if isinstance(current_basis, Mapping) and current_basis.get("status") == "stale":
+                    # Only validated refs count: a re-sent basis that cites nothing beyond
+                    # its already stale refs is not new evidence and stays stale.
+                    cited = {ref for ref in [*kept, adverse] if ref}
+                    resent_stale = not (cited - set(current_basis.get("stale_refs", [])))
+            if resent_stale and isinstance(basis, dict):
+                for key in ("status", "stale_refs", "invalidated_by", "bound_revision"):
+                    if key in current_basis:
+                        basis[key] = copy.deepcopy(current_basis[key])
+            else:
+                basis_fresh = isinstance(basis, dict)
+                if bound and isinstance(basis, dict):
+                    basis["bound_revision"] = bound
             next_slots["basis"] = basis
             changed.append("basis")
+        if "hypothesis" in delta:
+            current_hyp = self._slots.get("hypothesis")
+            next_slots["hypothesis"] = copy.deepcopy(delta["hypothesis"])
+            hyp = next_slots["hypothesis"]
+            if (not basis_fresh and isinstance(current_hyp, Mapping)
+                    and current_hyp.get("status") == "stale" and isinstance(hyp, dict)
+                    and hyp.get("text") == current_hyp.get("text")):
+                for key in ("status", "invalidated_by", "bound_revision"):
+                    if key in current_hyp:
+                        hyp[key] = copy.deepcopy(current_hyp[key])
+                if bound:
+                    hyp.setdefault("bound_revision", bound)
+            elif bound and isinstance(hyp, dict):
+                hyp["bound_revision"] = bound
+            changed.append("hypothesis")
+        elif basis_fresh:
+            # Fresh evidence revalidates the standing hypothesis: tie its freshness to the basis.
+            hyp = next_slots.get("hypothesis")
+            if isinstance(hyp, dict) and hyp.get("status") == "stale":
+                hyp["status"] = "unverified"
+                hyp.pop("invalidated_by", None)
+                if bound:
+                    hyp["bound_revision"] = bound
         if "rejected" in delta:
             next_slots["rejected"] = copy.deepcopy(delta["rejected"])
             changed.append("rejected")
@@ -854,6 +909,8 @@ class SlotDecisionContinuityStore:
         result: dict[str, object] = {"adverse_ref": adverse, "support_refs": support,
                                      "sentence": _clip(value.get("sentence"),
                                                         sentence_limit)}
+        if value.get("bound_revision"):
+            result["bound_revision"] = short_id(value.get("bound_revision"))
         if value.get("status") == "stale":
             result["status"] = "stale"
             result["stale_refs"] = [
@@ -878,6 +935,9 @@ class SlotDecisionContinuityStore:
             }
             if hypothesis.get("scope") and level == 0:
                 result["hypothesis"]["scope"] = _clip(hypothesis.get("scope"), MAX_SCOPE)
+            if hypothesis.get("bound_revision"):
+                result["hypothesis"]["bound_revision"] = short_id(
+                    hypothesis.get("bound_revision"))
             if hypothesis.get("invalidated_by"):
                 result["hypothesis"]["invalidated_by"] = list(
                     _clip(path, MAX_SCOPE if level < 3 else 32)
@@ -996,7 +1056,8 @@ class SlotDecisionContinuityStore:
     render = render_message
 
     def sync_organ_projection(self, projection: Mapping[str, object], *,
-                              existing_refs: set[str] | Sequence[str] = ()) -> dict[str, object]:
+                              existing_refs: set[str] | Sequence[str] = (),
+                              revision: object = None) -> dict[str, object]:
         """Accept the legacy advisory seam without promoting incomplete slots.
 
         The old organ projector does not provide the required falsifiability,
@@ -1009,7 +1070,7 @@ class SlotDecisionContinuityStore:
         raw_slots = projection.get("slots")
         if not isinstance(raw_slots, Mapping):
             return {"accepted": True, "changed": [], "dropped_refs": []}
-        return self.apply_delta(raw_slots, existing_refs=existing_refs)
+        return self.apply_delta(raw_slots, existing_refs=existing_refs, revision=revision)
 
 
 __all__ = [

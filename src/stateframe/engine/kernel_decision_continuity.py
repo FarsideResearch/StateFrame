@@ -626,7 +626,8 @@ class DecisionContinuityStore:
         return True
 
     def apply_delta(self, value: object, *, existing_refs: set[str] | Sequence[str] = (),
-                    step: int | None = None) -> dict[str, object]:
+                    step: int | None = None,
+                    revision: object = None) -> dict[str, object]:
         try:
             delta = normalize_delta(value)
         except DecisionContinuityError as error:
@@ -659,7 +660,8 @@ class DecisionContinuityStore:
     ingest = apply_delta
 
     def sync_organ_projection(self, projection: Mapping[str, object], *,
-                              existing_refs: set[str] | Sequence[str] = ()) -> dict[str, object]:
+                              existing_refs: set[str] | Sequence[str] = (),
+                              revision: object = None) -> dict[str, object]:
         """Install bounded values emitted by existing host cognition organs.
 
         A model DELTA remains the owner of a field it explicitly patched.  Empty

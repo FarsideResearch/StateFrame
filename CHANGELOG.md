@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- Fix: the decision handoff now marks a decision as stale when a later edit invalidated it, and shows the revision it was based on instead of the current one.
+- The decision handoff now reads "STALE since edit to <files>; recheck" for invalidated decisions, and decision snapshots record a `bound_revision` (shown as a 12-character prefix) for the revision each decision was written against; older snapshots without it show "revision unknown".
+
 ## 0.6.7 (2026-11-13)
 
 - Fixed Linux sandbox parity, tokenizer replay, and security tests with a shared-memory pytest basetemp by keeping sandbox-visible fixtures on disk and pinning the scripted provider dialect; probe test budgets now honor `SF_TEST_TIMEOUT_SCALE`.
