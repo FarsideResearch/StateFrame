@@ -180,7 +180,9 @@ class TestRunProfile:
 
     def record_sandbox_result(self, trace: object, payload: object, *,
                               stdout: object, stderr: object,
-                              returncode: object) -> None:
+                              returncode: object,
+                              memory_limit_mechanism: object = None,
+                              cgroup_leaf_pattern: object = None) -> None:
         if len(self.child_runs) >= _MAX_CHILD_RUNS:
             return
         child = parse_child_report(payload)
@@ -212,13 +214,18 @@ class TestRunProfile:
             self.mark(prefix + key, trace_map.get(key))
 
         normalized_returncode = returncode if type(returncode) is int else None
-        self.child_runs.append({
+        run = {
             "attempt": len(self.child_runs) + 1,
             "returncode": normalized_returncode,
             "stdout_chars": len(stdout) if isinstance(stdout, str) else 0,
             "stderr_chars": len(stderr) if isinstance(stderr, str) else 0,
             "report": child,
-        })
+        }
+        if isinstance(memory_limit_mechanism, str):
+            run["memory_limit_mechanism"] = memory_limit_mechanism
+        if isinstance(cgroup_leaf_pattern, str):
+            run["cgroup_leaf_pattern"] = cgroup_leaf_pattern
+        self.child_runs.append(run)
         if self.mode == "shadow":
             self._compare_shadow(normalized_returncode, stdout, stderr, child)
 

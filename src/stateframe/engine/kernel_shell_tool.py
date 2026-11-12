@@ -102,6 +102,9 @@ class ShellReply:
     environment_identity: str = "disabled"
     fatal: bool = False
     exit_code: int | None = None
+    memory_limit_mechanism: str | None = None
+    memory_limit_killed: bool = False
+    cgroup_leaf_pattern: str | None = None
 
 
 def request_confirmation(run_dir: Path, call_id: str, command: str, *, timeout: float = 120) -> bool:
@@ -449,7 +452,13 @@ class ShellTool:
         else:
             tape.complete(call_id=call_id, observation=observation, **completion)
         return ShellReply(observation, tuple(effects.applied), after_identity != identity,
-                          after_identity, exit_code=result.exit_code)
+                          after_identity, exit_code=result.exit_code,
+                          memory_limit_mechanism=getattr(
+                              result, "memory_limit_mechanism", None),
+                          memory_limit_killed=(
+                              result.cleanup.detail == "aggregate resident-memory limit exceeded"),
+                          cgroup_leaf_pattern=getattr(
+                              result, "cgroup_leaf_pattern", None))
 
 
 _active: ShellTool | None = None
@@ -470,6 +479,19 @@ def publish_effects(reply: ShellReply, runtime, bolt, created: set[str], *, name
     from kernel_green_lock import note_applied_product_edit
 
     paths = tuple(effect.path for effect in reply.applied)
+    if reply.memory_limit_mechanism:
+        runtime.journal.emit(
+            "shell_memory_enforcement",
+            producer="kernel_shell_tool",
+            memory_limit_mechanism=reply.memory_limit_mechanism,
+            **({"cgroup_leaf_pattern": reply.cgroup_leaf_pattern}
+               if isinstance(reply.cgroup_leaf_pattern, str) else {}),
+            **({
+                "memory_limit_killed": True,
+                "memory_limit_reason": "aggregate resident-memory limit exceeded",
+            } if reply.memory_limit_killed else {}),
+            dispatch=False,
+        )
     target = runtime.target
     for effect in reply.applied:
         path = Path(bolt.root) / effect.path

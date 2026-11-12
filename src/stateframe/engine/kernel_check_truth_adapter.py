@@ -99,6 +99,8 @@ def record_native_observation(
         counts: object = None, selector_scope: object = None,
         execution_complete: object = None, termination_reason: object = None,
         output_truncated: object = None,
+        memory_limit_mechanism: str | None = None,
+        cgroup_leaf_pattern: str | None = None,
         producer: object = None,
         finalize: bool = True,
 ) -> dict[str, object]:
@@ -126,6 +128,8 @@ def record_native_observation(
         execution_complete=execution_complete,
         termination_reason=termination_reason,
         output_truncated=output_truncated,
+        memory_limit_mechanism=memory_limit_mechanism,
+        cgroup_leaf_pattern=cgroup_leaf_pattern,
         producer=producer or "kernel_check_truth_adapter",
         wrapper_parse_error=wrapper_parse_error,
     )

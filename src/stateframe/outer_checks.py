@@ -203,9 +203,10 @@ def _helper() -> int:
         process_cleaned = False
         return spawned, capabilities
 
-    def tracked_kill_group(process):
+    def tracked_kill_group(process, family=None, *, launch_identity=None):
         nonlocal process_cleaned
-        cleaned = original_kill_group(process)
+        cleaned = original_kill_group(
+            process, family, launch_identity=launch_identity)
         if process is spawned and cleaned and getattr(process, "returncode", None) is not None:
             process_cleaned = True
         return cleaned

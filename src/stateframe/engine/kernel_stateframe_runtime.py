@@ -55,6 +55,71 @@ from kernel_verdict import (
 PUBLIC_TEST_VERDICT_FACT_ENV = "STATEFRAME_PUBLIC_TEST_VERDICT_FACT"
 
 
+def _model_facing_check_evidence(runtime: object) -> dict[str, object]:
+    """Build check evidence, excluding host audit fields only when present."""
+    test_receipts = getattr(runtime, "test_receipts", [])
+    host_checks = getattr(runtime, "host_check_receipts", ())
+    from kernel_wire_identity import (
+        WIRE_AUDIT_ONLY_FIELDS, WIRE_ENV_IDENTITY_FIELDS, wire_identity_field_value,
+    )
+
+    excluded_fields = WIRE_AUDIT_ONLY_FIELDS | WIRE_ENV_IDENTITY_FIELDS
+    base_content = {
+        "test_receipts": test_receipts,
+        "host_checks": host_checks,
+        "scope": getattr(runtime, "_scope_lock_last_result", None),
+    }
+
+    def has_excluded_field(value: object, parent_key: str = "") -> bool:
+        if isinstance(value, Mapping):
+            return any(
+                str(key) in excluded_fields
+                or (parent_key == "observation_certificate" and str(key) == "binding")
+                or has_excluded_field(item, str(key))
+                for key, item in value.items()
+            )
+        if isinstance(value, (list, tuple, set, frozenset)):
+            return any(has_excluded_field(item) for item in value)
+        return False
+
+    def without_excluded_fields(value: object, parent_key: str = "") -> object:
+        if isinstance(value, Mapping):
+            return {
+                key: without_excluded_fields(
+                    wire_identity_field_value(key, item), str(key))
+                for key, item in value.items()
+                if str(key) not in excluded_fields
+                and not (parent_key == "observation_certificate" and str(key) == "binding")
+            }
+        if isinstance(value, list):
+            return [without_excluded_fields(item) for item in value]
+        if isinstance(value, tuple):
+            return tuple(without_excluded_fields(item) for item in value)
+        if isinstance(value, set):
+            return {without_excluded_fields(item) for item in value}
+        if isinstance(value, frozenset):
+            return frozenset(without_excluded_fields(item) for item in value)
+        return value
+
+    excluded_present = has_excluded_field(base_content)
+    identity_content = without_excluded_fields(base_content) if excluded_present else base_content
+    if not isinstance(identity_content, Mapping):
+        raise TypeError("check evidence identity content must be a mapping")
+    if excluded_present:
+        test_rows = identity_content.get("test_receipts")
+        host_rows = identity_content.get("host_checks")
+        if (not isinstance(test_rows, (list, tuple))
+                or not isinstance(host_rows, (list, tuple))):
+            raise TypeError("check evidence identity rows must be sequences")
+        public_evidence = tuple((*test_rows, *host_rows))
+    else:
+        public_evidence = tuple(test_receipts + list(host_checks))
+    return {
+        "dependency_identity": digest(identity_content),
+        "public_evidence": public_evidence,
+    }
+
+
 def public_test_verdict_fact_mode(value: object = None) -> str:
     """Return the fail-open, default-off public-verdict fact mode."""
     try:
@@ -8329,6 +8394,9 @@ class StateFrameRuntime:
         counts: Mapping[str, object] | None = None,
         typed_observation: Mapping[str, object] | None = None,
         output_truncated: bool | None = None,
+        memory_limit_mechanism: str | None = None,
+        cgroup_leaf_pattern: str | None = None,
+        memory_limit_killed: bool = False,
     ) -> None:
         replay_green = self._replay_green_observation(selectors)
         if replay_green is not None:
@@ -8425,6 +8493,8 @@ class StateFrameRuntime:
                 execution_complete=typed.get("execution_complete"),
                 termination_reason=typed.get("termination_reason"),
                 output_truncated=output_truncated,
+                memory_limit_mechanism=memory_limit_mechanism,
+                cgroup_leaf_pattern=cgroup_leaf_pattern,
                 producer="kernel_stateframe_runtime.test_observation",
                 finalize=not will_receive_native_detail,
             )
@@ -8475,7 +8545,9 @@ class StateFrameRuntime:
             except (ValueError, AttributeError):
                 signal_name = f"SIG{signal_number}"
         likely_initiator = None
-        if signal_name == "SIGKILL":
+        if memory_limit_killed:
+            likely_initiator = "aggregate_rss_supervisor"
+        elif signal_name == "SIGKILL":
             likely_initiator = "sandbox_rlimit_cpu_or_memory"  # RLIMIT_CPU hard limit / OOM deliver SIGKILL
         elif signal_name == "SIGXCPU":
             likely_initiator = "sandbox_rlimit_cpu_soft"
@@ -8485,6 +8557,12 @@ class StateFrameRuntime:
             likely_initiator = "wall_timeout"
         event = self.journal.emit("test_subprocess_completed", producer="test_subprocess",
                                   selectors=list(selectors), exit_code=exit_code,
+                                  **({"memory_limit_mechanism": memory_limit_mechanism}
+                                     if memory_limit_mechanism is not None else {}),
+                                  **({
+                                      "memory_limit_killed": True,
+                                      "memory_limit_reason": "aggregate resident-memory limit exceeded",
+                                  } if memory_limit_killed else {}),
                                   **({"environment_reason": environment_reason,
                                       "environment_classification": "ENVIRONMENT_BLOCKED"}
                                      if environment_reason else {}),
@@ -22110,6 +22188,7 @@ class StateFrameRuntime:
         self._sync_work_carry(frame, path)
         if provider_request:
             from kernel_v46_mechanism_wiring import decide2_checkpoint
+            check_evidence = _model_facing_check_evidence(self)
             # DECIDE2 must inspect the same prepared capability/evidence
             # boundary that is about to be budgeted, not a synthetic route list
             # from an earlier stage.  Keep these host-only fields out of the
@@ -22124,15 +22203,8 @@ class StateFrameRuntime:
                     for item in tools if isinstance(item, Mapping)
                 ),
                 "revision": self.binding().get("product_revision", "unknown"),
-                "dependency_identity": digest({
-                    "test_receipts": self.test_receipts,
-                    "host_checks": getattr(self, "host_check_receipts", ()),
-                    "scope": getattr(self, "_scope_lock_last_result", None),
-                }),
-                "public_evidence": tuple(
-                    self.test_receipts
-                    + list(getattr(self, "host_check_receipts", ()))
-                ),
+                "dependency_identity": check_evidence["dependency_identity"],
+                "public_evidence": check_evidence["public_evidence"],
                 "menu_identity": digest(tuple(tools)),
             })
             decide2_checkpoint(self, decide_frame)

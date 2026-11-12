@@ -20,19 +20,22 @@ def test_outer_helper_keeps_successful_policy_cleanup_after_collection_error(
         tmp_path, monkeypatch):
     packets = []
     kills = []
-    process = SimpleNamespace(returncode=None, wait=lambda timeout: 0)
+    child = SimpleNamespace(returncode=None, wait=lambda timeout: 0)
+    expected_family = object()
+    expected_launch_identity = object()
 
-    def kill_group(target):
-        assert target is process
-        kills.append(target)
+    def kill_group(process, family=None, *, launch_identity=None):
+        assert process is child
+        kills.append((process, family, launch_identity))
         if len(kills) > 1:
             raise tracker.ContainmentUnverified("leader already reaped")
-        process.returncode = -signal.SIGKILL
+        child.returncode = -signal.SIGKILL
         return True
 
     def collect(*_args, **_kwargs):
         policy.sandboxed_popen([], tmp_path)
-        policy._kill_group(process)
+        policy._kill_group(
+            child, expected_family, launch_identity=expected_launch_identity)
         raise ValueError("collection failed after cleanup")
 
     spec = {"command": "true", "cwd": str(tmp_path),
@@ -44,7 +47,7 @@ def test_outer_helper_keeps_successful_policy_cleanup_after_collection_error(
                         lambda **_kw: SimpleNamespace(name=str(tmp_path / "scratch"), cleanup=lambda: None))
     monkeypatch.setattr(outer_checks.shutil, "copytree", lambda *_a, **_k: None)
     monkeypatch.setattr(policy, "require_capabilities", lambda: None)
-    monkeypatch.setattr(policy, "sandboxed_popen", lambda *_a, **_k: (process, None))
+    monkeypatch.setattr(policy, "sandboxed_popen", lambda *_a, **_k: (child, None))
     monkeypatch.setattr(policy, "run_sandboxed", collect)
     monkeypatch.setattr(policy, "_kill_group", kill_group)
     monkeypatch.setattr(outer_checks, "print", lambda packet, **_k: packets.append(json.loads(packet)),
@@ -61,7 +64,7 @@ def test_outer_helper_keeps_successful_policy_cleanup_after_collection_error(
         sys.path[:] = original_path
 
     assert packets == [{"error": "collection failed after cleanup"}, {"cleanup_ok": True}]
-    assert kills == [process]
+    assert kills == [(child, expected_family, expected_launch_identity)]
 
 
 def test_environment_cleanup_then_close_reuses_verified_containment(tmp_path, monkeypatch):

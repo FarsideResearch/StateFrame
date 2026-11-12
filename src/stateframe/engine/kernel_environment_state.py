@@ -24,7 +24,7 @@ import time
 from typing import Generic, TypeVar
 
 from kernel_environment_bindings import ApplicabilityResult, EnvironmentLedger
-from kernel_execution_policy import ExecutionPolicyError, sandboxed_popen
+from kernel_execution_policy import ExecutionPolicyError, finish_supervision, sandboxed_popen
 from kernel_exec_tracker import child_exited_unreaped, recorded_launch_identity, signal_launch_group
 from kernel_environment_recipes import RecipeRegistry, SetupRecipe
 from kernel_environment_types import RequirementBinding, ResourceFact, ResourcePredicate
@@ -609,6 +609,7 @@ class EnvironmentState:
             process.wait(timeout=0.1)
         except (AttributeError, subprocess.TimeoutExpired):
             pass
+        finish_supervision(process)
         code, exit_signal, terminal_kind = _exit_fields(process.returncode)
         state = "killed" if managed.cleanup_requested else ("exited" if code == 0 else "crashed")
         tail, tail_truncated = self._tail_text(managed)

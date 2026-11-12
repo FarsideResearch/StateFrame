@@ -5126,6 +5126,9 @@ def _run_tests_impl(root: pathlib.Path, fn: str, explicit: str | None,
         if _profile:
             _profile.end_span(_snapshot_span)
         _check_output_truncated: bool | None = None
+        _check_memory_limit_mechanism: str | None = None
+        _check_cgroup_leaf_pattern: str | None = None
+        _check_memory_limit_killed = False
 
         def _timeout_stream(value):
             if isinstance(value, bytes):
@@ -5155,9 +5158,18 @@ def _run_tests_impl(root: pathlib.Path, fn: str, explicit: str | None,
             return rendered + "\n" + compact_observation(shadow_receipt)
 
         def _run_check(command):
-            nonlocal _check_output_truncated
+            nonlocal _check_output_truncated, _check_memory_limit_mechanism
+            nonlocal _check_cgroup_leaf_pattern
+            nonlocal _check_memory_limit_killed
             _check_output_truncated = None
-            from kernel_execution_policy import policy_read_grants, run_sandboxed
+            _check_memory_limit_mechanism = None
+            _check_cgroup_leaf_pattern = None
+            _check_memory_limit_killed = False
+            from kernel_execution_policy import (
+                policy_memory_limit_mechanism,
+                policy_read_grants,
+                run_sandboxed,
+            )
             from kernel_pilot import ParentBudgetExhausted
             try:
                 # The CPU budget must match the wall budget: the policy default (30 s RLIMIT_CPU,
@@ -5176,6 +5188,9 @@ def _run_tests_impl(root: pathlib.Path, fn: str, explicit: str | None,
                 raise
             except RuntimeError as refusal:  # ExecutionPolicyError, stage6 canary, ...
                 raise _HostExecutionRefused(refusal) from refusal
+            _check_memory_limit_mechanism = policy_memory_limit_mechanism(result)
+            _check_cgroup_leaf_pattern = getattr(result, "cgroup_leaf_pattern", None)
+            _check_memory_limit_killed = bool(getattr(result, "memory_limit_killed", False))
             reported_truncation = getattr(result, "output_truncated", None)
             _check_output_truncated = (
                 reported_truncation if type(reported_truncation) is bool else None
@@ -5188,6 +5203,8 @@ def _run_tests_impl(root: pathlib.Path, fn: str, explicit: str | None,
                         stdout=getattr(result.completed, "stdout", ""),
                         stderr=getattr(result.completed, "stderr", ""),
                         returncode=getattr(result.completed, "returncode", None),
+                        memory_limit_mechanism=_check_memory_limit_mechanism,
+                        cgroup_leaf_pattern=_check_cgroup_leaf_pattern,
                     )
                 except Exception:  # observation failures never change the check result
                     pass
@@ -5243,6 +5260,8 @@ def _run_tests_impl(root: pathlib.Path, fn: str, explicit: str | None,
                     observation=str(_timeout_observation) + "\npytest exit 1 — TIMED OUT",
                     run_write_set=_timeout_write_set, command=_cmd,
                     test_environment=env,
+                    memory_limit_mechanism=_check_memory_limit_mechanism,
+                    cgroup_leaf_pattern=_check_cgroup_leaf_pattern,
                 )
         # E403: carry a parseable exit marker — a HANGING implementation is a FAILING
         # implementation. Without "pytest exit" in this string the grading tail mapped a
@@ -5270,6 +5289,8 @@ def _run_tests_impl(root: pathlib.Path, fn: str, explicit: str | None,
                                if isinstance(_test_binding, Mapping) else None),
                     sequence=getattr(getattr(_runtime, "owner", None), "current_step", None),
                     output_truncated=_check_output_truncated,
+                    memory_limit_mechanism=_check_memory_limit_mechanism,
+                    cgroup_leaf_pattern=_check_cgroup_leaf_pattern,
                 )
             return timeout_context + "\n" + compact_observation(timeout_receipt)
         return timeout_context + (
@@ -5285,6 +5306,9 @@ def _run_tests_impl(root: pathlib.Path, fn: str, explicit: str | None,
                 _test_observation, p.returncode, _test_binding,
                 observation=p.stdout + "\n" + p.stderr,
                 run_write_set=_test_write_set, command=_cmd, test_environment=env,
+                memory_limit_mechanism=_check_memory_limit_mechanism,
+                cgroup_leaf_pattern=_check_cgroup_leaf_pattern,
+                memory_limit_killed=_check_memory_limit_killed,
             )
         _repro_gate = getattr(_runtime, "repro_first_gate", None)
         _repro_context = getattr(_runtime, "_repro_first_observation_context", None)

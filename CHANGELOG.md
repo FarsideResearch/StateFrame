@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.4.42 (2026-11-11)
+
+- Fixed: on Linux, checks and exec-session commands that run Go or Node programs no longer die at startup. StateFrame no longer caps their virtual address space (`RLIMIT_AS`), which those runtimes reserve far beyond what they use. The memory budget itself is unchanged and still enforced. This removes the matching entry from `KNOWN_LIMITATIONS.md`.
+- Linux memory limits for checks and exec-session commands use cgroup v2 `memory.max` (with swap verified off) when StateFrame runs as the only process family in a delegated, writable cgroup: it moves itself into a `supervisor` child it creates, enables the `memory` and `pids` controllers on the parent and gives each command its own sibling group. In every other case, including a cgroup shared with a calling shell or a pipeline sibling, it falls back to `RLIMIT_DATA` plus the existing aggregate RSS supervisor, which also kills shared and memfd memory above the budget. The mechanism used is recorded in the run journal and private receipts only; request bytes are unchanged.
+- Security: StateFrame now reuses a `supervisor` cgroup only when the current process proves it created that leaf. A pre-existing operator `supervisor` keeps its `memory.max` and `pids.max` limits inherited by commands, with StateFrame's `RLIMIT_DATA` plus RSS fallback still applied.
+- Changed default: the file-size limit for `run_sandboxed` and `sandboxed_popen` callers that omit `file_bytes` (checks and other sandboxed commands) rises from 8 MiB to 64 MiB, so a cold Go build can write its archives. Callers can still set `file_bytes`; explicit file-size budgets elsewhere are unchanged.
+- Linux fallback memory checks now count page-table allocations as well as resident process memory, keeping large read-only mappings within the configured budget.
+- Fixed: an interrupted check now cleans up its supervised child processes and reports the original interruption instead of stopping during cleanup.
+- Fixed: StateFrame now enforces Linux memory limits when launched in a delegated systemd scope, while safely falling back if unrelated processes share that scope.
+- Checkpoint resume stays fail-closed for journal tails that contain a memory-enforcement kill, since restore does not replay that supervisor result.
+- The memory supervisor no longer kills or fails a healthy check because of timing. A process exiting mid-sample, a torn status read, or slow process accounting under memory pressure now skips that sample and measures again. Post-exit verification waits for the supervisor's verdict instead of failing after 15 seconds. A check is killed for memory only on a measured over-budget reading, and the execution record now names why a check was stopped (`memory_limit` or `supervisor_error`) along with any skipped samples.
+
 ## 0.4.41 (2026-11-11)
 
 - Resumed runs now measure rebuilt requests the same way the original attempt did while the tokenizer endpoint is down. The tokenizer retry schedule counts requests only, so time spent waiting on the model no longer changes which history gets compacted.

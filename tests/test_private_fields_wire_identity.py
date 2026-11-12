@@ -534,9 +534,20 @@ def test_private_fields_do_not_change_check_wire_identity(monkeypatch):
     fields, definitions = _private_field_inventory()
     # The diff stores the cgroup path as ManagedProcess.cgroup. Leaf-pattern
     # failure status carries the fallback reason, with no separate reason field.
-    # The RLIMIT owner adds these fields on its branch. Check them as soon as
-    # present here; this tree currently exposes only ManagedProcess.cgroup.
-    assert "cgroup" in fields
+    required_new_fields = {
+        "memory_limit_mechanism", "memory_limit_killed",
+        "memory_limit_reason", "cgroup_leaf_pattern", "cgroup",
+    }
+    assert required_new_fields <= fields, (
+        "private field inventory missed new execution fields: "
+        + ", ".join(sorted(required_new_fields - fields)))
+    assert set(kernel_wire_identity.WIRE_AUDIT_ONLY_FIELDS) == {
+        "memory_limit_mechanism", "memory_limit_killed",
+        "memory_limit_reason", "cgroup_leaf_pattern",
+        "memory_limit_samples_skipped", "memory_limit_sample_skip_reason",
+        "memory_limit_stop_cause",
+    }
+    assert set(kernel_wire_identity.WIRE_AUDIT_ONLY_FIELDS) <= fields
     assert {"_stateframe_memo_generation", "_receipt_identity_content"} <= fields
     # This value is producer-computed from the receipt's intentional identity
     # inputs and drives duplicate-receipt ordinals. Mutating it alone fabricates
@@ -709,19 +720,27 @@ def test_check_reference_guard_detects_planted_environment_leak(monkeypatch):
     assert "rendered_wire_fact" in leaks["environment_revision"]
 
 
-def test_wire_identity_content_drops_environment_identity_recursively():
+def test_wire_identity_content_drops_environment_and_audit_identity_recursively():
     content = {
         "binding": {
             "environment": "host-a",
             "environment_revision": "env-a",
             "product_revision": "product-a",
+            "memory_limit_mechanism": "rlimit_data+rss_supervisor",
+            "memory_limit_killed": False,
+            "memory_limit_reason": "private sample threshold exceeded",
+            "cgroup_leaf_pattern": "applied",
         },
         "after_binding": [{
             "environment": "host-b",
             "environment_revision": "env-b",
             "product_revision": "product-a",
+            "memory_limit_killed": True,
         }],
-        "nested": {"deeper": [{"environment_revision": "env-c"}]},
+        "nested": {"deeper": [{
+            "environment_revision": "env-c",
+            "cgroup_leaf_pattern": "failed:foreign_process",
+        }]},
     }
 
     public_content = kernel_wire_identity.wire_identity_content(content)
@@ -792,3 +811,64 @@ def test_private_request_and_action_receipt_metadata_do_not_change_wire_ids() ->
         journal, **action, fingerprint="semantic-edit-a") !=
         kernel_wire_identity.action_receipt_wire_id(
             journal, **action, fingerprint="semantic-edit-b"))
+
+def test_only_rss_kill_initiator_is_normalized_from_wire_identity():
+    from kernel_wire_identity import wire_identity_content
+
+    assert wire_identity_content({
+        "likely_initiator": "aggregate_rss_supervisor",
+    }) == {"likely_initiator": None}
+    assert wire_identity_content({
+        "likely_initiator": "wall_timeout",
+    }) == {"likely_initiator": "wall_timeout"}
+
+def test_continuation_wire_dependencies_drop_both_host_identity_sets(monkeypatch):
+    import kernel_continuation_runtime
+
+    monkeypatch.setattr(
+        kernel_continuation_runtime, "binding_versions", lambda binding: dict(binding))
+    private_fields = (
+        set(kernel_wire_identity.WIRE_ENV_IDENTITY_FIELDS)
+        | set(kernel_wire_identity.WIRE_AUDIT_ONLY_FIELDS)
+    )
+    binding = {field: f"private-{field}" for field in private_fields}
+    binding["product_revision"] = "product-a"
+
+    assert kernel_continuation_runtime._wire_dependencies(binding) == {
+        "product_revision": "product-a",
+    }
+
+
+def test_wire_identity_content_drops_environment_identity_recursively():
+    content = {
+        "binding": {
+            "environment": "host-a",
+            "environment_revision": "env-a",
+            "product_revision": "product-a",
+        },
+        "after_binding": [{
+            "environment": "host-b",
+            "environment_revision": "env-b",
+            "product_revision": "product-a",
+        }],
+        "nested": {"deeper": [{"environment_revision": "env-c"}]},
+    }
+
+    public_content = kernel_wire_identity.wire_identity_content(content)
+
+    assert public_content == {
+        "binding": {"product_revision": "product-a"},
+        "after_binding": [{"product_revision": "product-a"}],
+        "nested": {"deeper": [{}]},
+    }
+    changed_product_content = {
+        "binding": {
+            "environment": "host-a",
+            "environment_revision": "env-a",
+            "product_revision": "product-b",
+        },
+        "after_binding": content["after_binding"],
+        "nested": content["nested"],
+    }
+    assert public_content != kernel_wire_identity.wire_identity_content(
+        changed_product_content)

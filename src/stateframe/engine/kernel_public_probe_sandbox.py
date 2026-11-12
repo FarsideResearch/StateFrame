@@ -10,7 +10,6 @@ if sys.platform != 'linux':
     raise RuntimeError('public probe process containment currently requires Linux seccomp')
 resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
 resource.setrlimit(resource.RLIMIT_FSIZE, (1048576, 1048576))
-resource.setrlimit(resource.RLIMIT_AS, (1073741824, 1073741824))
 resource.setrlimit(resource.RLIMIT_CPU, (10, 10))
 resource.setrlimit(resource.RLIMIT_NOFILE, (256, 256))
 # Missing library, unsupported syscalls or filter installation errors fail closed.

@@ -127,6 +127,21 @@ def seeded_content_wire_id(seed: object, kind: str, step: object,
                           _checked_ordinal(ordinal))
 
 
+# Host memory-enforcement telemetry does not identify checks.
+WIRE_AUDIT_ONLY_FIELDS = frozenset({
+    "memory_limit_mechanism", "memory_limit_killed", "memory_limit_reason",
+    "cgroup_leaf_pattern", "memory_limit_samples_skipped", "memory_limit_sample_skip_reason",
+    "memory_limit_stop_cause",
+})
+
+
+def wire_identity_field_value(name: object, value: object) -> object:
+    """Normalize the initiator label that is derived from an RSS limit kill."""
+    if str(name) == "likely_initiator" and value == "aggregate_rss_supervisor":
+        return None
+    return value
+
+
 _WIRE_IDENTITY_METADATA_KEYS = frozenset({
     "request_id", "receipt_id", "edit_receipt", "check_receipt_id",
     "execution_id", "worker_id", "branch_id", "journal_id",
@@ -145,6 +160,13 @@ _WIRE_IDENTITY_METADATA_KEYS = frozenset({
 # Host environment identity (installed packages, tool cache) is audit-only: it stays in
 # receipts and journal bindings but never enters a model-facing identity.
 WIRE_ENV_IDENTITY_FIELDS = frozenset({"environment", "environment_revision"})
+
+
+def _wire_identity_excluded_fields() -> frozenset[str]:
+    """Return host-derived fields omitted from model-facing identities."""
+    return WIRE_ENV_IDENTITY_FIELDS | WIRE_AUDIT_ONLY_FIELDS
+
+
 # Digests computed over a binding that still holds the environment. The binding itself is
 # already in the content (scrubbed above), so these derived copies are dropped too.
 # The certificate itself keeps the environment on purpose: installed packages can change
@@ -166,15 +188,17 @@ def _without_env_derived(key: str, item: object) -> object:
 
 
 def wire_identity_content(value: object) -> object:
-    """Remove generated identity metadata before hashing nested request content."""
+    """Remove generated IDs and host audit telemetry before hashing content."""
     if isinstance(value, str) and _JOURNAL_POSITION.fullmatch(value):
         return "<journal-position>"
     if isinstance(value, Mapping):
+        excluded_fields = _wire_identity_excluded_fields()
         return {
-            str(key): wire_identity_content(_without_env_derived(str(key), item))
+            str(key): wire_identity_content(_without_env_derived(
+                str(key), wire_identity_field_value(key, item)))
             for key, item in sorted(value.items(), key=lambda pair: str(pair[0]))
             if str(key) not in _WIRE_IDENTITY_METADATA_KEYS
-            and str(key) not in WIRE_ENV_IDENTITY_FIELDS
+            and str(key) not in excluded_fields
         }
     if isinstance(value, (list, tuple)):
         return [wire_identity_content(item) for item in value]

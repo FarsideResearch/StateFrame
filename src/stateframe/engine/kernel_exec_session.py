@@ -86,6 +86,8 @@ class ExecResult:
     output_total_bytes: int
     wall_seconds: float
     cleanup: CleanupReport
+    memory_limit_mechanism: str | None = None
+    cgroup_leaf_pattern: str | None = None
 
 
 def _cleanup(value: dict) -> CleanupReport:
@@ -172,10 +174,14 @@ def rpc_timeout_seconds() -> float:
 
 
 class JobHandle:
-    def __init__(self, ident: str, session: ExecSession):
+    def __init__(self, ident: str, session: ExecSession,
+                 memory_limit_mechanism: str | None = None,
+                 cgroup_leaf_pattern: str | None = None):
         self.id = ident
         self._session = session
         self.lost_bytes = 0
+        self.memory_limit_mechanism = memory_limit_mechanism
+        self.cgroup_leaf_pattern = cgroup_leaf_pattern
 
     def _status(self, consume=False):
         return self._session._rpc({"op": "status", "id": self.id, "consume": consume})
@@ -405,7 +411,8 @@ class ExecSession:
             value = self._rpc({"op": "start", "argv": list(argv), "cap": cap.as_dict(),
                                "cwd": str(cwd) if cwd is not None else None,
                                "stdin": base64.b64encode(stdin).decode() if stdin is not None else None})
-            handle = JobHandle(value["id"], self)
+            handle = JobHandle(value["id"], self, value.get("memory_limit_mechanism"),
+                               value.get("cgroup_leaf_pattern"))
             self._handles.append(handle)
             return handle
 
@@ -439,7 +446,9 @@ class ExecSession:
                     return ExecResult(status["exit_code"], status["timed_out"], bytes(head + tail),
                                       bool(lost or total_received > cap.limits.output_bytes),
                                       status["output_total_bytes"], status["wall_seconds"],
-                                      _cleanup(status["cleanup"]))
+                                      _cleanup(status["cleanup"]),
+                                      status.get("memory_limit_mechanism"),
+                                      handle.cgroup_leaf_pattern)
                 time.sleep(0.01)
         except BaseException:
             handle.stop(0.1)
