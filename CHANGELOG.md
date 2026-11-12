@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.5.10 (2026-11-12)
 
 - Resumed runs now retry a changed, unanswered request live and record why it was discarded, while refusing to replay a completed response for a changed request.
 - Model requests now retry transient connection failures before any response bytes arrive, with a bounded backoff and the same request identity; `STATEFRAME_TRANSPORT_MAX_ATTEMPTS` and `STATEFRAME_TRANSPORT_BACKOFF_S` can tune the limits. Partial responses and HTTP 4xx remain terminal.
