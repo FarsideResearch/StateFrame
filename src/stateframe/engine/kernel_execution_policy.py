@@ -20,6 +20,7 @@ import resource
 import selectors
 import signal
 import subprocess
+import sys
 import threading
 import time
 import uuid
@@ -41,6 +42,10 @@ from sf_launch import (
 MAX_WALL_SECONDS = 900.0
 MAX_INPUT_BYTES = 4 * 1024 * 1024
 DEFAULT_CPU_SECONDS = 30.0
+# User checks get RLIMIT_CPU only as a runaway backstop, never as a budget: real suites can
+# legitimately burn many CPU minutes. STATEFRAME_PUBLIC_CHECK_CPU_SECONDS overrides it.
+CHECK_CPU_BACKSTOP_SECONDS = 3600.0
+MAX_CPU_SECONDS = 86400.0
 DEFAULT_MEMORY_BYTES = 512 * 1024 * 1024
 DEFAULT_FILE_BYTES = 64 * 1024 * 1024
 DEFAULT_NOFILE = 128
@@ -113,6 +118,9 @@ class PolicyResult:
     memory_limit_samples_skipped: int = 0
     memory_limit_sample_skip_reason: str | None = None
     memory_limit_stop_cause: str | None = None
+    # RLIMIT_CPU requested for the check, and the CPU its whole launch unit used.
+    cpu_limit_seconds: float | None = None
+    cpu_seconds_used: float | None = None
 
 
 def policy_read_grants(result: object) -> SandboxReadGrants | None:
@@ -236,6 +244,18 @@ def _safe_environment(env: Mapping[object, object] | None) -> dict[str, str]:
     return result
 
 
+def check_cpu_backstop_seconds() -> float:
+    """RLIMIT_CPU for a user check: the policy value, else the generous backstop."""
+    raw = os.environ.get("STATEFRAME_PUBLIC_CHECK_CPU_SECONDS", "").strip()
+    try:
+        value = float(raw) if raw else CHECK_CPU_BACKSTOP_SECONDS
+    except ValueError:
+        value = CHECK_CPU_BACKSTOP_SECONDS
+    if not math.isfinite(value) or value <= 0:
+        value = CHECK_CPU_BACKSTOP_SECONDS
+    return min(value, MAX_CPU_SECONDS)
+
+
 def _limit_value(name: str, requested: float | int, *, maximum: float | int) -> float | int:
     try:
         value = float(requested)
@@ -264,7 +284,7 @@ def _resource_preexec(cpu_seconds: float, memory_bytes: int,
                       file_bytes: int, nofile: int, nproc: int,
                       cgroup: Path | None = None,
                       memory_report_fd: int | None = None) -> Callable[[], None]:
-    cpu = int(math.ceil(_limit_value("cpu_seconds", cpu_seconds, maximum=MAX_WALL_SECONDS)))
+    cpu = int(math.ceil(_limit_value("cpu_seconds", cpu_seconds, maximum=MAX_CPU_SECONDS)))
     memory = int(_limit_value("memory_bytes", memory_bytes, maximum=4 * 1024 * 1024 * 1024))
     file_limit = int(_limit_value("file_bytes", file_bytes, maximum=64 * 1024 * 1024))
     nofile_limit = int(_limit_value("nofile", nofile, maximum=1024))
@@ -288,7 +308,11 @@ def _resource_preexec(cpu_seconds: float, memory_bytes: int,
                 cgroup_joined = True
             except OSError:
                 pass  # The in-namespace RLIMIT_NPROC is mandatory; cgroup is optional.
-        _lower_only(resource.RLIMIT_CPU, cpu)
+        # Soft one second under hard: a runaway dies by SIGXCPU, a signal no other limit
+        # sends, so the receipt can name RLIMIT_CPU exactly instead of guessing at a SIGKILL.
+        _cpu_soft, cpu_hard = resource.getrlimit(resource.RLIMIT_CPU)
+        cpu_hard = cpu if cpu_hard == resource.RLIM_INFINITY else min(cpu, cpu_hard)
+        resource.setrlimit(resource.RLIMIT_CPU, (max(1, cpu_hard - 1), cpu_hard))
         _lower_only(resource.RLIMIT_FSIZE, file_limit)
         _lower_only(resource.RLIMIT_CORE, 0)
         resource.setrlimit(resource.RLIMIT_NOFILE,
@@ -321,6 +345,58 @@ def _resource_preexec(cpu_seconds: float, memory_bytes: int,
             os.close(memory_report_fd)
 
     return apply
+
+
+def _process_cpu_seconds(row: ProcessIdentity) -> float | None:
+    """User plus system CPU seconds of one live Linux process; None when gone or reused."""
+    try:
+        raw = (Path("/proc") / str(row.pid) / "stat").read_text()
+        fields = raw[raw.rfind(")") + 2:].split()
+        if (int(fields[19]), 0) != tuple(row.start):
+            return None
+        return (int(fields[11]) + int(fields[12])) / os.sysconf("SC_CLK_TCK")
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+def _note_peak_process_cpu(process: subprocess.Popen[bytes],
+                           rows: Sequence[ProcessIdentity]) -> None:
+    """Keep the highest per-process CPU time seen; RLIMIT_CPU is a per-process limit."""
+    if not sys.platform.startswith("linux"):
+        return
+    peak = getattr(process, "check_peak_process_cpu_seconds", None)
+    for row in rows:
+        seconds = _process_cpu_seconds(row)
+        if seconds is not None and (peak is None or seconds > peak):
+            peak = seconds
+    if peak is not None:
+        process.check_peak_process_cpu_seconds = peak
+
+
+def _exited_unit_cpu_seconds(process: subprocess.Popen[bytes]) -> float | None:
+    """CPU seconds of an exited, still-unreaped leader plus every descendant it reaped.
+
+    The leader's zombie keeps its own and its waited-for children's times, which covers the
+    sandboxed check inside bwrap. Anything unreadable is unknown, never zero.
+    """
+    if not sys.platform.startswith("linux") or not child_exited_unreaped(process):
+        return None
+    try:
+        raw = (Path("/proc") / str(process.pid) / "stat").read_text()
+        fields = raw[raw.rfind(")") + 2:].split()
+        ticks = sum(int(fields[index]) for index in (11, 12, 13, 14))
+        return ticks / os.sysconf("SC_CLK_TCK")
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+def _check_cpu_seconds_used(process: subprocess.Popen[bytes]) -> float | None:
+    """Peak per-process CPU from supervision; without it, the exited unit's total."""
+    peak = getattr(process, "check_peak_process_cpu_seconds", None)
+    if isinstance(peak, float):
+        return peak
+    total = getattr(process, "check_cpu_seconds_used", None)
+    return total if isinstance(total, float) else None
 
 
 def _kill_group(process: subprocess.Popen[bytes], family: Descendants | None = None, *,
@@ -682,6 +758,7 @@ class _ResidentMemorySupervisor:
                     # Check known members before a potentially slow full procfs scan so
                     # an already-visible memory breach can stop the launch immediately.
                     live = self._track_work(lambda: self._update_family(rows))
+                    _note_peak_process_cpu(self.process, live)
                     breach = self.table.resident_memory_limit_breach(
                         live, self.memory_bytes)
                     now = time.monotonic()
@@ -1227,6 +1304,7 @@ def _collect(process: subprocess.Popen[bytes], input_data: bytes | None, deadlin
                         "containment unverified: cannot sweep completed check process group")
                 time.sleep(.02)
             group_killed = True
+    process.check_cpu_seconds_used = _exited_unit_cpu_seconds(process)
     process.wait(timeout=1)
     if on_leader_reaped is not None:
         on_leader_reaped()
@@ -1412,13 +1490,15 @@ def run_sandboxed(command: Sequence[object], root: str | os.PathLike[str], *,
         memory_limit_samples_skipped=int(getattr(process, "memory_limit_samples_skipped", 0) or 0),
         memory_limit_sample_skip_reason=getattr(process, "memory_limit_sample_skip_reason", None),
         memory_limit_stop_cause=getattr(process, "memory_limit_stop_cause", None),
+        cpu_limit_seconds=float(math.ceil(cpu_seconds)),
+        cpu_seconds_used=_check_cpu_seconds_used(process),
     )
 
 
 __all__ = [
-    "CapabilityReport", "DEFAULT_CPU_SECONDS", "DEFAULT_FILE_BYTES",
+    "CHECK_CPU_BACKSTOP_SECONDS", "CapabilityReport", "DEFAULT_CPU_SECONDS", "DEFAULT_FILE_BYTES",
     "DEFAULT_MEMORY_BYTES", "ExecutionPolicyError", "MAX_OUTPUT_BYTES",
     "PolicyResult", "available", "capability_report", "policy_memory_limit_mechanism",
-    "finish_supervision", "policy_read_grants", "require_capabilities",
+    "check_cpu_backstop_seconds", "finish_supervision", "policy_read_grants", "require_capabilities",
     "run_sandboxed", "sandboxed_popen", "supervised_process",
 ]

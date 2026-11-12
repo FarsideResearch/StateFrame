@@ -175,8 +175,9 @@ def _run_process(command: tuple[str, ...], cwd: Path, env: Mapping[str, str] | N
                  timeout: float, popen_factory: Callable[..., subprocess.Popen]) -> tuple[
                      subprocess.CompletedProcess, bool, bool]:
     del popen_factory  # compatibility parameter; raw subprocess injection is not supported
-    from kernel_execution_policy import run_sandboxed
-    result = run_sandboxed(command, cwd, env=env, timeout=timeout)
+    from kernel_execution_policy import check_cpu_backstop_seconds, run_sandboxed
+    result = run_sandboxed(command, cwd, env=env, timeout=timeout,
+                           cpu_seconds=check_cpu_backstop_seconds())
     return result.completed, result.timed_out, result.process_group_killed
 
 

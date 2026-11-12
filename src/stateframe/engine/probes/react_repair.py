@@ -119,6 +119,8 @@ from kernel_tool_paths import (  # noqa: E402
 )
 from kernel_verdict import BLOCKED  # noqa: E402
 from kernel_tool_reply import tool_reply_for_call as _tool_reply_for_call  # noqa: E402
+from kernel_kill_attribution import (  # noqa: E402
+    attribute_termination, model_facing_kill_line as _model_facing_kill_line)
 if os.environ.get("STATEFRAME_MUTATIONS", "off") in {"prebuilt", "authored"}:
     from contextvars import ContextVar
 
@@ -168,10 +170,6 @@ def _mutation_turns_left(step: int) -> int:
     return 99 if left is None else left
 
 
-# CPU budget for one public check, aligned with its 300 s wall timeout (recorded bound; the
-# policy default of 30 s RLIMIT_CPU SIGKILLed a 37 s check in prior run).  Bounded by the
-# execution policy's MAX_WALL_SECONDS.
-PUBLIC_CHECK_CPU_SECONDS = float(os.environ.get("STATEFRAME_PUBLIC_CHECK_CPU_SECONDS", "300"))
 # Module-level so a persistence wrapper can diversify retries: attempt 1 stays at 0 for
 # comparability, later attempts resample (an identical deterministic trajectory teaches
 # nothing). See probes/persist_repair.py.
@@ -5066,6 +5064,7 @@ def _run_tests_impl(root: pathlib.Path, fn: str, explicit: str | None,
     if _profile:
         _profile.end_span(_target_span)
     _config_span = _profile.start_span("config_command_preparation") if _profile else None
+    _check_termination: dict = {}  # kill evidence of the latest check run
     try:
         env = dict(os.environ)
         # A FRESH DATABASE PER PYTEST INVOCATION. grading audit asked "is the parent-
@@ -5202,25 +5201,26 @@ def _run_tests_impl(root: pathlib.Path, fn: str, explicit: str | None,
             nonlocal _check_cgroup_leaf_pattern
             nonlocal _check_memory_limit_killed
             _check_output_truncated = None
+            _check_termination.clear()
             _check_memory_limit_mechanism = None
             _check_cgroup_leaf_pattern = None
             _check_memory_limit_killed = False
             from kernel_execution_policy import (
+                check_cpu_backstop_seconds,
                 policy_memory_limit_mechanism,
                 policy_read_grants,
                 run_sandboxed,
             )
             from kernel_pilot import ParentBudgetExhausted
             try:
-                # The CPU budget must match the wall budget: the policy default (30 s RLIMIT_CPU,
-                # hard) SIGKILLed a 37 s public check mid-run (rc 137, prior run) while this call
-                # allowed 300 s of wall time.  Recorded bound: PUBLIC_CHECK_CPU_SECONDS.
+                # RLIMIT_CPU is only a runaway backstop here, never a budget: the old 30 s
+                # policy default SIGKILLed a 37 s public check mid-run (rc 137).
                 result = run_sandboxed(
                     command,
                     root,
                     env=env,
                     timeout=300,
-                    cpu_seconds=PUBLIC_CHECK_CPU_SECONDS,
+                    cpu_seconds=check_cpu_backstop_seconds(),
                     output_limit=256 * 1024,
                     **({"observe_pytest": True} if _profiled_command else {}),
                 )
@@ -5231,6 +5231,12 @@ def _run_tests_impl(root: pathlib.Path, fn: str, explicit: str | None,
             _check_memory_limit_mechanism = policy_memory_limit_mechanism(result)
             _check_cgroup_leaf_pattern = getattr(result, "cgroup_leaf_pattern", None)
             _check_memory_limit_killed = bool(getattr(result, "memory_limit_killed", False))
+            _check_termination.update(
+                memory_limit_killed=_check_memory_limit_killed,
+                memory_limit_reason=getattr(result, "memory_limit_reason", None),
+                stop_cause=getattr(result, "memory_limit_stop_cause", None),
+                cpu_seconds_used=getattr(result, "cpu_seconds_used", None),
+                cpu_limit_seconds=getattr(result, "cpu_limit_seconds", None))
             reported_truncation = getattr(result, "output_truncated", None)
             _check_output_truncated = (
                 reported_truncation if type(reported_truncation) is bool else None
@@ -5349,6 +5355,7 @@ def _run_tests_impl(root: pathlib.Path, fn: str, explicit: str | None,
                 memory_limit_mechanism=_check_memory_limit_mechanism,
                 cgroup_leaf_pattern=_check_cgroup_leaf_pattern,
                 memory_limit_killed=_check_memory_limit_killed,
+                termination_evidence=dict(_check_termination),
             )
         _repro_gate = getattr(_runtime, "repro_first_gate", None)
         _repro_context = getattr(_runtime, "_repro_first_observation_context", None)
@@ -5375,9 +5382,8 @@ def _run_tests_impl(root: pathlib.Path, fn: str, explicit: str | None,
     # true costs nothing and saves the rest of the run.
     meaning = {
         # Signal exits (128+N / negative) are HOST outcomes, never a verdict on the patch.
-        **{code: ("CHECK PROCESS KILLED BY THE HOST SANDBOX (signal %d) — a resource limit or "
-                  "timeout, NOT a test result; nothing about your patch was observed. Re-run the "
-                  "same check once; if it is killed again, narrow the selector." % (code - 128))
+        **{code: _model_facing_kill_line(
+                attribute_termination(code, **_check_termination), code - 128)
            for code in (130, 134, 137, 143, 152, 153)},
         124: "CHECK TIMED OUT (host wall limit) — not a test result; re-run or narrow the selector.",
         0: "ALL TESTS PASSED.",

@@ -6,6 +6,7 @@ from collections.abc import Mapping
 from pathlib import Path
 
 from kernel_execution_policy import (
+    check_cpu_backstop_seconds,
     policy_memory_limit_mechanism,
     policy_read_grants,
     run_sandboxed,
@@ -55,7 +56,7 @@ def check_result(root: Path, row: Mapping[str, object]) -> tuple[str, int]:
         return "check refused: a protected test resource is absent or unsafe", 125
     try:
         result = run_sandboxed(
-            command, root, timeout=CHECK_TIMEOUT, cpu_seconds=CHECK_TIMEOUT,
+            command, root, timeout=CHECK_TIMEOUT, cpu_seconds=check_cpu_backstop_seconds(),
             output_limit=OUTPUT_LIMIT, generic_check=True)
     except (RuntimeError, OSError, ValueError) as error:
         detail = f"check refused: {type(error).__name__}: {error}"
