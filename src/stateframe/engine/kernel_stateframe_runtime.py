@@ -8397,6 +8397,7 @@ class StateFrameRuntime:
         memory_limit_mechanism: str | None = None,
         cgroup_leaf_pattern: str | None = None,
         memory_limit_killed: bool = False,
+        termination_evidence: Mapping[str, object] | None = None,
     ) -> None:
         replay_green = self._replay_green_observation(selectors)
         if replay_green is not None:
@@ -8544,17 +8545,12 @@ class StateFrameRuntime:
                 signal_name = signal.Signals(signal_number).name
             except (ValueError, AttributeError):
                 signal_name = f"SIG{signal_number}"
-        likely_initiator = None
-        if memory_limit_killed:
-            likely_initiator = "aggregate_rss_supervisor"
-        elif signal_name == "SIGKILL":
-            likely_initiator = "sandbox_rlimit_cpu_or_memory"  # RLIMIT_CPU hard limit / OOM deliver SIGKILL
-        elif signal_name == "SIGXCPU":
-            likely_initiator = "sandbox_rlimit_cpu_soft"
-        elif signal_name == "SIGXFSZ":
-            likely_initiator = "sandbox_rlimit_fsize"
-        elif exit_code == 124:
-            likely_initiator = "wall_timeout"
+        # Name the exact limit from the sandbox's evidence; a SIGKILL no limit explains is
+        # reported as external with the CPU it had used, never as a guessed rlimit.
+        from kernel_kill_attribution import receipt_fields
+        termination_fields = receipt_fields(
+            exit_code, memory_limit_killed=memory_limit_killed, evidence=termination_evidence)
+        likely_initiator = termination_fields.pop("likely_initiator")
         event = self.journal.emit("test_subprocess_completed", producer="test_subprocess",
                                   selectors=list(selectors), exit_code=exit_code,
                                   **({"memory_limit_mechanism": memory_limit_mechanism}
@@ -8579,6 +8575,7 @@ class StateFrameRuntime:
                                   } for row in canonical_rows],
                                   signal_number=signal_number, signal_name=signal_name,
                                   likely_initiator=likely_initiator,
+                                  **termination_fields,
                                   binding=filtered_binding,
                                   after_binding=filtered_after_binding,
                                   binding_stable=stable,

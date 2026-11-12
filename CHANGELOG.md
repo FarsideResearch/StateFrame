@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- A check killed by a signal now names the exact limit that stopped it, such as `RLIMIT_CPU=3600s`. A kill that none of the check's limits explains is reported as external, with the CPU time the check had used, instead of being guessed as a CPU or memory limit, and the model is told to re-run the check.
+- The CPU-time limit on checks is now a runaway backstop of 3,600 CPU seconds per process (was 300 for public checks and 30 for supervised commands), configurable with `STATEFRAME_PUBLIC_CHECK_CPU_SECONDS` in a custom profile.
+
 ## 0.5.4 (2026-11-12)
 
 - Session shutdown no longer kills a slow execution supervisor on elapsed time. It is killed only when its processes show no CPU progress and no member changes for a load-scaled window, and the kill is logged with the reason.

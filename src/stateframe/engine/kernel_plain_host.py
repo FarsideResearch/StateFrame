@@ -401,7 +401,7 @@ def sandboxed_check_runner(lock_path: Path, audit_path: Path, *,
 
     def execute(argv: Sequence[str], root: Path) -> CheckOutcome:
         from capability_study_support import locked_test_process
-        from kernel_execution_policy import run_sandboxed
+        from kernel_execution_policy import check_cpu_backstop_seconds, run_sandboxed
         from kernel_test_artifact_policy import prepare_pytest_command
         profile = _active_test_run_profile()
         config_span = profile.start_span("config_command_preparation") if profile else None
@@ -432,7 +432,7 @@ def sandboxed_check_runner(lock_path: Path, audit_path: Path, *,
                     execution_options["observe_pytest"] = True
                 result = run_sandboxed(
                     list(command), root, env=env, timeout=CHECK_TIMEOUT_S,
-                    cpu_seconds=float(os.environ.get("STATEFRAME_PUBLIC_CHECK_CPU_SECONDS", "300")),
+                    cpu_seconds=check_cpu_backstop_seconds(),
                     output_limit=256 * 1024, **execution_options,
                 )
                 if profile:
