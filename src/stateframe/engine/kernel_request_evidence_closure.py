@@ -1350,6 +1350,20 @@ def build_source_closure(root: Path, paths: Sequence[str], ticket: TicketIdentit
                          workspace_authorization=workspace_authorization)
 
 
+def zero_byte_source_path(plan: Mapping[str, object], path: str) -> bool:
+    """True when ``path`` is a zero-byte source whose declared revision proves it.
+
+    A zero-byte file has no line, so the closure selects no unit for it and there
+    is no body to place on the wire. The revision (sha256 of the empty bytes) is
+    the whole proof, so it is checked against the plan's own source bytes here.
+    """
+    contents = plan.get("source_contents")
+    revisions = plan.get("revisions")
+    return (isinstance(contents, Mapping) and isinstance(revisions, Mapping)
+            and contents.get(path) == ""
+            and revisions.get(path) == source_revision(""))
+
+
 def _empty_delivery_status(plan: Mapping[str, object], path: str) -> str:
     """Distinguish an intentionally unselected path from unavailable source."""
 
@@ -1373,6 +1387,8 @@ def _empty_delivery_status(plan: Mapping[str, object], path: str) -> str:
             return "UNKNOWN"
         if completeness in {"UNKNOWN", "UNAVAILABLE", "FAILED", "PARTIAL", "MISSING", "NOT_FOUND"}:
             return "UNKNOWN"
+    if zero_byte_source_path(plan, path):
+        return "COMPLETE"
     if path == str(plan.get("target_path", "")):
         return "PARTIAL"
     return "NOT_SELECTED"
@@ -1529,6 +1545,7 @@ def record_source_delivery(plan: Mapping[str, object], path: str,
                 delivery.get(path, {}).get("retrieval_route")
                 if isinstance(delivery.get(path), Mapping) else None
             ),
+            "empty_source": not units and zero_byte_source_path(plan, path),
             "status": (_empty_delivery_status(plan, path) if not units else
                        "COMPLETE" if not omitted else "PARTIAL")}
 
@@ -1566,9 +1583,12 @@ def record_final_source_delivery(
         or item.get("status") not in {"NOT_SELECTED", "UNKNOWN"}
     }
     total_units = sum(int(item.get("selected_units", 0)) for item in selected_results.values())
-    complete = bool(selected_results) and total_units > 0 and all(
-        item.get("status") == "COMPLETE" for item in selected_results.values()
-    )
+    # Zero selected units never proves delivery, except for zero-byte sources:
+    # their revision is the whole body, so nothing remains to deliver.
+    complete = bool(selected_results) and (
+        total_units > 0
+        or all(item.get("empty_source") is True for item in selected_results.values())
+    ) and all(item.get("status") == "COMPLETE" for item in selected_results.values())
     selected_paths = set(selected_results)
     plan_has_omissions = any(
         omission_blocks_delivery(row, selected_paths)
