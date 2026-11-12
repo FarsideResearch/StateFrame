@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.5.1 (2026-11-12)
 
 - Fixed: runs on repositories containing empty source files (for example an empty __init__.py) no longer stop before the first request.
 
