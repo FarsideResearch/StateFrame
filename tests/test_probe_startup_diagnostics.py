@@ -13,6 +13,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from _timeouts import scaled
 from fixtures.process_signals import (
     close_signal_binding,
     record_identity,
@@ -41,7 +42,7 @@ def _supervisor_command_fragment() -> str:
 def _linux_supervisor_pid(launcher_pid: int, *, timeout: float = 5.0) -> int:
     """Find this bwrap launcher's supervisor, rather than signalling bwrap itself."""
     table = ProcessTable()
-    deadline = time.monotonic() + timeout
+    deadline = time.monotonic() + scaled(timeout)
     while time.monotonic() < deadline:
         rows = table.snapshot()
         descendants = {launcher_pid}
@@ -82,7 +83,7 @@ def _wait_for_signal_target_exit(identity, *, timeout: float = 5.0) -> None:
         return
     expected_start = (int(identity.kernel_identity.rsplit(":", 1)[1]), 0)
     table = ProcessTable()
-    deadline = time.monotonic() + timeout
+    deadline = time.monotonic() + scaled(timeout)
     while time.monotonic() < deadline:
         current = table.identity(identity.pid)
         if current is None or current.start != expected_start or current.zombie:
@@ -102,7 +103,7 @@ def _plant_supervisor_death(session, *, launched_after: float) -> None:
         binding = retain_signal_binding(identity)
         signal_bound(binding, signal.SIGKILL)
         _wait_for_signal_target_exit(identity)
-        session._process.wait(timeout=5)
+        session._process.wait(timeout=scaled(5))
     except Exception as error:
         cleanup_error = None
         try:

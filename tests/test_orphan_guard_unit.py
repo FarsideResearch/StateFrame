@@ -14,6 +14,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from _timeouts import scaled
 import _orphan_guard as orphan_guard
 from test_orphan_guard_acceptance import _STRIP_TOKEN_SCRIPT
 
@@ -78,7 +79,7 @@ def _launch_helper(tmp_path: Path):
 def _stop_helper(process: subprocess.Popen[bytes]) -> None:
     if process.poll() is None:
         process.kill()
-    process.wait(timeout=5.0)
+    process.wait(timeout=scaled(5.0))
 
 
 def test_registered_launch_waits_until_scope_ends(tmp_path):
@@ -281,7 +282,7 @@ def test_exited_registered_adoption_owner_does_not_end_scope(tmp_path):
     owner = scope.launch(
         [sys.executable, "-c", "pass"], cwd=tmp_path,
         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    owner.process.wait(timeout=5.0)
+    owner.process.wait(timeout=scaled(5.0))
     handle = _LiveHandle(7350)
     adopted = scope.register_adopted(
         7350, bound_handle=handle, attributed=True,

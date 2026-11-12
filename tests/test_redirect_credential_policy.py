@@ -15,6 +15,7 @@ import urllib.request
 
 import pytest
 
+from _timeouts import scaled
 from stateframe import endpoint
 from stateframe.engine import kernel_bounded_http, kernel_redirect_policy
 import kernel_request_diet
@@ -667,12 +668,12 @@ class _RedirectServers:
             server.shutdown()
             server.server_close()
         for thread in self.threads:
-            thread.join(timeout=5)
+            thread.join(timeout=scaled(5))
             assert not thread.is_alive(), "redirect server did not stop"
 
 
 def _open(opener: urllib.request.OpenerDirector, request: urllib.request.Request) -> None:
-    with opener.open(request, timeout=5) as response:
+    with opener.open(request, timeout=scaled(5)) as response:
         assert response.status == 200
         assert response.read() == b""
 
@@ -712,14 +713,14 @@ def test_redirect_sites_strip_secrets_across_origins_and_keep_same_origin(site, 
 def test_routed_redirect_policy_imports_in_isolated_http_child() -> None:
     wire = b'{"model":"redirect-child","messages":[]}'
     with _RedirectServers() as servers:
-        deadline = time.monotonic() + 10.0
+        deadline = time.monotonic() + scaled(10.0)
         packet = json.dumps({
             "wire": wire.decode("utf-8"),
             "endpoint": servers.state["a_url"] + "/child/start",
             "key": "fixture-key",
             "deadline": deadline,
             "request_deadline": deadline,
-            "socket_timeout": 3.0,
+            "socket_timeout": scaled(3.0),
             "send_stall_seconds": kernel_bounded_http.send_stall_seconds(),
             "report_body_sent": True,
             "gzip": False,
@@ -731,7 +732,7 @@ def test_routed_redirect_policy_imports_in_isolated_http_child() -> None:
             input=packet,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            timeout=12.0,
+            timeout=scaled(12.0),
             check=False,
         )
 
@@ -756,8 +757,8 @@ def test_routed_redirect_policy_imports_in_isolated_http_child() -> None:
 def test_routed_redirect_after_request_deadline_does_not_start_followup() -> None:
     wire = b'{"model":"late-redirect","messages":[]}'
     with _RedirectServers() as servers:
-        request_deadline = time.monotonic() + 2.0
-        deadline = request_deadline + 5.0
+        request_deadline = time.monotonic() + scaled(2.0)
+        deadline = request_deadline + scaled(5.0)
         servers.state["late_redirect_release_at"] = request_deadline + 0.05
         packet = json.dumps({
             "wire": wire.decode("utf-8"),
@@ -765,7 +766,7 @@ def test_routed_redirect_after_request_deadline_does_not_start_followup() -> Non
             "key": "fixture-key",
             "deadline": deadline,
             "request_deadline": request_deadline,
-            "socket_timeout": 1.0,
+            "socket_timeout": scaled(1.0),
             "send_stall_seconds": kernel_bounded_http.send_stall_seconds(),
             "report_body_sent": True,
             "gzip": False,
@@ -777,7 +778,7 @@ def test_routed_redirect_after_request_deadline_does_not_start_followup() -> Non
             input=packet,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            timeout=10.0,
+            timeout=scaled(10.0),
             check=False,
         )
 

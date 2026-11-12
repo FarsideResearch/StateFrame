@@ -11,6 +11,7 @@ import urllib.request
 
 import pytest
 
+from _timeouts import scaled
 from stateframe import _child
 from stateframe.engine.kernel_redirect_policy import build_credential_scoped_opener
 
@@ -277,7 +278,7 @@ class _Servers:
             server.shutdown()
             server.server_close()
         for thread in self.threads:
-            thread.join(timeout=5)
+            thread.join(timeout=scaled(5))
 
     @property
     def origin_url(self) -> str:
@@ -307,7 +308,7 @@ def test_direct_mode_ignores_proxy_environment(monkeypatch) -> None:
         _proxy_environment(monkeypatch, servers.proxy_url)
         monkeypatch.setattr(urllib.request, "getproxies", lambda: pytest.fail("read proxy env"))
         opener = build_credential_scoped_opener(proxy_mode="direct")
-        with opener.open(servers.origin_url + "/direct", timeout=5) as response:
+        with opener.open(servers.origin_url + "/direct", timeout=scaled(5)) as response:
             assert response.read() == b"ok"
         assert len(servers.origin.records) == 1
         assert servers.proxy.records == []
@@ -321,7 +322,7 @@ def test_environment_mode_uses_proxy_and_honors_no_proxy(monkeypatch) -> None:
         opener = build_credential_scoped_opener(
             proxy_mode="environment", credential_origin=proxied_url,
         )
-        with opener.open(proxied_url, timeout=5) as response:
+        with opener.open(proxied_url, timeout=scaled(5)) as response:
             assert response.read() == b"ok"
         assert len(servers.proxy.records) == 1
         assert servers.origin.records == []
@@ -333,7 +334,7 @@ def test_environment_mode_uses_proxy_and_honors_no_proxy(monkeypatch) -> None:
         request = urllib.request.Request(
             servers.origin_url + "/bypass", headers={"Proxy-Authorization": "bad"},
         )
-        with bypass.open(request, timeout=5) as response:
+        with bypass.open(request, timeout=scaled(5)) as response:
             assert response.read() == b"ok"
         assert len(servers.origin.records) == 1
         _assert_proxy_authorization_absent(servers.origin.records[0][1])
@@ -347,7 +348,7 @@ def test_direct_scrubber_preserves_default_request_headers(monkeypatch) -> None:
         scoped = build_credential_scoped_opener(proxy_mode="direct")
         baseline = urllib.request.build_opener(urllib.request.ProxyHandler({}))
         for opener in (scoped, baseline):
-            with opener.open(servers.origin_url + "/default", timeout=5) as response:
+            with opener.open(servers.origin_url + "/default", timeout=scaled(5)) as response:
                 assert response.read() == b"ok"
         assert len(servers.origin.records) == 2
         assert servers.origin.records[0][1] == servers.origin.records[1][1]
@@ -363,7 +364,7 @@ def test_direct_mode_scrubs_caller_proxy_authorization(monkeypatch) -> None:
             servers.origin_url + "/direct-header",
             headers={"Proxy-Authorization": "Basic proxy-only-secret"},
         )
-        with opener.open(request, timeout=5) as response:
+        with opener.open(request, timeout=scaled(5)) as response:
             assert response.read() == b"ok"
         assert len(servers.origin.records) == 1
         _assert_proxy_authorization_absent(servers.origin.records[0][1])
@@ -391,7 +392,7 @@ def test_proxy_credentials_and_origin_secrets_stop_after_cross_origin_redirect(m
                     self.server.redirect = False
                 super().do_GET()
         servers.proxy.RequestHandlerClass = RedirectOnce
-        with opener.open(request, timeout=5) as response:
+        with opener.open(request, timeout=scaled(5)) as response:
             assert response.read() == b"ok"
         first, second = servers.proxy.records
         expected = "Basic " + base64.b64encode(b"user:secret").decode("ascii")
@@ -421,7 +422,7 @@ def test_proxy_reinjection_control_after_redirect_stripping(monkeypatch) -> None
                 super().do_GET()
 
         servers.proxy.RequestHandlerClass = RedirectOnce
-        with opener.open(origin_url, timeout=5) as response:
+        with opener.open(origin_url, timeout=scaled(5)) as response:
             assert response.read() == b"ok"
         _first, second = servers.proxy.records
         assert second[0] == "http://other.example.test/final"
@@ -443,7 +444,7 @@ def test_child_opener_forces_direct_helper_and_remains_installed(monkeypatch) ->
                 proxy_mode="environment", credential_origin=servers.origin_url,
             )
             assert urllib.request._opener is child_opener
-            with helper.open(servers.origin_url + "/child", timeout=5) as response:
+            with helper.open(servers.origin_url + "/child", timeout=scaled(5)) as response:
                 assert response.read() == b"ok"
         finally:
             urllib.request._opener = previous

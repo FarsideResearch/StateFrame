@@ -13,6 +13,7 @@ import pytest
 
 from stateframe.profiles import DEFAULT as DEFAULT_PROFILE
 from stateframe.scripted_endpoint import Script, serve
+from _timeouts import scaled
 from engine_run import start_monitored
 
 
@@ -110,6 +111,7 @@ def _run_engine_cli(
     timeout: float,
     step: str,
 ) -> subprocess.CompletedProcess[str]:
+    timeout = scaled(timeout)
     with start_monitored(command, expected_seconds=timeout, run_dir=run_dir, step=step,
                          cwd=ROOT, env=environment) as process:
         returncode = process.wait(timeout=timeout)
@@ -337,7 +339,7 @@ def test_project_hooks_trust_cli_flow_and_changed_file_is_untrusted(tmp_path):
         env=environment,
         capture_output=True,
         text=True,
-        timeout=30,
+        timeout=scaled(30),
     )
     assert trusted.returncode == 0, trusted.stdout + trusted.stderr
     assert "project-context" in trusted.stdout

@@ -6,7 +6,7 @@ evidence, and submission owners.  The functions here validate that snapshot,
 derive one consistent set of lifecycle predicates, and describe the impact of
 a request/source change for the host to commit.
 
-The source binding deliberately accepts the shared ``mc-outline/1`` result as
+The source binding deliberately accepts the shared ``sample project-outline/1`` result as
 opaque structured data.  It does not parse Python (or any other language), so
 the same contract covers Go, Rust, TypeScript/JavaScript, Java, PHP, Vue, and
 other languages supported by OUTLINEGENERIC.

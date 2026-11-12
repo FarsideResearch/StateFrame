@@ -37,12 +37,12 @@ SCHEMA = "stateframe-request-diet/1"
 ENDPOINT_CONTEXT_TOKENS = ENDPOINT_SIZE.context_tokens
 ENDPOINT_PROMPT_TOKEN_BUDGET = ENDPOINT_SIZE.prompt_budget
 INITIAL_BYTES_PER_TOKEN = 2.46
-# Crew-01: 109 rows, 3.02-3.92 bytes/token; +2,863 minimum margin with this cap.
+# Calibration: 109 rows, 3.02-3.92 bytes/token; +2,863 minimum margin with this cap.
 MAX_CALIBRATED_BYTES_PER_TOKEN = 3.0
-# Crew-01 r2-owner send 2 undercounted 515 tokens after one sample.
+# Calibration calibration send 2 undercounted 515 tokens after one sample.
 MIN_CALIBRATION_SAMPLES = 2
 # SPEED 2026-10-22: Stage6 relay RTT is 0.14-0.15 s for tiny bodies and
-# 0.68-0.77 s for 90 KB. b1569's ~211 ms and product benchmark's ~203 ms were
+# 0.68-0.77 s for 90 KB. earlier run's ~211 ms and product benchmark's ~203 ms were
 # the old 0.2 s timeout firing, not successful-tokenization latency.
 TOKENIZE_REQUEST_TIMEOUT_SECONDS = 2.0
 TOKENIZE_REQUEST_TIMEOUT_CAP_SECONDS = 30.0
@@ -56,10 +56,10 @@ TOKENIZE_RELAY_RTT_SECONDS = 0.15
 TOKENIZE_RELAY_LOAD_MARGIN = 3.0
 TOKENIZE_SLOW_SECONDS = 1.0  # Telemetry only: never discard a valid count.
 TOKENIZE_MAX_CONSECUTIVE_FAILURES = 3
-# Probes only at a later request boundary: five requests avoid noisy retries,
-# while the 30-second wall bound limits recovery delay on sparse workloads.
+# Probes only at a later request boundary, after five requests. The schedule
+# counts requests, never wall time: a resumed run rebuilds earlier requests
+# faster than they first ran and must measure them the same way.
 TOKENIZE_REPROBE_AFTER_REQUESTS = 5
-TOKENIZE_REPROBE_AFTER_SECONDS = 30.0
 TEMPLATE_OVERHEAD_TOKENS = 1_148
 TEMPLATE_OVERHEAD_EVIDENCE = (
     "calibration-batch-927 request d402be5a823d4026a7d6b6066403fe84: "
@@ -131,7 +131,7 @@ def _density_floor_tokens(body: Mapping[str, object], template_reserve: int) -> 
 _TOKENIZER_URL_ENV = (
     "LLAMA_CPP_TOKENIZE_URL", "LLAMA_CPP_BASE_URL", "A3B_ENDPOINT",
     "A3B_BASE_URL", "OPENAI_API_BASE", "OPENAI_BASE_URL",
-    # 10-08 r2b 932/933: the live harness sets only DS_URL (react_repair.API, the serving endpoint itself);
+    # 10-08 earlier run 932/933: the live harness sets only DS_URL (react_repair.API, the serving endpoint itself);
     # without it /tokenize was never tried and the diet ran uncalibrated bytes. Last: explicit vars win.
     "DS_URL",
 )
@@ -452,7 +452,7 @@ def _http_tokenize(content: str, url: str, *, deadline: float | None = None,
     request._stateframe_route_allow_remote = route_allow_remote
     request._stateframe_generation_origin = generation_origin
     # Budget the actual UTF-8 JSON payload, including escaping. Three times
-    # SPEED's upper measured relay cost covers the b1598 134 KB load case.
+    # SPEED's upper measured relay cost covers the earlier run 134 KB load case.
     timeout = min(TOKENIZE_REQUEST_TIMEOUT_CAP_SECONDS, max(
         TOKENIZE_QUEUEING_TIMEOUT_SECONDS,
         TOKENIZE_REQUEST_TIMEOUT_SECONDS,
@@ -554,7 +554,6 @@ class RequestTokenMeter:
         self._reprobe_active = False
         self._reprobe_attempts = 0
         self._reprobe_requests_since_attempt = 0
-        self._reprobe_last_attempt_at: float | None = None
         self._reprobe_ready_requests: set[str] = set()
         self._reprobe_attempted_requests: set[str] = set()
         self._reprobe_status: str | None = None
@@ -647,12 +646,7 @@ class RequestTokenMeter:
             # Keep the last classified failure visible while waiting for a probe.
             self._fallback_pending = True
             self._reprobe_requests_since_attempt += 1
-            time_due = (
-                self._reprobe_last_attempt_at is not None
-                and time.monotonic() - self._reprobe_last_attempt_at >= TOKENIZE_REPROBE_AFTER_SECONDS
-            )
-            if (self._reprobe_requests_since_attempt >= TOKENIZE_REPROBE_AFTER_REQUESTS
-                    or time_due):
+            if self._reprobe_requests_since_attempt >= TOKENIZE_REPROBE_AFTER_REQUESTS:
                 self._reprobe_ready_requests.add(request_id)
                 self._reprobe_status = "due"
                 self._reprobe_status_by_request[request_id] = "due"
@@ -690,14 +684,12 @@ class RequestTokenMeter:
         self._reprobe_attempted_requests.add(self._request_id)
         self._reprobe_status_by_request[self._request_id] = "probing"
         self._reprobe_requests_since_attempt = 0
-        self._reprobe_last_attempt_at = time.monotonic()
         self._reprobe_attempts += 1
         self._reprobe_status = "probing"
 
     def _start_reprobe_schedule(self) -> None:
         self._reprobe_active = True
         self._reprobe_requests_since_attempt = 0
-        self._reprobe_last_attempt_at = time.monotonic()
         self._reprobe_status = "waiting"
         if self._request_id is not None:
             self._reprobe_status_by_request[self._request_id] = "waiting"
@@ -706,7 +698,6 @@ class RequestTokenMeter:
         self._availability = "unavailable"
         # The probe loop already recorded the concrete failure reason.
         self._reprobe_status = "failed"
-        self._reprobe_last_attempt_at = time.monotonic()
         self._reprobe_requests_since_attempt = 0
         if self._request_id is not None:
             self._reprobe_status_by_request[self._request_id] = "failed"
@@ -2466,7 +2457,7 @@ def _upsert_duplicated_source_notice(
 def _upsert_dropped_source_notice_r2fo(
         messages: list[dict[str, object]], records: Sequence[Mapping[str, object]],
 ) -> None:
-    """Flag OFF: the r2FO function verbatim (byte-identical legacy panel and placement)."""
+    """Flag OFF: the earlier run function verbatim (byte-identical legacy panel and placement)."""
     if not records:
         return
     all_records: dict[tuple[str, int, int, str, str], dict[str, object]] = {}

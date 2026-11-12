@@ -373,12 +373,18 @@ def _print_summary(summary: dict) -> None:
             slot_summary = f"not pinned ({slot_reason})"
     else:
         slot_summary = "not recorded"
+    limitations = summary.get("limitations")
+    limitation_rows = [
+        ("limitation", " ".join(item.split())[:160])
+        for item in limitations if isinstance(item, str) and item.strip()
+    ] if isinstance(limitations, list) else []
     rows = [
         ("outcome", f"runtime={summary['runtime_outcome']} checks={summary['check_outcome']} "
          f"artifact={summary['artifact']}"),
         *([("result", result_line)] if result_line else []),
         *([("test evidence", json.dumps(summary["wrong_test_evidence"], sort_keys=True))]
           if summary.get("wrong_test_evidence") else []),
+        *limitation_rows,
         ("engine result", summary.get("engine_result")),
         ("provider dialects", provider_summary),
         ("prompt-cache slot", slot_summary),

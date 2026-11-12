@@ -51,7 +51,7 @@ DECOY_CATALOG: tuple[dict[str, object], ...] = (
     _schema_tool("social_create_post", "Create a social post draft.",
                  {"channel": _STRING, "copy": _STRING, "publish_at": _STRING},
                  ("channel", "copy")),
-    _schema_tool("helm_create_initiative", "Create an initiative under the company helm.",
+    _schema_tool("initiative_create", "Create an initiative with a name and objective.",
                  {"name": _STRING, "objective": _STRING, "owner": _STRING},
                  ("name", "objective")),
     _schema_tool("content_generate_draft", "Generate a content draft from a brief.",
@@ -75,7 +75,7 @@ DECOY_CATALOG: tuple[dict[str, object], ...] = (
                  {"url": _STRING, "scope": _STRING}, ("url",)),
     _schema_tool("social_schedule_campaign", "Schedule a social campaign.",
                  {"campaign_id": _STRING, "start_at": _STRING}, ("campaign_id", "start_at")),
-    _schema_tool("helm_create_operation", "Create an operational workstream.",
+    _schema_tool("operation_create", "Create an operation with a name and purpose.",
                  {"name": _STRING, "purpose": _STRING}, ("name", "purpose")),
     _schema_tool("content_publish_article", "Publish an approved article.",
                  {"draft_id": _STRING, "channel": _STRING}, ("draft_id", "channel")),
@@ -96,7 +96,7 @@ DECOY_CATALOG: tuple[dict[str, object], ...] = (
                  ("page_id", "title")),
     _schema_tool("social_get_calendar", "Read a social publishing calendar.",
                  {"channel": _STRING, "month": _STRING}, ("channel", "month")),
-    _schema_tool("helm_list_directives", "List active helm directives.",
+    _schema_tool("directive_list", "List directives by status.",
                  {"status": _STRING}, ("status",)),
     _schema_tool("content_list_drafts", "List content drafts.",
                  {"status": _STRING, "limit": _INTEGER}, ("status",)),
@@ -368,7 +368,7 @@ def validate_tool_arguments(
             errors.append(f"parameter {key} must be {prop.get('type')}")
         elif (isinstance(prop, Mapping) and isinstance(prop.get("enum"), list)
               and value not in prop["enum"]):
-            # r45 (r44c waiver W2): the menu's enum is the owner's restriction (e.g. repair-lock read targets)
+            # earlier run (earlier run waiver W2): the menu's enum is the owner's restriction (e.g. repair-lock read targets)
             errors.append(f"parameter {key} must be one of {json.dumps(prop['enum'])}")
     return tuple(errors)
 

@@ -34,7 +34,7 @@ DEFAULT_MAX_TOOLS = 5
 DEFAULT_MAX_SCHEMA_BYTES = 24 * 1024
 # L126E 922 capture: effective-config.json records context_per_slot=65,536.
 # Measure prefill throughput before choosing the request budget.
-# GET /props default_generation_settings.n_ctx = 65,536 and GET /slots = 4 slots x 65,536 (build b11044-2ec6bf846,
+# GET /props default_generation_settings.n_ctx = 65,536 and GET /slots = 4 slots x 65,536 (build earlier run-2ec6bf846,
 # Qwen3.6-35B-A3B-UD-Q4_K_XL). Per-slot context is the real limit for one request.
 ENDPOINT_CONTEXT_TOKENS = ENDPOINT_SIZE.context_tokens
 # All 11 captured 922 requests sent max_tokens=24,000. Reserve a separate
@@ -2940,7 +2940,7 @@ def _apply_budget_with_diet(
                     final_tools, vector, dispatchable=dispatchable)
         except (AttributeError, ImportError, OSError, RuntimeError, TypeError, ValueError) as error:
             # Host-only receipt (journal), never solver-visible: a swallowed TypeError here made
-            # every wire HOST_BLOCKED and done uncertifiable for 40 requests (batch 836) with no
+            # every wire HOST_BLOCKED and done uncertifiable for 40 requests (prior run) with no
             # way to see why.  Carry the message and the innermost frames.
             import traceback as _traceback
             frames = _traceback.extract_tb(error.__traceback__)[-4:]

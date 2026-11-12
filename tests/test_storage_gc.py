@@ -9,6 +9,7 @@ import sys
 import time
 from pathlib import Path
 
+from _timeouts import scaled
 from stateframe import storage_gc
 from stateframe.resume import hold_run_lock
 
@@ -36,6 +37,44 @@ def _finished_run(root, name="finished", *, result="SUBMITTED"):
     (run / "engine-result.json").write_text(json.dumps({"result": {"result": result}}))
     (run / "spec.json").write_text(json.dumps({"schema": "stateframe-run/1"}))
     return run
+
+
+def test_atomic_json_preserves_private_mode_before_publication(tmp_path, monkeypatch):
+    path = tmp_path / "spec.json"
+    path.write_text('{"generation":"old"}')
+    path.chmod(0o600)
+    replace = os.replace
+    observed = []
+
+    def check_staged_mode(source, destination):
+        assert destination == path
+        observed.append(Path(source).stat().st_mode & 0o777)
+        assert json.loads(path.read_text()) == {"generation": "old"}
+        replace(source, destination)
+
+    monkeypatch.setattr(storage_gc.os, "replace", check_staged_mode)
+    storage_gc._write_json_atomic(path, {"generation": "new"})
+
+    assert observed == [0o600]
+    assert path.stat().st_mode & 0o777 == 0o600
+    assert json.loads(path.read_text()) == {"generation": "new"}
+
+
+def test_atomic_json_sets_new_private_mode_before_publication(tmp_path, monkeypatch):
+    path = tmp_path / "tool-settings.json"
+    replace = os.replace
+    observed = []
+
+    def check_staged_mode(source, destination):
+        assert destination == path
+        observed.append(Path(source).stat().st_mode & 0o777)
+        replace(source, destination)
+
+    monkeypatch.setattr(storage_gc.os, "replace", check_staged_mode)
+    storage_gc._write_json_atomic(path, {"settings": "private"}, mode=0o600)
+
+    assert observed == [0o600]
+    assert path.stat().st_mode & 0o777 == 0o600
 
 
 def test_gc_dry_run_reports_artifacts_without_mutating_and_apply_is_idempotent(tmp_path):
@@ -409,7 +448,7 @@ def test_gc_cap_skips_in_use_seed(tmp_path, monkeypatch):
     finally:
         process.stdin.write("x")
         process.stdin.flush()
-        process.communicate(timeout=10)
+        process.communicate(timeout=scaled(10))
 
 
 def test_gc_of_explicit_roots_never_prunes_seeds_other_runs_may_use(tmp_path, monkeypatch, capsys):

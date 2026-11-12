@@ -1,7 +1,7 @@
 """Host-owned targetless localization for the IDEALPATH S2 boundary.
 
 This module is deliberately read-only.  It builds a small public inventory,
-reuses the vendored Mission Control graph, and returns typed records that can
+reuses the vendored repository graph, and returns typed records that can
 be independently checked before a target is bound.  A ranked suspect is a
 useful investigation handle, never proof of a root cause.
 """

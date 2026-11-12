@@ -21,7 +21,7 @@ from kernel_obligation_assess import UnavailableEvidence, _unavailable_evidence
 
 MODE_ENV = "STATEFRAME_INTENT_CARRY"
 SCHEMA = "stateframe-intent-carry/1"
-# r46 (tt_output_gap_v2 table items 1-2): deliver the pending intent on the F4 wire, suppress
+# earlier run (tt_output_gap_v2 table items 1-2): deliver the pending intent on the F4 wire, suppress
 # path-disagreeing extractions, drop the stale static BOOT phase sentence.  Strict off|on.
 F4_MODE_ENV = "STATEFRAME_INTENT_CARRY_F4"
 PENDING_INTENT_HEADER = "[Pending intent — host reminder, not edit authority]"
@@ -291,7 +291,7 @@ def _summary_for(text: str, start: int, end: int, target_path: str) -> str:
     cleaned_body = re.sub(r"\b(?:now|please)\s*[.!]?$", "", cleaned_body,
                           flags=re.IGNORECASE).strip()
     # A generic final "write the edit" gets its meaning from the sentence that
-    # committed the change immediately before it (the crawl R24 shape).
+    # committed the change immediately before it (the crawl earlier run shape).
     candidate = cleaned_body
     if candidate.lower().strip(" .") in _GENERIC_SUMMARIES or len(candidate) < 8:
         candidate = prior or candidate
@@ -589,7 +589,7 @@ class IntentCarryState:
             reasoning=reasoning, content=content, default_path=default_path,
             default_symbol=default_symbol, step=step, action=action)
         if reference_paths is not None and intents:
-            # r46 STATEFRAME_INTENT_CARRY_F4: the caller passes references only when on.
+            # earlier run STATEFRAME_INTENT_CARRY_F4: the caller passes references only when on.
             _tool, action_path, _symbol = _action_info(action)
             split = split_by_reference_paths(
                 intents, [action_path, *reference_paths], self.root, journal=self.journal,

@@ -8,6 +8,7 @@ from pathlib import Path, PurePosixPath
 
 import pytest
 
+from _timeouts import scaled
 from _stateframe_home import isolated_stateframe_home
 
 
@@ -17,18 +18,25 @@ ROOT = Path(__file__).resolve().parents[1]
 E2E_TESTS = Path("tests/e2e")
 
 
-def _fixture_repo_conftests(root: Path) -> list[str]:
+def _e2e_python_sources(root: Path) -> list[str]:
     e2e_root = root / E2E_TESTS
+    return [path.relative_to(root).as_posix() for path in e2e_root.rglob("*.py")]
+
+
+def _fixture_repo_conftests(root: Path, python_sources: list[str] | None = None) -> list[str]:
+    if python_sources is None:
+        python_sources = _e2e_python_sources(root)
     return sorted(
-        path.relative_to(root).as_posix()
-        for path in e2e_root.rglob("conftest.py")
-        if len(path.relative_to(e2e_root).parts) > 1
+        path
+        for path in python_sources
+        if PurePosixPath(path).name == "conftest.py" and PurePosixPath(path).parent != E2E_TESTS
     )
 
 
 def _assert_e2e_collection(root: Path) -> tuple[str, ...]:
     """Collect the suite in a fresh process and enforce the e2e/fixture boundary."""
-    fixture_conftests = _fixture_repo_conftests(root)
+    python_sources = _e2e_python_sources(root)
+    fixture_conftests = _fixture_repo_conftests(root, python_sources)
     if fixture_conftests:
         raise AssertionError(
             "fixture-repository conftest.py files found under tests/e2e: "
@@ -41,6 +49,7 @@ def _assert_e2e_collection(root: Path) -> tuple[str, ...]:
         "PYTHONDONTWRITEBYTECODE": "1",
         "STATEFRAME_HOME": isolated_stateframe_home(),
     }
+    # Fix root-relative node IDs in synthetic projects while preserving full suite collection.
     result = subprocess.run(
         [
             sys.executable,
@@ -50,13 +59,15 @@ def _assert_e2e_collection(root: Path) -> tuple[str, ...]:
             "-q",
             "-p",
             "no:cacheprovider",
+            "--rootdir",
+            str(root),
             "tests",
         ],
         cwd=root,
         env=environment,
         capture_output=True,
         text=True,
-        timeout=120,
+        timeout=scaled(120),
         check=False,
     )
     node_ids = tuple(
@@ -65,8 +76,9 @@ def _assert_e2e_collection(root: Path) -> tuple[str, ...]:
         if line.startswith("tests/") and "::" in line
     )
     expected_files = sorted(
-        path.relative_to(root).as_posix()
-        for path in (root / E2E_TESTS).glob("test_*.py")
+        path
+        for path in python_sources
+        if PurePosixPath(path).parent == E2E_TESTS and PurePosixPath(path).name.startswith("test_")
     )
     collected_files = {node_id.split("::", 1)[0] for node_id in node_ids}
     missing_files = [path for path in expected_files if path not in collected_files]
@@ -77,11 +89,7 @@ def _assert_e2e_collection(root: Path) -> tuple[str, ...]:
         and len(PurePosixPath(node_id.split("::", 1)[0]).parts) > 3
     ]
     output = result.stdout + result.stderr
-    nested_sources = [
-        path.relative_to(root).as_posix()
-        for path in (root / E2E_TESTS).rglob("*.py")
-        if len(path.relative_to(root / E2E_TESTS).parts) > 1
-    ]
+    nested_sources = [path for path in python_sources if PurePosixPath(path).parent != E2E_TESTS]
     imported_nested_sources = [path for path in nested_sources if path in output]
 
     problems = []

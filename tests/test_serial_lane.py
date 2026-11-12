@@ -10,6 +10,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from _timeouts import scaled
 import serial_lane_plugin
 
 pytest_plugins = ["pytester"]
@@ -227,7 +228,7 @@ def test_regular():
         capture_output=True,
         text=True,
         env=checker_env,
-        timeout=10,
+        timeout=scaled(10),
     )
     assert checker.returncode == 1
     assert checker.stderr == (
@@ -246,7 +247,7 @@ def test_regular():
         capture_output=True,
         text=True,
         env=checker_env,
-        timeout=10,
+        timeout=scaled(10),
     )
     assert checker.returncode == 0, checker.stderr
     assert checker.stdout == (
@@ -296,7 +297,7 @@ def test_runtime_marker(request):
         capture_output=True,
         text=True,
         env=os.environ.copy(),
-        timeout=10,
+        timeout=scaled(10),
     )
     assert checker.returncode == 1
     assert checker.stderr == (

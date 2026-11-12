@@ -92,7 +92,7 @@ class NativeToolBatch:
         if capture is None:
             raise ValueError('native batches require captured requests')
         if self.inflight is not None and not self.finalized:
-            # r46 B2 (A3B r45 442 ldev_01 seq 2458-2505 and 5 more runs): a queued call rejected before the
+            # earlier run B2 (A3B earlier run 442 reviewer event sequence-2505 and 5 more runs): a queued call rejected before the
             # step ledger opened a step (e.g. a garbled str_replace path, REJECTED at claim grounding) never reaches
             # close_step's action_closed(), so the next selection crashed the run.  Close it as not executed and
             # drop the rest of the batch (it was built on a decision whose action never ran), then continue.
@@ -202,7 +202,7 @@ class NativeToolBatch:
                 return ("Queued proposals discarded because the workspace changed outside "
                         "their recorded action chain. Request a fresh decision.", [])
         if self.index > 0 and self.pending and runtime is not None:
-            # r45 one owner (r44c 368 ldev_01 seq 1647): a QUEUED sibling proposed under an older menu is not
+            # earlier run one owner (earlier run 368 reviewer event sequence): a QUEUED sibling proposed under an older menu is not
             # dispatched into a refusal once the greenlock authority no longer permits its tool -- the rest of the
             # batch is discarded and the model gets a fresh decision under the current menu.
             lock = getattr(runtime, "green_lock", None)

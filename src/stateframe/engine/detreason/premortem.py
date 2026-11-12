@@ -216,7 +216,7 @@ def _rule_sort_key(rule_id: str) -> Tuple[int, str]:
 
 def discover_rule_ids(claude_md_path: str) -> Tuple[str, ...]:
     """MEASURE the rule ids actually present in ``project rules`` — a scan, not an
-    assumption (rule #207/#208: never trust a compressed or remembered
+    assumption (rules: never trust a compressed or remembered
     count). Pure I/O helper; ``generate_premortem`` itself never touches the
     filesystem — callers freeze this result before generation.
     """
@@ -276,7 +276,7 @@ def _rule(id_: str, domain: Tuple[str, ...], failure_mode: str, trigger: str, sa
 #: Hand-authored EXECUTABLE subset. Each id here MUST be a real project rule
 #: rule header — enforced by ``build_rule_corpus`` (a stale/typo'd id would
 #: otherwise silently vanish into "uncompiled", which is exactly the
-#: silent-drop failure family rule #223/#181c exist to prevent).
+#: silent-drop failure family rules exist to prevent).
 _EXECUTABLE_RULE_SPECS: Tuple[RuleSpec, ...] = (
     _rule("18", ("queue_consumer", "worker"), "duplicate AgentTask creation without dedup/dispatch guard",
           "a creation site for recurring/queued work with no existing-task query"),

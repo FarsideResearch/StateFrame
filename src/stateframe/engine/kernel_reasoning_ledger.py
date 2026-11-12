@@ -1,13 +1,13 @@
-"""request fitting: typed reasoning ledger (STATEFRAME_REASONING_LEDGER) -- supersedes the r46 reasoning anchor.
+"""request fitting: typed reasoning ledger (STATEFRAME_REASONING_LEDGER) -- supersedes the earlier run reasoning anchor.
 
 Problem (tt_output_gap / f3_r44d review 2e): F4 retains only the last 2 real exchanges and
 ``_pair_messages`` pops every ``reasoning_content``, so the model's own settled findings ("the fix
 is X", "Y is not the issue") and the host's outcomes of older actions leave the context with no
-trace.  The model then re-derives them in a fresh reasoning paragraph.  The r46 anchor kept only 3
+trace.  The model then re-derives them in a fresh reasoning paragraph.  The earlier run anchor kept only 3
 literal read/verify markers of EVICTED pairs; this organ keeps two typed, bounded streams:
 
 * RECEIPTS -- host facts.  One typed row per closed provider tool exchange, classified from a
-  fixed set of literal result markers calibrated on real r46 f4 journals (``classify_receipt``).
+  fixed set of literal result markers calibrated on real earlier run f4 journals (``classify_receipt``).
 * CLAIMS   -- the model's OWN earlier sentences, verbatim (clipped), extracted deterministically
   from ``reasoning_content`` by anchored regexes (``extract_claims``).  They are rendered as
   unverified candidates, never as facts, and they are INVALIDATED by later receipts: an edit that
@@ -101,7 +101,7 @@ def mode(environ: Mapping[str, str] | None = None) -> str:
         raise ValueError(f"{MODE_ENV} must be off or on")
     if value == "on" and environ is None:
         # Single owner of frame reasoning carry (same style as kernel_decision_continuity's
-        # F4 + DECISION_CONTINUITY=on rejection): the r47 L3a rationale swap and the L3b F4
+        # F4 + DECISION_CONTINUITY=on rejection): the earlier run L3a rationale swap and the L3b F4
         # echo would carry the same reasoning a second time, unbudgeted by this ledger.
         for module_name, env_name in (("kernel_handoff_conclusion", "STATEFRAME_HANDOFF_CONCLUSION"),
                                       ("kernel_f4_reasoning_echo", "STATEFRAME_F4_REASONING_ECHO")):
@@ -199,7 +199,7 @@ _SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+(?=[A-Z`])")
 _NOISE_RE = re.compile(r"^(?:(?:wait|actually|hmm+|okay|ok|oh)\b[\s,.!:;-]*)+", re.I)
 _BULLET_RE = re.compile(r"^(?:[-*]\s+|\d+\.\s+)")
 _DONE_RE = re.compile(r"\b(?:done|complete|completed|finished|finalize)\b"
-                      # request fitting extension (measured on j460 ldev_12: "So maybe ... no changes are needed."):
+                      # request fitting extension (measured on j460 reviewer: "So maybe ... no changes are needed."):
                       r"|no (?:further )?changes? (?:is |are )?(?:needed|required)|nothing (?:left|else) to (?:do|change|fix)",
                       re.I)
 _RULED_OUT_RE = re.compile(
@@ -347,7 +347,7 @@ def _target_of(tool: str, args: Mapping[str, object]) -> str:
 def classify_receipt(tool_name: str, arguments_json: str, result_content: str) -> dict[str, str]:
     """Pure, marker-based outcome of one closed tool exchange: {"target","outcome","detail"}.
 
-    Markers are the literal host strings seen in r46 f4 journals (README "markers").  The most
+    Markers are the literal host strings seen in earlier run f4 journals (README "markers").  The most
     specific marker wins; tool-specific fallbacks apply only when no marker matched.
     """
     tool = str(tool_name or "").strip() or "?"

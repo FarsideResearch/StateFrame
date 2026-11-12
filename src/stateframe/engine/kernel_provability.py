@@ -257,7 +257,7 @@ def _receipt_binds_row(row: Mapping[str, object], receipt: Mapping[str, object])
         return True
     # Host-issued identities such as check:ul:requirement:R1@... explicitly
     # name the clause.  Parse that structured identity; do not use a loose
-    # substring match that could bind R1 to R10.
+    # substring match that could bind R1 to earlier run.
     item_ids = {item for item in row_clauses if item}
     for identity in receipt_checks:
         for item_id in item_ids:

@@ -1,4 +1,4 @@
-"""Fail-closed completion facts for token-lab v20.
+"""Fail-closed completion facts for feature implementation.
 
 The v19 terminal paths can see a public green receipt without seeing every
 ticket clause.  This module provides one conservative, duck-typed check for

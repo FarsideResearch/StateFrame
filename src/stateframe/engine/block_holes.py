@@ -124,7 +124,7 @@ MAX_SITES = 8
 BLOCK_SAMPLES = 3
 
 #: Answer tokens for the authoring call. Not a server `max_tokens` — the seam
-#: adds the rule #11d reasoning headroom on top.
+#: adds the rule reasoning headroom on top.
 ANSWER_TOKENS = 320
 
 #: OFF until the live referendum deliberately flips it. A family that is on by

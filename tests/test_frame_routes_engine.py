@@ -18,6 +18,7 @@ from urllib.request import Request
 
 import pytest
 
+from _timeouts import scaled
 from stateframe import routes
 from kernel_continuation_journal import ContinuationJournal
 import kernel_frame_routes as frame_routes
@@ -307,13 +308,13 @@ def test_test_only_crash_hook_blocks_at_exact_boundary(tmp_path, point):
            "ROUTE_CRASH_POINT": point, "ROUTE_CRASH_MARKER": str(marker)}
     process = subprocess.Popen([sys.executable, "-c", code], env=env)
     try:
-        cutoff = time.monotonic() + 5
+        cutoff = time.monotonic() + scaled(5)
         while time.monotonic() < cutoff and process.poll() is None and not marker.is_file():
             time.sleep(0.01)
         assert marker.is_file() and process.poll() is None
     finally:
         process.kill()
-        process.wait(timeout=5)
+        process.wait(timeout=scaled(5))
 
 
 def test_selected_tokenizer_and_capacity_probe_use_same_routed_endpoint(monkeypatch):
@@ -566,7 +567,7 @@ def _post_server(responder):
     finally:
         server.shutdown()
         server.server_close()
-        thread.join(timeout=5)
+        thread.join(timeout=scaled(5))
 
 
 def _large_wire():
@@ -589,7 +590,7 @@ def test_gzip_send_past_deadline_times_out_without_resend():
                   "deadline": time.monotonic() + 1, "socket_timeout": 5, "gzip": True}
         result = subprocess.run(
             [sys.executable, "-I", "-B", kernel_bounded_http.__file__, "--http-child"],
-            input=json.dumps(packet).encode(), capture_output=True, timeout=5, check=False)
+            input=json.dumps(packet).encode(), capture_output=True, timeout=scaled(5), check=False)
     assert result.returncode != 0
     diagnostic = json.loads(result.stderr)
     assert diagnostic["error_type"] == "TimeoutError"

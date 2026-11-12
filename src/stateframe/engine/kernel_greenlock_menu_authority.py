@@ -1,6 +1,6 @@
-"""Single request-scoped allow authority for the terminal green lock (r43).
+"""Single request-scoped allow authority for the terminal green lock (earlier run).
 
-r42's live replay showed the offered menu and the dispatch gates disagreeing:
+earlier run's live replay showed the offered menu and the dispatch gates disagreeing:
 ``green_lock`` refused ``run_tests`` and the repair gate refused
 ``str_replace`` while both were on the menu.  The legacy code computes the
 menu (``_terminal_tool_menu`` + repair/coherence/get-sure mutators) and the
@@ -50,7 +50,7 @@ EDIT_ACTIONS = frozenset({
 })
 VERIFY_ACTIONS = frozenset({"run_tests", "test", "pytest", "predict"})
 WINDOW_ACTIONS = frozenset({"read", "probe"})
-# Product capabilities the readiness disposition never removes under hard-budget-only terminals (b1393).
+# Product capabilities the readiness disposition never removes under hard-budget-only terminals (earlier run).
 _READINESS_NEVER_STRIPS = frozenset({"edit", "str_replace", "file_create", "file_delete", "file_move", "shell", "run_tests", "read_check_receipt"})
 UPSTREAM_REFUSAL = "MENU: {action} is not offered on this request; use an offered tool."
 
@@ -77,11 +77,11 @@ def _history_arm(runtime: object | None) -> bool:
         return False
 
 
-# r45 rebase onto r44c: r44c makes this authority own green_lock/repair_gate UNCONDITIONALLY under a live
+# earlier run rebase onto earlier run: earlier run makes this authority own green_lock/repair_gate UNCONDITIONALLY under a live
 # continuation, so authority_under_continuation's composition-ready gate is redundant and was removed.  The
 # lane's additional, replay-evidenced behaviours below (per-step continuation allow-set intersection =
 # queued-batch menu re-projection, readiness-denial of done) stay behind
-# STATEFRAME_GREENLOCK_MENU_AUTHORITY_CONTINUATION (default off; off in every r45 arm).
+# STATEFRAME_GREENLOCK_MENU_AUTHORITY_CONTINUATION (default off; off in every earlier run arm).
 def applies(lock: object | None) -> bool:
     """True when the authority owns this lock's menu and dispatch."""
     if lock is None or getattr(lock, "mode", "off") != "terminal":
@@ -91,10 +91,10 @@ def applies(lock: object | None) -> bool:
         return False
     # Bounded-locate phases own the menu while active; repro-first is composed into
     # this authority so its product-edit predicate cannot diverge from projection.
-    # r44b: a LiveContinuation does NOT switch the lock's authority off.  Its
+    # earlier run: a LiveContinuation does NOT switch the lock's authority off.  Its
     # intention-level gate (LiveContinuation.authorize) is a separate dispatch layer
     # that never adds a tool; declining here left every frame arm on two divergent
-    # legacy rule chains (menu offered read, green_lock refused it: 362-ldev_01).
+    # legacy rule chains (menu offered read, green_lock refused it: 362-reviewer).
     return getattr(runtime, "bounded_locate", None) is None
 
 
@@ -226,7 +226,7 @@ def _readiness_on(runtime: object) -> bool:
 def _repair_on(lock: object) -> bool:
     """Repair gate active: the lock's repair switch OR the readiness authority.
 
-    r43 review3: the readiness authority rewrites the menu around its blockers
+    earlier run review3: the readiness authority rewrites the menu around its blockers
     (repair tools in, done out).  That permission lives HERE, in the one
     decision, instead of in a second competing final menu authority.
     """
@@ -244,7 +244,7 @@ def _repair_evidence(lock: object) -> tuple[Mapping[str, object], ...]:
 
 
 def canonical_action(action: object) -> str:
-    """THE action identity shared by decide(), the menu and every guard (r43 review4).
+    """THE action identity shared by decide(), the menu and every guard (earlier run review4).
 
     The real write guard (``guard_product_mutation`` -> ``before_mutation(path)``)
     cannot see which edit alias the provider called (str_replace, file_create, ...);
@@ -335,7 +335,7 @@ def _continuation_projection_event(runtime: object, allowed: object) -> None:
 def _owner_terminal_submission_reserved(runtime: object, snapshot: object) -> bool:
     """True when the completion owner has reserved an honest uncertified submission.
 
-    Measured (batch 800 sample task, seq 591/869/922): public tests PASS, but open
+    Measured (prior run sample task, event sequence/869/922): public tests PASS, but open
     obligations with ``MISSING_CHECKS`` keep readiness ``host_blocking`` so its
     ``done`` disposition is ``deny``. The completion owner then offers its
     terminal choice ("call done now... uncertified; open: [...]. No other action
@@ -352,7 +352,7 @@ def _owner_terminal_submission_reserved(runtime: object, snapshot: object) -> bo
         return False
     if _norm(getattr(runtime, "stateframe_completion_owner_mode", "on") or "on") == "off":
         return False
-    # Measured (batch 914 sample task, seq 1037/1079..3209): the owner's no-progress
+    # Measured (prior run sample task, event sequence/1079..3209): the owner's no-progress
     # edit cap selected the one-shot uncertified terminal
     # (``_begin_uncertified_submit``; system_outcome UNCERTIFIED_SUBMIT) without
     # ever setting terminal_choice_offered/final_submit_reserved, and the tool
@@ -371,8 +371,8 @@ def _owner_terminal_submission_reserved(runtime: object, snapshot: object) -> bo
 def _readiness_done_deny_is_stale_or_host_debt(runtime: object, snapshot: object) -> bool:
     """True when public tests are green on the CURRENT binding and the snapshot's done=deny carries no evidence
     against the candidate: either the snapshot is pre-green, or its only reason is host debt (host_blocking =
-    clause obligations UNKNOWN/MISSING_CHECKS) with NO counterexample blockers. Measured: b1427 seq 1933 and
-    b1428 seq 1866 are green=True, blockers=[], host_blocking=[obl-* UNKNOWN MISSING_CHECKS]. Counterexample
+    clause obligations UNKNOWN/MISSING_CHECKS) with NO counterexample blockers. Measured: earlier run event sequence and
+    earlier run event sequence are green=True, blockers=[], host_blocking=[obl-* UNKNOWN MISSING_CHECKS]. Counterexample
     blockers keep refusing. Current green uses the owner's strict check (SATISFIED verdict on the current
     binding, every trusted receipt stable, exit 0, bound to it)."""
     if tuple(getattr(snapshot, "blockers", ()) or ()):
@@ -407,9 +407,9 @@ def _lock_label_stale_readiness(runtime: object, snapshot: object) -> None:
 
 
 def _intersect_readiness(lock: object, decision: Decision) -> Decision:
-    """r44 P1-4: under continuation composition, honour the readiness disposition.
+    """earlier run P1-4: under continuation composition, honour the readiness disposition.
 
-    While the lock is not engaged, r43 left done/repair-tool shape to the upstream
+    While the lock is not engaged, earlier run left done/repair-tool shape to the upstream
     menu policies.  The continuation's no-root projection can empty that upstream
     shape, and the recovery path then re-offered ``done`` although the readiness
     authority's journaled disposition denies it before green (a replayed
@@ -421,7 +421,7 @@ def _intersect_readiness(lock: object, decision: Decision) -> Decision:
         return decision
     if decision.rule.startswith("postgreen_no_veto"):
         return decision
-    # b1386/b1381: a disengaged green lock let the readiness disposition deny
+    # earlier runs: a disengaged green lock let the readiness disposition deny
     # edit/str_replace/run_tests on every green menu while the model still had product work (correct
     # candidates timed out). The capability floor survives that deny; readiness still governs done.
     if decision.rule == "capability_floor" and _norm(decision.action) != "done":
@@ -438,7 +438,7 @@ def _intersect_readiness(lock: object, decision: Decision) -> Decision:
     try:
         getter = getattr(continuation.engine, "active_intention_id", None)
         active = getter() if callable(getter) else continuation.engine.state.active_id
-    except Exception:  # noqa: BLE001 - a broken executive keeps the r43 decision
+    except Exception:  # noqa: BLE001 - a broken executive keeps the earlier run decision
         return decision
     if active is None:
         return decision
@@ -460,7 +460,7 @@ def _intersect_readiness(lock: object, decision: Decision) -> Decision:
         _lock_label_stale_readiness(runtime, snapshot)
         return decision
     if isinstance(dispositions, Mapping) and _norm(dispositions.get(decision.action, "")) == "deny":
-        # b1393 (r2ES live, BUILDFIX2 10-18): readiness_disposition stripped edit/str_replace/run_tests on all
+        # earlier run (earlier run live, BUILDFIX2 10-18): readiness_disposition stripped edit/str_replace/run_tests on all
         # 34 post-green menus while the model still had product work. Under hard-budget-only terminals,
         # readiness steers done only; it never removes a product capability. Each override is recorded and
         # journaled as capability_floor_kept by the menu event (never journaled inside decide: see above).
@@ -814,7 +814,7 @@ REPAIR_PATH_TOOLS = ("read", "probe")
 
 
 def constrain_repair_paths(offered: Sequence[dict], decisions: Mapping[str, Decision]) -> list[dict]:
-    """r45 one owner (r44c waiver W2): under the repair lock an offered read/probe carries ``path.enum`` = the repair
+    """earlier run one owner (earlier run waiver W2): under the repair lock an offered read/probe carries ``path.enum`` = the repair
     targets -- the same evidence ``_linked`` checks at dispatch -- so the menu shows the lock's restriction and an
     off-target path is an argument-contract rejection, never a policy refusal of an offered tool.  Tools with any
     other rule, without a ``path`` property, or without target paths are returned unchanged (same object)."""

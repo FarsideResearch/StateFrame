@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pytest
 
+from _timeouts import scaled
 import kernel_hook_exec
 import kernel_hooks
 from kernel_effects import ContentStore, WorkspaceEffectPolicy, manifest_digest, scan
@@ -1172,7 +1173,7 @@ def test_sandbox_network_placement(tmp_path):
     listener = socket.socket()
     listener.bind(("127.0.0.1", 0))
     listener.listen(2)
-    listener.settimeout(10)
+    listener.settimeout(scaled(10))
     port = listener.getsockname()[1]
     accepted = []
 
@@ -1191,7 +1192,7 @@ def test_sandbox_network_placement(tmp_path):
     try:
         runner, _ = setup_runner(tmp_path)
         config = tmp_path / "hooks.json"
-        code = f"import socket;socket.create_connection(('127.0.0.1',{port}),timeout=2).close()"
+        code = f"import socket;socket.create_connection(('127.0.0.1',{port}),timeout={scaled(2):g}).close()"
         hooks = [
             {
                 "name": network,
@@ -1218,7 +1219,7 @@ def test_sandbox_network_placement(tmp_path):
         runner.close()
     finally:
         listener.close()
-        thread.join(timeout=2)
+        thread.join(timeout=scaled(2))
 
 
 def test_first_gate_deny_short_circuits_later_hooks(tmp_path, monkeypatch):

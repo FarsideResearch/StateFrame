@@ -295,7 +295,7 @@ def rank_suspects_live(root: str, subtree: str, candidates: Sequence[Candidate],
                         **kwargs) -> List[RankedSuspect]:
     """Convenience wrapper doing the real git walk. Kept separate from
     ``rank_suspects`` so every scoring path is testable with injected commit
-    lists (no live git in the unit-test suite — rule #190/#218 discipline:
+    lists (no live git in the unit-test suite — rules discipline:
     tests certify the math, not a slow/CPU-contended git walk)."""
     commits = walk_commits_from(root, anchor, subtree, window)
     baseline = walk_commits_from(root, anchor, subtree, baseline_window)

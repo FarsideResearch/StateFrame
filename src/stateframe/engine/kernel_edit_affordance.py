@@ -62,7 +62,7 @@ def _whole_file_eligibility(
             and 0 <= item['bytes'] <= 16384 for item in files.values()),
     }
 
-# Single-authority wire contract (r38).  capability_release_runner's preflight asserts these exact
+# Single-authority wire contract (earlier run).  capability_release_runner's preflight asserts these exact
 # strings; keep ONE definition so the runner and the renderer cannot drift (cdd3c5 crashed every run
 # at step 0 on 09-25 because the runner still asserted the removed legacy instruction).
 AUTHORITY_EDIT_DESCRIPTION = (

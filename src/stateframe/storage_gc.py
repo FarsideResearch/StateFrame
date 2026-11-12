@@ -271,10 +271,17 @@ def build_env_manifest(run_dir: str | os.PathLike[str]) -> dict[str, object]:
     }
 
 
-def _write_json_atomic(path: Path, value: object) -> None:
+def _write_json_atomic(path: Path, value: object, *, mode: int | None = None) -> None:
+    if mode is None:
+        try:
+            mode = stat.S_IMODE(path.stat().st_mode)
+        except FileNotFoundError:
+            pass
     temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
     try:
         with temporary.open("x", encoding="utf-8") as stream:
+            if mode is not None:
+                os.fchmod(stream.fileno(), mode)
             json.dump(value, stream, indent=1, sort_keys=True)
             stream.write("\n")
             stream.flush()

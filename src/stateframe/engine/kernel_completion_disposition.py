@@ -99,7 +99,7 @@ class V2Disposition:
             # A missing, stale, or inconclusive fact is not an admissible violation.
             return V2DoneDecision("accept", accepted=True, detail=detail)
         if self.refusal_count == 0 and not recoverable:
-            # r44 review F2: with no repair tool on the offered menu a refusal would refuse
+            # earlier run review F2: with no repair tool on the offered menu a refusal would refuse
             # every offered tool; terminalize truthfully (not submitted) instead.
             self.refusal_blocker = blocker
             self.terminal = "INCOMPLETE"

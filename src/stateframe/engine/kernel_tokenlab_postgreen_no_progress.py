@@ -1,4 +1,4 @@
-"""Single-owner post-green no-progress stop for token-lab v19."""
+"""Single-owner post-green no-progress stop for feature implementation."""
 from __future__ import annotations
 
 import os

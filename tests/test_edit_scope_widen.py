@@ -19,6 +19,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from _timeouts import scaled
 from probes import react_repair as rr
 from probes.react_repair import (EDIT_SCOPE_WIDEN_CAP, EDIT_SCOPE_WIDENED_KEY, FileSet,
                                  _edit_scope_widen_refusal, _widen_edit_scope)
@@ -490,7 +491,7 @@ def test_acceptance_widened_run_resumes_by_replay(tmp_path):
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
             env={**environment(), "STATEFRAME_CHECKPOINT": "save", "STATEFRAME_CHECKPOINT_EVERY": "1"},
             start_new_session=True)
-        deadline = time.monotonic() + 600
+        deadline = time.monotonic() + scaled(600)
         while time.monotonic() < deadline and not marker.exists():
             if runner.poll() is not None:
                 raise AssertionError("run ended before interruption: " + str(runner.communicate()))
@@ -514,23 +515,23 @@ def test_acceptance_widened_run_resumes_by_replay(tmp_path):
         signal_run_verified(run_dir, child, record_identity(
             child, launched_after=launched_after, command_fragment="_child.py"),
             signal.SIGKILL, deadline=deadline, what="widened edit replay")
-        runner.communicate(timeout=30)
+        runner.communicate(timeout=scaled(30))
     finally:
         if runner is not None and runner.poll() is None:
             # Failure cleanup may run before a checkpoint exists.
             signal_run_owned(run_dir, runner, signal.SIGKILL, deadline=time.monotonic(),
                              what="widened run cleanup", require_checkpoint_saved=False)
-            runner.wait(timeout=5)
+            runner.wait(timeout=scaled(5))
         if endpoint.poll() is None:
             endpoint.kill()
-            endpoint.wait(timeout=5)
+            endpoint.wait(timeout=scaled(5))
     spec = json.loads((run_dir / "spec.json").read_text())
     assert spec["environment"]["STATEFRAME_EDIT_SCOPE_WIDEN"] == "on"
     with Endpoint(_remaining_script(tmp_path)) as remaining:
         resumed = subprocess.run(
             [PYTHON, "-m", "stateframe", "resume", str(run_dir), "--endpoint", remaining.url,
              "--model", "scripted", "--quiet"], capture_output=True, text=True,
-            env=environment(), timeout=300, check=False)
+            env=environment(), timeout=scaled(300), check=False)
     output = resumed.stdout + resumed.stderr
     assert resumed.returncode == 0, output
     assert "checkpoint: engine state restored" not in output

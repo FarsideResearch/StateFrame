@@ -5,6 +5,8 @@ from pathlib import Path
 import subprocess
 import sys
 
+from _timeouts import scaled
+
 ENGINE = Path(__file__).resolve().parents[1] / "src" / "stateframe" / "engine"
 SRC = ENGINE.parent.parent
 HOST_IMPORTED = {"kernel_hooks.py", "kernel_hook_exec.py"}
@@ -109,6 +111,6 @@ def test_hook_host_imports_with_only_src_on_pythonpath(tmp_path):
         env={**os.environ, "PYTHONPATH": str(SRC)},
         capture_output=True,
         text=True,
-        timeout=30,
+        timeout=scaled(30),
     )
     assert result.returncode == 0, result.stdout + result.stderr

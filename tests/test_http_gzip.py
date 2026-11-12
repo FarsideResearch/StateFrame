@@ -12,6 +12,8 @@ from pathlib import Path
 
 import pytest
 
+from _timeouts import scaled
+
 from stateframe.engine import kernel_bounded_http
 from stateframe.engine.kernel_plain_host import _PlainHTTPProvider, encode_request_body
 from stateframe import _child
@@ -69,7 +71,7 @@ def transport_server():
     finally:
         server.shutdown()
         server.server_close()
-        thread.join(timeout=5)
+        thread.join(timeout=scaled(5))
 
 
 @pytest.mark.host_sandbox
@@ -78,7 +80,7 @@ def test_default_large_request_to_server_refusing_gzip(monkeypatch, transport_se
     monkeypatch.delenv("STATEFRAME_HTTP_GZIP", raising=False)
     endpoint, seen, _ = transport_server
     reply = kernel_bounded_http.request_bytes(
-        WIRE, endpoint, "", deadline=time.monotonic() + 10, socket_timeout=5)
+        WIRE, endpoint, "", deadline=time.monotonic() + scaled(10), socket_timeout=scaled(5))
     assert reply == b'{"ok":true}'
     assert seen == [(None, WIRE, hashlib.sha256(WIRE).hexdigest())]
 
@@ -88,7 +90,7 @@ def test_gzip_415_resends_same_identity_once(monkeypatch, transport_server):
     monkeypatch.setenv("STATEFRAME_HTTP_GZIP", "on")
     endpoint, seen, _ = transport_server
     reply = kernel_bounded_http.request_bytes(
-        WIRE, endpoint, "", deadline=time.monotonic() + 10, socket_timeout=5)
+        WIRE, endpoint, "", deadline=time.monotonic() + scaled(10), socket_timeout=scaled(5))
     assert reply == b'{"ok":true}'
     assert [entry[0] for entry in seen] == ["gzip", None]
     assert gzip.decompress(seen[0][1]) == seen[1][1] == WIRE
@@ -146,7 +148,7 @@ def test_gzip_415_identity_queue_wait_uses_resend_first_byte(monkeypatch):
     finally:
         server.shutdown()
         server.server_close()
-        thread.join(timeout=5)
+        thread.join(timeout=scaled(5))
 
 
 @pytest.mark.host_sandbox
@@ -173,7 +175,7 @@ def test_identity_415_is_not_resent(monkeypatch, transport_server):
     settings["reject_identity"] = True
     with pytest.raises(kernel_bounded_http.BoundedTransportError) as failure:
         kernel_bounded_http.request_bytes(
-            WIRE, endpoint, "", deadline=time.monotonic() + 10, socket_timeout=5)
+            WIRE, endpoint, "", deadline=time.monotonic() + scaled(10), socket_timeout=scaled(5))
     assert failure.value.http_status == 415
     assert [entry[0] for entry in seen] == [None]
 
@@ -185,7 +187,7 @@ def test_gzip_then_identity_415_stops_after_one_resend(monkeypatch, transport_se
     settings["reject_identity"] = True
     with pytest.raises(kernel_bounded_http.BoundedTransportError) as failure:
         kernel_bounded_http.request_bytes(
-            WIRE, endpoint, "", deadline=time.monotonic() + 10, socket_timeout=5)
+            WIRE, endpoint, "", deadline=time.monotonic() + scaled(10), socket_timeout=scaled(5))
     assert failure.value.http_status == 415
     assert [entry[0] for entry in seen] == ["gzip", None]
     assert gzip.decompress(seen[0][1]) == seen[1][1] == WIRE
@@ -197,7 +199,7 @@ def test_plain_provider_gzip_415_resends_identity(monkeypatch, transport_server)
     endpoint, seen, _ = transport_server
     # The fake server is not llama.cpp, so the provider sends strict OpenAI chat bodies; use one so the body stays above the gzip threshold.
     reply = _PlainHTTPProvider(endpoint, "")(
-        {"messages": [{"role": "user", "content": "x" * 40_000}]}, timeout=5)
+        {"messages": [{"role": "user", "content": "x" * 40_000}]}, timeout=scaled(5))
     assert reply == {"ok": True}
     assert [entry[0] for entry in seen] == ["gzip", None]
     assert gzip.decompress(seen[0][1]) == seen[1][1]
@@ -214,8 +216,8 @@ def test_wire_recorder_captures_both_physical_attempts(monkeypatch, tmp_path, tr
     monkeypatch.setattr(child_http, "request_bytes", child_http.request_bytes)
     _child.install_wire_recorder(tmp_path, endpoint)
     assert child_http.request_bytes(
-        WIRE, endpoint, "", deadline=time.monotonic() + 10,
-        socket_timeout=5) == b'{"ok":true}'
+        WIRE, endpoint, "", deadline=time.monotonic() + scaled(10),
+        socket_timeout=scaled(5)) == b'{"ok":true}'
     record = json.loads((tmp_path / "sends.jsonl").read_text())
     assert [attempt["content_encoding"] for attempt in record["transport_attempts"]] == ["gzip", None]
     assert [attempt["http_status"] for attempt in record["transport_attempts"]] == [415, 200]
@@ -238,7 +240,7 @@ def test_wire_recorder_keeps_refused_resend_evidence_on_failure(monkeypatch, tmp
     _child.install_wire_recorder(tmp_path, endpoint)
     with pytest.raises(child_http.BoundedTransportError) as failure:
         child_http.request_bytes(
-            WIRE, endpoint, "", deadline=time.monotonic() + 10, socket_timeout=5)
+            WIRE, endpoint, "", deadline=time.monotonic() + scaled(10), socket_timeout=scaled(5))
     assert failure.value.http_status == 415
     assert [entry[0] for entry in seen] == ["gzip", None]
     record = json.loads((tmp_path / "sends.jsonl").read_text())
@@ -262,7 +264,7 @@ def test_wire_recorder_keeps_resend_when_server_closes_without_response(
     _child.install_wire_recorder(tmp_path, endpoint)
     with pytest.raises(child_http.BoundedTransportError) as failure:
         child_http.request_bytes(
-            WIRE, endpoint, "", deadline=time.monotonic() + 10, socket_timeout=5)
+            WIRE, endpoint, "", deadline=time.monotonic() + scaled(10), socket_timeout=scaled(5))
 
     assert [entry[0] for entry in seen] == ["gzip", None]
     assert gzip.decompress(seen[0][1]) == seen[1][1] == WIRE
@@ -298,8 +300,8 @@ def test_wire_recorder_normal_record_keeps_022_shape(monkeypatch, tmp_path, tran
     try:
         _child.install_wire_recorder(tmp_path, endpoint)
         assert child_http.request_bytes(
-            WIRE, endpoint, "", deadline=time.monotonic() + 10,
-            socket_timeout=5) == b'{"ok":true}'
+            WIRE, endpoint, "", deadline=time.monotonic() + scaled(10),
+            socket_timeout=scaled(5)) == b'{"ok":true}'
     finally:
         ACTIVE_REQUEST.reset(token)
     line = (tmp_path / "sends.jsonl").read_text()
@@ -369,8 +371,8 @@ def test_wire_recorder_keeps_failed_open_layout_reason(monkeypatch, tmp_path, tr
     try:
         _child.install_wire_recorder(tmp_path, endpoint)
         assert child_http.request_bytes(
-            WIRE, endpoint, "", deadline=time.monotonic() + 10,
-            socket_timeout=5) == b'{"ok":true}'
+            WIRE, endpoint, "", deadline=time.monotonic() + scaled(10),
+            socket_timeout=scaled(5)) == b'{"ok":true}'
     finally:
         ACTIVE_REQUEST.reset(token)
     record = json.loads((tmp_path / "sends.jsonl").read_text())
@@ -384,7 +386,7 @@ def test_gzip_accepting_server_keeps_compressed_send(monkeypatch, transport_serv
     endpoint, seen, accepts_gzip = transport_server
     accepts_gzip["value"] = True
     reply = kernel_bounded_http.request_bytes(
-        WIRE, endpoint, "", deadline=time.monotonic() + 10, socket_timeout=5)
+        WIRE, endpoint, "", deadline=time.monotonic() + scaled(10), socket_timeout=scaled(5))
     assert reply == b'{"ok":true}'
     assert len(seen) == 1
     assert seen[0][0] == "gzip"
@@ -459,7 +461,7 @@ def test_default_profile_cli_run_sends_large_request_without_gzip(tmp_path):
             "--endpoint", f"http://127.0.0.1:{server.server_port}/v1",
             "--model", "scripted", "--run-dir", str(run_dir),
             "--test-python", sys.executable, "--max-turns", "4", "--quiet",
-        ], env=env, capture_output=True, text=True, expected_seconds=240)
+        ], env=env, capture_output=True, text=True, expected_seconds=scaled(240))
         if (result.returncode != 0 and not seen
                 and "sandbox-exec: sandbox_apply: Operation not permitted" in result.stderr):
             pytest.skip("macOS sandbox-exec unavailable in this nested sandbox")
@@ -471,4 +473,4 @@ def test_default_profile_cli_run_sends_large_request_without_gzip(tmp_path):
     finally:
         server.shutdown()
         server.server_close()
-        thread.join(timeout=5)
+        thread.join(timeout=scaled(5))

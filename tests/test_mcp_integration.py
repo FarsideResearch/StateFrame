@@ -11,6 +11,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from _timeouts import scaled, timeout_scale
 from acceptance._support import copy_repo, run_case
 from kernel_mcp_tools import McpError, McpTool, _schema, discover, load_mcp_files, run_driver, result_text, validate_arguments
 from kernel_agent_tools import AgentTools
@@ -36,10 +37,21 @@ def config(tmp_path, mode, *, replay="external", writes="none", argv_tail=(),
     path = tmp_path / "mcp.json"
     path.write_text(json.dumps({"schema": "stateframe-mcp/1", "servers": [{
         "name": "fixture", "trust": "Reviewed local fixture for this test",
-        "argv": [sys.executable, str(FIXTURE), mode, *argv_tail], "network": "none",
+        "argv": [sys.executable, str(FIXTURE), mode, *argv_tail,
+                 f"--sf-test-timeout-scale={timeout_scale()}"], "network": "none",
         "writes": writes, "replay": replay, "processes": processes,
         "timeout_seconds": timeout_seconds}]}))
     return path
+
+
+def test_timeout_scale_reaches_isolated_mcp_fixture(tmp_path, monkeypatch):
+    monkeypatch.delenv("SF_TEST_TIMEOUT_SCALE", raising=False)
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    server = load_mcp_files([config(tmp_path, "scale_probe")], shell_network="none").servers[0]
+    result = run_driver(server, "call", workspace, tmp_path, shell_network="none",
+                        host_authorization=False, tool="echo", arguments={"value": "x"})
+    assert result_text(result["result"]) == str(timeout_scale())
 
 
 def test_discovery_and_budget(tmp_path):
@@ -293,7 +305,7 @@ def test_omission_attack_cannot_enter_actual_request(tmp_path):
 
 def _lock_released(marker):
     assert marker.is_file(), "server descendant did not start"
-    deadline = time.monotonic() + 1
+    deadline = time.monotonic() + scaled(1)
     while time.monotonic() < deadline:
         with marker.open("r+") as handle:
             try:
@@ -345,7 +357,8 @@ def _limited_exchange(tmp_path, mode, *, memory_bytes, nproc=32, arguments=None)
                            extra_read_roots=executable_read_roots(FIXTURE))
     cap = replace(cap, limits=replace(cap.limits, memory_bytes=memory_bytes,
                                       nproc=nproc, wall_seconds=4))
-    request = {"argv": [sys.executable, str(FIXTURE), mode, str(marker)],
+    request = {"argv": [sys.executable, str(FIXTURE), mode, str(marker),
+                        f"--sf-test-timeout-scale={timeout_scale()}"],
                "operation": "call", "timeout_seconds": 4,
                "client_version": __version__, "tool": "echo",
                "arguments": arguments or {"value": "x"}}

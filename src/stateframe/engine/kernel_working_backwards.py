@@ -195,7 +195,7 @@ class GoldValidation:
             environment = "NOT_READY"
         else:
             environment = "UNKNOWN"
-        # Fix (post-review r44, finding 4): `runner` used to accept
+        # Fix (post-review earlier run, finding 4): `runner` used to accept
         # arbitrary text (up to 80 chars) with no category restriction, so
         # a full filesystem path (e.g. a controller-side checkout path)
         # could survive straight into a report/render that otherwise claims
@@ -217,7 +217,7 @@ class GoldValidation:
 
     @property
     def green(self) -> bool:
-        # Fix (post-review r44, finding 2): a nonzero/known-failing
+        # Fix (post-review earlier run, finding 2): a nonzero/known-failing
         # exit_code is authoritative CONTRADICTING evidence -- a receipt
         # claiming status="GREEN" (or a caller-asserted `passed=True`) while
         # exit_code=1 is a conflict, not admissible green evidence. The old
@@ -257,7 +257,7 @@ class GoldValidation:
         if isinstance(value, cls):
             return value
         if isinstance(value, bool):
-            # Fix (post-review r44, finding 2): a bare boolean is an
+            # Fix (post-review earlier run, finding 2): a bare boolean is an
             # underspecified receipt -- it asserts pass/fail with NO
             # environment or execution evidence at all, yet used to
             # synthesize worker_env="READY" outright. Reject it; admission
@@ -295,7 +295,7 @@ class GoldValidation:
         if isinstance(environment_ready, bool):
             worker_env = "READY" if environment_ready else "NOT_READY"
         if worker_env is None:
-            # Fix (post-review r44, finding 2): environment readiness must
+            # Fix (post-review earlier run, finding 2): environment readiness must
             # be its own EXPLICIT evidence (worker_env_ready/environment_ready
             # or a worker_env/environment field) -- it must never be inferred
             # from the status text alone. `{'status': 'GREEN'}` with no
@@ -357,7 +357,7 @@ def run_gold_in_worker(spec: object) -> GoldValidation:
         return GoldValidation("UNKNOWN", worker_env="NOT_READY")
     if not workspace.is_dir() or not executable.is_file():
         return GoldValidation("UNKNOWN", worker_env="NOT_READY", runner=runner)
-    # Fix (post-review r44, finding 1): `executable` (the declared worker
+    # Fix (post-review earlier run, finding 1): `executable` (the declared worker
     # interpreter) was checked for existence and then never used -- the
     # unrelated `command` executed with the CONTROLLER's inherited
     # environment/PATH, so a controller Python/public-test invocation could
@@ -480,7 +480,7 @@ _PUBLIC_TASK_FIELDS = frozenset({
 def _public_task_projection(task: Mapping[str, object]) -> dict[str, object]:
     """The ONLY task view the analysis callback and packet builder may see.
 
-    Fix (post-review r44, finding 3): the caller-supplied ``analysis``
+    Fix (post-review earlier run, finding 3): the caller-supplied ``analysis``
     callback previously received the WHOLE raw task -- including any
     private fields it happens to carry (fixed_src, hidden_test_src,
     oracle_symptom, ...) -- and its returned prose was trusted as public,
@@ -564,7 +564,7 @@ class WorkingBackwardsPacket:
             raise WorkingBackwardsError("packet requires green gold validation")
         object.__setattr__(self, "task_id", _safe_identifier(self.task_id, "task id"))
         object.__setattr__(self, "brief", _safe_text(self.brief, "public brief"))
-        # Fix (post-review r44, finding 4): __post_init__ previously
+        # Fix (post-review earlier run, finding 4): __post_init__ previously
         # validated only task_id/brief. Every other text-bearing field
         # (public_tests, the seven what-would-it-take sections,
         # gap_classes, probe_input_fields) was trusted as-is -- a packet
@@ -665,7 +665,7 @@ class WorkingBackwardsPacket:
     def render(self, *, max_chars: int = MAX_RENDER_CHARS) -> str:
         if not isinstance(max_chars, int) or isinstance(max_chars, bool) or max_chars < 256:
             raise WorkingBackwardsError("packet render bound must be at least 256 characters")
-        # Fix (post-review r44, finding 4): render() used to build its text
+        # Fix (post-review earlier run, finding 4): render() used to build its text
         # straight from self.* without the same boundary check to_dict()
         # applies -- run the identical fail-closed scan here too, so no
         # rendering path can ever disagree with to_dict() about what is
@@ -729,7 +729,7 @@ def build_packet(
     checked = GoldValidation.from_value(validation)
     if not checked.green:
         raise WorkingBackwardsError("gold validation is not green")
-    # Fix (post-review r44, finding 3): project to the public-only field
+    # Fix (post-review earlier run, finding 3): project to the public-only field
     # allowlist HERE, at the actual packet-construction boundary -- this is
     # the documented public entry point and may be called directly (not
     # only through run_protocol), so the guarantee belongs here, not only

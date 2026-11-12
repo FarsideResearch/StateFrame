@@ -1,4 +1,4 @@
-"""C4c integration of the measured r2IC cache renderer, before the sole seal.
+"""C4c integration of the measured earlier run cache renderer, before the sole seal.
 
 Separate from the pre-existing permutation-only kernel_cache_layout APIs.
 """

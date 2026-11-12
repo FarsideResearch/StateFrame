@@ -165,8 +165,8 @@ def _arguments(command: Sequence[object]) -> list[str]:
 
 
 # The HOST (never the model) may declare task-environment keys a project's tests need,
-# e.g. a stage6 AHA worker sets STATEFRAME_TASK_ENV_KEYS=DATABASE_URL,TEST_DATABASE_URL,...
-# 10-03: without this every AHA check died at settings import (pytest exit 4).
+# e.g. a stage6 sample project worker sets STATEFRAME_TASK_ENV_KEYS=DATABASE_URL,TEST_DATABASE_URL,...
+# 10-03: without this every sample project check died at settings import (pytest exit 4).
 TASK_ENV_KEYS_VAR = "STATEFRAME_TASK_ENV_KEYS"
 _TASK_ENV_KEY_RE = re.compile(r"^[A-Z][A-Z0-9_]{0,63}$")
 
@@ -196,7 +196,7 @@ def _safe_environment(env: Mapping[object, object] | None) -> dict[str, str]:
     # Declared task keys come from the host process env and are AUTHORITATIVE: they
     # override caller-supplied values. 10-03: run_tests pre-fills DATABASE_URL with a
     # localhost default via setdefault, which silently beat the container's real value
-    # and every AHA check still died at import (exit 4). The model cannot set host env.
+    # and every sample project check still died at import (exit 4). The model cannot set host env.
     result.update(_HOST_TASK_ENV_VALUES)
     return result
 

@@ -40,7 +40,7 @@ def cache_enabled(name: str) -> bool:
         cache_switch = _PER_CACHE_SWITCHES.get(
             normalized, f"STATEFRAME_HOST_CACHE_{normalized}")
         return (_switch("STATEFRAME_HOST_CACHE", "off")
-                and _switch(cache_switch, "on"))  # global default OFF (BUILD r2EY cut rule); per-cache switches only narrow
+                and _switch(cache_switch, "on"))  # global default OFF (BUILD earlier run cut rule); per-cache switches only narrow
     except Exception:
         return False
 

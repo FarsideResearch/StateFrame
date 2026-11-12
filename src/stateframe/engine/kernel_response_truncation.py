@@ -1,6 +1,6 @@
 """STATEFRAME_RESPONSE_TRUNCATION: a length-truncated completion is never parsed into a proposal (rule 11d).
 
-Every arm, same policy (r45; crawl_l_one-924103-r44d-f4 spent 24,000 completion tokens on one truncated response that
+Every arm, same policy (earlier run; crawl_l_one-924103-earlier run-f4 spent 24,000 completion tokens on one truncated response that
 became an ``invalid_proposal``).  When a response stops on ``finish_reason == "length"`` AT the output ceiling (no
 larger budget exists -- budgets are never lowered or capped here):
   1. journal ``response_truncated`` (result_class RESPONSE_TRUNCATED) with the request id and attempt;

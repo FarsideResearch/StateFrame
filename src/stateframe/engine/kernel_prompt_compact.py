@@ -260,7 +260,7 @@ def _compact_hypotheses(lines: list[str]) -> list[str]:
             out.append(line)
             continue
         if line.startswith("current_revision: "):
-            # r46 journals: this revision (the hypothesis projector's product_revision) never
+            # earlier run journals: this revision (the hypothesis projector's product_revision) never
             # equalled the StateFrame rev (83/83 requests) -- different artifacts, so they are
             # NOT unified; the line is relabelled by domain so the request carries exactly one
             # value called "current" (the StateFrame rev).
@@ -423,7 +423,7 @@ _PASSIVE_WITHHELD = re.compile(
     r"^\[reference only: recorded against an earlier binding; body withheld, id=([^\]]*)\]$")
 PASSIVE_WITHHELD_NOTE = "basis=changed rows were recorded against an earlier binding; their bodies are withheld."
 # STATEFRAME_TOKENLAB_PASSIVE_WITHHELD_DROP: withheld rows are dropped instead of rendered as
-# reference rows (measured: every passive row in 702 ldev_12 v5 was withheld).  Strict off|on, default off.
+# reference rows (measured: every passive row in 702 reviewer v5 was withheld).  Strict off|on, default off.
 PASSIVE_WITHHELD_DROP_ENV = "STATEFRAME_TOKENLAB_PASSIVE_WITHHELD_DROP"
 PASSIVE_WITHHELD_DROP_EVENT = "passive_withheld_dropped"
 PASSIVE_DROPPED_NOTE = "earlier conclusions recorded against a previous binding were withheld (not shown)."

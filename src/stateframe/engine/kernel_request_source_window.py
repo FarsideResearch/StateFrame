@@ -5242,7 +5242,7 @@ __all__ = [
 ]
 
 
-# Flag OFF (STATEFRAME_TRUTHFUL_READ_PANELS default): the r2FO functions verbatim.
+# Flag OFF (STATEFRAME_TRUTHFUL_READ_PANELS default): the earlier run functions verbatim.
 def _normalized_deferred_paths_r2fo(paths: Sequence[object]) -> tuple[str, ...]:
     return tuple(dict.fromkeys(
         str(path).replace("\\", "/").strip()

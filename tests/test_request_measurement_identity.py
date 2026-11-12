@@ -15,6 +15,7 @@ import kernel_checkpoint
 import kernel_request_auth_identity
 import kernel_request_diet
 import pytest
+from _timeouts import scaled
 from fixtures.process_signals import signal_multiprocessing_owned
 from kernel_frame_allocation_capture import final_request_tokens
 from kernel_request_diet import RequestTokenMeter
@@ -229,7 +230,7 @@ def _spawn_auth_binding_worker(state_home: str, barrier, results) -> None:
     os.setpgrp()
     if os.environ.get("STATEFRAME_HOME") != state_home:
         raise RuntimeError("spawned worker did not inherit the isolated StateFrame home")
-    barrier.wait(timeout=30)
+    barrier.wait(timeout=scaled(30))
     binding = kernel_request_auth_identity.auth_binding_for_key("concurrent-first-use")
     meter = RequestTokenMeter(disabled=True)
     meter.bind_tokenizer_auth("concurrent-first-use", GENERATION_ENDPOINT)
@@ -250,9 +251,9 @@ def test_concurrent_first_use_publishes_one_private_key(tmp_path, monkeypatch):
     try:
         for process in processes:
             process.start()
-        bindings = [results.get(timeout=30) for _ in processes]
+        bindings = [results.get(timeout=scaled(30)) for _ in processes]
         for process in processes:
-            process.join(timeout=30)
+            process.join(timeout=scaled(30))
 
         assert all(process.exitcode == 0 for process in processes)
         assert bindings[0][0] == bindings[1][0]
@@ -271,7 +272,7 @@ def test_concurrent_first_use_publishes_one_private_key(tmp_path, monkeypatch):
                 except ProcessLookupError:
                     if process.is_alive():
                         raise
-            process.join(timeout=5)
+            process.join(timeout=scaled(5))
         results.close()
         results.join_thread()
 

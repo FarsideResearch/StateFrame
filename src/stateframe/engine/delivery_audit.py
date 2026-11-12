@@ -225,7 +225,7 @@ def _revision_equal(left: object, right: object) -> bool:
     if a == b:
         return True
     # Prefix matching is valid only for an explicitly ellipsized digest.  An
-    # opaque revision such as ``r1`` must not equal ``r10`` by accident.
+    # opaque revision such as ``r1`` must not equal ``earlier run`` by accident.
     return ((a_truncated and b.startswith(a))
             or (b_truncated and a.startswith(b)))
 

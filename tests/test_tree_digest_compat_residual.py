@@ -3,7 +3,7 @@
 `_revision12`, `dependency_revision` and the coordinated-change tree revision keep the 0.3.18
 bytes (path + NUL + content, no terminator) for regular files so that request bytes stay
 identical. Two different path lists can therefore still collide when one file's content ends
-with the start of the next path. Susan's option (a) keeps this residual for now; option (b),
+with the start of the next path. Option (a) keeps this residual for now; option (b),
 the fully typed encoding, changes request bytes. Whoever lands (b) must flip these assertions
 to `!=` on purpose and update KNOWN_LIMITATIONS.md.
 """

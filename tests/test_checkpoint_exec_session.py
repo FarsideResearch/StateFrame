@@ -7,6 +7,7 @@ import os
 import sys
 
 import pytest
+from _timeouts import scaled
 
 import kernel_checkpoint
 import kernel_run_vitals
@@ -81,7 +82,7 @@ def test_finished_job_handle_restores_detached(tmp_path):
     session = ExecSession(run)
     try:
         handle = session.spawn([PYTHON, "-I", "-c", "print('job')"], replace(cap, workspace_writable=False))
-        assert handle.wait(30) == 0
+        assert handle.wait(scaled(30)) == 0
         data = kernel_checkpoint.dumps({"jobs": [handle], "session": session}, _ctx())
     finally:
         session.close()

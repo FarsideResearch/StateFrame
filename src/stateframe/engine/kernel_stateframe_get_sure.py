@@ -125,7 +125,7 @@ def parse_ticket(ticket: object) -> tuple[dict[str, object], ...]:
     text = _ticket_text(ticket)
     if os.environ.get("STATEFRAME_POST_GREEN_WORK_MENU", "off").strip().lower() == "on":
         # Rule 4: one clause per logical sentence/list item, never per soft-wrapped line
-        # (r42 ldev_10: "[C5] ... A valid service" / "[C6] result includes approved=False.").
+        # (earlier run reviewer: "[C5] ... A valid service" / "[C6] result includes approved=False.").
         from kernel_post_green_menu import wrap_invariant_clauses
         lines = [_strip_clause_prefix(item) for item in wrap_invariant_clauses(text)
                  if _strip_clause_prefix(item)]
@@ -997,7 +997,7 @@ def scrub_request(messages: Sequence[dict], tools: object) -> tuple[list[dict], 
     if not enabled():
         return list(messages), tools
     clean_messages = sanitize_model_payload(list(messages))
-    clean_tools = tools  # r39: tool schemas are a wire contract; never rewritten
+    clean_tools = tools  # earlier run: tool schemas are a wire contract; never rewritten
     return list(clean_messages) if isinstance(clean_messages, list) else list(messages), clean_tools
 
 

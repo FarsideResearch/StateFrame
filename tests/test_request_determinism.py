@@ -8,6 +8,7 @@ import json
 import re
 import secrets
 import shutil
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -1972,12 +1973,15 @@ def test_bundled_example_guard_rejects_sequence_based_receipt_derivation(tmp_pat
     # receipt IDs also hash the global journal sequence (the old derivation).
     # The same plain-vs-observer comparison must then fail, or the guard above
     # cannot see the bug class it exists for.
-    planted = _planted_sequence_receipt_package(tmp_path / "planted-pkg")
-    seq_plain, seq_plain_requests, _ = _run_scripted_example(
-        monkeypatch, example, task, tmp_path / "pln-a", package_root=planted)
-    seq_observer, _, seq_observer_events = _run_scripted_example(
-        monkeypatch, example, task, tmp_path / "pln-o", observer=True,
-        package_root=planted)
+    # The isolated startup probe mounts a private /dev; a planted engine below
+    # a /dev/shm-backed pytest basetemp cannot start its supervisor there.
+    with tempfile.TemporaryDirectory(prefix="stateframe-planted-", dir="/tmp") as directory:
+        planted = _planted_sequence_receipt_package(Path(directory))
+        seq_plain, seq_plain_requests, _ = _run_scripted_example(
+            monkeypatch, example, task, tmp_path / "pln-a", package_root=planted)
+        seq_observer, _, seq_observer_events = _run_scripted_example(
+            monkeypatch, example, task, tmp_path / "pln-o", observer=True,
+            package_root=planted)
     assert seq_observer_events > 0, "the planted observer injection did not run"
     assert _has_applied_edit_in_frame(seq_plain_requests), "planted run made no edit to receipt"
     with pytest.raises(AssertionError, match="request hashes differ"):

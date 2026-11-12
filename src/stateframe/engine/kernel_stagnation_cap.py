@@ -276,7 +276,7 @@ def _trace_metadata(trace: Mapping[str, object]) -> tuple[str, str]:
 
 
 def score_trace(trace: Mapping[str, object], *, window: int = DEFAULT_WINDOW) -> dict:
-    """Score one eligible post-r44 trace without treating model prose as evidence."""
+    """Score one eligible post-earlier run trace without treating model prose as evidence."""
     if not isinstance(trace, Mapping):
         raise TypeError("stagnation traces must be mappings")
     window = _validate_window(window)

@@ -11,6 +11,7 @@ from types import SimpleNamespace
 
 import pytest
 from jsonschema import Draft202012Validator, ValidationError
+from _timeouts import scaled
 
 ROOT = Path(__file__).resolve().parents[1]
 ENGINE = ROOT / "src" / "stateframe" / "engine"
@@ -312,8 +313,8 @@ def test_explicit_one_attempt_limit_blocks_capacity_retry(monkeypatch, tmp_path:
     with pytest.raises(kernel_measurement.HarnessTransportError):
         capture._send_transport_with_retries(
             body, wire, "http://127.0.0.1:1/v1/chat/completions", "",
-            admission=None, socket_timeout=2, deadline=time.monotonic() + 10,
-            wall_timeout=2, backend_identity={}, request_extensions={},
+            admission=None, socket_timeout=scaled(2), deadline=time.monotonic() + scaled(10),
+            wall_timeout=scaled(2), backend_identity={}, request_extensions={},
             transport_attempt_limit=1)
     assert attempts == [1]
     assert capture._capacity_retry_count == 0

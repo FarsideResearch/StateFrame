@@ -8,6 +8,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from _timeouts import scaled, timeout_scale
+
 from kernel_custom_tools import CustomToolError
 from kernel_exec_capability import executable_read_roots, shell_capability
 from kernel_mcp_driver import exchange
@@ -48,7 +50,7 @@ def test_monitor_counts_private_namespace_and_nested_family_union(monkeypatch):
     assert monitor._sample() == "aggregate resident-memory limit exceeded"
 
 
-def call(tmp_path, mode, *, action="list", timeout=15, extra=()):
+def call(tmp_path, mode, *, action="list", timeout=scaled(15), extra=()):
     workspace = tmp_path / "workspace"
     home = tmp_path / "home"
     cache = tmp_path / "cache"
@@ -57,7 +59,11 @@ def call(tmp_path, mode, *, action="list", timeout=15, extra=()):
     cap = shell_capability(workspace=workspace, run_env_dir=cache, scratch_home=home,
                            network="none", writable=False,
                            extra_read_roots=executable_read_roots(FIXTURE))
-    cap = replace(cap, limits=replace(cap.limits, wall_seconds=timeout))
+    cap = replace(
+        cap,
+        env={**cap.env, "SF_TEST_TIMEOUT_SCALE": str(timeout_scale())},
+        limits=replace(cap.limits, wall_seconds=timeout),
+    )
     request = {"argv": [sys.executable, str(FIXTURE), mode, *extra],
                "operation": action, "timeout_seconds": timeout,
                "client_version": __version__,
@@ -96,14 +102,14 @@ def test_driver_cleans_malformed_peer(tmp_path):
     marker = tmp_path / "home" / "server.lock"
     # The malformed reply arrives as soon as the server starts; the deadline only has to
     # outlast a sandboxed interpreter start on a loaded host, and costs nothing otherwise.
-    response = call(tmp_path, "malformed", timeout=5, extra=(str(marker),))
+    response = call(tmp_path, "malformed", timeout=scaled(5), extra=(str(marker),))
     assert response["ok"] is False
     assert marker.read_text() == "server started\n"
     assert lock_released(marker)
 
 
 def lock_released(marker):
-    deadline = time.monotonic() + 1
+    deadline = time.monotonic() + scaled(1)
     while time.monotonic() < deadline:
         with marker.open("r+") as handle:
             try:

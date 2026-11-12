@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.4.41 (2026-11-11)
+
+- Resumed runs now measure rebuilt requests the same way the original attempt did while the tokenizer endpoint is down. The tokenizer retry schedule counts requests only, so time spent waiting on the model no longer changes which history gets compacted.
+- Tests: keep strict-provider interpreter wrappers and determinism planted engines in managed `/tmp` directories so `/dev/shm` test roots remain usable when isolated probes replace `/dev`.
+- Checkpoint resume now admits deterministic census audit events and journal-replayed provider context limits; capacity preflights, pending retries, failed refits, reroutes and completion-owner, obligation, unified-stop and wire-truth evidence failures remain fail-closed pending reconciliation, as do `intake_orientation_failed` and `repo_map_commit_sha_unavailable`.
+- Checkpoint resume now admits deterministic census audit events and journal-replayed provider context limits; capacity preflights, pending retries, failed refits, reroutes and completion-owner, obligation, unified-stop and wire-truth evidence failures remain fail-closed pending reconciliation.
+- Fixed: run spec, result, summary, settings, and child records now publish atomically with file fsync, replace, and directory fsync. Successful `--in-place` runs durably record applied files in `apply-receipt.json` before publishing the summary.
+- Intake orientation no longer fails silently: when building the intake orientation raises, the engine logs a warning and journals one `intake_orientation_failed` event (exception type, failing step, errno) instead of quietly dropping the block, so intermittent first-request differences can be traced to a cause.
+- The repo map's HEAD lookup now keeps its documented contract: on an I/O, value or git-object failure it returns an empty commit (uncached map) and journals `repo_map_commit_sha_unavailable` with the exception type and errno, instead of escaping into the intake orientation.
+- Release guard suite runs faster: the source-scanning guards share one cached parse of the tree (keyed by path, mtime and size) instead of re-reading every file per test; all assertions, scan roots and planted controls are unchanged (test-only).
+- Engine diagnostics now use the `[stateframe]` prefix; liveness receipt failures identify the census.
+- StateFrame no longer probes a local database port for namespace evidence.
+- Removed internal benchmarking scripts from the package.
+- Run identity now hashes only shipped engine modules; moved lab workloads retain a fail-closed concurrent-run guard.
+- Internal names removed from shipped code: optional decoy tool schemas use neutral names, and DB-backed test runs name their databases `stateframe_test_react_*`. Default requests are unchanged.
+- Removed private project, contributor, host, and measurement labels from shipped prose; added a source/test leak guard.
+- Docs: Clarified hosted endpoint retries, redirect credential safety, test directory targets, text replacement, repository map caching, and tokenizer limits.
+
 ## 0.4.40 (2026-11-10)
 
 - Hosted request metering: the byte-fallback cold estimate now has a raise-only density floor computed from the decoded content (digits, base64/hex runs, dense code, punctuation, non-ASCII), so long numbers, base64, hex and dense JSON or code are no longer underestimated on endpoints without exact tokenization; ordinary prose estimates are unchanged.

@@ -10,6 +10,7 @@ import zlib
 from pathlib import Path
 
 import pytest
+from _timeouts import scaled
 from fixtures.process_signals import signal_run_owned
 
 from stateframe.scripted_endpoint import Script, serve
@@ -58,7 +59,7 @@ def run_script(tmp_path, steps, *, failing=False, flags=(), prepare=None):
     try:
         result = run_monitored(
             command(repo, run, f"http://127.0.0.1:{server.server_port}/v1", flags),
-            env=environment(), capture_output=True, text=True, expected_seconds=240,
+            env=environment(), capture_output=True, text=True, expected_seconds=scaled(240),
             run_dir=run,
         )
         summary_path = run / "summary.json"
@@ -176,7 +177,7 @@ def test_kill_resume_serves_byte_identical_next_request(tmp_path):
         def next_call(self, offered):
             if self.position == 1 and self.pause:
                 self.arrived.set()
-                assert self.release.wait(120), "test did not release paused provider"
+                assert self.release.wait(scaled(120)), "test did not release paused provider"
             return super().next_call(offered)
 
     repo = fixture_repo(tmp_path)
@@ -186,7 +187,7 @@ def test_kill_resume_serves_byte_identical_next_request(tmp_path):
     url = f"http://127.0.0.1:{server.server_port}/v1"
     process = start_monitored(
         command(repo, run, url), env=environment(), stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE, text=True, run_dir=run, expected_seconds=120,
+        stderr=subprocess.PIPE, text=True, run_dir=run, expected_seconds=scaled(120),
         step="interrupted shell run",
     )
     try:
@@ -198,22 +199,22 @@ def test_kill_resume_serves_byte_identical_next_request(tmp_path):
         tape = [json.loads(line) for line in (run / "tool-tape.jsonl").read_text().splitlines()]
         assert [row["kind"] for row in tape] == ["intent", "complete"]
         assert tape[0]["call_id"] == tape[1]["call_id"]
-        signal_run_owned(run, process, signal.SIGTERM, deadline=time.monotonic() + 120,
+        signal_run_owned(run, process, signal.SIGTERM, deadline=time.monotonic() + scaled(120),
                          what="shell completion replay")
-        process.wait(timeout=20)
+        process.wait(timeout=scaled(20))
         original = {name: read_request_record(run, name) for name in list_request_records(run)}
         assert original and (run / "tool-tape.jsonl").exists()
         script.pause = False
         script.release.set()
         # The interrupted response can finish in the provider thread. Reset only
         # the endpoint boundary's cursor; the engine must replay the shell itself.
-        deadline = time.monotonic() + 5
+        deadline = time.monotonic() + scaled(5)
         while script.position == 1 and time.monotonic() < deadline:
             time.sleep(0.01)
         script.position = 1
         result = run_monitored([sys.executable, "-m", "stateframe", "resume", str(run),
                                  "--endpoint", url, "--model", "scripted", "--quiet"],
-                                env=environment(), capture_output=True, text=True, expected_seconds=240)
+                                env=environment(), capture_output=True, text=True, expected_seconds=scaled(240))
         assert result.returncode == 0, result.stdout + result.stderr
         rebuilt = {name: read_request_record(run, name) for name in list_request_records(run)}
         assert original.keys() <= rebuilt.keys()
@@ -226,7 +227,7 @@ def test_kill_resume_serves_byte_identical_next_request(tmp_path):
             # Failure cleanup may precede the first checkpoint.
             signal_run_owned(run, process, signal.SIGTERM, deadline=time.monotonic(),
                              what="shell replay cleanup", require_checkpoint_saved=False)
-            process.wait(timeout=20)
+            process.wait(timeout=scaled(20))
         server.shutdown()
         server.server_close()
 def test_kill_resume_preserves_repeated_read_request_bytes(tmp_path):
@@ -247,7 +248,7 @@ def test_kill_resume_preserves_repeated_read_request_bytes(tmp_path):
         def next_call(self, offered):
             if self.position == 2 and self.pause:
                 self.arrived.set()
-                assert self.release.wait(120), "test did not release paused provider"
+                assert self.release.wait(scaled(120)), "test did not release paused provider"
             return super().next_call(offered)
 
     repo = fixture_repo(tmp_path)
@@ -258,7 +259,7 @@ def test_kill_resume_preserves_repeated_read_request_bytes(tmp_path):
     env = environment()  # Both switches use their default engine values.
     process = start_monitored(
         command(repo, run, url), env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-        text=True, run_dir=run, expected_seconds=120,
+        text=True, run_dir=run, expected_seconds=scaled(120),
         step="interrupted repeated-read run",
     )
     try:
@@ -270,18 +271,18 @@ def test_kill_resume_preserves_repeated_read_request_bytes(tmp_path):
         original = {name: read_request_record(run, name) for name in list_request_records(run)}
         assert len(original) >= 3
         assert any(b"unchanged since request" in body for body in original.values())
-        signal_run_owned(run, process, signal.SIGTERM, deadline=time.monotonic() + 120,
+        signal_run_owned(run, process, signal.SIGTERM, deadline=time.monotonic() + scaled(120),
                          what="repeated read replay")
-        process.wait(timeout=20)
+        process.wait(timeout=scaled(20))
         script.pause = False
         script.release.set()
-        deadline = time.monotonic() + 5
+        deadline = time.monotonic() + scaled(5)
         while script.position == 2 and time.monotonic() < deadline:
             time.sleep(0.01)
         script.position = 2
         result = run_monitored([sys.executable, "-m", "stateframe", "resume", str(run),
                                  "--endpoint", url, "--model", "scripted", "--quiet"],
-                                env=env, capture_output=True, text=True, expected_seconds=240)
+                                env=env, capture_output=True, text=True, expected_seconds=scaled(240))
         assert result.returncode == 0, result.stdout + result.stderr
         rebuilt = {name: read_request_record(run, name) for name in list_request_records(run)}
         assert original.keys() <= rebuilt.keys()
@@ -294,6 +295,6 @@ def test_kill_resume_preserves_repeated_read_request_bytes(tmp_path):
             # Failure cleanup may precede the first checkpoint.
             signal_run_owned(run, process, signal.SIGTERM, deadline=time.monotonic(),
                              what="repeated read cleanup", require_checkpoint_saved=False)
-            process.wait(timeout=20)
+            process.wait(timeout=scaled(20))
         server.shutdown()
         server.server_close()

@@ -13,6 +13,8 @@ from pathlib import Path
 
 import pytest
 
+from _timeouts import scaled
+
 from stateframe.scripted_endpoint import Script, ScriptStepUnavailable, serve
 from fixtures.process_signals import record_identity, signal_run_owned, signal_run_verified
 from engine_run import run_monitored, start_monitored
@@ -77,7 +79,7 @@ def _run(tmp_path: Path, steps: list[dict], hooks: list[dict] | None):
             env=environment,
             capture_output=True,
             text=True,
-            expected_seconds=240,
+            expected_seconds=scaled(240),
         )
         try:
             script.assert_consumed()
@@ -246,7 +248,7 @@ def test_six_event_lifecycle_survives_kill_and_resume(tmp_path):
         def next_call(self, offered):
             if self.position == 2 and not self.interrupted.is_set():
                 self.waiting.set()
-                if not self.release.wait(60):
+                if not self.release.wait(scaled(60)):
                     raise TimeoutError("interrupted request was not released")
                 self.interrupted.set()
                 raise ScriptStepUnavailable("request interrupted before a response")
@@ -307,7 +309,7 @@ def test_six_event_lifecycle_survives_kill_and_resume(tmp_path):
     try:
         process = start_monitored(
             command, env=environment, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            text=True, run_dir=run, expected_seconds=600,
+            text=True, run_dir=run, expected_seconds=scaled(600),
             step="interrupted hook lifecycle run",
         )
         while not script.waiting.wait(0.5):
@@ -329,14 +331,14 @@ def test_six_event_lifecycle_survives_kill_and_resume(tmp_path):
         child = int(child_pids[0])
         identity = record_identity(child, launched_after=0, command_fragment="_child.py")
         signal_run_verified(run, child, identity, signal.SIGKILL,
-                            deadline=time.monotonic() + 120, what="hook lifecycle resume")
+                            deadline=time.monotonic() + scaled(120), what="hook lifecycle resume")
         script.release.set()
-        assert script.interrupted.wait(10)
-        process.communicate(timeout=90)
+        assert script.interrupted.wait(scaled(10))
+        process.communicate(timeout=scaled(90))
         resumed = run_monitored(
             [sys.executable, "-m", "stateframe", "resume", str(run),
              "--endpoint", endpoint], env=environment, capture_output=True,
-            text=True, expected_seconds=240,
+            text=True, expected_seconds=scaled(240),
         )
         assert resumed.returncode == 0, resumed.stdout + resumed.stderr
         script.assert_consumed()
@@ -383,6 +385,6 @@ def test_six_event_lifecycle_survives_kill_and_resume(tmp_path):
             # Failure cleanup may precede the first checkpoint.
             signal_run_owned(run, process, signal.SIGKILL, deadline=time.monotonic(),
                              what="hook lifecycle cleanup", require_checkpoint_saved=False)
-            process.communicate(timeout=10)
+            process.communicate(timeout=scaled(10))
         server.shutdown()
         server.server_close()

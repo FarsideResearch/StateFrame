@@ -1,4 +1,4 @@
-"""Self-contained Mission Control repository intelligence for StateFrame.
+"""Self-contained repository intelligence for StateFrame.
 
 The extraction and graph algorithms are vendored from the coding executor;
 this module is the release-local adapter.  It owns only bounded, read-only
@@ -611,9 +611,10 @@ def _ensure_focus_entry(repo_root: Path, repo_map: str, target_path: str) -> str
 
 
 def intake_orientation(root: Path, *, target_path: str = "", symbol: str = "",
-                       selectors: Sequence[object] = ()) -> str:
+                       selectors: Sequence[object] = (), journal: object | None = None) -> str:
     """Produce map text for the single existing NAVBASICS orientation owner."""
-    commit = get_current_commit_sha(str(root))
+    commit = (get_current_commit_sha(str(root), journal=journal) if journal is not None
+              else get_current_commit_sha(str(root)))
     # Intake sees mutable run workspaces and should stay content-deterministic without a cache scan.
     repo_map, map_stats = build_repo_map_with_stats(str(root), commit_sha=commit, use_cache=False)
     repo_map = _ensure_focus_entry(root, repo_map, target_path)

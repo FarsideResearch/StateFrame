@@ -265,7 +265,7 @@ def _reconcile_existing_fact(
             output_index = len(retained)
             retained.append({**message, "content": fact})
     return retained, {
-        "editready_schema": "stateframe-editready/1",  # never "schema": journal-RESERVED (r2EY ALL-arm step-0 crash)
+        "editready_schema": "stateframe-editready/1",  # never "schema": journal-RESERVED (earlier run ALL-arm step-0 crash)
         "status": (
             "already_present"
             if exact_index is not None and len(existing_indexes) == 1
@@ -297,7 +297,7 @@ def apply_editready_fact(
             if index not in existing_indexes
         ]
         return retained, {
-            "editready_schema": "stateframe-editready/1",  # never "schema": journal-RESERVED (r2EY ALL-arm step-0 crash)
+            "editready_schema": "stateframe-editready/1",  # never "schema": journal-RESERVED (earlier run ALL-arm step-0 crash)
             "status": "no_bound_editable_read_ranges",
             "stale_fact_removed": bool(existing_indexes),
         }
@@ -353,7 +353,7 @@ def apply_editready_fact(
         copied[selected] = {**copied[selected], "content": fact}
         action = "replaced_panel"
     return copied, {
-        "editready_schema": "stateframe-editready/1",  # never "schema": journal-RESERVED (r2EY ALL-arm step-0 crash)
+        "editready_schema": "stateframe-editready/1",  # never "schema": journal-RESERVED (earlier run ALL-arm step-0 crash)
         "status": action,
         "fact_sha256": hashlib.sha256(fact.encode("utf-8")).hexdigest(),
         "path_count": len(ranges),

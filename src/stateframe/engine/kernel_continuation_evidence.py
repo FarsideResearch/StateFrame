@@ -119,7 +119,7 @@ def classify_run_test_exit(exit_code: object) -> str:
 
     A child killed by a signal (negative code or 128+N, e.g. 137 = SIGKILL from the sandbox
     RLIMIT_CPU hard limit) or by a wall timeout (124) is a HOST outcome: it settles the effect as
-    HARNESS_ERROR (settled, not applied) so the run can continue.  10-06 batch 843: an unmapped 137
+    HARNESS_ERROR (settled, not applied) so the run can continue.  10-06 prior run: an unmapped 137
     left the continuation effect "unknown" and every later gate REFUSED_PREDISPATCH.
     """
     if type(exit_code) is int:
@@ -682,7 +682,7 @@ class HostEvidence:
                 elif (effect.tool in {"read", "text", "grep"}
                       # ERROR / OUT_OF_RANGE are typed host outcomes of a failed read/search attempt:
                       # no acquired-source credit, but they must settle or the next frame strands.
-                      # (Restored 09-24: a later lane's rewrite of this block dropped the gate-r35 fix;
+                      # (Restored 09-24: a later lane's rewrite of this block dropped the gate-earlier run fix;
                       # guarded by probes/test_result_class_registry.py.)
                       and result in {"ERROR", "OUT_OF_RANGE"}
                       and record.get("before_binding") == current and not record.get("changes")
@@ -790,7 +790,7 @@ class HostEvidence:
         return status
 
     def _certification_follows_dispatch(self, receipt: Mapping, original: Mapping, event: Mapping) -> bool:
-        """The certifying verdict is bound to the done dispatch it certifies (b1420).
+        """The certifying verdict is bound to the done dispatch it certifies (earlier run).
 
         Same request/turn is the common case. The host may instead finish the certifying run on a
         LATER turn, stamping that turn's request id; it still certifies this dispatch when the

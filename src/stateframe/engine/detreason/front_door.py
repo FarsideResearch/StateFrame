@@ -882,7 +882,7 @@ def evaluate(rows=None, extra_context: dict | None = None) -> dict:
 #                       recorded default. Only what genuinely cannot be resolved
 #                       becomes a question.
 #   3. THE ASSUMPTION LEDGER — every self-answer is recorded, sourced, and
-#                       flagged ``vetoable``. Rule #197: a model-authored field
+#                       flagged ``vetoable``. rule: a model-authored field
 #                       is NON-AUTHORITATIVE and must be visible as such. There
 #                       are no silent defaults anywhere in this module.
 #   4. THE COMPLETION LOOP — bounded (3 questions, hard cap), provably
@@ -896,7 +896,7 @@ def evaluate(rows=None, extra_context: dict | None = None) -> dict:
 #         -> FieldVerdict(RESOLVED | SELF_ANSWERED | ASK | PROCEED_WITHOUT | ABSTAIN)
 #
 #   Intended callers (contract documented here, NOT wired — wiring them is their
-#   own change, and a reader with no writer is worse than none, rule #223):
+#   own change, and a reader with no writer is worse than none, rule):
 #     * ``sufficiency``  — a GATHER verdict names what evidence is missing; each
 #       missing item is a field spec, and this decides ask vs assume vs proceed.
 #     * ``deliberation`` — a DISAGREE outcome is a field whose value two engines
@@ -2294,7 +2294,7 @@ def decompose(utterance: str, repo_root=None,
 # and a silent non-measure of everything else: a row could score a perfect
 # one-shot pass while the second half of a compound was dropped, a stated
 # prohibition was lost and a rejected option was forgotten, because nothing
-# asserted them (rule #223 — a reader with no writer, in reverse: a field with
+# asserted them (rule — a reader with no writer, in reverse: a field with
 # no assertion). v3 scores the STRUCTURE alongside the type, and reports the two
 # separately so neither can hide inside the other.
 V3_CORPUS_PATH = pathlib.Path(__file__).resolve().parent / "frontdoor_eval_messy_v3.jsonl"
@@ -2417,7 +2417,7 @@ def _spec_for(contract_type: str, field_name: str):
 # ``task_kind`` selects the obligation pack the run must cover. This is the
 # function that hands one over.
 #
-# IT FAILS CLOSED, and that is the whole point (rule #223, #127): an
+# IT FAILS CLOSED, and that is the whole point (rules): an
 # underdetermined contract must NOT seed a procedure run. A run started from a
 # contract whose CRITICAL field is unknown will dutifully enumerate obligations
 # about a thing nobody named, and every downstream artifact will look

@@ -742,7 +742,7 @@ def project_frame(frame: Mapping[str, object], gear: str, *, context: Mapping[st
 
 
 def _g1_history_findings(frame: Mapping[str, object]) -> object:
-    """r44 F4 R5: carry the small, host-owned, already budgeted reverse-history
+    """earlier run F4 R5: carry the small, host-owned, already budgeted reverse-history
     payload through g1/g2 (it was silently dropped by the allowlist).  Opt-in
     only: with STATEFRAME_HISTORY_FINDINGS off the projection is unchanged."""
     value = frame.get("history_findings")
@@ -755,7 +755,7 @@ def _g1_history_findings(frame: Mapping[str, object]) -> object:
 
 
 def _g1_settled_findings(frame: Mapping[str, object]) -> object:
-    """Carry the selected r43 replay payload through the g1/g2 allowlist."""
+    """Carry the selected earlier run replay payload through the g1/g2 allowlist."""
     value = frame.get("settled_findings")
     if value in (None, {}, []):
         return None

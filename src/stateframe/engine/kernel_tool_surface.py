@@ -159,7 +159,7 @@ def tool_allowed(name: str, *, runtime: object | None = None,
 
 
 def runner_dispatchable(name: str, *, runtime: object | None = None) -> bool:
-    """The runner's name-level dispatch-branch conditions, in ONE place (r43 review5).
+    """The runner's name-level dispatch-branch conditions, in ONE place (earlier run review5).
 
     ``probes/react_repair.py`` routes a tool call to an execution branch only when
     this holds; otherwise it falls through to UNKNOWN_TOOL.  The green-lock menu

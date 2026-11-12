@@ -15,6 +15,7 @@ with a plain text fallback when neither is available.
 import hashlib
 import logging
 import os
+import re
 import tempfile
 from pathlib import Path
 
@@ -179,6 +180,7 @@ def _fallback_extract_sigs(source: str, ext: str) -> list[str]:
 
 _SCAN_EXTS = (".py", ".ts", ".tsx", ".js", ".jsx")
 _TEXT_SCAN = "text-scan fallback"
+_COMMIT_SHA_LOOKUP_FAILURE_REASON = "commit_sha_lookup_failed"
 
 
 def _outline_sigs(source: str, rel_path: str) -> tuple[list[str], str, str | None]:
@@ -524,10 +526,69 @@ def build_repo_map(
     )[0]
 
 
-def get_current_commit_sha(workspace_dir: str) -> str:
-    """Get HEAD commit SHA for cache key computation. Returns '' on any failure."""
+def _record_commit_sha_lookup_failure(error: BaseException, journal: object | None) -> None:
+    """Record safe failure metadata without rendering the exception.
+
+    Keep this metadata handling aligned with ``react_repair._record_intake_orientation_failure``.
+    """
+    error_type = type(error)
+    exc_type = "<unknown>"
+    try:
+        candidate_name = type.__dict__["__name__"].__get__(error_type, type)
+        if type(candidate_name) is str:
+            exc_type = "<invalid>"
+            if re.fullmatch(r"^[A-Za-z_][A-Za-z0-9_]{0,99}$", candidate_name) is not None:
+                exc_type = candidate_name
+    except BaseException:  # noqa: BLE001 - this guards only the built-in type slot descriptor
+        pass
+    errno_value: int | None = None
+    try:
+        error_mro = type.__dict__["__mro__"].__get__(error_type, type)
+        if any(base is OSError for base in error_mro):
+            # Bypass an OSError subclass's potentially hostile errno property.
+            candidate = OSError.errno.__get__(error)
+            if type(candidate) is int:
+                errno_value = candidate
+    except BaseException:  # noqa: BLE001 - diagnostics must not replace the lookup failure
+        errno_value = None
+
+    try:
+        logger.warning(
+            "repo_map: commit SHA lookup failed: exc_type=%s errno=%s",
+            exc_type, errno_value,
+        )
+    except Exception:  # noqa: BLE001 - logging must not replace the lookup result
+        pass
+
+    selected_journal = journal
+    if selected_journal is None:
+        try:
+            from kernel_pilot import ACTIVE_RUNTIME
+            runtime = ACTIVE_RUNTIME.get()
+            selected_journal = getattr(runtime, "journal", None)
+        except (ImportError, LookupError):
+            selected_journal = None
+    try:
+        emit = getattr(selected_journal, "emit", None)
+        if callable(emit):
+            emit(
+                "repo_map_commit_sha_unavailable",
+                reason=_COMMIT_SHA_LOOKUP_FAILURE_REASON,
+                exc_type=exc_type,
+                errno=errno_value,
+            )
+    except Exception:  # noqa: BLE001 - ordinary journal failures must not replace the lookup result
+        pass
+
+
+def get_current_commit_sha(workspace_dir: str, *, journal: object | None = None) -> str:
+    """Get HEAD commit SHA for cache key computation; expected lookup failures return ''."""
     from pathlib import Path
 
-    from kernel_git_view import legacy_git_query
-    result = legacy_git_query(Path(workspace_dir), ["rev-parse", "HEAD"])
+    from kernel_git_view import GitObjectError, legacy_git_query
+    try:
+        result = legacy_git_query(Path(workspace_dir), ["rev-parse", "HEAD"])
+    except (OSError, ValueError, GitObjectError) as error:
+        _record_commit_sha_lookup_failure(error, journal)
+        return ""
     return result.strip()[:40] if result else ""

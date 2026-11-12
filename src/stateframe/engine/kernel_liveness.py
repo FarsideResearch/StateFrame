@@ -595,13 +595,13 @@ def _emit_receipt(
                 handle.write(json.dumps(dict(receipt), sort_keys=True) + "\n")
         except OSError as exc:
             errors.append(f"receipt_persist_failed:{type(exc).__name__}")
-            print(f"[kernel-wiring] coverage check receipt persist failed: {type(exc).__name__}")
+            print(f"[stateframe] liveness census receipt persist failed: {type(exc).__name__}")
     if receipt_sink is not None:
         try:
             receipt_sink(receipt)
         except Exception as exc:  # noqa: BLE001 - census must not break task finalization
             errors.append(f"receipt_sink_failed:{type(exc).__name__}")
-            print(f"[kernel-wiring] coverage check receipt sink failed: {type(exc).__name__}")
+            print(f"[stateframe] liveness census receipt sink failed: {type(exc).__name__}")
     return tuple(errors)
 
 
@@ -949,7 +949,7 @@ def render_report(report: CensusReport) -> str:
                 f"[FINDINGS] DARK ORGAN organ={item.organ_id} N={item.n} M={item.m} S={item.s}"
             )
     if report.errors:
-        lines.append("[kernel-wiring] census finalization errors: " + ", ".join(report.errors))
+        lines.append("[stateframe] census finalization errors: " + ", ".join(report.errors))
     return "\n".join(lines)
 
 

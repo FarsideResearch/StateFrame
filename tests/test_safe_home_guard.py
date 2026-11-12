@@ -4,12 +4,17 @@ from __future__ import annotations
 import ast
 from collections import Counter
 from collections.abc import Mapping
+from dataclasses import dataclass
+from functools import lru_cache
 import os
 from pathlib import Path
 import subprocess
 import sys
 
 import pytest
+
+from _guard_scan_cache import source_tree_signature
+from _timeouts import scaled
 
 import kernel_safe_paths as safe_paths
 
@@ -19,6 +24,13 @@ SOURCE = ROOT / "src" / "stateframe"
 # No reviewed exceptions: build_parser runs for every command, so a home lookup there crashed every invocation
 # without HOME (the cli config-init default, removed 11-04). Add an entry only for code no normal run reaches.
 ALLOWLIST: dict[tuple[str, str, str], str] = {}
+
+
+@dataclass(frozen=True)
+class _SourceTreeScan:
+    scanned_files: int
+    home_calls: tuple[tuple[str, str, str, int], ...]
+    passwd_uid_calls: tuple[tuple[str, str, str], ...]
 
 
 def _function_name(node: ast.AST, parents: dict[ast.AST, ast.AST]) -> str:
@@ -31,15 +43,48 @@ def _function_name(node: ast.AST, parents: dict[ast.AST, ast.AST]) -> str:
 
 
 def _path_home_calls(tree: ast.AST, relative_path: str) -> list[tuple[str, str, str, int]]:
-    parents = {child: parent for parent in ast.walk(tree) for child in ast.iter_child_nodes(parent)}
-    sites = []
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
+    nodes = list(ast.walk(tree))
+    parents = {child: parent for parent in nodes for child in ast.iter_child_nodes(parent)}
+    home_calls, _ = _source_call_sites(nodes, parents, relative_path)
+    return home_calls
+
+
+def _source_call_sites(
+    nodes: list[ast.AST], parents: dict[ast.AST, ast.AST], relative_path: str,
+) -> tuple[list[tuple[str, str, str, int]], list[tuple[str, str, str]]]:
+    home_calls = []
+    passwd_uid_calls = []
+    for node in nodes:
+        if not isinstance(node, ast.Call):
             continue
-        if node.func.attr not in {"home", "expanduser"}:
-            continue
-        sites.append((relative_path, _function_name(node, parents), ast.unparse(node.func), node.lineno))
-    return sites
+        if isinstance(node.func, ast.Attribute) and node.func.attr in {"home", "expanduser"}:
+            home_calls.append((relative_path, _function_name(node, parents), ast.unparse(node.func), node.lineno))
+        if (isinstance(node.func, ast.Attribute) and node.func.attr == "getpwuid"
+                or isinstance(node.func, ast.Name) and node.func.id == "getpwuid"):
+            passwd_uid_calls.append((relative_path, _function_name(node, parents), ast.unparse(node.func)))
+    return home_calls, passwd_uid_calls
+
+
+@lru_cache(maxsize=2)
+def _cached_source_tree_scan(
+    _signature: tuple[tuple[str, int, int], ...],
+) -> _SourceTreeScan:
+    home_calls = []
+    passwd_uid_calls = []
+    paths = sorted(SOURCE.rglob("*.py"))
+    for path in paths:
+        relative = path.relative_to(ROOT).as_posix()
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=relative)
+        nodes = list(ast.walk(tree))
+        parents = {child: parent for parent in nodes for child in ast.iter_child_nodes(parent)}
+        file_home_calls, file_passwd_uid_calls = _source_call_sites(nodes, parents, relative)
+        home_calls.extend(file_home_calls)
+        passwd_uid_calls.extend(file_passwd_uid_calls)
+    return _SourceTreeScan(len(paths), tuple(home_calls), tuple(passwd_uid_calls))
+
+
+def _source_tree_scan() -> _SourceTreeScan:
+    return _cached_source_tree_scan(source_tree_signature(SOURCE))
 
 
 def _site_key(site: tuple[str, str, str, int]) -> tuple[str, str, str]:
@@ -98,19 +143,14 @@ def test_flat_engine_child_and_skills_import_shared_home_helper(tmp_path):
     child_env.pop("PYTHONPATH", None)
     child_env.pop("PYTHONHOME", None)
     result = subprocess.run([sys.executable, "-I", "-c", script], cwd=tmp_path, env=child_env,
-                            capture_output=True, text=True, timeout=30, check=False)
+                            capture_output=True, text=True, timeout=scaled(30), check=False)
     assert result.returncode == 0, result.stdout + result.stderr
 
 
 def test_home_call_site_scan_has_only_reviewed_calls(capsys):
-    sites = []
-    scanned_files = 0
-    for path in sorted(SOURCE.rglob("*.py")):
-        scanned_files += 1
-        relative = path.relative_to(ROOT).as_posix()
-        tree = ast.parse(path.read_text(encoding="utf-8"), filename=relative)
-        sites.extend(_path_home_calls(tree, relative))
-
+    scan = _source_tree_scan()
+    sites = list(scan.home_calls)
+    scanned_files = scan.scanned_files
     violations, missing = _violations(sites, ALLOWLIST)
     violated_count = len(violations) + len(missing)
     with capsys.disabled():
@@ -136,14 +176,5 @@ def test_home_call_scan_detects_a_planted_violation():
 
 
 def test_passwd_uid_lookup_is_confined_to_safe_home():
-    sites = []
-    for path in sorted(SOURCE.rglob("*.py")):
-        relative = path.relative_to(ROOT).as_posix()
-        tree = ast.parse(path.read_text(encoding="utf-8"), filename=relative)
-        parents = {child: parent for parent in ast.walk(tree) for child in ast.iter_child_nodes(parent)}
-        for node in ast.walk(tree):
-            if (isinstance(node, ast.Call) and (
-                    isinstance(node.func, ast.Attribute) and node.func.attr == "getpwuid"
-                    or isinstance(node.func, ast.Name) and node.func.id == "getpwuid")):
-                sites.append((relative, _function_name(node, parents), ast.unparse(node.func)))
+    sites = list(_source_tree_scan().passwd_uid_calls)
     assert sites == [("src/stateframe/engine/kernel_safe_paths.py", "safe_home", "pwd.getpwuid")]

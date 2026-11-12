@@ -13,6 +13,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from _timeouts import scaled
 import kernel_exec_tracker as tracker
 import kernel_mcp_driver as mcp
 from kernel_exec_session import ExecSessionError
@@ -166,7 +167,7 @@ def test_exited_leader_descendant_is_stopped_before_reap(cleanup):
     assert launch_tracker.capture_launch_identity(process) is not None
     child = int(process.stdout.readline())
     try:
-        until = time.monotonic() + 2
+        until = time.monotonic() + scaled(2)
         while not launch_tracker.child_exited_unreaped(process) and time.monotonic() < until:
             time.sleep(.01)
         assert launch_tracker.child_exited_unreaped(process)
@@ -179,7 +180,7 @@ def test_exited_leader_descendant_is_stopped_before_reap(cleanup):
                 assert _kill_group(process)
             except tracker.ContainmentUnverified as error:
                 assert "descendant family unavailable" in str(error)
-        until = time.monotonic() + 2
+        until = time.monotonic() + scaled(2)
         while _alive(child) and time.monotonic() < until:
             time.sleep(.01)
         assert not _alive(child)

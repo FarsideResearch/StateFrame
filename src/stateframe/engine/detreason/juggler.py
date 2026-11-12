@@ -912,7 +912,7 @@ def compile_pamphlet(rt: LaneRuntime, *, session_id: str,
 @dataclass
 class Telemetry:
     """Item 7 of the missing-wiring list. Counters only — no sampling, no
-    averaging into a lifetime cumulative rate (project rule #160: a displayed
+    averaging into a lifetime cumulative rate (rule: a displayed
     rate comes from a window over raw events, so we keep the raw events)."""
 
     ticks: int = 0

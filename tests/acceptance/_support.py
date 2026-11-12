@@ -16,6 +16,7 @@ from pathlib import Path
 
 from _journal import measurement_events
 from _stateframe_home import isolated_stateframe_home
+from _timeouts import scaled
 from stateframe.request_records import list_request_records, read_request_record
 from engine_run import run_monitored
 
@@ -27,7 +28,7 @@ _PASS_ENV = ("PATH", "HOME", "LANG", "TMPDIR")
 # Slowest stateframe subprocess wall time per case, in seconds. The acceptance cases use
 # 3 reps on the slowest gate host (2x Xeon E5-2680 v1 container, 1 worker; 850db00 at
 # load5 61-70 and f8e8925 at load5 70-90, 2026-11-03). The recorded blocked case uses
-# Mike's completed 122.9s host run on 2026-11-03; remeasure it after the host can run
+# A completed 122.9s host run on 2026-11-03; remeasure it after the host can run
 # nested sandbox-exec. Gates rarely run solo, so the loaded maximum is the reference.
 # Re-measure when a case changes; tests/acceptance/test_acceptance_budgets.py checks that
 # every case is used and that measured callers carry no bare deadline literal.
@@ -204,10 +205,12 @@ class Endpoint:
             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             text=True, env=environment())
         assert self.process.stdout is not None
-        ready, _, _ = select.select([self.process.stdout], [], [], 15)
+        startup_timeout = scaled(15)
+        ready, _, _ = select.select([self.process.stdout], [], [], startup_timeout)
         if not ready:
             self.close()
-            raise AssertionError("scripted endpoint did not start within 15 seconds")
+            raise AssertionError(
+                f"scripted endpoint did not start within {startup_timeout:g} seconds")
         self.url = self.process.stdout.readline().strip()
         assert self.url.startswith("http://127.0.0.1:") and self.url.endswith("/v1"), self.url
 
@@ -215,10 +218,10 @@ class Endpoint:
         if self.process.poll() is None:
             self.process.terminate()
             try:
-                self.process.wait(timeout=5)
+                self.process.wait(timeout=scaled(5))
             except subprocess.TimeoutExpired:
                 self.process.kill()
-                self.process.wait(timeout=5)
+                self.process.wait(timeout=scaled(5))
 
     def __enter__(self) -> "Endpoint":
         return self
@@ -254,7 +257,7 @@ def run_case(tmp_path: Path, script: str, *, repo_name: str = "simple_repo",
              "--max-turns", "32",
              "--quiet", *flags], capture_output=True, text=True,
             env={**environment(), **(env_overrides or {})},
-            expected_seconds=timeout, check=False)
+            expected_seconds=scaled(timeout), check=False)
     path = run_dir / "summary.json"
     summary = json.loads(path.read_text()) if path.is_file() else None
     return Case(repo, run_dir, process, summary, read_requests(run_dir))

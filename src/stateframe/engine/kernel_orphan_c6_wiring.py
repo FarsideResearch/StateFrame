@@ -6,7 +6,7 @@ qualification, and which historical owner is absent from ``src_v46``.  The
 BUILDLEAD session is responsible for integrating an adapter into a protected
 runtime owner.
 
-Source-owner checks consume the existing ``mc-outline/1`` API.  They inspect
+Source-owner checks consume the existing ``sample project-outline/1`` API.  They inspect
 the shared records (imports, module statements, types, and functions) and do
 not contain language-specific parsers or Python AST logic.
 """

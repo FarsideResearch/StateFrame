@@ -25,9 +25,11 @@ The server-visible action list grows as actions first appear, but each step stil
 
 Each run prints its run directory; pass it to `stateframe inspect`. There is no time limit: stop any run with Ctrl-C.
 
+This example uses a local server. For a hosted OpenAI-compatible endpoint, set `STATEFRAME_ALLOW_REMOTE_ENDPOINT=1`, choose its URL and model, and pass `--api-key-env` with the name of the variable holding your key. See [Hosted and OpenAI-compatible endpoints](docs/guide/running.md#hosted-and-openai-compatible-endpoints) for token counting and context-limit behavior.
+
 For an optional closing check based on the task's own sentences, set `STATEFRAME_REQUIREMENT_RECHECK=on` in the shell before starting StateFrame. It is off by default. See [the running guide](docs/guide/running.md#closing-check-requirement-recheck) for when the check applies and its measured results.
 
-## Model server on another machine: co-locate the tokenizer
+## llama.cpp server on another machine: co-locate the tokenizer
 
 The engine counts tokens many times per turn, by default on the model server. If that server is remote,
 run a second llama.cpp server with the same model file on this machine (it only tokenizes: no GPU, small

@@ -1,7 +1,7 @@
 """GREENFACT.
 
-Measured: b1420 benchmark cut 4 (green + hidden-correct): done within 2 calls T 8/8 (done FIRST call 8/8) vs C 2/8 vs
-P 3/8; premature benchmark cuts b1423 c11-c13: 0 dones in every arm (no harm), edits continued.
+Measured: benchmark run cut 4 (green + hidden-correct): done within 2 calls T 8/8 (done FIRST call 8/8) vs C 2/8 vs
+P 3/8; premature benchmark cuts earlier run c11-c13: 0 dones in every arm (no harm), edits continued.
 Lever = exact TEXT + exact POSITION: appended to the END of the LAST user message of the request
 (splice op insert_after / role user / anchor_mode message_end). Rewording or moving it is a new arm and needs
 its own screen. Rendered once per request ID and green revision (legacy callers without an ID deduplicate per revision):

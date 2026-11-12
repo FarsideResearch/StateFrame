@@ -23,7 +23,7 @@ The two design notes were written without repo access. Three of their
 assumptions do not hold here, and pretending otherwise would produce a library
 whose numbers mean nothing:
 
-1. "approximately 40k general commits". MEASURED: `lab-repo` carries 245
+1. "approximately 40k general commits". MEASURED: `sample repository` carries 245
    commits (9 touching `backend/`) and `mission-control` carries 1720. The
    mining envelope is therefore ~1.9k commits, not 40k, and the yield bands in
    the design (300..900 promotable clusters) are off by more than an order of
@@ -31,7 +31,7 @@ whose numbers mean nothing:
    quoting the design's.
 
 2. "resolved: base witness fails, post witness passes". There is no per-commit
-   witness executor for historical AHA/MC revisions, and building one would
+   witness executor for historical sample project/sample project revisions, and building one would
    mean running each repo's suite at ~2k revisions. Every mined episode is
    therefore the design's `candidate` class. `witness_family` on a template is
    a STATIC obligation partition derived from the block's role (the design's

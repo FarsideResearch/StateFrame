@@ -7,6 +7,7 @@ from dataclasses import replace
 from pathlib import Path
 
 from .engine.kernel_run_env import RunEnvError, create_run_env
+from .storage_gc import _write_json_atomic
 
 
 def path_authority() -> tuple[list[str], list[str]]:
@@ -49,7 +50,7 @@ def provision(options, run_dir: Path, spec: dict) -> None:
             options.tool_settings = settings
             spec["tool_settings"] = settings.as_dict()
             settings_file = run_dir / "tool-settings.json"
-            settings_file.write_text(json.dumps(settings.as_dict(), indent=1, sort_keys=True))
+            _write_json_atomic(settings_file, settings.as_dict(), mode=0o600)
         else:
             use_run_env_python(options, environment)
             spec["run_env"] = {"root": str(environment.root), "kind": environment.kind,
@@ -58,7 +59,7 @@ def provision(options, run_dir: Path, spec: dict) -> None:
             spec["shell_read_roots"] = sorted(set(spec["shell_read_roots"]) |
                                               {str(path) for path in environment.external_import_roots})
             spec["capabilities"]["test_python"] = str(environment.python)
-    (run_dir / "spec.json").write_text(json.dumps(spec, indent=1, sort_keys=True))
+    _write_json_atomic(run_dir / "spec.json", spec)
 
 
 def answer_pending(run_dir: Path, confirm=None) -> None:

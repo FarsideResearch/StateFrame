@@ -1,6 +1,6 @@
-"""STATEFRAME_RIPPLE_INLINE: ripple preview stays advisory but never holds the edit (r45 token cause 1).
+"""STATEFRAME_RIPPLE_INLINE: ripple preview stays advisory but never holds the edit (earlier run token cause 1).
 
-Measured on the r44c frame smoke journals (364/368 ldev_01, 364 ldev_09, 365 ldev_09): 6 of 23 edit calls (26%) were
+Measured on the earlier run frame smoke journals (364/368 reviewer, 364 reviewer, 365 reviewer): 6 of 23 edit calls (26%) were
 staged as REFUSED_PREDISPATCH and cost a re-issue turn (7,076 completion tokens); 2 of the 6 re-issues were the
 identical call (staging changed nothing).  With the switch on the edit applies immediately; the ripple advisory is
 journaled (``ripple_preview_inline``) and still reaches the next request through the advisory frame projection.

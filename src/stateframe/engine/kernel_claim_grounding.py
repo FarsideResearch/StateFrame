@@ -45,7 +45,7 @@ _PATH_EXTENSIONS = frozenset({
 # a path needs a path shape/extension, while a symbol needs a qualified form,
 # an uppercase name, or an underscore-bearing identifier.
 # Line locators the host itself teaches (diet notices say "path:start-end"): accept
-# :N, :N:M (line:column), :N-M (range) and #LN / #LN-LM. Live benchmark 1036 seq 2960:
+# :N, :N:M (line:column), :N-M (range) and #LN / #LN-LM. Live benchmark 1036 event sequence:
 # the model's correct first edit cited target_ref="backend/app/utils/ai_utils.py:14-16",
 # the :N-M form did not parse, and the edit was rejected UNGROUNDED_CLAIM.
 _LOCATOR = r"(?::[0-9]+(?:[:-][0-9]+)?|#L[0-9]+(?:-L?[0-9]+)?)"

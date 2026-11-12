@@ -1,7 +1,7 @@
-"""R45's opt-in single-carrier tool-schema reduction.
+"""earlier run's opt-in single-carrier tool-schema reduction.
 
 The decision cache and continuity modules own their fields and consumers.  This
-module owns only the cross-cutting R45 rule: when enabled, those optional
+module owns only the cross-cutting earlier run rule: when enabled, those optional
 sidecars remain advertised on one stable tool instead of every tool.
 """
 from __future__ import annotations
@@ -16,7 +16,7 @@ CARRIER_TOOL_NAME = "done"
 OPTIONAL_FIELDS = ("memory", "decision_delta")
 EVENT = "tool_schema_diet_applied"
 # STATEFRAME_TOKENLAB_SIDECAR_OFF: no carrier at all -- the sidecars are stripped from EVERY tool
-# (they cost 2.3-4.3 KB of `done` schema per request and were populated in 0 of 425 tool calls across 9 r46
+# (they cost 2.3-4.3 KB of `done` schema per request and were populated in 0 of 425 tool calls across 9 earlier run
 # frame journals).  Strict off|on, default off (byte-identical).  Own event: tool_sidecar_stripped, emitted by
 # the runtime at the confirmed-render point on the FINAL tool list of a provider request.
 SIDECAR_OFF_ENV = "STATEFRAME_TOKENLAB_SIDECAR_OFF"

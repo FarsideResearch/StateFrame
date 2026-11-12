@@ -575,7 +575,7 @@ def is_admitted_counterexample(check: object, receipt: object, decision: Admissi
             key in counterexample for key in ("missing_symbol", "binding_error", "wrong_binding")):
         signature_gap = False
         if os.environ.get("STATEFRAME_NAMED_LAYER_REPAIR", "off").strip().lower() == "on":
-            # autopsy-a3b-r44c-ldev01 A: a ticket-literal signature gap on a resolved target is a product
+            # autopsy-a3b-earlier run-ldev01 A: a ticket-literal signature gap on a resolved target is a product
             # counterexample; missing symbols / wrong bindings / unaligned rows stay refused.
             from kernel_named_layer_repair import is_signature_gap
             row = receipt if isinstance(receipt, Mapping) else {}

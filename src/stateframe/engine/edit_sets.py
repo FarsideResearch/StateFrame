@@ -25,7 +25,7 @@ The INTERNAL unit is a **span edit**, not a line index::
     SpanEdit(old="...", new="...", role="...")
 
 ``old`` is an exact multi-line substring of the source; ``new`` replaces it and
-may be ``""`` (delete is free). This is MC's production ``_code_str_replace``
+may be ``""`` (delete is free). This is sample project's production ``_code_str_replace``
 primitive, and it is deliberately the internal representation even though v1
 only *emits* line-tuple-compatible sets: adopting spans later must not require
 re-deriving every generator. Its four safety disciplines are ported verbatim in

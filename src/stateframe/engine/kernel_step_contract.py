@@ -179,7 +179,7 @@ Working rules
 
 # v3 = v2's reasoning guidance, rewritten for the StateFrame architecture. v2's "call done immediately"
 # rule is a stopping policy; in frame the host's completion authority owns stopping, and v2's rule made
-# ldev_01 quit early (batch 255). v3 hands stopping to the host and teaches the model how to read the frame.
+# reviewer quit early (prior run). v3 hands stopping to the host and teaches the model how to read the frame.
 V3_FRAME_GUIDANCE = V2_GENERIC_GUIDANCE.replace(V2_DONE_SECTION, """Reading the frame
 - Each step you get a fresh frame, not a transcript. The host builds it from what actually happened:
   the current source, what you edited, which checks ran on which revision, and what is still open.
@@ -1096,9 +1096,9 @@ run_tests accepts a pytest path or selector, not shell commands or package insta
 REASONING_EFFORTS = frozenset({'none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'})
 
 
-# 10-08 CONFIRMED_BUILD (FRAMELAB, pooled 100 bands): a 4k thinking budget matches unbounded on correctness (benchmark 57 vs
+# 10-08 CONFIRMED_BUILD (evaluation cohort, pooled 100 bands): a 4k thinking budget matches unbounded on correctness (benchmark 57 vs
 # 57%, benchmark 79 vs 80%, benchmark 94 vs 95%) and caps the runaway tail (max 17.7k tok / 363 s -> 4.7k / 161 s); thinking OFF
-# loses 18 points on benchmark. ONE value: REACT_REASONING_BUDGET_TOKENS overrides it (OPERATOR2's THINK_CAP_LIVE can move it).
+# loses 18 points on benchmark. ONE value: REACT_REASONING_BUDGET_TOKENS overrides it (operator harness's THINK_CAP_LIVE can move it).
 DEFAULT_REASONING_BUDGET_TOKENS = 4096
 
 
@@ -2041,7 +2041,7 @@ def render_edit_nturn_scope_turn(
     path = _normalize_edit_site(site.path)
     if path is None:
         raise ValueError("scope-turn labels require a repository path")
-    # b1424: a model-plan prose fragment ("I need to read more of the") was spliced in as the owner, producing
+    # earlier run: a model-plan prose fragment ("I need to read more of the") was spliced in as the owner, producing
     # "handle I need to read more of the in <path>". Only a code identifier may be named; otherwise name the
     # path alone.
     if owner and not _REASONING_OWNER.search(owner):
@@ -2098,7 +2098,7 @@ def emit_edit_nturn_rendered(journal: object, *, n_sites: int, turns_used: int,
                              site_source: str = "model_plan") -> None:
     """Journal the completed sequence without copying site names into telemetry.
 
-    ONE spelling with the reader (rule #223): tools/ceiling/edit_specs/live_edit_nturn_report.py reads n_sites,
+    ONE spelling with the reader (rule): tools/ceiling/edit_specs/live_edit_nturn_report.py reads n_sites,
     turns_used (extra turns fired = turns_used - 1) and edit_wall_seconds. site_source tells whether the horizon
     came from a model-owned plan or the fixed fallback. Emitted after every applied first EDIT."""
     emitter = getattr(journal, "emit", None)

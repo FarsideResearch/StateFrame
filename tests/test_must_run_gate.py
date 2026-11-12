@@ -10,6 +10,8 @@ import time
 from pathlib import Path
 from types import SimpleNamespace
 
+from _timeouts import scaled
+
 import must_run_plugin
 
 
@@ -444,7 +446,7 @@ def _git(project: Path, *arguments: str) -> subprocess.CompletedProcess[str]:
         capture_output=True,
         text=True,
         check=True,
-        timeout=30,
+        timeout=scaled(30),
     )
 
 
@@ -550,7 +552,7 @@ def _prepare(project: Path, directory: Path) -> tuple[Path, Path]:
          "--ticket-dir", str(ticket_dir), "--evidence-dir", str(evidence_dir)],
         capture_output=True,
         text=True,
-        timeout=30,
+        timeout=scaled(30),
         check=False,
     )
     assert result.returncode == 0, result.stdout + result.stderr
@@ -589,7 +591,7 @@ def _run_shard(
         command.extend(["-n", "1"])
     command.extend(["-o", "enable_assertion_pass_hook=true"])
     return subprocess.run(
-        command, cwd=project, env=environment, capture_output=True, text=True, timeout=45, check=False
+        command, cwd=project, env=environment, capture_output=True, text=True, timeout=scaled(45), check=False
     )
 
 
@@ -677,7 +679,7 @@ def _run_control(
     if deselect_required:
         command.extend(["-k", "other"])
     return subprocess.run(command, cwd=project, env=environment, capture_output=True,
-                          text=True, timeout=45, check=False)
+                          text=True, timeout=scaled(45), check=False)
 
 
 def _control_evidence(
@@ -819,7 +821,7 @@ def test_pid_namespace_provision_probe_reports_unavailable_when_command_fails(mo
     assert len(calls) == 1
     command, options = calls[0]
     assert "--pid" in command and "--fork" in command
-    assert options["timeout"] == 3.0
+    assert options["timeout"] == scaled(3.0)
 
 
 def test_planted_controls_reject_unqualified_runs(tmp_path):
@@ -992,7 +994,7 @@ def test_optional_dependency_present_absent_and_touch_controls(tmp_path):
         })
         result = subprocess.run(
             [sys.executable, "-m", "pytest", "-q", "--tb=short", "-o", "enable_assertion_pass_hook=true"],
-            cwd=project, env=environment, capture_output=True, text=True, timeout=45, check=False,
+            cwd=project, env=environment, capture_output=True, text=True, timeout=scaled(45), check=False,
         )
         output = result.stdout + result.stderr
         assert result.returncode == expected_status, f"{name}: {output}"
@@ -1060,7 +1062,7 @@ def test_aggregator_rejects_missing_and_stale_job_evidence(tmp_path):
         [sys.executable, str(PLUGIN_FILE), "prepare", "--candidate-root", str(project),
          "--manifest", str(manifest_path), "--ticket-dir", str(ticket_dir),
          "--evidence-dir", str(evidence_dir)],
-        capture_output=True, text=True, timeout=30, check=False,
+        capture_output=True, text=True, timeout=scaled(30), check=False,
     )
     assert prepared.returncode == 0, prepared.stdout + prepared.stderr
     aggregate_command = [
@@ -1068,7 +1070,7 @@ def test_aggregator_rejects_missing_and_stale_job_evidence(tmp_path):
         "--manifest", str(manifest_path), "--ticket-dir", str(ticket_dir),
         "--evidence-dir", str(evidence_dir),
     ]
-    missing = subprocess.run(aggregate_command, capture_output=True, text=True, timeout=30, check=False)
+    missing = subprocess.run(aggregate_command, capture_output=True, text=True, timeout=scaled(30), check=False)
     assert missing.returncode == 1
     assert "expected=2 scanned=0 violated=2" in missing.stdout
     detected_controls = 1
@@ -1084,7 +1086,7 @@ def test_aggregator_rejects_missing_and_stale_job_evidence(tmp_path):
         (evidence_dir / f"{job_id}.serial_lane.json").write_text(
             json.dumps(serial_evidence), encoding="utf-8"
         )
-    stale = subprocess.run(aggregate_command, capture_output=True, text=True, timeout=30, check=False)
+    stale = subprocess.run(aggregate_command, capture_output=True, text=True, timeout=scaled(30), check=False)
     assert stale.returncode == 1
     assert "stale or wrong-run evidence" in stale.stdout
     detected_controls += 1
@@ -1094,7 +1096,7 @@ def test_aggregator_rejects_missing_and_stale_job_evidence(tmp_path):
     serial_valid = _control_evidence(project, ticket, cell)
     (evidence_dir / "darwin.xdist.json").write_text(json.dumps(valid), encoding="utf-8")
     (evidence_dir / "darwin.serial_lane.json").write_text(json.dumps(serial_valid), encoding="utf-8")
-    complete = subprocess.run(aggregate_command, capture_output=True, text=True, timeout=30, check=False)
+    complete = subprocess.run(aggregate_command, capture_output=True, text=True, timeout=scaled(30), check=False)
     assert complete.returncode == 0, complete.stdout + complete.stderr
     assert "expected=2 scanned=2 violated=0" in complete.stdout
     detected_controls += 1
@@ -1117,7 +1119,7 @@ def test_aggregator_rejects_missing_and_stale_job_evidence(tmp_path):
         json.dumps(optional_na_rows[1][1]), encoding="utf-8"
     )
     rejected_optional_na = subprocess.run(
-        aggregate_command, capture_output=True, text=True, timeout=30, check=False
+        aggregate_command, capture_output=True, text=True, timeout=scaled(30), check=False
     )
     assert rejected_optional_na.returncode == 1
     assert "invalid prerequisite skip evidence" in rejected_optional_na.stdout
@@ -1133,7 +1135,7 @@ def test_aggregator_rejects_missing_and_stale_job_evidence(tmp_path):
             "validated_absence": True,
         }]
         (evidence_dir / f"{job_id}.serial_lane.json").write_text(json.dumps(evidence), encoding="utf-8")
-    optional_na = subprocess.run(aggregate_command, capture_output=True, text=True, timeout=30, check=False)
+    optional_na = subprocess.run(aggregate_command, capture_output=True, text=True, timeout=scaled(30), check=False)
     assert optional_na.returncode == 0, optional_na.stdout + optional_na.stderr
     assert "expected=2 scanned=2 violated=0" in optional_na.stdout
     detected_controls += 1
@@ -1145,7 +1147,7 @@ def test_aggregator_rejects_missing_and_stale_job_evidence(tmp_path):
         json.dumps(optional_na_rows[1][1]), encoding="utf-8"
     )
     invalid_skip_report = subprocess.run(
-        aggregate_command, capture_output=True, text=True, timeout=30, check=False
+        aggregate_command, capture_output=True, text=True, timeout=scaled(30), check=False
     )
     assert invalid_skip_report.returncode == 1
     assert "invalid prerequisite skip evidence" in invalid_skip_report.stdout
@@ -1178,7 +1180,7 @@ def test_aggregator_rejects_missing_and_stale_job_evidence(tmp_path):
         [sys.executable, str(PLUGIN_FILE), "aggregate", "--candidate-root", str(shard_project),
          "--manifest", str(shard_project / "tests" / "must_run.json"),
          "--ticket-dir", str(shard_tickets), "--evidence-dir", str(shard_evidence)],
-        capture_output=True, text=True, timeout=30, check=False,
+        capture_output=True, text=True, timeout=scaled(30), check=False,
     )
     assert shard_aggregate.returncode == 0, shard_aggregate.stdout + shard_aggregate.stderr
     assert "expected=1 scanned=1 violated=0" in shard_aggregate.stdout

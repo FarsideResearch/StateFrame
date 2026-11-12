@@ -12,6 +12,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from _timeouts import scaled
 from _journal import measurement_journal_paths
 
 from stateframe.engine import kernel_bounded_http
@@ -84,7 +85,7 @@ def provider(*, slots_status: int = 401, hold_post: bool = True,
     finally:
         server.shutdown()
         server.server_close()
-        thread.join(timeout=5)
+        thread.join(timeout=scaled(5))
 
 
 @pytest.mark.host_sandbox
@@ -195,10 +196,10 @@ def test_probe_redirect_never_sends_key_to_second_origin(monkeypatch):
     finally:
         source.shutdown()
         source.server_close()
-        source_thread.join(timeout=5)
+        source_thread.join(timeout=scaled(5))
         destination.shutdown()
         destination.server_close()
-        destination_thread.join(timeout=5)
+        destination_thread.join(timeout=scaled(5))
 
 
 @pytest.mark.host_sandbox
@@ -239,7 +240,7 @@ def test_trickling_probe_headers_cannot_pass_hard_deadline(monkeypatch):
     finally:
         server.shutdown()
         server.server_close()
-        thread.join(timeout=5)
+        thread.join(timeout=scaled(5))
 
 
 @pytest.mark.host_sandbox
@@ -272,7 +273,7 @@ def test_recovery_trickling_health_body_obeys_wait_deadline():
     finally:
         server.shutdown()
         server.server_close()
-        thread.join(timeout=5)
+        thread.join(timeout=scaled(5))
 
 
 def test_probe_process_start_failure_is_a_failed_probe(monkeypatch):

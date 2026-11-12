@@ -253,7 +253,7 @@ def _check_witness(symptom_class, span_lines, mut):
     # built with survived=True — so any candidate it cannot speak about came back PASS. That
     # made `witness` return PASS on 3,232 of 3,232 candidates: a check that never once failed
     # and never once eliminated anything, while still reading as verification on every
-    # evidence row. Rule #7: a gate that cannot fail is worse than no gate.
+    # evidence row. rule: a gate that cannot fail is worse than no gate.
     #
     # `_judge` already publishes `supported`, distinguishing "I judged this and it survived"
     # from "I have nothing to say about this". Honour it. This CANNOT cause a wrong

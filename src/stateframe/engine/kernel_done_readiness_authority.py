@@ -856,7 +856,7 @@ def _decision(
     candidates = _candidate_recoveries(rows, readiness, tools, runtime,
                                        blocker_id=all_debt[0])
     # D2NOEFFECT: a recovery that only re-runs an already-current passing check reuses the same
-    # receipt and cannot clear anything; offering it again is the b1366 refusal loop.
+    # receipt and cannot clear anything; offering it again is the earlier run refusal loop.
     candidates = [c for c in candidates
                   if not _rerun_reuses_current_pass(c, runtime, current_revision)]
     recovery = _callable_recovery(candidates, tools)

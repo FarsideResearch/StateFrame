@@ -1,8 +1,8 @@
-"""ONE accessor for "has this run's done been accepted" (b1426).
+"""ONE accessor for "has this run's done been accepted" (earlier run).
 
 Two authorities record acceptance on the runtime/measurement: the completion reducer sets
 ``completion_accepted``, the legacy disposition-v2 path sets ``v2_accepted_done``. Readers that consulted
-only one of them dropped a sealed, accepted done (b1426: reducer ACCEPTED+sealed, terminal relabelled it
+only one of them dropped a sealed, accepted done (earlier run: reducer ACCEPTED+sealed, terminal relabelled it
 "step limit without accepted done"). Every reader goes through done_accepted(); the source scan
 done_acceptance_scan.py (guard probes/test_done_acceptance_single_accessor_unittest.py) fails on any raw read
 elsewhere. Writers keep setting their own flag; withdrawal (repair_blocks_done) clears both.
@@ -20,7 +20,7 @@ def done_accepted(runtime: object) -> bool:
         return True
     # Under STATEFRAME_DONE_IS_SUBMIT the seal is written in finish (after pending mutations settle),
     # but the v2 terminal is decided before that, so a MODEL done read as "step limit without accepted done"
-    # (r2GB DONE-env smoke: done_submit_requested model seq 932, v2_terminal seq 940, done_sealed seq 953).
+    # (earlier run DONE-env smoke: done_submit_requested model event sequence, v2_terminal event sequence, done_sealed event sequence).
     # An accepted, pending MODEL submission is an accepted done. Host-sourced pending never counts.
     try:
         if not done_submit_enabled(runtime):

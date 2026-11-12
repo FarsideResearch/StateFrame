@@ -1,6 +1,6 @@
 """Tree-sitter dispatch boundaries and language-neutral source outlines.
 
-Pinned companion of Mission Control's ``call_graph.py``. It announces runtime
+Pinned companion of the vendored ``call_graph.py``. It announces runtime
 dispatch boundaries instead of inventing static edges, and exposes the shared
 outline contract used by qprobe and the kernel adapter; neither path raises.
 """

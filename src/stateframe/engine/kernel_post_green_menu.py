@@ -1,8 +1,8 @@
-"""Post-green working menu for the terminal green lock (r44, dissection-r42-hybrid-vs-frame.md).
+"""Post-green working menu for the terminal green lock (earlier run, dissection-earlier run-hybrid-vs-frame.md).
 
-r42/341: once public tests went green the frame collapsed the menu to done/read/probe and then
+earlier run/341: once public tests went green the frame collapsed the menu to done/read/probe and then
 to ``done`` alone.  In 16 locked runs 3 passed hidden tests (8/12 when the menu never locked);
-in ldev_10/924104 the model reasoned "I need to modify service.py" and had no edit tool.  The
+in reviewer/924104 the model reasoned "I need to modify service.py" and had no edit tool.  The
 done challenge could not bite either: with ``done`` as the only tool it was waved through as
 ``sole_tool_submission`` while ticket clauses were still open (16x in 341).
 
@@ -13,7 +13,7 @@ done challenge could not bite either: with ``done`` as the only tool it was wave
    allow authority (kernel_greenlock_menu_authority.decide) also permits the working tools
    edit/str_replace/read/probe/run_tests; ``done`` keeps its legacy verdict.  Menu and dispatch
    use the same predicate, so offered == allowed.
-   Anti-churn (r37t green-churn): a product edit made through the window marks the lineage
+   Anti-churn (earlier run green-churn): a product edit made through the window marks the lineage
    *pending verification*; ``done`` is denied (and therefore not offered) until a test receipt
    lands, while run_tests stays allowed.  A red result falls to the existing green-lock repair
    path (the lock is simply not engaged).  Post-green edit cycles are capped per green lineage
@@ -313,7 +313,7 @@ def capability_floor_needed(runtime: object) -> bool:
     if not hard_budget_only_enabled(runtime):
         return False
     lock = getattr(runtime, "green_lock", None)
-    # b1386: key on observed GREEN, not terminal engagement. A non-terminal lock mode is green
+    # earlier run: key on observed GREEN, not terminal engagement. A non-terminal lock mode is green
     # with terminal_engaged=False; the continuation gate then stripped edit while the model still had product work.
     if lock is None or not bool(getattr(lock, "green", getattr(lock, "terminal_engaged", False))):
         return False
@@ -416,12 +416,12 @@ def decide(lock: object, action: str, path: object = None, selector: object = No
         return False, RULE_IDENTICAL_RERUN
     if action in WORK_ACTIONS and window_open(lock):
         if action == "run_tests":
-            # r45 one owner (r44c 364 ldev_09 seq 920): never offer a rerun the first-green disclosure refuses.
+            # earlier run one owner (earlier run 364 reviewer event sequence): never offer a rerun the first-green disclosure refuses.
             try:
                 from kernel_first_green_disclosure import identical_rerun_refused_next
                 import kernel_inflight_fixes
                 if kernel_inflight_fixes.enabled():
-                    # r45 in-flight fix 3: ONE predicate -- verification already reused at this revision.  The
+                    # earlier run in-flight fix 3: ONE predicate -- verification already reused at this revision.  The
                     # identical-rerun counter it replaces is only written on the DISPOSITION-v1 path (inert in frame).
                     if kernel_inflight_fixes.reused_at(runtime, kernel_inflight_fixes.verification_key(runtime)):
                         kernel_inflight_fixes.emit(runtime, "reused_rerun_dropped", stage="acted")
@@ -568,7 +568,7 @@ def receipt_verifies(pending: Mapping[str, object] | None,
         receipt_request_id = receipt.get("request_id")
         if not isinstance(receipt_request_id, str) or not receipt_request_id.strip():
             return False
-        # b1420/b1424 (3/3 false post_green_edit_unverified refusals): the host runs the public tests
+        # earlier runs (3/3 false post_green_edit_unverified refusals): the host runs the public tests
         # right after the edit IN THE SAME REQUEST. Same-request evidence is admissible only when the
         # edit-time binding is KNOWN and the receipt's stable binding equals it (checked below), i.e.
         # the receipt provably tested the edited revision. Without a known binding, keep refusing.
@@ -612,7 +612,7 @@ def note_test_receipt(runtime: object, receipt: Mapping[str, object] | None = No
 
 
 def note_same_request_host_receipt(runtime: object, receipt: Mapping[str, object] | None) -> bool:
-    """Discharge pending verification from the host's own test run in the EDIT's request (b1420/b1424).
+    """Discharge pending verification from the host's own test run in the EDIT's request (earlier runs).
 
     The host runs the public checks right after an applied edit, in the same request. Those receipts are
     not "explicit" (the model did not call run_tests), so they never reached note_test_receipt and every
@@ -838,7 +838,7 @@ def window_admitted_files(lock: object) -> tuple[str, ...]:
 
 
 def window_actions(lock: object) -> tuple[str, ...]:
-    """Actions the post-green rule admits now -- the one predicate readiness defers to (r45 one owner)."""
+    """Actions the post-green rule admits now -- the one predicate readiness defers to (earlier run one owner)."""
     if lock is None:
         return ()
     out = []

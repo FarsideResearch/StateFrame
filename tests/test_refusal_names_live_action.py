@@ -8,6 +8,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from _timeouts import scaled
 from _journal import measurement_events, measurement_journal_paths
 from acceptance._support import budget
 from test_shell_e2e import command, environment, fixture_repo, run_script, step
@@ -439,7 +440,7 @@ def recorded_blocked_run(tmp_path_factory):
                 command(repo, run, f"http://127.0.0.1:{server.server_port}/v1",
                         flags=("--hooks", str(config), "--max-turns", "4")),
                 env=environment(), capture_output=True, text=True,
-                timeout=budget("recorded_blocked_run"))
+                timeout=scaled(budget("recorded_blocked_run")))
         except subprocess.TimeoutExpired as error:
             requests = len(list((run / "wire").glob("*.request.json")))
             pytest.fail(f"recorded blocked run exceeded measured timeout: "

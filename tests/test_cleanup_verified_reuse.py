@@ -13,6 +13,7 @@ import kernel_environment_state as environment
 import kernel_exec_tracker as tracker
 import kernel_execution_policy as policy
 from stateframe import outer_checks
+from _timeouts import scaled
 
 
 def test_outer_helper_keeps_successful_policy_cleanup_after_collection_error(
@@ -83,7 +84,7 @@ def test_environment_cleanup_then_close_reuses_verified_containment(tmp_path, mo
                         "pathlib.Path(sys.argv[1]).touch(); time.sleep(30)", str(ready)])
     process = launched[0]
     try:
-        until = time.monotonic() + 2
+        until = time.monotonic() + scaled(2)
         while not ready.exists() and time.monotonic() < until:
             time.sleep(.01)
         assert ready.exists()
@@ -96,7 +97,7 @@ def test_environment_cleanup_then_close_reuses_verified_containment(tmp_path, mo
     finally:
         if process.poll() is None:
             process.kill()
-        process.wait(timeout=2)
+        process.wait(timeout=scaled(2))
         process.stdout.close()
 
 
@@ -135,4 +136,4 @@ def test_recovered_launch_row_builds_family_under_wait_lock(monkeypatch):
     finally:
         if process.poll() is None:
             process.kill()
-        process.wait(timeout=2)
+        process.wait(timeout=scaled(2))

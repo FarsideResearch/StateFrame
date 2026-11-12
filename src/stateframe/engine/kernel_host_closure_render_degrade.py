@@ -1,9 +1,9 @@
-"""Graceful over-cap fallback for the host-closure presentation (r43).
+"""Graceful over-cap fallback for the host-closure presentation (earlier run).
 
 ``bounded_host_closure_projection`` used to raise "host closure mandatory
 projection exceeds render cap" once satisfied rows were shed and the view was
-still too large; the child crashed (r41 3/28 frame runs, r42 341/345
-crawl_l_two and ldev_11).  With ``STATEFRAME_HOST_CLOSURE_RENDER_DEGRADE=on``
+still too large; the child crashed (earlier run 3/28 frame runs, earlier run 341/345
+crawl_l_two and reviewer).  With ``STATEFRAME_HOST_CLOSURE_RENDER_DEGRADE=on``
 (the runtime passes ``degrade=True``) the projection degrades instead:
 
 1. ``rows_active_detail`` / ``rows_minimal`` - shed optional detail (check file,

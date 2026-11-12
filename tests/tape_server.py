@@ -12,6 +12,8 @@ from collections.abc import Mapping, Sequence
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
+from _timeouts import scaled
+
 
 _PIECE = re.compile(r" ?[A-Za-z]{1,7}|\d|[^\sA-Za-z\d]{1,2}|\s+")
 _MAX_BODY_BYTES = 32 * 1024 * 1024
@@ -249,7 +251,7 @@ class TapeServer:
             return
         self._server.shutdown()
         self._server.server_close()
-        self._thread.join(timeout=5)
+        self._thread.join(timeout=scaled(5))
         if self._thread.is_alive():
             raise RuntimeError("tape server did not stop")
         self._thread = None

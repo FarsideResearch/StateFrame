@@ -9,6 +9,7 @@ import time
 import pytest
 
 from ._support import Endpoint, FIXTURES, budget, PYTHON, copy_repo, environment, read_requests, run_case
+from _timeouts import scaled
 from fixtures.process_signals import record_identity, signal_run_owned, signal_run_verified
 from engine_run import run_monitored, start_monitored
 
@@ -67,9 +68,9 @@ def _interrupted_run(tmp_path, *, network="none", script_name="resume.script.jso
             "--shell-network", network, "--shell", shell],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             text=True, env=environment(), start_new_session=True,
-            expected_seconds=600, step="interrupted run",
+            expected_seconds=scaled(600), step="interrupted run",
             watch_paths=(run_dir / "checkpoints",))
-        deadline = time.monotonic() + 600
+        deadline = time.monotonic() + scaled(600)
         while not marker.exists():
             if runner.poll() is not None:
                 stdout, stderr = runner.communicate()
@@ -90,7 +91,7 @@ def _interrupted_run(tmp_path, *, network="none", script_name="resume.script.jso
         identity = record_identity(child, launched_after=launched_after, command_fragment="_child.py")
         signal_run_verified(run_dir, child, identity, signal.SIGKILL, deadline=deadline,
                             what="paused resume request")
-        runner.communicate(timeout=30)
+        runner.communicate(timeout=scaled(30))
         if wait_for_checkpoint:
             retain_endpoint = True
             return repo, run_dir, requests_before[paused_index], endpoint, url
@@ -100,14 +101,14 @@ def _interrupted_run(tmp_path, *, network="none", script_name="resume.script.jso
             # Failure cleanup may run before the first checkpoint exists.
             signal_run_owned(run_dir, runner, signal.SIGKILL, deadline=time.monotonic(),
                              what="interrupted run cleanup", require_checkpoint_saved=False)
-            runner.wait(timeout=5)
+            runner.wait(timeout=scaled(5))
         if not retain_endpoint and endpoint.poll() is None:
             endpoint.terminate()
             try:
-                endpoint.wait(timeout=5)
+                endpoint.wait(timeout=scaled(5))
             except subprocess.TimeoutExpired:
                 endpoint.kill()
-                endpoint.wait(timeout=5)
+                endpoint.wait(timeout=scaled(5))
 
 
 def test_e16_local_shell_resume_replays_identical_next_request(tmp_path):
@@ -116,7 +117,7 @@ def test_e16_local_shell_resume_replays_identical_next_request(tmp_path):
         resumed = run_monitored(
             [PYTHON, "-m", "stateframe", "resume", str(run_dir), "--endpoint", endpoint.url,
              "--model", "scripted", "--quiet"], capture_output=True, text=True,
-            env=environment(), expected_seconds=240, check=False)
+            env=environment(), expected_seconds=scaled(240), check=False)
     summary = json.loads((run_dir / "summary.json").read_text())
     assert resumed.returncode == 0, resumed.stdout + resumed.stderr + str(summary)
     actual = read_requests(run_dir)[1]
@@ -144,7 +145,7 @@ def test_continuation_resume_sends_uncrashed_prepared_request_bytes(tmp_path, mo
         resumed = run_monitored(
             [PYTHON, "-m", "stateframe", "resume", str(run_dir), "--endpoint", endpoint.url,
              "--model", "scripted", "--quiet"], capture_output=True, text=True,
-            env=environment(), expected_seconds=240, check=False)
+            env=environment(), expected_seconds=scaled(240), check=False)
     assert resumed.returncode == 0, resumed.stdout + resumed.stderr
     sent = tuple(json.loads(line) for line in request_log.read_text().splitlines())
     assert sent, "resume did not send a provider request"
@@ -160,14 +161,14 @@ def test_checkpoint_restores_and_verifies_paused_request(tmp_path, monkeypatch):
         resumed = run_monitored(
             [PYTHON, "-m", "stateframe", "resume", str(run_dir), "--endpoint", url,
              "--model", "scripted", "--quiet"], capture_output=True, text=True,
-            env=environment(), expected_seconds=240, check=False)
+            env=environment(), expected_seconds=scaled(240), check=False)
     finally:
         endpoint.terminate()
         try:
-            endpoint.wait(timeout=5)
+            endpoint.wait(timeout=scaled(5))
         except subprocess.TimeoutExpired:
             endpoint.kill()
-            endpoint.wait(timeout=5)
+            endpoint.wait(timeout=scaled(5))
     assert resumed.returncode == 0, resumed.stdout + resumed.stderr + (run_dir / "engine.log").read_text()
     actual = read_requests(run_dir)[2]
     assert actual["messages"] == expected["messages"]
@@ -186,15 +187,15 @@ def test_shell_run_restores_checkpoint_after_shell_step(tmp_path, monkeypatch):
         resumed = run_monitored(
             [PYTHON, "-m", "stateframe", "resume", str(run_dir), "--endpoint", url,
              "--model", "scripted", "--quiet", "--keep-checkpoints"], capture_output=True, text=True,
-            env=environment(), expected_seconds=240, check=False)
+            env=environment(), expected_seconds=scaled(240), check=False)
         seconds = time.monotonic() - started
     finally:
         endpoint.terminate()
         try:
-            endpoint.wait(timeout=5)
+            endpoint.wait(timeout=scaled(5))
         except subprocess.TimeoutExpired:
             endpoint.kill()
-            endpoint.wait(timeout=5)
+            endpoint.wait(timeout=scaled(5))
     log = (run_dir / "engine.log").read_text()
     print(f"shell resume: rc={resumed.returncode} in {seconds:.1f} s")
     assert resumed.returncode == 0, resumed.stdout + resumed.stderr + log
@@ -225,7 +226,7 @@ def test_full_replay_verifies_check_receipt_request_in_flight(tmp_path, monkeypa
         resumed = run_monitored(
             [PYTHON, "-m", "stateframe", "resume", str(run_dir), "--endpoint", endpoint.url,
              "--model", "scripted", "--quiet"], capture_output=True, text=True,
-            env=environment(), expected_seconds=240, check=False)
+            env=environment(), expected_seconds=scaled(240), check=False)
     assert resumed.returncode == 0, resumed.stdout + resumed.stderr
     assert (run_dir / "wire" / "0002.request.json").read_bytes() == recorded
     assert not (run_dir / "resume-divergence.json").exists()
@@ -245,10 +246,10 @@ def test_checkpoint_verifies_check_receipt_request_in_flight(tmp_path, monkeypat
         resumed = run_monitored(
             [PYTHON, "-m", "stateframe", "resume", str(run_dir), "--endpoint", url,
              "--model", "scripted", "--quiet"], capture_output=True, text=True,
-            env=environment(), expected_seconds=240, check=False)
+            env=environment(), expected_seconds=scaled(240), check=False)
     finally:
         endpoint.terminate()
-        endpoint.wait(timeout=5)
+        endpoint.wait(timeout=scaled(5))
     assert resumed.returncode == 0, resumed.stdout + resumed.stderr
     assert (run_dir / "wire" / "0002.request.json").read_bytes() == recorded
     assert '"kind":"checkpoint_verified"' in (run_dir / "engine.log").read_text()
@@ -264,10 +265,10 @@ def test_checkpoint_off_on_resume_skips_restore_and_later_saves(tmp_path, monkey
         resumed = run_monitored(
             [PYTHON, "-m", "stateframe", "resume", str(run_dir), "--endpoint", url,
              "--model", "scripted", "--quiet"], capture_output=True, text=True,
-            env=env, expected_seconds=240, check=False)
+            env=env, expected_seconds=scaled(240), check=False)
     finally:
         endpoint.terminate()
-        endpoint.wait(timeout=5)
+        endpoint.wait(timeout=scaled(5))
     assert resumed.returncode == 0, resumed.stdout + resumed.stderr
     assert json.loads((run_dir / "spec.json").read_text())["environment"]["STATEFRAME_CHECKPOINT"] == "off"
     assert not (run_dir / "checkpoints").exists()
@@ -288,10 +289,10 @@ def test_checkpoint_hex_mismatch_refuses_after_fallback(tmp_path, monkeypatch):
         resumed = run_monitored(
             [PYTHON, "-m", "stateframe", "resume", str(run_dir), "--endpoint", url,
              "--model", "scripted", "--quiet"], capture_output=True, text=True,
-            env=environment(), expected_seconds=240, check=False)
+            env=environment(), expected_seconds=scaled(240), check=False)
     finally:
         endpoint.terminate()
-        endpoint.wait(timeout=5)
+        endpoint.wait(timeout=scaled(5))
     assert resumed.returncode != 0, resumed.stdout + resumed.stderr
     spec = json.loads((run_dir / "spec.json").read_text())
     assert "CheckpointUnfaithful" in spec["resume"]["checkpoint_refused"]
@@ -306,14 +307,14 @@ def test_e23_full_network_shell_requires_replay_external(tmp_path):
         resumed = run_monitored(
             [PYTHON, "-m", "stateframe", "resume", str(run_dir), "--endpoint", endpoint.url,
              "--model", "scripted", "--quiet"], capture_output=True, text=True,
-            env=environment(), expected_seconds=60, check=False)
+            env=environment(), expected_seconds=scaled(60), check=False)
     assert resumed.returncode != 0
     assert "--replay-external" in resumed.stderr + resumed.stdout
     with Endpoint(FIXTURES / "scripts" / "resume_remaining.script.json") as endpoint:
         approved = run_monitored(
             [PYTHON, "-m", "stateframe", "resume", str(run_dir), "--endpoint", endpoint.url,
              "--model", "scripted", "--replay-external", "--quiet"],
-            capture_output=True, text=True, env=environment(), expected_seconds=240, check=False)
+            capture_output=True, text=True, env=environment(), expected_seconds=scaled(240), check=False)
     assert approved.returncode == 0, approved.stdout + approved.stderr
     assert json.loads((run_dir / "summary.json").read_text())["succeeded"] is True
 
@@ -324,7 +325,7 @@ def test_e19_volatile_shell_observation_is_byte_identical_on_resume(tmp_path):
         resumed = run_monitored(
             [PYTHON, "-m", "stateframe", "resume", str(run_dir), "--endpoint", endpoint.url,
              "--model", "scripted", "--quiet"], capture_output=True, text=True,
-            env=environment(), expected_seconds=budget("e19_resume"), check=False)
+            env=environment(), expected_seconds=scaled(budget("e19_resume")), check=False)
     assert resumed.returncode == 0, resumed.stdout + resumed.stderr
     actual = read_requests(run_dir)[1]
     assert actual["messages"] == expected["messages"]
@@ -367,7 +368,7 @@ def test_file_move_kill_resume_replays_identical_request_and_sealed_rename(tmp_p
         resumed = run_monitored(
             [PYTHON, "-m", "stateframe", "resume", str(run_dir), "--endpoint", endpoint.url,
              "--model", "scripted", "--quiet"], capture_output=True, text=True,
-            env=environment(), expected_seconds=240, check=False)
+            env=environment(), expected_seconds=scaled(240), check=False)
     assert resumed.returncode == 0, resumed.stdout + resumed.stderr
     actual = read_requests(run_dir)[1]
     assert actual["messages"] == expected["messages"]

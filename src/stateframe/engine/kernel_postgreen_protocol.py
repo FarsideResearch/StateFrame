@@ -591,7 +591,7 @@ def _refusal(runtime: object, action: str, key: str, *, reason: str,
             clean, block, open_ids = _clean(runtime)
         settled = _settle(runtime, certified=clean, reason=block if not clean else reason,
                           open_ids=open_ids)
-        # One spelling (rule #223): _settle publishes "settlement"
+        # One spelling (rule): _settle publishes "settlement"
         # (READY_FOR_COMMON_TERMINAL | UNCERTIFIED); there is no "outcome" key.
         outcome = str(settled.get(SETTLEMENT_KEY) or SETTLEMENT_UNCERTIFIED)
         next_action = "done" if clean else "host_stop"

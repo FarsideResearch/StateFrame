@@ -1,4 +1,4 @@
-"""r47 L4 ripple: inline the ripple advisory and HOLD the edit only when candidates >= 3.
+"""earlier run L4 ripple: inline the ripple advisory and HOLD the edit only when candidates >= 3.
 
 token_bloat_verdict.md section 6 row L4 (lane 4 M4): ripple STAGED costs +10 turns (a re-issue turn per
 staged edit, 2 of 6 re-issues identical).  RIPPLE_INLINE removes every hold; this switch keeps the hold

@@ -1,4 +1,4 @@
-"""RUNREAL candidate selection bound to the immutable final-product manifest."""
+"""real-task runner candidate selection bound to the immutable final-product manifest."""
 
 from __future__ import annotations
 

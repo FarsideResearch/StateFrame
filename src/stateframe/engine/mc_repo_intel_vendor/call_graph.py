@@ -167,7 +167,7 @@ def enforce_repo_cache_cap(base: Path, keep: Path | None = None, *, now: float |
 def repo_cache_file(repo_path, filename: str = _CACHE_FILENAME) -> Path:
     """Cache location for a repo, OUTSIDE the repo (StateFrame vendored copy, 10-05).
 
-    MC writes the cache into a fresh clone; in StateFrame the repo is a sealed task snapshot, and a
+    sample project writes the cache into a fresh clone; in StateFrame the repo is a sealed task snapshot, and a
     cache file inside it broke exact-membership verification (sample task parent gained this file).
     STATEFRAME_REPO_CACHE_DIR overrides the root; the default is ~/.cache/stateframe/repo-intel.
     """
@@ -232,7 +232,7 @@ _MAX_PARSE_BYTES = 1_500_000
 
 # ── Coverage taxonomy ────────────────────────────────────────────────────────
 # Every candidate source file lands in exactly one bucket. The point is ABSENCE
-# HONESTY (rule #158): a symbol the graph cannot see must be explained, not
+# HONESTY (rule): a symbol the graph cannot see must be explained, not
 # silently missing, or "no callers" reads as proof when it is merely ignorance.
 COVERAGE_INDEXED = "indexed"            # parsed cleanly, defs/calls extracted
 COVERAGE_PARSE_PARTIAL = "parse_partial"  # parsed WITH errors — extract is incomplete
@@ -277,7 +277,7 @@ _ENTRYPOINT_DECORATORS = frozenset({
 
 # Confidence tiers for a resolved call edge, keyed to the branch in
 # _resolve_callee() that produced it. Confidence is ALWAYS an annotation, never
-# a filter — even an "unresolved" call stays a reported edge (rule #158).
+# a filter — even an "unresolved" call stays a reported edge (rule).
 _CONF_SELF_METHOD = 1.0    # self.method(), matched via receiver's own class
 _CONF_LSP = 0.95           # real type resolution (app/lsp_resolve.py) — see below
 _CONF_MODULE_FUNC = 0.9    # module.func(), matched via the import table
@@ -1036,7 +1036,7 @@ def _extract_file(file_path: Path, repo_root: Path) -> _FileExtract:
 
     A failure is recorded as a coverage STATUS on the returned extract rather
     than swallowed into an indistinguishable empty result — "no symbols here"
-    and "this file never parsed" are different answers (project rule #158).
+    and "this file never parsed" are different answers (rule).
     """
     try:
         source = file_path.read_text(encoding="utf-8", errors="replace")
@@ -1180,7 +1180,7 @@ class CodeGraph:
         # Diagnostics for the type-resolution pass — how many low-confidence
         # Python call sites were asked, and how many got a definitive answer.
         # A layer that silently resolves nothing is the failure mode this makes
-        # visible (rule #158).
+        # visible (rule).
         self.lsp_stats: dict[str, object] = {
             "enabled": False, "backend": "none", "consulted": 0,
             "resolved": 0, "overridden": 0, "files": 0,
@@ -1265,7 +1265,7 @@ class CodeGraph:
         # Multiple call sites can collapse to the same deduplicated edge (e.g. two
         # call sites in the same function calling the same target). MAX-aggregate:
         # if any one call site resolves confidently, the edge is trusted — this
-        # mirrors the module's existing over-report bias (rule #158).
+        # mirrors the module's existing over-report bias (rule).
         key = (caller, callee)
         if confidence > self._edge_confidence.get(key, 0.0) or key not in self._edge_confidence:
             self._edge_confidence[key] = confidence
@@ -1495,7 +1495,7 @@ class CodeGraph:
         # PASS 1 — name matching. Unchanged, and always the baseline: even when
         # the type engine later overrides an edge, the name-matched candidates
         # STAY on the graph. Over-reporting is the module's deliberate bias
-        # (rule #158) and a type engine that is wrong about a dynamic
+        # (rule) and a type engine that is wrong about a dynamic
         # receiver must not be able to delete a real edge.
         pending: list[tuple[CallSite, float]] = []
         for call in self.calls:
@@ -1972,7 +1972,7 @@ class CodeGraph:
               all its child methods, then climb callers from all of them.
 
         Depth-bounded BFS over ``_rev`` (call edges only). Over-reports by design
-        (project rule #158): a too-wide radius is safe to review; a missed caller is
+        (rule): a too-wide radius is safe to review; a missed caller is
         the silent break we exist to catch.
         """
         seeds = set(self._ids_for(symbol))
@@ -2437,7 +2437,7 @@ def _memo_hit(graph: CodeGraph) -> CodeGraph:
     graph was built" — that build refreshed and re-saved the index, so it is
     true exactly once. Carrying it across memo hits would make explore's
     staleness banner fire forever for a file nothing has touched since, which is
-    a permanently-on warning, i.e. no warning at all (project rule #189).
+    a permanently-on warning, i.e. no warning at all (rule).
     """
     graph.rebuilt_files = set()
     return graph

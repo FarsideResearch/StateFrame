@@ -69,7 +69,7 @@ def calibrate_oneb_seconds(ledger_path: str) -> dict:
     Returns {"value": float, "rows": int, "margins": int, "ledger_path": str}.
 
     NOTE: `results/unified_gym.jsonl` is a LIVE file other processes append
-    to (moving-corpus trap, repo rule #214 family) — calling this against
+    to (moving-corpus trap, rule family) — calling this against
     that path will drift over time. `ONEB_CALL_CALIBRATION` below is a
     point-in-time SNAPSHOT of one such call, recorded with the row/margin
     counts it was taken at; it is not re-derived at import time and is not

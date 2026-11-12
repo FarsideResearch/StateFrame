@@ -1,6 +1,6 @@
 """Standalone grading adapter for non-coding rows.
 
-The hot ``probes/converge.py`` integration can call ``grade_artifact`` without
+The ``bench/lab/converge.py`` integration can call ``grade_artifact`` without
 knowing any class-specific truth logic.  This file intentionally has no model,
 database, network, or pytest dependency.
 """

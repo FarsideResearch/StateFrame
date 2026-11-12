@@ -101,7 +101,7 @@ def at_request_boundary(runtime: object) -> bool:
     if done_submit_enabled(runtime):
         # DESIGN RULE: done comes from the MODEL; DONE_IS_SUBMIT only means the host never
         # refuses a model done. This branch submitted as the HOST with no readiness check, at step 0 before
-        # request 0 (r2EY DONE-env smoke: readiness_submit_committed seq 134, requests=0, host_stopped). Under
+        # request 0 (earlier run DONE-env smoke: readiness_submit_committed event sequence, requests=0, host_stopped). Under
         # DONE_IS_SUBMIT the host never submits on its own.
         del request_submission, wait_for_pending_mutations
         return False

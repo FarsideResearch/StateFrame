@@ -1,6 +1,6 @@
 """A done call is never answered with an empty tool reply.
 
-b1427 benchmark: three `done` calls on a green, unchanged, correct candidate were answered with len-0 tool replies.
+benchmark run: three `done` calls on a green, unchanged, correct candidate were answered with len-0 tool replies.
 The model had no refusal to inspect, so it re-read, re-ran tests and called done again until the wall.
 Every request passes through RequestCapture.send, which fills such replies with one plain sentence BEFORE
 preparation (so wire truth and request hashes describe the final bytes). Non-empty replies are untouched.

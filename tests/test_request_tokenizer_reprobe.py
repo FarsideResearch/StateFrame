@@ -169,7 +169,6 @@ def test_slow_burst_recovers_once_with_recorded_event_sequence(monkeypatch):
     monkeypatch.setattr(request_diet, "TOKENIZE_REQUEST_TIMEOUT_CAP_SECONDS", TOKENIZE_TIMEOUT_SECONDS)
     monkeypatch.setattr(request_diet, "TOKENIZE_QUEUEING_TIMEOUT_SECONDS", TOKENIZE_TIMEOUT_SECONDS)
     monkeypatch.setattr(request_diet, "TOKENIZE_REPROBE_AFTER_REQUESTS", 2)
-    monkeypatch.setattr(request_diet, "TOKENIZE_REPROBE_AFTER_SECONDS", 3600.0)
     script = {
         "model": "allocation-replay-model",
         "turns": [{"message": {"role": "assistant", "content": "done"}}],
@@ -209,7 +208,6 @@ def test_slow_burst_recovers_once_with_recorded_event_sequence(monkeypatch):
 
 def test_reprobe_is_limited_to_one_attempt_per_request(monkeypatch):
     monkeypatch.setattr(request_diet, "TOKENIZE_REPROBE_AFTER_REQUESTS", 1)
-    monkeypatch.setattr(request_diet, "TOKENIZE_REPROBE_AFTER_SECONDS", 3600.0)
     calls = 0
 
     def unavailable(_content: str) -> object:
@@ -431,7 +429,6 @@ def test_permanent_tokenizer_outage_replay_submits_with_bounded_probes(tmp_path)
         tokenize_slow_calls=tuple(range(1, 512)),
         tokenize_timeout_s=TOKENIZE_TIMEOUT_SECONDS,
         tokenize_reprobe_after_requests=probe_interval,
-        tokenize_reprobe_after_s=3600.0,
     )
 
     assert outcome.engine_result == "SUBMITTED", (
@@ -554,7 +551,7 @@ def _capture_clean_meter_request_bodies(
     # v0.4.0 changes default request order; the 0.3.30 byte oracle uses plain order.
     # Stop at the needed request count instead of replaying all 41 tape turns.
     # Each clean-meter request costs ~71 s of engine-side prep on Linux (measured on e62db60:
-    # 34 sends in 2422 s; journal attribution by crew-08: public_test_verdict_fact_normalized,
+    # 34 sends in 2422 s; journal attribution by prior contributor: public_test_verdict_fact_normalized,
     # code_bookmark_activation_decision, continuation_transition), so the full replay ran past
     # the engine deadline before submitting. Current capture compares requests 1-6.
     outcome = corpus._run_case(
@@ -670,8 +667,8 @@ def test_healthy_measurement_preserves_baseline_request_bytes(tmp_path, baseline
     assert _masked_wire_sha256(bytes(changed_body)) != computed_masked_hashes[0]
 
     # Compare requests 1-2 only: a callsite census at step 12 fires depending on run timing
-    # and changes request 3+ bytes (a determinism leak). Owner: sf-test-runners.
-    # Finding: sf-work/lanes/findings/census_timing_1104.md.
+    # and changes request 3+ bytes (a determinism leak). The timing finding is tracked with
+    # the test-runner maintenance notes.
     # Full masked identity is checked by ident_pair.sh.
     assert computed_masked_hashes[:2] == baseline_masked_hashes, (
         f"masked request SHA-256s differ from the immediate base {baseline_tree} "
@@ -687,3 +684,32 @@ def test_healthy_measurement_preserves_baseline_request_bytes(tmp_path, baseline
     assert changed_current_hashes != baseline_masked_hashes, (
         "baseline-relative masked comparison accepted a one-byte change in current request 0001"
     )
+
+
+def test_reprobe_schedule_ignores_wall_time(monkeypatch):
+    # A resumed run rebuilds earlier requests in moments, while the original
+    # attempt waited on the model between them. Probe timing must depend only
+    # on the request sequence, or the rebuilt request is measured differently.
+    monkeypatch.setattr(request_diet, "TOKENIZE_REPROBE_AFTER_REQUESTS", 5)
+    calls = 0
+
+    def unavailable(_content: str) -> object:
+        nonlocal calls
+        calls += 1
+        raise TimeoutError("scripted tokenizer deadline")
+
+    def run(gap_s: float) -> list[tuple[str, str | None]]:
+        nonlocal calls
+        calls = 0
+        clock = [1_000.0]
+        monkeypatch.setattr(request_diet.time, "monotonic", lambda: clock[0])
+        meter = request_diet.RequestTokenMeter(tokenizer=unavailable, template_overhead_tokens=0)
+        observed = []
+        for index in range(1, 4):
+            meter.begin_request(f"request-{index}")
+            method = meter.measure(_body(f"request {index}"))[1]
+            observed.append((method, meter.journal_fields(method).get("tokenize_reprobe_status")))
+            clock[0] += gap_s
+        return observed + [("calls", str(calls))]
+
+    assert run(gap_s=0.0) == run(gap_s=600.0)

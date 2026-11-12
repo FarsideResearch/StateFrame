@@ -2692,7 +2692,7 @@ class NitpickerState:
         try:
             callback("nitpicker", event, str(entry["detail"]))
         except Exception as exc:  # noqa: BLE001 - observability cannot control work
-            print(f"[kernel-wiring] nitpicker trace failed: {type(exc).__name__}")
+            print(f"[stateframe] nitpicker trace failed: {type(exc).__name__}")
             self.trace_cb = None
 
     def arm(self) -> None:

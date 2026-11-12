@@ -17,6 +17,7 @@ from fixtures.process_signals import (record_identity, signal_run_owned, signal_
                                       wait_for_checkpoint_saved)
 
 from ._support import Endpoint, PYTHON, ROOT, copy_repo, environment, read_measurement_events
+from _timeouts import scaled, timeout_scale
 from engine_run import EngineProcess, run_monitored, start_monitored
 
 
@@ -28,17 +29,17 @@ def _kill_run(process: EngineProcess, run_dir: Path, *,
     """Kill the CLI and, like a machine crash, the engine: it runs in its own session and holds the run lock."""
     # The lock holder is matched by its engine command and re-verified before the signal.
     launched_after = 0.0
-    deadline = time.monotonic() + 120
+    deadline = time.monotonic() + scaled(120)
     if require_checkpoint_saved:
         wait_for_checkpoint_saved(run_dir, deadline=deadline, what="routed run crash")
     if process.poll() is None:
         # The shared barrier above covers both signals in this crash simulation.
         signal_run_owned(run_dir, process, signal.SIGKILL, deadline=deadline,
                          what="routed runner crash", require_checkpoint_saved=False, group=True)
-    process.communicate(timeout=5)
+    process.communicate(timeout=scaled(5))
     from stateframe.resume import ENGINE_LOCK, _lock_holder
 
-    cutoff = time.monotonic() + 15
+    cutoff = time.monotonic() + scaled(15)
     while (holder := _lock_holder(run_dir / ENGINE_LOCK)) is not None and time.monotonic() < cutoff:
         try:
             pid = int(holder)
@@ -62,6 +63,7 @@ def _crash_python(tmp_path: Path, point: str) -> tuple[Path, Path, Path]:
         f"if [ -e {shlex.quote(str(arm))} ]; then\n"
         f"  ROUTE_CRASH_POINT={shlex.quote(point)} "
         f"ROUTE_CRASH_MARKER={shlex.quote(str(marker))} "
+        f"SF_TEST_TIMEOUT_SCALE={shlex.quote(str(timeout_scale()))} "
         f"PYTHONPATH={shlex.quote(str(hook_dir))} "
         f"exec {shlex.quote(PYTHON)} \"$@\"\n"
         "fi\n"
@@ -86,7 +88,7 @@ def test_public_cli_routes_first_plan_send_to_second_endpoint(tmp_path):
             "--max-turns", "3", "--quiet", "--route", f"plan.endpoint={cheap.url}",
             "--route", "plan.model=cheap", "--route", f"read.endpoint={cheap.url}",
             "--route", "read.model=cheap"], capture_output=True, text=True,
-            env=environment(), expected_seconds=240, check=False)
+            env=environment(), expected_seconds=scaled(240), check=False)
     assert process.returncode in (0, 1), process.stdout + process.stderr
     spec = json.loads((run_dir / "spec.json").read_text())
     first = json.loads((run_dir / "wire" / "0001.route.json").read_text())
@@ -117,7 +119,7 @@ def test_failed_check_replans_then_read_action_returns_to_read_route(tmp_path):
             "--endpoint", default.url, "--model", "scripted", "--run-dir", str(run_dir),
             "--test-python", PYTHON, "--max-turns", "3", "--quiet",
             "--route", f"plan.endpoint={plan.url}", "--route", "plan.model=plan",
-        ], capture_output=True, text=True, env=environment(), expected_seconds=300, check=False)
+        ], capture_output=True, text=True, env=environment(), expected_seconds=scaled(300), check=False)
     assert process.returncode in (0, 1), process.stdout + process.stderr
     wire = run_dir / "wire"
     routes = [json.loads((wire / f"{index:04d}.route.json").read_text())
@@ -152,7 +154,7 @@ def test_read_edit_reply_is_discarded_and_reasked_on_default(tmp_path):
             "--max-turns", "5", "--quiet", "--route", f"plan.endpoint={cheap.url}",
             "--route", "plan.model=cheap", "--route", f"read.endpoint={cheap.url}",
             "--route", "read.model=cheap"], capture_output=True, text=True,
-            env=environment(), expected_seconds=300, check=False)
+            env=environment(), expected_seconds=scaled(300), check=False)
     assert process.returncode in (0, 1), process.stdout + process.stderr
     cheap_requests = [json.loads(line) for line in cheap_log.read_text().splitlines()]
     default_requests = [json.loads(line) for line in default_log.read_text().splitlines()]
@@ -228,13 +230,13 @@ def test_killed_second_leg_replays_first_leg_and_verifies_pending_bytes(tmp_path
             "--test-python", PYTHON, "--test-cmd", "python -m unittest discover -s tests -q",
             "--max-turns", "3", "--quiet", *routes], stdout=subprocess.PIPE,
             stderr=subprocess.PIPE, text=True, env=environment(), start_new_session=True,
-            expected_seconds=120, step="routed second-leg interruption")
+            expected_seconds=scaled(120), step="routed second-leg interruption")
         pending_route = run_dir / "wire" / "0002.route.json"
         pending_request = run_dir / "wire" / "0002.request.json"
         try:
             while process.poll() is None and not pending_request.is_file():
                 time.sleep(0.02)
-            assert pending_route.is_file() and pending_request.is_file(), process.communicate(timeout=3)
+            assert pending_route.is_file() and pending_request.is_file(), process.communicate(timeout=scaled(3))
             first = (run_dir / "wire" / "0001.request.json").read_bytes()
             second = pending_request.read_bytes()
             route_bytes = pending_route.read_bytes()
@@ -242,7 +244,7 @@ def test_killed_second_leg_replays_first_leg_and_verifies_pending_bytes(tmp_path
             _kill_run(process, run_dir)
             resumed = run_monitored([PYTHON, "-m", "stateframe", "resume", str(run_dir),
                                       "--quiet"], capture_output=True, text=True,
-                                      env=environment(), expected_seconds=300, check=False)
+                                      env=environment(), expected_seconds=scaled(300), check=False)
         finally:
             if process.poll() is None:
                 # Failure cleanup may precede the first checkpoint.
@@ -279,7 +281,7 @@ def test_routed_crash_boundary_replays_with_same_route_and_request_bytes(tmp_pat
             "--max-turns", "3", "--quiet", *routes], stdout=subprocess.PIPE,
             stderr=subprocess.PIPE, text=True,
             env=environment(),
-            start_new_session=True, expected_seconds=120,
+            start_new_session=True, expected_seconds=scaled(120),
             step="routed crash-boundary interruption")
         wire = run_dir / "wire"
         route2 = wire / "0002.route.json"
@@ -287,8 +289,8 @@ def test_routed_crash_boundary_replays_with_same_route_and_request_bytes(tmp_pat
         try:
             while process.poll() is None and not marker.is_file():
                 time.sleep(0.02)
-            assert marker.is_file(), process.communicate(timeout=3)
-            assert process.poll() is None, process.communicate(timeout=3)
+            assert marker.is_file(), process.communicate(timeout=scaled(3))
+            assert process.poll() is None, process.communicate(timeout=scaled(3))
             assert (wire / "0001.request.json").is_file()
             if crash_point == "after_route:2":
                 assert route2.is_file() and not request2.exists()
@@ -301,7 +303,7 @@ def test_routed_crash_boundary_replays_with_same_route_and_request_bytes(tmp_pat
             arm.unlink()
             resumed = run_monitored([PYTHON, "-m", "stateframe", "resume", str(run_dir),
                                       "--quiet", *routes], capture_output=True, text=True,
-                                     env=environment(), expected_seconds=300, check=False)
+                                     env=environment(), expected_seconds=scaled(300), check=False)
         finally:
             if process.poll() is None:
                 # Failure cleanup may precede the first checkpoint.
@@ -333,7 +335,7 @@ def test_escalation_without_second_response_allowance_stops_before_dispatch(tmp_
             "--test-python", PYTHON, "--test-cmd", "python -m unittest discover -s tests -q",
             "--max-turns", "1", "--quiet", "--route", f"plan.endpoint={cheap.url}",
             "--route", "plan.model=cheap"], capture_output=True, text=True,
-            env=environment(), expected_seconds=240, check=False)
+            env=environment(), expected_seconds=scaled(240), check=False)
     assert process.returncode in (0, 1), process.stdout + process.stderr
     assert (run_dir / "wire" / "0001.route.json").is_file()
     assert not (run_dir / "wire" / "0002.request.json").exists()
@@ -370,7 +372,7 @@ def test_routed_tokenizer_survives_sealing_on_a_separate_server(tmp_path):
             "--endpoint", default.url, "--model", "scripted", "--run-dir", str(run_dir),
             "--test-python", PYTHON, "--test-cmd", "python -m unittest discover -s tests -q",
             "--max-turns", "2", "--quiet", *routes], capture_output=True, text=True,
-            env=environment(), expected_seconds=240, check=False)
+            env=environment(), expected_seconds=scaled(240), check=False)
     assert process.returncode in (0, 1), process.stdout + process.stderr
     roles = [json.loads(path.read_text())["role"] for path in sorted((run_dir / "wire").glob("*.route.json"))]
     assert roles and set(roles) <= {"plan", "read"}
@@ -481,7 +483,7 @@ def test_routed_generic_shell_check_escalates_edit_and_passes(tmp_path):
             "--endpoint", default.url, "--model", "scripted", "--run-dir", str(run_dir),
             "--test-cmd", "sh check.sh", "--runner-kind", "generic", "--target", "app.sh",
             "--max-turns", "8", "--quiet", *_route_flags(cheap)],
-            capture_output=True, text=True, env=environment(), expected_seconds=300, check=False)
+            capture_output=True, text=True, env=environment(), expected_seconds=scaled(300), check=False)
     summary = json.loads((run_dir / "summary.json").read_text())
     assert process.returncode == 0, process.stdout + process.stderr
     assert summary["runner_kind"] == "generic"
@@ -546,7 +548,7 @@ def test_routed_protect_all_refuses_escalated_test_edit(tmp_path):
             "--test-python", PYTHON, "--test-cmd", "python -m pytest -q tests/test_value.py",
             "--protect-tests", "all", "--target", "value.py", "--max-turns", "10",
             "--quiet", *_route_flags(cheap)], capture_output=True, text=True,
-            env=environment(), expected_seconds=300, check=False)
+            env=environment(), expected_seconds=scaled(300), check=False)
     assert process.returncode == 0, process.stdout + process.stderr
     spec = json.loads((run_dir / "spec.json").read_text())
     summary = json.loads((run_dir / "summary.json").read_text())
@@ -589,7 +591,7 @@ def test_routed_hook_runs_once_for_escalated_edit_and_context_reaches_each_route
             "--endpoint", default.url, "--model", "scripted", "--run-dir", str(run_dir),
             "--test-cmd", "sh check.sh", "--runner-kind", "generic", "--target", "app.sh",
             "--hooks", str(config), "--max-turns", "8", "--quiet", *_route_flags(cheap)],
-            capture_output=True, text=True, env=environment(), expected_seconds=300, check=False)
+            capture_output=True, text=True, env=environment(), expected_seconds=scaled(300), check=False)
     assert process.returncode == 0, process.stdout + process.stderr
     assert json.loads((run_dir / "summary.json").read_text())["succeeded"] is True
     assert (run_dir / "workspace" / "app.sh").read_text() == "VALUE=good\n"
@@ -643,12 +645,12 @@ def test_routed_hooks_resume_after_discard_replays_tape_without_skipped_check(tm
             "--runner-kind", "generic", "--target", "app.sh", "--hooks", str(config),
             "--max-turns", "8", "--quiet", *_route_flags(cheap)],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-            env=environment(), start_new_session=True, expected_seconds=120,
+            env=environment(), start_new_session=True, expected_seconds=scaled(120),
             step="routed hooks interruption")
         try:
             while process.poll() is None and not marker.is_file():
                 time.sleep(0.02)
-            assert marker.is_file() and process.poll() is None, process.communicate(timeout=3)
+            assert marker.is_file() and process.poll() is None, process.communicate(timeout=scaled(3))
             wire = run_dir / "wire"
             assert (wire / "0002.response.json").is_file()
             first_request = (wire / "0001.request.json").read_bytes()
@@ -663,7 +665,7 @@ def test_routed_hooks_resume_after_discard_replays_tape_without_skipped_check(tm
             arm.unlink()
             resumed = run_monitored([PYTHON, "-m", "stateframe", "resume", str(run_dir),
                                       "--quiet"], capture_output=True, text=True,
-                                     env=environment(), expected_seconds=300, check=False)
+                                     env=environment(), expected_seconds=scaled(300), check=False)
         finally:
             if process.poll() is None:
                 # Failure cleanup may precede the first checkpoint.

@@ -641,7 +641,7 @@ def resolve_repo(
     if skipped_files:
         # ONE honest line — never per file. The pass is a bounded bonus; saying
         # so out loud is what keeps a silently-degraded layer from looking
-        # healthy (rule #158).
+        # healthy (rule).
         logger.info(
             "lsp_resolve: repo budget of %.0fs exhausted — %d file(s) left to "
             "name matching this build (they resolve on the next one, cache-forward)",

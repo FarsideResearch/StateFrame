@@ -51,7 +51,7 @@ RESOLUTIONS = (RESOLVED, PARTIAL, UNRESOLVED)
 
 #: Documented, deliberate gaps of graph-store v1 against the source designs.
 #: Read by ``build.py`` into every receipt so a consumer can never mistake v1's
-#: scope for the full design (rule #218: a scan certifies its own observation).
+#: scope for the full design (rule: a scan certifies its own observation).
 KNOWN_GAPS: Tuple[str, ...] = (
     "no-entity-lineage: a rename mints a new entity id (a_graph_layers line ~840)",
     "no-tombstones: deleted entities vanish from the next build rather than "
@@ -135,7 +135,7 @@ class Edge:
 
 @dataclass
 class Receipt:
-    """Rule #218: a layer build certifies its own observation before its verdict.
+    """rule: a layer build certifies its own observation before its verdict.
 
     A layer that scanned nothing, parsed nothing, or truncated is VISIBLE here.
     ``truncated`` and ``sampled`` are never silently applied — ``build.py``

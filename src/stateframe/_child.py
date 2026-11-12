@@ -69,6 +69,26 @@ def emit(kind: str, **fields: object) -> None:
                                          default=str, separators=(",", ":")), flush=True)
 
 
+def atomic_bytes(path: Path, data: bytes) -> None:
+    """Durably publish exact bytes without exposing a partially written snapshot."""
+    temporary: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(dir=path.parent, prefix=path.name + ".", delete=False) as stream:
+            temporary = Path(stream.name)
+            stream.write(data)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+        directory_fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+
+
 def emit_run_env_events(run: Path) -> None:
     """Forward host provisioning events to the durable engine log stream."""
     try:
@@ -255,15 +275,6 @@ def install_wire_recorder(run: Path, chat_url: str, replayer: Replayer | None = 
     counter = {"n": 0}
     HOST_STATE["wire"] = counter
 
-    def atomic_bytes(path: Path, data: bytes) -> None:
-        with tempfile.NamedTemporaryFile(dir=path.parent, prefix=path.name + ".", delete=False) as stream:
-            temp = Path(stream.name)
-            stream.write(data)
-        try:
-            os.replace(temp, path)
-        finally:
-            temp.unlink(missing_ok=True)
-
     def final_layout_record(_wire: bytes) -> dict[str, str]:
         from kernel_measurement import ACTIVE_REQUEST
 
@@ -316,7 +327,7 @@ def install_wire_recorder(run: Path, chat_url: str, replayer: Replayer | None = 
                 route, sort_keys=True, separators=(",", ":")).encode())
             atomic_bytes(stem.with_suffix(".request.json"), wire)
         else:
-            stem.with_suffix(".request.json").write_bytes(wire)
+            atomic_bytes(stem.with_suffix(".request.json"), wire)
         started = time.monotonic()
         replayed = None
         # An in-flight request to verify keeps the replayer in the path even with no tail left to answer.
@@ -326,16 +337,16 @@ def install_wire_recorder(run: Path, chat_url: str, replayer: Replayer | None = 
                 atomic_bytes(run / "resume-pending-verified.json", json.dumps(
                     replayer.pending_verified, sort_keys=True, separators=(",", ":")).encode())
             if replayed is None and replayer.diverged is not None:
-                (run / "resume-divergence.json").write_text(json.dumps(
-                    {**replayer.diverged, "send": index, "checkpoint": replayer.strict}, indent=1))
+                atomic_bytes(run / "resume-divergence.json", json.dumps(
+                    {**replayer.diverged, "send": index, "checkpoint": replayer.strict}, indent=1).encode())
                 if routed_endpoints is not None and replayer.route_mismatch:
                     raise CheckpointUnfaithful(f"send {index}: {replayer.diverged['reason']}")
                 if replayer.strict:
                     emit("checkpoint_unfaithful", send=index, **{k: v for k, v in replayer.diverged.items()
                                                                  if k != "first_difference"})
-                    (run / "checkpoint-refused.json").write_text(json.dumps(
-                        {"error": "CheckpointUnfaithful", "send": index, "reason": replayer.diverged["reason"]},
-                        indent=1))
+                    atomic_bytes(run / "checkpoint-refused.json", json.dumps(
+                        {"error": "CheckpointUnfaithful", "send": index,
+                         "reason": replayer.diverged["reason"]}, indent=1).encode())
                     raise CheckpointUnfaithful(f"send {index}: {replayer.diverged['reason']}")
                 if replayer.pending_mismatch:
                     raise ReplayUnfaithful(f"send {index}: {replayer.diverged['reason']}")
@@ -370,8 +381,9 @@ def install_wire_recorder(run: Path, chat_url: str, replayer: Replayer | None = 
         except Exception as error:
             detail = getattr(error, "error_detail", None)
             detail = detail if isinstance(detail, str) and detail else None
-            (wire_dir / f"{index:04d}.error.txt").write_text(
-                type(error).__name__ + (f": {detail}" if detail else "") + "\n")
+            atomic_bytes(
+                wire_dir / f"{index:04d}.error.txt",
+                (type(error).__name__ + (f": {detail}" if detail else "") + "\n").encode("utf-8"))
             if transport_attempts:
                 with (run / "sends.jsonl").open("a") as stream:
                     stream.write(json.dumps({"send": index, "request_bytes": len(wire),
@@ -388,7 +400,7 @@ def install_wire_recorder(run: Path, chat_url: str, replayer: Replayer | None = 
             request_id = getattr(capture, "request_id", None)
             hook_wiring.sent(wire, str(request_id) if request_id is not None else f"send:{index}")
         elapsed = time.monotonic() - started
-        stem.with_suffix(".response.json").write_bytes(response)
+        atomic_bytes(stem.with_suffix(".response.json"), response)
         try:
             parsed = json.loads(response)
         except (ValueError, RecursionError):
@@ -479,8 +491,8 @@ def install_checked_ask(rr, spec: dict, run: Path, hook_wiring=None) -> None:
                       "messages": messages, "tools": tools,
                       "presentation": {k: v for k, v in presentation.items()
                                        if isinstance(v, (str, int, float, bool)) or v is None}}
-            (requests_dir / f"{index:04d}.json").write_text(
-                json.dumps(record, ensure_ascii=False, default=str, indent=1))
+            atomic_bytes(requests_dir / f"{index:04d}.json",
+                         json.dumps(record, ensure_ascii=False, default=str, indent=1).encode("utf-8"))
             emit("request", request=index, turn=turn, messages=len(messages),
                  roles="".join(m.get("role", "?")[0] for m in messages if isinstance(m, dict)),
                  tools=[t.get("function", {}).get("name") for t in tools if isinstance(t, dict)])
@@ -771,7 +783,8 @@ def install_check_recorder(run: Path, replayer: Replayer | None, recorded_dir: P
                                   recorded_timings=True)
             else:
                 substitution["enabled"] = False  # the replay's state differs from here on; never patch again
-        (folder / f"{index:04d}.json.z").write_bytes(zlib.compress(json.dumps(record).encode("utf-8")))
+        atomic_bytes(folder / f"{index:04d}.json.z",
+                     zlib.compress(json.dumps(record).encode("utf-8")))
         return result
 
     policy.run_sandboxed = run_sandboxed
@@ -1158,7 +1171,7 @@ def main(argv: list[str]) -> int:
         result = rr.work(row)
         status = 0
     except BaseException as error:  # noqa: BLE001 - report every engine failure as a typed record
-        (run / "child-traceback.txt").write_text(traceback.format_exc())
+        atomic_bytes(run / "child-traceback.txt", traceback.format_exc().encode("utf-8"))
         emit("engine_error", error=type(error).__name__, detail=" ".join(str(error).split())[:300])
         if hook_wiring is not None:
             from kernel_hook_exec import HookContainmentError
@@ -1189,8 +1202,8 @@ def main(argv: list[str]) -> int:
                 result, status = {"result": "ENGINE_ERROR", "error": "ShellCleanupFailed"}, 1
             signal.signal(signal.SIGTERM, previous_term)
     elapsed = time.monotonic() - started
-    (run / "engine-result.json").write_text(json.dumps(
-        {"result": result, "seconds": round(elapsed, 3)}, default=str, indent=1))
+    atomic_bytes(run / "engine-result.json", json.dumps(
+        {"result": result, "seconds": round(elapsed, 3)}, default=str, indent=1).encode("utf-8"))
     emit("engine_end", result=(result or {}).get("result") if isinstance(result, dict) else str(result),
          seconds=round(elapsed, 1))
     return status

@@ -1,4 +1,4 @@
-"""Opt-in deduplication for the r42 UNVERIFIED/checklist presentation.
+"""Opt-in deduplication for the earlier run UNVERIFIED/checklist presentation.
 
 The open rows themselves remain owned by the live-counterexample and coverage
 reducers.  This module stores only model-facing presentation bookkeeping:

@@ -1,14 +1,14 @@
-"""Stage 6 terminal settlement for the plain-loop engine, in RUNREAL's existing vocabulary.
+"""Stage 6 terminal settlement for the plain-loop engine, in real-task runner's existing vocabulary.
 
-RUNREAL (bin/run_real.sh) selects the graded candidate ONLY through a final-product
+real-task runner (bin/run_real.sh) selects the graded candidate ONLY through a final-product
 manifest, and otherwise routes on journaled host facts. A COMPLETE run with neither
 is labelled HOST_ERROR (batches 1046-1049). This module emits exactly what the full
-kernel emits, through the same canonical writer, so RUNREAL needs no plain-specific
+kernel emits, through the same canonical writer, so real-task runner needs no plain-specific
 branch:
 
 - model called ``done`` with product files changed -> ``attempt_terminated`` (PASS =
   clean finish, never a grade) + ``kernel_final_product_manifest`` manifest;
-  if writing it fails -> ``final_product_manifest_failed`` (RUNREAL salvage-grades);
+  if writing it fails -> ``final_product_manifest_failed`` (real-task runner salvage-grades);
 - anything else -> ``final_product_no_candidate`` with reason ``no_product_edit`` or
   ``not_completed`` and ``salvage_gradable`` when product files changed.
 
@@ -54,7 +54,7 @@ def settle_stage6(*, outcome: Mapping[str, object], row: Mapping[str, object], f
             journal_path=Path(journal.path), solver_run_id=solver_run_id,
             task_id=str(row.get("task_id") or ""), candidate_dir=capture_dir,
             event_sink=lambda kind, **fields: journal.write(kind, **fields))
-    except Exception as error:  # host bookkeeping never flips the outcome; RUNREAL salvage-grades
+    except Exception as error:  # host bookkeeping never flips the outcome; real-task runner salvage-grades
         journal.write("final_product_manifest_failed", producer="kernel_plain_settlement", fact_owner="HOST",
                       dispatch=False, error_type=type(error).__name__, message=str(error)[:400],
                       fallback="timeout_salvage_export")

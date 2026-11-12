@@ -1,4 +1,4 @@
-"""Host-only completion-boundary diagnosis for the r45 R-001/R-004 slice.
+"""Host-only completion-boundary diagnosis for the earlier run R-001/R-004 slice.
 
 The diagnostic records the wire menu, the runner's dispatchable subset, open
 obligations, and the action adopted by the completion reducer.  It is a

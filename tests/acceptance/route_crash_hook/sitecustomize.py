@@ -1,13 +1,21 @@
 """Test-only crash barriers injected through --python by test_routes_host."""
 import builtins
+import importlib.util
 import os
 from pathlib import Path
 import threading
 
+_TIMEOUTS_SPEC = importlib.util.spec_from_file_location(
+    "_route_crash_test_timeouts", Path(__file__).resolve().parents[2] / "_timeouts.py")
+if _TIMEOUTS_SPEC is None or _TIMEOUTS_SPEC.loader is None:
+    raise ImportError("cannot load shared test timeout helper")
+_TIMEOUTS = importlib.util.module_from_spec(_TIMEOUTS_SPEC)
+_TIMEOUTS_SPEC.loader.exec_module(_TIMEOUTS)
+
 
 def _block() -> None:
     Path(os.environ["ROUTE_CRASH_MARKER"]).touch()
-    threading.Event().wait(120)
+    threading.Event().wait(_TIMEOUTS.scaled(120))
 
 
 if os.environ.get("ROUTE_CRASH_POINT") == "after_route:2":

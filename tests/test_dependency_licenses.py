@@ -15,7 +15,7 @@ IMPORT_ALIASES = {"yaml": "pyyaml"}
 # ts_grammars.install_as_language_pack() registers this module at run time from the per-language
 # grammar packages, so it is StateFrame code, not a dependency.
 RUNTIME_SHIMS = {"tree_sitter_language_pack"}
-# Reviewed 2026-10-30, present in the 0.1.0 release: lab-only modules absent from release builds
+# Reviewed 2026-10-30, present in the 0.1.0 release: development-only modules absent from release builds
 # (their importers are guarded or unreachable in a release) and one optional fallback parser that
 # StateFrame never installs. Nothing here is shipped or installed. Add to this set only after the
 # same review; a new third-party dependency belongs in THIRD_PARTY_LICENSES.md instead.

@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from _timeouts import scaled
 from stateframe.engine import kernel_env_seed
 from stateframe.engine import kernel_run_env
 from stateframe.engine.kernel_run_env import create_run_env
@@ -120,7 +121,7 @@ def test_concurrent_seed_builders_publish_one_seed(tmp_path, monkeypatch):
                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
                  for index in range(2)]
     for process in processes:
-        stdout, stderr = process.communicate(timeout=60)
+        stdout, stderr = process.communicate(timeout=scaled(60))
         assert process.returncode == 0, stdout + stderr
     seeds = list((tmp_path / "home/env-seeds").glob("[0-9a-f]" * 64))
     assert len(seeds) == 1

@@ -18,6 +18,7 @@ import pytest
 
 from _journal import measurement_events
 from _stateframe_home import isolated_stateframe_home
+from _timeouts import scaled
 from engine_run import EngineRunTimeout, run_monitored
 from tests.tape_server import TapeServer
 
@@ -237,14 +238,15 @@ def _engine_and_parent_timeouts(total_steps: int) -> tuple[int, int]:
     return engine_seconds, parent_seconds
 
 
-def _engine_timeout_argv(engine_seconds: int) -> tuple[str, str]:
-    return "--timeout", str(engine_seconds)
+def _engine_timeout_argv(engine_seconds: int | float) -> tuple[str, str]:
+    seconds = float(engine_seconds)
+    value = str(int(seconds)) if seconds.is_integer() else str(seconds)
+    return "--timeout", value
 
 
 def _short_tokenize_timeout_engine_python(
         tmp_path: Path, timeout_s: float, *,
         reprobe_after_requests: int | None = None,
-        reprobe_after_s: float | None = None,
 ) -> Path:
     wrapper = tmp_path / "python-with-short-tokenize-timeout"
     bootstrap = "\n".join((
@@ -262,8 +264,6 @@ def _short_tokenize_timeout_engine_python(
         f"request_diet.TOKENIZE_QUEUEING_TIMEOUT_SECONDS = {timeout_s!r}",
         *([f"request_diet.TOKENIZE_REPROBE_AFTER_REQUESTS = {reprobe_after_requests!r}"]
           if reprobe_after_requests is not None else []),
-        *([f"request_diet.TOKENIZE_REPROBE_AFTER_SECONDS = {reprobe_after_s!r}"]
-          if reprobe_after_s is not None else []),
         "raise SystemExit(host.main([str(child), str(run)]))",
     ))
     wrapper.write_text(
@@ -354,7 +354,7 @@ def test_request_capped_engine_python_runs_extra_bootstrap_before_main(tmp_path)
     child = _source_root() / "stateframe" / "_child.py"
     result = subprocess.run(
         [str(wrapper), "-B", str(child), str(tmp_path / "unused-run")],
-        capture_output=True, text=True, timeout=15, check=False,
+        capture_output=True, text=True, timeout=scaled(15), check=False,
     )
     assert result.returncode == 0, result.stderr
     assert marker.read_text(encoding="ascii") == "ready"
@@ -366,7 +366,6 @@ def _run_case(
         tokenize_slow_calls: tuple[int, ...] = (),
         tokenize_timeout_s: float | None = None,
         tokenize_reprobe_after_requests: int | None = None,
-        tokenize_reprobe_after_s: float | None = None,
         props_available: bool | None = None,
         stop_after_provider_requests: int | None = None,
         source_root: Path | None = None,
@@ -428,6 +427,8 @@ def _run_case(
     started = time.monotonic()
     with TapeServer(tape_script) as endpoint:
         engine_timeout, parent_timeout = _engine_and_parent_timeouts(endpoint.total_steps)
+        engine_timeout = scaled(engine_timeout)
+        parent_timeout = scaled(parent_timeout)
         command = [
             sys.executable, "-m", "stateframe", "run", "--repo", str(repo), "--task", task,
             "--endpoint", endpoint.url,
@@ -445,7 +446,6 @@ def _run_case(
                 _short_tokenize_timeout_engine_python(
                     tmp_path, tokenize_timeout_s,
                     reprobe_after_requests=tokenize_reprobe_after_requests,
-                    reprobe_after_s=tokenize_reprobe_after_s,
                 )
             )))
         elif stop_after_provider_requests is not None:
@@ -589,7 +589,7 @@ def test_every_corpus_file_has_neutral_model_and_no_host_identity():
 def test_tape_server_reads_a_gzip_script_and_keeps_neutral_model_id():
     tape_path = CASE_FILES[0] / "script.json.gz"
     with TapeServer(tape_path) as endpoint:
-        with urlopen(f"{endpoint.url}/models", timeout=2) as response:
+        with urlopen(f"{endpoint.url}/models", timeout=scaled(2)) as response:
             payload = json.load(response)
     assert payload["data"][0]["id"] == "allocation-replay-model"
 
@@ -701,7 +701,7 @@ def _request_tape_turn(endpoint_url: str) -> dict[str, object]:
         data=body,
         headers={"Content-Type": "application/json"},
     )
-    with urlopen(request, timeout=2) as response:
+    with urlopen(request, timeout=scaled(2)) as response:
         payload = json.load(response)
     return payload["choices"][0]["message"]
 

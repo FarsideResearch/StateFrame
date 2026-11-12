@@ -154,7 +154,7 @@ def _normalise(finding: Mapping[str, object]) -> dict[str, object]:
             finding.get("supersedes", ()), field="supersedes", maximum=100)[:MAX_SUPERSEDES],
     }
     if finding.get("product_binding") is not None:
-        # r44 F4 item 8: a test-derived finding is bound to the test receipt's FULL
+        # earlier run F4 item 8: a test-derived finding is bound to the test receipt's FULL
         # product/dependency binding, not only the target-source sha.  Optional,
         # so target-local findings keep their target-only binding.
         row["product_binding"] = _text(
@@ -304,7 +304,7 @@ class HistoryFindingsStore:
                 current_product_binding: str | None = None) -> dict[str, object]:
         """Return the compact frame payload, demoting stale evidence explicitly.
 
-        ``current_product_binding`` (r44 F4 item 8): when given, a finding that
+        ``current_product_binding`` (earlier run F4 item 8): when given, a finding that
         carries a ``product_binding`` is SETTLED only if it matches; an edit to a
         dependency (target sha unchanged) therefore demotes a test-derived pass to
         STALE, consistent with work_carry's demotion and the vacuity sentinel.

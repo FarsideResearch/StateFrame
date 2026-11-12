@@ -305,7 +305,7 @@ class UsageIndex:
         The rank is a TOTAL order: most-repeated statement shape first, then
         the statement text, then path, then line. No recency, no mtime, no
         filesystem order — an index that reorders itself between runs cannot
-        be cited (rule #207's generalization: a claim made through a shifting
+        be cited (rule's generalization: a claim made through a shifting
         view is unverified).
         """
         if usage_kind is not None and usage_kind not in USAGE_KINDS:
@@ -1202,7 +1202,7 @@ def knowledge_evidence(query: str, index: UsageIndex, *, limit: int = 3,
                        ledger: KnowledgeLedger | None = None) -> list:
     """Evidence-card-ready lines for ``query``. The pamphlet seam.
 
-    CONTRACT (rule #223 — a producer that says so):
+    CONTRACT (rule — a producer that says so):
 
       * Returns a list of SHORT, self-contained strings. Every line is inline
         text, carrying its own citation as ``path:line``. No line ever tells a

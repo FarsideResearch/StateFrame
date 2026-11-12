@@ -21,9 +21,9 @@ ALREADY_PRESENT = "ALREADY_PRESENT"
 STUB_STREAK_TO_CUT = 2
 _STATE_ATTR = "_stateframe_stub_sweep_cut"
 
-# r46: llama.cpp does not enforce tool-call JSON schemas (measured: `anyOf`/`not enum` on the read tool's
+# earlier run: llama.cpp does not enforce tool-call JSON schemas (measured: `anyOf`/`not enum` on the read tool's
 # parameters is text in the prompt, not grammar-constrained -- reference_llamacpp_constrained_decoding_scope.md).
-# Measured on the 23 A3B r45 frame journals (batches 442-455) that emit `stub_sweep_read_dropped`: 15/23 runs
+# Measured on the 23 A3B earlier run frame journals (batches 442-455) that emit `stub_sweep_read_dropped`: 15/23 runs
 # (336 incidents total) re-read the SAME path at the SAME default range after the menu cut fired. The menu hint
 # alone does not act. This switch is a second, independent owner: it refuses the exact redundant dispatch instead
 # of only reshaping the menu. Default off; STUB_SWEEP_CUT's menu transform is unchanged and remains the sole
@@ -353,9 +353,9 @@ def observe_response(runtime: object, receipts: object, *, revision: object = No
         released = True
         state["last_release_reason"] = "revision_changed"
     result = {
-        # r46 bug fix: "schema" is a RESERVED continuation-journal field (kernel_continuation_journal.RESERVED).
+        # earlier run bug fix: "schema" is a RESERVED continuation-journal field (kernel_continuation_journal.RESERVED).
         # Emitting it here made journal.emit() raise ValueError, and _emit()'s fail-open swallow silently
-        # dropped every "stub_sweep_evaluated" event (0 of 11 A3B r45 frame runs, batches 442-455; see
+        # dropped every "stub_sweep_evaluated" event (0 of 11 A3B earlier run frame runs, batches 442-455; see
         # trials/r45_staging/README.md "Pre-launch kit fixes"). apply_menu's own emits already used
         # "stub_sweep_schema" -- this brings observe_response's result payload onto the same one spelling.
         "stub_sweep_schema": SCHEMA,
@@ -559,7 +559,7 @@ def dispatch_refusal(runtime: object, path: object, *, line: object = None) -> s
         requested_line = None
     if requested_line is not None and requested_line >= 2:
         return None  # never a new range -- only the exact redundant default-range read
-    # r46 hunt #10: never a standing veto (NO_VETO owns post-green product reads) -- at most ONE refusal per
+    # earlier run hunt #10: never a standing veto (NO_VETO owns post-green product reads) -- at most ONE refusal per
     # (path, revision); a repeated read of the same target is dispatched.
     refused = getattr(runtime, "_stub_sweep_dispatch_refused", None)   # its own ledger, never the cut's _state
     if not isinstance(refused, set):

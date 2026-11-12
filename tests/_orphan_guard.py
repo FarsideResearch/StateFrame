@@ -4,6 +4,7 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping, Sequence
 import ctypes
 import errno
+import importlib.util
 import math
 import os
 from pathlib import Path
@@ -18,15 +19,22 @@ from typing import Literal, Protocol, cast
 
 import pytest
 
+_TIMEOUTS_SPEC = importlib.util.spec_from_file_location(
+    "_orphan_guard_test_timeouts", Path(__file__).with_name("_timeouts.py"))
+if _TIMEOUTS_SPEC is None or _TIMEOUTS_SPEC.loader is None:
+    raise ImportError("cannot load shared test timeout helper")
+_TIMEOUTS = importlib.util.module_from_spec(_TIMEOUTS_SPEC)
+_TIMEOUTS_SPEC.loader.exec_module(_TIMEOUTS)
+scaled = _TIMEOUTS.scaled
 
 _TOKEN_ENV = "SF_TEST_TOKEN"
-_TERM_GRACE_SECONDS = 0.35
-_KILL_GRACE_SECONDS = 0.65
-_CHECK_DEADLINE_SECONDS = 8.0
+_TERM_GRACE_SECONDS = scaled(0.35)
+_KILL_GRACE_SECONDS = scaled(0.65)
+_CHECK_DEADLINE_SECONDS = scaled(8.0)
 _PIDFD_EXIT_EVENTS = select.POLLIN | select.POLLHUP
 _PIDFD_ERROR_EVENTS = select.POLLERR | select.POLLNVAL
 _PIDFD_EVENTS = _PIDFD_EXIT_EVENTS | _PIDFD_ERROR_EVENTS
-_CLOSE_REAP_TIMEOUT_SECONDS = 1.0
+_CLOSE_REAP_TIMEOUT_SECONDS = scaled(1.0)
 _PROC_PIDT_BSDINFOWITHUNIQID = 18
 
 OutcomeKind = Literal["leak", "cleanup unverified", "confirmed exit"]

@@ -435,7 +435,7 @@ def check_presentation(messages: list[dict], spec: dict, runtime,
         distinct_working = list(dict.fromkeys(working))
         working = distinct_working
     # With STATEFRAME_SOURCE_LABELS=plain every source block (working, retained, observed) shares the
-    # "[Current source: " header, so several are legitimate once the model has read more than one file (r35c full
+    # "[Current source: " header, so several are legitimate once the model has read more than one file (earlier run full
     # smoke died at step 2 on the old exactly-one rule). Legacy labels keep the exactly-one working source rule.
     working_ok = len(working) >= 1 if plain_source_labels_enabled() else len(working) == 1
     if len(frames) != 1 or not working_ok:

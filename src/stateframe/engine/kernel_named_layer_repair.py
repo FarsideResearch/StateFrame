@@ -1,9 +1,9 @@
-"""Named-layer repair (r45; autopsy-a3b-r44c-ldev01.md + autopsy-ldev01-cross-release.md).
+"""Named-layer repair (earlier run; autopsy-a3b-earlier run-ldev01.md + autopsy-ldev01-cross-release.md).
 
 ``STATEFRAME_NAMED_LAYER_REPAIR`` (strict ``off|on``, default ``off``; frame arms only).  With the
-switch off nothing in this module is reached and every caller keeps its byte-identical r45 path.
+switch off nothing in this module is reached and every caller keeps its byte-identical earlier run path.
 
-ldev_01 lost four releases running on ONE missing layer (``app/cli.py``).  The kernel had the proof
+reviewer lost four releases running on ONE missing layer (``app/cli.py``).  The kernel had the proof
 in hand every time and overrode the model instead of acting on it:
 
 A. Signature gap is a counterexample.  The host check executed ``app.cli:run`` with the ticket's

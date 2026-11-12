@@ -16,6 +16,7 @@ from pathlib import Path
 
 import pytest
 
+from _timeouts import scaled
 import kernel_check_receipts as receipts
 import kernel_test_isolation as isolation
 
@@ -178,7 +179,7 @@ def test_linux_check_command_with_home_removed_under_unknown_uid(tmp_path):
     child_env = dict(os.environ)
     child_env.pop("HOME", None)
     result = subprocess.run([sys.executable, "-c", script], cwd=tmp_path, env=child_env,
-                            capture_output=True, text=True, timeout=30, check=False)
+                            capture_output=True, text=True, timeout=scaled(30), check=False)
     assert result.returncode == 0, result.stdout + result.stderr
 
 
@@ -242,6 +243,6 @@ def test_live_uv_venv_runs_under_the_check_sandbox(tmp_path):
         argv, env = isolation.isolated_command([program, "-c", "import json; print('ok')"],
                                                project, dict(os.environ))
         result = subprocess.run(argv, cwd=project, env=env, capture_output=True, text=True,
-                                timeout=60, check=False)
+                                timeout=scaled(60), check=False)
         assert (result.returncode, result.stdout.strip()) == (0, "ok"), result.stderr
     assert isolation.check_sandbox_exec_denial(str(python)) is None

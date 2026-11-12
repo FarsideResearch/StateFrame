@@ -8,6 +8,20 @@ import signal
 import sys
 import time
 
+_TIMEOUT_SCALE_FLAG = "--sf-test-timeout-scale="
+_TIMEOUT_SCALE = float(next(
+    (arg.removeprefix(_TIMEOUT_SCALE_FLAG) for arg in sys.argv[2:]
+     if arg.startswith(_TIMEOUT_SCALE_FLAG)),
+    os.environ.get("SF_TEST_TIMEOUT_SCALE", "1.0"),
+))
+# Drop the scale flag so positional arguments (marker, variant path) keep their indexes.
+sys.argv = [arg for arg in sys.argv if not arg.startswith(_TIMEOUT_SCALE_FLAG)]
+
+
+def _scaled(seconds: float) -> float:
+    return seconds * _TIMEOUT_SCALE
+
+
 mode = sys.argv[1] if len(sys.argv) > 1 else "normal"
 if mode == "hang" and len(sys.argv) > 2:
     held_marker = open(sys.argv[2], "w", encoding="utf-8")
@@ -79,7 +93,7 @@ while line := sys.stdin.readline():
                 os._exit(0)
             if child is not None:
                 os.waitpid(child, 0)
-                until = time.monotonic() + 1
+                until = time.monotonic() + _scaled(1)
                 while time.monotonic() < until:
                     if os.path.exists(sys.argv[2]):
                         with open(sys.argv[2], encoding="utf-8") as marker:
@@ -186,7 +200,9 @@ while line := sys.stdin.readline():
                     "inputSchema": {"type": "object", "properties": {}}})
             response(request["id"], {"tools": tools})
     elif method == "tools/call":
-        if mode == "nested_memory_fanout":
+        if mode == "scale_probe":
+            response(request["id"], {"content": [{"type": "text", "text": str(_TIMEOUT_SCALE)}]})
+        elif mode == "nested_memory_fanout":
             with open(sys.argv[2], "w", encoding="utf-8") as marker:
                 fcntl.flock(marker, fcntl.LOCK_EX)
                 marker.write("children started\n")
@@ -223,7 +239,7 @@ while line := sys.stdin.readline():
             response(request["id"], {"content": [{"type": "text", "text": text}]})
         elif mode == "probe_network":
             try:
-                with socket.create_connection(("127.0.0.1", int(sys.argv[2])), timeout=.5):
+                with socket.create_connection(("127.0.0.1", int(sys.argv[2])), timeout=_scaled(.5)):
                     text = "connected"
             except OSError as error:
                 text = type(error).__name__

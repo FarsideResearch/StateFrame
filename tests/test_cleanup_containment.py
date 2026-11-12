@@ -12,6 +12,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from _timeouts import scaled
 import capability_host_capacity as capacity
 import capability_release_runner as release
 import kernel_environment_state as environment
@@ -65,7 +66,7 @@ def _launch(tmp_path, *, identity):
                                start_new_session=True)
     if identity:
         assert tracker.capture_launch_identity(process, session_leader=True) is not None
-    end = time.monotonic() + 3
+    end = time.monotonic() + scaled(3)
     contents = ""
     while time.monotonic() < end:
         if pids_file.exists():
@@ -86,7 +87,7 @@ def _dispose(process, children):
             pass
     if process.poll() is None:
         process.kill()
-    process.wait(timeout=2)
+    process.wait(timeout=scaled(2))
     process.stdout.close()
     process.stderr.close()
 
@@ -105,7 +106,7 @@ def test_missing_family_reports_unverified_even_after_group_kill(tmp_path, monke
             tracker.kill_launch_unit(process, launch_identity=identity, deadline_seconds=.2)
         # The escaped child left the group before any signal, so cleanup must not reach it.
         assert _alive(children[1])
-        until = time.monotonic() + 2
+        until = time.monotonic() + scaled(2)
         while _alive(children[0]) and time.monotonic() < until:
             time.sleep(.01)
         assert not _alive(children[0])
@@ -128,7 +129,7 @@ def test_job_reader_cannot_reap_leader_before_group_escalation(tmp_path, monkeyp
     try:
         killed = owner.job_kill(row["job_id"])
         assert killed["state"] == "killed"
-        until = time.monotonic() + 2
+        until = time.monotonic() + scaled(2)
         while _alive(children[0]) and time.monotonic() < until:
             time.sleep(.01)
         assert not _alive(children[0])

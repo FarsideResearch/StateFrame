@@ -5,6 +5,7 @@ StateFrame keeps run records needed for inspect and resume in each run directory
 ## What a run stores
 
 - `wire/` contains the exact requests and responses exchanged with the model. It is never compacted by finish-time cleanup or `stateframe gc`.
+- `summary.json` records the run outcome. For a successful `--in-place` promotion, `apply-receipt.json` records the applied file paths and is durably published before `summary.json`. If summary publication is interrupted after changes are applied, inspect this receipt to identify the promoted files.
 - `requests/NNNN.json` contains preflight request records. These are records made before the provider request and are not necessarily the same bytes as `wire/`. At finish, StateFrame stores their exact original bytes in `requests.pack.xz`, a compressed tar archive, then removes the loose files. `stateframe inspect`, summaries and test helpers read both formats. Older runs with loose records remain supported.
 - `worker/measurement-runs/*/events.jsonl` is sealed as `events.jsonl.xz` (about 12x smaller), and the journal's compressed blobs are appended to `blobs/pack-0001.sfpk` with a rebuildable index. Every reader goes through one journal store that reads both the sealed and the loose layout, so older runs need no conversion.
 - `checkpoints/` and `env/` are removed once the terminal engine result cannot be resumed. A stopped, cancelled, killed, crashed, budget-stopped or interrupted run keeps resume state.

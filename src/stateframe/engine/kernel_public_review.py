@@ -36,7 +36,7 @@ class PublicReview:
         self.seen_bindings = set()
         self.last_receipt = None
         self.exposed = False
-        # Fix (post-review r44, finding 1): callers need to distinguish a
+        # Fix (post-review earlier run, finding 1): callers need to distinguish a
         # hard PROBE_RED refusal from a PROBE_INCONCLUSIVE diagnostic-only
         # card -- the latter must never become completion evidence, but must
         # also never itself refuse an otherwise-admissible `done`.

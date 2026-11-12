@@ -21,6 +21,7 @@ from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 
 import pytest
+from _timeouts import scaled
 
 
 _PROVISIONS = frozenset({
@@ -124,7 +125,8 @@ _STATE_KEY = pytest.StashKey[GateState]()
 _ACTIVE_STATE: GateState | None = None
 
 
-def _git(root: Path, *arguments: str, timeout: float = 15.0) -> subprocess.CompletedProcess[bytes]:
+def _git(root: Path, *arguments: str,
+         timeout: float = scaled(15.0)) -> subprocess.CompletedProcess[bytes]:
     try:
         return subprocess.run(
             ["git", "-C", str(root), *arguments],
@@ -517,7 +519,7 @@ def _sandbox_executable(name: str) -> str | None:
     return None
 
 
-def _command_problem(command: list[str], *, timeout: float = 8.0) -> str | None:
+def _command_problem(command: list[str], *, timeout: float = scaled(8.0)) -> str | None:
     try:
         result = subprocess.run(
             command, capture_output=True, text=True, errors="replace", timeout=timeout, check=False
@@ -567,12 +569,13 @@ def _pid_namespace_problem() -> str | None:
                     "--proc", "/proc", "--dev", "/dev", "--chdir", directory, "--",
                 ])
             command = [*command_prefix, sys.executable, "-c", "import os; print(os.getpid())"]
+            probe_timeout = scaled(3.0)
             result = subprocess.run(
                 command, cwd=directory, stdin=subprocess.DEVNULL, capture_output=True,
-                text=True, errors="replace", timeout=3.0, check=False,
+                text=True, errors="replace", timeout=probe_timeout, check=False,
             )
     except subprocess.TimeoutExpired:
-        return f"{tool} PID namespace probe timed out after 3 seconds"
+        return f"{tool} PID namespace probe timed out after {probe_timeout:g} seconds"
     except OSError as error:
         return f"could not run {tool} PID namespace probe: {error}"
 

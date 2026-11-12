@@ -14,6 +14,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from _timeouts import scaled
+
 from kernel_code_bookmarks import _source as bookmark_source
 from kernel_frame_source_snapshot import (
     _current_window, _source_coverage_line_items, editable_product_windows,
@@ -193,7 +195,7 @@ def _checkpoint_after_four_requests(tmp_path):
     root = Path(__file__).resolve().parents[1] / "src"
     subprocess.run([sys.executable, "-c", _CHECKPOINT_CHILD, str(root),
                     str(root / "stateframe/engine"), str(marker)], check=True,
-                   timeout=20, env=os.environ.copy())
+                   timeout=scaled(20), env=os.environ.copy())
     return json.loads(marker.read_text())
 
 

@@ -10,6 +10,8 @@ from pathlib import Path
 
 import pytest
 
+from _timeouts import scaled
+
 import kernel_provider_dialect as dialect
 from stateframe import _child
 from stateframe.engine import kernel_bounded_http
@@ -85,7 +87,7 @@ def servers():
             server.shutdown()
             server.server_close()
         for thread in threads:
-            thread.join(timeout=5)
+            thread.join(timeout=scaled(5))
 
 
 def _set_proxy(monkeypatch, proxy_url):
@@ -102,7 +104,7 @@ def test_bounded_http_ignores_proxy(monkeypatch, servers):
     wire = b'{"model":"scripted","messages":[]}'
     assert kernel_bounded_http.request_bytes(
         wire, target_url + "/v1/chat/completions", "secret",
-        deadline=time.monotonic() + 10, socket_timeout=5) == b'{"ok":true}'
+        deadline=time.monotonic() + scaled(10), socket_timeout=scaled(5)) == b'{"ok":true}'
     assert [(path, body) for path, body, _ in target_requests] == [
         ("/v1/chat/completions", wire)]
     assert target_requests[0][2]["Authorization"] == "Bearer secret"
@@ -137,7 +139,7 @@ def test_plain_http_ignores_proxy(monkeypatch, servers):
     tracker_id = tracker.begin()
     try:
         request = urllib.request.Request(target_url + "/v1/chat/completions", data=b"body")
-        with tracker.opener(tracker_id).open(request, timeout=5) as response:
+        with tracker.opener(tracker_id).open(request, timeout=scaled(5)) as response:
             assert response.read() == b'{"ok":true}'
     finally:
         tracker.finish(tracker_id)
@@ -154,7 +156,7 @@ def test_engine_child_global_opener_ignores_proxy(monkeypatch, servers):
     original = urllib.request._opener
     try:
         _child._install_direct_opener()
-        with urllib.request.urlopen(target_url + "/slots", timeout=5) as response:
+        with urllib.request.urlopen(target_url + "/slots", timeout=scaled(5)) as response:
             assert json.loads(response.read()) == [
                 {"id": 0, "n_ctx": 65536, "is_processing": False}]
     finally:

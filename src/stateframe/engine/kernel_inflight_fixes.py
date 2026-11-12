@@ -2,7 +2,7 @@
 
 On:
   1. class-scoped edits accept leading import lines next to the one class; missing imports are added at module top
-     (ldev_05 fe: ``import copy`` + class rejected INVALID_CLASS_PAYLOAD 4x).
+     (reviewer fe: ``import copy`` + class rejected INVALID_CLASS_PAYLOAD 4x).
   3. a post-green STALLED exit submits through green-then-exhaust instead of ending unsubmitted, and a reused
      verification at the same product revision drops run_tests from the post-green menu (one predicate, also used
      by the identical-rerun rule, which is inert under DISPOSITION v2 otherwise).

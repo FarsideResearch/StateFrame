@@ -24,7 +24,9 @@ import tempfile
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "src"))
+sys.path.insert(0, str(ROOT / "tests"))
 from stateframe.request_records import list_request_records, read_request_record  # noqa: E402
+from _timeouts import scaled  # noqa: E402
 
 
 def source_env(tree: Path, stable_tool_head: str | None, final_cache_layout: str | None, *,
@@ -684,7 +686,7 @@ def capture(tree: Path, python: str, launcher: Path, script: Path,
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     try:
         assert endpoint.stdout is not None
-        ready, _, _ = select.select([endpoint.stdout], [], [], 15)
+        ready, _, _ = select.select([endpoint.stdout], [], [], scaled(15))
         if not ready:
             raise RuntimeError("scripted endpoint did not start")
         url = endpoint.stdout.readline().strip()
@@ -698,7 +700,7 @@ def capture(tree: Path, python: str, launcher: Path, script: Path,
             "--no-run-env", "--quiet",
             *(("--runner-kind", "pytest", "--protect-tests", "all") if legacy_mode else ())]
         result = subprocess.run(command, cwd=tree, env=environment, capture_output=True,
-                                text=True, timeout=300, check=False)
+                                text=True, timeout=scaled(300), check=False)
         # The comparison is about request bytes, so a run whose checks fail still counts;
         # only a run that never wrote its summary or requests is a capture failure.
         names = list_request_records(run_dir)
@@ -709,10 +711,10 @@ def capture(tree: Path, python: str, launcher: Path, script: Path,
     finally:
         endpoint.terminate()
         try:
-            endpoint.wait(timeout=5)
+            endpoint.wait(timeout=scaled(5))
         except subprocess.TimeoutExpired:
             endpoint.kill()
-            endpoint.wait(timeout=5)
+            endpoint.wait(timeout=scaled(5))
 
 
 def main() -> int:

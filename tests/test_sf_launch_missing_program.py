@@ -11,6 +11,7 @@ from pathlib import Path
 
 import pytest
 
+from _timeouts import scaled
 import stateframe
 
 LAUNCHER = Path(stateframe.__file__).parent / "engine" / "sf_launch.py"
@@ -23,7 +24,7 @@ def test_missing_program_matches_bwrap_execvp_line(tmp_path, mode):
     value = str(tmp_path / "no-cgroup") if mode == "--cgroup-enter" else "8"
     result = subprocess.run(
         [sys.executable, "-I", str(LAUNCHER), mode, value, "sf-no-such-check-program", "test"],
-        capture_output=True, text=True, timeout=30, check=False)
+        capture_output=True, text=True, timeout=scaled(30), check=False)
     assert result.returncode != 0
     assert result.stderr.startswith("bwrap: execvp sf-no-such-check-program: No such file or directory")
     assert "execution launcher failed" not in result.stderr

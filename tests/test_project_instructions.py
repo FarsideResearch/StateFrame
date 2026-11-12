@@ -11,6 +11,8 @@ from pathlib import Path
 
 import pytest
 
+from _timeouts import scaled
+
 import kernel_project_instructions as slot
 from kernel_tool_settings import ToolSettings
 from stateframe import instructions as host
@@ -263,13 +265,13 @@ def _scripted_run(tmp_path: Path, name: str, agents_text: str | None, *extra: st
             [sys.executable, "-m", "stateframe", "run", "--repo", str(repo), "--task",
              "Fix the pricing code so the tests pass.", "--endpoint", url, "--model", "scripted",
              "--run-dir", str(run_dir), "--test-python", sys.executable, "--quiet", *extra],
-            capture_output=True, text=True, env=environment, expected_seconds=300, check=False)
+            capture_output=True, text=True, env=environment, expected_seconds=scaled(300), check=False)
         summary = json.loads((run_dir / "summary.json").read_text())
         assert result.returncode == 0, result.stdout + result.stderr + str(summary)
         assert summary["succeeded"] is True, summary
     finally:
         endpoint.terminate()
-        endpoint.wait(timeout=10)
+        endpoint.wait(timeout=scaled(10))
     requests = [json.loads(read_request_record(run_dir, name))
                 for name in list_request_records(run_dir)]
     return [request.get("body", request) for request in requests]

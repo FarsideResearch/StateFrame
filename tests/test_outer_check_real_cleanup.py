@@ -4,6 +4,7 @@ import sys
 
 import pytest
 
+from _timeouts import scaled
 from stateframe import outer_checks
 
 
@@ -18,7 +19,7 @@ def test_outer_check_reports_normal_completion_and_cleanup(tmp_path, exit_code):
     result = outer_checks.run(
         f"{sys.executable} check.py", tmp_path, python=sys.executable,
         test_python=sys.executable, runner_kind="generic", capture_output=True,
-        timeout_s=20,
+        timeout_s=scaled(20),
     )
 
     assert result["exit_code"] == exit_code

@@ -1210,7 +1210,7 @@ def bounded_host_closure_projection(*, assessments: Sequence[object] = (),
         view["omitted_satisfied"] = omitted_satisfied
     if _projection_json_size(view) > cap:
         if degrade:
-            # r43: shed optional detail, then summarise mandatory rows with exact
+            # earlier run: shed optional detail, then summarise mandatory rows with exact
             # counts and accounted ids; never crash, never exceed the cap.
             from kernel_host_closure_render_degrade import degrade_projection
             return degrade_projection(view, cap=cap, active_id=active_obligation,
@@ -3072,9 +3072,9 @@ _SIGNATURE_BIND_LINE = ('        return "SIGNATURE_MISMATCH", str(error)\n'
 
 def _script_for_check(check: CheckDefinition) -> str:
     script = _script_for_check_base(check)
-    # STATEFRAME_NAMED_LAYER_REPAIR (autopsy-a3b-r44c-ldev01 A): bind_target runs only after resolve()
+    # STATEFRAME_NAMED_LAYER_REPAIR (autopsy-a3b-earlier run-ldev01 A): bind_target runs only after resolve()
     # succeeded, so a bind TypeError there is a SIGNATURE_MISMATCH on a real entry point, not an unbound
-    # check.  Off: the script text is byte-identical to r45.
+    # check.  Off: the script text is byte-identical to earlier run.
     from kernel_named_layer_repair import enabled as named_layer_repair_enabled
     if named_layer_repair_enabled() and _UNBOUND_BIND_LINE in script:
         script = script.replace(_UNBOUND_BIND_LINE, _SIGNATURE_BIND_LINE, 1)

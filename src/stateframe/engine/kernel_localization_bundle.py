@@ -308,7 +308,7 @@ def _graph_relations(
     if not bounded:
         if bound_reason == "deadline":
             return [], {"status": "PARTIAL", "reason": "deadline", "files": file_count, "bytes": total_bytes}, [{"kind": "graph_deadline"}]
-        # W8: a real repository exceeds the whole-repo budget (AHA: 2.9 MB),
+        # W8: a real repository exceeds the whole-repo budget (sample project: 2.9 MB),
         # so build the graph over a task-scoped mirror within the same budget.
         scoped, scope_info = _scoped_graph_files(root, declared_paths, symbols, deadline=deadline)
         if not scoped or time.monotonic() >= deadline:
@@ -492,7 +492,7 @@ def build_localization_bundle(
                 max_scan_bytes=MAX_SCAN_BYTES, max_context_bytes=MAX_CONTEXT_BYTES,
             )
         else:
-            # W8: identifier-free tickets (the live AHA shape) rank whole-file
+            # W8: identifier-free tickets (the live sample project shape) rank whole-file
             # owners by ticket-word overlap, labelled and bounded.
             result = rank_owner_spans_by_words(
                 workspace, path, ticket_words(safe_ticket),

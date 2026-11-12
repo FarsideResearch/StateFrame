@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pytest
 
+from _timeouts import scaled
 from stateframe import runner
 from stateframe.engine import kernel_env_seed as seeds
 
@@ -81,7 +82,7 @@ def test_locked_seed_is_skipped(tmp_path, monkeypatch):
     finally:
         process.stdin.write("x")
         process.stdin.flush()
-        process.communicate(timeout=10)
+        process.communicate(timeout=scaled(10))
 
 
 def test_external_hardlink_seed_is_skipped(tmp_path, monkeypatch):
@@ -237,7 +238,7 @@ def test_concurrent_clones_leave_valid_seeds_below_soft_bound(tmp_path, monkeypa
     for process in processes:
         process.stdin.close()
         process.stdin = None
-        stdout, stderr = process.communicate(timeout=60)
+        stdout, stderr = process.communicate(timeout=scaled(60))
         assert process.returncode == 0, stdout + stderr
     remaining = [path for path in store.iterdir() if path.is_dir() and len(path.name) == 64]
     assert all(seeds._valid(seed, seed.name) for seed in remaining)

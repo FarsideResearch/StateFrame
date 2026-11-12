@@ -3784,6 +3784,30 @@
     },
     {
       "file": "src/stateframe/engine/mc_repo_intel_vendor/repo_map.py",
+      "function": "_record_commit_sha_lookup_failure",
+      "except_clause": "except BaseException:",
+      "ordinal": 1,
+      "reason": "Built-in type-name descriptor is diagnostic only; the recorder continues with <unknown> and attempts warning and journal evidence.",
+      "risk": "low: hostile exception metaclass may hide its type name"
+    },
+    {
+      "file": "src/stateframe/engine/mc_repo_intel_vendor/repo_map.py",
+      "function": "_record_commit_sha_lookup_failure",
+      "except_clause": "except Exception:",
+      "ordinal": 3,
+      "reason": "Logging is best effort; a logger failure cannot replace the commit SHA lookup result, and journal emission is attempted next.",
+      "risk": "medium: if logging and journal both fail, this metadata is unavailable"
+    },
+    {
+      "file": "src/stateframe/engine/mc_repo_intel_vendor/repo_map.py",
+      "function": "_record_commit_sha_lookup_failure",
+      "except_clause": "except Exception:",
+      "ordinal": 5,
+      "reason": "Final journal emission guard must not replace the commit SHA lookup result after warning was attempted.",
+      "risk": "medium: if logging also failed, this failure has no durable diagnostic"
+    },
+    {
+      "file": "src/stateframe/engine/mc_repo_intel_vendor/repo_map.py",
       "function": "_generate_repo_map_with_stats",
       "except_clause": "except ValueError:",
       "ordinal": 1,
@@ -3813,6 +3837,30 @@
       "ordinal": 2,
       "reason": "baseline debt 2026-11-05, see inventory",
       "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/probes/react_repair.py",
+      "function": "_record_intake_orientation_failure",
+      "except_clause": "except BaseException:",
+      "ordinal": 1,
+      "reason": "Built-in type-name descriptor is diagnostic only; the recorder continues with <unknown> and attempts warning and journal evidence.",
+      "risk": "low: hostile exception metaclass may hide its type name"
+    },
+    {
+      "file": "src/stateframe/engine/probes/react_repair.py",
+      "function": "_record_intake_orientation_failure",
+      "except_clause": "except Exception:",
+      "ordinal": 3,
+      "reason": "Logging is best effort; logger failure cannot replace intake failure, and journal emission is attempted next.",
+      "risk": "medium: if logging and journal both fail, this metadata is unavailable"
+    },
+    {
+      "file": "src/stateframe/engine/probes/react_repair.py",
+      "function": "_record_intake_orientation_failure",
+      "except_clause": "except Exception:",
+      "ordinal": 4,
+      "reason": "Final journal emission guard must not replace intake failure after warning was attempted.",
+      "risk": "medium: if logging also failed, this failure has no durable diagnostic"
     },
     {
       "file": "src/stateframe/engine/probes/react_repair.py",
@@ -4016,22 +4064,6 @@
     },
     {
       "file": "src/stateframe/engine/probes/react_repair.py",
-      "function": "_db_alive",
-      "except_clause": "except OSError:",
-      "ordinal": 1,
-      "reason": "baseline debt 2026-11-05, see inventory",
-      "risk": "unclassified"
-    },
-    {
-      "file": "src/stateframe/engine/probes/react_repair.py",
-      "function": "_ensure_db",
-      "except_clause": "except Exception:",
-      "ordinal": 1,
-      "reason": "baseline debt 2026-11-05, see inventory",
-      "risk": "unclassified"
-    },
-    {
-      "file": "src/stateframe/engine/probes/react_repair.py",
       "function": "_discover_test_targets",
       "except_clause": "except (OSError, UnicodeError):",
       "ordinal": 2,
@@ -4113,6 +4145,14 @@
     {
       "file": "src/stateframe/engine/probes/react_repair.py",
       "function": "work",
+      "except_clause": "except BaseException:",
+      "ordinal": 33,
+      "reason": "Best-effort journal flush during an existing post-construction failure must preserve the original exception raised immediately afterward.",
+      "risk": "low: a failed flush may leave buffered journal records unwritten"
+    },
+    {
+      "file": "src/stateframe/engine/probes/react_repair.py",
+      "function": "work",
       "except_clause": "except Exception:",
       "ordinal": 1,
       "reason": "baseline debt 2026-11-05, see inventory",
@@ -4154,7 +4194,7 @@
       "file": "src/stateframe/engine/probes/react_repair.py",
       "function": "work",
       "except_clause": "except (TypeError, ValueError):",
-      "ordinal": 35,
+      "ordinal": 37,
       "reason": "baseline debt 2026-11-05, see inventory",
       "risk": "high"
     },
@@ -4162,7 +4202,7 @@
       "file": "src/stateframe/engine/probes/react_repair.py",
       "function": "work",
       "except_clause": "except (TypeError, ValueError):",
-      "ordinal": 38,
+      "ordinal": 40,
       "reason": "baseline debt 2026-11-05, see inventory",
       "risk": "high"
     },
@@ -4170,7 +4210,7 @@
       "file": "src/stateframe/engine/probes/react_repair.py",
       "function": "work",
       "except_clause": "except Exception:",
-      "ordinal": 40,
+      "ordinal": 42,
       "reason": "baseline debt 2026-11-05, see inventory",
       "risk": "unclassified"
     },
@@ -4178,7 +4218,7 @@
       "file": "src/stateframe/engine/probes/react_repair.py",
       "function": "work",
       "except_clause": "except OSError:",
-      "ordinal": 41,
+      "ordinal": 43,
       "reason": "baseline debt 2026-11-05, see inventory",
       "risk": "unclassified"
     },
@@ -4186,7 +4226,7 @@
       "file": "src/stateframe/engine/probes/react_repair.py",
       "function": "work",
       "except_clause": "except Exception:",
-      "ordinal": 56,
+      "ordinal": 58,
       "reason": "baseline debt 2026-11-05, see inventory",
       "risk": "unclassified"
     },
@@ -4194,7 +4234,7 @@
       "file": "src/stateframe/engine/probes/react_repair.py",
       "function": "work",
       "except_clause": "except (OSError, ValueError):",
-      "ordinal": 62,
+      "ordinal": 64,
       "reason": "baseline debt 2026-11-05, see inventory",
       "risk": "med"
     },
@@ -4202,14 +4242,6 @@
       "file": "src/stateframe/engine/probes/react_repair.py",
       "function": "work",
       "except_clause": "except (ImportError, AttributeError, TypeError, ValueError):",
-      "ordinal": 66,
-      "reason": "baseline debt 2026-11-05, see inventory",
-      "risk": "unclassified"
-    },
-    {
-      "file": "src/stateframe/engine/probes/react_repair.py",
-      "function": "work",
-      "except_clause": "except AttributeError:",
       "ordinal": 68,
       "reason": "baseline debt 2026-11-05, see inventory",
       "risk": "unclassified"
@@ -4217,8 +4249,16 @@
     {
       "file": "src/stateframe/engine/probes/react_repair.py",
       "function": "work",
+      "except_clause": "except AttributeError:",
+      "ordinal": 70,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/probes/react_repair.py",
+      "function": "work",
       "except_clause": "except Exception:",
-      "ordinal": 82,
+      "ordinal": 84,
       "reason": "baseline debt 2026-11-05, see inventory",
       "risk": "unclassified"
     },
@@ -4226,7 +4266,7 @@
       "file": "src/stateframe/engine/probes/react_repair.py",
       "function": "work",
       "except_clause": "except (AttributeError, TypeError):",
-      "ordinal": 85,
+      "ordinal": 87,
       "reason": "baseline debt 2026-11-05, see inventory",
       "risk": "unclassified"
     },
@@ -4234,15 +4274,7 @@
       "file": "src/stateframe/engine/probes/react_repair.py",
       "function": "work",
       "except_clause": "except (ImportError, AttributeError, TypeError, ValueError, OSError):",
-      "ordinal": 89,
-      "reason": "baseline debt 2026-11-05, see inventory",
-      "risk": "unclassified"
-    },
-    {
-      "file": "src/stateframe/engine/probes/react_repair.py",
-      "function": "work",
-      "except_clause": "except Exception:",
-      "ordinal": 98,
+      "ordinal": 91,
       "reason": "baseline debt 2026-11-05, see inventory",
       "risk": "unclassified"
     },
@@ -4266,7 +4298,7 @@
       "file": "src/stateframe/engine/probes/react_repair.py",
       "function": "work",
       "except_clause": "except Exception:",
-      "ordinal": 103,
+      "ordinal": 104,
       "reason": "baseline debt 2026-11-05, see inventory",
       "risk": "unclassified"
     },
@@ -4283,14 +4315,6 @@
       "function": "work",
       "except_clause": "except Exception:",
       "ordinal": 107,
-      "reason": "baseline debt 2026-11-05, see inventory",
-      "risk": "unclassified"
-    },
-    {
-      "file": "src/stateframe/engine/probes/react_repair.py",
-      "function": "work",
-      "except_clause": "except Exception:",
-      "ordinal": 108,
       "reason": "baseline debt 2026-11-05, see inventory",
       "risk": "unclassified"
     },
@@ -4330,6 +4354,14 @@
       "file": "src/stateframe/engine/probes/react_repair.py",
       "function": "work",
       "except_clause": "except Exception:",
+      "ordinal": 113,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/probes/react_repair.py",
+      "function": "work",
+      "except_clause": "except Exception:",
       "ordinal": 114,
       "reason": "baseline debt 2026-11-05, see inventory",
       "risk": "unclassified"
@@ -4338,7 +4370,7 @@
       "file": "src/stateframe/engine/probes/react_repair.py",
       "function": "work",
       "except_clause": "except Exception:",
-      "ordinal": 118,
+      "ordinal": 116,
       "reason": "baseline debt 2026-11-05, see inventory",
       "risk": "unclassified"
     },
@@ -4346,7 +4378,7 @@
       "file": "src/stateframe/engine/probes/react_repair.py",
       "function": "work",
       "except_clause": "except Exception:",
-      "ordinal": 128,
+      "ordinal": 120,
       "reason": "baseline debt 2026-11-05, see inventory",
       "risk": "unclassified"
     },
@@ -4355,6 +4387,14 @@
       "function": "work",
       "except_clause": "except Exception:",
       "ordinal": 130,
+      "reason": "baseline debt 2026-11-05, see inventory",
+      "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/probes/react_repair.py",
+      "function": "work",
+      "except_clause": "except Exception:",
+      "ordinal": 132,
       "reason": "baseline debt 2026-11-05, see inventory",
       "risk": "unclassified"
     }

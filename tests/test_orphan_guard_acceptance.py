@@ -44,6 +44,8 @@ from pathlib import Path
 
 import pytest
 
+from _timeouts import scaled, timeout_scale
+
 import _orphan_guard as orphan_guard
 from orphan_guard_mutants import MUTANTS
 
@@ -51,7 +53,7 @@ pytest_plugins = ("pytester",)
 
 
 _IS_LINUX = sys.platform == "linux"
-_SETUP_TIMEOUT = 20.0
+_SETUP_TIMEOUT = scaled(20.0)
 _CHECK_TIMEOUT = 30.0
 _TOKEN_ENV = "SF_TEST_TOKEN"
 _PID1_TOKEN_SOURCE = "SF_TEST_PID1_CHILD_TOKEN"
@@ -124,7 +126,7 @@ os.close(ready_r)
 os.close(ready_w)
 os.close(go_r)
 os.close(adopted_w)
-readable, _, _ = select.select([pid_r], [], [], 20.0)
+readable, _, _ = select.select([pid_r], [], [], __SF_SETUP_TIMEOUT_SECONDS__)
 if not readable:
     emit({"stage": "setup_error", "detail": "timed out waiting for forked child pid"})
     raise SystemExit(2)
@@ -135,7 +137,7 @@ try:
 except ValueError:
     emit({"stage": "setup_error", "detail": "forked child pid record was invalid"})
     raise SystemExit(2)
-readable, _, _ = select.select([control_fd], [], [], 20.0)
+readable, _, _ = select.select([control_fd], [], [], __SF_SETUP_TIMEOUT_SECONDS__)
 command = os.read(control_fd, 1) if readable else b""
 if command != b"g":
     for pid in (intermediate, child_pid):
@@ -161,7 +163,7 @@ os.write(go_w, b"1")
 os.close(go_w)
 parent_exit = select.poll()
 parent_exit.register(parent_pidfd, select.POLLIN | select.POLLHUP | select.POLLERR)
-if not parent_exit.poll(20_000):
+if not parent_exit.poll(__SF_SETUP_TIMEOUT_MILLISECONDS__):
     os.close(parent_pidfd)
     for pid in (intermediate, child_pid):
         try:
@@ -175,12 +177,12 @@ os.close(parent_pidfd)
 emit({"stage": "parent_exit", "parent_pid": intermediate,
       "confirmed": True, "wait_status": status})
 os.kill(child_pid, signal.SIGUSR1)
-readable, _, _ = select.select([adopted_r], [], [], 20.0)
+readable, _, _ = select.select([adopted_r], [], [], __SF_SETUP_TIMEOUT_SECONDS__)
 if not readable or not os.read(adopted_r, 1):
     emit({"stage": "setup_error", "detail": "adopted child did not acknowledge transition"})
     raise SystemExit(2)
 os.close(adopted_r)
-readable, _, _ = select.select([control_fd], [], [], 20.0)
+readable, _, _ = select.select([control_fd], [], [], __SF_SETUP_TIMEOUT_SECONDS__)
 if not readable or os.read(control_fd, 1) != b"x":
     emit({"stage": "setup_error", "detail": "test did not release subreaper helper"})
     raise SystemExit(2)
@@ -251,7 +253,7 @@ os.close(child_ready_r)
 os.close(child_ready_w)
 os.close(parent_go_r)
 os.close(pid_w)
-readable, _, _ = select.select([pid_r], [], [], 20.0)
+readable, _, _ = select.select([pid_r], [], [], __SF_SETUP_TIMEOUT_SECONDS__)
 if not readable:
     emit({"stage": "setup_error", "detail": "timed out waiting for forked child pid"})
     raise SystemExit(2)
@@ -263,7 +265,7 @@ except ValueError:
     emit({"stage": "setup_error", "detail": "forked child pid record was invalid"})
     raise SystemExit(2)
 emit({"stage": "created", "pid": child_pid, "old_parent_pid": intermediate})
-readable, _, _ = select.select([control_fd], [], [], 20.0)
+readable, _, _ = select.select([control_fd], [], [], __SF_SETUP_TIMEOUT_SECONDS__)
 command = os.read(control_fd, 1) if readable else b""
 if command != b"g":
     for pid in (intermediate, child_pid):
@@ -288,7 +290,7 @@ os.write(parent_go_w, b"1")
 os.close(parent_go_w)
 parent_exit = select.poll()
 parent_exit.register(parent_pidfd, select.POLLIN | select.POLLHUP | select.POLLERR)
-if not parent_exit.poll(20_000):
+if not parent_exit.poll(__SF_SETUP_TIMEOUT_MILLISECONDS__):
     os.close(parent_pidfd)
     for pid in (intermediate, child_pid):
         try:
@@ -301,7 +303,7 @@ _, status = os.waitpid(intermediate, 0)
 os.close(parent_pidfd)
 emit({"stage": "parent_exit", "parent_pid": intermediate,
       "confirmed": True, "wait_status": status})
-readable, _, _ = select.select([control_fd], [], [], 20.0)
+readable, _, _ = select.select([control_fd], [], [], __SF_SETUP_TIMEOUT_SECONDS__)
 if not readable or os.read(control_fd, 1) != b"a":
     emit({"stage": "setup_error", "detail": "test did not request PID-1 guard observation"})
     raise SystemExit(2)
@@ -321,7 +323,7 @@ except ProcessLookupError:
     alive = False
 emit({"stage": "observer", "alive": alive,
       "start_time_before": before, "start_time_after": after})
-readable, _, _ = select.select([control_fd], [], [], 20.0)
+readable, _, _ = select.select([control_fd], [], [], __SF_SETUP_TIMEOUT_SECONDS__)
 if not readable or os.read(control_fd, 1) != b"x":
     emit({"stage": "setup_error", "detail": "test did not release PID-1 helper"})
     raise SystemExit(2)
@@ -332,6 +334,17 @@ except ProcessLookupError:
 os.waitpid(child_pid, 0)
 os.close(control_fd)
 '''
+
+def _scale_setup_script_waits(script: str) -> str:
+    return script.replace(
+        "__SF_SETUP_TIMEOUT_SECONDS__", repr(_SETUP_TIMEOUT)
+    ).replace(
+        "__SF_SETUP_TIMEOUT_MILLISECONDS__", str(int(_SETUP_TIMEOUT * 1000))
+    )
+
+
+_SUBREAPER_SCRIPT = _scale_setup_script_waits(_SUBREAPER_SCRIPT)
+_PID1_CHILD_SCRIPT = _scale_setup_script_waits(_PID1_CHILD_SCRIPT)
 
 
 def _token() -> str:
@@ -361,7 +374,7 @@ def test_readline_fd_bounds_partial_readiness_records():
     read_fd, write_fd = os.pipe()
     try:
         os.write(write_fd, b"rea")
-        deadline = time.monotonic() + 0.05
+        deadline = time.monotonic() + scaled(0.05)
         with pytest.raises(pytest.fail.Exception, match="timed out waiting for readiness"):
             _readline_fd(read_fd, deadline, "readiness")
     finally:
@@ -746,7 +759,7 @@ def _check_guard(guard):
         raise _CheckDeadline
 
     signal.signal(signal.SIGALRM, raise_deadline)
-    previous_timer = signal.setitimer(signal.ITIMER_REAL, _CHECK_TIMEOUT)
+    previous_timer = signal.setitimer(signal.ITIMER_REAL, scaled(_CHECK_TIMEOUT))
     started = time.monotonic()
     try:
         result = guard.check()
@@ -1322,6 +1335,7 @@ def _configure_pytester(pytester, monkeypatch) -> None:
     inherited = os.environ.get("PYTHONPATH", "")
     monkeypatch.setenv(
         "PYTHONPATH", os.pathsep.join(value for value in (tests_dir, inherited) if value))
+    monkeypatch.setenv("SF_TEST_TIMEOUT_SCALE", str(timeout_scale()))
 
 
 def _run_inner(pytester, monkeypatch, source: str):
@@ -1341,6 +1355,7 @@ import subprocess
 import sys
 import time
 import pytest
+from _timeouts import scaled
 from test_orphan_guard_acceptance import _readline_fd
 
 HELPER = "import os,signal; os.write(1,b'ready\\n'); signal.pause()"
@@ -1348,7 +1363,7 @@ HELPER = "import os,signal; os.write(1,b'ready\\n'); signal.pause()"
 def wait_ready(process):
     if process.stdout is None:
         pytest.fail("setup: helper has no readiness stream", pytrace=False)
-    line = _readline_fd(process.stdout.fileno(), time.monotonic() + 20.0, "helper readiness")
+    line = _readline_fd(process.stdout.fileno(), time.monotonic() + scaled(20.0), "helper readiness")
     if line != b"ready":
         pytest.fail("setup: helper sent invalid readiness", pytrace=False)
 
@@ -1356,7 +1371,7 @@ def cleanup(process):
     if process.poll() is None:
         process.kill()
         try:
-            process.wait(timeout=20.0)
+            process.wait(timeout=scaled(20.0))
         except subprocess.TimeoutExpired:
             pytest.fail("setup: atexit cleanup could not stop helper", pytrace=False)
 
@@ -1371,7 +1386,7 @@ def ended_scope_with_helper(orphan_guard, tmp_path):
     yield launch
     launch.process.terminate()
     try:
-        launch.process.wait(timeout=20.0)
+        launch.process.wait(timeout=scaled(20.0))
     except subprocess.TimeoutExpired:
         pytest.fail("setup: fixture finalizer could not stop helper", pytrace=False)
 
@@ -1410,6 +1425,7 @@ import subprocess
 import sys
 import time
 import pytest
+from _timeouts import scaled
 from test_orphan_guard_acceptance import _readline_fd
 
 HELPER = "import os,signal,sys; fd=os.open(sys.argv[1],os.O_CREAT|os.O_RDWR,0o600); os.write(1,b'ready\\n'); signal.pause()"
@@ -1428,7 +1444,7 @@ class Handle:
 def wait_ready(process):
     if process.stdout is None:
         pytest.fail("setup: helper has no readiness stream", pytrace=False)
-    line = _readline_fd(process.stdout.fileno(), time.monotonic() + 20.0, "helper readiness")
+    line = _readline_fd(process.stdout.fileno(), time.monotonic() + scaled(20.0), "helper readiness")
     if line != b"ready":
         pytest.fail("setup: helper sent invalid readiness", pytrace=False)
 
@@ -1436,7 +1452,7 @@ def cleanup(process):
     if process.poll() is None:
         process.kill()
         try:
-            process.wait(timeout=20.0)
+            process.wait(timeout=scaled(20.0))
         except subprocess.TimeoutExpired:
             pytest.fail("setup: atexit cleanup could not stop helper", pytrace=False)
 

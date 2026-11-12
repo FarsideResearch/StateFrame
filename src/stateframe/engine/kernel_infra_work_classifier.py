@@ -160,7 +160,7 @@ def prepare_batch(
 
     Rows without an explicit nested ``signals`` mapping are treated as the
     host record itself.  This keeps the kernel useful for small runners while
-    the MC pack can provide a normalized nested record.
+    the sample project pack can provide a normalized nested record.
     """
 
     active = enabled() if enabled_mode is None else bool(enabled_mode)

@@ -7,6 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from _timeouts import scaled
 import kernel_exec_tracker as tracker
 import kernel_execution_policy as policy
 
@@ -28,7 +29,7 @@ def test_collect_cleans_normal_process_before_reaping(tmp_path, monkeypatch):
     monkeypatch.setattr(policy, "signal_launch_group", sweep)
 
     stdout, stderr, timed_out, truncated, cleaned = policy._collect(
-        process, None, time.monotonic() + 5, 4096,
+        process, None, time.monotonic() + scaled(5), 4096,
     )
 
     assert (stdout, stderr, timed_out, truncated, cleaned, process.returncode) == (
@@ -46,7 +47,7 @@ def test_collect_accepts_empty_group_after_real_signal_attempt(tmp_path):
     assert tracker.capture_launch_identity(process, session_leader=True) is not None
 
     stdout, stderr, timed_out, truncated, cleaned = policy._collect(
-        process, None, time.monotonic() + 5, 4096,
+        process, None, time.monotonic() + scaled(5), 4096,
     )
 
     assert (stdout, stderr, timed_out, truncated, cleaned, process.returncode) == (
@@ -69,7 +70,7 @@ def test_collect_refuses_unverified_normal_sweep(tmp_path, monkeypatch, signalle
     try:
         with pytest.raises(tracker.ContainmentUnverified,
                            match="cannot sweep completed check process group"):
-            policy._collect(process, None, time.monotonic() + 5, 4096)
+            policy._collect(process, None, time.monotonic() + scaled(5), 4096)
         assert process.returncode is None
     finally:
-        process.wait(timeout=2)
+        process.wait(timeout=scaled(2))

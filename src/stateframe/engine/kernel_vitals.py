@@ -411,7 +411,7 @@ class VitalsEKG:
                 detail=f"organ_out failed: {type(exc).__name__}",
             )
             print(
-                f"    [kernel-wiring] vitals organ_out failed: {type(exc).__name__}"
+                f"    [stateframe] vitals organ_out failed: {type(exc).__name__}"
             )
             self.last_decision = {
                 "event": "EKG_ADVISORY",

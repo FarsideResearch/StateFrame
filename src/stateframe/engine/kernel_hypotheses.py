@@ -29,7 +29,7 @@ THE BOUNDARY:
 DEGRADATION: every detreason import happens inside a function body (cycle safety —
 `kernel_bolt` imports this, this must never import back at module scope). Any import
 or runtime failure flips the tracker to a permanent no-op and prints exactly ONE
-`[kernel-wiring] hypotheses degraded: <exc>` line. Wiring standard rule 2: no silent
+`[stateframe] hypotheses degraded: <exc>` line. Wiring standard rule 2: no silent
 degradation, ever. A dark organ must be visible in the transcript.
 
 SNITCH: `open_from_prose()` is the declaration channel — the model's stated theory is
@@ -174,7 +174,7 @@ class HypothesisTracker:
         """One line, naming the exception, then permanent silence (#113)."""
         if not self.degraded:
             self.degraded = True
-            print(f"[kernel-wiring] hypotheses degraded: {type(exc).__name__}: {exc}")
+            print(f"[stateframe] hypotheses degraded: {type(exc).__name__}: {exc}")
             self._trace("hypotheses_disarmed", f"{type(exc).__name__}: {exc}")
         self._mg = None
         self._consumer = None

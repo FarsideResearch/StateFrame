@@ -158,7 +158,7 @@ def range_notice(row: Mapping[str, object]) -> str:
 def delivered_view(row: Mapping[str, object]) -> tuple[str, str] | None:
     """Content and coverage notice that claim exactly the complete lines delivered.
 
-    Live benchmark r2AR (batch 1028, reproduced offline): a retained read clipped at
+    Live benchmark earlier run (prior run, reproduced offline): a retained read clipped at
     6,000 characters still claimed "lines 1-120 ... current bytes are delivered";
     the final-wire verifier rejected the range (source_range_bytes_mismatch) and
     the request died HARNESS_CONTRACT. A clipped page now claims only its complete

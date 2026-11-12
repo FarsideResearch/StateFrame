@@ -19,6 +19,8 @@ from pathlib import Path
 
 import pytest
 
+from _timeouts import scaled
+
 ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "src"
 
@@ -114,7 +116,7 @@ def fixture_repo(tmp_path):
 def _probe(mode, repo, files=FIXTURE):
     result = subprocess.run(
         [sys.executable, "-I", "-c", PROBE, mode, str(SRC), str(repo), json.dumps(sorted(files))],
-        capture_output=True, text=True, timeout=120, check=False)
+        capture_output=True, text=True, timeout=scaled(120), check=False)
     assert result.returncode == 0, result.stderr
     return json.loads(result.stdout)
 
@@ -270,7 +272,7 @@ BROKEN_PARSER = textwrap.dedent('''\
 @needs_ast
 def test_repo_map_header_does_not_claim_tree_sitter_when_every_parse_failed(fixture_repo):
     result = subprocess.run([sys.executable, "-I", "-c", BROKEN_PARSER, str(SRC), str(fixture_repo)],
-                            capture_output=True, text=True, timeout=120, check=False)
+                            capture_output=True, text=True, timeout=scaled(120), check=False)
     assert result.returncode == 0, result.stderr
     repo_map = json.loads(result.stdout)
     assert repo_map.splitlines()[1:] == FALLBACK_MAP.splitlines()[1:]  # the entries really are text scan
@@ -282,7 +284,7 @@ def test_repo_map_header_does_not_claim_tree_sitter_when_every_parse_failed(fixt
 @needs_ast
 def test_repo_map_header_counts_one_failed_parser(fixture_repo):
     result = subprocess.run([sys.executable, "-I", "-c", BROKEN_PARSER, str(SRC), str(fixture_repo), "python"],
-                            capture_output=True, text=True, timeout=120, check=False)
+                            capture_output=True, text=True, timeout=scaled(120), check=False)
     assert result.returncode == 0, result.stderr
     repo_map = json.loads(result.stdout)
     assert repo_map.splitlines()[0] == "## Repository Map (3 files, tree-sitter; 1 text-scan fallback, 1 parse failures)"
@@ -360,7 +362,7 @@ def test_orientation_journals_the_modes_actually_used(fixture_repo):
     # A private map cache, so a map cached by an earlier run cannot answer for this build.
     env = {**os.environ, "STATEFRAME_HOME": str(fixture_repo.parent / "stateframe-home")}
     result = subprocess.run([sys.executable, "-I", "-c", RECEIPT, str(SRC), str(fixture_repo)],
-                            capture_output=True, text=True, timeout=120, check=False, env=env)
+                            capture_output=True, text=True, timeout=scaled(120), check=False, env=env)
     assert result.returncode == 0, result.stderr
     (event,) = json.loads(result.stdout)
     assert {key: event[key] for key in ("source", "files", "tree_sitter", "text_scan", "parse_failures",
@@ -391,7 +393,7 @@ STALE_CACHE = textwrap.dedent('''\
 def test_map_cached_by_an_older_build_is_not_served(fixture_repo):
     env = {**os.environ, "STATEFRAME_HOME": str(fixture_repo.parent / "stateframe-home")}
     result = subprocess.run([sys.executable, "-I", "-c", STALE_CACHE, str(SRC), str(fixture_repo)],
-                            capture_output=True, text=True, timeout=120, check=False, env=env)
+                            capture_output=True, text=True, timeout=scaled(120), check=False, env=env)
     assert result.returncode == 0, result.stderr
     probe = json.loads(result.stdout)
     assert probe["old_key"] != probe["new_key"]

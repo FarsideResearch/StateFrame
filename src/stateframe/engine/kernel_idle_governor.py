@@ -382,7 +382,7 @@ class IdleGovernor:
         # changed bytes, or a different range is never refused. Exempt reads (paths the
         # request itself says are required but missing) are never refused either.
         # Keys are recorded only when the read is allowed, so a refusal cannot make
-        # a never-seen path look already read (the r2X benchmark starvation).
+        # a never-seen path look already read (the earlier benchmark starvation).
         novelty_escape = False
         read_key = ""
         if kind == "read" and action_path:

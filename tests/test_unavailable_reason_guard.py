@@ -5,7 +5,10 @@ import re
 from pathlib import Path
 from types import SimpleNamespace
 
-from _class_guard_scanners import scan_unavailable_events
+import pytest
+
+from _class_guard_scanners import scan_unavailable_events as _scan_unavailable_events_reference
+from _unavailable_reason_guard_scan import scan_unavailable_events_fast
 
 
 _UNAVAILABLE_SCAN_FLOOR = 12  # Current literal journal emissions in src/stateframe.
@@ -14,7 +17,7 @@ _UNAVAILABLE_SCAN_FLOOR = 12  # Current literal journal emissions in src/statefr
 def test_unavailable_events_include_a_reason() -> None:
     root = Path(__file__).resolve().parents[1]
     sources = sorted((root / "src/stateframe").rglob("*.py"))
-    report = scan_unavailable_events(sources, root=root)
+    report = scan_unavailable_events_fast(sources, root=root)
     print(report.receipt)
 
     assert re.fullmatch(
@@ -32,7 +35,8 @@ def test_source_scanner_rejects_a_planted_unavailable_event(tmp_path: Path) -> N
         'def call(emit):\n    emit("x_unavailable")\n',
         encoding="utf-8",
     )
-    report = scan_unavailable_events([planted], root=tmp_path)
+    report = scan_unavailable_events_fast([planted], root=tmp_path)
+    assert report == _scan_unavailable_events_reference([planted], root=tmp_path)
     assert report.scanned == 1
     assert report.with_reason == 0
     assert len(report.violations) == 1
@@ -45,7 +49,8 @@ def test_source_scanner_rejects_a_blank_unavailable_reason(tmp_path: Path) -> No
         'def call(emit):\n    emit("x_unavailable", reason="  ")\n',
         encoding="utf-8",
     )
-    report = scan_unavailable_events([planted], root=tmp_path)
+    report = scan_unavailable_events_fast([planted], root=tmp_path)
+    assert report == _scan_unavailable_events_reference([planted], root=tmp_path)
     assert report.scanned == 1
     assert report.with_reason == 0
     assert len(report.violations) == 1
@@ -57,7 +62,8 @@ def test_source_scanner_resolves_an_event_name_variable(tmp_path: Path) -> None:
         'def call(emit):\n    event = "x_unavailable"\n    emit(event)\n',
         encoding="utf-8",
     )
-    report = scan_unavailable_events([planted], root=tmp_path)
+    report = scan_unavailable_events_fast([planted], root=tmp_path)
+    assert report == _scan_unavailable_events_reference([planted], root=tmp_path)
     assert report.receipt == "unavailable-reason scan: scanned=1 with_reason=0 violations=1"
 
 
@@ -71,8 +77,34 @@ def test_source_scanner_rejects_placeholder_reasons(tmp_path: Path) -> None:
         '    emit("third_unavailable", reason=reason)\n',
         encoding="utf-8",
     )
-    report = scan_unavailable_events([planted], root=tmp_path)
+    report = scan_unavailable_events_fast([planted], root=tmp_path)
+    assert report == _scan_unavailable_events_reference([planted], root=tmp_path)
     assert report.receipt == "unavailable-reason scan: scanned=3 with_reason=0 violations=3"
+
+
+@pytest.mark.parametrize("source", [
+    'events.append({"kind": "x_unavailable"})\n',
+    'event = {"type": "x_unavailable"}\njournal.write(event)\n',
+    'reason = "  "\nemit(kind="x_unavailable", reason=reason)\n',
+    'reason = "  "\nemit("x_unavailable", {"reason": reason})\n',
+])
+def test_fast_scan_matches_reference_event_and_reason_forms(tmp_path: Path, source: str) -> None:
+    planted = tmp_path / "event_forms.py"
+    planted.write_text(source, encoding="utf-8")
+    assert scan_unavailable_events_fast([planted], root=tmp_path) == (
+        _scan_unavailable_events_reference([planted], root=tmp_path)
+    )
+
+
+def test_fast_scan_rechecks_changed_file(tmp_path: Path) -> None:
+    planted = tmp_path / "changing.py"
+    planted.write_text('emit("x_unavailable")\n', encoding="utf-8")
+    assert scan_unavailable_events_fast([planted], root=tmp_path).scanned == 1
+    planted.write_text('emit("x_unavailable")\nemit("y_unavailable")\n', encoding="utf-8")
+    assert scan_unavailable_events_fast([planted], root=tmp_path) == (
+        _scan_unavailable_events_reference([planted], root=tmp_path)
+    )
+    assert scan_unavailable_events_fast([planted], root=tmp_path).scanned == 2
 
 
 def test_abandoned_readiness_decision_reports_the_consumer_failure() -> None:

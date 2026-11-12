@@ -14,15 +14,15 @@ from kernel_done_acceptance import done_accepted
 
 
 MODE_ENV = "STATEFRAME_GREEN_THEN_EXHAUST"
-# r46 f3 #6: a stall-submit at a stale (reused, never re-run) verification or with an open
+# earlier run f3 #6: a stall-submit at a stale (reused, never re-run) verification or with an open
 # advisory counterexample can accept a hidden-red candidate as done.  Gated, default off,
 # scoped to the post_green_stall boundary only; the response_budget boundary is unchanged.
 STALL_STRICT_ENV = "STATEFRAME_STALL_SUBMIT_STRICT"
 SCHEMA = "stateframe-green-then-exhaust/1"
 PRODUCER = "kernel_green_then_exhaust"
 SUBMISSION_REASON = "RESPONSE_BUDGET_EXHAUSTED_READY"
-STALL_SUBMISSION_REASON = "POST_GREEN_STALL_READY"   # r45 in-flight fix 3 (STATEFRAME_INFLIGHT_FIXES)
-# These two r47 boundaries feed this same submitter; their own modules own only
+STALL_SUBMISSION_REASON = "POST_GREEN_STALL_READY"   # earlier run in-flight fix 3 (STATEFRAME_INFLIGHT_FIXES)
+# These two earlier run boundaries feed this same submitter; their own modules own only
 # eligibility/counting and telemetry, never terminal rendering or commitment.
 POSTGREEN_BUDGET_SUBMISSION_REASON = "POSTGREEN_BUDGET_READY"
 READINESS_SUBMISSION_REASON = "READINESS_CERTIFIED_READY"
@@ -318,14 +318,14 @@ def submit_if_ready(runtime: object, *, boundary: str = "response_budget"):
         # DESIGN RULE: done comes from the MODEL. DONE_IS_SUBMIT only means the host never
         # REFUSES a model done; it must never let the host submit or stop on its own. This branch used to call
         # request_submission(source="host") at every boundary with no readiness check, so the readiness_submit
-        # boundary submitted at step 0 BEFORE request 0 (r2EY DONE-env strict smoke: requests=0, host_stopped,
+        # boundary submitted at step 0 BEFORE request 0 (earlier run DONE-env strict smoke: requests=0, host_stopped,
         # SUBMITTED, product_files_changed=0). Under DONE_IS_SUBMIT host-initiated submission is off entirely.
         _record(runtime, "green_then_exhaust_host_submit_suppressed", rendered=False,
                 boundary=boundary, done_is_submit=True)
         return None
     del request_submission, wait_for_pending_mutations
     if enabled(runtime) and not own_switch:
-        # r46: own event for every call while the switch is on, regardless of outcome
+        # earlier run: own event for every call while the switch is on, regardless of outcome
         # (kit/fired_check_r45.py SITUATIONAL note: this OWN_EVENT had no emitter).
         _record(runtime, "green_then_exhaust_evaluated", rendered=False, boundary=boundary)
     # The response-budget boundary requires its rendered notice; a post-green stall is the runner's own terminal

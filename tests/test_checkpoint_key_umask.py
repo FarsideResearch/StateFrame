@@ -8,6 +8,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+from _timeouts import scaled
 from stateframe import _child, runner
 from stateframe.state_dirs import private_directory
 
@@ -171,7 +172,7 @@ sys.stdout.write(key.hex() if key else 'NONE')
                                   env={**os.environ, "HOME": str(tmp_path)},
                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
                  for _ in range(16)]
-    keys = [process.communicate(timeout=60)[0].strip().splitlines()[-1] for process in processes]
+    keys = [process.communicate(timeout=scaled(60))[0].strip().splitlines()[-1] for process in processes]
     assert "NONE" not in keys
     assert len(set(keys)) == 1
     assert os.stat(_key_dir(tmp_path) / "checkpoint.key").st_nlink == 1
