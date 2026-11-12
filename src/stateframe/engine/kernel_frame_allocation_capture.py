@@ -1430,6 +1430,21 @@ def finalize_frame_candidate(
             # of recent pages that the actual remaining capacity permits.
             if base_fits:
                 break
+            # Only the terminal minimum path may relax the legacy protected
+            # byte estimate. A frozen "tokenize" label can survive a later
+            # tokenizer outage, so require fresh exact proof for this body.
+            if (method == "tokenize"
+                    and request_bytes <= byte_limit
+                    and frame_token_count <= runtime.frame_ceiling):
+                exact_tokens, exact_method = meter.measure(candidate)
+                if (exact_method == "tokenize"
+                        and exact_tokens <= token_limit
+                        and within_protected_capacity(
+                            candidate, protected, exact_tokenizer=True,
+                        )):
+                    tokens = exact_tokens
+                    _remember_exact_pair(candidate, meter, tokens)
+                    break
             raise FrameFit5ImpossibleMinimum(
                 {
                     "request_bytes": request_bytes,
