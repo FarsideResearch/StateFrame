@@ -140,6 +140,17 @@ def _source_value(payload: object) -> str | None:
     return None
 
 
+def _non_python_product_file(value: object) -> bool:
+    """True for a plain relative non-.py path; anything suspicious goes to _safe_path."""
+    if not isinstance(value, str) or not value.strip():
+        return False
+    path = value.replace("\\", "/")
+    pure = PurePosixPath(path)
+    return (pure.suffix != ".py" and not pure.is_absolute() and ".." not in pure.parts
+            and pure.as_posix() == path and "\x00" not in path
+            and not (pure.parts and ":" in pure.parts[0]))
+
+
 def _collect_files(value: object, *, test: bool) -> dict[str, str]:
     result: dict[str, str] = {}
     if isinstance(value, Mapping):
@@ -151,6 +162,10 @@ def _collect_files(value: object, *, test: bool) -> dict[str, str]:
         items = ()
     total = 0
     for raw_path, payload in items:
+        if not test and _non_python_product_file(raw_path):
+            # Briefs, configs and data files are public context, not boundary
+            # sources. Skipping them keeps one TASK.md from disabling the checks.
+            continue
         path = _safe_path(raw_path, test=test)
         source = _source_value(payload)
         if not isinstance(source, str) or not source.strip():
