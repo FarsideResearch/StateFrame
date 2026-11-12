@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.5.8 (2026-11-12)
 
 - Tests: release guards use a sandbox-visible interpreter link for the gate's temporary virtualenv.
 
