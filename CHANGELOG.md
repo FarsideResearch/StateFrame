@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.5.7 (2026-11-12)
 
 - Fixed: a run could stop with FrameFit5ImpossibleMinimum even though its exactly measured request fit the model context.
 
