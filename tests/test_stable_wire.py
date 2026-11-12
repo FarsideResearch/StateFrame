@@ -1089,3 +1089,40 @@ def test_resume_recorded_plain_stable_wire_send_does_not_project(monkeypatch, tm
                     "source_plan": {}, "sources": {}, "receipt": None})
         with pytest.raises(AssertionError):
             _assert_plain_wire(control)
+
+
+def test_metadata_rerender_of_delivered_window_starts_fresh_epoch(monkeypatch):
+    # Live control-arm crash: same path/revision/range, unchanged source lines, but the
+    # window's delivery metadata re-rendered. That needs a relayout, not a run abort.
+    first = _window(path="pkg/a.py", revision=_revision("1"))
+    other = _window(path="pkg/b.py", revision=_revision("2"))
+    runtime = SimpleNamespace(_stable_wire_state=None)
+    _invoke(monkeypatch, _body([first, other]), runtime)
+
+    rerendered = copy.deepcopy(first)
+    rerendered["content"] = rerendered["content"].replace(
+        '"max_lines":1000', '"max_lines":999')
+    assert rerendered["content"] != first["content"]
+    projected, _, journal = _invoke(monkeypatch, _body([rerendered, other]), runtime)
+
+    sources = _messages_with_prefix(projected["messages"], "[Current source:")
+    assert sources == [rerendered, other]
+    epochs = [event for event in journal.events if event["kind"] == "stable_wire_epoch"]
+    assert len(epochs) == 1 and epochs[0].get("reason") == "rerender"
+    assert "\nEpoch 2\n" in _status_rows(projected["messages"])[0]["content"]
+
+    # The next send keeps the rerendered epoch's prefix byte-stable.
+    again, _, journal = _invoke(monkeypatch, _body([rerendered, other]), runtime)
+    assert _messages_with_prefix(again["messages"], "[Current source:") == [rerendered, other]
+    assert not [event for event in journal.events if event["kind"] == "stable_wire_epoch"]
+
+
+def test_changed_source_lines_under_same_revision_still_refuse(monkeypatch):
+    first = _window(revision=_revision("1"), text="value = 1\n")
+    runtime = SimpleNamespace(_stable_wire_state=None)
+    _invoke(monkeypatch, _body([first]), runtime)
+    lying = copy.deepcopy(first)
+    lying["content"] = lying["content"].replace(
+        '"max_lines":1000', '"max_lines":999').replace("value = 1", "value = 9")
+    with pytest.raises(ValueError, match="re-rendered"):
+        _invoke(monkeypatch, _body([lying]), runtime)

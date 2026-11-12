@@ -237,6 +237,37 @@ def _identity_key(identity: Mapping[str, object]) -> str:
     return _canonical_json(identity)
 
 
+def _source_lines(content: str) -> str:
+    """Return a window's source-line body, without its delivery metadata."""
+    from kernel_request_source_window import WINDOW_CONTENT_MARKER
+
+    _metadata, marker, body = content.partition(WINDOW_CONTENT_MARKER)
+    if not marker:
+        raise StableWireError("stable wire source window has no content section")
+    return body
+
+
+def _rerendered_keys(delivered: Sequence[Mapping[str, object]],
+                     current: Sequence[Mapping[str, object]]) -> set[str]:
+    """Find delivered windows whose metadata was re-rendered for the same bytes.
+
+    Owner, continuation and anchor metadata can change for an unchanged
+    path/revision/range. That needs a fresh epoch. Changed source lines under
+    the same revision would contradict the revision itself, so they still refuse.
+    """
+    delivered_by_key = {str(row["key"]): row for row in delivered}
+    rerendered = set()
+    for row in current:
+        key = str(row["key"])
+        prior = delivered_by_key.get(key)
+        if prior is None or prior["content"] == row["content"]:
+            continue
+        if _source_lines(str(prior["content"])) != _source_lines(str(row["content"])):
+            raise StableWireError("stable wire refuses a re-rendered delivered source window")
+        rerendered.add(key)
+    return rerendered
+
+
 def _window_entries(messages: Sequence[object]) -> list[dict[str, object]]:
     entries = []
     seen: set[str] = set()
@@ -732,16 +763,16 @@ def project_stable_wire(capture, runtime, body, *, meter, inputs,
     previous_delivered = previous["delivered"] if previous is not None else []
     seen_keys = list(previous.get("seen_keys", ())) if previous is not None else []
 
-    prior_by_key = {str(row["key"]): row for row in previous_delivered}
+    rerender_rebase = bool(_rerendered_keys(previous_delivered, current)) and not (
+        first_epoch or structural_rebase)
+    epoch += int(rerender_rebase)
     for row in current:
         key = str(row["key"])
-        prior = prior_by_key.get(key)
-        if prior is not None and prior["content"] != row["content"]:
-            raise StableWireError("stable wire refuses a re-rendered delivered source window")
         if key not in seen_keys:
             seen_keys.append(key)
 
-    delivered = [] if first_epoch or structural_rebase else previous_delivered
+    delivered = ([] if first_epoch or structural_rebase or rerender_rebase
+                 else previous_delivered)
     candidate_delivered = copy.deepcopy(delivered)
     known = {str(row["key"]): row for row in candidate_delivered}
     for row in current:
@@ -757,18 +788,19 @@ def project_stable_wire(capture, runtime, body, *, meter, inputs,
     retained = [row for row in candidate_delivered if str(row["key"]) not in current_keys]
     retained_tokens, retained_method = _source_tokens(
         meter, [row["message"] for row in retained])
-    headroom_rebase = (not first_epoch and not structural_rebase
+    headroom_rebase = (not first_epoch and not structural_rebase and not rerender_rebase
                        and (retained_method == "unavailable" or retained_tokens > headroom))
 
-    reason = "start" if first_epoch else "structural" if structural_rebase else None
-    must_relayout = first_epoch or structural_rebase
+    reason = ("start" if first_epoch else "structural" if structural_rebase
+              else "rerender" if rerender_rebase else None)
+    must_relayout = first_epoch or structural_rebase or rerender_rebase
     if headroom_rebase:
         epoch += 1
         must_relayout = True
         reason = "headroom"
 
     first_seen_rank = {key: index for index, key in enumerate(seen_keys)}
-    if structural_rebase or headroom_rebase:
+    if structural_rebase or headroom_rebase or rerender_rebase:
         candidate_delivered = sorted(
             copy.deepcopy(current), key=lambda row: first_seen_rank[str(row["key"])])
 
