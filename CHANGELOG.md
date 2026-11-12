@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.5.6 (2026-11-12)
 
 - Cache-friendly requests now reserve space for layout overhead and refit when needed. Source windows keep their first-delivered order across requests, with newly selected windows appended at the end. Priority still determines which windows are selected.
 
