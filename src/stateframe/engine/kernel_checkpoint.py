@@ -265,6 +265,7 @@ DROP_ATTRS = {
     ("kernel_request_diet", "RequestTokenMeter"): frozenset({
         "_tokenizer_auth_key", "_generation_endpoint", "_http_opener",
         "_http_ssl_context", "_http_ssl_context_lock",
+        "_count_key_last",
     }),
 }
 _OWN_MODULE = __name__

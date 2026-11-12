@@ -24,7 +24,7 @@ _ENTRIES: "OrderedDict[int, _Entry]" = OrderedDict()
 
 
 class _Entry:
-    __slots__ = ("body", "stamp", "plain", "chars", "digests")
+    __slots__ = ("body", "stamp", "plain", "chars", "digests", "values")
 
     def __init__(self, body: object, stamp: list[object]) -> None:
         self.body = body  # strong ref keeps id() unique while cached
@@ -32,6 +32,7 @@ class _Entry:
         self.plain: bytes | None = None
         self.chars: int | None = None
         self.digests: dict[Callable[[object], str], str] = {}
+        self.values: dict[str, object] = {}
 
 
 def _stamp(body: object) -> list[object] | None:
@@ -135,3 +136,13 @@ def canonical_digest(body: Mapping[str, object], compute: Callable[[object], str
     if digest is None:
         digest = entry.digests[compute] = compute(body)
     return digest
+
+
+def memoized_value(body: Mapping[str, object], name: str, compute: Callable[[], object]) -> object:
+    """Memoize an immutable pure function of ``body`` under ``name`` (same stamp guard)."""
+    entry = _entry(body)
+    if entry is None:
+        return compute()
+    if name not in entry.values:
+        entry.values[name] = compute()
+    return entry.values[name]
