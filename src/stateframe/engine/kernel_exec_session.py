@@ -343,9 +343,10 @@ class ExecSession:
     def _start(self, cap: ExecCapability) -> None:
         if self._closed:
             raise ExecSessionError("execution session is closed")
-        mutation_session = (cap.purpose in {"mutation", "mutation_broker"}
-                            or (self._initial_capability is not None
-                                and self._initial_capability.purpose in {"mutation", "mutation_broker"}))
+        # Capabilities may be duck-typed (probes, tests); only mutation ones carry purpose.
+        purposes = {getattr(cap, "purpose", None),
+                    getattr(self._initial_capability, "purpose", None)}
+        mutation_session = bool(purposes & {"mutation", "mutation_broker"})
         if mutation_session and self._network_envelope is None:
             self._network_envelope = cap.network
             self._read_envelope = (*cap.read_roots, cap.workspace)
@@ -495,7 +496,7 @@ class ExecSession:
                                **({"armable_wall_s": armable_wall_s}
                                   if armable_wall_s is not None else {})})
             identity = value.get("identity")
-            if identity is not None and cap.purpose in {"mutation", "mutation_broker"}:
+            if identity is not None and getattr(cap, "purpose", None) in {"mutation", "mutation_broker"}:
                 launcher = getattr(self, "_process", None)
                 identity = (_host_mutation_identity(identity, launcher=launcher)
                             if launcher is not None else _host_mutation_identity(identity))
@@ -666,6 +667,12 @@ class ExecSession:
         if self._log is not None and not self._log.closed:
             attempt(self._log.close)
         if errors:
+            if stop_error is not None:
+                # Lead with the failure that made cleanup unverified, as callers did
+                # before close became retryable; keep the verification failure too.
+                raise ExecSessionError(
+                    f"{stop_error}; cleanup verification failed: "
+                    f"{type(errors[0]).__name__}: {errors[0]}") from errors[0]
             raise errors[0]
         self._closed = True
 
