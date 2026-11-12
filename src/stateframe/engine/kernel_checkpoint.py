@@ -29,6 +29,7 @@ import hashlib
 import io
 import json
 import marshal
+import errno
 import os
 import pickle
 import random
@@ -1829,36 +1830,82 @@ def _snapshot_tree(source: Path, target: Path, relative: str, pool: Path, manife
         _clone(source, target)
 
 
+# Per-run content-addressed store of changed run files. A changed file is hashed once while it is
+# copied into the store; the snapshot then hard-links the object, so equal (bytes, mode, mtime)
+# files across checkpoints share one inode. Objects no snapshot links any more (nlink == 1) are
+# collected when a checkpoint is published.
+OBJECT_DIR = "env-objects"
+
+
+def _store_object(path: str, info: os.stat_result, objects: Path, counter: list[int]) -> str:
+    """Copy ``path`` into the object store (once per distinct content) and return the object path."""
+    objects.mkdir(mode=0o700, exist_ok=True)
+    counter[0] += 1
+    temporary = objects / f".{os.getpid()}-{counter[0]}.tmp"
+    digest = hashlib.sha256()
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0)
+    with open(path, "rb") as reader, os.fdopen(os.open(temporary, flags, 0o600), "wb") as writer:
+        for block in iter(lambda: reader.read(1 << 20), b""):
+            digest.update(block)
+            writer.write(block)
+    shutil.copystat(path, temporary, follow_symlinks=False)
+    final = objects / f"{digest.hexdigest()}-{stat.S_IMODE(info.st_mode):o}-{info.st_mtime_ns}"
+    try:
+        if final.stat().st_size == info.st_size:  # equal content, mode and mtime: reuse the object
+            os.unlink(temporary)
+            return str(final)
+    except OSError:
+        pass
+    os.replace(temporary, final)
+    return str(final)
+
+
 def _copy_tree(source: Path, target: Path, previous: Path | None,
-               durable_inodes: set[tuple[int, int]], *, seed: Path | None = None) -> dict[str, int]:
+               durable_inodes: set[tuple[int, int]], *, seed: Path | None = None,
+               objects: Path | None = None) -> dict[str, int]:
     """Copy ``source`` to ``target``; a file unchanged since the previous checkpoint is hard-linked.
 
     Checkpoint copies are never modified after they are written, so linking to one is safe; a file
     is unchanged when size and mtime_ns equal the previous copy (copies keep the source mtime).
     Seed-matching env files and big changed files are APFS-cloned (copy-on-write)
-    when possible; small changed files are copied.
+    when possible; other changed files go through the content-addressed ``objects`` store when one
+    is given, else they are copied. One lstat per unchanged file (scandir types are free).
     """
     counts = {"linked": 0, "copied": 0, "cloned": 0}
-    for directory, dirnames, filenames in os.walk(source):
-        rel = os.path.relpath(directory, source)
-        out_dir = target if rel == "." else target / rel
-        out_dir.mkdir(parents=True, exist_ok=True)
-        for name in list(dirnames):
-            path = os.path.join(directory, name)
-            if os.path.islink(path):
-                os.symlink(os.readlink(path), out_dir / name)
-                dirnames.remove(name)
-        for name in filenames:
-            path = os.path.join(directory, name)
-            destination = out_dir / name
-            info = os.lstat(path)
-            if os.path.islink(path):
+    counter = [0]
+    if previous is None:
+        objects = None  # a first snapshot has nothing to dedup against; skip the hash pass
+    darwin = sys.platform == "darwin"
+    src_root, dst_root = os.fspath(source), os.fspath(target)
+    prev_root = None if previous is None else os.fspath(previous)
+    seed_root = None if seed is None else os.fspath(seed)
+    pending = [""]
+    while pending:
+        rel = pending.pop()
+        directory = os.path.join(src_root, rel) if rel else src_root
+        out_dir = os.path.join(dst_root, rel) if rel else dst_root
+        os.makedirs(out_dir, exist_ok=True)
+        try:
+            with os.scandir(directory) as scan:
+                entries = list(scan)
+        except OSError:
+            continue
+        old_dir = None if prev_root is None else (os.path.join(prev_root, rel) if rel else prev_root)
+        for entry in entries:
+            name = entry.name
+            path = entry.path
+            destination = os.path.join(out_dir, name)
+            if entry.is_symlink():
                 os.symlink(os.readlink(path), destination)
                 continue
-            if seed is not None and not info.st_mode & 0o222:
-                candidate = seed / os.path.relpath(path, source)
+            if entry.is_dir(follow_symlinks=False):
+                pending.append(os.path.join(rel, name) if rel else name)
+                continue
+            info = entry.stat(follow_symlinks=False)
+            relpath = os.path.join(rel, name) if rel else name
+            if seed_root is not None and not info.st_mode & 0o222:
                 try:
-                    seed_info = candidate.stat()
+                    seed_info = os.stat(os.path.join(seed_root, relpath))
                 except OSError:
                     seed_info = None
                 if (seed_info is not None and info.st_dev == seed_info.st_dev
@@ -1867,8 +1914,8 @@ def _copy_tree(source: Path, target: Path, previous: Path | None,
                     durable_inodes.add((info.st_dev, info.st_ino))
                     counts["linked"] += 1
                     continue
-            old = None if previous is None else (previous if rel == "." else previous / rel) / name
-            if old is not None:
+            if old_dir is not None:
+                old = os.path.join(old_dir, name)
                 try:
                     prior = os.lstat(old)
                 except OSError:
@@ -1878,25 +1925,49 @@ def _copy_tree(source: Path, target: Path, previous: Path | None,
                     durable_inodes.add((prior.st_dev, prior.st_ino))
                     counts["linked"] += 1
                     continue
-            if seed is not None and sys.platform == "darwin":
-                candidate = seed / os.path.relpath(path, source)
+            if seed_root is not None and darwin:
                 try:
-                    seed_info = candidate.stat()
+                    seed_info = os.stat(os.path.join(seed_root, relpath))
                 except OSError:
                     seed_info = None
                 if (seed_info is not None and stat.S_ISREG(seed_info.st_mode)
                         and seed_info.st_size == info.st_size
                         and seed_info.st_mtime_ns == info.st_mtime_ns
-                        and _clonefile(Path(path), destination)):
+                        and _clonefile(Path(path), Path(destination))):
                     counts["cloned"] += 1
                     continue
-            if info.st_size >= _BIG_FILE and sys.platform == "darwin":
-                if _clonefile(Path(path), destination):
+            if info.st_size >= _BIG_FILE and darwin:
+                if _clonefile(Path(path), Path(destination)):
                     counts["cloned"] += 1
                     continue
-            shutil.copy2(path, destination, follow_symlinks=False)
+            if objects is not None and stat.S_ISREG(info.st_mode):
+                try:
+                    os.link(_store_object(path, info, objects, counter), destination)
+                except OSError as error:
+                    # Identical tiny files (empty __init__.py) share one object inode and can
+                    # reach the filesystem link limit; a private copy is always correct.
+                    if error.errno != errno.EMLINK:
+                        raise
+                    shutil.copy2(path, destination, follow_symlinks=False)
+            else:
+                shutil.copy2(path, destination, follow_symlinks=False)
             counts["copied"] += 1
     return counts
+
+
+def _prune_objects(root: Path) -> None:
+    """Drop objects no checkpoint links any more, and temporaries a killed writer left behind."""
+    folder = root / OBJECT_DIR
+    try:
+        entries = list(os.scandir(folder))
+    except OSError:
+        return
+    for entry in entries:
+        try:
+            if entry.name.endswith(".tmp") or entry.stat(follow_symlinks=False).st_nlink <= 1:
+                os.unlink(entry.path)
+        except OSError:
+            pass
 
 
 def _sends(run_dir: Path) -> int:
@@ -2064,6 +2135,7 @@ def _publish_checkpoint(root: Path, tmp: Path, final: Path, run_dir: Path) -> No
             shutil.rmtree(old, ignore_errors=True)
     _prune_chunks(root)
     _prune_pool(root, run_dir)
+    _prune_objects(root)
 
 
 def _save_into(payload, ctx, step, run_dir, root, final, tmp, clocks, started, collected, background):
@@ -2098,7 +2170,7 @@ def _save_into(payload, ctx, step, run_dir, root, final, tmp, clocks, started, c
         if source.is_dir() and not source.is_symlink():
             seed = _seed_for_run(run_dir) if name == "env" else None
             for key, value in _copy_tree(source, destination, prior, durable_inodes,
-                                         seed=seed).items():
+                                         seed=seed, objects=root / OBJECT_DIR).items():
                 copied[key] += value
         else:
             _clone(source, destination)
@@ -2167,6 +2239,8 @@ def _save_into(payload, ctx, step, run_dir, root, final, tmp, clocks, started, c
         _fsync_snapshot(tmp, new_pool_files, durable_inodes)
         if (root / CACHE_DIR).is_dir():
             _fsync_dir(root / CACHE_DIR)
+        if (root / OBJECT_DIR).is_dir():
+            _fsync_dir(root / OBJECT_DIR)
         _publish_checkpoint(root, tmp, final, run_dir)
         return meta
 
