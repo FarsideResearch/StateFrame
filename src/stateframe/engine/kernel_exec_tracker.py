@@ -334,6 +334,19 @@ class ProcessTable:
         return ProcessIdentity(pid, int(fields[1]), int(fields[2]), int(fields[3]),
                                (int(fields[19]), 0), fields[0] in {"Z", "X", "x"})
 
+    def cpu_ticks(self, row: ProcessIdentity) -> int | None:
+        """User plus system clock ticks of a live Linux process; None when gone or unknown."""
+        if self._lib is not None:
+            return None
+        try:
+            raw = (Path("/proc") / str(row.pid) / "stat").read_text()
+        except (FileNotFoundError, ProcessLookupError):
+            return None
+        fields = raw[raw.rfind(")") + 2:].split()
+        if (int(fields[19]), 0) != row.start:
+            return None
+        return int(fields[11]) + int(fields[12])
+
     def resident_bytes(self, row: ProcessIdentity) -> int:
         current = self.identity(row.pid)
         if current is None or current.start != row.start or current.zombie:

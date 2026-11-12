@@ -24,8 +24,7 @@ def test_supervisor_stop_timeout_retains_artifacts_until_reaped(tmp_path, monkey
 
         def wait(self, timeout):
             events.append("wait")
-            if events.count("wait") == 1:
-                raise subprocess.TimeoutExpired("supervisor", timeout)
+            raise subprocess.TimeoutExpired("supervisor", timeout)
 
     class Control:
         def settimeout(self, timeout):
@@ -49,6 +48,11 @@ def test_supervisor_stop_timeout_retains_artifacts_until_reaped(tmp_path, monkey
     survivors = iter(([123], []))
     monkeypatch.setattr(sessions, "kill_launch_unit", lambda *args, **kwargs: next(survivors))
     monkeypatch.setattr(sessions, "recorded_launch_identity", lambda process: None)
+    # The supervisor is alive with an unchanging launch unit: no progress, so it is killed.
+    monkeypatch.setattr(sessions, "CLOSE_SAMPLE_SECONDS", 0.5)
+    monkeypatch.setattr(sessions, "rpc_timeout_seconds", lambda: 1.0)
+    monkeypatch.setattr(sessions, "_launch_unit_progress",
+                        lambda process, table: (7, frozenset({(1, (2, 0))}), 0))
 
     root = tmp_path / "mutation"
     for name in ("session", "boot", Path("stage") / ("a" * 32)):
@@ -63,6 +67,8 @@ def test_supervisor_stop_timeout_retains_artifacts_until_reaped(tmp_path, monkey
 
     with pytest.raises(MutationContainmentError, match="did not terminate"):
         executor.close()
+    waits = events.count("wait")
+    assert waits > 1
     assert session._log.closed
     assert events.count("pidfd") == 1
     assert events.count("owner") == 1
@@ -79,7 +85,7 @@ def test_supervisor_stop_timeout_retains_artifacts_until_reaped(tmp_path, monkey
     assert not executor._boot.exists()
     assert not executor._stage.exists()
     assert executor._ledger.closed
-    assert events.count("wait") == 1
+    assert events.count("wait") == waits
     assert events.count("pidfd") == 1
 
 
@@ -290,5 +296,6 @@ def test_slow_stop_waits_for_supervisor_exit_before_verifying(tmp_path, monkeypa
 
     session.close()
 
-    assert events == ["control closed", ("wait", 42.0), "verify launch unit"]
+    assert events == ["control closed", ("wait", sessions.CLOSE_SAMPLE_SECONDS),
+                      "verify launch unit"]
     assert session._closed and session._log.closed
