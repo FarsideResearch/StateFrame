@@ -36,13 +36,16 @@ def test_monitor_counts_private_namespace_and_nested_family_union(monkeypatch):
         def pid_namespace(self, pid):
             return {100: "host", 101: "private", 102: "private", 103: "nested"}.get(pid, "host")
 
+        def pin_pid_namespace(self, pid, namespace):
+            return SimpleNamespace(close=lambda: None)
+
         def limit_breach(self, live, limits):
             assert {row.pid for row in live} == {100, 101, 102, 103}
             return "aggregate resident-memory limit exceeded"
 
     monkeypatch.setattr(driver, "ProcessTable", Table)
     monkeypatch.setattr(driver, "sys", SimpleNamespace(platform="linux"))
-    process = SimpleNamespace(pid=100, _stateframe_launch_identity=LaunchIdentity(
+    process = SimpleNamespace(pid=100, returncode=None, _stateframe_launch_identity=LaunchIdentity(
         100, rows[100].start, None))
     monitor = driver._ContainmentMonitor(process,
                                          SimpleNamespace(limits=SimpleNamespace(wall_seconds=4)))

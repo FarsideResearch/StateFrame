@@ -33,6 +33,9 @@ def _monitor(monkeypatch, *, sample_seconds, private=True, alive=True):
         def pid_namespace(self, pid):
             return "private" if private and pid == CHILD else "host"
 
+        def pin_pid_namespace(self, pid, namespace):
+            return SimpleNamespace(close=lambda: None)
+
         def limit_breach(self, live, limits):
             return None
 

@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Fixed: a sandbox monitor could kill another engine's new sandbox (its supervisor launcher then exited 137). Monitors recognised a sandbox's private PID namespace by its number, which the kernel reuses once that namespace ends. They now hold the namespace open while they compare by that number, and refuse, with an error log, any process older than the sandbox.
+
 ## 0.4.43 (2026-11-11)
 
 - Fixed: checks and startup probes no longer die with exit 137 on a loaded host because StateFrame killed its own slow sandbox. Session cleanup now waits for the supervisor to finish, and kills it only if it is still running and has stopped answering after a load-scaled wait. A child that outlives its parent process is matched to its job before the session is stopped as an escape. A startup probe killed by cleanup is retried and reported as host load, not as a broken interpreter.

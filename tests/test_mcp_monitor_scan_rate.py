@@ -38,6 +38,9 @@ def _monitor(monkeypatch, *, snapshot_delay=0.0, clock=None):
         def pid_namespace(self, pid):
             return "private" if self.namespaces.get(pid) == 20 else "host"
 
+        def pin_pid_namespace(self, pid, namespace):
+            return SimpleNamespace(close=lambda: None)
+
         def pid_namespace_inode(self, pid):
             return self.namespaces.get(pid, 10)
 
