@@ -579,7 +579,7 @@
   "kernel_source_evidence_store.py": "9e760c6fae0896f72641ee8d11c91d5f0af28c2be855eb2fd43819f62cdfde9f",
   "kernel_source_presentation.py": "c92ef83ee2127b214f79535d6c4d3d6003c8cb28f00712e5b72fecd314f8eeed",
   "kernel_stable_tool_head.py": "e4c5165b30b150bda77653dea5f6cd05fd816de22a50f549f03ad0caf193f402",
-  "kernel_stable_wire.py": "0ae1c91d8652d06e6d26a3c2197dff1d86e763a3c554afe881260b370396da28",
+  "kernel_stable_wire.py": "da3497887caf3732a09f98e560375a97d9c2fe9628b317c5c463164f11a91c45",
   "kernel_stagnation_cap.py": "6820b184662b458680aa9eb4eb7701eb3508abc38fc04ff09b78e193b77d3db3",
   "kernel_stale_edit_policy.py": "237214601ef1db930f9e2f251372112cfcff004201a1a4de5d2b828ddea0d308",
   "kernel_stale_probe_inspect.py": "df88400f5737c02031279f6f235cbfb2709382d3f11104521ced72483f260e2e",
