@@ -474,7 +474,10 @@ def gate_evidence_identity(value: object) -> object:
             return gate_evidence_identity(to_dict())
         return gate_evidence_identity(dataclasses.asdict(value))
     if isinstance(value, Mapping):
-        return {str(key): gate_evidence_identity(item) for key, item in value.items()}
+        # JSON-native keys stay as they are so json.dumps sorts and renders them exactly as
+        # before normalization (int keys sort numerically, bools render true/false).
+        return {(key if key is None or isinstance(key, (str, int, float, bool)) else str(key)):
+                gate_evidence_identity(item) for key, item in value.items()}
     if isinstance(value, (list, tuple)):
         return [gate_evidence_identity(item) for item in value]
     if isinstance(value, (set, frozenset)):

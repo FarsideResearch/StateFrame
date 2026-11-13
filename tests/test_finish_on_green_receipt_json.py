@@ -14,7 +14,9 @@ normalized the smoke result.  Every one of those digests now goes through
 ``gate_evidence_identity`` (typed: ``to_dict`` for receipt rows, field mapping for other
 dataclasses, never ``default=str``).
 
-(a) e2e: the real CLI + scripted endpoint, finish on the first green check -> graded success.
+(a) e2e: the real CLI + scripted endpoint with a frozen public host check bundle, so the run
+    holds a real ``CheckReceipt`` when it finishes on the first green check -> graded success.
+    Without a bundle no host check runs and the finish line never digests a receipt.
 (b) property: every runtime evidence collection that reaches ``canonical_bytes`` from the
     pass-gates / done-readiness / DECIDE2 path is JSON-native after normalization, and the
     normalization is byte-identical for rows that were already JSON-native (replay parity).
@@ -22,13 +24,16 @@ dataclasses, never ``default=str``).
 from __future__ import annotations
 
 import dataclasses
+import hashlib
 import json
 import os
+import shutil
 import sys
 from pathlib import Path
 
 import pytest
 
+from _journal import measurement_events
 from _timeouts import scaled
 from engine_run import run_monitored
 from stateframe.profiles import load as load_profile
@@ -68,15 +73,39 @@ STEPS = (
 )
 
 
-def _environment() -> dict[str, str]:
+# One host check that the untouched fixture already satisfies: the first green check is
+# a real CheckReceipt in host_check_receipts when the run finishes.
+HOST_BUNDLE = {"schema": "stateframe-host-checks/1", "checks": [{
+    "check_id": "get-missing", "obligation_id": "get-missing", "template": "OUTPUT_EQUALS",
+    "entry_point": "app.api:get", "fixture": {"args": [99]},
+    "expected": {"error": "not_found"}, "interpretation": "VALIDATED"}]}
+
+
+def _source_with_host_bundle(tmp_path: Path) -> Path:
+    """A copy of the engine source whose checks/ dir holds this task's frozen bundle.
+
+    Static bundles are read only from the engine's own checks/ directory, so the run uses
+    a private copy instead of writing into the source tree."""
+    source = tmp_path / "src"
+    shutil.copytree(ROOT / "src", source, ignore=shutil.ignore_patterns("__pycache__"))
+    task_id = "task-" + hashlib.sha256(TASK.encode("utf-8")).hexdigest()[:12]
+    checks = source / "stateframe" / "engine" / "checks"
+    checks.mkdir(exist_ok=True)
+    (checks / f"{task_id}.json").write_text(json.dumps(HOST_BUNDLE), encoding="utf-8")
+    return source
+
+
+def _environment(source: Path) -> dict[str, str]:
     environment = {name: value for name, value in os.environ.items()
                    if not name.startswith(("STATEFRAME_", "REACT_"))}
-    environment["PYTHONPATH"] = os.pathsep.join((str(ROOT / "src"), str(ENGINE)))
+    environment["PYTHONPATH"] = os.pathsep.join(
+        (str(source), str(source / "stateframe" / "engine")))
     return environment
 
 
 def _profile(tmp_path: Path) -> Path:
     switches = load_profile("r2hc3")
+    switches["STATEFRAME_STATIC_BUNDLES"] = "on"
     path = tmp_path / "profile.json"
     path.write_text(json.dumps({"schema": "stateframe-product-profile/1", "switches": switches}))
     return path
@@ -89,6 +118,7 @@ def test_finish_on_first_green_check_completes_with_graded_success(tmp_path: Pat
         (repo / relative).parent.mkdir(parents=True, exist_ok=True)
         (repo / relative).write_text(text, encoding="utf-8")
     run_dir = tmp_path / "run"
+    source = _source_with_host_bundle(tmp_path)
     document = {"model": "scripted", "steps": [dict(step) for step in STEPS],
                 "tokenize": {"mode": "ok"}, "slots": [65536]}
     server = serve(Script(document))
@@ -98,13 +128,22 @@ def test_finish_on_first_green_check_completes_with_graded_success(tmp_path: Pat
                    "--model", "scripted", "--run-dir", str(run_dir), "--test-python", sys.executable,
                    "--max-turns", "8", "--in-place", "--shell", "off",
                    "--profile", str(_profile(tmp_path)), "--quiet"]
-        result = run_monitored(command, env=_environment(), run_dir=run_dir, check=False,
+        result = run_monitored(command, env=_environment(source), run_dir=run_dir, check=False,
                                expected_seconds=scaled(300), step="finish-on-green")
     finally:
         server.shutdown()
         server.server_close()
     output = result.stdout + result.stderr
+    engine_log = run_dir / "engine.log"
+    output += engine_log.read_text(errors="replace") if engine_log.is_file() else ""
     assert DEATH_MARKER not in output, output[-4000:]
+    # The finish line must actually have held a host receipt; otherwise this proves nothing.
+    events = measurement_events(run_dir)
+    sources = [e.get("source") for e in events if e.get("kind") == "host_check_bundle_source"]
+    assert any(isinstance(row, dict) and row.get("kind") == "static_bundle" for row in sources), sources
+    checks = [e for e in events if e.get("kind") == "host_obligation_check"]
+    assert any(e.get("check_id") == "get-missing"
+               and (e.get("receipt") or {}).get("status") == "PASS" for e in checks), checks
     assert "Traceback" not in output, output[-4000:]
     assert result.returncode == 0, output[-4000:]
     summary_path = run_dir / "summary.json"
@@ -270,3 +309,12 @@ def test_runtime_evidence_collections_are_receipt_rows_or_json_native() -> None:
         assert isinstance(argument, ast.Call) and isinstance(argument.func, ast.Name) \
             and argument.func.id == "gate_evidence_identity", (
                 f"line {call.lineno}: digest() argument must be wrapped in gate_evidence_identity")
+
+
+def test_gate_evidence_identity_keeps_json_native_mapping_keys_byte_identical() -> None:
+    from kernel_measurement import canonical_bytes
+    from kernel_stateframe_runtime import gate_evidence_identity
+
+    # int keys sort numerically and bool keys render true/false; str() would change both.
+    for row in ({2: "b", 10: "a"}, {True: "t", False: "f"}, {"k": (1, 2), "j": {3: None}}):
+        assert canonical_bytes(gate_evidence_identity(row)) == canonical_bytes(row)
