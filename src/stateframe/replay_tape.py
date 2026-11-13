@@ -119,6 +119,29 @@ def with_recorded_countdown(request: bytes, recorded: bytes) -> bytes | None:
     return b"".join(pieces) + request[position:]
 
 
+# Private per-request record of the live countdown (seconds_left, time_allowance_seconds),
+# written next to NNNN.request.json by the engine child. The request itself carries only the
+# declared allowance, so same-seed runs stay byte-identical.
+TIME_LEFT_SUFFIX = ".time-left.json"
+
+
+def recorded_time_left(request_path: Path) -> float | None:
+    """Seconds the run had left at this send: the sidecar, else the legacy countdown text."""
+    name = request_path.name
+    if name.endswith(".request.json"):
+        sidecar = request_path.with_name(name[: -len(".request.json")] + TIME_LEFT_SUFFIX)
+        try:
+            value = json.loads(sidecar.read_bytes()).get("seconds_left")
+        except (OSError, ValueError, AttributeError):
+            value = None
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            return float(value)
+    try:
+        return recorded_countdown_seconds(request_path.read_bytes())
+    except OSError:
+        return None
+
+
 def recorded_countdown_seconds(request: bytes) -> float | None:
     """The last finite countdown a recorded request showed, in seconds; None if unbounded or absent."""
     values = [match.group(2) for match in _COUNTDOWN.finditer(request)]
@@ -140,7 +163,7 @@ def recorded_countdown_window(wire_dir: Path) -> tuple[float, float] | None:
         response = request.with_name(request.name.replace(".request.", ".response."))
         if not response.is_file() or not _response_ok(response.read_bytes()):
             continue
-        value = recorded_countdown_seconds(request.read_bytes())
+        value = recorded_time_left(request)
         if value is not None:
             seconds.append(value)
     return (seconds[0], seconds[-1]) if seconds else None

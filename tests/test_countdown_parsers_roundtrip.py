@@ -1,4 +1,10 @@
-"""Class guard for renderer/parser drift; add any new parser of this text here."""
+"""Class guard for renderer/parser drift; add any new parser of this text here.
+
+The rendered limits line no longer carries a live countdown (see
+test_clock_class_wire_identity): it states the declared wall allowance or ``unbounded``. The
+legacy countdown parsers stay for tapes recorded by earlier releases and must keep reading that
+older text, while never mistaking the new text for a countdown.
+"""
 
 from __future__ import annotations
 
@@ -13,67 +19,45 @@ from kernel_read_fixes import ContinuationLimits, ResponseBudget
 from stateframe.replay_tape import recorded_countdown_seconds, with_recorded_countdown
 
 
+LEGACY_SLOTS = (
+    "00000.0 (about 0000 minutes left, ~---- turns at your pace)",
+    "00100.0 (about 0002 minutes left, ~0001 turns at your pace)",
+    "10737.6 (about 0179 minutes left, ~0012 turns at your pace)",
+    "99999.9 (about 999+ minutes left, ~999+ turns at your pace)",
+)
+
+
 @pytest.mark.parametrize("ledger_type", (ResponseBudget, ContinuationLimits))
 @pytest.mark.parametrize(
-    ("seconds", "now", "used", "expected_seconds", "visible_note", "old_parser_misses"),
+    ("seconds", "allowance", "expected"),
     (
-        pytest.param(0, 100.0, 0, 0.0, "00000.0", True, id="zero"),
-        pytest.param(10**1000, 100.0, 0, 99999.9, "99999.9", True, id="saturated"),
-        pytest.param(60, 100.0, 0, 60.0, "~---- turns", True, id="no-pace"),
-        pytest.param(60, 60.0, 1, 60.0, "~0001 turns", False, id="one-turn"),
-        pytest.param(60, 0.01, 1, 60.0, "~999+ turns", True, id="many-turns"),
-        pytest.param(
-            60_000, 100.0, 0, 60_000.0, "999+ minutes", True, id="many-minutes"
-        ),
-        pytest.param(None, 100.0, 0, None, "unbounded", False, id="unbounded"),
+        pytest.param(None, None, "unbounded", id="unbounded"),
+        pytest.param(0.0, 900.0, "limited (wall allowance 900s)", id="spent"),
+        pytest.param(123.4, 2400.0, "limited (wall allowance 2400s)", id="running"),
+        pytest.param(123.4, None, "limited (wall allowance undeclared)", id="undeclared"),
     ),
 )
-def test_rendered_limits_round_trip_through_every_countdown_parser(
+def test_rendered_limits_state_the_allowance_not_the_clock(
     monkeypatch: pytest.MonkeyPatch,
     ledger_type: type[ResponseBudget],
-    seconds: int | None,
-    now: float,
-    used: int,
-    expected_seconds: float | None,
-    visible_note: str,
-    old_parser_misses: bool,
+    seconds: float | None,
+    allowance: float | None,
+    expected: str,
 ) -> None:
-    monkeypatch.setattr(countdown.time, "monotonic", lambda: now)
-    limits = ledger_type(limit=10, mode="response")
-    limits.responses_used = used
-    if isinstance(limits, ContinuationLimits):
-        limits.continuation_model_decisions_used = used
-    limits._time_left_clock_start = 0.0
-    limits._time_left_decisions_at_start = 0
+    limits = ledger_type(limit=10, mode="response", sandbox_time_allowance_seconds=allowance)
     monkeypatch.setattr(limits, "_sandbox_seconds_remaining", lambda now=None: seconds)
 
-    slot = countdown.render_time_slot(limits, seconds)
     line = limits.render_continuation_limits()
-    assert visible_note in slot
-    assert f"sandbox_seconds_remaining={slot};" in line
+    assert f"sandbox_seconds_remaining={expected};" in line
 
     recorded = json.dumps({"messages": [{"role": "user", "content": line}]}).encode()
-    assert recorded_countdown_seconds(recorded) == expected_seconds
-    replacement = (
-        "00012.3 (about 0000 minutes left, ~---- turns at your pace)"
-        if seconds is None
-        else "unbounded"
-    )
-    rebuilt = recorded.replace(
-        f"sandbox_seconds_remaining={slot};".encode(),
-        f"sandbox_seconds_remaining={replacement};".encode(),
-    )
-    assert rebuilt != recorded
-    replaced = with_recorded_countdown(rebuilt, recorded)
-    assert replaced == recorded
-    assert recorded_countdown_seconds(replaced) == expected_seconds
+    # Legacy parsers never read a countdown out of the new text, and the sizing projection
+    # leaves it alone: there is no live slot to project.
+    assert recorded_countdown_seconds(recorded) is None
+    assert countdown.canonical_time_text(line) == line
+    assert countdown.canonical_countdown(line) == line
 
-    canonical = (
-        line if seconds is None else line.replace(slot, countdown.CANONICAL_TIME_SLOT)
-    )
-    assert countdown.canonical_time_text(line) == canonical
-    assert countdown.canonical_countdown(line) == canonical
-
+    # The default-off final-wire projection still classes the whole line as the limits tail.
     assert wire_stability._tail_category(line) == "time"
     assert wire_stability._volatile_segments(line) == [("limits", line)]
     stable = "stable prefix\n"
@@ -84,15 +68,31 @@ def test_rendered_limits_round_trip_through_every_countdown_parser(
     )
     assert projected.body["messages"] == [
         {"role": "user", "content": stable},
-        {
-            "role": "user",
-            "content": wire_stability.VOLATILE_TAIL_MARKER + "\n\n" + line,
-        },
+        {"role": "user", "content": wire_stability.VOLATILE_TAIL_MARKER + "\n\n" + line},
     ]
 
-    # The replay parser before the fix misses both ---- and 999+ producer values.
+
+@pytest.mark.parametrize("slot", LEGACY_SLOTS)
+def test_legacy_countdown_text_still_round_trips_through_every_parser(slot: str) -> None:
+    line = ("[CONTINUATION LIMITS | stateframe-continuation-limits/1] model_decisions_remaining=10; "
+            f"sandbox_seconds_remaining={slot}; next_action_admission=allowed")
+    recorded = json.dumps({"messages": [{"role": "user", "content": line}]}).encode()
+    assert recorded_countdown_seconds(recorded) == float(slot.split(" ", 1)[0])
+
+    rebuilt = recorded.replace(f"sandbox_seconds_remaining={slot};".encode(),
+                               b"sandbox_seconds_remaining=unbounded;")
+    assert rebuilt != recorded
+    replaced = with_recorded_countdown(rebuilt, recorded)
+    assert replaced == recorded
+
+    canonical = line.replace(slot, countdown.CANONICAL_TIME_SLOT)
+    assert countdown.canonical_time_text(line) == canonical
+    assert countdown.canonical_countdown(line) == canonical
+
+    # The replay parser before the ---- / 999+ fix missed those producer values; the current
+    # one reads every legacy slot.
     old_parser = re.compile(
         rb"(sandbox_seconds_remaining=)(unbounded|[0-9]+\.[0-9] \(about [0-9]+ minutes left"
         rb"(?:, ~[0-9]+ turns at your pace)?\))"
     )
-    assert (old_parser.search(recorded) is None) is old_parser_misses
+    assert (old_parser.search(recorded) is None) is ("----" in slot or "999+" in slot)

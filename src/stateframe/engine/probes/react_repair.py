@@ -7285,6 +7285,10 @@ def work(d, *, resume=None):
                 _wall = float("nan")
             if _wall == _wall and _wall > 0:
                 _sandbox_deadline = time.monotonic() + _wall
+        try:
+            _allowance = float(os.environ.get("STATEFRAME_RUN_TIME_ALLOWANCE_S", "") or "nan")
+        except ValueError:
+            _allowance = float("nan")
         _budget = ContinuationLimits(
             step_cap,
             mode=_budget_mode,
@@ -7293,6 +7297,8 @@ def work(d, *, resume=None):
             terminal_reserve_limit=2,
             output_reservation_tokens=_output_ceiling,
             sandbox_deadline_monotonic=_sandbox_deadline,
+            sandbox_time_allowance_seconds=(
+                _allowance if _allowance == _allowance and _allowance > 0 else None),
         )
         decoy_call_names: list[str] = []
         schema_violation_details: list[dict[str, object]] = []
