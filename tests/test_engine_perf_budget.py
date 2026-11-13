@@ -794,13 +794,10 @@ def test_finalize_frame_candidate_has_bounded_copies_and_body_serializations(
     # Four top-level clones remain: caller-body isolation, incoming-plan
     # isolation, the independently retained receipt, and the published closure
     # snapshot. Bookmark/source snapshots and inactive optional inputs are shared.
-    # The unchanged body is serialized exactly eight times: meter wire size,
-    # measured-pair chars, frozen chars+digest, one source-proof payload,
-    # one frozen identity check, and final carried chars+digest. Reuse of the
-    # prepared source-proof wire covers all later size checks and measurement bind.
-    # Candidate counts are exact on this fixture; the combined assertion also
-    # exposes both pass-1 baseline values in the planted control run.
-    assert (deepcopy_calls, candidate_serializations) == (4, 8)
+    # The unchanged body is serialized once per distinct encoding (wire,
+    # sorted chars, canonical identity); a guarded memo covers every repeat.
+    assert deepcopy_calls == 4
+    assert candidate_serializations == 3
 
 
 def test_source_plan_snapshot_detaches_metadata_and_shares_text_snapshot():

@@ -28,6 +28,7 @@ from collections.abc import Callable, Mapping, Sequence
 
 from kernel_context import token_estimate
 from kernel_measurement import profiled_function_span
+from kernel_body_serialization_memo import plain_wire
 from kernel_endpoint_size import ENDPOINT_SIZE
 from kernel_obligation_assess import UnavailableEvidence
 from kernel_request_auth_identity import auth_binding_for_key as _auth_binding_for_key
@@ -846,7 +847,7 @@ class RequestTokenMeter:
                 ENDPOINT_VERIFIED_BYTES_PER_TOKEN, FREE_STAGE, _lean_request_limits,
             )
             byte_limit, token_limit = _lean_request_limits(body, FREE_STAGE, exact_tokenizer=True)
-            size = _wire_bytes(body) if wire_bytes is None else wire_bytes
+            size = len(plain_wire(body)) if wire_bytes is None else wire_bytes
             if size > byte_limit:
                 # A rejection bound, never an exact count or endpoint failure.
                 # Smaller candidates can still tokenize within this request.
