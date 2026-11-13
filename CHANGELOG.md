@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Fixed: engine runs no longer write react_live.log or receipts under the installed package or src/; they go to the run directory (or STATEFRAME_RESULTS_DIR, else a temp dir).
 - A native tool-call batch now prepares once per model response: queued sibling actions settle their step, receipts, live state and lineage through a lean boundary instead of rendering a full request whose body was discarded. The request actually sent is byte-identical; the discarded `request_prepared`, `history_decision`, `selection_decision`, `exposure_composition` and `tokens_row6_delivery_audit` records for queued siblings are no longer journaled.
 
 ## 0.5.13 (2026-11-12)
