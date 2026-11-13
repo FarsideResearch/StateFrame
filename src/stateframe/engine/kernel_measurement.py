@@ -959,9 +959,9 @@ def refit_guarded_body(candidate, *, limit, budget, finalize, guard, emit=None):
     return refit
 
 
-def _finalize_provider_refit(body, *, profile, dialect):
+def _finalize_provider_refit(body, *, profile, dialect, side_call=False):
     """Revalidate a budget refit with the selected endpoint's provider dialect."""
-    return enforce_provider_body(body, profile=profile, dialect=dialect)
+    return enforce_provider_body(body, profile=profile, dialect=dialect, side_call=side_call)
 
 
 @dataclass(frozen=True, slots=True)
@@ -3202,6 +3202,7 @@ class RequestCapture:
             journal_timeouts: bool = True,
             boundary_state: _BoundaryRecoveryContext | None = None,
             frozen_retry_only: bool = False,
+            provider_dialect: str = "llama.cpp",
     ) -> tuple[dict, dict[str, object], int]:
         """Retry classified transport failures under the shared bounded policy."""
         from kernel_pilot import POLICY, ParentBudgetExhausted
@@ -3289,7 +3290,8 @@ class RequestCapture:
                     "transport_retry_validation" if attempt else "transport_attempt_validation")
             self._guard_retry_submission(attempt, attempt_reasons)
             from kernel_request_kind import guard_physical_send
-            guard_physical_send(self, getattr(self, "_wire_truth_runtime", None), body, wire)
+            guard_physical_send(self, getattr(self, "_wire_truth_runtime", None), body, wire,
+                                dialect=provider_dialect)
             sealed = self.qualified_request
             if sealed is not None:
                 from kernel_request_seal import RequestSealError
@@ -3921,7 +3923,8 @@ class RequestCapture:
                     )
             started = time.perf_counter_ns()
             self._assert_wire_string_hygiene(wire)
-            guard_physical_send(self, getattr(self, "_wire_truth_runtime", None), body, wire)
+            guard_physical_send(self, getattr(self, "_wire_truth_runtime", None), body, wire,
+                                dialect=provider_dialect)
             if os.environ.get("STATEFRAME_MUTATIONS", "off") in {"prebuilt", "authored"}:
                 from kernel_mutate_runtime import service as mutation_service
                 _mutations = mutation_service()
@@ -5330,6 +5333,7 @@ class RequestCapture:
                     value = _finalize_provider_refit(
                         value, profile=provider_profile,
                         dialect=provider_capabilities.dialect,
+                        side_call=side_call_contract is not None,
                     )
                 return value
 
@@ -5753,7 +5757,8 @@ class RequestCapture:
                 # after router, sampler, template, and budget transforms.
                 _require_provider_features(body)
                 body = enforce_provider_body(body, profile=final_profile,
-                                             dialect=provider_capabilities.dialect)
+                                             dialect=provider_capabilities.dialect,
+                                             side_call=side_call_contract is not None)
             except ProviderBoundaryContractError as error:
                 self.journal.emit(
                     "provider_boundary_contract_error",
@@ -5875,7 +5880,8 @@ class RequestCapture:
                 enforce_context_capacity(self, body, endpoint=endpoint, key=key)
             _require_provider_features(body)
             body = enforce_provider_body(body, profile=final_profile,
-                                         dialect=provider_capabilities.dialect)
+                                         dialect=provider_capabilities.dialect,
+                                         side_call=side_call_contract is not None)
             wire = _serialize_final_request_body(body, wire_truth_runtime, self.request_id)
             if _boundary_state is not None:
                 _boundary_state.phase = "final_serialization_validation"
@@ -6087,7 +6093,8 @@ class RequestCapture:
                 body = _apply_request_capture_budget(self, body)
                 body = self._ensure_final_wire_ticket(body)
                 body = enforce_provider_body(body, profile=final_profile,
-                                             dialect=provider_capabilities.dialect)
+                                             dialect=provider_capabilities.dialect,
+                                             side_call=side_call_contract is not None)
                 body = _guard_final_wire(body)
                 body = _rebudget_if_guard_grew(
                     body, ticket=True, provider_profile=final_profile,
@@ -6119,7 +6126,8 @@ class RequestCapture:
                     body = _apply_request_capture_budget(self, body)
                     body = self._ensure_final_wire_ticket(body)
                     body = enforce_provider_body(body, profile=final_profile,
-                                                 dialect=provider_capabilities.dialect)
+                                                 dialect=provider_capabilities.dialect,
+                                                 side_call=side_call_contract is not None)
                     body = _guard_final_wire(body)
                     body = _rebudget_if_guard_grew(
                         body, ticket=True, provider_profile=final_profile,
@@ -6216,7 +6224,8 @@ class RequestCapture:
                         body = _apply_request_capture_budget(self, body)
                         body = self._ensure_final_wire_ticket(body)
                         body = enforce_provider_body(body, profile=final_profile,
-                                                     dialect=provider_capabilities.dialect)
+                                                     dialect=provider_capabilities.dialect,
+                                                     side_call=side_call_contract is not None)
                         body = _guard_final_wire(body)
                         body = _rebudget_if_guard_grew(
                             body, ticket=True, provider_profile=final_profile,
@@ -6363,7 +6372,8 @@ class RequestCapture:
                         frame_request_allocation=self.frame_request_allocation,
                     )
             body = enforce_provider_body(body, profile=final_profile,
-                                         dialect=provider_capabilities.dialect)
+                                         dialect=provider_capabilities.dialect,
+                                         side_call=side_call_contract is not None)
             wire = _serialize_final_request_body(body, wire_truth_runtime, self.request_id)
             if _boundary_state is not None:
                 _boundary_state.phase = "final_serialization_validation"
@@ -6633,7 +6643,8 @@ class RequestCapture:
 
             if framefit5_request:
                 body = enforce_provider_body(body, profile=final_profile,
-                                             dialect=provider_capabilities.dialect)
+                                             dialect=provider_capabilities.dialect,
+                                             side_call=side_call_contract is not None)
                 wire = _serialize_final_request_body(
                     body, wire_truth_runtime, self.request_id,
                 )
@@ -6868,7 +6879,8 @@ class RequestCapture:
                 from kernel_launch_identity_cost import assert_openai_chat_body
                 assert_openai_chat_body(body)
                 checked = enforce_provider_body(
-                    body, profile=final_profile, dialect="openai-strict")
+                    body, profile=final_profile, dialect="openai-strict",
+                    side_call=side_call_contract is not None)
                 if checked != body or json.dumps(body).encode() != wire:
                     raise ProviderBoundaryContractError(
                         "strict_final_body_changed",
@@ -6895,7 +6907,8 @@ class RequestCapture:
                     transport_attempt_limit=transport_attempt_limit,
                     journal_timeouts=journal_timeouts,
                     boundary_state=_boundary_state,
-                    frozen_retry_only=_frozen_retry_only)
+                    frozen_retry_only=_frozen_retry_only,
+                    provider_dialect=provider_capabilities.dialect)
             finally:
                 from kernel_completion_owner import finish_request_submission
                 finish_request_submission(wire_truth_runtime, request_id=self.request_id)

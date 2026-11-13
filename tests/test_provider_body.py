@@ -515,7 +515,8 @@ def test_empty_reasoning_effort_is_treated_as_unset(monkeypatch):
     assert "reasoning_effort" not in strict
     assert reasoning_controls_summary(
         "openai-strict", environ={"REACT_REASONING_EFFORT": "  "},
-    ) == "reasoning controls dropped"
+    ) == ("reasoning controls omitted; proposal side-calls refused: require "
+          "operator-confirmed REACT_REASONING_EFFORT=none support")
 
 
 @pytest.mark.parametrize("effort", ["none", "minimal", "low", "medium", "high", "xhigh", "max"])

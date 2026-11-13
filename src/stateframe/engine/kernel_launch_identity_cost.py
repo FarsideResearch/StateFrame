@@ -176,17 +176,35 @@ def _openai_message(value: object) -> object:
     return message
 
 
+def require_strict_side_call_reasoning_off(effort: object) -> None:
+    """Require operator-confirmed off support, never infer it from a dialect.
+
+    ProviderCapabilities proves llama.cpp features, not whether a strict model
+    accepts reasoning controls or disables reasoning when they are omitted.
+    """
+    if effort != "none":
+        raise ProviderBoundaryContractError(
+            "side_call_reasoning_off_unproven",
+            "side-call reasoning must be explicitly disabled; set "
+            "REACT_REASONING_EFFORT=none only if the selected provider and model "
+            "accept that field and value, or select a compatible side-call endpoint",
+        )
+
+
 def _openai_body(
     body: Mapping[str, object],
     selected: "ReasoningProfile",
     *,
     environ: Mapping[str, str] | None = None,
+    side_call: bool = False,
 ) -> dict[str, object]:
     source = os.environ if environ is None else environ
     raw_effort = source.get("REACT_REASONING_EFFORT")
     explicit_effort = raw_effort.strip().lower() if isinstance(raw_effort, str) else None
     if not explicit_effort:
         explicit_effort = None
+    if side_call:
+        require_strict_side_call_reasoning_off(explicit_effort)
     if selected.off and explicit_effort != "none":
         raise ProviderBoundaryContractError(
             "reasoning_off_unproven",
@@ -200,7 +218,7 @@ def _openai_body(
             "invalid_reasoning_effort",
             "REACT_REASONING_EFFORT must be one of none|minimal|low|medium|high|xhigh|max")
     else:
-        # The operator selected this OpenAI schema field for this endpoint.
+        # The selected policy explicitly admits this OpenAI schema field.
         result["reasoning_effort"] = explicit_effort
     if "n_probs" in body:
         count = body["n_probs"]
@@ -619,6 +637,7 @@ def enforce_provider_body(
     profile: ReasoningProfile | None = None,
     dialect: str = "llama.cpp",
     environ: Mapping[str, str] | None = None,
+    side_call: bool = False,
 ) -> dict[str, object]:
     """Apply and prove the explicit profile at the last mutable boundary."""
     selected = profile or reasoning_profile(environ=environ)
@@ -626,7 +645,7 @@ def enforce_provider_body(
         if not isinstance(body, Mapping):
             raise ProviderBoundaryContractError(
                 "request_not_mapping", "provider request must be a mapping")
-        result = _openai_body(body, selected, environ=environ)
+        result = _openai_body(body, selected, environ=environ, side_call=side_call)
         assert_openai_chat_body(result)
         return result
     if dialect != "llama.cpp":

@@ -10,10 +10,16 @@ from dataclasses import dataclass
 
 try:  # Host runner imports the helper as a package; the engine loads it top-level.
     from .kernel_bounded_http import bounded_json_probe
-    from .kernel_launch_identity_cost import OPENAI_REASONING_EFFORTS, ProviderBoundaryContractError
+    from .kernel_launch_identity_cost import (
+        OPENAI_REASONING_EFFORTS, ProviderBoundaryContractError,
+        require_strict_side_call_reasoning_off,
+    )
 except ImportError:
     from kernel_bounded_http import bounded_json_probe
-    from kernel_launch_identity_cost import OPENAI_REASONING_EFFORTS, ProviderBoundaryContractError
+    from kernel_launch_identity_cost import (
+        OPENAI_REASONING_EFFORTS, ProviderBoundaryContractError,
+        require_strict_side_call_reasoning_off,
+    )
 
 
 LLAMA_CPP = "llama.cpp"
@@ -478,8 +484,16 @@ def reasoning_controls_summary(
         effort = None
     if reasoning_off and effort != "none":
         return "global reasoning-off refused: no proven reasoning_effort=none support"
+    try:
+        require_strict_side_call_reasoning_off(effort)
+    except ProviderBoundaryContractError:
+        side_calls = (
+            "proposal side-calls refused: require operator-confirmed REACT_REASONING_EFFORT=none support"
+        )
+    else:
+        side_calls = "proposal side-calls reasoning-off operator-confirmed"
     if effort is not None:
         if effort not in OPENAI_REASONING_EFFORTS:
             return "reasoning controls refused: unsupported REACT_REASONING_EFFORT"
-        return f"reasoning controls mapped to reasoning_effort={effort}"
-    return "reasoning controls dropped"
+        return f"reasoning controls mapped to reasoning_effort={effort}; {side_calls}"
+    return f"reasoning controls omitted; {side_calls}"

@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.6.2 (2026-11-13)
+
+- Fixed: strict-provider proposal side-calls require operator-confirmed `REACT_REASONING_EFFORT=none` before dispatch instead of sending an unrequested reasoning parameter. Dialect probes do not prove model reasoning support. Explicit reasoning-off survives conversion, refitting and transport retries without weakening the side-call validator; the provider summary reports when strict side-calls are refused.
+
 ## 0.6.1 (2026-11-13)
 
 - Keep recorded stable-wire trims intact after checkpoint restore so repeated resumes rebuild the same request even when token estimates change.
