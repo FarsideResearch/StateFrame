@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.6.3 (2026-11-13)
+
+- Fixed: check receipts now size their stdout, stderr and assertion context from the same normalised text the model sees (durations and object addresses masked), so a rerun's wall-clock time no longer changes the receipt line or the evidence pin on the wire; same-seed requests are byte-identical again and the cached prompt prefix survives a check.
+
 ## 0.6.2 (2026-11-13)
 
 - Fixed: strict-provider proposal side-calls require operator-confirmed `REACT_REASONING_EFFORT=none` before dispatch instead of sending an unrequested reasoning parameter. Dialect probes do not prove model reasoning support. Explicit reasoning-off survives conversion, refitting and transport retries without weakening the side-call validator; the provider summary reports when strict side-calls are refused.
