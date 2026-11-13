@@ -87,8 +87,29 @@ def _recover_post_fit_growth(candidate, context, body, fitted_body, fitted_count
     from kernel_context import token_estimate
     from kernel_context_capacity import enforce_context_capacity
     from kernel_frame_allocation_capture import (
-        FrameFit5ImpossibleMinimum, final_request_tokens, finalize_frame_candidate,
+        FrameFit5ImpossibleMinimum, carry_final_request_tokens,
+        final_request_tokens, finalize_frame_candidate,
     )
+    from kernel_cache_layout_candidate import (
+        replay_stable_wire_decision, replay_stable_wire_windows,
+    )
+    from kernel_stable_wire import recorded_window_layout, replay_mismatch
+
+    replay_mismatched = False
+    if replay_stable_wire_decision() == "applied":
+        projected_layout = recorded_window_layout(body.get("messages"))
+        if projected_layout is not None:
+            recorded_layout = replay_stable_wire_windows()
+            if recorded_layout is not None:
+                if projected_layout == recorded_layout:
+                    # The renderer already proved these recorded windows and epoch.
+                    # Today's meter cannot revoke that admission. Carry its fitted
+                    # counter onto the rebuilt body for the later frozen proof;
+                    # transport still compares the entire request byte for byte.
+                    carry_final_request_tokens(body, candidate, fitted_counter.tokens)
+                    return body, False
+                replay_mismatch(candidate, body, reason="qualification_layout_mismatch")
+                replay_mismatched = True
 
     def fits(value):
         tokens, _method = final_request_tokens(value, meter, candidate)
@@ -96,7 +117,7 @@ def _recover_post_fit_growth(candidate, context, body, fitted_body, fitted_count
         return (tokens <= inputs["token_ceiling"]
                 and len(json.dumps(value).encode()) <= inputs["byte_ceiling"])
 
-    if fits(body):
+    if not replay_mismatched and fits(body):
         return body, False
 
     # A projection is optional. Restore the fully fitted canonical candidate

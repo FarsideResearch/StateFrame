@@ -175,7 +175,9 @@ def test_numeric_record_rejects_invalid_or_unbounded_trim_history(tmp_path, bad)
 
 
 @pytest.mark.parametrize("flag", [None, "off"])
-def test_stable_wire_off_request_and_tape_bytes_match_0517(tmp_path, tmp_path_factory, flag):
+@pytest.mark.parametrize("final_layout", [None, "on", "off"])
+def test_stable_wire_off_request_and_tape_bytes_match_0517(
+        tmp_path, tmp_path_factory, flag, final_layout):
     baseline = pinned_tree("9f07117d53b8edf6a02ce2f48a8ff706ccad11f3", tmp_path_factory)
     root = Path(__file__).resolve().parents[1]
     script = r'''
@@ -214,10 +216,62 @@ print(json.dumps({str(p.relative_to(run)):p.read_bytes().hex()
                if not key.startswith(("STATEFRAME_", "KERNEL_", "DS_", "REACT_", "PILOT_", "UNIT_PLAN_"))}
         if flag is not None:
             env["STATEFRAME_STABLE_WIRE"] = flag
+        if final_layout is not None:
+            env["STATEFRAME_FINAL_CACHE_LAYOUT"] = final_layout
         env.update(STATEFRAME_PAGE_LOG="off",
                    PYTHONPATH=os.pathsep.join(str(path) for path in (
                        checkout / "src/stateframe/engine", checkout / "src", root / "tests")))
         result = subprocess.run([sys.executable, "-c", script, str(tmp_path / name)],
+                                env=env, capture_output=True, text=True, timeout=60)
+        assert result.returncode == 0, result.stderr
+        outputs.append(json.loads(result.stdout))
+    assert outputs[0] == outputs[1]
+    assert set(outputs[1]) == {"wire/0001.request.json", "wire/0001.response.json", "sends.jsonl"}
+    assert "stable_wire_reserves" not in bytes.fromhex(outputs[1]["sends.jsonl"]).decode()
+
+
+@pytest.mark.parametrize("final_layout", ["on", "off"])
+def test_allocator_off_request_and_tape_bytes_match_immediate_base(
+        tmp_path, tmp_path_factory, final_layout):
+    baseline = pinned_tree("37f0ac81", tmp_path_factory)
+    root = Path(__file__).resolve().parents[1]
+    script = r'''
+import json, sys
+from pathlib import Path
+import pytest
+import kernel_bounded_http
+from kernel_measurement import ACTIVE_REQUEST
+from stateframe import _child
+from test_stable_wire_trim_selection import allocator
+patch = pytest.MonkeyPatch()
+prepare, render = allocator.__wrapped__(patch, Path(sys.argv[1]))
+patch.setenv("STATEFRAME_STABLE_WIRE", "off")
+patch.setenv("STATEFRAME_FINAL_CACHE_LAYOUT", sys.argv[2])
+prepared = prepare()
+body = render(prepared)
+assert getattr(prepared[1], "_stable_wire_reserves_record", None) is None
+assert "kernel_stable_wire_initial" not in sys.modules
+wire = json.dumps(body).encode()
+kernel_bounded_http.request_bytes = lambda *a, **k: b'{"choices":[{}]}'
+_child.time.monotonic = lambda: 1.0
+_child.emit = lambda *a, **k: None
+run = Path(sys.argv[1]); run.mkdir()
+_child.install_wire_recorder(run, "http://localhost/chat")
+active = ACTIVE_REQUEST.set(prepared[1])
+try:
+    kernel_bounded_http.request_bytes(wire, "http://localhost/chat", "")
+finally:
+    ACTIVE_REQUEST.reset(active)
+print(json.dumps({str(p.relative_to(run)):p.read_bytes().hex()
+                  for p in run.rglob("*") if p.is_file()}, sort_keys=True))
+'''
+    outputs = []
+    for checkout, name in ((baseline, "baseline"), (root, "current")):
+        env = {key: value for key, value in os.environ.items()
+               if not key.startswith(("STATEFRAME_", "KERNEL_", "DS_", "REACT_", "PILOT_", "UNIT_PLAN_"))}
+        env["PYTHONPATH"] = os.pathsep.join(str(path) for path in (
+            checkout / "src/stateframe/engine", checkout / "src", root / "tests"))
+        result = subprocess.run([sys.executable, "-c", script, str(tmp_path / name), final_layout],
                                 env=env, capture_output=True, text=True, timeout=60)
         assert result.returncode == 0, result.stderr
         outputs.append(json.loads(result.stdout))

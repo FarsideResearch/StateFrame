@@ -14,8 +14,8 @@ def validate_reserves_record(value: object) -> dict[str, object] | None:
     if value is None:
         return None
     if (not isinstance(value, Mapping)
-            or set(value) not in ({"reserves", "trim_count", "epoch"},
-                                  {"reserves", "trim_count", "epoch", "selections"})
+            or not {"reserves", "trim_count", "epoch"} <= set(value)
+            or set(value) - {"reserves", "trim_count", "epoch", "selections", "initial_selection"}
             or type(value["trim_count"]) is not int
             or not 0 <= value["trim_count"] <= MAX_STABLE_TRIMS
             or type(value["epoch"]) is not int or value["epoch"] < 1
@@ -55,4 +55,10 @@ def validate_reserves_record(value: object) -> dict[str, object] | None:
                 rows.append(dict(row))
             copied.append(rows)
         result["selections"] = copied
+    if "initial_selection" in value:
+        try:
+            from .kernel_stable_wire_initial import validate_initial_selection
+        except ImportError:
+            from kernel_stable_wire_initial import validate_initial_selection
+        result["initial_selection"] = validate_initial_selection(value["initial_selection"])
     return result

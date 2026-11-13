@@ -320,6 +320,9 @@ def render_final_cache_candidate(capture, runtime, body, *, meter, inputs):
         )
     stable_wire_enabled = stable_switch_enabled or stable_decision in {"applied", "plain"}
     trim_callback = inputs.pop("_final_layout_trim", None) if isinstance(inputs, dict) else None
+    if getattr(capture, "_stable_wire_initial_mismatch", False):
+        from kernel_stable_wire import replay_mismatch
+        return replay_mismatch(capture, body, reason="recorded_initial_selection_unavailable")
     if decision == "plain":
         _record_final_layout(capture, "plain")
         if stable_wire_enabled or stable_decision == "plain":
@@ -779,6 +782,9 @@ def _render_final_cache_layout(capture, runtime, body, *, meter, inputs,
                 if ((selection_capable and not stable_replay and reserves)
                         or "selections" in (replay_record or {})):
                     capture._stable_wire_reserves_record["selections"] = selections
+                initial = getattr(capture, "_stable_wire_initial_selection", None)
+                if initial is not None:
+                    capture._stable_wire_reserves_record["initial_selection"] = copy.deepcopy(initial)
 
         if stable_replay:
             # Final window/epoch proof belongs to project_stable_wire; no fit or admission
