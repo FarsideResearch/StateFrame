@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Fixed the llama.cpp wire-seal regression test to compare requests before and after provider normalization in the same run, so intentional prompt and tool-schema updates no longer look like seal regressions.
 - Updated the isolated HTTP child import check to recognize its shared redirect and capacity helpers, verify both helpers in an installed wheel, and keep rejecting unavailable dependencies.
 
 ## 0.6.30 (2026-11-14)
