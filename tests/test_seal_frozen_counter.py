@@ -211,7 +211,7 @@ def test_changed_exact_body_uses_frozen_delta_when_tokenizer_fails(monkeypatch):
 
 
 def test_stable_wire_fit_and_reserve_use_frozen_count_after_tokenizer_failure(monkeypatch):
-    from kernel_stable_wire import _request_fits, _request_retry_reserve
+    from kernel_stable_wire import _fit_report, _request_retry_reserve
 
     body = _body(80000)
     meter = RequestTokenMeter(tokenizer=lambda _text: 20000)
@@ -223,8 +223,8 @@ def test_stable_wire_fit_and_reserve_use_frozen_count_after_tokenizer_failure(mo
               "measurement_identity": "tokenize"}
     monkeypatch.setattr(meter, "_availability", "unavailable")
     assert meter.measure(body)[0] > inputs["token_ceiling"]  # Planted live-meter control.
-    assert not _request_fits(body, meter, inputs)
-    assert _request_fits(body, meter, inputs, capture)
+    assert not _fit_report(body, meter, inputs)["fits"]
+    assert _fit_report(body, meter, inputs, capture)["fits"]
     assert _request_retry_reserve(body, meter, inputs, capture) == (16, 256)
 
 

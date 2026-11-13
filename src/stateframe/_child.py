@@ -226,10 +226,12 @@ def install_wire_recorder(run: Path, chat_url: str, replayer: Replayer | None = 
         from kernel_cache_layout_candidate import (
             install_replay_layout_decision_provider,
             install_replay_stable_wire_decision_provider,
+            install_replay_stable_wire_windows_provider,
+            install_replay_stable_wire_reserves_provider,
         )
         from kernel_cache_layout_view import FINAL_LAYOUT_NAME
         from kernel_stateframe_final_message import AUTHORITY_OVERLAY_HEADER
-        from kernel_stable_wire import is_stable_wire_projection
+        from kernel_stable_wire import is_stable_wire_projection, recorded_window_layout
 
         def replay_layout_decision() -> str | None:
             recorded = replayer.request_for_layout_decision()
@@ -265,9 +267,25 @@ def install_wire_recorder(run: Path, chat_url: str, replayer: Replayer | None = 
             messages = request.get("messages") if isinstance(request, dict) else None
             if not isinstance(messages, list):
                 return None
-            return "applied" if is_stable_wire_projection(messages) else "plain"
+            # Inspect recorded structure without consulting this same decision
+            # provider again when today's stable-wire switch is off.
+            return "applied" if is_stable_wire_projection(messages, recorded=True) else "plain"
 
         install_replay_stable_wire_decision_provider(replay_stable_wire_decision)
+
+        def replay_stable_wire_windows() -> tuple[list[str], int] | None:
+            recorded = replayer.request_for_layout_decision()
+            if recorded is None:
+                return None
+            try:
+                request = json.loads(recorded)
+            except (ValueError, RecursionError):
+                return None
+            messages = request.get("messages") if isinstance(request, dict) else None
+            return recorded_window_layout(messages)
+
+        install_replay_stable_wire_windows_provider(replay_stable_wire_windows)
+        install_replay_stable_wire_reserves_provider(replayer.reserves_for_layout_decision)
 
     wire_dir = run / "wire"
     wire_dir.mkdir(exist_ok=True)
@@ -322,6 +340,16 @@ def install_wire_recorder(run: Path, chat_url: str, replayer: Replayer | None = 
         counter["n"] += 1
         index = counter["n"]
         stem = wire_dir / f"{index:04d}"
+        from kernel_measurement import ACTIVE_REQUEST
+        from kernel_stable_wire_record import validate_reserves_record
+
+        reserves = validate_reserves_record(
+            getattr(ACTIVE_REQUEST.get(), "_stable_wire_reserves_record", None))
+        stable_record = {"stable_wire_reserves": reserves} if reserves is not None else {}
+        if reserves is not None:
+            # fsync before publishing the request, so a pending send has its trim authority.
+            atomic_bytes(stem.with_suffix(".stable-wire.json"), json.dumps(
+                reserves, sort_keys=True, separators=(",", ":")).encode())
         if routed_endpoints is not None:
             atomic_bytes(stem.with_suffix(".route.json"), json.dumps(
                 route, sort_keys=True, separators=(",", ":")).encode())
@@ -398,6 +426,7 @@ def install_wire_recorder(run: Path, chat_url: str, replayer: Replayer | None = 
                     stream.write(json.dumps({"send": index, "request_bytes": len(wire),
                                              "request_sha256": hashlib.sha256(wire).hexdigest(),
                                              **final_layout_record(wire),
+                                             **stable_record,
                                              "transport_attempts": transport_attempts,
                                              "error": type(error).__name__}) + "\n")
             emit("send_error", send=index, error=type(error).__name__,
@@ -424,6 +453,7 @@ def install_wire_recorder(run: Path, chat_url: str, replayer: Replayer | None = 
                   "request_sha256": hashlib.sha256(wire).hexdigest(),
                   "messages": len(messages) if isinstance(messages, list) else None,
                   **final_layout_record(wire),
+                  **stable_record,
                   "seconds": round(elapsed, 3), **usage, "actions": _actions(parsed)}
         if replayed is not None:
             record.update(replayed=True, replay_position=replayer.cursor, replay_total=len(replayer.tape))

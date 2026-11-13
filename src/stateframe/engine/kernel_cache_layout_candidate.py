@@ -12,6 +12,7 @@ import os
 import threading
 
 from kernel_stateframe_page_log import PageLogPending, mode
+from kernel_stable_wire_record import MAX_STABLE_TRIMS, validate_reserves_record
 
 _COMMIT_LOCK = threading.RLock()
 
@@ -23,6 +24,8 @@ FINAL_SOURCE_ORDER_STATE_ATTR = "_final_cache_source_order_state"
 FINAL_SOURCE_ORDER_STATE_SCHEMA = "stateframe-final-source-order/1"
 _REPLAY_LAYOUT_DECISION_PROVIDER: Callable[[], str | None] | None = None
 _REPLAY_STABLE_WIRE_DECISION_PROVIDER: Callable[[], str | None] | None = None
+_REPLAY_STABLE_WIRE_WINDOWS_PROVIDER: Callable[[], tuple[list[str], int] | None] | None = None
+_REPLAY_STABLE_WIRE_RESERVES_PROVIDER: Callable[[], dict[str, object] | None] | None = None
 
 
 class FinalCacheLayoutProjectionError(ValueError):
@@ -203,6 +206,47 @@ def install_replay_stable_wire_decision_provider(provider: Callable[[], str | No
     _REPLAY_STABLE_WIRE_DECISION_PROVIDER = provider
 
 
+def install_replay_stable_wire_windows_provider(
+        provider: Callable[[], tuple[list[str], int] | None] | None) -> None:
+    """Install the window contents of the recorded request being rebuilt (replay-only)."""
+    global _REPLAY_STABLE_WIRE_WINDOWS_PROVIDER
+    if provider is not None and not callable(provider):
+        raise TypeError("stable wire replay windows provider must be callable")
+    _REPLAY_STABLE_WIRE_WINDOWS_PROVIDER = provider
+
+
+def replay_stable_wire_windows() -> tuple[list[str], int] | None:
+    """Recorded source windows and the epoch parsed from the recorded status row."""
+    provider = _REPLAY_STABLE_WIRE_WINDOWS_PROVIDER
+    if provider is None:
+        return None
+    value = provider()
+    if value is None:
+        return None
+    if not isinstance(value, tuple) or len(value) != 2:
+        raise ValueError("invalid recorded stable wire layout")
+    windows, epoch = value
+    if not isinstance(windows, list) or any(not isinstance(row, str) for row in windows):
+        raise ValueError("invalid recorded stable wire windows")
+    if type(epoch) is not int or epoch < 1:
+        raise ValueError("invalid recorded stable wire epoch")
+    return windows, epoch
+
+
+def install_replay_stable_wire_reserves_provider(
+        provider: Callable[[], dict[str, object] | None] | None) -> None:
+    """Install numeric trim authority for the next recorded send (including pending)."""
+    global _REPLAY_STABLE_WIRE_RESERVES_PROVIDER
+    if provider is not None and not callable(provider):
+        raise TypeError("stable wire replay reserves provider must be callable")
+    _REPLAY_STABLE_WIRE_RESERVES_PROVIDER = provider
+
+
+def replay_stable_wire_reserves() -> dict[str, object] | None:
+    provider = _REPLAY_STABLE_WIRE_RESERVES_PROVIDER
+    return validate_reserves_record(provider()) if provider is not None else None
+
+
 def replay_stable_wire_decision() -> str | None:
     provider = _REPLAY_STABLE_WIRE_DECISION_PROVIDER
     if provider is None:
@@ -263,6 +307,7 @@ def render_final_cache_candidate(capture, runtime, body, *, meter, inputs):
 
     try:
         capture._final_cache_layout_record = {}
+        capture._stable_wire_reserves_record = None
     except (AttributeError, TypeError):
         pass
     decision = replay_final_layout_decision()
@@ -584,7 +629,9 @@ def _render_final_cache_layout(capture, runtime, body, *, meter, inputs,
         # append newly selected windows for cache reuse.
         ordered_body, order_state = _order_final_source_windows(body, runtime)
     projected = _checked_final_cache_projection(ordered_body)
-    tokens, method = admission_tokens(projected)
+    # Replaying an admitted stable send must not depend on today's tokenizer availability.
+    stable_replay = stable_wire_enabled and stable_replay_decision == "applied"
+    tokens, method = (0, "recorded") if stable_replay else admission_tokens(projected)
     size = _wire_size(projected)
     if not stable_wire_enabled and replay_decision != "layout" and (
             tokens > inputs["token_ceiling"] or size > inputs["byte_ceiling"]):
@@ -631,7 +678,8 @@ def _render_final_cache_layout(capture, runtime, body, *, meter, inputs,
     if capture is not None:
         capture.request_source_final_delivery = receipt
     if stable_wire_enabled and stable_replay_decision != "plain":
-        from kernel_stable_wire import STATE_ATTR, project_stable_wire
+        from kernel_stable_wire import (
+            RETRY_AFTER_TRIM_KEY, STATE_ATTR, TRIM_COUNT_KEY, project_stable_wire)
         stable_state_present = hasattr(runtime, STATE_ATTR)
         stable_state_before = copy.deepcopy(getattr(runtime, STATE_ATTR, None))
 
@@ -645,21 +693,67 @@ def _render_final_cache_layout(capture, runtime, body, *, meter, inputs,
                 delattr(runtime, STATE_ATTR)
             _record_stable_wire(capture, "plain", "final_layout_failed_open")
 
+        # The trim callback sizes its limits from the untrimmed base, so each call asks for the
+        # running total of every reserve requested so far.
+        requested = [0, 0]
+        reserves = []
+        selections = []
+        selection_capable = getattr(trim_callback, "replays_selections", False)
+        replay_record = replay_stable_wire_reserves() if stable_replay else None
+        recorded_reserves = replay_record["reserves"] if replay_record is not None else []
+
         def stable_trim(token_reserve, byte_reserve):
             if not callable(trim_callback):
                 return False
             fitted_body = copy.deepcopy(body)
-            trimmed = trim_callback(token_reserve, byte_reserve)
+            recorded_selections = replay_record.get("selections") if replay_record is not None else None
+            if recorded_selections is not None:
+                if not selection_capable:
+                    return False
+                trimmed = trim_callback(
+                    requested[0] + token_reserve, requested[1] + byte_reserve,
+                    recorded_selection=recorded_selections[len(reserves)])
+            else:
+                trimmed = trim_callback(requested[0] + token_reserve, requested[1] + byte_reserve)
             if trimmed is False and isinstance(body, dict):
                 body.clear()
                 body.update(fitted_body)
+            else:
+                requested[0] += token_reserve
+                requested[1] += byte_reserve
+                reserves.append(list(requested))
+                if selection_capable:
+                    selections.append(copy.deepcopy(trim_callback.selection))
             return trimmed
 
-        result = project_stable_wire(
-            capture, runtime, projected, meter=meter, inputs=inputs,
-            trim_callback=stable_trim if callable(trim_callback) else None,
-            replay_decision=stable_replay_decision)
-        if inputs.pop("_stable_wire_retry_after_trim", False):
+        def project_attempt(projected, *, last_attempt=False):
+            if stable_replay and len(reserves) < len(recorded_reserves):
+                # Apply exact cumulative reserves through the same bounded retry loop. Do not
+                # project intermediate windows: allocation can change their metadata on a trim.
+                target = recorded_reserves[len(reserves)]
+                if callable(trim_callback) and not last_attempt:
+                    trimmed = stable_trim(target[0] - requested[0], target[1] - requested[1])
+                    if trimmed is not False:
+                        inputs[RETRY_AFTER_TRIM_KEY] = True
+                        return projected
+                from kernel_stable_wire import replay_mismatch
+                return replay_mismatch(capture, projected, reason="recorded_trim_unavailable")
+            from kernel_stateframe_framefit5 import _validated_exchange_and_volatile_tail
+            _exchange, native_start, _tail = _validated_exchange_and_volatile_tail(
+                projected["messages"])
+            return project_stable_wire(
+                capture, runtime, projected, meter=meter, inputs=inputs,
+                exchange_start=native_start,
+                trim_callback=(stable_trim if callable(trim_callback) and not last_attempt
+                               else None),
+                replay_decision=stable_replay_decision)
+
+        result = project_attempt(projected)
+        # A trim is sized from one measurement, so the projection of the trimmed body can still
+        # sit a little over the envelope. Re-project and trim again, bounded, before failing open.
+        for _attempt in range(MAX_STABLE_TRIMS):
+            if not inputs.pop(RETRY_AFTER_TRIM_KEY, False):
+                break
             projected = _checked_final_cache_projection(body)
             receipt = verify_final_source_delivery(
                 inputs["source_plan"], projected["messages"], payload=projected,
@@ -670,9 +764,27 @@ def _render_final_cache_layout(capture, runtime, body, *, meter, inputs,
             inputs["receipt"] = receipt
             if capture is not None:
                 capture.request_source_final_delivery = receipt
-            result = project_stable_wire(
-                capture, runtime, projected, meter=meter, inputs=inputs,
-                replay_decision=stable_replay_decision)
+            last_attempt = _attempt == MAX_STABLE_TRIMS - 1
+            result = project_attempt(projected, last_attempt=last_attempt)
+        inputs.pop(RETRY_AFTER_TRIM_KEY, None)
+        inputs.pop(TRIM_COUNT_KEY, None)
+
+        def record_success():
+            if capture is not None and getattr(capture, "_final_cache_layout_record", {}).get(
+                    "stable_wire") == "applied":
+                capture._stable_wire_reserves_record = {
+                    "reserves": reserves, "trim_count": len(reserves),
+                    "epoch": getattr(runtime, STATE_ATTR)["epoch"],
+                }
+                if ((selection_capable and not stable_replay and reserves)
+                        or "selections" in (replay_record or {})):
+                    capture._stable_wire_reserves_record["selections"] = selections
+
+        if stable_replay:
+            # Final window/epoch proof belongs to project_stable_wire; no fit or admission
+            # decision may veto it using a different meter. Transport still compares all bytes.
+            record_success()
+            return result
         if result is projected:
             # Stable wire failed open to the final-layout body. The layout
             # fallback still owns any overflow in that body.
@@ -695,6 +807,7 @@ def _render_final_cache_layout(capture, runtime, body, *, meter, inputs,
                 bytes=_wire_size(result), byte_ceiling=inputs["byte_ceiling"],
             )
         carry_final_request_tokens(result, capture, result_tokens)
+        record_success()
         return result
     if stable_wire_enabled:
         _record_stable_wire(capture, "plain", "recorded_plain_wire")

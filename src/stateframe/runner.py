@@ -522,6 +522,7 @@ OPT_IN_SWITCHES = {
     "STATEFRAME_PROVIDER": ("llama.cpp",),  # operator-confirmed llama.cpp dialect override
     "STATEFRAME_STABLE_WIRE": ("on", "off"),  # append-only source windows and a split stable frame
     "STATEFRAME_STABLE_WIRE_HEADROOM": (),  # retained, not-current source window tokens per epoch
+    "STATEFRAME_STABLE_WIRE_RETAIN_PREFIX": ("on", "off"),  # relayouts may keep not-current windows in the prefix
     "STATEFRAME_QUEUE_WAIT_MAX_S": (),  # finite positive seconds; a profile may set it too
     "STATEFRAME_SEND_STALL_S": (),  # 10-600 seconds without request-body progress
     "STATEFRAME_TRANSPORT_MAX_ATTEMPTS": ("1", "2", "3", "4", "5"),

@@ -653,7 +653,7 @@ DOCUMENTED_REJECT: dict[str, str] = {
         skeptic_cleared_by_reused_verification skeptic_fired source_requalified
         source_revision_read_pins_retired source_revision_replan_refused source_revision_replan_started
         source_revision_reprepared source_store_error source_store_state stable_wire_epoch
-        stable_wire_failed_open stage_transition_action_refused stagnation_cap_blocked stagnation_cap_observed
+        stable_wire_failed_open stable_wire_replay_mismatch stage_transition_action_refused stagnation_cap_blocked stagnation_cap_observed
         stall_observation_applied stall_observation_fired stall_submit_strict_evaluated
         starter_conflict_boundary_bundle_error starter_conflict_refresh_error starter_conflict_setup_error
         state_owner_inventory stateframe_frame_append_committed stateframe_frame_append_failed_open
