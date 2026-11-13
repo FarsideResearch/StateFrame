@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.5.15 (2026-11-12)
+
+- Continuation consumers receive durable journal records through bounded in-memory cursor fanout; restart and cursor gaps retain verified disk replay, with journal bytes and checkpoint content unchanged.
+
 ## 0.5.14 (2026-11-12)
 
 - Fixed: engine runs no longer write react_live.log or receipts under the installed package or src/; they go to the run directory (or STATEFRAME_RESULTS_DIR, else a temp dir).

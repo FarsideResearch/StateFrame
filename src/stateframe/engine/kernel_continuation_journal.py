@@ -739,8 +739,8 @@ class ContinuationJournal(AuditJournal):
         self._record_cache_start = 0
         self._record_cache_bytes = 0
         self._record_cache_sizes: list[int] = []
-        # Repeated continuation cursors reuse bounded detached suffix snapshots.
-        # New appends extend these lists in place alongside the durable index.
+        # Cursor readers share bounded sequence-keyed fanout. Empty head entries
+        # register warm readers before emit extends them alongside the durable index.
         self._records_since_cache: OrderedDict[int, tuple[int, list[dict], int]] = OrderedDict()
         self._records_since_cache_bytes = 0
         # One compact pointer and one digest per durable line. Old cursors and
@@ -2004,7 +2004,7 @@ class ContinuationJournal(AuditJournal):
     def _remember_records_since(self, sequence: int, rows: tuple[dict, ...]) -> None:
         cache_start = self._record_cache_start
         cache_end = cache_start + len(self._record_cache)
-        if (not rows or len(rows) > RECORD_CACHE_LIMIT
+        if (len(rows) > RECORD_CACHE_LIMIT
                 or sequence < cache_start or cache_end != self._sequence
                 or sequence - cache_start + len(rows) != len(self._record_cache)):
             return
@@ -2077,13 +2077,16 @@ class ContinuationJournal(AuditJournal):
                         pass
                 return tuple(self._record_cache[sequence:])
             if sequence >= self._sequence:
+                self._remember_records_since(self._sequence, ())
                 return ()
             cached = self._records_since_cache.get(sequence)
             if cached is not None and cached[0] == self._sequence:
                 self._records_since_cache.move_to_end(sequence)
+                self._remember_records_since(self._sequence, ())
                 return tuple(copy.deepcopy(row) for row in cached[1])
             rows = tuple(self._record_range(sequence, self._sequence))
             self._remember_records_since(sequence, rows)
+            self._remember_records_since(self._sequence, ())
             return rows
 
     def _borrow_records_since(self, sequence: int) -> tuple[dict, ...]:
@@ -2098,8 +2101,21 @@ class ContinuationJournal(AuditJournal):
                         pass
                 return tuple(self._record_cache[sequence:])
             if sequence >= self._sequence:
+                self._remember_records_since(self._sequence, ())
                 return ()
-            return tuple(self._record_range(sequence, self._sequence, detached=False))
+            cached = self._records_since_cache.get(sequence)
+            if (sequence < self._record_cache_start and cached is not None
+                    and cached[0] == self._sequence):
+                # Cursor older than the retained window: reuse its fanout suffix.
+                # In-window cursors use the range reader, which lends host rows.
+                self._records_since_cache.move_to_end(sequence)
+                rows = tuple(cached[1])
+            else:
+                # Restart, retention overflow or a skipped cursor leaves a gap;
+                # the ordinary range reader verifies any missing durable prefix.
+                rows = tuple(self._record_range(sequence, self._sequence, detached=False))
+            self._remember_records_since(self._sequence, ())
+            return rows
 
     def record_by_event_id(self, reference: object) -> dict | None:
         """Resolve one durable event without replaying its predecessors."""
