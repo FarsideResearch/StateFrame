@@ -619,7 +619,7 @@
   "kernel_stateframe_reasoning_anchor.py": "a78b502fd6c1b9046a64955633ecfc1e31900de5fd8d299782365bbcf0194da9",
   "kernel_stateframe_receipts.py": "d2b016ae942b97fc0e777a282e3b8c2e051f5adc774ef6cab06bd0cae9ec160c",
   "kernel_stateframe_resume.py": "196e7c0f093de0ca7c73cc9d0dcd046183f6ce6c1330a298455deb6644b27082",
-  "kernel_stateframe_runtime.py": "bb629602329d3d85de18ede62b8833251a9e68fbe94106ee11456eb0c62ef41a",
+  "kernel_stateframe_runtime.py": "4de497aa4462da15661edcc52cba4e3e25f154d39c9843bbaad9276fd69d6954",
   "kernel_stateframe_settled_findings.py": "8d45875371b11e1c346b8c7dce20b9666a9731c5ff6668a893e9eab5fd3c85fc",
   "kernel_stateframe_thinking.py": "0ad1934c5220c0449d7909b118c350337d4952062625df89b59934632bdf515a",
   "kernel_stateframe_thinking_router.py": "fb39e270301719befebcacf2521c554808e813b8ed6953ad8914f10303961d6d",
