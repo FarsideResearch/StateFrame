@@ -64,6 +64,26 @@ else:  # Direct historical script entrypoint.
     )
 
 POC = pathlib.Path(__file__).resolve().parents[1]
+_PACKAGE_POC = POC
+
+
+def _results_dir() -> pathlib.Path:
+    """Run-artifact directory (react_live.log, receipts, transcripts, ...).
+
+    Real runs rebind POC to the run's worker dir, so artifacts land in <POC>/results.
+    STATEFRAME_RESULTS_DIR overrides it. If POC is still the package engine dir (probe or
+    test helper invoked without a run dir), use a temp dir so nothing is ever written
+    under the installed package or src/.
+    """
+    configured = os.environ.get("STATEFRAME_RESULTS_DIR")
+    if configured:
+        root = pathlib.Path(configured)
+    elif POC == _PACKAGE_POC:
+        root = pathlib.Path(tempfile.gettempdir()) / f"stateframe-results-{os.getuid()}"
+    else:
+        root = POC / "results"
+    root.mkdir(parents=True, exist_ok=True)
+    return root
 logger = logging.getLogger(__name__)
 
 
@@ -926,7 +946,7 @@ def _capture_done_candidate_after_exception(
     return submit_done(
         measurement,
         source=source,
-        destination=POC / "results" / "react_done_submissions",
+        destination=_results_dir() / "react_done_submissions",
         task_id=task_id,
         sources=source_map,
         parent_sources=parent_sources,
@@ -7011,7 +7031,7 @@ def work(d, *, resume=None):
                     _cap = None
                     _carry_diag: dict = {}
                     _env = build_prior_carry_envelope(
-                        str(POC / "results"), fn, d.get("sha", ""), 10**6,
+                        str(_results_dir()), fn, d.get("sha", ""), 10**6,
                         row=d, worker_id=worker_identity_from_row(d), max_tokens=800,
                         diagnostics=_carry_diag)
                     if _carry_diag.get("filtered"):
@@ -7023,7 +7043,7 @@ def work(d, *, resume=None):
                 else:
                     from detreason.attempt_memory import render_prior_capsule
                     _cap = render_prior_capsule(
-                        str(POC / "results"), fn, d.get("sha", ""),
+                        str(_results_dir()), fn, d.get("sha", ""),
                         current_attempt=10**6, max_tokens=800)
                 if _cap:
                     _cap = bolt.organ_out("crossrun", _cap)
@@ -7057,7 +7077,7 @@ def work(d, *, resume=None):
                 print(f"    [stateframe] unit planner OFF: {type(_e).__name__}: {_e}")
         # E334: per-task receipt tape (append-only JSONL, telemetry-only).
         try:
-            _rdir = POC / "results" / ("receipts" + os.environ.get("REACT_TAG", ""))
+            _rdir = _results_dir() / ("receipts" + os.environ.get("REACT_TAG", ""))
             _rdir.mkdir(parents=True, exist_ok=True)
             bolt.receipts_path = str(_rdir / f"{fn}.jsonl")
         except OSError as _e:
@@ -8242,7 +8262,7 @@ def work(d, *, resume=None):
                     # so the offline projector can reconstruct the FULL run. Never read
                     # back into the loop, never shown to the model.
                     try:
-                        _edir = POC / "results" / ("react_events"
+                        _edir = _results_dir() / ("react_events"
                                                    + os.environ.get("REACT_TAG", ""))
                         _edir.mkdir(parents=True, exist_ok=True)
                         with (_edir / f"{fn}.jsonl").open("a") as _ef:
@@ -8368,7 +8388,10 @@ def work(d, *, resume=None):
             if _provider_request and callable(_prepare_host_inputs):
                 msgs = _prepare_host_inputs(msgs)
                 _uncapped_messages = _prepare_host_inputs(_uncapped_messages)
-            if _provider_request and _request_host_text_preparer is not None:
+            if not _provider_request:
+                _prepared = measurement.prepare_queued_native_action(
+                    msgs, uncapped=_uncapped_messages, tools=_request_tools)
+            elif _request_host_text_preparer is not None:
                 _prepared = measurement.prepare(
                     msgs, uncapped=_uncapped_messages,
                     tools=_request_tools, provider_request=True,
@@ -9639,7 +9662,7 @@ def work(d, *, resume=None):
                                              _obs)
                             _obs = _append_structure_fact_observation(measurement, bolt, _obs, "edit")
                             msgs.append(_tool_reply_for_call(msgs, tool_call_id_fc, _obs))
-                            with (POC / "results" /
+                            with (_results_dir() /
                                   f"react_live{os.environ.get('REACT_TAG', '')}.log"
                                   ).open("a") as live:
                                 live.write(f"[{fn[:26]:28s} s{step + 1:02d}] "
@@ -11687,7 +11710,7 @@ def work(d, *, resume=None):
                         measurement.parent.charge("challenges", reason="existing kernel completion challenge")
                     msgs.append(_tool_reply_for_call(msgs, tool_call_id, why) if tool_call_id
                                 else {"role": "user", "content": why})
-                    with (POC / "results" / f"react_live{os.environ.get('REACT_TAG', '')}.log").open("a") as live:
+                    with (_results_dir() / f"react_live{os.environ.get('REACT_TAG', '')}.log").open("a") as live:
                         live.write(f"[{fn[:26]:28s} s{step + 1:02d}] "
                                    f"{'done REFUSED by kernel':72s} -> {why[:88]}\n")
                     if _submit_shadow and _effect_boundary_done_only(measurement):
@@ -13562,7 +13585,7 @@ def work(d, *, resume=None):
 
             # Flush each step with a task tag so concurrent activity can be inspected
             # promptly and parser failures remain visible.
-            with (POC / "results" / f"react_live{os.environ.get('REACT_TAG', '')}.log").open("a") as live:
+            with (_results_dir() / f"react_live{os.environ.get('REACT_TAG', '')}.log").open("a") as live:
                 live.write(f"[{fn[:26]:28s} s{step + 1:02d}] {line[:70]:72s} "
                            f"-> {obs[:90].splitlines()[0] if obs.strip() else '(empty)'}\n")
                 live.flush()
@@ -13711,7 +13734,7 @@ def work(d, *, resume=None):
                 _task_slug = re.sub(r"[^A-Za-z0-9_.-]+", "_",
                                     str(d.get("task_id") or fn))[:120]
                 source_map_path = _persist_source_map(
-                    POC / "results" / f"react_final{os.environ.get('REACT_TAG', '')}"
+                    _results_dir() / f"react_final{os.environ.get('REACT_TAG', '')}"
                     / _task_slug,
                     final_sources)
             except Exception:                                            # noqa: BLE001
@@ -13737,7 +13760,7 @@ def work(d, *, resume=None):
                     _rel_key = d.get("path") or d.get("rel")
                     if not _rel_key:
                         raise KeyError("row has neither path nor rel")
-                    _ff = (POC / "results" /
+                    _ff = (_results_dir() /
                            f"react_final{os.environ.get('REACT_TAG', '')}" / _rel_key)
                     _ff.parent.mkdir(parents=True, exist_ok=True)
                     _ff.write_text(target.read_text(errors="ignore"))
@@ -13765,7 +13788,7 @@ def work(d, *, resume=None):
                 submit_done(
                     measurement,
                     source=submission_source,
-                    destination=POC / "results" / "react_done_submissions",
+                    destination=_results_dir() / "react_done_submissions",
                     task_id=d.get("task_id") or d.get("id") or fn,
                     sources=current_sources,
                     parent_sources=parent_sources,
@@ -13980,7 +14003,7 @@ def work(d, *, resume=None):
             _done_submit_fields = {
                 "submission_error": getattr(measurement, "_done_capture_error_class"),
             }
-        tdir = POC / "results" / ("react_transcripts" + os.environ.get("REACT_TAG", ""))
+        tdir = _results_dir() / ("react_transcripts" + os.environ.get("REACT_TAG", ""))
         tdir.mkdir(exist_ok=True)
         _multi_result = ({
             "task_id": d.get("task_id"),
@@ -14024,7 +14047,7 @@ def work(d, *, resume=None):
                          "repeats_blocked": bolt.repeats}, **_done_submit_fields,
               **_multi_result,
               **_memory_identity_fields(d)}, indent=1))
-        with (POC / "results" / f"react_live{os.environ.get('REACT_TAG', '')}.log").open("a") as live:
+        with (_results_dir() / f"react_live{os.environ.get('REACT_TAG', '')}.log").open("a") as live:
             live.write(bolt.report() + "\n")
         # #41: a dialect abort with a graded WIN is still a win — the evidence outranks the
         # conversation's ending. Without a win it stays HARNESS_SUSPECT (uncharged).
