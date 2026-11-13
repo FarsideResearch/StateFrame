@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- Fixed: the profile switch `STATEFRAME_ROUTE_BUDGET` is renamed to `STATEFRAME_ROUTEBUDGET_MODE`, because the old name sat inside the `STATEFRAME_ROUTE_` namespace used for per-role model settings and crashed the CLI when the shipped profile's switches were exported. Set the new name in a profile; the old name is refused with a message naming the replacement.
+- Fixed: the profile switch `STATEFRAME_ROUTE_BUDGET` is renamed to `STATEFRAME_ROUTEBUDGET_MODE`; the old name is still accepted but deprecated in profiles and the environment, with a one-line stderr warning. The new name wins when both are set, with a warning that the old name was ignored. This avoids treating the engine switch as a per-role model setting in the `STATEFRAME_ROUTE_` namespace, which previously crashed the CLI when profile switches were exported.
 
 ## 0.6.19 (2026-11-13)
 

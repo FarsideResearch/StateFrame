@@ -21,7 +21,7 @@ Also register its admission, receipt and completion contracts so the tool surviv
 
 Read the switch in engine code with a literal name, for example `os.environ.get("STATEFRAME_MY_SWITCH", "off")`, in a file listed in the engine's `release-manifest.json` (`src/stateframe/engine/release-manifest.json`; add your new module there). The switch registry finds readers by reading the source, so a name built at run time is not seen. Then set it in a profile.
 
-Keep engine switch names outside namespaces consumed by other parsers, such as `STATEFRAME_ROUTE_` for per-role model settings. The registry namespace test derives these prefixes from parser source and checks every registered switch, honoring the parser's explicit metadata exemptions. The recovery-view switch uses `STATEFRAME_ROUTEBUDGET_MODE` in the profile to avoid that namespace.
+Keep engine switch names outside namespaces consumed by other parsers, such as `STATEFRAME_ROUTE_` for per-role model settings. The registry namespace test derives these prefixes from parser source and checks every registered switch, honoring the parser's explicit metadata exemptions. The recovery-view profile switch was renamed from `STATEFRAME_ROUTE_BUDGET` to `STATEFRAME_ROUTEBUDGET_MODE`; the old name is still accepted but deprecated in profiles and the environment, with a one-line stderr warning. If both names are set, the new name wins and the warning says the old name was ignored. Profile loading maps the alias to the new key before engine validation; the route parser skips the alias, and only the new name belongs in the switch registry.
 
 ## Configure lifecycle hooks
 

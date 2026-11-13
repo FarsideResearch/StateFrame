@@ -13,7 +13,7 @@ from typing import Mapping
 
 from .endpoint import EndpointError, _is_loopback, normalize_base_url
 
-from .engine.kernel_route_budget import LEGACY_ERROR
+from .engine.kernel_route_budget import warn_legacy_switch
 from .engine.kernel_safe_paths import safe_expanduser, safe_home
 
 SCHEMA = "stateframe-routes/1"
@@ -189,11 +189,12 @@ def routes_path(explicit: Path | None, environ: Mapping[str, str]) -> Path | Non
 
 
 def _env_blocks(environ: Mapping[str, str]) -> dict[str, dict[str, object]]:
-    if "STATEFRAME_ROUTE_BUDGET" in environ:
-        raise RouteError(LEGACY_ERROR)
+    warn_legacy_switch(environ)
     result: dict[str, dict[str, object]] = {}
     for name, raw in environ.items():
-        if not name.startswith("STATEFRAME_ROUTE_") or name in _SPEC_ONLY:
+        # Deprecated engine alias, not a per-role model setting.
+        if (not name.startswith("STATEFRAME_ROUTE_") or name in _SPEC_ONLY
+                or name == "STATEFRAME_ROUTE_BUDGET"):
             continue
         tail = name.removeprefix("STATEFRAME_ROUTE_")
         field = next((candidate for candidate in _ENV_FIELDS if tail.endswith("_" + candidate.upper())), None)

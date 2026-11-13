@@ -15,6 +15,9 @@ SCHEMA = "stateframe-switch-registry/1"
 # Host setup and retention switches are read before engine creation and are never
 # handed to the engine child, even when their literals appear in engine modules.
 HOST_ONLY_SWITCHES = frozenset({"STATEFRAME_ENV_SEED"})
+# Compatibility spellings are normalized at public boundaries, not registered
+# engine switches. Keep this exemption exact and guarded by the namespace tests.
+DEPRECATED_SWITCH_ALIASES = frozenset({"STATEFRAME_ROUTE_BUDGET"})
 
 
 class StateFrameSwitchPreflightError(RuntimeError):
@@ -196,7 +199,7 @@ def _scan(files: tuple[Path, ...]) -> frozenset[str]:
         reader = _SwitchReaderVisitor()
         reader.visit(tree)
         switches.update(reader.switches())
-    return frozenset(switches - HOST_ONLY_SWITCHES)
+    return frozenset(switches - HOST_ONLY_SWITCHES - DEPRECATED_SWITCH_ALIASES)
 
 
 def _shipped_registry(root: Path, fingerprint: str) -> tuple[frozenset[str], str] | None:

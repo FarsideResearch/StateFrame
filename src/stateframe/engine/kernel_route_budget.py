@@ -3,10 +3,12 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 from collections.abc import Mapping, Sequence
+from functools import lru_cache
 
 MODE_ENV = "STATEFRAME_ROUTEBUDGET_MODE"
-LEGACY_ERROR = f"STATEFRAME_ROUTE_BUDGET was renamed to {MODE_ENV}; remove the old setting"
+LEGACY_MODE_ENV = "STATEFRAME_ROUTE_BUDGET"
 START = "[STATEFRAME recovery view]"
 END = "[/STATEFRAME recovery view]"
 
@@ -15,14 +17,22 @@ def enabled() -> bool:
     return mode() == "on"
 
 
-def refuse_legacy_switch(environ: Mapping[str, object]) -> None:
-    if "STATEFRAME_ROUTE_BUDGET" in environ:
-        raise ValueError(LEGACY_ERROR)
+@lru_cache(maxsize=4)
+def _warn_legacy_once(source: str, ignored: bool) -> None:
+    """One stderr notice per source and precedence case, shared by env readers."""
+    action = f"ignored because {MODE_ENV} is set" if ignored else f"use {MODE_ENV}"
+    print(f"stateframe: WARNING {LEGACY_MODE_ENV} is deprecated; {action} ({source})",
+          file=sys.stderr, flush=True)
+
+
+def warn_legacy_switch(settings: Mapping[str, object], *, source: str = "environment") -> None:
+    if LEGACY_MODE_ENV in settings:
+        _warn_legacy_once(source, MODE_ENV in settings)
 
 
 def mode() -> str:
-    refuse_legacy_switch(os.environ)
-    value = os.environ.get(MODE_ENV, "off").strip().lower()
+    warn_legacy_switch(os.environ)
+    value = os.environ.get(MODE_ENV, os.environ.get(LEGACY_MODE_ENV, "off")).strip().lower()
     if value not in {"off", "on"}:
         raise ValueError(f"{MODE_ENV} must be off or on")
     return value
@@ -129,5 +139,5 @@ def filter_menu(runtime: object, tools: list[dict]) -> list[dict]:
     return filtered
 
 
-__all__ = ["END", "LEGACY_ERROR", "MODE_ENV", "START", "enabled", "filter_menu", "mode",
-           "refuse_legacy_switch", "render"]
+__all__ = ["END", "LEGACY_MODE_ENV", "MODE_ENV", "START", "enabled", "filter_menu", "mode",
+           "render", "warn_legacy_switch"]

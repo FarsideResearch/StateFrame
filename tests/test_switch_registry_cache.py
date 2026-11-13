@@ -13,7 +13,8 @@ from pathlib import Path
 
 import pytest
 
-from stateframe import routes
+from stateframe import profiles, routes
+from stateframe.engine import kernel_route_budget as route_budget
 
 ENGINE = Path(__file__).resolve().parents[1] / "src" / "stateframe" / "engine"
 sys.path.insert(0, str(ENGINE))
@@ -171,6 +172,48 @@ def test_registered_switches_do_not_collide_with_parser_namespaces():
                   for name in sorted(candidates)
                   for prefix, owners in prefixes.items() if name.startswith(prefix)]
     assert collisions == []
+
+
+@pytest.mark.parametrize("replacement", [None, "off", "on"])
+def test_deprecated_route_budget_alias_is_normalized_before_engine_preflight(
+        tmp_path, monkeypatch, capsys, replacement):
+    """An alias must survive both public parsers without becoming a registered switch."""
+    route_budget._warn_legacy_once.cache_clear()
+    switches = {"STATEFRAME_ROUTE_BUDGET": "on"}
+    if replacement is not None:
+        switches["STATEFRAME_ROUTEBUDGET_MODE"] = replacement
+    path = tmp_path / "legacy.json"
+    path.write_text(json.dumps({"schema": "stateframe-product-profile/1", "switches": switches}))
+    normalized = profiles.load(str(path))
+    assert normalized == {"STATEFRAME_ROUTEBUDGET_MODE": replacement or "on"}
+    assert registry.unconsumed_stateframe_switches(normalized)["unknown_switches"] == []
+    assert routes._env_blocks(switches) == {}
+    monkeypatch.setattr(route_budget.os, "environ", switches)
+    assert route_budget.mode() == (replacement or "on")
+    assert "deprecated" in capsys.readouterr().err
+    for registered in (json.loads((ENGINE / registry.REGISTRY_FILE).read_text())["switches"],
+                       registry.build_registry_document(ENGINE)["switches"]):
+        assert "STATEFRAME_ROUTEBUDGET_MODE" in registered
+        assert "STATEFRAME_ROUTE_BUDGET" not in registered
+
+
+def test_deprecated_switch_alias_exemption_is_exact():
+    # Only this compatibility spelling is excluded from registry discovery.
+    # It is normalized at the public boundary, never admitted as an engine switch.
+    assert registry.DEPRECATED_SWITCH_ALIASES == frozenset({"STATEFRAME_ROUTE_BUDGET"})
+
+
+def test_namespace_guard_still_rejects_a_registered_deprecated_alias(tmp_path, monkeypatch):
+    package = tmp_path / "stateframe"
+    engine = package / "engine"
+    engine.mkdir(parents=True)
+    (package / "routes.py").write_text((ENGINE.parent / "routes.py").read_text())
+    (engine / registry.REGISTRY_FILE).write_text(json.dumps({
+        "switches": ["STATEFRAME_ROUTE_BUDGET"],
+    }))
+    monkeypatch.setitem(globals(), "ENGINE", engine)
+    with pytest.raises(AssertionError, match="STATEFRAME_ROUTE_BUDGET"):
+        test_registered_switches_do_not_collide_with_parser_namespaces()
 
 
 def test_parser_namespace_discovery_reads_literals_and_constants(tmp_path):
