@@ -622,7 +622,24 @@ def _render_final_cache_layout(capture, runtime, body, *, meter, inputs,
         if ((method == "calibrated_bytes" or changed_exact)
                 and getattr(meter, "measure_method", None) == "calibrated_bytes"):
             current, current_method = meter.measure(value)
-            tokens = current if current_method == "tokenize" else max(tokens, current)
+            accounting = None
+            if changed_exact and current_method == "calibrated_bytes":
+                from kernel_frozen_delta_bound import frozen_delta_bound
+                accounting = frozen_delta_bound(body, value, meter, frozen)
+            if accounting is not None:
+                tokens = accounting["prompt_tokens"]
+            else:
+                tokens = current if current_method == "tokenize" else max(tokens, current)
+                accounting = {
+                    "path": "live_exact" if current_method == "tokenize" else "fallback",
+                    "reason": "live_remeasurement" if current_method == "tokenize"
+                    else "whole_body_guard",
+                    "prompt_tokens": tokens,
+                }
+            from kernel_stateframe_page_log import _emit
+            _emit(getattr(capture, "journal", None), "final_cache_layout_admission",
+                  request_id=getattr(capture, "request_id", None),
+                  token_ceiling=inputs["token_ceiling"], **accounting)
         return tokens, method
 
     order_state = None

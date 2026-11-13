@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Fixed: during a tokenizer outage, a cache-friendly request that was exactly counted before its final layout is no longer dropped to the plain request because the whole body is re-estimated from bytes. Only the added or replaced parts are estimated, at the most conservative byte ratio plus a fixed margin per splice; any other change still falls back to the plain request.
+
 ## 0.6.11 (2026-11-13)
 
 - Tool receipts are now labelled by what actually happened: a test run that executed and reported failures is RED, a successful list_files or grep is APPLIED, and only calls refused before dispatch are REJECTED (errored runs are ERROR).
