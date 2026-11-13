@@ -1,6 +1,8 @@
 # Changelog
 
-## Unreleased
+## 0.6.4 (2026-11-13)
+
+- Replay and checkpoint refusals now explain that this version cannot replay the recording and tell you to start a fresh run, including in the final CLI summary and JSON output.
 
 ## 0.6.3 (2026-11-13)
 
@@ -11,8 +13,6 @@
 - Fixed: strict-provider proposal side-calls require operator-confirmed `REACT_REASONING_EFFORT=none` before dispatch instead of sending an unrequested reasoning parameter. Dialect probes do not prove model reasoning support. Explicit reasoning-off survives conversion, refitting and transport retries without weakening the side-call validator; the provider summary reports when strict side-calls are refused.
 
 ## 0.6.1 (2026-11-13)
-
-- Replay and checkpoint refusals now explain that this version cannot replay the recording and tell you to start a fresh run, including in the final CLI summary and JSON output.
 
 - Keep recorded stable-wire trims intact after checkpoint restore so repeated resumes rebuild the same request even when token estimates change.
 - Rebuild stable-wire initial allocations from recorded candidate selections so replay preserves request bytes when tokenizer counts change.
