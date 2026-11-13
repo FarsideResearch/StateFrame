@@ -35,11 +35,28 @@ def enabled() -> bool:
     return mode() == "on"
 
 
+def _without_card(text: str) -> str:
+    """Remove every embedded copy of the card (and the newline that joined it) from ``text``."""
+    while HARNESS_CARD in text:
+        index = text.find(HARNESS_CARD)
+        tail = text[index + len(HARNESS_CARD):]
+        if tail.startswith("\n"):
+            tail = tail[1:]
+        text = text[:index] + tail
+    return text
+
+
 def system_prefix(content: str) -> str:
-    """Return one stable card followed by the existing generic system content."""
+    """Return one stable card followed by the existing generic system content.
+
+    Exactly one copy of the card survives, and it is the prefix: a copy that an upstream
+    prompt builder embedded mid-text is hoisted rather than duplicated, so the cacheable
+    head stays identical whichever path assembled the system message.
+    """
     text = str(content or "")
-    if text.startswith(HARNESS_CARD):
+    if text.startswith(HARNESS_CARD) and HARNESS_CARD not in text[len(HARNESS_CARD):]:
         return text
+    text = _without_card(text)
     return HARNESS_CARD + ("\n" + text if text else "")
 
 

@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Fixed: the stable StateFrame system-message prefix was sent twice in every request under the shipped profile (once as the prefix and once embedded in the operating instructions). It now appears exactly once, at the start of the system message, saving about 1 KB per request; a test rejects any repeated block inside the system message.
+
 ## 0.6.15 (2026-11-13)
 
 - The host records `final_product_no_candidate` (and its `terminal_outcome_recorded` companion) through the open journal from a terminal-fact hook inside `finish()`, ahead of `attempt_terminated`, instead of after the writer closed; the `post_finish_facts.jsonl` sidecar and its stderr note remain only for a writer that is genuinely unusable, so vitals, audits and replay now see the fact.
