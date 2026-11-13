@@ -203,8 +203,16 @@ def _add_mutation_arguments(command: argparse.ArgumentParser) -> None:
                          help="attach a retained observing mutation to post_tool or session_end")
 
 
-def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
+class _JSONArgumentParser(argparse.ArgumentParser):
+    def error(self, message: str) -> None:
+        """Route parse failures through main's JSON error boundary, including subcommands."""
+        self.print_usage(sys.stderr)
+        raise ValueError(message)
+
+
+def build_parser(*, json_errors: bool = False) -> argparse.ArgumentParser:
+    parser_class = _JSONArgumentParser if json_errors else argparse.ArgumentParser
+    parser = parser_class(
         prog="stateframe",
         description="Run the StateFrame coding agent on a local repository.")
     parser.add_argument("--version", action="version", version=f"stateframe {__version__}")
@@ -513,18 +521,33 @@ def _print_summary(summary: dict) -> None:
         print(f"apply error: {summary['apply_error']}")
 
 
+def _report_error(args: argparse.Namespace, message: str, exit_code: int = 2) -> int:
+    """Keep diagnostics on stderr and supply a JSON result before a summary exists."""
+    print(message, file=sys.stderr)
+    if getattr(args, "json", False):
+        print(json.dumps({"error": message, "exit_code": exit_code, "succeeded": False}, indent=1))
+    return exit_code
+
+
 def main(argv: list[str] | None = None) -> int:
     # Live progress must reach a pipe or log file as it happens, not only when the run ends.
     try:
         sys.stdout.reconfigure(line_buffering=True)
     except (AttributeError, ValueError):  # a replaced stdout (tests, embedding) keeps its own buffering
         pass
-    args = build_parser().parse_args(argv)
+    argv = sys.argv[1:] if argv is None else argv
+    option_argv = argv[:argv.index("--")] if "--" in argv else argv
+    # Detect JSON intent before parsing can fail, even before the flag is reached.
+    # Match argparse's abbreviations, but never treat positional text after -- as a flag.
+    args = argparse.Namespace(json=any(
+        token.startswith("--") and "--json".startswith(token.partition("=")[0])
+        for token in option_argv
+    ))
     try:
+        args = build_parser(json_errors=args.json).parse_args(argv)
         refusal = _mutation_platform_refusal(args)
         if refusal is not None:
-            print(f"stateframe: refused: {refusal}", file=sys.stderr)
-            return 2
+            return _report_error(args, f"stateframe: refused: {refusal}")
         if args.command == "mutations":
             from . import mutations_cli
             return mutations_cli.dispatch(args)
@@ -627,14 +650,11 @@ def main(argv: list[str] | None = None) -> int:
             _print_summary(summary)
         return summary["exit_code"]
     except ResumeRefused as error:
-        print(f"stateframe: cannot resume: {error}", file=sys.stderr)
-        return 2
+        return _report_error(args, f"stateframe: cannot resume: {error}")
     except (EndpointError, RunError, TaskRowError, WorkCopyError, InspectError, ValueError, OSError) as error:
-        print(f"stateframe: error: {error}", file=sys.stderr)
-        return 2
+        return _report_error(args, f"stateframe: error: {error}")
     except KeyboardInterrupt:
-        print("stateframe: interrupted", file=sys.stderr)
-        return 130
+        return _report_error(args, "stateframe: interrupted", 130)
 
 
 if __name__ == "__main__":

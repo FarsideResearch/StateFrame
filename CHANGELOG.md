@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Fixed: with `--json`, stdout is always exactly one JSON document. The "run environment off" notice now goes to stderr, and argument errors, startup refusals, resume refusals and interruptions print a JSON error object.
+
 ## 0.6.20 (2026-11-13)
 
 - Fixed: the profile switch `STATEFRAME_ROUTE_BUDGET` is renamed to `STATEFRAME_ROUTEBUDGET_MODE`; the old name is still accepted but deprecated in profiles and the environment, with a one-line stderr warning. The new name wins when both are set, with a warning that the old name was ignored. This avoids treating the engine switch as a per-role model setting in the `STATEFRAME_ROUTE_` namespace, which previously crashed the CLI when profile switches were exported.
