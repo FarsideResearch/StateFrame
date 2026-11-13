@@ -4768,6 +4768,9 @@ class StateFrameRuntime:
         manifest['frame_series_control'] = series_control
         from unit_planner import joint_handoffs_enabled
         manifest['unit_plan_joint_handoffs'] = joint_handoffs_enabled()
+        from unit_planner_v2 import enabled as unit_plan_v2_enabled
+        if unit_plan_v2_enabled():
+            manifest['unit_plan_v2'] = 'on'
         if self.bind_quantity_enabled:
             manifest['bind_quantity'] = 'on'
         if self.figure_it_out_enabled:

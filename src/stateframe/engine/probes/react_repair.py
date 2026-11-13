@@ -7162,7 +7162,13 @@ def work(d, *, resume=None):
         if d.get("repo") == "build":
             try:
                 from unit_planner import derive_unit_plan, render_plan_block, joint_handoffs_enabled
-                _uplan = derive_unit_plan(d, joint_handoffs=joint_handoffs_enabled())
+                _uplan = None
+                from unit_planner_v2 import derive_with_index as _plan_v2
+                _uplan = _plan_v2(d, root)       # None unless STATEFRAME_UNIT_PLAN_V2=on + index
+                if _uplan is not None:
+                    bolt.unit_plan_v2_on = True
+                else:
+                    _uplan = derive_unit_plan(d, joint_handoffs=joint_handoffs_enabled())
                 bolt.unit_plan = _uplan
                 if len(getattr(_uplan, "units", ())) > 1:
                     _pblock = bolt.organ_out("unit_plan", render_plan_block(_uplan))
@@ -8428,7 +8434,7 @@ def work(d, *, resume=None):
                             len(getattr(bolt.unit_plan, "units", ())) > 1:
                         try:
                             from unit_planner import render_current_unit_line
-                            _up_line = "\n" + render_current_unit_line(bolt.unit_plan)
+                            _up_line = "\n" + render_current_unit_line(bolt.unit_plan, getattr(bolt, "unit_index", 0))
                         except Exception:                            # noqa: BLE001
                             _up_line = ""
                     _wk_digest = ""
@@ -12862,6 +12868,10 @@ def work(d, *, resume=None):
                         tool_name=("run_tests" if locals().get("_name") == "run_tests"
                                    else "test"),
                     )
+                if getattr(bolt, "unit_plan_v2_on", False) and bolt.last_test_exit is not None:
+                    # unit gate: tests + seam check; the unit pointer advances only on pass
+                    from unit_planner_v2 import gate_and_advance
+                    gate_and_advance(bolt, root, plain_observation)
                 _sig = None
                 if bolt.last_test_exit == 1:
                     try:

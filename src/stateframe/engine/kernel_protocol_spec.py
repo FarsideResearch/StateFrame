@@ -133,6 +133,12 @@ _SWITCH_REFS = (
         "MODE_ENV",
     ),
     SwitchRef(
+        "STATEFRAME_UNIT_PLAN_V2", "unit_planner_v2", "mode",
+        ("off", "on"), "off",
+        "index-ordered multi-file unit plan, cycles coalesced into joint units, per-unit gate (tests + seam check)",
+        "MODE_ENV",
+    ),
+    SwitchRef(
         "STATEFRAME_TERMINAL_LATTICE", "kernel_terminal_lattice", "enabled",
         ("off", "on"), "off",
         "monotone accepted, delivery, stop-reason, and artifact-digest terminal labels",
