@@ -1,5 +1,7 @@
 # Changelog
 
+## Unreleased
+
 ## 0.6.0 (2026-11-13)
 
 - Fixed: with `STATEFRAME_STABLE_WIRE=on`, a request whose newest user message sat just before the tool result could end the run with "newest user suffix changed during allocation". The stable-wire projection moved that message into the cached prefix, ahead of the source windows. Only the stable preface (system, task and anything before the first window) stays in the cached prefix now; every later per-request message keeps its recorded order after the cache boundary, and the canonical view restores it before the frame. A projection whose canonical view would still reorder messages falls back to the plain wire with the reason `projection_reorders_messages` on the `stable_wire_failed_open` event, and a changed newest user turn re-prepares the request once instead of ending the run.
