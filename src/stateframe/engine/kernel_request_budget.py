@@ -848,6 +848,11 @@ def _record_lean_required_source_paths(capture: object | None, runtime: object |
                 for unit in units if isinstance(unit, Mapping)
                 and str(unit.get("path", "")).strip()
             }
+            # A zero-byte target has no unit; its revision proves it, so it is planned.
+            from kernel_request_evidence_closure import zero_byte_source_path
+            planned_paths.update(
+                str(path) for path in required_paths if zero_byte_source_path(plan, str(path))
+            )
             # Keep the target fail-closed. Other editable paths become required
             # only when this request's source closure actually selects them.
             if required_paths and required_paths[0] in planned_paths:

@@ -33,6 +33,7 @@ from kernel_request_evidence_closure import (
     render_closure_receipt,
     ticket_identity_for_runtime,
     units_for_path,
+    zero_byte_source_path,
 )
 from kernel_aha11_native_honesty import _public_path, reserve_source_unit
 from kernel_measurement import profile_active_host_span, profiled_function_span
@@ -2598,6 +2599,10 @@ def _record_required_source_deferral(
 ) -> None:
     if candidate not in required_paths:
         return
+    if zero_byte_source_path(closure_plan, candidate):
+        # Nothing to read back: the empty revision is the proof (see
+        # ensure_source_message). Every deferral producer stays unit-bearing.
+        return
     if candidate not in deferred_paths:
         deferred_paths.append(candidate)
     closure_plan["deferred_paths"] = list(deferred_paths)
@@ -2778,6 +2783,17 @@ def bound_runtime_sources(
             and not isinstance(verified_history, (str, bytes, bytearray)) else []
         )
     _ensure_target_unit(closure_plan, path, source_reservation.as_dict())
+    # A path deferred on an earlier request may have been emptied by an edit
+    # since (or come from an older checkpoint). A zero-byte source is proven by
+    # its revision alone and has no unit to read back, so it leaves the
+    # deferral set here, before the runtime carries it into another request.
+    settled_deferred_paths = [
+        candidate for candidate in deferred_paths
+        if not zero_byte_source_path(closure_plan, candidate)
+    ]
+    if settled_deferred_paths != deferred_paths:
+        deferred_paths = settled_deferred_paths
+        setattr(runtime, "_request_deferred_source_paths", tuple(deferred_paths))
     closure_plan["deferred_paths"] = list(deferred_paths)
     from kernel_aha10_honest_loop import bounded_source_delivery
     bounded_units: list[dict[str, object]] = []
@@ -2886,6 +2902,12 @@ def bound_runtime_sources(
 
     def ensure_source_message(candidate: str, candidate_source: str, *,
                               ahead_of_optional: bool = False) -> None:
+        if candidate_source == "" and zero_byte_source_path(closure_plan, candidate):
+            # A zero-byte file has no window to insert and nothing to read back;
+            # its revision (sha256 of the empty bytes) is the whole proof. It is
+            # never deferred: a deferral would leave a path with no selected unit
+            # on deferred_paths, which the final proof cannot verify mid-run.
+            return
         if candidate in deferred_paths or has_source_message(candidate, candidate_source):
             return
         header = f"[Current source: {candidate}]\n"
@@ -3168,6 +3190,22 @@ def verify_final_source_delivery(
         and not isinstance(raw_deferred_paths, (str, bytes, bytearray))
         else ()
     )
+    # A zero-byte source carries no unit and no read route; its revision is its
+    # whole proof, so a deferral recorded for it (an older plan or checkpoint)
+    # can neither be selected nor verified. Settle it here, before the notice
+    # and the unselected-path checks, and prune the plan the same way
+    # _apply_deferred_delivery_status settles COMPLETE rows.
+    zero_byte_deferred_paths = tuple(
+        candidate for candidate in deferred_paths
+        if zero_byte_source_path(plan, candidate)
+    )
+    if zero_byte_deferred_paths:
+        deferred_paths = tuple(
+            candidate for candidate in deferred_paths
+            if candidate not in zero_byte_deferred_paths
+        )
+        if isinstance(plan, dict):
+            plan["deferred_paths"] = list(deferred_paths)
     exact_notice, wire_read_tool_available = _wire_deferred_notice_state(
         decoded_wire, deferred_paths,
     )

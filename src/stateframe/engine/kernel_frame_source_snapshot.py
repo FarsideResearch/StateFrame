@@ -1076,6 +1076,31 @@ def frame_source_snapshot(
             raise FrameAllocationReplanNeeded("source proof workspace revision unavailable")
         sources[path] = source
         checked.add(path)
+    # A zero-byte source has no line, so the closure selects no unit for it and
+    # the loop above never visits it. Callers adopt this map as the plan's
+    # source_contents, which would drop the empty bytes that are its whole proof
+    # (revision == sha256("")). Keep them, checked against the workspace exactly
+    # like a selected path.
+    from kernel_request_evidence_closure import zero_byte_source_path
+    revision_of_empty = source_revision("")
+    for path in snapshots:
+        if path in checked or not isinstance(path, str) or not zero_byte_source_path(plan, path):
+            continue
+        if (_safe_framefit_path(path) != path or public_path(path) != path
+                or not frame_source_path_allowed(path)):
+            raise FrameAllocationReplanNeeded("source proof has an unsafe selected path")
+        # Same stale-cache contract as the selected loop: a non-empty cached body
+        # for a now-empty path is never silently overwritten.
+        cached = sources.get(path)
+        if cached is not None and source_revision(cached) != revision_of_empty:
+            if getattr(runtime, "_source_replan_in_progress", False):
+                sources.pop(path)
+            else:
+                raise FrameAllocationReplanNeeded("source proof snapshot revision changed")
+        if _read_optional_source(root, path) != b"":
+            raise FrameAllocationReplanNeeded("source proof workspace revision unavailable")
+        sources[path] = ""
+        checked.add(path)
     return sources
 
 

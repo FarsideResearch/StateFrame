@@ -1367,6 +1367,10 @@ def zero_byte_source_path(plan: Mapping[str, object], path: str) -> bool:
 def _empty_delivery_status(plan: Mapping[str, object], path: str) -> str:
     """Distinguish an intentionally unselected path from unavailable source."""
 
+    # Zero bytes need no parser: the revision proves them, so adapter capability
+    # (non-Python languages, missing tree-sitter) is irrelevant here.
+    if zero_byte_source_path(plan, path):
+        return "COMPLETE"
     declared = plan.get("paths", ())
     if not isinstance(declared, Sequence) or isinstance(declared, (str, bytes, bytearray)):
         return "UNKNOWN"
@@ -1387,8 +1391,6 @@ def _empty_delivery_status(plan: Mapping[str, object], path: str) -> str:
             return "UNKNOWN"
         if completeness in {"UNKNOWN", "UNAVAILABLE", "FAILED", "PARTIAL", "MISSING", "NOT_FOUND"}:
             return "UNKNOWN"
-    if zero_byte_source_path(plan, path):
-        return "COMPLETE"
     if path == str(plan.get("target_path", "")):
         return "PARTIAL"
     return "NOT_SELECTED"
