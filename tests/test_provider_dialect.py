@@ -383,7 +383,7 @@ def test_provider_status_summary_includes_configured_routes(monkeypatch):
     summary = runner._provider_preflight_summary(options)
 
     assert "provider dialect: openai-strict (openai-strict because /props was 404 and /slots was unproven)" in summary
-    assert "reasoning controls dropped" in summary
+    assert "reasoning controls omitted; proposal side-calls refused" in summary
     assert "routes: edit@https://edit.example=llama.cpp (operator override, /props unreachable)" in summary
 
 
@@ -415,13 +415,25 @@ def test_provider_summary_reports_operator_mapped_reasoning_effort(monkeypatch):
     assert "reasoning controls mapped to reasoning_effort=high" in summary
 
 
-def test_reasoning_summary_reports_operator_mapped_effort_and_dropped_default():
+@pytest.mark.parametrize("effort,primary,side_calls", [
+    (None, "reasoning controls omitted", "refused"),
+    ("", "reasoning controls omitted", "refused"),
+    ("high", "reasoning controls mapped to reasoning_effort=high", "refused"),
+    (" NONE ", "reasoning controls mapped to reasoning_effort=none", "confirmed"),
+])
+def test_reasoning_summary_reports_primary_effort_and_side_call_support(effort, primary, side_calls):
     from kernel_provider_dialect import reasoning_controls_summary
 
-    assert reasoning_controls_summary("openai-strict", environ={}) == "reasoning controls dropped"
-    assert reasoning_controls_summary(
-        "openai-strict", environ={"REACT_REASONING_EFFORT": "high"},
-    ) == "reasoning controls mapped to reasoning_effort=high"
+    environ = {} if effort is None else {"REACT_REASONING_EFFORT": effort}
+    summary = reasoning_controls_summary("openai-strict", environ=environ)
+    assert summary.startswith(primary + "; ")
+    if side_calls == "refused":
+        assert summary.endswith(
+            "proposal side-calls refused: require operator-confirmed REACT_REASONING_EFFORT=none support")
+    else:
+        assert summary.endswith("proposal side-calls reasoning-off operator-confirmed")
+    assert reasoning_controls_summary("llama.cpp", environ=environ) == (
+        "llama.cpp reasoning controls unchanged")
 
 
 def test_provider_override_promotes_only_dialect_and_keeps_slots_proof(monkeypatch):

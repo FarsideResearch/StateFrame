@@ -84,7 +84,7 @@ def test_shipped_profile_cli_completes_two_turns_on_strict_openai_mock(
     assert "provider dialect: openai-strict" in first_line
     assert "openai-strict because /props was 404" in first_line
     reasoning_disposition = (
-        "reasoning controls dropped" if reasoning_effort is None
+        "reasoning controls omitted; proposal side-calls refused" if reasoning_effort is None
         else f"reasoning controls mapped to reasoning_effort={reasoning_effort}"
     )
     assert reasoning_disposition in first_line

@@ -176,6 +176,21 @@ def _openai_message(value: object) -> object:
     return message
 
 
+def require_strict_side_call_reasoning_off(effort: object) -> None:
+    """Require operator-confirmed off support, never infer it from a dialect.
+
+    ProviderCapabilities proves llama.cpp features, not whether a strict model
+    accepts reasoning controls or disables reasoning when they are omitted.
+    """
+    if effort != "none":
+        raise ProviderBoundaryContractError(
+            "side_call_reasoning_off_unproven",
+            "side-call reasoning must be explicitly disabled; set "
+            "REACT_REASONING_EFFORT=none only if the selected provider and model "
+            "accept that field and value, or select a compatible side-call endpoint",
+        )
+
+
 def _openai_body(
     body: Mapping[str, object],
     selected: "ReasoningProfile",
@@ -189,9 +204,7 @@ def _openai_body(
     if not explicit_effort:
         explicit_effort = None
     if side_call:
-        # Registered auxiliary calls require no thinking independently of the
-        # solver profile. Carry that policy into the strict provider dialect.
-        explicit_effort = "none"
+        require_strict_side_call_reasoning_off(explicit_effort)
     if selected.off and explicit_effort != "none":
         raise ProviderBoundaryContractError(
             "reasoning_off_unproven",

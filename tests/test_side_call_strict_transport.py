@@ -38,10 +38,13 @@ def request(contract):
 
 
 @pytest.mark.parametrize("tool_name", TOOL_NAMES)
-@pytest.mark.parametrize("dialect", ["openai-strict", "llama.cpp"])
-@pytest.mark.parametrize("solver_effort", [None, "high"])
+@pytest.mark.parametrize("dialect,solver_effort", [
+    ("openai-strict", "none"), ("llama.cpp", None), ("llama.cpp", "high"),
+])
+@pytest.mark.parametrize("attempt_limit", [1, 2])
 def test_captured_side_call_sends_explicit_reasoning_off(
-        tmp_path, monkeypatch, tool_name, dialect, solver_effort):
+        tmp_path, monkeypatch, tool_name, dialect, solver_effort, attempt_limit):
+    monkeypatch.setenv("STATEFRAME_TRANSPORT_BACKOFF_S", "0")
     if solver_effort is None:
         monkeypatch.delenv("REACT_REASONING_EFFORT", raising=False)
     else:
@@ -67,7 +70,9 @@ def test_captured_side_call_sends_explicit_reasoning_off(
         else:
             canonical = sent
         contract.validate(canonical)
-        wires.append(sent)
+        wires.append(wire)
+        if attempt_limit > 1 and len(wires) == 1:
+            raise ConnectionResetError("transient pre-response failure")
         return json.dumps({"choices": [{"index": 0, "finish_reason": "stop", "message": {
             "role": "assistant", "content": "{}",
         }}], "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}}).encode()
@@ -80,16 +85,52 @@ def test_captured_side_call_sends_explicit_reasoning_off(
     def provider(body, *, side_call_contract):
         assert side_call_contract is contract
         return capture.send(body, "https://provider.invalid/v1/chat/completions", "",
-                            side_call_contract=side_call_contract, transport_attempt_limit=1)
+                            side_call_contract=side_call_contract,
+                            transport_attempt_limit=attempt_limit)
 
     reply = _invoke_decide2_provider(provider, body, contract)
     assert reply["message"]["content"] == "{}"
     assert body == original
-    assert len(wires) == 1
-    assert wires[0]["tools"][0]["function"]["name"] == tool_name
+    assert len(wires) == attempt_limit
+    assert all(wire == wires[0] for wire in wires)
+    assert json.loads(wires[0])["tools"][0]["function"]["name"] == tool_name
     events = [json.loads(line) for line in journal.path.read_text().splitlines()]
-    assert sum(row["kind"] == "request_submitted" for row in events) == 1
+    submitted = [row for row in events if row["kind"] == "request_submitted"]
+    assert [row["transport_attempt"] for row in submitted] == list(range(1, attempt_limit + 1))
+    assert len({row["request_id"] for row in submitted}) == 1
+    if attempt_limit > 1:
+        assert submitted[1]["payload_delta"]["identical_wire"] is True
+        assert any(row["kind"] == "transport_error" and row["retry_scheduled"] for row in events)
     assert any(row["kind"] == "response_received" for row in events)
+
+
+@pytest.mark.parametrize("tool_name", TOOL_NAMES)
+@pytest.mark.parametrize("effort", [None, "", "high", "minimal", "invalid"])
+def test_strict_side_call_without_confirmed_off_support_never_dispatches(
+        tmp_path, monkeypatch, tool_name, effort):
+    if effort is None:
+        monkeypatch.delenv("REACT_REASONING_EFFORT", raising=False)
+    else:
+        monkeypatch.setenv("REACT_REASONING_EFFORT", effort)
+    monkeypatch.setattr(kernel_provider_dialect, "capabilities_for", lambda *args, **kwargs:
+                        kernel_provider_dialect.ProviderCapabilities(slots_status=404))
+
+    def reject_http(*args, **kwargs):
+        pytest.fail("unproven reasoning controls reached the provider")
+
+    monkeypatch.setattr(kernel_measurement, "_request_bytes_for_capture", reject_http)
+    contract = Decide2SideCallContract("decision", tool_name=tool_name)
+    body = request(contract)
+    original = copy.deepcopy(body)
+    journal = kernel_measurement.AuditJournal(tmp_path, "unproven-side-call", {})
+    capture = kernel_measurement.RequestCapture(journal, 0, "snapshot", call_purpose="decide2")
+    bind_auxiliary(capture, "decide2")
+    with pytest.raises(ProviderBoundaryContractError, match="REACT_REASONING_EFFORT=none"):
+        capture.send(body, "https://provider.invalid/v1/chat/completions", "",
+                     side_call_contract=contract, transport_attempt_limit=2)
+    assert body == original
+    events = [json.loads(line) for line in journal.path.read_text().splitlines()]
+    assert not any(row["kind"] == "request_submitted" for row in events)
 
 
 def strict_admission(contract):
@@ -144,10 +185,15 @@ def test_wire_conversion_does_not_relax_canonical_contract():
 
 
 def test_strict_side_call_policy_survives_repeated_conversion_and_refit(monkeypatch):
-    monkeypatch.setenv("REACT_REASONING_EFFORT", "high")
+    monkeypatch.setenv("REACT_REASONING_EFFORT", " NONE ")
     body = request(Decide2SideCallContract("decision", tool_name="forced_ask_judge"))
     strict = enforce_provider_body(body, dialect="openai-strict", side_call=True)
     assert strict["reasoning_effort"] == "none"
     assert enforce_provider_body(strict, dialect="openai-strict", side_call=True) == strict
     assert _finalize_provider_refit(strict, profile=None, dialect="openai-strict", side_call=True) == strict
+    monkeypatch.setenv("REACT_REASONING_EFFORT", "high")
     assert enforce_provider_body(body, dialect="openai-strict")["reasoning_effort"] == "high"
+    with pytest.raises(ProviderBoundaryContractError, match="REACT_REASONING_EFFORT=none"):
+        enforce_provider_body(strict, dialect="openai-strict", side_call=True)
+    with pytest.raises(ProviderBoundaryContractError, match="REACT_REASONING_EFFORT=none"):
+        _finalize_provider_refit(strict, profile=None, dialect="openai-strict", side_call=True)

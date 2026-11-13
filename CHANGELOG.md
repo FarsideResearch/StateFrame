@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- Fixed: strict-provider side-calls no longer fail admission with "side-call reasoning must be explicitly disabled". Their reasoning-off policy survives provider conversion and refitting without weakening the side-call validator.
+- Fixed: strict-provider proposal side-calls require operator-confirmed `REACT_REASONING_EFFORT=none` before dispatch instead of sending an unrequested reasoning parameter. Dialect probes do not prove model reasoning support. Explicit reasoning-off survives conversion, refitting and transport retries without weakening the side-call validator; the provider summary reports when strict side-calls are refused.
 
 ## 0.6.1 (2026-11-13)
 
