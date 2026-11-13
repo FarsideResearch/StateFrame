@@ -3627,6 +3627,7 @@ def verify_final_source_delivery(
         proof_failures.append({
             "kind": "deferred_source_notice_unverified",
             "paths": list(deferred_paths),
+            "notice_present": bool(exact_notice),
             "read_tool_available": wire_read_tool_available,
         })
     unselected_deferred_paths = set(deferred_paths) - selected_paths
@@ -5423,25 +5424,89 @@ def upsert_deferred_source_notice(messages, paths, *args, **kwargs):
 
 # --- owner-admission receipt reconciliation --------------------------------
 
-_DELIVERED_PATH_STATUSES = frozenset({"COMPLETE", "DEFERRED"})
 _DEFERRAL_PROOF_FAILURE_KINDS = frozenset({
     "deferred_source_path_unselected", "deferred_source_notice_unverified",
 })
 
 
-def _verified_delivered_paths(receipt: Mapping[str, object]) -> dict[str, str]:
-    """Paths a receipt proved delivered (COMPLETE on the wire or DEFERRED+VERIFIED)."""
-    rows = receipt.get("paths")
+def _receipt_failures(receipt: Mapping[str, object]) -> list[Mapping[str, object]]:
+    raw = receipt.get("proof_failures")
+    if not isinstance(raw, Sequence) or isinstance(raw, (str, bytes, bytearray)):
+        return []
+    return [failure for failure in raw if isinstance(failure, Mapping)]
+
+
+def _failure_paths(failure: Mapping[str, object]) -> tuple[str, ...]:
+    named = failure.get("paths")
+    if not isinstance(named, Sequence) or isinstance(named, (str, bytes, bytearray)):
+        named = (failure.get("path"),) if failure.get("path") else ()
+    return _normalized_deferred_paths(tuple(named))
+
+
+def _normalized_key_map(rows: object) -> dict[str, Mapping[str, object]]:
     if not isinstance(rows, Mapping):
         return {}
-    out: dict[str, str] = {}
+    out: dict[str, Mapping[str, object]] = {}
     for raw_path, row in rows.items():
         if not isinstance(row, Mapping):
             continue
+        for path in _normalized_deferred_paths((raw_path,)):
+            out[path] = row
+    return out
+
+
+def _delivered_paths_on_wire(receipt: Mapping[str, object]) -> dict[str, str]:
+    """Paths a receipt proves delivered, judged from per-path evidence.
+
+    ``verify_final_source_delivery`` stamps the receipt-wide ``proof_status``
+    onto every row and demotes COMPLETE rows to PARTIAL as soon as any proof
+    failure exists, so an unsatisfied receipt carries no VERIFIED row even
+    for pages that are complete on the wire.  A page therefore counts as
+    delivered when its own evidence says so: every selected unit carried by a
+    delivered range with a final-wire proof (or a zero-byte source proven by
+    revision) and no proof failure scoped to that path.  DEFERRED rows count
+    only when the receipt verified the deferral (``deferred_paths``).
+    """
+    rows = _normalized_key_map(receipt.get("paths"))
+    if not rows:
+        return {}
+    raw_proofs = receipt.get("delivery_proofs")
+    proof_paths: set[str] = set()
+    if isinstance(raw_proofs, Mapping):
+        for raw_path, items in raw_proofs.items():
+            if (isinstance(items, Sequence) and not isinstance(items, (str, bytes, bytearray))
+                    and items):
+                proof_paths.update(_normalized_deferred_paths((raw_path,)))
+    failed_paths: set[str] = set()
+    for failure in _receipt_failures(receipt):
+        if failure.get("path"):
+            failed_paths.update(_normalized_deferred_paths((failure.get("path"),)))
+    verified_deferred = set(_normalized_deferred_paths(tuple(
+        receipt.get("deferred_paths", ()) or ())))
+    receipt_verified = str(receipt.get("proof_status", "")).upper() == "VERIFIED"
+    out: dict[str, str] = {}
+    for path, row in rows.items():
         status = str(row.get("status", "")).upper()
-        if (status in _DELIVERED_PATH_STATUSES
+        if status == "DEFERRED" and path in verified_deferred:
+            out[path] = "DEFERRED"
+            continue
+        if path in failed_paths:
+            continue
+        if (receipt_verified and status == "COMPLETE"
                 and str(row.get("proof_status", "")).upper() == "VERIFIED"):
-            out[str(raw_path)] = status
+            out[path] = "COMPLETE"
+            continue
+        selected = row.get("selected_units")
+        delivered = row.get("delivered_units")
+        omitted = row.get("omitted_units")
+        ranges = row.get("ranges")
+        has_ranges = (isinstance(ranges, Sequence)
+                      and not isinstance(ranges, (str, bytes, bytearray)) and bool(ranges))
+        if (type(selected) is int and selected > 0 and omitted == 0 and delivered == selected
+                and has_ranges and path in proof_paths):
+            out[path] = "COMPLETE"
+        elif selected == 0 and row.get("empty_source") is True:
+            out[path] = "COMPLETE"
     return out
 
 
@@ -5464,37 +5529,45 @@ def classify_final_delivery_regression(
 ) -> dict[str, object]:
     """Explain why a satisfied receipt became unsatisfied after owner admission.
 
-    ``genuine_loss`` is True only when the admitted request really lost
-    something the earlier receipt had proved: a page that was COMPLETE or
-    DEFERRED-verified is no longer delivered on the final wire and was not
-    merely moved into the deferral set, or the final wire carries deferrals
-    while admission dropped the ``read`` tool.  Every other regression is a
-    late deferral: the earlier receipt was computed before window fitting
-    discovered the deferral, so the two receipts describe different plans and
-    the comparison is not evidence that anything was lost.
+    ``genuine_loss`` is True unless the regression is exactly a late or
+    unqualifiable deferral: every page the earlier receipt proved is still
+    delivered on the final wire (per-path evidence) or is declared deferred
+    by a notice that is actually on the wire, the ``read`` tool is admitted,
+    and every proof failure is one of the deferral kinds.  A page that is
+    neither delivered nor declared deferred, a deferral with no notice on the
+    wire, a dropped ``read`` route, or any proof failure the reconciliation
+    does not understand keeps the fail-closed stop.
     """
-    previous_delivered = _verified_delivered_paths(previous)
-    final_delivered = _verified_delivered_paths(final)
+    previous_delivered = _delivered_paths_on_wire(previous)
+    final_delivered = _delivered_paths_on_wire(final)
     previous_deferred = set(_normalized_deferred_paths(tuple(
         previous.get("deferred_paths", ()) or ())))
     final_deferred = set(_normalized_deferred_paths(tuple(
         final.get("deferred_paths", ()) or ())))
+    failures = _receipt_failures(final)
     # A deferral the verifier could not qualify (no selected units, no read
-    # route, unverified notice) is still a declared deferral, not a page the
-    # admitted request dropped. It surfaces as a typed proof failure naming
-    # the path; fold those paths into the deferred set.
+    # route) is still a declared deferral when the notice is on the wire. With
+    # no notice the model has neither the page nor any statement that it was
+    # deferred, so the path counts as lost.
+    notice_on_wire = final.get("deferred_notice_verified") is True or any(
+        str(failure.get("kind", "")) == "deferred_source_notice_unverified"
+        and failure.get("notice_present") is True
+        for failure in failures
+    )
     unqualified_deferred: set[str] = set()
-    raw_failures = final.get("proof_failures")
-    if isinstance(raw_failures, Sequence) and not isinstance(raw_failures, (str, bytes, bytearray)):
-        for failure in raw_failures:
-            if not isinstance(failure, Mapping):
-                continue
-            if str(failure.get("kind", "")) not in _DEFERRAL_PROOF_FAILURE_KINDS:
-                continue
-            named = failure.get("paths")
-            if not isinstance(named, Sequence) or isinstance(named, (str, bytes, bytearray)):
-                named = (failure.get("path"),) if failure.get("path") else ()
-            unqualified_deferred.update(_normalized_deferred_paths(tuple(named)))
+    undeclared_deferred: set[str] = set()
+    unexplained_failure_kinds: list[str] = []
+    for failure in failures:
+        kind = str(failure.get("kind", ""))
+        if kind not in _DEFERRAL_PROOF_FAILURE_KINDS:
+            if kind not in unexplained_failure_kinds:
+                unexplained_failure_kinds.append(kind)
+            continue
+        named = set(_failure_paths(failure))
+        if notice_on_wire:
+            unqualified_deferred |= named
+        else:
+            undeclared_deferred |= named
     final_deferred |= unqualified_deferred
     lost_paths = sorted(
         path for path in previous_delivered
@@ -5504,15 +5577,15 @@ def classify_final_delivery_regression(
         final.get("read_tool_available") is True
         or (tools is not None and _tools_admit_read(tools))
     )
-    read_tool_dropped = bool(final_deferred) and not read_admitted and (
+    pending_deferred = final_deferred | undeclared_deferred
+    read_tool_dropped = bool(pending_deferred) and not read_admitted and (
         previous.get("read_tool_available") is True or not previous_deferred
     )
     late_deferred = sorted(final_deferred - previous_deferred)
     unresolved_deferred: list[dict[str, object]] = []
-    final_rows = final.get("paths") if isinstance(final.get("paths"), Mapping) else {}
-    for path in sorted(final_deferred):
-        row = final_rows.get(path) if isinstance(final_rows, Mapping) else None
-        row = row if isinstance(row, Mapping) else {}
+    final_rows = _normalized_key_map(final.get("paths"))
+    for path in sorted(pending_deferred):
+        row = final_rows.get(path, {})
         route = row.get("retrieval_route")
         unresolved_deferred.append({
             "path": path,
@@ -5523,19 +5596,23 @@ def classify_final_delivery_regression(
                            if isinstance(route, Mapping)
                            and isinstance(route.get("unit_handles"), Sequence) else 0),
             "late": path in late_deferred,
+            "declared": path not in undeclared_deferred,
         })
     if lost_paths:
         reason = "verified_page_absent_after_admission"
     elif read_tool_dropped:
         reason = "read_tool_dropped_by_admission"
+    elif unexplained_failure_kinds:
+        reason = "final_receipt_unsatisfied"
     elif unqualified_deferred:
         reason = "deferral_unqualifiable"
     elif late_deferred:
         reason = "late_deferral_unsatisfied"
     else:
         reason = "final_receipt_unsatisfied"
+    genuine_loss = bool(lost_paths or read_tool_dropped) or reason == "final_receipt_unsatisfied"
     return {
-        "genuine_loss": bool(lost_paths or read_tool_dropped),
+        "genuine_loss": genuine_loss,
         "reason": reason,
         "lost_paths": lost_paths,
         "read_tool_dropped": read_tool_dropped,
@@ -5543,6 +5620,9 @@ def classify_final_delivery_regression(
         "late_deferred_paths": late_deferred,
         "deferred_paths": sorted(final_deferred),
         "unqualified_deferred_paths": sorted(unqualified_deferred),
+        "undeclared_deferred_paths": sorted(undeclared_deferred),
+        "unexplained_failure_kinds": unexplained_failure_kinds,
+        "deferred_notice_on_wire": bool(notice_on_wire),
         "deferred_notice_verified": final.get("deferred_notice_verified") is True,
         "deferred_rows": unresolved_deferred,
         "previous_status": str(previous.get("status", "")).upper(),
@@ -5569,9 +5649,16 @@ def reconcile_owner_source_delivery(
     if verdict["genuine_loss"]:
         if verdict["lost_paths"]:
             detail = "pages absent from the admitted request: " + ", ".join(verdict["lost_paths"])
-        else:
+            if verdict["undeclared_deferred_paths"]:
+                detail += "; deferred without a notice on the wire: " + ", ".join(
+                    verdict["undeclared_deferred_paths"])
+        elif verdict["read_tool_dropped"]:
             detail = "read tool dropped by admission while pages are deferred: " + ", ".join(
-                verdict["deferred_paths"])
+                sorted(set(verdict["deferred_paths"]) | set(verdict["undeclared_deferred_paths"])))
+        else:
+            detail = ("final receipt unsatisfied for a reason the reconciliation does not "
+                      "qualify: " + (", ".join(verdict["unexplained_failure_kinds"]) or
+                                     f"status={verdict['final_status']}"))
         raise RuntimeError("final source delivery lost after owner admission (" + detail + ")")
     from kernel_harden8 import record_failure
     record_failure(

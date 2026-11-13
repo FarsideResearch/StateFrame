@@ -21777,22 +21777,9 @@ class StateFrameRuntime:
                 and deferred_source_paths):
             # Window fitting can discover deferrals after the earlier transcript
             # notice pass; bind this exact path set before the request contract freezes.
-            from kernel_request_source_window import (
-                upsert_deferred_source_notice, verify_final_source_delivery,
-            )
+            from kernel_request_source_window import upsert_deferred_source_notice
             upsert_deferred_source_notice(prepared, deferred_source_paths)
             validate_deferred_reads(prepared, selected_tools)
-            # The notice changed the delivered plan: refresh the receipt so a
-            # later re-verify compares against this deferral, not a receipt
-            # computed before window fitting discovered it.
-            try:
-                capture.request_source_final_delivery = verify_final_source_delivery(
-                    source_closure, prepared,
-                    payload={"messages": prepared, "tools": selected_tools},
-                )
-            except (AttributeError, OSError, TypeError, ValueError):
-                # Unavailable host verification is recorded by the budget boundary.
-                pass
         _record_lean_required_source_paths(capture, self)
         try:
             from kernel_wire_truth_facts import render_fact_messages

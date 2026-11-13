@@ -7,8 +7,10 @@ the frame receipt was already satisfied.  The post-owner re-verify compared the 
 kept every page and the ``read`` tool.  The engine stopped with ENGINE_ERROR while
 preparing request 14.
 
-The reconciliation must raise only when the admitted request really dropped a verified
-page or the read route; a late deferral is journaled as a typed harden8 advisory.
+The reconciliation raises unless the regression is exactly a late or unqualifiable
+deferral: every previously proven page is still delivered (per-path evidence, because an
+unsatisfied receipt stamps FAILED on every row) or declared deferred by a notice that is
+on the wire, ``read`` is admitted, and no other proof failure exists.
 """
 from types import SimpleNamespace
 
@@ -60,7 +62,79 @@ def _late_deferral_receipt(*, deferred, kept=(), read_tool_available=True, units
     }
 
 
-def test_late_deferral_refreshes_receipt():
+def _repo(tmp_path, *, ticket=None):
+    root = tmp_path / "repo"
+    (root / "core").mkdir(parents=True)
+    (root / TARGET).write_text(
+        "def handler(value):\n    return value + 1\n\n\ndef other(value):\n    return value - 1\n",
+        encoding="utf-8",
+    )
+    (root / SIBLING).write_text(
+        "".join(f"def handler_{index}(value):\n    return value + {index}\n\n"
+                for index in range(60)),
+        encoding="utf-8",
+    )
+    task_row = {"ticket_text": ticket} if ticket else {}
+    events = []
+    runtime = SimpleNamespace(
+        target=root / TARGET, owner=SimpleNamespace(root=root, task_row=task_row),
+        product_revision="0",
+        journal=SimpleNamespace(emit=lambda kind, **fields: events.append((kind, fields))),
+    )
+    return root, runtime, events
+
+
+def _sources(root):
+    return {path: (root / path).read_text(encoding="utf-8") for path in (TARGET, SIBLING)}
+
+
+def _verify(root, runtime, messages, tools):
+    return window.verify_final_source_delivery(
+        runtime._request_source_closure, messages,
+        payload={"messages": messages, "tools": tools}, sources=_sources(root),
+    )
+
+
+def _kept_page_plus_deferral_wire(tmp_path, *, tools, notice=True):
+    """Real wire: the target is windowed COMPLETE, the sibling deferred with no units."""
+    root, runtime, events = _repo(tmp_path, ticket=f"fix handler in {TARGET}")
+    runtime._request_deferred_source_paths = [SIBLING]
+    messages = [{"role": "user", "content": f"please fix {TARGET}"}]
+    result = window.bound_runtime_sources(
+        messages, runtime, max_request_bytes=20_000, tools=tools)
+    assert isinstance(result, dict), result
+    plan = runtime._request_source_closure
+    assert plan["deferred_paths"] == [SIBLING]
+    assert [unit["path"] for unit in plan["units"]] == [TARGET]
+    if notice:
+        window.upsert_deferred_source_notice(messages, plan["deferred_paths"])
+    return root, runtime, events, messages
+
+
+def _envelope_deferral_wire(tmp_path, *, tools, notice):
+    """Real wire: the envelope already exceeds the budget, the target is deferred unselected."""
+    root, runtime, events = _repo(tmp_path)
+    runtime.target = root / SIBLING
+    messages = [{"role": "user", "content": "x" * 4000}]
+    result = window.bound_runtime_sources(
+        messages, runtime, max_request_bytes=512, tools=tools)
+    assert isinstance(result, dict), result
+    plan = runtime._request_source_closure
+    assert plan["deferred_paths"] == [SIBLING]
+    assert not any(
+        window.parse_model_source_window(message.get("content")) is not None
+        for message in messages if isinstance(message, dict)
+    )
+    if notice:
+        window.upsert_deferred_source_notice(messages, plan["deferred_paths"])
+    return root, runtime, events, messages
+
+
+def _harden8_kinds(events):
+    return [kind for kind, _ in events if kind.startswith("harden8")]
+
+
+def test_late_deferral_is_advisory():
     # Same pages as before (the target moved into the deferral set) and read admitted:
     # the regression is a late deferral, journaled, never a crash.
     runtime, events = _runtime()
@@ -133,45 +207,46 @@ def test_satisfied_or_never_satisfied_receipts_are_not_reconciled():
     assert not hasattr(capture, "request_source_delivery_regression")
 
 
+def test_unexplained_receipt_failure_still_raises():
+    # Nothing delivered before, nothing deferred now, but the final receipt failed for a
+    # reason the reconciliation does not qualify: keep the fail-closed stop.
+    runtime, events = _runtime()
+    capture = SimpleNamespace()
+    final = dict(_complete_receipt(), status="UNKNOWN", proof_status="FAILED",
+                 proof_failures=[{"kind": "workspace_authorization_unverified",
+                                  "status": "UNVERIFIED"}])
+    with pytest.raises(RuntimeError, match="workspace_authorization_unverified"):
+        window.reconcile_owner_source_delivery(
+            runtime, capture, _complete_receipt(), final, tools=[READ_TOOL])
+    verdict = capture.request_source_delivery_regression
+    assert verdict["reason"] == "final_receipt_unsatisfied"
+    assert verdict["unexplained_failure_kinds"] == ["workspace_authorization_unverified"]
+    assert events == []
+
+
+def test_receipt_keys_are_normalized():
+    previous = _complete_receipt("./core\\service.py")
+    final = _late_deferral_receipt(deferred=(SIBLING,), units=0)
+    verdict = window.classify_final_delivery_regression(previous, final, tools=[READ_TOOL])
+    assert verdict["genuine_loss"] is False
+    assert verdict["lost_paths"] == []
+    assert verdict["deferred_paths"] == [SIBLING]
+
+
 def test_envelope_over_budget_target_page_defers_without_crash(tmp_path):
     # Non-empty sibling of the zero-byte case: the envelope already exceeds the window
     # budget, so window fitting defers the target after the frame receipt was computed.
-    # The real wire receipt carries the deferral as a typed proof failure; against a
-    # stale satisfied receipt the reconciliation must journal, not raise. Only a page
-    # that is neither delivered nor deferred anywhere is a loss.
-    root = tmp_path / "repo"
-    (root / "core").mkdir(parents=True)
-    target = root / "core/service.py"
-    target.write_text(
-        "".join(f"def handler_{index}(value):\n    return value + {index}\n\n"
-                for index in range(60)),
-        encoding="utf-8",
-    )
-    runtime = SimpleNamespace(
-        target=target, owner=SimpleNamespace(root=root), product_revision="0")
-    runtime.journal = SimpleNamespace(emit=lambda kind, **fields: events.append((kind, fields)))
-    events = []
-    messages = [{"role": "user", "content": "x" * 4000}]
+    # The real wire receipt carries the deferral as a typed proof failure and the notice
+    # is on the wire; against a stale satisfied receipt the reconciliation must journal,
+    # not raise. Only a page that is neither delivered nor deferred anywhere is a loss.
     tools = [READ_TOOL, EDIT_TOOL]
-    result = window.bound_runtime_sources(
-        messages, runtime, max_request_bytes=512, tools=tools)
-    assert isinstance(result, dict), result
-    plan = runtime._request_source_closure
-    assert plan["deferred_paths"] == [SIBLING]
-    assert not any(
-        window.parse_model_source_window(message.get("content")) is not None
-        for message in messages if isinstance(message, dict)
-    )
-    window.upsert_deferred_source_notice(messages, plan["deferred_paths"])
-    final = window.verify_final_source_delivery(
-        plan, messages, payload={"messages": messages, "tools": tools},
-        sources={SIBLING: target.read_text(encoding="utf-8")},
-    )
+    root, runtime, events, messages = _envelope_deferral_wire(tmp_path, tools=tools, notice=True)
+    final = _verify(root, runtime, messages, tools)
     assert final["deferred_notice_verified"] is True
     assert final["read_tool_available"] is True
     assert not window.source_delivery_satisfied(final)
-    assert any(failure["kind"] == "deferred_source_path_unselected"
-               for failure in final["proof_failures"]), final["proof_failures"]
+    assert [failure["kind"] for failure in final["proof_failures"]] == [
+        "deferred_source_path_unselected"]
 
     capture = SimpleNamespace()
     verdict = window.reconcile_owner_source_delivery(
@@ -179,9 +254,103 @@ def test_envelope_over_budget_target_page_defers_without_crash(tmp_path):
     assert verdict["genuine_loss"] is False
     assert verdict["reason"] == "deferral_unqualifiable"
     assert verdict["unqualified_deferred_paths"] == [SIBLING]
-    assert [kind for kind, _ in events if kind.startswith("harden8")] == ["harden8_advisory_failure"]
+    assert verdict["deferred_notice_on_wire"] is True
+    assert _harden8_kinds(events) == ["harden8_advisory_failure"]
 
     # Control: a second page that was COMPLETE before and is now nowhere is a loss.
     with pytest.raises(RuntimeError, match=TARGET):
         window.reconcile_owner_source_delivery(
             runtime, capture, _complete_receipt(SIBLING, TARGET), final, tools=tools)
+
+
+def test_deferral_without_notice_on_wire_is_a_loss(tmp_path):
+    # R2 body 1: the deferral was never written to the wire (no upsert ran). The model
+    # has neither the page it had last request nor a statement that it was deferred, so
+    # `deferred_source_notice_unverified` names the path but must not fold it into the
+    # declared deferrals: raise, naming the page.
+    tools = [READ_TOOL, EDIT_TOOL]
+    root, runtime, events, messages = _envelope_deferral_wire(tmp_path, tools=tools, notice=False)
+    final = _verify(root, runtime, messages, tools)
+    kinds = {failure["kind"]: failure for failure in final["proof_failures"]}
+    assert set(kinds) == {"deferred_source_notice_unverified", "deferred_source_path_unselected"}
+    assert kinds["deferred_source_notice_unverified"]["notice_present"] is False
+    assert kinds["deferred_source_notice_unverified"]["read_tool_available"] is True
+
+    capture = SimpleNamespace()
+    with pytest.raises(RuntimeError, match="pages absent from the admitted request") as info:
+        window.reconcile_owner_source_delivery(
+            runtime, capture, _complete_receipt(SIBLING), final, tools=tools)
+    assert SIBLING in str(info.value)
+    assert "without a notice on the wire" in str(info.value)
+    verdict = capture.request_source_delivery_regression
+    assert verdict["lost_paths"] == [SIBLING]
+    assert verdict["undeclared_deferred_paths"] == [SIBLING]
+    assert verdict["deferred_notice_on_wire"] is False
+    assert _harden8_kinds(events) == []
+
+
+def test_notice_on_wire_but_read_absent_is_a_loss(tmp_path):
+    # Sibling of the above: the notice is present but admission dropped `read`, so the
+    # deferred page has no retrieval route. Raise as a dropped read tool.
+    tools = [EDIT_TOOL]
+    root, runtime, _events, messages = _envelope_deferral_wire(tmp_path, tools=tools, notice=True)
+    final = _verify(root, runtime, messages, tools)
+    kinds = {failure["kind"]: failure for failure in final["proof_failures"]}
+    assert kinds["deferred_source_notice_unverified"]["notice_present"] is True
+    assert final["read_tool_available"] is False
+
+    capture = SimpleNamespace()
+    with pytest.raises(RuntimeError, match="read tool dropped by admission"):
+        window.reconcile_owner_source_delivery(
+            runtime, capture, _complete_receipt(SIBLING), final, tools=tools)
+    assert capture.request_source_delivery_regression["read_tool_dropped"] is True
+
+
+def test_kept_page_with_unqualified_deferral_is_advisory_on_real_wire(tmp_path):
+    # R2 body 2: the real receipt stamps FAILED on every row once any proof failure
+    # exists, so the kept target row reads PARTIAL/FAILED although it is complete on
+    # the wire. Judged per path it is delivered; only the sibling is (declared) deferred.
+    tools = [READ_TOOL, EDIT_TOOL]
+    root, runtime, events, messages = _kept_page_plus_deferral_wire(tmp_path, tools=tools)
+    final = _verify(root, runtime, messages, tools)
+    assert not window.source_delivery_satisfied(final)
+    assert [failure["kind"] for failure in final["proof_failures"]] == [
+        "deferred_source_path_unselected"]
+    target_row = final["paths"][TARGET]
+    assert target_row["proof_status"] == "FAILED"
+    assert target_row["status"] == "PARTIAL"
+    assert target_row["delivered_units"] == target_row["selected_units"] == 1
+    assert final["delivery_proofs"][TARGET]
+
+    capture = SimpleNamespace()
+    verdict = window.reconcile_owner_source_delivery(
+        runtime, capture, _complete_receipt(TARGET), final, tools=tools)
+    assert verdict["genuine_loss"] is False
+    assert verdict["reason"] == "deferral_unqualifiable"
+    assert verdict["lost_paths"] == []
+    assert verdict["deferred_paths"] == [SIBLING]
+    assert _harden8_kinds(events) == ["harden8_advisory_failure"]
+
+
+def test_truncated_kept_page_on_real_wire_raises(tmp_path):
+    # Same wire, but admission truncated the kept page: its proof fails for that path,
+    # so the page is lost even though a late deferral is also present.
+    tools = [READ_TOOL, EDIT_TOOL]
+    root, runtime, events, messages = _kept_page_plus_deferral_wire(tmp_path, tools=tools)
+    windows = [index for index, message in enumerate(messages)
+               if str(message.get("content", "")).startswith(f"[Current source: {TARGET}]")]
+    assert len(windows) == 1, messages
+    content = messages[windows[0]]["content"]
+    # Drop the last source line of the delivered window (admission strip/truncation).
+    messages[windows[0]]["content"] = content[:content.rstrip("\n").rfind("\n")] + "\n"
+    final = _verify(root, runtime, messages, tools)
+    assert any(failure.get("path") == TARGET for failure in final["proof_failures"]), (
+        final["proof_failures"])
+
+    capture = SimpleNamespace()
+    with pytest.raises(RuntimeError, match="pages absent from the admitted request") as info:
+        window.reconcile_owner_source_delivery(
+            runtime, capture, _complete_receipt(TARGET), final, tools=tools)
+    assert TARGET in str(info.value)
+    assert capture.request_source_delivery_regression["lost_paths"] == [TARGET]
+    assert _harden8_kinds(events) == []
