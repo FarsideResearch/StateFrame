@@ -5419,3 +5419,172 @@ def upsert_deferred_source_notice(messages, paths, *args, **kwargs):
     if not truthful_read_panels_enabled():
         return _upsert_deferred_source_notice_r2fo(messages, paths, *args, **kwargs)
     return _upsert_truthful_deferred_source_notice(messages, paths, *args, **kwargs)
+
+
+# --- owner-admission receipt reconciliation --------------------------------
+
+_DELIVERED_PATH_STATUSES = frozenset({"COMPLETE", "DEFERRED"})
+_DEFERRAL_PROOF_FAILURE_KINDS = frozenset({
+    "deferred_source_path_unselected", "deferred_source_notice_unverified",
+})
+
+
+def _verified_delivered_paths(receipt: Mapping[str, object]) -> dict[str, str]:
+    """Paths a receipt proved delivered (COMPLETE on the wire or DEFERRED+VERIFIED)."""
+    rows = receipt.get("paths")
+    if not isinstance(rows, Mapping):
+        return {}
+    out: dict[str, str] = {}
+    for raw_path, row in rows.items():
+        if not isinstance(row, Mapping):
+            continue
+        status = str(row.get("status", "")).upper()
+        if (status in _DELIVERED_PATH_STATUSES
+                and str(row.get("proof_status", "")).upper() == "VERIFIED"):
+            out[str(raw_path)] = status
+    return out
+
+
+def _tools_admit_read(tools: object) -> bool:
+    if not isinstance(tools, Sequence) or isinstance(tools, (str, bytes, bytearray)):
+        return False
+    for tool in tools:
+        if not isinstance(tool, Mapping):
+            continue
+        function = tool.get("function")
+        name = function.get("name") if isinstance(function, Mapping) else tool.get("name")
+        if str(name or "") == "read":
+            return True
+    return False
+
+
+def classify_final_delivery_regression(
+        previous: Mapping[str, object], final: Mapping[str, object], *,
+        tools: object = None,
+) -> dict[str, object]:
+    """Explain why a satisfied receipt became unsatisfied after owner admission.
+
+    ``genuine_loss`` is True only when the admitted request really lost
+    something the earlier receipt had proved: a page that was COMPLETE or
+    DEFERRED-verified is no longer delivered on the final wire and was not
+    merely moved into the deferral set, or the final wire carries deferrals
+    while admission dropped the ``read`` tool.  Every other regression is a
+    late deferral: the earlier receipt was computed before window fitting
+    discovered the deferral, so the two receipts describe different plans and
+    the comparison is not evidence that anything was lost.
+    """
+    previous_delivered = _verified_delivered_paths(previous)
+    final_delivered = _verified_delivered_paths(final)
+    previous_deferred = set(_normalized_deferred_paths(tuple(
+        previous.get("deferred_paths", ()) or ())))
+    final_deferred = set(_normalized_deferred_paths(tuple(
+        final.get("deferred_paths", ()) or ())))
+    # A deferral the verifier could not qualify (no selected units, no read
+    # route, unverified notice) is still a declared deferral, not a page the
+    # admitted request dropped. It surfaces as a typed proof failure naming
+    # the path; fold those paths into the deferred set.
+    unqualified_deferred: set[str] = set()
+    raw_failures = final.get("proof_failures")
+    if isinstance(raw_failures, Sequence) and not isinstance(raw_failures, (str, bytes, bytearray)):
+        for failure in raw_failures:
+            if not isinstance(failure, Mapping):
+                continue
+            if str(failure.get("kind", "")) not in _DEFERRAL_PROOF_FAILURE_KINDS:
+                continue
+            named = failure.get("paths")
+            if not isinstance(named, Sequence) or isinstance(named, (str, bytes, bytearray)):
+                named = (failure.get("path"),) if failure.get("path") else ()
+            unqualified_deferred.update(_normalized_deferred_paths(tuple(named)))
+    final_deferred |= unqualified_deferred
+    lost_paths = sorted(
+        path for path in previous_delivered
+        if path not in final_delivered and path not in final_deferred
+    )
+    read_admitted = (
+        final.get("read_tool_available") is True
+        or (tools is not None and _tools_admit_read(tools))
+    )
+    read_tool_dropped = bool(final_deferred) and not read_admitted and (
+        previous.get("read_tool_available") is True or not previous_deferred
+    )
+    late_deferred = sorted(final_deferred - previous_deferred)
+    unresolved_deferred: list[dict[str, object]] = []
+    final_rows = final.get("paths") if isinstance(final.get("paths"), Mapping) else {}
+    for path in sorted(final_deferred):
+        row = final_rows.get(path) if isinstance(final_rows, Mapping) else None
+        row = row if isinstance(row, Mapping) else {}
+        route = row.get("retrieval_route")
+        unresolved_deferred.append({
+            "path": path,
+            "status": str(row.get("status", "ABSENT")).upper(),
+            "proof_status": str(row.get("proof_status", "UNVERIFIED")).upper(),
+            "route_status": (str(route.get("status", "")) if isinstance(route, Mapping) else "NONE"),
+            "unit_count": (len(route.get("unit_handles", ()))
+                           if isinstance(route, Mapping)
+                           and isinstance(route.get("unit_handles"), Sequence) else 0),
+            "late": path in late_deferred,
+        })
+    if lost_paths:
+        reason = "verified_page_absent_after_admission"
+    elif read_tool_dropped:
+        reason = "read_tool_dropped_by_admission"
+    elif unqualified_deferred:
+        reason = "deferral_unqualifiable"
+    elif late_deferred:
+        reason = "late_deferral_unsatisfied"
+    else:
+        reason = "final_receipt_unsatisfied"
+    return {
+        "genuine_loss": bool(lost_paths or read_tool_dropped),
+        "reason": reason,
+        "lost_paths": lost_paths,
+        "read_tool_dropped": read_tool_dropped,
+        "read_tool_admitted": bool(read_admitted),
+        "late_deferred_paths": late_deferred,
+        "deferred_paths": sorted(final_deferred),
+        "unqualified_deferred_paths": sorted(unqualified_deferred),
+        "deferred_notice_verified": final.get("deferred_notice_verified") is True,
+        "deferred_rows": unresolved_deferred,
+        "previous_status": str(previous.get("status", "")).upper(),
+        "final_status": str(final.get("status", "")).upper(),
+        "final_proof_status": str(final.get("proof_status", "")).upper(),
+    }
+
+
+def reconcile_owner_source_delivery(
+        runtime: object | None, capture: object,
+        previous: object, final: Mapping[str, object], *, tools: object = None,
+) -> dict[str, object] | None:
+    """Post-owner receipt check: raise only on genuine loss, else record a typed event.
+
+    Returns the regression verdict (also stored on ``capture``), or None when
+    the final receipt is satisfied or there was no satisfied receipt before.
+    """
+    if source_delivery_satisfied(final):
+        return None
+    if not isinstance(previous, Mapping) or not source_delivery_satisfied(previous):
+        return None
+    verdict = classify_final_delivery_regression(previous, final, tools=tools)
+    setattr(capture, "request_source_delivery_regression", copy.deepcopy(verdict))
+    if verdict["genuine_loss"]:
+        if verdict["lost_paths"]:
+            detail = "pages absent from the admitted request: " + ", ".join(verdict["lost_paths"])
+        else:
+            detail = "read tool dropped by admission while pages are deferred: " + ", ".join(
+                verdict["deferred_paths"])
+        raise RuntimeError("final source delivery lost after owner admission (" + detail + ")")
+    from kernel_harden8 import record_failure
+    record_failure(
+        runtime,
+        "completion_owner.source_delivery_receipt",
+        RuntimeError(
+            f"{verdict['reason']}: deferred={verdict['deferred_paths']} "
+            f"late={verdict['late_deferred_paths']} "
+            f"notice_verified={verdict['deferred_notice_verified']} "
+            f"read_admitted={verdict['read_tool_admitted']} "
+            f"rows={verdict['deferred_rows']}"
+        ),
+        authority=False,
+        disposition="degrade",
+    )
+    return verdict
