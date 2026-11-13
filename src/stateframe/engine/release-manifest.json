@@ -143,7 +143,7 @@
   "kernel_check_authoring_route.py": "5181201ec93a29d73c1887169a6b35c99cef2abbbcf5823823517b5c792d2d43",
   "kernel_check_bundles.py": "865675fe7e911e2ebed9a2182a140dee553b5341fea11926088bf1a57986ef48",
   "kernel_check_generator_fixes.py": "60fce8ec3ce0a60ef49d65115e7b971b54c2152d594a99f4c5178169b36f02f5",
-  "kernel_check_receipts.py": "f4c29efa74e4b47aac5d951addf80f03e7162d4e49abe54740f3f86100d548f6",
+  "kernel_check_receipts.py": "9751275293834e85cb09a5f36ae5fa73ad12b822739c2035e5a875387e9ff26e",
   "kernel_check_truth_adapter.py": "b29fc4e62a12be13852dd1702ea120273a95211ba59c467368d684f5a67c1f23",
   "kernel_checkpoint.py": "ff56aee4b78b7bc8d78def8c10466efbeeb856cc0185951fb72cae193b55699f",
   "kernel_claim_grounding.py": "d1f45732040df42fb09c04e09efa4a5d0322008f7f6fb61bf022d2e71447ebb4",

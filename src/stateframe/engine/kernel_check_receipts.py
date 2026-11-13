@@ -910,7 +910,18 @@ def record_check_output(
     revision_text = (_revision_value(runtime, effective_revision)
                      if effective_revision is not None else _current_revision(runtime))
     handle = _execution_receipt_id(execution_text)
-    context_preview, context_omitted = _preview(context_text)
+    # Sizes, previews and the runner tail are model-facing facts.  They are
+    # derived from the SAME normalised text the model is shown (durations and
+    # object addresses masked), never from the raw stream: otherwise "in 0.42s"
+    # versus "in 12.3s" changes stdout_bytes on the wire and the receipt line is
+    # no longer deterministic for a same-seed rerun.  The raw streams themselves
+    # stay lossless in the stored receipt; retrieve_check_output pages them.
+    from kernel_wire_identity import public_wire_text
+    journal = getattr(runtime, "journal", None)
+    visible_stdout = public_wire_text(stdout_text, journal)
+    visible_stderr = public_wire_text(stderr_text, journal)
+    visible_context = public_wire_text(context_text, journal)
+    context_preview, context_omitted = _preview(visible_context)
     environment_error = (sandbox_exec_denial("\n".join((stdout_text, stderr_text)),
                                              read_grants=read_grants)
                          if typed_outcome == "ENVIRONMENT" else None)
@@ -958,14 +969,14 @@ def record_check_output(
             raise ValueError("unknown memory_limit_mechanism")
         private["memory_limit_mechanism"] = memory_limit_mechanism
     private.update({
-        "stdout_bytes": _bytes(stdout_text),
-        "stderr_bytes": _bytes(stderr_text),
-        "assertion_context_bytes": _bytes(context_text),
-        "stdout_omitted_bytes": _bytes(stdout_text),
-        "stderr_omitted_bytes": _bytes(stderr_text),
+        "stdout_bytes": _bytes(visible_stdout),
+        "stderr_bytes": _bytes(visible_stderr),
+        "assertion_context_bytes": _bytes(visible_context),
+        "stdout_omitted_bytes": _bytes(visible_stdout),
+        "stderr_omitted_bytes": _bytes(visible_stderr),
         "assertion_context_preview": context_preview,
         "assertion_context_omitted_bytes": context_omitted,
-        "runner_tail": _runner_tail(stdout_text, stderr_text),
+        "runner_tail": _runner_tail(visible_stdout, visible_stderr),
     })
     if environment_error:
         private["environment_error"] = environment_error
