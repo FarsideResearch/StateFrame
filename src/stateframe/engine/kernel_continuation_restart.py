@@ -1528,6 +1528,7 @@ def checkpoint(runtime, messages, worker_state):
     resume_work = resume_work_checkpoint_section(runtime)
     if resume_work is not None:
         state[RESUME_WORK_CHECKPOINT_KEY] = resume_work
+    # The checkpoint row is always fsynced by emit(), which also makes every earlier row durable.
     checkpoint_event = runtime.journal.emit(
         "continuation_worker_checkpoint", checkpoint=state, checkpoint_hash=digest(state))
     _register_checkpoint(runtime, checkpoint_event)

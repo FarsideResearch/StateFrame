@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.5.16 (2026-11-12)
+
+- The continuation journal now encodes each record once for its hash and its written line, and defers the fsync of `turn_timing` and `action_envelope_metrics` rows to the next durable row, `sync()` or close, only until the first resume checkpoint exists. Every receipt, mutation, seal, checkpoint, request and dispatch row is still fsynced before `emit` returns; `SF_JOURNAL_GROUP_COMMIT=0` restores per-row fsync.
+
 ## 0.5.15 (2026-11-12)
 
 - Continuation consumers receive durable journal records through bounded in-memory cursor fanout; restart and cursor gaps retain verified disk replay, with journal bytes and checkpoint content unchanged.
