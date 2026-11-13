@@ -56,6 +56,9 @@ WORKER_FIELDS = (
 )
 _HOST_PROGRESS_WORKER_FIELD = "host_progress_facts"
 _HOST_PROGRESS_ADVISORY_FIELD = "zero_progress_advised_checkpoints"
+_HOST_PROGRESS_READS_FIELD = "zero_progress_read_counts"
+_MAX_PERSISTED_READ_PATHS = 40
+_MAX_PERSISTED_PATH_CHARS = 120
 
 
 def _valid_host_progress_facts(facts: object) -> bool:
@@ -76,12 +79,29 @@ def _valid_host_progress_facts(facts: object) -> bool:
 
 
 def _valid_advised_checkpoints(value: object) -> bool:
+    """At most one delivered no-progress nudge, recorded as the step it fired at."""
     return (
         isinstance(value, (tuple, list))
-        and len(value) <= 3
-        and all(type(step) is int and step in {50, 100, 150} for step in value)
-        and len(set(value)) == len(value)
+        and len(value) <= 1
+        and all(type(step) is int and step > 0 for step in value)
     )
+
+
+def _valid_read_counts(value: object) -> bool:
+    """Bounded {path: read count} host facts behind the no-progress nudge."""
+    return (
+        isinstance(value, Mapping)
+        and len(value) <= _MAX_PERSISTED_READ_PATHS
+        and all(isinstance(path, str) and 0 < len(path) <= _MAX_PERSISTED_PATH_CHARS
+                and type(count) is int and count > 0 for path, count in value.items())
+    )
+
+
+def bounded_read_counts(counts: Mapping[str, int]) -> dict[str, int]:
+    """Top reads by count for the checkpoint; the nudge only ever shows the top three."""
+    ranked = sorted(counts.items(), key=lambda item: (-item[1], item[0]))
+    return {path[:_MAX_PERSISTED_PATH_CHARS]: count
+            for path, count in ranked[:_MAX_PERSISTED_READ_PATHS] if path}
 
 
 def _valid_worker_state_fields(value: object) -> bool:
@@ -100,11 +120,8 @@ def _valid_worker_state_fields(value: object) -> bool:
     extra = set(value) - base
     if not extra:
         return set(value) == base
-    allowed_extra = {
-        frozenset({_HOST_PROGRESS_WORKER_FIELD}),
-        frozenset({_HOST_PROGRESS_WORKER_FIELD, _HOST_PROGRESS_ADVISORY_FIELD}),
-    }
-    if frozenset(extra) not in allowed_extra or set(value) != base | extra:
+    optional = {_HOST_PROGRESS_ADVISORY_FIELD, _HOST_PROGRESS_READS_FIELD}
+    if _HOST_PROGRESS_WORKER_FIELD not in extra or not extra <= optional | {_HOST_PROGRESS_WORKER_FIELD} or not base <= set(value):
         return False
     from kernel_progress_facts import host_truth_progress_enabled
     if not host_truth_progress_enabled():
@@ -113,6 +130,8 @@ def _valid_worker_state_fields(value: object) -> bool:
         _valid_host_progress_facts(value[_HOST_PROGRESS_WORKER_FIELD])
         and (_HOST_PROGRESS_ADVISORY_FIELD not in extra
              or _valid_advised_checkpoints(value[_HOST_PROGRESS_ADVISORY_FIELD]))
+        and (_HOST_PROGRESS_READS_FIELD not in extra
+             or _valid_read_counts(value[_HOST_PROGRESS_READS_FIELD]))
     )
 
 

@@ -540,6 +540,7 @@ OPT_IN_SWITCHES = {
     "STATEFRAME_STABLE_WIRE": ("on", "off"),  # append-only source windows and a split stable frame
     "STATEFRAME_STABLE_WIRE_HEADROOM": (),  # retained, not-current source window tokens per epoch
     "STATEFRAME_STABLE_WIRE_RETAIN_PREFIX": ("on", "off"),  # relayouts may keep not-current windows in the prefix
+    "STATEFRAME_ZERO_PROGRESS_NUDGE_STEP": (),  # positive int step for the one no-edit/no-check nudge; default 35
     "STATEFRAME_QUEUE_WAIT_MAX_S": (),  # finite positive seconds; a profile may set it too
     "STATEFRAME_SEND_STALL_S": (),  # 10-600 seconds without request-body progress
     "STATEFRAME_TRANSPORT_MAX_ATTEMPTS": ("1", "2", "3", "4", "5"),
@@ -568,6 +569,18 @@ def resolve_opt_in_switches(engine_dir: Path = ENGINE_DIR) -> dict[str, str]:
         if name == "STATEFRAME_ENV_SEED_MAX_GB":
             # The host seed builder reports an invalid ambient value and uses the default.
             chosen[name] = raw if re.fullmatch(r"(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)", raw) else "10"
+            continue
+        if name == "STATEFRAME_ZERO_PROGRESS_NUDGE_STEP":
+            # Same whole-number rule as the engine reader; a bad value is refused here, never silently ignored.
+            try:
+                step = int(raw.replace(",", "").replace("_", ""))
+            except ValueError:
+                step = 0
+            if step <= 0:
+                raise RunError(f"{name}={raw!r} is not a positive whole number of turns; set it to e.g. 35 or unset it")
+            if name not in engine_switches(engine_dir):
+                raise RunError(f"{name} is set, but this engine does not support it; unset it to run")
+            chosen[name] = str(step)
             continue
         if name == "STATEFRAME_STABLE_WIRE_HEADROOM":
             value = _positive_int(name, raw)
