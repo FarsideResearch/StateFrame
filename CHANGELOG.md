@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Added an opt-in, read-only cross-file index of a repo (definitions with signatures, imports, references, scope-aware name resolution and dangling-reference detection), off by default behind `STATEFRAME_CROSSFILE_INDEX` and not yet used by any engine step.
+
 ## 0.6.22 (2026-11-13)
 
 - Fixed: a run no longer stops with `final source delivery lost after owner admission` when request fitting defers a required source file after the request's source receipt was already recorded. The post-admission check now judges each page on its own evidence (a page complete on the wire counts as delivered even when the receipt as a whole failed, and a page the wire's deferral notice declares deferred is not lost even when a second, later deferral keeps the receipt from verifying it) and journals a late or unqualifiable deferral as a typed `harden8_advisory_failure` naming the deferred paths and the reason. It still stops when a previously delivered page is neither on the wire nor named by a deferral notice that is actually on the wire, when admission dropped the `read` tool while pages are deferred, or when the final receipt failed for any reason other than the deferral itself (those failures are not reconciled and keep the fail-closed stop).

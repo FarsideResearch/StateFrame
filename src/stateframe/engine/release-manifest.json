@@ -181,6 +181,8 @@
   "kernel_countdown_slot.py": "caf042ea3e6bb13da00b6e6963013483e2c7f15933afdd8da2b29a9522597c62",
   "kernel_counterexample_visibility.py": "507cee724394328e3388b8eea154f50b633d897af11cfd9acb1e066fc5f2de24",
   "kernel_coverage_reminders.py": "d1a89b0934ebdad0bdc097cc79fbcf0ab0a66028e4157331478e1c6aacefbd13",
+  "kernel_crossfile_extract.py": "3cc11d83f9c76c0e51d2b601e6407d115515a24d74545b526168ea3ac8d87bf6",
+  "kernel_crossfile_index.py": "56e01ba0bf6745bebbd32a969cd8de9873bad43acd0f29c22e95ca223ea234bc",
   "kernel_crosssession.py": "0b91310c1d862e02d4a74f53fd09eade0f64e9d48b3a47cac8c4917e941c0ddd",
   "kernel_custom_tools.py": "1ea3cdb78f5f94b974ddcd3371df1a89329c68027f291d954898bf1e8766b3d0",
   "kernel_cutoff_rule.py": "e9096f9a12f09cc35a3fe97f7ed614125d86222abd875143719beefde8f680da",
