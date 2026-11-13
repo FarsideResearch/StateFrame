@@ -2533,6 +2533,22 @@ def summarize(run: Path, started: float) -> dict[str, object]:
         "result", "reason_code", "error", "error_type", "error_message", "failure_origin", "behaviour",
         "done_facts", "submission", "labels", "claims")
         if key in result}
+    # Replay refusals keep their actionable detail in the event, not the terminal receipt.
+    # Preserve it for the final CLI summary and --json, which suppresses live events.
+    log_path = run / "engine.log"
+    if (result.get("error") in ("ReplayUnfaithful", "CheckpointUnfaithful")
+            and log_path.is_file()):
+        with log_path.open(encoding="utf-8") as stream:
+            for line in stream:
+                if not line.startswith(LOG_PREFIX):
+                    continue
+                try:
+                    event = json.loads(line[len(LOG_PREFIX):])
+                except ValueError:
+                    continue
+                if (isinstance(event, dict) and event.get("kind") == "engine_error"
+                        and event.get("error") == result["error"] and event.get("detail")):
+                    summary["engine_error_reason"] = str(event["detail"])
     if isinstance(result.get("wrong_test_evidence"), dict):
         summary["wrong_test_evidence"] = result["wrong_test_evidence"]
     limitations = result.get("limitations")

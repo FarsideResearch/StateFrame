@@ -334,9 +334,13 @@ def install_wire_recorder(run: Path, chat_url: str, replayer: Replayer | None = 
             if wire_model != route.get("model"):
                 raise ValueError("routed send model differs from route authority")
         if replayer is not None and replayer.strict and replayer.diverged is not None:
-            raise CheckpointUnfaithful("an earlier rebuilt request differed; nothing more is sent")
+            raise CheckpointUnfaithful(
+                "This recording can't be replayed by this version. Start a fresh run. "
+                "an earlier rebuilt request differed; nothing more is sent")
         if replayer is not None and replayer.route_mismatch:
-            raise CheckpointUnfaithful("an earlier routed replay differed; nothing more is sent")
+            raise CheckpointUnfaithful(
+                "This recording can't be replayed by this version. Start a fresh run. "
+                "an earlier routed replay differed; nothing more is sent")
         counter["n"] += 1
         index = counter["n"]
         stem = wire_dir / f"{index:04d}"
@@ -368,14 +372,18 @@ def install_wire_recorder(run: Path, chat_url: str, replayer: Replayer | None = 
                 atomic_bytes(run / "resume-divergence.json", json.dumps(
                     {**replayer.diverged, "send": index, "checkpoint": replayer.strict}, indent=1).encode())
                 if routed_endpoints is not None and replayer.route_mismatch:
-                    raise CheckpointUnfaithful(f"send {index}: {replayer.diverged['reason']}")
+                    raise CheckpointUnfaithful(
+                        "This recording can't be replayed by this version. Start a fresh run. "
+                        f"send {index}: {replayer.diverged['reason']}")
                 if replayer.strict:
                     emit("checkpoint_unfaithful", send=index, **{k: v for k, v in replayer.diverged.items()
                                                                  if k != "first_difference"})
                     atomic_bytes(run / "checkpoint-refused.json", json.dumps(
                         {"error": "CheckpointUnfaithful", "send": index,
                          "reason": replayer.diverged["reason"]}, indent=1).encode())
-                    raise CheckpointUnfaithful(f"send {index}: {replayer.diverged['reason']}")
+                    raise CheckpointUnfaithful(
+                        "This recording can't be replayed by this version. Start a fresh run. "
+                        f"send {index}: {replayer.diverged['reason']}")
                 if replayer.pending_mismatch:
                     # No answer exists for this send. Retire replay authority before
                     # handing the rebuilt request to the live transport.
@@ -391,7 +399,9 @@ def install_wire_recorder(run: Path, chat_url: str, replayer: Replayer | None = 
                     end_replay()
                     _start_resumed_deadline()
                 else:
-                    raise ReplayUnfaithful(f"send {index}: {replayer.diverged['reason']}")
+                    raise ReplayUnfaithful(
+                        "This recording can't be replayed by this version. Start a fresh run. "
+                        f"send {index}: {replayer.diverged['reason']}")
             elif replayed is not None and not replayer.active:
                 emit("replay_done", send=index, replayed=replayer.cursor)
                 # The next request is the first one built live: it shows the resumed time left.

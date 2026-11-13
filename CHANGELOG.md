@@ -12,6 +12,8 @@
 
 ## 0.6.1 (2026-11-13)
 
+- Replay and checkpoint refusals now explain that this version cannot replay the recording and tell you to start a fresh run, including in the final CLI summary and JSON output.
+
 - Keep recorded stable-wire trims intact after checkpoint restore so repeated resumes rebuild the same request even when token estimates change.
 - Rebuild stable-wire initial allocations from recorded candidate selections so replay preserves request bytes when tokenizer counts change.
 - Preserve faithfully rebuilt stable-wire requests during replay qualification even when the replay tokenizer reports a larger request.
