@@ -1,5 +1,7 @@
 # Changelog
 
+## Unreleased
+
 ## 0.5.18 (2026-11-12)
 
 - The environment seed digest is cached on disk under the StateFrame cache directory, keyed by the source root, entry count, total size and newest mtime/ctime, so unchanged environments skip the full content hash on every run; any file change recomputes it and the post-copy integrity check still hashes in full.
