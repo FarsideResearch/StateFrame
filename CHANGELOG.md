@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- The ideal-path final verification answer now asks for its evidence before the `outcome` choice (outcome is the last property and last required key).
+
 ## 0.6.12 (2026-11-13)
 
 - Fixed: during a tokenizer outage, a cache-friendly request that was exactly counted before its final layout is no longer dropped to the plain request because the whole body is re-estimated from bytes. Only the added or replaced parts are estimated, at the most conservative byte ratio plus a fixed margin per splice; any other change still falls back to the plain request.
