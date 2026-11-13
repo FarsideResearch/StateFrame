@@ -327,6 +327,11 @@ def _source_failures(messages: object, context: Mapping[str, object],
             for unit in plan.get("units", ()) if isinstance(unit, Mapping)
             and str(unit.get("path", "")).strip()
         }
+        # Zero-byte targets have no unit; their revision proves them.
+        from kernel_request_evidence_closure import zero_byte_source_path
+        planned_paths.update(
+            path for path in lean_required_paths if zero_byte_source_path(plan, path)
+        )
         failures.extend(
             f"source_plan_missing_required_path:{path}"
             for path in lean_required_paths if path not in planned_paths
