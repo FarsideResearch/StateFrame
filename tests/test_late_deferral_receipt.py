@@ -354,3 +354,108 @@ def test_truncated_kept_page_on_real_wire_raises(tmp_path):
     assert TARGET in str(info.value)
     assert capture.request_source_delivery_regression["lost_paths"] == [TARGET]
     assert _harden8_kinds(events) == []
+
+
+def _partial_target_plus_unselected_deferral_wire(tmp_path, *, tools, notice_paths=None):
+    """Real wire: the target is deferred WITH selected units (the exact read route carries
+    them) and a second declared deferral is never selected."""
+    root, runtime, events = _repo(tmp_path, ticket=f"fix handler_7 in {SIBLING}")
+    runtime.target = root / SIBLING
+    runtime._request_deferred_source_paths = [TARGET]
+    messages = [{"role": "user", "content": f"please fix handler_7 in {SIBLING}"}]
+    result = window.bound_runtime_sources(
+        messages, runtime, max_request_bytes=2_200, tools=tools)
+    assert isinstance(result, dict), result
+    plan = runtime._request_source_closure
+    assert sorted(plan["deferred_paths"]) == sorted([TARGET, SIBLING]), plan["deferred_paths"]
+    assert SIBLING in [unit["path"] for unit in plan["units"]], plan["units"]
+    assert TARGET not in [unit["path"] for unit in plan["units"]], plan["units"]
+    if notice_paths is None:
+        notice_paths = plan["deferred_paths"]
+    if notice_paths:
+        window.upsert_deferred_source_notice(messages, notice_paths)
+    return root, runtime, events, messages
+
+
+def test_prior_verified_deferral_plus_late_second_deferral_is_advisory_on_real_wire(tmp_path):
+    # R3 body 1: the previous receipt verified the target as DEFERRED with a read route.
+    # Window fitting then deferred a second page that is never selected. The notice on
+    # the wire names both pages and `read` is admitted, yet any proof failure empties
+    # receipt["deferred_paths"], so the target used to be judged lost and the run stopped.
+    # The declared deferral set is published regardless of proof status; folded in when
+    # the notice is on the wire, the target is neither lost nor late: advisory only.
+    tools = [READ_TOOL, EDIT_TOOL]
+    root, runtime, events, messages = _partial_target_plus_unselected_deferral_wire(
+        tmp_path, tools=tools)
+    final = _verify(root, runtime, messages, tools)
+    assert final["deferred_notice_verified"] is True
+    assert final["read_tool_available"] is True
+    assert not window.source_delivery_satisfied(final)
+    assert [failure["kind"] for failure in final["proof_failures"]] == [
+        "deferred_source_path_unselected"], final["proof_failures"]
+    assert final["proof_failures"][0]["paths"] == [TARGET]
+    assert final["deferred_paths"] == []
+    assert sorted(final["declared_deferred_paths"]) == sorted([TARGET, SIBLING])
+    assert final["paths"][SIBLING]["status"] == "PARTIAL"
+    assert final["paths"][SIBLING]["selected_units"] == 1
+
+    previous = _late_deferral_receipt(deferred=(SIBLING,), units=1)
+    capture = SimpleNamespace()
+    verdict = window.reconcile_owner_source_delivery(
+        runtime, capture, previous, final, tools=tools)
+    assert verdict["genuine_loss"] is False
+    assert verdict["reason"] == "deferral_unqualifiable"
+    assert verdict["lost_paths"] == []
+    assert verdict["deferred_paths"] == sorted([TARGET, SIBLING])
+    assert verdict["unqualified_deferred_paths"] == [TARGET]
+    assert verdict["late_deferred_paths"] == [TARGET]
+    assert verdict["deferred_notice_on_wire"] is True
+    assert _harden8_kinds(events) == ["harden8_advisory_failure"]
+
+
+def test_prior_verified_deferral_missing_from_notice_is_a_loss_on_real_wire(tmp_path):
+    # Control for the above: the notice on the wire names only the new page. The target
+    # the model was promised a read route for is neither delivered nor declared deferred
+    # anywhere on this wire: raise, naming it.
+    tools = [READ_TOOL, EDIT_TOOL]
+    root, runtime, events, messages = _partial_target_plus_unselected_deferral_wire(
+        tmp_path, tools=tools, notice_paths=[TARGET])
+    final = _verify(root, runtime, messages, tools)
+    kinds = {failure["kind"]: failure for failure in final["proof_failures"]}
+    assert set(kinds) == {"deferred_source_notice_unverified", "deferred_source_path_unselected"}
+    assert kinds["deferred_source_notice_unverified"]["notice_present"] is False
+    assert sorted(final["declared_deferred_paths"]) == sorted([TARGET, SIBLING])
+
+    previous = _late_deferral_receipt(deferred=(SIBLING,), units=1)
+    capture = SimpleNamespace()
+    with pytest.raises(RuntimeError, match="pages absent from the admitted request") as info:
+        window.reconcile_owner_source_delivery(
+            runtime, capture, previous, final, tools=tools)
+    assert SIBLING in str(info.value)
+    assert capture.request_source_delivery_regression["lost_paths"] == [SIBLING]
+    assert _harden8_kinds(events) == []
+
+
+def test_undeclared_deferral_message_names_the_pages():
+    # R3 nit 2: a never-delivered page deferred with no notice on the wire has no lost
+    # page and no unexplained kind; the catch-all must name the undeclared deferral
+    # instead of "status=...".
+    runtime, events = _runtime()
+    capture = SimpleNamespace()
+    final = dict(
+        _complete_receipt(), status="PARTIAL", proof_status="FAILED",
+        deferred_notice_verified=False,
+        proof_failures=[
+            {"kind": "deferred_source_notice_unverified", "paths": [TARGET],
+             "notice_present": False, "read_tool_available": True},
+            {"kind": "deferred_source_path_unselected", "paths": [TARGET]},
+        ])
+    with pytest.raises(RuntimeError, match="deferred without a notice on the wire") as info:
+        window.reconcile_owner_source_delivery(
+            runtime, capture, _complete_receipt(), final, tools=[READ_TOOL])
+    assert TARGET in str(info.value)
+    assert "status=" not in str(info.value)
+    verdict = capture.request_source_delivery_regression
+    assert verdict["reason"] == "final_receipt_unsatisfied"
+    assert verdict["undeclared_deferred_paths"] == [TARGET]
+    assert events == []

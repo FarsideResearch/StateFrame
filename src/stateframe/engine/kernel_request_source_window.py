@@ -3734,6 +3734,11 @@ def verify_final_source_delivery(
         notice_verified=deferred_notice_verified,
     )
     receipt["deferred_paths"] = list(verified_deferred_paths)
+    # The plan's declared deferral set, independent of proof status: any proof
+    # failure empties ``deferred_paths`` above, yet a page the notice declares
+    # deferred on this wire is not lost. The post-owner reconciliation folds
+    # this set in only when the notice is actually on the wire.
+    receipt["declared_deferred_paths"] = list(deferred_paths)
     receipt["deferred_notice_verified"] = deferred_notice_verified
     receipt["read_tool_available"] = wire_read_tool_available
     if isinstance(plan, dict):
@@ -5569,6 +5574,12 @@ def classify_final_delivery_regression(
         else:
             undeclared_deferred |= named
     final_deferred |= unqualified_deferred
+    # Any proof failure empties the verified ``deferred_paths``; the plan's
+    # declared set survives on the receipt and, with the notice on the wire,
+    # every page in it is declared deferred to the model rather than lost.
+    if notice_on_wire:
+        final_deferred |= set(_normalized_deferred_paths(tuple(
+            final.get("declared_deferred_paths", ()) or ())))
     lost_paths = sorted(
         path for path in previous_delivered
         if path not in final_delivered and path not in final_deferred
@@ -5655,10 +5666,15 @@ def reconcile_owner_source_delivery(
         elif verdict["read_tool_dropped"]:
             detail = "read tool dropped by admission while pages are deferred: " + ", ".join(
                 sorted(set(verdict["deferred_paths"]) | set(verdict["undeclared_deferred_paths"])))
+        elif verdict["unexplained_failure_kinds"]:
+            detail = ("final receipt unsatisfied for a reason the reconciliation does not "
+                      "qualify: " + ", ".join(verdict["unexplained_failure_kinds"]))
+        elif verdict["undeclared_deferred_paths"]:
+            detail = ("final receipt unsatisfied; deferred without a notice on the wire: "
+                      + ", ".join(verdict["undeclared_deferred_paths"]))
         else:
             detail = ("final receipt unsatisfied for a reason the reconciliation does not "
-                      "qualify: " + (", ".join(verdict["unexplained_failure_kinds"]) or
-                                     f"status={verdict['final_status']}"))
+                      f"qualify: status={verdict['final_status']}")
         raise RuntimeError("final source delivery lost after owner admission (" + detail + ")")
     from kernel_harden8 import record_failure
     record_failure(
