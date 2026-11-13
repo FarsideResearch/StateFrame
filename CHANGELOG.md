@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Updated the isolated HTTP child import check to recognize its shared redirect and capacity helpers, verify both helpers in an installed wheel, and keep rejecting unavailable dependencies.
+
 ## 0.6.30 (2026-11-14)
 
 - Refusals, fallbacks and degrades now say why: budget and cap refusals with the measured value against the limit, evictions and omissions naming what was dropped, failed-open frame paths, tokenizer fallbacks, and seal or containment failures. Nothing on a healthy run prints at the default level.

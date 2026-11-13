@@ -17,25 +17,57 @@ from _timeouts import scaled
 
 
 ROOT = Path(__file__).resolve().parents[1]
-# Direct script targets of -I launchers in request_bytes, outer_checks.run,
-# kernel_exec_session, kernel_test_isolation, and kernel_exec_supervisor.
+# Direct script targets of -I launchers, plus the HTTP child's audited siblings.
+# Probe those siblings too: their startup imports must work in the installed wheel
+# without the checkout, script directory, or optional dependencies on sys.path.
 ISOLATED_SCRIPTS = (
     "stateframe/engine/kernel_bounded_http.py",
+    "stateframe/engine/kernel_capacity_retry.py",
+    "stateframe/engine/kernel_redirect_policy.py",
     "stateframe/outer_checks.py",
     "stateframe/engine/kernel_exec_supervisor.py",
     "stateframe/engine/sf_launch.py",
 )
 
+# The HTTP entry point adds its installed directory before these deferred imports.
+# Keep credential policy shared rather than duplicating it to satisfy this guard.
+HTTP_SIBLING_IMPORTS = frozenset({
+    "kernel_capacity_retry", "kernel_redirect_policy", ".kernel_redirect_policy",
+})
 
-def test_bounded_http_child_uses_only_standard_library_imports():
-    source = ROOT / "src/stateframe/engine/kernel_bounded_http.py"
+
+def _unsupported_http_imports(source: str) -> set[str]:
     imports = []
-    for node in ast.walk(ast.parse(source.read_text())):
+    for node in ast.walk(ast.parse(source)):
         if isinstance(node, ast.Import):
-            imports.extend(alias.name.split(".")[0] for alias in node.names)
-        elif isinstance(node, ast.ImportFrom) and node.module:
-            imports.append(node.module.split(".")[0])
-    assert set(imports) <= sys.stdlib_module_names | {"__future__"}
+            imports.extend(alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            imports.append("." * node.level + (node.module or ""))
+    return {
+        name for name in imports
+        if name not in HTTP_SIBLING_IMPORTS
+        and name.split(".")[0] not in sys.stdlib_module_names | {"__future__"}
+    }
+
+
+def test_bounded_http_child_uses_only_stdlib_or_audited_sibling_imports():
+    source = ROOT / "src/stateframe/engine/kernel_bounded_http.py"
+    assert not _unsupported_http_imports(source.read_text())
+
+
+@pytest.mark.parametrize("statement, unexpected", [
+    ("import requests", "requests"),
+    ("from requests import post", "requests"),
+    ("import kernel_unknown", "kernel_unknown"),
+    ("import kernel_capacity_retry.extra", "kernel_capacity_retry.extra"),
+    ("from ..kernel_redirect_policy import opener", "..kernel_redirect_policy"),
+    ("from .json import loads", ".json"),
+    ("from . import json", "."),
+])
+@pytest.mark.parametrize("deferred", [False, True])
+def test_http_import_guard_rejects_unavailable_imports(statement, unexpected, deferred):
+    source = f"def send():\n    {statement}\n" if deferred else statement
+    assert _unsupported_http_imports(source) == {unexpected}
 
 
 def _run(argv: list[str], *, cwd: Path, input_data: bytes | None = None) -> subprocess.CompletedProcess[bytes]:
