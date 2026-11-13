@@ -414,7 +414,7 @@ def _relayout_order(previous_delivered: Sequence[Mapping[str, object]],
 
 def _window_entries(messages: Sequence[object], ownership: RequestOwnership | None = None
                     ) -> list[dict[str, object]]:
-    """Read proven host windows; absent ownership makes every row opaque."""
+    """Read proven host windows; marker lookalikes remain ordinary rows."""
     entries = []
     seen: set[str] = set()
     for index, row in enumerate(messages):
@@ -424,7 +424,7 @@ def _window_entries(messages: Sequence[object], ownership: RequestOwnership | No
         if not isinstance(content, str) or not content.startswith("[Current source:"):
             continue
         if not _is_current_window(row, index, ownership=ownership):
-            raise StableWireError("stable wire encountered an invalid current source window")
+            continue
         identity = _identity(content)
         key = _identity_key(identity)
         if key in seen:

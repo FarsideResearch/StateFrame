@@ -150,7 +150,7 @@ def test_tiny_site_scripted_run_preserves_whole_stable_messages(tmp_path):
         record = json.loads(
             path.with_name(path.name.replace(".request.json", ".stable-wire.json")).read_bytes())
         assert record == send["stable_wire_reserves"]
-        assert set(record) == {"reserves", "trim_count", "epoch"}
+        assert set(record) == {"reserves", "trim_count", "epoch", "initial_selection"}
         assert record["trim_count"] == len(record["reserves"])
         assert record["epoch"] == _status_epoch(rows)
     host_fact_order_checked = False

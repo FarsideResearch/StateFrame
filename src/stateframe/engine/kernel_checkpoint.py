@@ -246,6 +246,12 @@ HOST_GLOBALS = frozenset(
     # recorded tail; the saved tape stops at this boundary and replay was off in the old process.
     ("kernel_tool_tape", "_active_tape"),
     ("kernel_tool_tape", "_replay_active"),
+    # These providers read the resumed child's recorded tail or pending request.
+    # Restoring old None values (or old provider closures) erases that authority.
+    ("kernel_cache_layout_candidate", "_REPLAY_LAYOUT_DECISION_PROVIDER"),
+    ("kernel_cache_layout_candidate", "_REPLAY_STABLE_WIRE_DECISION_PROVIDER"),
+    ("kernel_cache_layout_candidate", "_REPLAY_STABLE_WIRE_WINDOWS_PROVIDER"),
+    ("kernel_cache_layout_candidate", "_REPLAY_STABLE_WIRE_RESERVES_PROVIDER"),
 })
 # Derived or runtime-only instance attributes do not belong in restored task state.
 DROP_ATTRS = {

@@ -794,6 +794,52 @@ def finalize_frame_candidate(
     _layout_retry_pass: int = 0,
     _layout_reserve_floor: int = 0,
 ) -> dict[str, object]:
+    """Apply initial replay authority atomically; unknown IDs use the plain fit."""
+    from kernel_cache_layout_candidate import replay_stable_wire_decision, replay_stable_wire_reserves
+    from kernel_stable_wire import mode as stable_wire_mode
+
+    # A second allocation must not accidentally publish a prior candidate's record.
+    capture.__dict__.pop("_stable_wire_initial_selection", None)
+    capture.__dict__.pop("_stable_wire_initial_mismatch", None)
+    kwargs = dict(frame_counter=frame_counter, token_ceiling=token_ceiling,
+                  byte_ceiling=byte_ceiling, _layout_retry_pass=_layout_retry_pass,
+                  _layout_reserve_floor=_layout_reserve_floor)
+    replay = replay_stable_wire_decision()
+    record = replay_stable_wire_reserves() if replay == "applied" else None
+    initial = record.get("initial_selection") if record is not None else None
+    record_initial = (replay is None and stable_wire_mode() == "on"
+                      and os.environ.get("STATEFRAME_FINAL_CACHE_LAYOUT", "on").strip().lower() == "on")
+    if initial is None and not record_initial:
+        # Off and old-record paths do not even import the new authority module.
+        return _finalize_frame_candidate(runtime, capture, body, **kwargs, _initial_authority=False)
+    from kernel_stable_wire_initial import InitialSelectionMismatch
+
+    saved = vars(capture).copy()
+    try:
+        return _finalize_frame_candidate(
+            runtime, capture, body, **kwargs, _initial_selection_record=initial)
+    except InitialSelectionMismatch:
+        capture.__dict__.clear()
+        capture.__dict__.update(saved)
+        capture.__dict__.pop("_stable_wire_initial_selection", None)
+        capture._stable_wire_initial_mismatch = True
+        return _finalize_frame_candidate(
+            runtime, capture, body, **kwargs, _initial_authority=False)
+
+
+def _finalize_frame_candidate(
+    runtime: object,
+    capture: object,
+    body: Mapping[str, object],
+    *,
+    frame_counter: Callable[[Mapping[str, object]], int],
+    token_ceiling: int | None = None,
+    byte_ceiling: int | None = None,
+    _layout_retry_pass: int = 0,
+    _layout_reserve_floor: int = 0,
+    _initial_authority: bool = True,
+    _initial_selection_record: dict[str, object] | None = None,
+) -> dict[str, object]:
     """Fit a detached candidate; return a proposal without wire authorization."""
     from kernel_request_budget import (
         ENDPOINT_PROMPT_TOKEN_BUDGET,
@@ -817,6 +863,21 @@ def finalize_frame_candidate(
     layout_reallocation_enabled = _final_layout_reallocation_enabled()
     candidate = copy.deepcopy(body)
     meter = _request_token_meter(runtime, capture)
+    authority = None
+    if _initial_authority:
+        from kernel_stable_wire_initial import InitialSelection
+        authority = InitialSelection(body, capture, meter, _initial_selection_record)
+
+    def decision(kind, value, live):
+        return authority.observe(kind, value, live) if authority is not None else live()
+
+    def measured_tokens(value, *, wire_bytes=None):
+        return decision(1, value, lambda: final_request_tokens(
+            value, meter, capture, wire_bytes=wire_bytes))
+
+    def source_measurement(value, serialized_bytes):
+        return decision(3, value, lambda: _measure_source_candidate(meter, value, serialized_bytes))
+
     from kernel_context import FRAME_CEILING_TOKENS, token_estimate
     # The unconfigured 8K default is the historical local selection estimate,
     # not a provider prompt budget. Explicit frame ceilings opt into measured
@@ -831,11 +892,11 @@ def finalize_frame_candidate(
 
     def frame_tokens(value: Mapping[str, object], *, wire_bytes: int | None = None) -> int:
         return (fitted_request_tokens(value, wire_bytes=wire_bytes) if use_meter_for_frame
-                else frame_counter(value))
+                else decision(2, value, lambda: frame_counter(value)))
 
     def fitted_request_tokens(value: Mapping[str, object], *,
                               wire_bytes: int | None = None) -> int:
-        return final_request_tokens(value, meter, capture, wire_bytes=wire_bytes)[0]
+        return measured_tokens(value, wire_bytes=wire_bytes)[0]
 
     def verified_envelope(method: str) -> bool:
         # A caller-supplied frame counter cannot change the meter's wire proof.
@@ -899,16 +960,19 @@ def finalize_frame_candidate(
         token_limit = min(token_limit, capacity_retry_limits.max_prompt_tokens)
     token_ceiling = token_limit
     existing_counter = getattr(capture, "_frame_candidate_counter", None)
-    if isinstance(existing_counter, FrozenRequestCounter):
-        # A later body rewrite can trigger a second fit. Keep the first fit's
-        # method and ratio, even if tokenizer availability has since changed.
-        initial_count, initial_method = final_request_tokens(candidate, meter, capture)
-    else:
-        initial_count, initial_method = meter.measure(candidate)
-        if initial_method == "calibrated_bytes":
-            initial_count = calibrated_estimate(candidate, meter)
-        elif initial_method == "tokenize":
-            _remember_exact_pair(candidate, meter, initial_count)
+
+    def initial_measurement():
+        if isinstance(existing_counter, FrozenRequestCounter):
+            return final_request_tokens(candidate, meter, capture)
+        count, method = meter.measure(candidate)
+        if method == "calibrated_bytes":
+            count = calibrated_estimate(candidate, meter)
+        elif method == "tokenize":
+            _remember_exact_pair(candidate, meter, count)
+        return count, method
+
+    initial_count, initial_method = decision(0, candidate, initial_measurement)
+    if not isinstance(existing_counter, FrozenRequestCounter):
         capture._frame_candidate_counter = FrozenRequestCounter.capture(
             candidate, meter, initial_count, initial_method, str(capture.request_id))
 
@@ -1194,11 +1258,11 @@ def finalize_frame_candidate(
             prepared_source_candidates[id(trial)] = (trial, None, None)
             return False  # Let the normal callback keep its established failure path.
         serialized_bytes = _wire_bytes(trial)
-        nonfit, measurement = _source_candidate_nonfit(
-            meter, trial, serialized_bytes, request_byte_limit,
-            hard_max_request_bytes=HARD_MAX_REQUEST_BYTES,
-            clip_to_hard_limit=(getattr(capture, "_release_prefix_boundary", None) is not None),
-        )
+        measurement = source_measurement(trial, serialized_bytes)
+        limit = request_byte_limit(measurement[1])
+        if getattr(capture, "_release_prefix_boundary", None) is not None:
+            limit = min(limit, HARD_MAX_REQUEST_BYTES)
+        nonfit = serialized_bytes > limit
         if nonfit:
             return True
         prepared_source_candidates[id(trial)] = (trial, serialized_bytes, measurement)
@@ -1218,7 +1282,7 @@ def finalize_frame_candidate(
             measured = None
         _count, trial_method = (
             measured if measured is not None
-            else _measure_source_candidate(meter, trial, serialized_bytes)
+            else source_measurement(trial, serialized_bytes)
         )
         byte_limit_for_windows = source_trial_byte_limit(trial_method)
         return (
@@ -1327,9 +1391,7 @@ def finalize_frame_candidate(
             if not source_delivery_satisfied(receipt):
                 raise source_refusal(plan, receipt, sources)
         request_bytes = len(candidate_wire)
-        tokens, method = final_request_tokens(
-            candidate, meter, capture, wire_bytes=request_bytes,
-        )
+        tokens, method = measured_tokens(candidate, wire_bytes=request_bytes)
         byte_limit = request_byte_limit(method)
         frame_token_count = frame_tokens(candidate, wire_bytes=request_bytes)
         from kernel_stateframe_capacity import (
@@ -1450,7 +1512,7 @@ def finalize_frame_candidate(
             if (method == "tokenize"
                     and request_bytes <= byte_limit
                     and frame_token_count <= runtime.frame_ceiling):
-                exact_tokens, exact_method = meter.measure(candidate)
+                exact_tokens, exact_method = decision(3, candidate, lambda: meter.measure(candidate))
                 if (exact_method == "tokenize"
                         and exact_tokens <= token_limit
                         and within_protected_capacity(
@@ -1548,9 +1610,7 @@ def finalize_frame_candidate(
             byte_limit = trim_optional_candidate()
         else:
             raise source_refusal(plan, receipt, sources)
-        tokens, method = final_request_tokens(
-            candidate, meter, capture, wire_bytes=len(candidate_wire),
-        )
+        tokens, method = measured_tokens(candidate, wire_bytes=len(candidate_wire))
         byte_limit = request_byte_limit(method)
     # This per-finalize source snapshot is shared by the plan and later readers;
     # those consumers inspect its path→text entries without mutating them.
@@ -1567,9 +1627,7 @@ def finalize_frame_candidate(
         if not source_delivery_satisfied(receipt):
             raise source_refusal(plan, receipt, sources)
         request_bytes = len(candidate_wire)
-        tokens, method = final_request_tokens(
-            candidate, meter, capture, wire_bytes=request_bytes,
-        )
+        tokens, method = measured_tokens(candidate, wire_bytes=request_bytes)
         byte_limit = request_byte_limit(method)
     else:
         request_bytes = len(candidate_wire)
@@ -1599,6 +1657,11 @@ def finalize_frame_candidate(
         "byte_ceiling": byte_limit, "token_ceiling": token_ceiling,
         "measurement_identity": method,
     }
+    rejection_bound = (source_measurement(candidate, request_bytes)[0]
+                       if method == "calibrated_bytes" else None)
+    if authority is not None:
+        capture._stable_wire_initial_selection = authority.finish(candidate)
+        authority = None  # Final-layout trims have their own recorded authority.
     layout_renderer_inputs = capture._frame_candidate_inputs
     # The final renderer can request a bounded full allocation retry before
     # falling back to this candidate's optional-source trim callback.
@@ -1796,10 +1859,7 @@ def finalize_frame_candidate(
         trim_for_final_layout.replays_selections = selection_enabled
         capture._frame_candidate_inputs["_final_layout_trim"] = trim_for_final_layout
     capture._frame_candidate_fallback_fit = method == "calibrated_bytes"
-    capture._frame_candidate_rejection_bound = (
-        _measure_source_candidate(meter, candidate, request_bytes)[0]
-        if method == "calibrated_bytes" else None
-    )
+    capture._frame_candidate_rejection_bound = rejection_bound
     capture._request_source_closure_override = _copy_source_plan_snapshot(plan)
     capture.request_source_final_delivery = receipt
     capture.request_budget_exceeded = False
