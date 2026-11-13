@@ -399,7 +399,7 @@ def test_mutation_owner_envelope_never_widens(mutation_root):
     sys.platform != "linux",
     reason="Linux PID namespace/cgroups contain fork bombs",
 )
-def test_mutation_mike_fork_bomb(mutation_root):
+def test_mutation_fork_bomb(mutation_root):
     import kernel_mutate_build as build
     import kernel_mutate_exec as execution
     import kernel_mutate_wire as wire

@@ -1178,9 +1178,9 @@ def test_metadata_rerender_of_delivered_window_starts_fresh_epoch(monkeypatch):
 
 
 def test_changed_source_lines_under_same_key_relayout_instead_of_raising(monkeypatch):
-    """Body 8: a delivered window whose source lines re-rendered under the same
-    path/revision/ranges used to raise StableWireError and end the run (it crashed
-    crew-02's 0.5.0 controls). It is renderer drift, not a file edit, so it now gets
+    """A delivered window whose source lines re-rendered under the same
+    path/revision/ranges used to raise StableWireError and end the run.
+    It is renderer drift, not a file edit, so it now gets
     the same answer as metadata drift: a rerender relayout in a fresh epoch that
     sends the current bytes and keeps only the prefix ahead of the changed row."""
     first = _window(path="pkg/a.py", revision=_revision("1"), text="value = 1\n")
