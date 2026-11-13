@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.5.15 (2026-11-12)
 
 - Continuation consumers receive durable journal records through bounded in-memory cursor fanout; restart and cursor gaps retain verified disk replay, with journal bytes and checkpoint content unchanged.
 
