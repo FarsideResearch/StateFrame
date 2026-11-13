@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Fixed: with `STATEFRAME_FINAL_CACHE_LAYOUT=on`, a tool result or assistant message that happened to contain the text `[CONTINUATION LIMITS |` or `[StateFrame authority]`, or a user message before the tool exchange that started with `[StateFrame]`, could end the run with "final cache authority is not unique or physically final" or "requires the canonical frame input". Both final-layout entry points now find the frame and the authority row by where the host placed them (the row before the tool exchange and the final row), and never read text inside assistant, tool or earlier user messages as a host marker. A host-owned frame or authority row that is genuinely malformed still fails as before.
+
 ## 0.6.34 (2026-11-14)
 
 - Fixed: when a model response batches several whole-file `edit` calls to different files, the second and later calls are no longer refused with `prefix result differs from exact declared replacement`. The batch proof now replays an `edit` under whole-file authority as the complete-file replacement the executor actually wrote, including files with several top-level definitions; definition-level authority keeps the single-definition replay. Host journal metadata preserves the mode through capacity retries, and empty or whitespace-only replacements follow the executor's acceptance rules.
