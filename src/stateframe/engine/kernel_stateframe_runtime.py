@@ -56,9 +56,14 @@ PUBLIC_TEST_VERDICT_FACT_ENV = "STATEFRAME_PUBLIC_TEST_VERDICT_FACT"
 
 
 def _model_facing_check_evidence(runtime: object) -> dict[str, object]:
-    """Build check evidence, excluding host audit fields only when present."""
-    test_receipts = getattr(runtime, "test_receipts", [])
-    host_checks = getattr(runtime, "host_check_receipts", ())
+    """Build check evidence, excluding host audit fields only when present.
+
+    Host rows are ``CheckReceipt`` dataclasses; they enter here as their journaled
+    ``to_dict()`` form (via ``gate_evidence_identity``) so the dependency identity digest
+    never sees a non-JSON object and the audit-field exclusion applies to them too.
+    JSON-native rows pass through byte-identical."""
+    test_receipts = gate_evidence_identity(list(getattr(runtime, "test_receipts", [])))
+    host_checks = gate_evidence_identity(tuple(getattr(runtime, "host_check_receipts", ())))
     from kernel_wire_identity import (
         WIRE_AUDIT_ONLY_FIELDS, WIRE_ENV_IDENTITY_FIELDS, wire_identity_field_value,
     )
@@ -115,7 +120,7 @@ def _model_facing_check_evidence(runtime: object) -> dict[str, object]:
     else:
         public_evidence = tuple(test_receipts + list(host_checks))
     return {
-        "dependency_identity": digest(identity_content),
+        "dependency_identity": digest(gate_evidence_identity(identity_content)),
         "public_evidence": public_evidence,
     }
 
@@ -448,22 +453,40 @@ def _cache_prefill_economics_mode() -> str:
 
 
 def gate_evidence_identity(value: object) -> object:
-    """Stable, JSON-serializable identity for pass-gate evidence.
+    """Typed, deterministic, JSON-native identity for pass-gate / check evidence.
 
-    Dataclasses (e.g. ``ShipTreeSmokeResult``) become their field mapping, mappings and
-    sequences recurse, JSON primitives pass through, anything else becomes ``repr`` so the
-    gate vector digest never raises on a host-owned object (10-06 prior run: a TypeError here
-    made ``done`` uncertifiable while every public check was green)."""
+    Executor receipt rows (``CheckReceipt`` and any dataclass with ``to_dict``) become their
+    journaled ``to_dict()`` form, so the gate digest agrees with the journal; other
+    dataclasses (e.g. ``ShipTreeSmokeResult``) become their field mapping; mappings and
+    sequences recurse; sets are ordered by their canonical bytes; JSON primitives pass
+    through unchanged, so rows that were already JSON-native keep their exact digest
+    (replay / resume parity).  Anything else raises ``TypeError`` naming the type: a digest
+    over ``repr``/``default=str`` is neither stable nor meaningful.
+
+    0.5.9 P0: ``host_check_receipts`` held ``CheckReceipt`` objects and the evidence digest
+    fed them straight to ``json.dumps``, so a run finishing on its first green host check
+    died with ``TypeError: Object of type CheckReceipt is not JSON serializable``.
+    (10-06 prior run: the same class for ``ShipTreeSmokeResult`` made ``done`` uncertifiable
+    while every public check was green.)"""
     if dataclasses.is_dataclass(value) and not isinstance(value, type):
+        to_dict = getattr(value, "to_dict", None)
+        if callable(to_dict):
+            return gate_evidence_identity(to_dict())
         return gate_evidence_identity(dataclasses.asdict(value))
     if isinstance(value, Mapping):
-        return {str(key): gate_evidence_identity(item) for key, item in value.items()}
-    if isinstance(value, (list, tuple, set, frozenset)):
-        items = [gate_evidence_identity(item) for item in value]
-        return sorted(items, key=repr) if isinstance(value, (set, frozenset)) else items
+        # JSON-native keys stay as they are so json.dumps sorts and renders them exactly as
+        # before normalization (int keys sort numerically, bools render true/false).
+        return {(key if key is None or isinstance(key, (str, int, float, bool)) else str(key)):
+                gate_evidence_identity(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [gate_evidence_identity(item) for item in value]
+    if isinstance(value, (set, frozenset)):
+        from kernel_measurement import canonical_bytes
+        return sorted((gate_evidence_identity(item) for item in value), key=canonical_bytes)
     if value is None or isinstance(value, (bool, int, float, str)):
         return value
-    return repr(value)
+    raise TypeError(
+        f"gate evidence must be JSON-native or a receipt dataclass, not {type(value).__name__}")
 
 
 def host_closure_task_id(owner) -> str:
@@ -17396,7 +17419,12 @@ class StateFrameRuntime:
             "full_schema": getattr(self, "full_schema_revision",
                                    getattr(self, "_full_schema_revision", "")),
         }
-        evidence = digest({
+        # Every axis goes through gate_evidence_identity: host_checks / host_repairs hold
+        # CheckReceipt dataclasses (0.5.9 P0: the raw digest died at the finish line on the
+        # first green host check) and smoke holds ShipTreeSmokeResult (10-06: TypeError on
+        # EVERY pass_gates_vector call -> both callers swallowed it -> every wire HOST_BLOCKED
+        # and done uncertifiable).  JSON-native axes keep their exact bytes.
+        evidence = digest(gate_evidence_identity({
             # These are explicit cache axes even when an older runtime has not
             # populated one yet.  A role/resolver/schema-only correction must
             # not reuse a prior gate vector.
@@ -17407,11 +17435,8 @@ class StateFrameRuntime:
             "catalog": getattr(self, "_catalog_receipt_fingerprint", None),
             "scope": getattr(self, "_scope_lock_last_result", None),
             "scope_authorizations": getattr(self, "scope_lock_authorizations", ()),
-            # 10-06 prior run: ShipTreeSmokeResult (a frozen dataclass) is not JSON-serializable,
-            # so digest() raised TypeError on EVERY pass_gates_vector call -> both callers swallowed
-            # it -> every wire HOST_BLOCKED and done uncertifiable.  Normalize to a stable identity.
-            "smoke": gate_evidence_identity(getattr(self, "_ship_tree_smoke_result",
-                                                     getattr(self, "ship_tree_smoke_result", None))),
+            "smoke": getattr(self, "_ship_tree_smoke_result",
+                             getattr(self, "ship_tree_smoke_result", None)),
             "authored": getattr(self, "_row_role_authored_receipts", ()),
             "available_actions": tuple(
                 str(item.get("function", {}).get("name", "")
@@ -17427,7 +17452,7 @@ class StateFrameRuntime:
                 if isinstance(item, Mapping)
             ),
             "witness_rows": getattr(self, "_clause_discriminator_receipts", ()),
-        })
+        }))
         available = tuple(
             str(
                 item.get("function", {}).get("name", "")
