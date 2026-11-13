@@ -357,12 +357,16 @@ def cross_file_seams(manifest: dict) -> list:
 # =====================================================================
 # 2. SEAM VIOLATIONS  (the gate)
 # =====================================================================
-def seam_violations(manifest: dict, files: dict) -> list:
+def seam_violations(manifest: dict, files: dict, *, index=None, baseline: dict | None = None) -> list:
     """Intrinsic cross-file inconsistencies. Deterministic, no model, no exec.
 
     Every violation is {kind, file, lineno, name, detail} and is stable across
     runs so a gate can diff BEFORE vs AFTER an edit and charge only what the
     edit actually introduced.
+
+    With STATEFRAME_SEAM_RECALL=on and a CrossFileIndex, chains_recall adds
+    recall (untyped locals, relative imports, info-level unverified_attribute;
+    `baseline` is the pre-edit manifest). Otherwise this is the original path.
     """
     out = []
     if manifest["parse_errors"]:
@@ -470,6 +474,14 @@ def seam_violations(manifest: dict, files: dict) -> list:
                         lineno=r["lineno"], name=r["name"],
                         detail=f"class {cls} exposes "
                                f"{sorted(attrs)[:8]}, not {r['name']!r}"))
+
+    if index is not None:
+        import chains_recall
+        if chains_recall.enabled():
+            seen = {(v["kind"], v["file"], v["lineno"], v["name"]) for v in out}
+            out += [v for v in chains_recall.recall_violations(
+                        manifest, files, index, _PY_BUILTIN_ATTRS, baseline)
+                    if (v["kind"], v["file"], v["lineno"], v["name"]) not in seen]
 
     out.sort(key=lambda v: (v["kind"], v["file"], v["lineno"], v["name"]))
     return out

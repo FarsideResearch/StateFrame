@@ -4,6 +4,7 @@
 
 - Added an opt-in, read-only cross-file index of a repo (definitions with signatures, imports, references, scope-aware name resolution and dangling-reference detection), off by default behind `STATEFRAME_CROSSFILE_INDEX` and not yet used by any engine step.
 - Added an opt-in existence check that reports imports and uses of repo symbols an edit left pointing at nothing, including importers of a renamed or deleted definition, off by default behind `STATEFRAME_CROSSFILE_EXISTENCE_CHECK` and not yet called by the engine.
+- Opt-in with `STATEFRAME_SEAM_RECALL=on`: cross-file seam checks can follow a local variable to its class through a shared cross-file index, so a renamed field is caught even when the consumer never names the class. Off by default; nothing calls it yet.
 
 ## 0.6.22 (2026-11-13)
 
