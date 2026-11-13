@@ -681,7 +681,7 @@ DOCUMENTED_REJECT: dict[str, str] = {
         submission_idempotency sufficiency_fired supervised_command_completed supervision_stop
         system_one_receipt system_one_triggered system_trim_applied target_bound task_id
         template_conformance_prepared template_conformance_submitted terminal_candidate_capture_failed
-        terminal_disposition_minted terminal_lower_refused terminal_outcome_recorded
+        terminal_disposition_minted terminal_fact_hook_error terminal_lower_refused terminal_outcome_recorded
         terminal_outcome_recording_failed terminal_reserve_exhausted terminal_result test_integrity_baseline
         test_integrity_baseline_restored test_integrity_checked test_integrity_dispute
         test_integrity_mutation_check test_integrity_obligation test_integrity_obligation_closed

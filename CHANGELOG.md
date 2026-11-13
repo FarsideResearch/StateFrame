@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- The host records `final_product_no_candidate` (and its `terminal_outcome_recorded` companion) through the open journal from a terminal-fact hook inside `finish()`, ahead of `attempt_terminated`, instead of after the writer closed; the `post_finish_facts.jsonl` sidecar and its stderr note remain only for a writer that is genuinely unusable, so vitals, audits and replay now see the fact.
+
 ## 0.6.14 (2026-11-13)
 
 - View ladder renderer (`engine/kernel_view_ladder/`): pure, deterministic `[read view]` carriers for the range/relevant, symbols/outline and stub rungs of a delivered read, with exact line slices of the delivered text, explicit `omitted:` records, `L<a>-<b>` anchors on every structure row, a one-line difflib change notice and the `READ_RESULT_DEGRADED sha= lines=` stub statement. Not wired into the request path yet; nothing on the wire changes.
