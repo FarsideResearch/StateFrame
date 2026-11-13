@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Fixed: strict-provider side-calls no longer fail admission with "side-call reasoning must be explicitly disabled". Their reasoning-off policy survives provider conversion and refitting without weakening the side-call validator.
+
 ## 0.6.1 (2026-11-13)
 
 - Keep recorded stable-wire trims intact after checkpoint restore so repeated resumes rebuild the same request even when token estimates change.

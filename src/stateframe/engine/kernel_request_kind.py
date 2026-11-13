@@ -165,8 +165,17 @@ def gate_required(capture) -> bool:
             or getattr(capture, "_qualified_request_gate", None) is not None)
 
 
-def guard_physical_send(capture, runtime, body, wire) -> None:
-    if not classify(capture, runtime, body,
+def guard_physical_send(capture, runtime, body, wire, *, dialect="llama.cpp") -> None:
+    admission_body = body
+    if dialect == "openai-strict" and getattr(capture, "request_kind", None) == "decide2":
+        from kernel_launch_identity_cost import assert_openai_chat_body
+        assert_openai_chat_body(body)
+        if body.get("reasoning_effort") != "none":
+            raise ValueError("side-call reasoning must be explicitly disabled")
+        # Validate the same registered contract against a canonical view only
+        # after proving its strict-wire equivalent. Never send this view.
+        admission_body = {**body, "chat_template_kwargs": {"enable_thinking": False}}
+    if not classify(capture, runtime, admission_body,
                     side_call_contract=getattr(capture, "_wire_truth_side_call_contract", None)):
         return
     validate_adapter(capture)
