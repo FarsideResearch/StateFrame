@@ -34,6 +34,7 @@ def _final_layout(messages):
         _partition_authority, _payload_has_authority_keys, _restore_authority,
     )
     from kernel_stateframe_message_layout import stateframe_message_index
+    from kernel_stable_wire_ownership import CanonicalMessages
 
     if not isinstance(messages, list) or len(messages) < 4:
         raise CacheLayoutError("final cache layout has no message array")
@@ -49,7 +50,10 @@ def _final_layout(messages):
     encoded = content[marker_index + len(marker):]
     try:
         overlay, consumed = json.JSONDecoder().raw_decode(encoded)
-        state_index = stateframe_message_index(messages)
+        if isinstance(messages, CanonicalMessages) and messages.frame_index is not None:
+            state_index = messages.frame_index
+        else:
+            state_index = stateframe_message_index(messages)
         base = json.loads(messages[state_index]["content"].split("\n", 1)[1])
     except (ValueError, TypeError, KeyError, IndexError) as error:
         raise CacheLayoutError("final cache layout has invalid typed data") from error
@@ -203,8 +207,7 @@ def _final_layout(messages):
     if any(row is None for row in prefix_rows):
         raise CacheLayoutError("final cache original prefix has a missing message")
     canonical = [row for row in prefix_rows if row is not None]
-    canonical_frame_index = next(index for index, row in enumerate(canonical)
-                                 if str(row.get("content", "")).startswith("[StateFrame]\n"))
+    canonical_frame_index = physical_to_canonical[state_index]
     canonical[canonical_frame_index]["content"] = "[StateFrame]\n" + json.dumps(
         restored, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     for offset, row in enumerate(messages[exchange_start:-1]):
@@ -238,7 +241,7 @@ def inspect_layout(messages):
     from kernel_stable_wire import canonicalize_stable_wire, is_stable_wire_projection
     if is_stable_wire_projection(messages):
         canonical, _physical_to_canonical = canonicalize_stable_wire(messages)
-        _canonical_state_index, payload, _order = _final_layout(canonical)
+        _canonical_state_index, payload, _canonical, _index_map = _final_layout(canonical)
         from kernel_stable_wire import _frame_index
         state_index = _frame_index(messages)
         return state_index, payload, frozenset(), state_index
@@ -329,16 +332,20 @@ def semantic_messages(messages):
     """Same message positions, current frame, opaque native exchange, no stale pages."""
     from kernel_stable_wire import canonicalize_stable_wire, is_stable_wire_projection
     if is_stable_wire_projection(messages):
+        from kernel_stable_wire_ownership import CanonicalMessages
         canonical, _physical_to_canonical = canonicalize_stable_wire(messages)
-        return semantic_messages(canonical)
+        return CanonicalMessages(semantic_messages(canonical))
     if not is_cache_layout(messages):
         return messages
     if messages[-1].get("name") == FINAL_LAYOUT_NAME:
         _state_index, payload, view, _index_map = _final_layout(messages)
-        canonical_index = next(index for index, row in enumerate(view)
-                               if str(row.get("content", "")).startswith("[StateFrame]\n"))
+        canonical_index = _index_map[_state_index]
         view[canonical_index]["content"] = "[StateFrame]\n" + json.dumps(
             payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        from kernel_stable_wire_ownership import CanonicalMessages
+        if isinstance(messages, CanonicalMessages):
+            view = CanonicalMessages(view)
+            view.frame_index = canonical_index
         return view
     state_index, payload, current_pages, end = inspect_layout(messages)
     view = copy.deepcopy(list(messages))

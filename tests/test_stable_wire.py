@@ -178,8 +178,10 @@ def _final_layout_body():
     ], "tools": []}
 
 
-def _invoke(monkeypatch, body, runtime, *, headroom=16_000, meter=None, inputs=None):
+def _invoke(monkeypatch, body, runtime, *, headroom=16_000, meter=None, inputs=None,
+            retain="on"):
     monkeypatch.setenv("STATEFRAME_STABLE_WIRE", "on")
+    monkeypatch.setenv("STATEFRAME_STABLE_WIRE_RETAIN_PREFIX", retain)
     monkeypatch.setenv("STATEFRAME_STABLE_WIRE_HEADROOM", str(headroom))
     monkeypatch.setattr("kernel_request_source_window.verify_final_source_delivery",
                         lambda _plan, _messages, **_kwargs: {"status": "COMPLETE"})
@@ -205,24 +207,25 @@ def _status_rows(rows):
     return _messages_with_prefix(rows, "[Source windows status]")
 
 
-def _serialized_stable_messages(messages):
-    volatile_index = next(
+def _serialized_stable_messages(messages, rows=None):
+    """Exact serialized bytes of the stable head: up to the volatile row, or the first ``rows``."""
+    stop = rows if rows is not None else next(
         index for index, row in enumerate(messages)
         if isinstance(row, dict) and row.get("name") == "stateframe_stable_wire_volatile"
     )
     return b"\n".join(
         json.dumps(row, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-        for row in messages[:volatile_index]
+        for row in messages[:stop]
     )
 
 
-def _assert_stable_message_byte_prefix(first, second):
-    first_bytes = _serialized_stable_messages(first["messages"])
-    second_bytes = _serialized_stable_messages(second["messages"])
+def _assert_stable_message_byte_prefix(first, second, rows=None):
+    first_bytes = _serialized_stable_messages(first["messages"], rows)
+    second_bytes = _serialized_stable_messages(second["messages"], rows)
     assert second_bytes.startswith(first_bytes)
 
 
-def _estimated_window_sequence(monkeypatch, *, source_method):
+def _estimated_window_sequence(monkeypatch, *, source_method, extra_sets=()):
     windows = [
         _window(path=f"pkg/{name}.py", revision=_revision(str(index)),
                 text="x" * 30_000 + "\n")
@@ -232,10 +235,12 @@ def _estimated_window_sequence(monkeypatch, *, source_method):
     meter = EstimatedMeter(source_method=source_method)
     inputs = {"token_ceiling": 33_344, "byte_ceiling": 1_000_000,
               "source_plan": {}, "sources": {}, "receipt": None}
-    current_sets = ([windows[0], windows[1]], [windows[1]], [windows[2]], [windows[3]])
+    current_sets = ([windows[0], windows[1]], [windows[1]], [windows[2]], [windows[3]],
+                    *extra_sets)
     results = []
     events = []
     for current in current_sets:
+        current = [windows[row] if isinstance(row, int) else row for row in current]
         result, _, journal = _invoke(
             monkeypatch, _body(current), runtime, headroom=16_000,
             meter=meter, inputs=copy.deepcopy(inputs))
@@ -273,12 +278,16 @@ def test_windows_remain_byte_immutable_and_new_versions_append(monkeypatch):
     assert "Not current, do not edit from these:" in third_status
     assert "pkg/a.py" in third_status and "lines 1 to 1" in third_status
 
-    # Planted control: same path/revision/range with one changed byte must refuse.
+    # Planted control: same path/revision/range with one changed byte. Body 8: this used
+    # to refuse and end the run; it is now a rerender relayout that never resends the
+    # old bytes, so the delivered-bytes immutability holds through a fresh epoch instead.
     changed = copy.deepcopy(first)
     changed["content"] = changed["content"].replace("value = 1", "value = 9")
     control_runtime = SimpleNamespace(_stable_wire_state=copy.deepcopy(old_runtime._stable_wire_state))
-    with pytest.raises(ValueError, match="immutable|re-render|stable wire"):
-        _invoke(monkeypatch, _body([changed]), control_runtime)
+    control_result, _, journal = _invoke(monkeypatch, _body([changed]), control_runtime)
+    assert _messages_with_prefix(control_result["messages"], "[Current source:") == [changed]
+    assert first_delivered not in control_result["messages"]
+    _only_relayout(journal, "rerender")
 
 
 def test_status_omits_not_current_section_when_all_delivered_windows_are_current(monkeypatch):
@@ -428,7 +437,8 @@ def test_headroom_relays_to_current_windows_then_appends_again(monkeypatch):
     v2 = _window(path="pkg/b.py", revision=_revision("2"))
     v3 = _window(path="pkg/c.py", revision=_revision("3"))
     other = _window(path="pkg/d.py", revision=_revision("4"))
-    meter = SourceMeter({row["content"]: 4_000 for row in (v1, v2, v3, other)})
+    meter = SourceMeter({**{row["content"]: 4_000 for row in (v1, v2, v3)},
+                         other["content"]: 1_000})
     runtime = SimpleNamespace(_stable_wire_state=None)
     first, _, events1 = _invoke(monkeypatch, _body([v1]), runtime, headroom=6_000, meter=meter)
     assert len(_messages_with_prefix(first["messages"], "[Current source:")) == 1
@@ -441,23 +451,33 @@ def test_headroom_relays_to_current_windows_then_appends_again(monkeypatch):
     assert not any(row["kind"] == "stable_wire_epoch" for row in events2.events)
     assert "Not current, do not edit from these:" in _status_rows(second["messages"])[0]["content"]
 
-    # v1 and v2 are now both retained, so one headroom rebase keeps current v3 only.
+    # v1 and v2 are now both retained (8000 > 6000), so the headroom relayout fires. Keeping
+    # both plus v3 is over the 10000 ceiling, so the longest fitting prefix keeps only v1.
     third, _, events3 = _invoke(monkeypatch, _body([v3]), runtime, headroom=6_000, meter=meter)
-    assert _messages_with_prefix(third["messages"], "[Current source:") == [v3]
+    assert _messages_with_prefix(third["messages"], "[Current source:") == [v1, v3]
     epochs = [row for row in events3.events if row["kind"] == "stable_wire_epoch"]
     assert len(epochs) == 1 and epochs[0].get("reason") == "headroom"
     assert "\nEpoch 2\n" in _status_rows(third["messages"])[0]["content"]
+    # The kept prefix holds only what fits the headroom, and the event reports that layout.
+    assert epochs[0]["kept_prefix_windows"] == 1 and epochs[0]["retained_tokens"] == 4_000
 
-    # The compacted epoch retains only v3, and a later new window appends normally.
+    # The retained set now fits the headroom, so the next sends do not relayout again.
+    again, _, events_again = _invoke(monkeypatch, _body([v3]), runtime, headroom=6_000, meter=meter)
+    assert _messages_with_prefix(again["messages"], "[Current source:") == [v1, v3]
+    assert not any(row["kind"] == "stable_wire_epoch" for row in events_again.events)
+    _assert_stable_message_byte_prefix(third, again, rows=4)
+
+    # A later new window appends after the delivered prefix, still in the same epoch.
     fourth, _, events4 = _invoke(monkeypatch, _body([v3, other]), runtime,
                                  headroom=6_000, meter=meter)
-    assert _messages_with_prefix(fourth["messages"], "[Current source:") == [v3, other]
+    assert _messages_with_prefix(fourth["messages"], "[Current source:") == [v1, v3, other]
     assert not any(row["kind"] == "stable_wire_epoch" for row in events4.events)
+    _assert_stable_message_byte_prefix(third, fourth, rows=4)
 
 
 def test_estimated_meter_keeps_same_epoch_stable_prefix_and_counts_retained_headroom(monkeypatch):
     windows, results, events, meter = _estimated_window_sequence(
-        monkeypatch, source_method="estimate")
+        monkeypatch, source_method="estimate", extra_sets=([3],))
 
     # The first window is retained, not-current, on the next send. Its estimate
     # keeps the source block in epoch 1, so the serialized stable messages match.
@@ -480,28 +500,63 @@ def test_estimated_meter_keeps_same_epoch_stable_prefix_and_counts_retained_head
     assert retained_tokens > expected_sets[2][1]
     assert retained_method == "estimate"
 
+    # Three retained windows exceed the headroom, so the relayout keeps the longest prefix
+    # whose retained rows fit: windows 0 and 1. The event reports that chosen layout.
     epochs = [event for event in events[3] if event["kind"] == "stable_wire_epoch"]
     assert len(epochs) == 1
     assert epochs[0]["reason"] == "headroom"
-    assert epochs[0]["retained_tokens"] == retained_tokens
     assert epochs[0]["epoch"] == 2
+    assert epochs[0]["kept_prefix_windows"] == 2
+    assert epochs[0]["retained_tokens"] == measured[expected_sets[1][0]][0]
+    assert _sources(results[3]) == [windows[0], windows[1], windows[3]]
+    _assert_stable_message_byte_prefix(results[2], results[3], rows=4)
+
+    # The same retained set on the next send is within the headroom: no epoch.
+    assert not any(event["kind"] == "stable_wire_epoch" for event in events[4])
+    assert _sources(results[4]) == _sources(results[3])
+    _assert_stable_message_byte_prefix(results[3], results[4])
 
 
-def test_unavailable_source_meter_rebases_each_send_and_breaks_prefix_control(monkeypatch):
-    _windows, results, events, meter = _estimated_window_sequence(
-        monkeypatch, source_method="unavailable")
+def test_unavailable_source_meter_stops_the_kept_prefix_at_the_first_retained_row(monkeypatch):
+    windows = [_window(path=f"pkg/{name}.py", revision=_revision(str(index)),
+                       text="x" * 30_000 + "\n")
+               for index, name in enumerate(("a", "b", "c", "d"), start=1)]
+    runtime = SimpleNamespace(_stable_wire_state=None)
+    meter = EstimatedMeter(source_method="unavailable")
+    inputs = {"token_ceiling": 60_000, "byte_ceiling": 1_000_000,
+              "source_plan": {}, "sources": {}, "receipt": None}
 
-    epochs = [[event for event in rows if event["kind"] == "stable_wire_epoch"]
-              for rows in events]
-    assert [rows[0]["epoch"] for rows in epochs] == [1, 2, 3, 4]
-    assert all(rows[0]["reason"] in {"start", "headroom"} for rows in epochs)
+    def send(current):
+        return _invoke(monkeypatch, _body(current), runtime, headroom=16_000,
+                       meter=meter, inputs=copy.deepcopy(inputs))
+
+    def epochs_of(journal):
+        return [event for event in journal.events if event["kind"] == "stable_wire_epoch"]
+
+    first, _, _ = send(windows[:3])
+    # Window c left. Its tokens cannot be measured, so the prefix stops right before it.
+    second, _, journal = send(windows[:2])
+    event = epochs_of(journal)[0]
+    assert event["reason"] == "headroom" and event["epoch"] == 2
+    assert event["kept_prefix_windows"] == 2
+    assert _sources(second) == windows[:2]
+    _assert_stable_message_byte_prefix(first, second, rows=4)
     assert all(method == "unavailable" and tokens == 0
                for _contents, tokens, method in meter.source_measurements)
 
-    # Planted control: applying the prefix assertion to the same sequence with
-    # an unavailable source meter fails because each send rebases to its window.
-    with pytest.raises(AssertionError):
-        _assert_stable_message_byte_prefix(results[0], results[1])
+    # No retained rows remain, so epochs stop bumping.
+    third, _, journal = send(windows[:2])
+    assert not epochs_of(journal)
+    _assert_stable_message_byte_prefix(second, third)
+
+    # A retained row at the very front keeps nothing: one more epoch, then stable again.
+    fourth, _, journal = send([windows[1], windows[3]])
+    event = epochs_of(journal)[0]
+    assert event["epoch"] == 3 and event["kept_prefix_windows"] == 0
+    assert _sources(fourth) == [windows[1], windows[3]]
+    fifth, _, journal = send([windows[1], windows[3]])
+    assert not epochs_of(journal)
+    _assert_stable_message_byte_prefix(fourth, fifth)
 
 
 def test_estimated_stable_request_uses_040b_reserve_and_fits_its_token_ceiling(monkeypatch):
@@ -689,18 +744,23 @@ def test_structural_relayout_keeps_current_windows_in_run_first_seen_order(monke
     assert len(epochs) == 1 and epochs[0].get("reason") == "structural"
 
 
-def test_stable_frame_change_rebases_before_same_epoch_message_prefix_changes(monkeypatch):
+def test_stable_frame_change_keeps_epoch_and_appends_windows_after_delivered_ones(monkeypatch):
+    """The frame sits after the windows, so a frame-only change must not relayout them."""
     old = _window(path="pkg/old.py", revision=_revision("1"))
     current = _window(path="pkg/current.py", revision=_revision("2"))
     runtime = SimpleNamespace(_stable_wire_state=None)
-    _invoke(monkeypatch, _body([old]), runtime)
+    first, _, _ = _invoke(monkeypatch, _body([old]), runtime)
+    first_status = _status_rows(first["messages"])[0]["content"]
+    assert "\nEpoch 1\n" in first_status
 
     payload = _payload()
     payload["state"]["framefit5"]["stable_marker"] = "changed"
     projected, _, journal = _invoke(monkeypatch, _body([current], payload=payload), runtime)
-    assert _messages_with_prefix(projected["messages"], "[Current source:") == [current]
-    epochs = [event for event in journal.events if event["kind"] == "stable_wire_epoch"]
-    assert len(epochs) == 1 and epochs[0].get("reason") == "structural"
+    assert not [event for event in journal.events if event["kind"] == "stable_wire_epoch"]
+    assert _messages_with_prefix(projected["messages"], "[Current source:") == [old, current]
+    status = _status_rows(projected["messages"])[0]["content"]
+    assert "\nEpoch 1\n" in status
+    assert materialize_stable_frame(projected["messages"]) != materialize_stable_frame(first["messages"])
 
 
 def test_headroom_guard_rejects_values_below_6000_at_first_request(monkeypatch):
@@ -1117,12 +1177,636 @@ def test_metadata_rerender_of_delivered_window_starts_fresh_epoch(monkeypatch):
     assert not [event for event in journal.events if event["kind"] == "stable_wire_epoch"]
 
 
-def test_changed_source_lines_under_same_revision_still_refuse(monkeypatch):
-    first = _window(revision=_revision("1"), text="value = 1\n")
+def test_changed_source_lines_under_same_key_relayout_instead_of_raising(monkeypatch):
+    """Body 8: a delivered window whose source lines re-rendered under the same
+    path/revision/ranges used to raise StableWireError and end the run (it crashed
+    crew-02's 0.5.0 controls). It is renderer drift, not a file edit, so it now gets
+    the same answer as metadata drift: a rerender relayout in a fresh epoch that
+    sends the current bytes and keeps only the prefix ahead of the changed row."""
+    first = _window(path="pkg/a.py", revision=_revision("1"), text="value = 1\n")
+    other = _window(path="pkg/b.py", revision=_revision("2"))
     runtime = SimpleNamespace(_stable_wire_state=None)
-    _invoke(monkeypatch, _body([first]), runtime)
-    lying = copy.deepcopy(first)
-    lying["content"] = lying["content"].replace(
-        '"max_lines":1000', '"max_lines":999').replace("value = 1", "value = 9")
-    with pytest.raises(ValueError, match="re-rendered"):
-        _invoke(monkeypatch, _body([lying]), runtime)
+    _invoke(monkeypatch, _body([other, first]), runtime)
+    changed = copy.deepcopy(first)
+    changed["content"] = changed["content"].replace("value = 1", "value = 9")
+    assert changed["content"] != first["content"]
+
+    projected, _, journal = _invoke(monkeypatch, _body([other, changed]), runtime)
+    assert _sources(projected) == [other, changed]
+    assert first not in projected["messages"]
+    _only_relayout(journal, "rerender")
+    event = next(e for e in journal.events if e["kind"] == "stable_wire_epoch")
+    assert event["epoch"] == 2 and event["kept_prefix_windows"] == 1
+    assert "\nEpoch 2\n" in _status_rows(projected["messages"])[0]["content"]
+
+    # The next send keeps the new epoch's prefix byte-stable.
+    again, _, journal = _invoke(monkeypatch, _body([other, changed]), runtime)
+    assert _sources(again) == [other, changed]
+    assert not [e for e in journal.events if e["kind"] == "stable_wire_epoch"]
+
+
+def test_structural_rebase_skips_the_rerender_check(monkeypatch):
+    """A structural rebase discards the previous layout, so a row whose source lines
+    re-rendered under the same key must not be compared against it (body 8)."""
+    first = _window(path="pkg/a.py", revision=_revision("1"), text="value = 1\n")
+    other = _window(path="pkg/b.py", revision=_revision("2"))
+    runtime = SimpleNamespace(_stable_wire_state=None)
+    _invoke(monkeypatch, _body([first, other]), runtime)
+    changed = copy.deepcopy(first)
+    changed["content"] = changed["content"].replace("value = 1", "value = 9")
+
+    rebased = _body([other, changed])
+    rebased["messages"][1]["content"] = "Task: a structurally new task"
+    projected, _, journal = _invoke(monkeypatch, rebased, runtime)
+    assert _sources(projected) == [changed, other]
+    assert first not in projected["messages"]
+    _only_relayout(journal, "structural")
+    event = next(e for e in journal.events if e["kind"] == "stable_wire_epoch")
+    assert event["epoch"] == 2 and event["kept_prefix_windows"] == 0
+
+
+# --- prefix-preserving relayout -------------------------------------------------------
+
+
+def _relayout_windows():
+    """A-D form the previous layout; Z was seen first but dropped, E and F are new."""
+    return {name: _window(path=f"pkg/{name}.py", revision=_revision(str(index)))
+            for index, name in enumerate("ABCDEFZ", start=1)}
+
+
+def _late_z_layout(monkeypatch, w, runtime, **kwargs):
+    """Leave the run with layout [A, B, C, D, Z] while Z is first in first-seen order.
+
+    That is the live shape: a window that dropped out of one layout and came back is
+    appended last, so the previous layout order differs from run first-seen order.
+    """
+    _invoke(monkeypatch, _body([w["Z"], w["A"], w["B"], w["C"], w["D"]]), runtime, **kwargs)
+    changed_task = _body([w["A"], w["B"], w["C"], w["D"]])
+    changed_task["messages"][1]["content"] = "Task: a structurally new task"
+    _invoke(monkeypatch, changed_task, runtime, **kwargs)
+    again = _body([w["A"], w["B"], w["C"], w["D"], w["Z"]])
+    again["messages"][1]["content"] = "Task: a structurally new task"
+    projected, _, _ = _invoke(monkeypatch, again, runtime, **kwargs)
+    assert _sources(projected) == [w[n] for n in "ABCDZ"]
+
+
+def _sources(result):
+    return _messages_with_prefix(result["messages"], "[Current source:")
+
+
+def _only_relayout(journal, reason):
+    epochs = [event for event in journal.events if event["kind"] == "stable_wire_epoch"]
+    assert len(epochs) == 1 and epochs[0]["action"] == "relayout" and epochs[0]["reason"] == reason
+
+
+def _relayout_body(windows):
+    body = _body(windows)
+    body["messages"][1]["content"] = "Task: a structurally new task"
+    return body
+
+
+def test_rerender_relayout_keeps_unchanged_prefix_then_new_content_then_first_seen(monkeypatch):
+    w = _relayout_windows()
+    runtime = SimpleNamespace(_stable_wire_state=None)
+    _late_z_layout(monkeypatch, w, runtime)
+
+    rerendered = copy.deepcopy(w["C"])
+    rerendered["content"] = rerendered["content"].replace('"max_lines":1000', '"max_lines":999')
+    # D dropped; F is shown before E, so F is first seen first.
+    current = [w["F"], w["E"], w["Z"], rerendered, w["B"], w["A"]]
+    projected, _, journal = _invoke(monkeypatch, _relayout_body(current), runtime)
+
+    delivered = _sources(projected)
+    assert delivered[:2] == [w["A"], w["B"]]            # (a) unchanged prefix, same order
+    assert delivered.count(rerendered) == 1 and w["C"] not in delivered  # (b) new content, once
+    assert w["D"] not in delivered                       # (c) dropped window is gone
+    # (d) everything after the kept prefix follows first-seen order, new windows last.
+    assert delivered[2:] == [w["Z"], rerendered, w["F"], w["E"]]
+    _only_relayout(journal, "rerender")
+
+
+def test_headroom_relayout_keeps_unchanged_prefix_then_first_seen(monkeypatch):
+    w = _relayout_windows()
+    costs = {row["content"]: 500 for row in w.values()}
+    costs[w["C"]["content"]] = 7_000  # the dropped window alone exceeds the 6000 headroom
+    meter = SourceMeter(costs)
+    runtime = SimpleNamespace(_stable_wire_state=None)
+    _late_z_layout(monkeypatch, w, runtime, headroom=6_000, meter=meter)
+
+    # C dropped, so D (current, unchanged) no longer continues the prefix and moves behind it.
+    current = [w["F"], w["E"], w["D"], w["Z"], w["B"], w["A"]]
+    projected, _, journal = _invoke(monkeypatch, _relayout_body(current), runtime,
+                                    headroom=6_000, meter=meter)
+    delivered = _sources(projected)
+    assert delivered[:2] == [w["A"], w["B"]]
+    assert w["C"] not in delivered
+    assert delivered.count(w["D"]) == 1
+    assert delivered[2:] == [w["Z"], w["D"], w["F"], w["E"]]
+    _only_relayout(journal, "headroom")
+
+
+def test_envelope_relayout_keeps_unchanged_prefix_then_first_seen(monkeypatch):
+    class EnvelopeMeter:
+        def measure(self, body):
+            messages = body.get("messages", [])
+            sources = [row for row in messages
+                       if str(row.get("content", "")).startswith("[Current source:")]
+            if len(sources) == len(messages):
+                return len(sources), "tokenize"
+            return (10_001 if len(sources) > 6 else 1), "tokenize"
+
+    meter = EnvelopeMeter()
+    w = _relayout_windows()
+    runtime = SimpleNamespace(_stable_wire_state=None)
+    _late_z_layout(monkeypatch, w, runtime, meter=meter)
+
+    # Retaining C on top of the six current windows would be seven sources: over the envelope.
+    current = [w["F"], w["E"], w["D"], w["Z"], w["B"], w["A"]]
+    projected, _, journal = _invoke(monkeypatch, _relayout_body(current), runtime,
+                                    meter=meter)
+    delivered = _sources(projected)
+    assert delivered[:2] == [w["A"], w["B"]]
+    assert w["C"] not in delivered and delivered.count(w["D"]) == 1
+    assert delivered[2:] == [w["Z"], w["D"], w["F"], w["E"]]
+    assert meter.measure(projected)[0] <= 10_000
+    _only_relayout(journal, "envelope")
+
+
+def test_relayout_order_keeps_the_prefix_and_sorts_the_rest_first_seen():
+    from kernel_stable_wire import _relayout_order, _source_tokens, _window_entries
+    from kernel_stable_wire_ownership import request_ownership
+
+    w = _relayout_windows()
+    messages = _body([w["F"], w["E"], w["D"], w["B"], w["A"]])["messages"]
+    entries = _window_entries(messages, request_ownership(messages, len(messages) - 2))
+    by_path = {row["identity"]["path"]: row for row in entries}
+    previous = [by_path["pkg/A.py"], by_path["pkg/B.py"], {
+        **by_path["pkg/D.py"], "key": "stale", "content": "gone"}]
+    rank = {row["key"]: index for index, row in enumerate(reversed(entries))}
+    plain = sorted(copy.deepcopy(entries), key=lambda row: rank[row["key"]])
+    meter = SourceMeter({row["content"]: 123 for row in entries})
+
+    ordered = _relayout_order(previous, entries, rank, 2)
+    assert sorted(ordered, key=lambda row: row["key"]) == sorted(plain, key=lambda row: row["key"])
+    assert _source_tokens(meter, [r["message"] for r in ordered]) == \
+        _source_tokens(meter, [r["message"] for r in plain])
+    assert [r["identity"]["path"] for r in ordered[:2]] == ["pkg/A.py", "pkg/B.py"]
+
+    # keep=3 retains the stale (no longer current) third row and the other current rows follow
+    # it in first-seen order; keep=0 is the plain first-seen sort.
+    retained = _relayout_order(previous, entries, rank, 3)
+    assert [r["key"] for r in retained[:3]] == [previous[0]["key"], previous[1]["key"], "stale"]
+    assert retained[2]["content"] == "gone"
+    rest = [row for row in plain if row["key"] not in {previous[0]["key"], previous[1]["key"]}]
+    assert [r["key"] for r in retained[3:]] == [r["key"] for r in rest]
+    assert _relayout_order(previous, entries, rank, 0) == plain
+
+
+# --- longest-fitting-prefix relayout (class killer) -----------------------------------
+
+
+class ForcedRelayoutMeter:
+    """Sources-only bodies count windows. A full request is over the envelope while
+    ``reject_next`` is set (one shot, consumed by the append-only fit check) or when it
+    holds more than ``max_sources`` windows. This forces an envelope relayout."""
+
+    def __init__(self, max_sources=99):
+        self.max_sources = max_sources
+        self.reject_next = False
+        self.calls = 0
+        self.full_counts = []  # window count of every full-request measurement, in order
+
+    def measure(self, body):
+        messages = body.get("messages", [])
+        sources = [row for row in messages
+                   if str(row.get("content", "")).startswith("[Current source:")]
+        if len(sources) == len(messages):
+            return len(sources), "tokenize"
+        self.calls += 1
+        self.full_counts.append(len(sources))
+        if self.reject_next:
+            self.reject_next = False
+            return 10_001, "tokenize"
+        return (10_001 if len(sources) > self.max_sources else 1), "tokenize"
+
+
+def _epochs(journal):
+    return [event for event in journal.events if event["kind"] == "stable_wire_epoch"]
+
+
+def _fake_tokens(messages):
+    """Token-level view: one fake token per character of concatenated content."""
+    return list("".join(str(row.get("content", "")) for row in messages))
+
+
+def test_envelope_relayout_keeps_whole_prefix_when_a_window_leaves_and_a_new_one_arrives(monkeypatch):
+    w = _relayout_windows()
+    meter = ForcedRelayoutMeter()
+    runtime = SimpleNamespace(_stable_wire_state=None)
+    # Z is seen first but is not delivered in send N, so first-seen order differs from the
+    # append-only order and the relayout candidate is a different layout.
+    _invoke(monkeypatch, _body([w[n] for n in "ZABCD"]), runtime, meter=meter)
+    first, _, _ = _invoke(monkeypatch, _relayout_body([w[n] for n in "ABCD"]), runtime,
+                          meter=meter)
+    assert _sources(first) == [w[n] for n in "ABCD"]
+
+    meter.reject_next = True
+    # A left the current set, E is new, Z returns, and the upstream order is shuffled.
+    second, _, journal = _invoke(
+        monkeypatch, _relayout_body([w["E"], w["D"], w["C"], w["B"], w["Z"]]), runtime,
+        meter=meter)
+
+    assert _sources(second) == [w[n] for n in "ABCDZE"]
+    head = 2 + 4  # system, task, windows A-D
+    assert second["messages"][:head] == first["messages"][:head]   # identical message dicts
+    _assert_stable_message_byte_prefix(first, second, rows=head)   # identical serialized bytes
+    assert _fake_tokens(second["messages"][:head]) == _fake_tokens(first["messages"][:head])
+    event = _epochs(journal)[0]
+    assert event["reason"] == "envelope" and event["action"] == "relayout"
+    assert event["kept_prefix_windows"] == 4
+    assert event["retained_tokens"] == 1  # A is the one retained, not-current window
+    status = _status_rows(second["messages"])[0]["content"]
+    current_part, retained_part = status.split("Not current, do not edit from these:")
+    assert "pkg/A.py: current" not in current_part and "pkg/A.py" in retained_part
+    assert "pkg/E.py: current" in current_part
+
+
+def test_envelope_relayout_keeps_only_the_prefix_that_fits(monkeypatch):
+    w = _relayout_windows()
+    meter = ForcedRelayoutMeter(max_sources=4)
+    runtime = SimpleNamespace(_stable_wire_state=None)
+    first, _, _ = _invoke(monkeypatch, _body([w[n] for n in "ABCD"]), runtime, meter=meter)
+
+    meter.reject_next = True
+    # C and D left. Keeping k=2 gives A,B,F,E (4 windows); k=3 or k=4 is over the envelope.
+    projected, _, journal = _invoke(
+        monkeypatch, _body([w["F"], w["E"], w["A"], w["B"]]), runtime, meter=meter)
+    assert _sources(projected) == [w["A"], w["B"], w["F"], w["E"]]
+    assert _epochs(journal)[0]["kept_prefix_windows"] == 2
+    _assert_stable_message_byte_prefix(first, projected, rows=2 + 2)
+
+
+def test_binary_search_uses_few_meter_calls(monkeypatch):
+    import kernel_stable_wire
+
+    names = [f"w{i}" for i in range(16)]
+    w = {n: _window(path=f"pkg/{n}.py", revision=_revision("a"), text=f"{n} = 1\n")
+         for n in names}
+    meter = ForcedRelayoutMeter()
+    runtime = SimpleNamespace(_stable_wire_state=None)
+    first, _, _ = _invoke(monkeypatch, _body([w[n] for n in names[:8]]), runtime, meter=meter)
+    meter.max_sources = 5
+    meter.calls = 0
+    meter.full_counts.clear()
+    proofs = []
+    real_prove = kernel_stable_wire._prove_projection
+    monkeypatch.setattr(kernel_stable_wire, "_prove_projection",
+                        lambda *args, **kwargs: proofs.append(1) or real_prove(*args, **kwargs))
+    # Five of the eight prior windows left. The append-only layout (8 windows) is measured
+    # once and rejected. Keeping all 8 would be the same bytes, so it is not measured again.
+    # The search then probes k=4 (fits), k=6 (over), k=5 (fits) and reuses that last report.
+    projected, _, journal = _invoke(monkeypatch, _body([w[n] for n in names[:3]]), runtime,
+                                    meter=meter)
+    assert _sources(projected) == [w[n] for n in names[:5]]
+    assert _epochs(journal)[0]["kept_prefix_windows"] == 5
+    assert meter.full_counts == [8, 4, 6, 5]
+    # Only the append-only candidate and the chosen layout get the full proof.
+    assert len(proofs) == 2
+    _assert_stable_message_byte_prefix(first, projected, rows=2 + 5)
+
+
+def test_non_size_fit_failure_skips_the_search_and_fails_open(monkeypatch):
+    w = _relayout_windows()
+    meter = ForcedRelayoutMeter()
+    runtime = SimpleNamespace(_stable_wire_state=None)
+    _invoke(monkeypatch, _body([w[n] for n in "AB"]), runtime, meter=meter)
+    meter.calls = 0
+    meter.full_counts.clear()
+    inputs = {"token_ceiling": 10_000, "byte_ceiling": 1_000_000, "source_plan": {},
+              "sources": {}, "receipt": None, "measurement_identity": "other-tokenizer"}
+    body = _body([w[n] for n in "ABC"])
+    projected, _, journal = _invoke(monkeypatch, body, runtime, meter=meter, inputs=inputs)
+    assert projected == body
+    assert meter.calls == 1  # one measurement, no relayout search
+    failed = [e for e in journal.events if e["kind"] == "stable_wire_failed_open"]
+    assert len(failed) == 1 and failed[0]["cause"] == "measurement_method_mismatch"
+    assert not _epochs(journal)
+
+
+def test_rerendered_window_caps_the_kept_prefix(monkeypatch):
+    w = _relayout_windows()
+    runtime = SimpleNamespace(_stable_wire_state=None)
+    _invoke(monkeypatch, _body([w[n] for n in "ABCD"]), runtime)
+    rerendered = copy.deepcopy(w["C"])
+    rerendered["content"] = rerendered["content"].replace('"max_lines":1000', '"max_lines":999')
+    projected, _, journal = _invoke(
+        monkeypatch, _body([w["A"], w["B"], rerendered, w["D"]]), runtime)
+    assert _sources(projected) == [w["A"], w["B"], rerendered, w["D"]]
+    event = _epochs(journal)[0]
+    assert event["reason"] == "rerender" and event["kept_prefix_windows"] == 2
+
+
+def test_structural_relayout_still_does_a_full_first_seen_sort(monkeypatch):
+    w = _relayout_windows()
+    runtime = SimpleNamespace(_stable_wire_state=None)
+    _late_z_layout(monkeypatch, w, runtime)
+    changed = _body([w["A"], w["B"], w["C"], w["D"], w["Z"]])
+    changed["messages"][1]["content"] = "Task: yet another structure"
+    projected, _, journal = _invoke(monkeypatch, changed, runtime)
+    assert _sources(projected) == [w[n] for n in "ZABCD"]
+    event = _epochs(journal)[0]
+    assert event["reason"] == "structural" and event["kept_prefix_windows"] == 0
+
+
+def test_appended_rows_follow_persisted_first_seen_order_across_three_sends(monkeypatch):
+    w = _relayout_windows()
+    meter = ForcedRelayoutMeter(max_sources=4)
+    runtime = SimpleNamespace(_stable_wire_state=None)
+    _invoke(monkeypatch, _body([w["D"], w["B"]]), runtime, meter=meter)
+
+    meter.reject_next = True
+    second, _, _ = _invoke(monkeypatch, _body([w["C"], w["A"], w["B"], w["D"]]),
+                           runtime, meter=meter)
+    # First seen: D, B, then C, A. The kept prefix is D,B and the rest follows first-seen order.
+    assert _sources(second) == [w["D"], w["B"], w["C"], w["A"]]
+
+    meter.reject_next = True
+    third, _, journal = _invoke(monkeypatch, _body([w["F"], w["E"], w["A"], w["C"]]),
+                                runtime, meter=meter)
+    # Only k=0 fits four windows, so the sort is persisted first-seen (C, A), then F, E.
+    assert _sources(third) == [w["C"], w["A"], w["F"], w["E"]]
+    assert _epochs(journal)[0]["kept_prefix_windows"] == 0
+
+
+def test_retain_prefix_switch_defaults_to_off_and_rejects_bad_values():
+    from kernel_stable_wire import RETAIN_PREFIX_ENV, retain_prefix
+
+    assert RETAIN_PREFIX_ENV == "STATEFRAME_STABLE_WIRE_RETAIN_PREFIX"
+    assert retain_prefix({}) is False
+    assert retain_prefix({RETAIN_PREFIX_ENV: " ON "}) is True
+    assert retain_prefix({RETAIN_PREFIX_ENV: "off"}) is False
+    with pytest.raises(ValueError, match="invalid"):
+        retain_prefix({RETAIN_PREFIX_ENV: "maybe"})
+
+
+@pytest.mark.parametrize("retain, leaver, expected, kept", [
+    # ON keeps the not-current first window in the prefix; OFF stops at it (k=0).
+    ("on", "A", "ABCDZE", 4),
+    ("off", "A", "ZBCDE", 0),
+    # A window leaving at the end never blocks the prefix in either mode.
+    ("on", "D", "ABCDZE", 4),
+    ("off", "D", "ABCZE", 3),
+])
+def test_relayout_prefix_by_retain_mode_keeps_exact_bytes(monkeypatch, retain, leaver, expected, kept):
+    w = _relayout_windows()
+    meter = ForcedRelayoutMeter()
+    runtime = SimpleNamespace(_stable_wire_state=None)
+    _invoke(monkeypatch, _body([w[n] for n in "ZABCD"]), runtime, meter=meter, retain=retain)
+    first, _, _ = _invoke(monkeypatch, _relayout_body([w[n] for n in "ABCD"]), runtime,
+                          meter=meter, retain=retain)
+    meter.reject_next = True
+    current = [w[n] for n in "ABCD" if n != leaver] + [w["Z"], w["E"]]
+    second, _, journal = _invoke(monkeypatch, _relayout_body(current[::-1]), runtime,
+                                 meter=meter, retain=retain)
+    assert _sources(second) == [w[n] for n in expected]
+    event = _epochs(journal)[0]
+    assert event["kept_prefix_windows"] == kept and event["retain_prefix"] is (retain == "on")
+    head = 2 + kept
+    _assert_stable_message_byte_prefix(first, second, rows=head)
+    assert _fake_tokens(second["messages"][:head]) == _fake_tokens(first["messages"][:head])
+
+
+def test_retain_off_epoch_never_keeps_a_not_current_row_in_the_prefix(monkeypatch):
+    w = _relayout_windows()
+    runtime = SimpleNamespace(_stable_wire_state=None)
+    _invoke(monkeypatch, _body([w[n] for n in "ABC"]), runtime, retain="off")
+    rerendered = copy.deepcopy(w["C"])
+    rerendered["content"] = rerendered["content"].replace('"max_lines":1000', '"max_lines":999')
+    # B left and C re-rendered: the rerender relayout keeps A only, no retained rows.
+    projected, _, journal = _invoke(monkeypatch, _body([w["A"], rerendered]), runtime,
+                                    retain="off")
+    assert _sources(projected) == [w["A"], rerendered]
+    assert "Not current, do not edit from these:" not in _status_rows(projected["messages"])[0]["content"]
+    assert _epochs(journal)[0]["kept_prefix_windows"] == 1
+
+
+def _recorded_k2_sends(monkeypatch):
+    """Record an envelope-forced k=2 relayout and return the sends' bodies and results."""
+    w = _relayout_windows()
+    meter = ForcedRelayoutMeter(max_sources=4)
+    runtime = SimpleNamespace(_stable_wire_state=None)
+    bodies = [_body([w[n] for n in "ABCD"]),
+              _body([w["F"], w["E"], w["A"], w["B"]])]
+    results = []
+    meter.reject_next = False
+    for index, body in enumerate(bodies):
+        meter.reject_next = index == 1
+        result, _, journal = _invoke(monkeypatch, copy.deepcopy(body), runtime, meter=meter)
+        results.append((result, journal))
+    assert _epochs(results[1][1])[0]["kept_prefix_windows"] == 2
+    return w, bodies, results
+
+
+def test_replay_reproduces_the_recorded_kept_prefix(monkeypatch):
+    import kernel_cache_layout_candidate as candidate
+    from kernel_stable_wire import recorded_window_layout
+
+    _w, bodies, recorded = _recorded_k2_sends(monkeypatch)
+    queue = [recorded_window_layout(result["messages"]) for result, _ in recorded]
+    cursor = {"send": 0}
+    monkeypatch.setattr(candidate, "_REPLAY_STABLE_WIRE_DECISION_PROVIDER", lambda: "applied")
+    monkeypatch.setattr(candidate, "_REPLAY_STABLE_WIRE_WINDOWS_PROVIDER",
+                        lambda: queue[cursor["send"]])
+    # The replay meter never rejects: the recorded request alone decides the kept prefix.
+    meter = ForcedRelayoutMeter(max_sources=99)
+    runtime = SimpleNamespace(_stable_wire_state=None)
+    for index, body in enumerate(bodies):
+        cursor["send"] = index
+        replayed, _, journal = _invoke(monkeypatch, copy.deepcopy(body), runtime, meter=meter)
+        assert replayed == recorded[index][0]
+        assert (json.dumps(replayed, sort_keys=True).encode()
+                == json.dumps(recorded[index][0], sort_keys=True).encode())
+    assert _epochs(journal)[0]["reason"] == "envelope"
+    assert _epochs(journal)[0]["kept_prefix_windows"] == 2
+    # No replay fit decisions. These sends had zero recorded trims; final bytes match above.
+    assert meter.full_counts == []
+    assert not _events(journal, "stable_wire_replay_mismatch")
+    assert not _events(journal, "stable_wire_failed_open")
+
+
+def test_replay_applied_without_windows_provider_fails_open(monkeypatch):
+    import kernel_cache_layout_candidate as candidate
+
+    _w, bodies, _recorded = _recorded_k2_sends(monkeypatch)
+    monkeypatch.setattr(candidate, "_REPLAY_STABLE_WIRE_DECISION_PROVIDER", lambda: "applied")
+    monkeypatch.setattr(candidate, "_REPLAY_STABLE_WIRE_WINDOWS_PROVIDER", None)
+    runtime = SimpleNamespace(_stable_wire_state=None)
+    for body in bodies:
+        plain = copy.deepcopy(body)
+        replayed, _, journal = _invoke(monkeypatch, plain, runtime,
+                                 meter=ForcedRelayoutMeter(max_sources=99))
+        assert replayed is plain
+        assert len(_events(journal, "stable_wire_replay_mismatch")) == 1
+        assert _events(journal, "stable_wire_failed_open")[0]["reason"] == "replay_layout_mismatch"
+    assert runtime._stable_wire_state is None
+
+
+def test_replay_relayout_with_all_windows_uses_recorded_status_epoch(monkeypatch):
+    from kernel_stable_wire import recorded_window_layout
+
+    w = _relayout_windows()
+    meter = ForcedRelayoutMeter()
+    runtime = SimpleNamespace(_stable_wire_state=None)
+    bodies, recorded = [], []
+    # Reach epoch 9 with real structural sends. At 9 -> 10 the status size changes,
+    # so the relayout chooser probes k=all rather than skipping an identical envelope.
+    for index in range(9):
+        body = _body([w["A"], w["B"]])
+        body["messages"][1]["content"] = f"Task: epoch case {index}"
+        result, _, _ = _invoke(monkeypatch, body, runtime, meter=meter)
+        bodies.append(body)
+        recorded.append(result)
+    first = recorded[-1]
+    meter.reject_next = True
+    # Append-only is rejected on size, but k=all fits on the next probe, keeping the windows.
+    second, _, journal = _invoke(monkeypatch, bodies[-1], runtime, meter=meter)
+    bodies.append(copy.deepcopy(bodies[-1]))
+    recorded.append(second)
+    assert _epochs(journal)[0]["reason"] == "envelope"
+    assert _epochs(journal)[0]["kept_prefix_windows"] == 2
+    assert _sources(second) == _sources(first)
+    assert recorded_window_layout(second["messages"])[1] == 10
+
+    queue = [recorded_window_layout(value["messages"]) for value in recorded]
+    cursor = {"send": 0}
+    _replay_with(monkeypatch, lambda: queue[cursor["send"]])
+    runtime = SimpleNamespace(_stable_wire_state=None)
+    for index, (body, expected) in enumerate(zip(bodies, recorded)):
+        cursor["send"] = index
+        replayed, _, journal = _invoke(monkeypatch, body, runtime)
+        assert json.dumps(replayed).encode() == json.dumps(expected).encode()
+        assert not _events(journal, "stable_wire_replay_mismatch")
+
+    # Identical final windows cannot hide an unprovable status epoch.
+    queue[-1] = (queue[-1][0], 99)
+    result, _, journal = _invoke(monkeypatch, bodies[-1], runtime)
+    assert not any(row.get("name") == "stateframe_stable_wire_status" for row in result["messages"])
+    mismatch, = _events(journal, "stable_wire_replay_mismatch")
+    assert mismatch["recorded_epoch"] == 99
+    assert mismatch["shared_prefix_windows"] == 2
+    assert _events(journal, "stable_wire_failed_open")[0]["reason"] == "replay_layout_mismatch"
+    assert runtime._stable_wire_state["epoch"] == 10
+
+
+def _events(journal, kind):
+    return [event for event in journal.events if event["kind"] == kind]
+
+
+def _replay_with(monkeypatch, provider):
+    import kernel_cache_layout_candidate as candidate
+
+    monkeypatch.setattr(candidate, "_REPLAY_STABLE_WIRE_DECISION_PROVIDER", lambda: "applied")
+    monkeypatch.setattr(candidate, "_REPLAY_STABLE_WIRE_WINDOWS_PROVIDER", provider)
+
+
+def _assert_replay_failed_open(result, body, journal, *, reason, recorded, relayout):
+    """The resumed send carried the plain body, named the reason and leaked no content."""
+    assert result is body
+    mismatch = _events(journal, "stable_wire_replay_mismatch")
+    failed = _events(journal, "stable_wire_failed_open")
+    assert len(mismatch) == 1 and len(failed) == 1
+    assert failed[0]["reason"] == "replay_layout_mismatch"
+    for event in (mismatch[0], failed[0]):
+        assert event["recorded_window_count"] == len(recorded)
+        assert event["relayout"] is relayout
+        assert all(not isinstance(value, (list, dict)) for value in event.values())
+        assert not any("[Current source:" in str(value) for value in event.values())
+    assert mismatch[0]["layout_reason"] == failed[0]["layout_reason"] == reason
+    assert mismatch[0]["shared_prefix_windows"] < len(recorded)
+
+
+def test_replay_of_an_unreproducible_recorded_prefix_fails_open_with_an_event(monkeypatch):
+    from kernel_stable_wire import recorded_window_layout
+
+    w, bodies, recorded = _recorded_k2_sends(monkeypatch)
+    queue = [recorded_window_layout(result["messages"]) for result, _ in recorded]
+    # No kept prefix reproduces this order: F ahead of A,B is impossible from a first-seen sort.
+    windows, epoch = queue[1]
+    queue[1] = ([windows[2], windows[3], windows[0], windows[1]], epoch)
+    assert queue[1][0] != [str(w[n]["content"]) for n in "ABFE"]
+    cursor = {"send": 0}
+    _replay_with(monkeypatch, lambda: queue[cursor["send"]])
+    runtime = SimpleNamespace(_stable_wire_state=None)
+    _invoke(monkeypatch, copy.deepcopy(bodies[0]), runtime, meter=ForcedRelayoutMeter(max_sources=99))
+    cursor["send"] = 1
+    body = copy.deepcopy(bodies[1])
+    result, _, journal = _invoke(monkeypatch, body, runtime, meter=ForcedRelayoutMeter(max_sources=99))
+    _assert_replay_failed_open(result, body, journal, reason="envelope", recorded=queue[1][0],
+                               relayout=True)
+    # The failed-open send never became delivered state for the next send.
+    assert runtime._stable_wire_state["epoch"] == 1
+
+
+def test_replay_append_only_mismatch_fails_open_instead_of_a_silent_relayout(monkeypatch):
+    w = _relayout_windows()
+    runtime = SimpleNamespace(_stable_wire_state=None)
+    # Recording says the second send relayouted to an order no kept prefix reproduces.
+    queue = [([str(w[n]["content"]) for n in "AB"], 1),
+             ([str(w[n]["content"]) for n in "CBA"], 2)]
+    cursor = {"send": 0}
+    _replay_with(monkeypatch, lambda: queue[cursor["send"]])
+    _invoke(monkeypatch, _body([w["A"], w["B"]]), runtime)
+    cursor["send"] = 1
+    body = _body([w["A"], w["B"], w["C"]])
+    result, _, journal = _invoke(monkeypatch, body, runtime)
+    _assert_replay_failed_open(result, body, journal, reason="envelope", recorded=queue[1][0],
+                               relayout=True)
+
+
+def _structural_sends(monkeypatch, runtime, *, provider=None):
+    """First send A,B; second send changes the task text so the windows relayout structurally."""
+    w = _relayout_windows()
+    if provider is not None:
+        _replay_with(monkeypatch, provider)
+    first = _invoke(monkeypatch, _body([w["A"], w["B"]]), runtime)
+    rebased = _body([w["C"], w["B"], w["A"]])
+    rebased["messages"][1]["content"] = "Task: a structurally new task"
+    return w, first, rebased
+
+
+def test_replay_structural_relayout_checks_the_recorded_rows(monkeypatch):
+    w = _relayout_windows()
+    cursor = {"send": 0}
+    # The recording kept C ahead of A: a structural first-seen sort can never reproduce it.
+    queue = [([str(w[n]["content"]) for n in "AB"], 1),
+             ([str(w[n]["content"]) for n in "CAB"], 2)]
+    runtime = SimpleNamespace(_stable_wire_state=None)
+    _, _first, rebased = _structural_sends(monkeypatch, runtime,
+                                           provider=lambda: queue[cursor["send"]])
+    cursor["send"] = 1
+    result, _, journal = _invoke(monkeypatch, rebased, runtime)
+    assert _epochs(journal) == []  # nothing stable was sent, so no epoch was announced
+    _assert_replay_failed_open(result, rebased, journal, reason="structural",
+                               recorded=queue[1][0], relayout=True)
+
+
+def test_replay_structural_relayout_with_a_matching_recording_is_byte_exact(monkeypatch):
+    from kernel_stable_wire import recorded_window_layout
+
+    runtime = SimpleNamespace(_stable_wire_state=None)
+    _w, first, rebased = _structural_sends(monkeypatch, runtime)
+    recorded_second, _, live_journal = _invoke(monkeypatch, copy.deepcopy(rebased), runtime)
+    assert _epochs(live_journal)[0]["reason"] == "structural"
+    queue = [recorded_window_layout(first[0]["messages"]),
+             recorded_window_layout(recorded_second["messages"])]
+    cursor = {"send": 0}
+    replay_runtime = SimpleNamespace(_stable_wire_state=None)
+    _, _, replayed_rebased = _structural_sends(monkeypatch, replay_runtime,
+                                               provider=lambda: queue[cursor["send"]])
+    cursor["send"] = 1
+    replayed, _, journal = _invoke(monkeypatch, replayed_rebased, replay_runtime)
+    assert (json.dumps(replayed, sort_keys=True).encode()
+            == json.dumps(recorded_second, sort_keys=True).encode())
+    assert _epochs(journal)[0]["reason"] == "structural"
+    assert not _events(journal, "stable_wire_replay_mismatch")
+    assert not _events(journal, "stable_wire_failed_open")

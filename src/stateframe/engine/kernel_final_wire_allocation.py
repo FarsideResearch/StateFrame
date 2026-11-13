@@ -63,6 +63,24 @@ def _prepare_qualified_hook_body(context, body, request_id):
     return wire_body
 
 
+def _stable_wire_record_for_publication(candidate, body):
+    """Publish trim authority only for the stable layout that survived qualification."""
+    value = getattr(candidate, "_stable_wire_reserves_record", None)
+    if value is None:
+        return None
+    from kernel_stable_wire import recorded_window_layout
+    from kernel_stable_wire_record import validate_reserves_record
+    from kernel_request_seal import RequestSealError
+
+    layout = recorded_window_layout(body.get("messages"))
+    if layout is None:  # a later recovery discarded the optional stable projection
+        return None
+    record = validate_reserves_record(value)
+    if record["epoch"] != layout[1]:
+        raise RequestSealError("stable wire trim epoch changed before publication")
+    return record
+
+
 def _recover_post_fit_growth(candidate, context, body, fitted_body, fitted_counter,
                              fitted_inputs, fitted_delivery, *, meter, endpoint, key):
     """Fit the final transport body before its budget proof can reject growth."""
@@ -460,6 +478,7 @@ def build_qualified_request(capture, runtime, body, *, endpoint, key, deadline=N
         raise TimeoutError("request deadline expired during qualification")
     capture_updates = {
         **pending_publication(candidate, runtime),
+        "_stable_wire_reserves_record": _stable_wire_record_for_publication(candidate, body),
         **{name: copy.deepcopy(metadata[name]) for name in (
             "request_action_contract", "_request_source_closure_override",
             "request_source_final_delivery", "request_budget_final_wire", "final_tool_surface",

@@ -17,6 +17,7 @@ from stateframe.scripted_endpoint import Script, serve
 ROOT = Path(__file__).resolve().parents[1]
 pytestmark = pytest.mark.host_sandbox
 RUN_TIMEOUT_SECONDS = 600
+FRAME_PREFIX = "[StateFrame]\n"
 
 
 def _index(rows, prefix):
@@ -33,17 +34,19 @@ def _status_epoch(rows):
 
 def _assert_same_epoch_stable_messages(previous, current):
     assert _status_epoch(previous) == _status_epoch(current)
-    previous_end = _index(previous, "[StateFrame volatile]")
-    current_end = _index(current, "[StateFrame volatile]")
+    # Only messages ahead of the frame row (system, task, windows) are epoch-stable.
+    # The frame sits after the windows and may change within an epoch.
+    previous_end = _index(previous, FRAME_PREFIX)
+    current_end = _index(current, FRAME_PREFIX)
     assert len(previous[:previous_end]) <= len(current[:current_end])
     for index, message in enumerate(previous[:previous_end]):
         assert current[index] == message
 
 
 def _stable_wire_prefix(wire):
-    """Return raw request bytes through the message before the volatile frame."""
+    """Return raw request bytes through the message before the frame row."""
     rows = json.loads(wire)["messages"]
-    volatile = json.dumps(rows[_index(rows, "[StateFrame volatile]")]).encode("utf-8")
+    volatile = json.dumps(rows[_index(rows, FRAME_PREFIX)]).encode("utf-8")
     # kernel_measurement serializes the provider body with json.dumps(body).encode().
     marker = b", " + volatile
     offset = wire.find(marker)
@@ -88,7 +91,7 @@ def _change_source_window_byte(wire):
     return wire[:offset + len(marker) - 1] + replacement + wire[offset + len(marker):]
 
 
-def test_whole_message_control_detects_changed_stable_frame():
+def test_whole_message_control_allows_changed_frame_but_detects_corrupted_window():
     previous = [
         {"role": "system", "content": "system"},
         {"role": "user", "content": "Task: stable"},
@@ -100,10 +103,9 @@ def test_whole_message_control_detects_changed_stable_frame():
     current = copy.deepcopy(previous)
     _assert_same_epoch_stable_messages(previous, current)
 
-    # Planted control: one changed stable-frame byte must break whole-message equality.
+    # The frame row follows the windows, so a changed frame byte is allowed in-epoch.
     current[3]["content"] += " "
-    with pytest.raises(AssertionError):
-        _assert_same_epoch_stable_messages(previous, current)
+    _assert_same_epoch_stable_messages(previous, current)
 
     # Planted control: corrupting a delivered source window also breaks its whole message.
     current = copy.deepcopy(previous)
@@ -141,6 +143,16 @@ def test_tiny_site_scripted_run_preserves_whole_stable_messages(tmp_path):
     assert len(wires) >= 2
     wire_bytes = [path.read_bytes() for path in wires]
     requests = [json.loads(wire)["messages"] for wire in wire_bytes]
+    # The final layout is built on a detached candidate. Its trim authority must
+    # reach the published capture used by the real child recorder, not stay local.
+    sends = [json.loads(line) for line in (run / "sends.jsonl").read_text().splitlines()]
+    for path, rows, send in zip(wires, requests, sends, strict=True):
+        record = json.loads(
+            path.with_name(path.name.replace(".request.json", ".stable-wire.json")).read_bytes())
+        assert record == send["stable_wire_reserves"]
+        assert set(record) == {"reserves", "trim_count", "epoch"}
+        assert record["trim_count"] == len(record["reserves"])
+        assert record["epoch"] == _status_epoch(rows)
     host_fact_order_checked = False
     for rows in requests:
         assert sum(str(row.get("content", "")).startswith("[Source windows status]")
@@ -165,10 +177,6 @@ def test_tiny_site_scripted_run_preserves_whole_stable_messages(tmp_path):
             wire_bytes, wire_bytes[1:], requests, requests[1:]):
         previous_epoch = _status_epoch(previous)
         current_epoch = _status_epoch(current)
-        previous_frame = previous[_index(previous, "[StateFrame]\n")]["content"]
-        current_frame = current[_index(current, "[StateFrame]\n")]["content"]
-        if previous_frame != current_frame:
-            assert current_epoch == previous_epoch + 1
         if previous_epoch == current_epoch:
             _assert_same_epoch_stable_messages(previous, current)
             _assert_same_epoch_stable_wire_prefix(previous_wire, current_wire)

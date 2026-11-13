@@ -25,12 +25,31 @@ import json
 import re
 from pathlib import Path
 
+try:
+    from .engine.kernel_stable_wire_record import validate_reserves_record
+except ImportError:  # engine child imports this module by path
+    from engine.kernel_stable_wire_record import validate_reserves_record
+
 SCHEMA = "stateframe-resume/1"
 _MODEL_FIELD = b'{"model": '
 
 
 class TapeError(ValueError):
     """The recorded sends of a run cannot be trusted as a replay tape."""
+
+
+def _stable_wire_record(stem: Path, send_record: dict | None = None) -> dict[str, object]:
+    """The durable pre-transport sidecar also covers interrupted pending sends."""
+    path = stem.with_suffix(".stable-wire.json")
+    try:
+        durable = validate_reserves_record(json.loads(path.read_bytes())) if path.is_file() else None
+        completed = validate_reserves_record((send_record or {}).get("stable_wire_reserves"))
+        if durable is not None and completed is not None and durable != completed:
+            raise ValueError("stable wire records differ")
+    except (ValueError, OSError) as error:
+        raise TapeError("invalid stable wire reserves tape record") from error
+    record = durable if durable is not None else completed
+    return {"stable_wire_reserves": record} if record is not None else {}
 
 
 REFUSAL_FILE = "checkpoint-refused.json"
@@ -267,6 +286,7 @@ def build(wire_dir: Path, sends_path: Path, *, routes_required: bool = False) ->
         tape.append({"send": index, "request": str(request_path), "response": str(response_path),
                       "request_digest": normalized_digest(request),
                       "response_sha256": hashlib.sha256(response).hexdigest(),
+                      **_stable_wire_record(stem, record),
                       **({"route": route} if route is not None else {})})
     return tape
 
@@ -293,6 +313,7 @@ def pending_request(wire_dir: Path, *, routes_required: bool = False) -> dict[st
     request = stem.with_suffix(".request.json")
     return {"send": indexes[-1], "request": str(request),
             "request_digest": normalized_digest(request.read_bytes()),
+            **_stable_wire_record(stem),
             **({"route": _route_record(_route_path(wire_dir, indexes[-1]))}
                if _route_path(wire_dir, indexes[-1]).is_file() else {})}
 
@@ -319,15 +340,24 @@ class Replayer:
         self.pending_verified: dict[str, object] | None = None
         self.route_changes = list(route_changes or [])
 
-    def request_for_layout_decision(self) -> bytes | None:
-        """Return the recorded bytes for the send currently being rebuilt, without consuming it."""
+    def _layout_item(self) -> dict[str, object] | None:
         if self.diverged is not None:
             return None
         if self.active and self.cursor < len(self.tape):
-            item = self.tape[self.cursor]
+            return self.tape[self.cursor]
         elif self.pending is not None and not self.pending.get("orphan_route"):
-            item = self.pending
-        else:
+            return self.pending
+        return None
+
+    def reserves_for_layout_decision(self) -> dict[str, object] | None:
+        """Numeric trim history for the next completed or pending send, without consuming it."""
+        item = self._layout_item()
+        return validate_reserves_record(item.get("stable_wire_reserves")) if item else None
+
+    def request_for_layout_decision(self) -> bytes | None:
+        """Return the recorded bytes for the send currently being rebuilt, without consuming it."""
+        item = self._layout_item()
+        if item is None:
             return None
         request_path = item.get("request")
         if not isinstance(request_path, str) or not request_path:

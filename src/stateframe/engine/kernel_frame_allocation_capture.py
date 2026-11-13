@@ -23,6 +23,8 @@ from kernel_evictfix_mode import enabled as evictfix_enabled
 
 _TOKEN_FIT_RESERVE = 64
 _FINAL_LAYOUT_MAX_EXTRA_ALLOCATION_PASSES = 2
+# Mirrors kernel_cache_layout_candidate.MAX_STABLE_TRIMS (not imported: that module loads after this one).
+_MAX_FINAL_LAYOUT_TRIMS = 3
 # The existing 922 capture measured 2.46 serialized bytes per prompt token.
 # For ASCII JSON this is the initial character ratio; exact tokenizer pairs
 # from this run replace it as soon as they exist.
@@ -284,11 +286,16 @@ def carry_final_request_tokens(body: Mapping[str, object], capture: object,
 
 def rebind_final_layout_trim(body: Mapping[str, object], meter: object,
                              capture: object, *, byte_limit: int,
-                             token_limit: int, wire: bytes | None = None) -> tuple[int, str]:
-    """Make a trimmed canonical body the frozen base for layout and proof."""
-    tokens, method = final_request_tokens(
-        body, meter, capture, wire_bytes=(len(wire) if wire is not None else None),
-    )
+                             token_limit: int, wire: bytes | None = None,
+                             replay_selection: bool = False) -> tuple[int, str]:
+    """Rebind a trim's proof; recorded selections never ask the meter to refit."""
+    if replay_selection:
+        frozen = capture._frame_candidate_counter
+        tokens, method = frozen.tokens, frozen.method
+    else:
+        tokens, method = final_request_tokens(
+            body, meter, capture, wire_bytes=(len(wire) if wire is not None else None),
+        )
     carry_final_request_tokens(body, capture, tokens)
     capture._frame_candidate_measurement = meter.bind_measurement(
         body, tokens=tokens, method=method, request_id=str(capture.request_id),
@@ -297,10 +304,10 @@ def rebind_final_layout_trim(body: Mapping[str, object], meter: object,
     capture._frame_candidate_inputs["measurement_identity"] = method
     capture._frame_candidate_fallback_fit = method == "calibrated_bytes"
     if method == "calibrated_bytes":
-        rejection_measurement = (
+        rejection_measurement = ((tokens, method) if replay_selection else (
             _measure_source_candidate(meter, body, len(wire))
             if wire is not None else meter.measure(body)
-        )
+        ))
         capture._frame_candidate_rejection_bound = rejection_measurement[0]
     else:
         capture._frame_candidate_rejection_bound = None
@@ -562,9 +569,11 @@ def capture_candidate(
     suffix_start = exchange_start - len(suffix)
     if (suffix_start < 0 or suffix_start > exchange_start
             or list(messages[suffix_start:exchange_start]) != suffix):
-        raise FrameRequestAllocationError(
-            "newest user suffix changed during allocation"
-        )
+        # Something between capture and allocation inserted, moved or edited a
+        # row of the newest user turn. The request is unsent: re-prepare it once
+        # from the workspace (logged) instead of ending the run.
+        from kernel_frame_optional_allocation import FrameAllocationReplanNeeded
+        raise FrameAllocationReplanNeeded("newest user suffix changed during allocation")
     exchange_end = exchange_start + len(exchange)
     carrier_roles = _capture_carrier_roles(
         messages,
@@ -1600,13 +1609,29 @@ def finalize_frame_candidate(
     if layout_enabled and replay_decision != "plain":
         base_token_limit = token_ceiling
         base_byte_limit = byte_limit
-        trim_used = False
+        trim_calls = 0
 
-        def trim_for_final_layout(token_reserve: int, byte_reserve: int) -> bool:
-            nonlocal token_limit, layout_byte_ceiling, trim_used
-            if trim_used:
-                raise FrameRequestAllocationError("final layout reserve requested more than once")
-            trim_used = True
+        from kernel_stable_wire import mode as stable_wire_mode
+        stable_replay = (getattr(candidate_module, "replay_stable_wire_decision", lambda: None)()
+                         == "applied")
+        selection_enabled = stable_wire_mode() == "on" or stable_replay
+
+        def trim_for_final_layout(token_reserve: int, byte_reserve: int, *,
+                                  recorded_selection: list[dict[str, object]] | None = None) -> bool:
+            nonlocal token_limit, layout_byte_ceiling, trim_calls
+            # Stable wire re-asks with a larger running reserve when its first trim lands short.
+            # The cap equals its own bound, so a runaway caller still fails loudly.
+            if trim_calls >= _MAX_FINAL_LAYOUT_TRIMS:
+                raise FrameRequestAllocationError("final layout reserve requested too many times")
+            trim_calls += 1
+
+            before_trim = (copy.deepcopy(candidate)
+                           if selection_enabled and (not stable_replay or recorded_selection is not None)
+                           else None)
+            if recorded_selection is not None:
+                from kernel_stable_wire_selection import apply_selection
+                if not apply_selection(candidate, recorded_selection):
+                    return False
 
             if layout_reallocation_enabled:
                 from kernel_cache_layout_candidate import (
@@ -1730,7 +1755,8 @@ def finalize_frame_candidate(
             layout_byte_ceiling = target_byte_limit
             try:
                 try:
-                    trim_optional_candidate()
+                    if recorded_selection is None:
+                        trim_optional_candidate()
                     if (layout_reallocation_enabled
                             and not _final_layout_trim_reached_target(
                                 candidate, meter, capture,
@@ -1743,6 +1769,14 @@ def finalize_frame_candidate(
             finally:
                 token_limit = base_token_limit
                 layout_byte_ceiling = None
+            selection = None
+            if before_trim is not None:
+                from kernel_stable_wire_selection import removed_candidates
+                selection = removed_candidates(before_trim, candidate)
+                if selection is None:
+                    # Capacity compaction can rewrite protected history. Do not publish
+                    # row-removal authority that cannot reproduce those bytes.
+                    return False
             from kernel_request_source_window import verify_final_source_delivery, source_delivery_satisfied
             trimmed_wire = json.dumps(candidate).encode()
             trimmed_receipt = verify_final_source_delivery(
@@ -1751,12 +1785,15 @@ def finalize_frame_candidate(
                 return False
             rebind_final_layout_trim(
                 candidate, meter, capture, byte_limit=request_byte_limit(frozen_method()),
-                token_limit=base_token_limit, wire=trimmed_wire)
+                token_limit=base_token_limit, wire=trimmed_wire,
+                replay_selection=recorded_selection is not None)
+            trim_for_final_layout.selection = selection
             # source_plan already points at this owned plan and reflects the trim.
             capture._frame_candidate_inputs["receipt"] = copy.deepcopy(trimmed_receipt)
             capture.request_source_final_delivery = trimmed_receipt
             return True
 
+        trim_for_final_layout.replays_selections = selection_enabled
         capture._frame_candidate_inputs["_final_layout_trim"] = trim_for_final_layout
     capture._frame_candidate_fallback_fit = method == "calibrated_bytes"
     capture._frame_candidate_rejection_bound = (
