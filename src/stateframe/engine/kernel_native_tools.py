@@ -235,6 +235,11 @@ class NativeToolBatch:
             self.origin, self.index, self.size = capture.request_id, 0, len(calls)
             self.origin_snapshot = capture.snapshot_id
             self.expected_binding = copy.deepcopy(getattr(runtime, "prepared_binding", None))
+            # Journal host authority separately from workspace identity and wire schemas.
+            # Capacity retries may remove all mode-discriminating tool prose.
+            edit_contract = getattr(runtime, "edit_contract", None)
+            edit_mode = edit_contract.get("mode") if isinstance(edit_contract, dict) else None
+            edit_mode = edit_mode if isinstance(edit_mode, str) else "definition"
             self.frozen_tools = (copy.deepcopy(kwargs.get("tools"))
                                  if os.environ.get("STATEFRAME_EMPIRICAL_FIXES", "off") == "on"
                                  else None)
@@ -244,6 +249,7 @@ class NativeToolBatch:
             self.journal.emit('native_batch_received', request_id=self.origin,
                               origin_snapshot_id=self.origin_snapshot,
                               origin_binding=self.expected_binding,
+                              edit_authority_mode=edit_mode,
                               calls=calls, batch_size=self.size,
                               execution='ordered', history='normalized_assistant_tool_pairs', **self._lineage())
         if self.expected_binding is not None:

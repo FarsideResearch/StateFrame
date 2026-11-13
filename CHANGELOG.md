@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Fixed: when a model response batches several whole-file `edit` calls to different files, the second and later calls are no longer refused with `prefix result differs from exact declared replacement`. The batch proof now replays an `edit` under whole-file authority as the complete-file replacement the executor actually wrote, including files with several top-level definitions; definition-level authority keeps the single-definition replay. Host journal metadata preserves the mode through capacity retries, and empty or whitespace-only replacements follow the executor's acceptance rules.
+
 ## 0.6.33 (2026-11-14)
 
 - Fixed: grep no longer claims a symbol is absent after a search with no hits, while retaining positive definition locations. Empty results identify the pattern, scope and search mode, including when `|` was matched literally; regex searches keep matching alternatives by default.
