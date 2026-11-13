@@ -1,8 +1,9 @@
 # Changelog
 
-## Unreleased
+## 0.5.18 (2026-11-12)
 
 - The environment seed digest is cached on disk under the StateFrame cache directory, keyed by the source root, entry count, total size and newest mtime/ctime, so unchanged environments skip the full content hash on every run; any file change recomputes it and the post-copy integrity check still hashes in full.
+
 ## 0.5.17 (2026-11-12)
 
 - Fixed: the empty-file fix announced in 0.5.13 was missing from that release's code; it is included now. Runs on repositories with empty source files no longer stop when they outgrow the request cap.
