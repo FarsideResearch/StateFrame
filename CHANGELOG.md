@@ -1,5 +1,7 @@
 # Changelog
 
+## Unreleased
+
 ## 0.6.5 (2026-11-13)
 
 - Checkpoint saves walk the environment tree with one stat per unchanged file instead of three (about 2.7x faster on a 9,000-file tree), and files that changed since the previous checkpoint go into a per-run content-addressed store under `checkpoints/env-objects` that snapshots hard-link and that is pruned when no checkpoint references an object. Saves were already limited to one per new model send; resume output is unchanged and is now covered by a SIGKILL replay test.
