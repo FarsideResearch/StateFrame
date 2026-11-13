@@ -1,5 +1,7 @@
 # Changelog
 
+## Unreleased
+
 ## 0.6.4 (2026-11-13)
 
 - Replay and checkpoint refusals now explain that this version cannot replay the recording and tell you to start a fresh run, including in the final CLI summary and JSON output.
