@@ -157,12 +157,12 @@ def test_checkpoint_request_mismatch_refuses_with_operation_tape(tmp_path, monke
     monkeypatch.setattr(kernel_bounded_http, "request_bytes", lambda *_args, **_kwargs: b"unused")
     _child.install_wire_recorder(run, "http://127.0.0.1:1/v1/chat/completions",
                                  replay_tape.Replayer(tape))
-    with pytest.raises(live_tool_tape.ToolReplayRefused):
+    with pytest.raises(replay_tape.ReplayUnfaithful):
         kernel_bounded_http.request_bytes(recorded.replace(b"a" * 32, b"b" * 32),
                                           "http://127.0.0.1:1/v1/chat/completions", "")
 
 
-def test_full_replay_pending_mismatch_refuses_before_live_send(tmp_path, monkeypatch):
+def test_full_replay_pending_mismatch_sends_live(tmp_path, monkeypatch):
     import kernel_bounded_http
 
     recorded = b'{"model": "scripted", "task": "original"}'
@@ -174,14 +174,88 @@ def test_full_replay_pending_mismatch_refuses_before_live_send(tmp_path, monkeyp
     live_calls = []
     monkeypatch.setattr(_child, "HOST_STATE", dict(_child.HOST_STATE))
     monkeypatch.setattr(kernel_bounded_http, "request_bytes",
+                        lambda wire, *_args, **_kwargs: live_calls.append(wire) or b'{"choices":[{}]}')
+    _child.install_wire_recorder(tmp_path, "http://127.0.0.1:1/v1/chat/completions", player)
+    rebuilt = recorded.replace(b"original", b"different")
+    assert kernel_bounded_http.request_bytes(
+        rebuilt, "http://127.0.0.1:1/v1/chat/completions", "") == b'{"choices":[{}]}'
+    assert live_calls == [rebuilt]
+    assert json.loads((tmp_path / "resume-divergence.json").read_text())["checkpoint"] is False
+
+
+def test_full_replay_discards_divergent_unanswered_request_and_sends_live(
+        tmp_path, monkeypatch, capsys):
+    import kernel_bounded_http
+    from kernel_measurement import ACTIVE_REQUEST
+
+    recorded = b'{"model": "scripted", "task": "original"}'
+    request = tmp_path / "old-request.json"
+    response = tmp_path / "old-response.json"
+    request.write_bytes(recorded)
+    response.write_bytes(b'{"choices":[{}]}')
+    rebuilt = recorded.replace(b"original", b"different")
+    player = replay_tape.Replayer([{
+        "send": 1, "request": str(request), "response": str(response),
+        "response_sha256": hashlib.sha256(response.read_bytes()).hexdigest(),
+    }], pending={"send": 2, "request": str(request)})
+    live_calls = []
+
+    def physical(wire, endpoint, key, **kwargs):
+        live_calls.append(wire)
+        return b'{"choices":[{}]}'
+
+    monkeypatch.setattr(_child, "HOST_STATE", dict(_child.HOST_STATE))
+    monkeypatch.setattr(kernel_bounded_http, "request_bytes", physical)
+    _child.install_wire_recorder(tmp_path, "http://127.0.0.1:1/v1/chat/completions", player)
+    events = []
+    journal = types.SimpleNamespace(emit=lambda kind, **fields: events.append((kind, fields)))
+    token = ACTIVE_REQUEST.set(types.SimpleNamespace(journal=journal))
+    try:
+        assert kernel_bounded_http.request_bytes(
+            recorded, "http://127.0.0.1:1/v1/chat/completions", "") == response.read_bytes()
+        assert kernel_bounded_http.request_bytes(
+            rebuilt, "http://127.0.0.1:1/v1/chat/completions", "") == b'{"choices":[{}]}'
+    finally:
+        ACTIVE_REQUEST.reset(token)
+    assert live_calls == [rebuilt]
+    assert player.pending is None and player.pending_mismatch
+    divergence = json.loads((tmp_path / "resume-divergence.json").read_text())
+    assert divergence["recorded_send"] == 2 and divergence["checkpoint"] is False
+    assert events == [("replay_pending_discarded", {
+        "send": 2, "tape_position": 2, "tape_total": 1,
+        "recorded_send": 2,
+        "recorded_digest": replay_tape.normalized_digest(recorded),
+        "replayed_digest": replay_tape.normalized_digest(rebuilt),
+        "reason": "the engine's rebuilt request differs from the request in flight when the attempt stopped",
+    })]
+    assert any('"kind":"replay_pending_discarded"' in line
+               for line in capsys.readouterr().out.splitlines())
+
+
+def test_full_replay_completed_request_mismatch_refuses_before_live_send(tmp_path, monkeypatch):
+    import kernel_bounded_http
+
+    recorded = b'{"model": "scripted", "task": "original"}'
+    request = tmp_path / "old-request.json"
+    response = tmp_path / "old-response.json"
+    request.write_bytes(recorded)
+    response.write_bytes(b'{"choices":[{}]}')
+    player = replay_tape.Replayer([{
+        "send": 1, "request": str(request), "response": str(response),
+        "response_sha256": hashlib.sha256(response.read_bytes()).hexdigest(),
+    }])
+    live_calls = []
+    monkeypatch.setattr(_child, "HOST_STATE", dict(_child.HOST_STATE))
+    monkeypatch.setattr(kernel_bounded_http, "request_bytes",
                         lambda *_args, **_kwargs: live_calls.append(True))
     _child.install_wire_recorder(tmp_path, "http://127.0.0.1:1/v1/chat/completions", player)
-    with pytest.raises(replay_tape.ReplayUnfaithful, match="request in flight"):
+
+    with pytest.raises(replay_tape.ReplayUnfaithful, match="recorded request"):
         kernel_bounded_http.request_bytes(
             recorded.replace(b"original", b"different"),
             "http://127.0.0.1:1/v1/chat/completions", "")
     assert not live_calls
-    assert json.loads((tmp_path / "resume-divergence.json").read_text())["checkpoint"] is False
+    assert player.cursor == 0
 
 
 def test_tokenizer_fallback_does_not_advance_journal_position():

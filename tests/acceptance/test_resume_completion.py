@@ -275,7 +275,7 @@ def test_checkpoint_off_on_resume_skips_restore_and_later_saves(tmp_path, monkey
     assert '"kind":"checkpoint_verified"' not in (run_dir / "engine.log").read_text()
 
 
-def test_checkpoint_hex_mismatch_refuses_after_fallback(tmp_path, monkeypatch):
+def test_checkpoint_hex_mismatch_continues_after_fallback(tmp_path, monkeypatch):
     monkeypatch.setenv("STATEFRAME_CHECKPOINT", "save")
     original_hex = "a" * 32
     task = f"Set app.py VALUE to after and verify it. Reference {original_hex}."
@@ -293,12 +293,15 @@ def test_checkpoint_hex_mismatch_refuses_after_fallback(tmp_path, monkeypatch):
     finally:
         endpoint.terminate()
         endpoint.wait(timeout=scaled(5))
-    assert resumed.returncode != 0, resumed.stdout + resumed.stderr
+    assert resumed.returncode == 0, resumed.stdout + resumed.stderr
     spec = json.loads((run_dir / "spec.json").read_text())
     assert "CheckpointUnfaithful" in spec["resume"]["checkpoint_refused"]
     assert (run_dir / "attempts" / "2" / "checkpoint-refused.json").is_file()
-    assert "ReplayUnfaithful" in (run_dir / "engine.log").read_text()
-    assert json.loads((run_dir / "summary.json").read_text())["succeeded"] is False
+    assert '"kind":"replay_pending_discarded"' in (run_dir / "engine.log").read_text()
+    summary = json.loads((run_dir / "summary.json").read_text())
+    assert summary["succeeded"] is True
+    assert summary["resume"]["replayed"] == 2
+    assert summary["resume"]["went_live_at_recorded_exchange"] == 3
 
 
 def test_e23_full_network_shell_requires_replay_external(tmp_path):

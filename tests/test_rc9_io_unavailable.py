@@ -26,12 +26,13 @@ def _journal():
     return SimpleNamespace(emit=lambda kind, **fields: events.append((kind, fields))), events
 
 
-def _gap(value, events, code, producer):
+def _gap(value, events, code, producer, *, sub_reason=None):
     assert isinstance(value, UnavailableEvidence)
     assert value.reason_code == code
-    assert events == [("host_obligation_evidence_failure", {
-        "producer": producer, "dispatch": False, "reason_code": code,
-    })]
+    fields = {"producer": producer, "dispatch": False, "reason_code": code}
+    if sub_reason is not None:
+        fields["sub_reason"] = sub_reason
+    assert events == [("host_obligation_evidence_failure", fields)]
 
 
 def _raises(error):
@@ -241,7 +242,44 @@ def test_planted_live_green_lock_binding_lookup_gap(failure):
 
     result = green_lock._current_binding(runtime)
 
-    _gap(result, events, "GREEN_LOCK_BINDING_UNAVAILABLE", "kernel_green_lock")
+    _gap(result, events, "GREEN_LOCK_BINDING_UNAVAILABLE", "kernel_green_lock",
+         sub_reason=type(failure).__name__)
+
+
+@pytest.mark.parametrize("failure", [OSError("private path"), ValueError("private content")])
+def test_green_lock_binding_error_records_only_bounded_class(failure):
+    journal, events = _journal()
+    runtime = SimpleNamespace(binding=_raises(failure), journal=journal)
+
+    result = green_lock._current_binding(runtime)
+
+    _gap(result, events, "GREEN_LOCK_BINDING_UNAVAILABLE", "kernel_green_lock",
+         sub_reason=type(failure).__name__)
+    assert "private" not in str(events)
+
+
+def test_green_lock_binding_error_identifies_uninitialized_runtime():
+    journal, events = _journal()
+    failure = AttributeError("private path", name="_binding_cache")
+    runtime = SimpleNamespace(binding=_raises(failure), journal=journal)
+
+    result = green_lock._current_binding(runtime)
+
+    _gap(result, events, "GREEN_LOCK_BINDING_UNAVAILABLE", "kernel_green_lock",
+         sub_reason="runtime_not_initialized")
+    assert "private" not in str(events)
+
+
+def test_green_lock_binding_error_bounds_custom_class_name():
+    journal, events = _journal()
+    error_type = type("B" * 100, (OSError,), {})
+    runtime = SimpleNamespace(binding=_raises(error_type("private path")), journal=journal)
+
+    result = green_lock._current_binding(runtime)
+
+    _gap(result, events, "GREEN_LOCK_BINDING_UNAVAILABLE", "kernel_green_lock",
+         sub_reason="B" * 64)
+    assert "private" not in str(events)
 
 
 def test_green_lock_fact_never_claims_green_when_binding_is_unavailable():

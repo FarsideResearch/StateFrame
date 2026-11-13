@@ -107,6 +107,34 @@ def _fixture_row(tmp_path: pathlib.Path, task_id: str) -> dict[str, object]:
     )
 
 
+@pytest.mark.parametrize("projector", ["legacy", "rich"])
+def test_green_lock_captures_starting_binding_without_startup_gap(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+    projector: str,
+) -> None:
+    monkeypatch.setenv("STATEFRAME_GREEN_LOCK", "terminal")
+    monkeypatch.setenv("STATEFRAME_PROJECTOR", projector)
+    starting_bindings: list[object] = []
+    current_bindings: list[object] = []
+
+    def capture_runtime(runtime: object) -> None:
+        starting_bindings.append(runtime.green_lock._starting_binding)
+        current_bindings.append(runtime.binding())
+
+    _body, events, _requests, _run_dir = _run_to_first_request(
+        tmp_path, monkeypatch, task_id=f"green-lock-startup-{projector}",
+        runtime_mutator=capture_runtime,
+    )
+
+    assert len(starting_bindings) == 1
+    assert isinstance(starting_bindings[0], dict)
+    assert starting_bindings[0] == current_bindings[0]
+    assert str(starting_bindings[0].get("artifact", "")).startswith("sha256:")
+    assert not [event for event in events
+                if event.get("kind") == "host_obligation_evidence_failure"]
+
+
 def _run_to_first_request(
     tmp_path: pathlib.Path,
     monkeypatch: pytest.MonkeyPatch,

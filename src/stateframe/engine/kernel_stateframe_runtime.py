@@ -5456,11 +5456,13 @@ class StateFrameRuntime:
             if self.stateframe_work_carry_mode == "on":
                 self._sync_work_carry({}, self._target_relative(),
                                       frame_authoritative=False)
-        self.green_lock = GreenLock(self, mode=self.green_lock_mode)
-        if self.stateframe_green_lock_repair_mode == "on":
-            from kernel_green_lock_repair import RepairController
-            self.repair_receipts: list[dict] = []
-            self.green_lock_repair = RepairController(self)
+        # Workspace binding is immutable between host writes for a given
+        # command/write-set pair. Several post-green decisions ask for it
+        # repeatedly in one dispatch; cache only behind this runtime's write
+        # epoch so an admitted edit always forces a fresh binding.
+        self._binding_epoch = 0
+        self._binding_cache: dict[str, object] | None = None
+        self._workspace_snapshot_cache: dict[tuple[str, str], dict[str, str | None]] = {}
         self.post_edit_tracker = (
             PostEditTracker(Path(owner.root))
             if self.post_edit_checks_mode == "on" or self.frame_edit_integrity_mode == "on"
@@ -5502,13 +5504,14 @@ class StateFrameRuntime:
         self.retained = (RetainedContext(owner, self.journal, scope=self.context_scope)
                          if retain_context else None)
         self.retained_evidence = []
-        # Workspace binding is immutable between host writes for a given
-        # command/write-set pair.  Several post-green decisions ask for it
-        # repeatedly in one dispatch; cache only behind this runtime's write
-        # epoch so an admitted edit always forces a fresh binding.
-        self._binding_epoch = 0
-        self._binding_cache: dict[str, object] | None = None
-        self._workspace_snapshot_cache: dict[tuple[str, str], dict[str, str | None]] = {}
+        # GreenLock captures the starting binding at construction, so it is
+        # built only after the information policy and contexts that the
+        # binding's identity fields read are in place.
+        self.green_lock = GreenLock(self, mode=self.green_lock_mode)
+        if self.stateframe_green_lock_repair_mode == "on":
+            from kernel_green_lock_repair import RepairController
+            self.repair_receipts: list[dict] = []
+            self.green_lock_repair = RepairController(self)
         self._retained_binding = self.binding() if self.retained is not None else None
         owner.audit_journal = self.journal
         owner.run_id = self.journal.run_id

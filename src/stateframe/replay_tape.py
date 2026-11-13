@@ -12,10 +12,9 @@ for byte.
 A resume that continues under another model NAME (``stateframe resume --model``: the same weights served
 under a different name) also compares with the request's leading top-level ``model`` value set back to
 the recorded one; that field and nothing else.
-On a completed exchange mismatch replay stops and the run continues live from that point: frame-only
-means the current frame is the whole state, so a faithful prefix is always a valid place to continue
-from. The request that was in flight when the attempt stopped is checked separately; a mismatch there
-refuses the resume before any live send.
+A completed exchange mismatch refuses replay before its recorded response can be used. The request
+that was in flight when the attempt stopped is checked separately; if it differs, the unanswered
+record is discarded and the rebuilt request is sent live.
 
 Imported by the runner as ``stateframe.replay_tape`` and by the engine child by file path.
 """
@@ -47,7 +46,7 @@ class CheckpointUnfaithful(BaseException):
 
 
 class ReplayUnfaithful(BaseException):
-    """A full replay rebuilt its in-flight request differently; refuse before a live send."""
+    """A full replay rebuilt a completed request differently; refuse before a live send."""
 
 
 _TEXT_RUN_ID = re.compile(r"(?<![0-9a-f])[0-9a-f]{32}(?![0-9a-f])")
