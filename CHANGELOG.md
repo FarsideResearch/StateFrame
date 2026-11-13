@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.5.13 (2026-11-12)
+
+- Fixed: runs on repositories with empty source files (any language, with or without a parser installed, in LEAN mode too) no longer stop partway through with `final cache layout source proof failed` once a request outgrows its byte cap; an empty file is proven by its revision alone, is never put on the deferred-read list, and a file emptied by an edit mid-run is handled the same way.
+
 ## 0.5.12 (2026-11-12)
 
 - Fixed: a run that finished on its first green host check could crash at the finish line with `TypeError: Object of type CheckReceipt is not JSON serializable`. Host check receipts now enter the pass-gate and request evidence digests in their journaled form; digests of runs without host receipts are unchanged.
