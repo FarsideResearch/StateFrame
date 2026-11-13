@@ -6,6 +6,7 @@
 - Added an opt-in existence check that reports imports and uses of repo symbols an edit left pointing at nothing, including importers of a renamed or deleted definition, off by default behind `STATEFRAME_CROSSFILE_EXISTENCE_CHECK` and not yet called by the engine.
 - Opt-in with `STATEFRAME_SEAM_RECALL=on`: cross-file seam checks can follow a local variable to its class through a shared cross-file index, so a renamed field is caught even when the consumer never names the class. Off by default; nothing calls it yet.
 - Opt-in with `STATEFRAME_UNIT_PLAN_V2=on`: multi-unit build tasks get a unit plan ordered by real provider-to-consumer references (not test co-occurrence), covering every project file the tests import and merging mutually dependent symbols into one joint unit. The current-unit pointer moves on only after the unit's tests and the cross-file seam check pass. Falls back to the old planner when no cross-file index is available. Off by default.
+- Added an opt-in signature check that reports callers an edit left inconsistent with a changed function signature (added required parameter, removed or renamed parameter, positional made keyword-only) and stays quiet for callers that still fit, off by default behind `STATEFRAME_CROSSFILE_SIGNATURE_CHECK` and not yet called by the engine.
 
 ## 0.6.22 (2026-11-13)
 

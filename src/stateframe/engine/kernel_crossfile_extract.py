@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import ast
 from dataclasses import dataclass, field
-from typing import Iterable
+from typing import Iterable, Mapping
 
 MODULE_SCOPE = "<module>"
 _FUNCS = (ast.FunctionDef, ast.AsyncFunctionDef)
@@ -89,6 +89,7 @@ class FileFacts:
     imports: tuple[Import, ...]
     scopes: tuple[Scope, ...]
     refs: tuple[RawRef, ...]
+    decorators: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
 
 
 def _signature(fn: ast.FunctionDef | ast.AsyncFunctionDef, drop_first: bool = False) -> Signature:
@@ -104,6 +105,18 @@ def _signature(fn: ast.FunctionDef | ast.AsyncFunctionDef, drop_first: bool = Fa
                 del params[i]
                 break
     return Signature(tuple(params), a.vararg.arg if a.vararg else None, a.kwarg.arg if a.kwarg else None)
+
+
+def _decorated(stmts: Iterable[ast.stmt], prefix: str, out: dict[str, tuple[str, ...]]) -> None:
+    """qualname -> decorator expressions as written, for decorated defs/classes (a decorator may
+    change the call shape, so callers of these cannot be judged from the signature alone)."""
+    for s in _flat(stmts):
+        if isinstance(s, _DEFS):
+            decs = tuple(t for t in (_unparse(d) for d in s.decorator_list) if t)
+            if decs:
+                out[prefix + s.name] = decs
+            if isinstance(s, ast.ClassDef):
+                _decorated(s.body, f"{prefix}{s.name}.", out)
 
 
 def _flat(stmts: Iterable[ast.stmt]) -> Iterable[ast.stmt]:
@@ -410,10 +423,12 @@ def extract_facts(source: str, *, defs_only: bool = False) -> FileFacts:
     tree = ast.parse(source)
     defs: list[Def] = []
     _collect_defs(tree.body, "", False, defs)
+    decs: dict[str, tuple[str, ...]] = {}
+    _decorated(tree.body, "", decs)
     iv = _ImportVisitor()
     iv.visit(tree)
     if defs_only:
-        return FileFacts(tuple(defs), tuple(iv.imports), (), ())
+        return FileFacts(tuple(defs), tuple(iv.imports), (), (), decs)
     ex = _Extractor(tree)
     ex.visit(tree)
-    return FileFacts(tuple(defs), tuple(iv.imports), tuple(ex.scopes), tuple(ex.refs))
+    return FileFacts(tuple(defs), tuple(iv.imports), tuple(ex.scopes), tuple(ex.refs), decs)
