@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Changed the shipped r2hc3 profile default: terminal lattice is now ON; lost/wrong terminal fields fell from 17 to 0 over n=10 writer sequences, with 9/9 CLI solves unchanged and identical request bytes.
+
 ## 0.6.25 (2026-11-14)
 
 - Experimental opt-in `STATEFRAME_UNIT_COALESCE=on` (requires `STATEFRAME_UNIT_PLAN_V2=on`): merge failed producer/consumer seams with bounded pooled repair attempts, retain fresh named gate evidence and passed-unit progress, and stop retries after merged-unit escalation. Off by default pending live A/B validation.
