@@ -1,11 +1,12 @@
 # Changelog
 
-## Unreleased
+## 0.6.1 (2026-11-13)
 
 - Keep recorded stable-wire trims intact after checkpoint restore so repeated resumes rebuild the same request even when token estimates change.
 - Rebuild stable-wire initial allocations from recorded candidate selections so replay preserves request bytes when tokenizer counts change.
 - Preserve faithfully rebuilt stable-wire requests during replay qualification even when the replay tokenizer reports a larger request.
 - Keep source-marker lookalikes as ordinary request content and cover frame order and replay safety with regression tests.
+
 ## 0.6.0 (2026-11-13)
 
 - Fixed: with `STATEFRAME_STABLE_WIRE=on`, a request whose newest user message sat just before the tool result could end the run with "newest user suffix changed during allocation". The stable-wire projection moved that message into the cached prefix, ahead of the source windows. Only the stable preface (system, task and anything before the first window) stays in the cached prefix now; every later per-request message keeps its recorded order after the cache boundary, and the canonical view restores it before the frame. A projection whose canonical view would still reorder messages falls back to the plain wire with the reason `projection_reorders_messages` on the `stable_wire_failed_open` event, and a changed newest user turn re-prepares the request once instead of ending the run.
