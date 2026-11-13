@@ -1,7 +1,8 @@
 # Changelog
 
-## Unreleased
+## 0.5.17 (2026-11-12)
 
+- Fixed: the empty-file fix announced in 0.5.13 was missing from that release's code; it is included now. Runs on repositories with empty source files no longer stop when they outgrow the request cap.
 
 ## 0.5.16 (2026-11-12)
 
