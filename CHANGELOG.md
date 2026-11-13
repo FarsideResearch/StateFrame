@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.5.12 (2026-11-12)
 
 - Fixed: a run that finished on its first green host check could crash at the finish line with `TypeError: Object of type CheckReceipt is not JSON serializable`. Host check receipts now enter the pass-gate and request evidence digests in their journaled form; digests of runs without host receipts are unchanged.
 
