@@ -7,6 +7,7 @@ import contextvars
 import copy
 import functools
 import hashlib
+import heapq
 import http.client
 import json
 import math
@@ -21,6 +22,7 @@ import urllib.parse
 import urllib.request
 import uuid
 import zlib
+from collections import deque
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -1288,16 +1290,24 @@ class TurnTimingRecorder:
             "tool_execution": 0, "prepare_subphases": 1, "menu_composition": 2,
             "contracts": 3, "budget_diet": 4, "journal_io": 5,
         }
+        starts: dict[int, list[tuple[int, int, str, int, int]]] = {}
+        for index, (name, start, end) in enumerate(clipped):
+            bucket = _turn_timing_bucket(name)
+            # The index preserves min()'s first-row tie behavior.
+            starts.setdefault(start, []).append(
+                (-priority[bucket], end - start, name, index, end)
+            )
+        active: list[tuple[int, int, str, int, int]] = []
         for left, right in zip(ordered, ordered[1:]):
             if right <= left:
                 continue
-            active = [row for row in clipped if row[1] <= left and row[2] >= right]
+            for row in starts.get(left, ()):
+                heapq.heappush(active, row)
+            # Expired rows can stay below a better live row until they reach the top.
+            while active and active[0][4] <= left:
+                heapq.heappop(active)
             if active:
-                name, _start, _end = min(
-                    active,
-                    key=lambda row: (-priority[_turn_timing_bucket(row[0])],
-                                     row[2] - row[1], row[0]),
-                )
+                name = active[0][2]
                 bucket = _turn_timing_bucket(name)
             else:
                 name, bucket = "tool_execution", "tool_execution"
@@ -1372,8 +1382,8 @@ class HostSpanRecorder:
 
     def __init__(self, *, limit: int = 4096) -> None:
         self.limit = max(1, int(limit))
-        self._spans: list[HostSpan] = []
-        self._trace_spans: list[dict[str, object]] = []
+        self._spans: deque[HostSpan] = deque()
+        self._trace_spans: deque[dict[str, object]] = deque()
         self._trace_parent_ids: dict[str, str | None] = {}
         self._trace_names: dict[str, str] = {}
         self._trace_request_ids: dict[str, str | None] = {}
@@ -1539,7 +1549,7 @@ class HostSpanRecorder:
             }
             with self._lock:
                 if len(self._trace_spans) >= self.limit:
-                    self._trace_spans.pop(0)
+                    self._trace_spans.popleft()
                 self._trace_spans.append(row)
                 self._trace_request_ids.pop(handle.span_id, None)
                 # Ancestor lookups walk only ACTIVE spans (whose ancestors are still open),
@@ -1552,10 +1562,15 @@ class HostSpanRecorder:
             pass
         finally:
             active_stack = _ACTIVE_HOST_SPAN_STACK.get()
-            _ACTIVE_HOST_SPAN_STACK.set(tuple(
-                item for item in active_stack
-                if not (item[0] is self and item[1] == handle.span_id)
-            ))
+            # Span IDs are unique within a recorder; the common LIFO close needs no scan.
+            if (active_stack and active_stack[-1][0] is self
+                    and active_stack[-1][1] == handle.span_id):
+                _ACTIVE_HOST_SPAN_STACK.set(active_stack[:-1])
+            else:
+                _ACTIVE_HOST_SPAN_STACK.set(tuple(
+                    item for item in active_stack
+                    if not (item[0] is self and item[1] == handle.span_id)
+                ))
 
     def find_active_ancestor(self, name: str) -> str | None:
         active_stack = _ACTIVE_HOST_SPAN_STACK.get()
@@ -1632,7 +1647,7 @@ class HostSpanRecorder:
         )
         with self._lock:
             if len(self._spans) >= self.limit:
-                self._spans.pop(0)
+                self._spans.popleft()
             self._spans.append(span)
         profile = _ACTIVE_HOST_SPAN_PROFILE.get()
         if profile is not None and profile.recorder is self:

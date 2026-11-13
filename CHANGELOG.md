@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.5.11 (2026-11-12)
+
+- Turn timing now attributes overlapping spans with a sweep-line, preserving the existing timing event and host span output while avoiding quadratic work as span counts grow.
+
 ## 0.5.10 (2026-11-12)
 
 - Resumed runs now retry a changed, unanswered request live and record why it was discarded, while refusing to replay a completed response for a changed request.
