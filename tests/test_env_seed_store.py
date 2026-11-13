@@ -218,3 +218,40 @@ def test_source_digest_is_framed_and_sees_content_mode_links_and_names(tmp_path)
         change()
         seen.add(kernel_env_seed._source_digest(root))
     assert len(seen) == 6
+
+
+def test_second_clone_skips_source_digest_and_keys_identically(tmp_path, monkeypatch):
+    source = _source(tmp_path)
+    calls = []
+    real = kernel_env_seed._source_digest
+    monkeypatch.setattr(kernel_env_seed, "_source_digest",
+                        lambda root: calls.append(root) or real(root))
+    first = kernel_env_seed.clone(source, tmp_path / "run1", source / "bin/python", None, ())
+    after_first = len(calls)
+    assert after_first >= 1
+    # Seed already built: the second run must not walk the source again.
+    second = kernel_env_seed.clone(source, tmp_path / "run2", source / "bin/python", None, ())
+    assert len(calls) == after_first
+    assert second == first
+    assert (second / "seed.json").read_bytes() == (first / "seed.json").read_bytes()
+
+
+def test_source_digest_cache_recomputes_when_a_file_changes(tmp_path, monkeypatch):
+    source = _source(tmp_path)
+    cache = tmp_path / "cache" / "digest.json"
+    calls = []
+    real = kernel_env_seed._source_digest
+    monkeypatch.setattr(kernel_env_seed, "_source_digest",
+                        lambda root: calls.append(root) or real(root))
+    before = kernel_env_seed._cached_source_digest(source, cache)
+    assert kernel_env_seed._cached_source_digest(source, cache) == before
+    assert len(calls) == 1
+    module = source / "lib/python3.11/site-packages/demo.py"
+    module.write_text("value = 2\n")
+    after = kernel_env_seed._cached_source_digest(source, cache)
+    assert len(calls) == 2 and after != before
+    # Same-size edit is still seen (mtime/ctime move).
+    module.write_text("value = 3\n")
+    assert kernel_env_seed._cached_source_digest(source, cache) != after
+    assert len(calls) == 3
+    assert not list(cache.parent.glob("*.tmp"))
