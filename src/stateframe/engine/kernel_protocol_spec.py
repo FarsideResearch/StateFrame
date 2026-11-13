@@ -597,6 +597,10 @@ def _event_rows() -> list[dict[str, object]]:
             "read_budget_admitted", "HOST_OBSERVED", "governed_read_admission",
             "kernel_idle_governor.IdleGovernor.should_allow",
         ),
+        "read_recovery_admitted": EventRef(
+            "read_recovery_admitted", "HOST_OBSERVED", "governed_read_recovery",
+            "kernel_idle_governor.IdleGovernor.should_allow",
+        ),
         "read_reuse_visibility_checked": EventRef(
             "read_reuse_visibility_checked", "HOST_OBSERVED", "serialized_source_visibility",
             "kernel_measurement.RequestCapture.send",

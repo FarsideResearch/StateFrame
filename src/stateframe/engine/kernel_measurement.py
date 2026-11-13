@@ -97,6 +97,21 @@ def _serialize_final_request_body(
     return wire
 
 
+def _remember_last_wire_messages(capture: object, messages: object) -> None:
+    """Keep the last request's final messages so the read budget can tell recovery
+    (content no longer shown) from a duplicate (content still in the request)."""
+    from kernel_pilot import ACTIVE_RUNTIME
+    for target in (capture, getattr(capture, "_wire_truth_runtime", None),
+                   getattr(capture, "completion_owner_runtime", None),
+                   ACTIVE_RUNTIME.get()):
+        if target is None:
+            continue
+        try:
+            setattr(target, "_last_wire_messages_for_reads", messages)
+        except (AttributeError, TypeError):
+            continue
+
+
 def _emit_scope_turns_final_wire_events(
         journal: object, wire: bytes, parsed_messages: object, *,
         runtime: object | None, request_id: str | None, submission_event_id: str,
@@ -3540,6 +3555,7 @@ class RequestCapture:
             self._guard_retry_submission(attempt, attempt_reasons)
             final_wire_body = json.loads(wire)
             self._evictfix_final_wire_messages = final_wire_body.get("messages", ())
+            _remember_last_wire_messages(self, self._evictfix_final_wire_messages)
             self.journal.emit(
                 "request_final_wire_prepared",
                 producer="kernel_measurement",

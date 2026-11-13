@@ -199,6 +199,104 @@ def _visible_in_messages(messages: Sequence[Mapping[str, object]] | None,
     return False
 
 
+def _source_interval(value: object) -> tuple[tuple[int, int], tuple[int, int]] | None:
+    """Half-open source coordinates, preserving clipped boundary columns."""
+    if not isinstance(value, Mapping):
+        return None
+    start, end = value.get("start_line"), value.get("end_line")
+    first, last = value.get("start_column", 0), value.get("end_column")
+    if (type(start) is not int or type(end) is not int or not 1 <= start <= end
+            or type(first) is not int or first < 0
+            or (last is not None and (type(last) is not int or last < 0))):
+        return None
+    lo, hi = (start, first), ((end + 1, 0) if last is None else (end, last))
+    return (lo, hi) if lo < hi else None
+
+
+def _visible_read_page(content: object) -> Mapping[str, object] | None:
+    """Parse the host page's source extent, excluding trailing annotations."""
+    from kernel_request_source_window import _READ_PAGE_HEADER
+    if not isinstance(content, str):
+        return None
+    header, separator, rest = content.partition("\n")
+    more, body_separator, body = rest.partition("\n")
+    match = _READ_PAGE_HEADER.fullmatch(header.removesuffix("\r"))
+    if not separator or not body_separator or match is None:
+        return None
+    fields = match.groupdict()
+    start, end, total, first, last, chars, size = (
+        int(fields[key]) for key in
+        ("start", "end", "total", "start_column", "end_column", "chars", "bytes"))
+    exact = body[:chars]
+    lines = exact.splitlines(keepends=True)
+    if (fields["replaced"] != "false" or not chars or len(exact) != chars
+            or len(exact.encode("utf-8")) != size or not 1 <= start <= end <= total
+            or int(fields["effective_start"]) != start or int(fields["effective_end"]) != end
+            or more.startswith("READ_CURSOR_STALE") or len(lines) != end - start + 1
+            or last != len(lines[-1]) + (first if start == end else 0)):
+        return None
+    return {"path": fields["path"], "revision": fields["revision"],
+            "start_line": start, "end_line": end,
+            "start_column": first, "end_column": None if exact.endswith("\n") else last}
+
+
+def read_span_visible(
+        messages: Sequence[Mapping[str, object]] | None, path: str,
+        delivery: Mapping[str, object] | None, observation: object = None,
+) -> bool | None:
+    """Whether a read's span is currently shown in the last request wire.
+
+    True: revision-bound source windows or host read pages cover the span.
+    False: the wire is known and does not show it (evicted, folded, deferred).
+    None: unknown (no wire snapshot, no usable range) so callers keep legacy handling.
+    """
+    if messages is None or not path:
+        return None
+    from kernel_request_source_window import parse_model_source_window, verify_model_source_window
+    wanted = path.replace("\\", "/").strip().removeprefix("./")
+    effective = delivery.get("effective_range") if isinstance(delivery, Mapping) else None
+    revision = delivery.get("revision") if isinstance(delivery, Mapping) else None
+    requested = _source_interval(effective)
+    spans: list[tuple[tuple[int, int], tuple[int, int]]] = []
+    for message in messages:
+        content = message.get("content") if isinstance(message, Mapping) else None
+        meta = parse_model_source_window(content)
+        rows: list[object] = []
+        if isinstance(meta, Mapping):
+            if (meta.get("absence") != "NONE"
+                    or not verify_model_source_window(content, path=str(meta.get("path", "")))):
+                continue
+            rows.extend(meta.get("ranges", ()))
+            if meta.get("status") == "PARTIAL_READ":
+                rows.append(meta.get("partial_read"))
+        elif isinstance(message, Mapping) and message.get("role") == "tool":
+            meta = _visible_read_page(content)
+            if meta is not None:
+                rows.append(meta)
+        if not isinstance(meta, Mapping):
+            continue
+        if str(meta.get("path", "")).replace("\\", "/").strip().removeprefix("./") != wanted:
+            continue
+        if not isinstance(revision, str) or meta.get("revision") != revision:
+            continue
+        for row in rows:
+            interval = _source_interval(row)
+            if interval is not None:
+                spans.append(interval)
+    if requested is not None:
+        cursor, end = requested
+        for lo, hi in sorted(spans):
+            if lo <= cursor <= hi:
+                cursor = hi
+            if cursor >= end:
+                return True
+        return False
+    if (isinstance(observation, str) and len(observation) >= 16
+            and _visible_in_messages(messages, observation)):
+        return True
+    return None
+
+
 def _unchanged_request_number(
         measurement: object, page: Mapping[str, object] | None,
         args: Mapping[str, object], start: int) -> int | None:

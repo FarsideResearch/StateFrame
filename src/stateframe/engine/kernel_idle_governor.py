@@ -261,6 +261,7 @@ class IdleGovernor:
         self._warnings = 0
         self._denials = 0
         self._resets = 0
+        self._recovery_reads = 0
         self._read_paths: set[str] = set()
         self._trace: list[dict[str, object]] = []
         self._last_receipt: IdleDecisionReceipt | None = None
@@ -289,6 +290,11 @@ class IdleGovernor:
     @property
     def resets(self) -> int:
         return self._resets
+
+    @property
+    def recovery_reads(self) -> int:
+        """Reads of content not currently shown; exempt from the budget."""
+        return self._recovery_reads
 
     @property
     def last_warning(self) -> str | None:
@@ -391,6 +397,17 @@ class IdleGovernor:
             novelty_escape = read_key not in self._read_paths
         exempt = bool(action.get("exempt")) if isinstance(action, Mapping) else False
 
+        # A read of a path/span that is NOT currently in the request is recovery, not
+        # waste: the model cannot act on bytes it cannot see. It is never refused under
+        # any budget state, never spends the budget, and is counted separately.
+        # ``visible`` is None when the caller could not determine visibility (legacy
+        # behavior applies); only an explicit False selects recovery.
+        if (kind == "read" and isinstance(action, Mapping)
+                and action.get("visible") is False):
+            self._recovery_reads += 1
+            self._remember_read(read_key)
+            return GovernorDecision.ALLOW, "IDLE_RECOVERY", "", novelty_escape
+
         self._consecutive_non_product += 1
         if self._mode is GovernorMode.GOVERNED:
             if exempt and kind == "read":
@@ -478,6 +495,7 @@ class IdleGovernor:
             "n1": self.n1,
             "n2": self.n2,
             **self.census(),
+            **({"recovery_reads": self._recovery_reads} if self._recovery_reads else {}),
         }
 
 
@@ -494,7 +512,8 @@ CENSUS_SPEC = OrganCensusSpec(
     organ_id="idle_governor",
     trigger=_idle_governor_trigger,
     fire_events=frozenset({"IDLE_WARNING", "IDLE_DENIED", "IDLE_GOVERNED"}),
-    suppression_events=frozenset({"IDLE_ALLOWED", "IDLE_NOVELTY_ESCAPE", "IDLE_RESET"}),
+    suppression_events=frozenset({"IDLE_ALLOWED", "IDLE_NOVELTY_ESCAPE", "IDLE_RESET",
+                                "IDLE_RECOVERY"}),
     dedup_events=frozenset(),
     challenge_once_events=frozenset({"IDLE_WARNING"}),
 )

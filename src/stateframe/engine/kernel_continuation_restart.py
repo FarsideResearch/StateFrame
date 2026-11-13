@@ -617,7 +617,7 @@ DOCUMENTED_REJECT: dict[str, str] = {
         qualified_request_sealed question_answered r44_blocks_rendered raising_h_packet_rendered
         read_budget_admitted read_contract_fired read_lockout_decision read_once_final_fired read_once_fired
         read_once_note_queued read_once_wire_note_reconciled read_pointer_edit_menu_armed
-        read_pointer_edit_menu_fired read_pointer_fired read_pointer_inline_fired read_repeat_assessed
+        read_pointer_edit_menu_fired read_pointer_fired read_pointer_inline_fired read_recovery_admitted read_repeat_assessed
         read_reuse_source_snapshot_reconciled read_reuse_visibility_checked readiness_decision
         readiness_done_refused readiness_menu_projected readiness_submit_committed readiness_submit_deferred
         readiness_submit_refused reasoning_ledger_state recall_requested red_terminal_suppressed
