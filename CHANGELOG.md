@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Fixed: with `--timeout`, the engine now stops its model loop a finalize reserve (10% of the limit, at most 120 s) before the run deadline, so it can seal and export its result instead of being killed at the same instant.
+
 ## 0.6.9 (2026-11-13)
 
 - Resuming a run that did not use stable wire no longer reports an unfaithful resume after a file was moved or deleted. Replay treated every recorded request as a stable-wire fallback, which skipped source-window ordering, so the first request built live after replay listed its source windows in a different order from the one that was in flight.

@@ -212,17 +212,34 @@ def _remaining(options: RunOptions) -> float:
 
 
 # The engine stops its model loop at its own wall, then seals, stores and exports the submission.
-# Killing the child at that same instant discarded a sealed, stored submission (one long run:
-# done_submission_stored at 1775.7 s, killed during export). The hard kill therefore allows a
-# finalization grace past the engine wall, still bounded by the absolute run deadline.
+# That wall used to equal the run deadline, so the hard kill (and SIGALRM) landed at the same
+# instant and the engine never got to finalize (no engine_end, no engine-result.json). The engine
+# wall is now the run deadline minus a finalize reserve, and the hard kill stays at the run
+# deadline: the reserve is the window in which the engine seals and exports.
 ENGINE_FINALIZE_GRACE_S = 120.0
 
 
+def _finalize_reserve(budget_s: float) -> float:
+    # Scales with the budget (10%, at most 120 s) so tiny limits stay tight.
+    return min(ENGINE_FINALIZE_GRACE_S, 0.1 * max(0.0, budget_s))
+
+
 def _kill_deadline(engine_deadline: float, run_deadline: float | None, budget_s: float) -> float:
-    # Grace scales with the engine budget (10%, at most 120 s) so tiny limits stay tight.
-    grace = min(ENGINE_FINALIZE_GRACE_S, 0.1 * max(0.0, budget_s))
-    return min(engine_deadline + grace,
+    return min(engine_deadline + _finalize_reserve(budget_s),
                run_deadline if run_deadline is not None else math.inf)
+
+
+def _engine_wall(now: float, remaining: float, run_deadline: float | None) -> tuple[float, float]:
+    """Return (engine_deadline, kill_at) as monotonic times; both infinite when no limit is set.
+
+    engine_deadline = run deadline - finalize reserve; kill_at is the run deadline. Single source
+    for the engine wall env, the attempt deadline and the watchdog so they cannot drift.
+    """
+    if not math.isfinite(remaining):
+        return math.inf, math.inf
+    run_end = min(now + remaining, run_deadline if run_deadline is not None else math.inf)
+    engine_deadline = run_end - _finalize_reserve(remaining)
+    return engine_deadline, _kill_deadline(engine_deadline, run_end, remaining)
 
 
 @contextmanager
@@ -1918,6 +1935,9 @@ def drive(run: Path, options: RunOptions, printer=print) -> int:
     """Start the engine child and stream its progress lines."""
     _validate_timeout(options.timeout_s)
     remaining = _remaining(options)
+    now = time.monotonic()
+    engine_deadline, kill_at = _engine_wall(now, remaining, options._deadline)
+    engine_budget = max(0.0, engine_deadline - now)  # inf when no limit
     spec_path = run / "spec.json"
     if spec_path.exists():
         spec = json.loads(spec_path.read_text())
@@ -1925,7 +1945,7 @@ def drive(run: Path, options: RunOptions, printer=print) -> int:
         sources = spec.setdefault("environment_sources", {})
         # No engine wall unless the user set a run limit: the engine reads an unset wall as no deadline.
         if math.isfinite(remaining):
-            environment["STATEFRAME_RUN_WALL_SECONDS"] = str(remaining)
+            environment["STATEFRAME_RUN_WALL_SECONDS"] = str(engine_budget)
             sources["STATEFRAME_RUN_WALL_SECONDS"] = "wrapper:run-deadline"
         else:
             environment.pop("STATEFRAME_RUN_WALL_SECONDS", None)
@@ -1945,11 +1965,9 @@ def drive(run: Path, options: RunOptions, printer=print) -> int:
                              ("STATEFRAME_PER_REQUEST_TIMEOUT_S", 600)):
             limit = float(environment.get(key, default))
             _validate_timeout(limit)
-            environment[key] = str(min(limit, remaining))
+            environment[key] = str(min(limit, engine_budget))
             if math.isfinite(remaining):
                 sources[key] = "wrapper:run-deadline"
-    engine_deadline = min(time.monotonic() + remaining,
-                          options._deadline if options._deadline is not None else math.inf)
     if spec_path.exists():
         # react_repair reads this absolute deadline before constructing its
         # continuation budget, avoiding a fresh allowance after child startup.
@@ -2011,7 +2029,6 @@ def drive(run: Path, options: RunOptions, printer=print) -> int:
             _stop_group(process)
 
         # A silent, hung engine must still be stopped, so the limit is a timer, not a line check.
-        kill_at = _kill_deadline(engine_deadline, options._deadline, remaining)
         watchdog = (threading.Timer(max(0, kill_at - time.monotonic()), on_timeout)
                     if math.isfinite(kill_at) else None)  # no limit set: no watchdog kill
         try:
