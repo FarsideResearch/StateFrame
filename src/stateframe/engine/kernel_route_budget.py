@@ -5,7 +5,8 @@ import json
 import os
 from collections.abc import Mapping, Sequence
 
-MODE_ENV = "STATEFRAME_ROUTE_BUDGET"
+MODE_ENV = "STATEFRAME_ROUTEBUDGET_MODE"
+LEGACY_ERROR = f"STATEFRAME_ROUTE_BUDGET was renamed to {MODE_ENV}; remove the old setting"
 START = "[STATEFRAME recovery view]"
 END = "[/STATEFRAME recovery view]"
 
@@ -14,7 +15,13 @@ def enabled() -> bool:
     return mode() == "on"
 
 
+def refuse_legacy_switch(environ: Mapping[str, object]) -> None:
+    if "STATEFRAME_ROUTE_BUDGET" in environ:
+        raise ValueError(LEGACY_ERROR)
+
+
 def mode() -> str:
+    refuse_legacy_switch(os.environ)
     value = os.environ.get(MODE_ENV, "off").strip().lower()
     if value not in {"off", "on"}:
         raise ValueError(f"{MODE_ENV} must be off or on")
@@ -122,4 +129,5 @@ def filter_menu(runtime: object, tools: list[dict]) -> list[dict]:
     return filtered
 
 
-__all__ = ["END", "MODE_ENV", "START", "enabled", "filter_menu", "mode", "render"]
+__all__ = ["END", "LEGACY_ERROR", "MODE_ENV", "START", "enabled", "filter_menu", "mode",
+           "refuse_legacy_switch", "render"]

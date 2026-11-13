@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Fixed: the profile switch `STATEFRAME_ROUTE_BUDGET` is renamed to `STATEFRAME_ROUTEBUDGET_MODE`, because the old name sat inside the `STATEFRAME_ROUTE_` namespace used for per-role model settings and crashed the CLI when the shipped profile's switches were exported. Set the new name in a profile; the old name is refused with a message naming the replacement.
+
 ## 0.6.19 (2026-11-13)
 
 - Test results now say how many of the task's declared checks a run covered (the denominator is the task declaration, coverage is counted from the selectors that actually executed and refused selectors never count). A run that covers only part of the declaration is reported as a partial pass everywhere: the delivered result, the test action receipt, the frame and automatic verification agree, `done` is not suggested, no green fact is recorded, and the flag survives a continuation restart.

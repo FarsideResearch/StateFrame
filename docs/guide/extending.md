@@ -21,6 +21,8 @@ Also register its admission, receipt and completion contracts so the tool surviv
 
 Read the switch in engine code with a literal name, for example `os.environ.get("STATEFRAME_MY_SWITCH", "off")`, in a file listed in the engine's `release-manifest.json` (`src/stateframe/engine/release-manifest.json`; add your new module there). The switch registry finds readers by reading the source, so a name built at run time is not seen. Then set it in a profile.
 
+Keep engine switch names outside namespaces consumed by other parsers, such as `STATEFRAME_ROUTE_` for per-role model settings. The registry namespace test derives these prefixes from parser source and checks every registered switch, honoring the parser's explicit metadata exemptions. The recovery-view switch uses `STATEFRAME_ROUTEBUDGET_MODE` in the profile to avoid that namespace.
+
 ## Configure lifecycle hooks
 
 Hooks are user configuration, not new model-callable engine tools. Use `stateframe-hooks/1` definitions for run events, project trust, sandbox capabilities, formatter write scope and replay behavior. Start with the [hooks guide](hooks.md) and the working files under `examples/hooks/`. Changes to the hook engine itself belong in `kernel_hooks.py`, `kernel_hook_exec.py`, `kernel_hook_driver.py` or `kernel_hook_wiring.py`; add tests for every changed boundary and update both engine manifests for new modules.

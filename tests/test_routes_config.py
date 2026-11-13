@@ -1,9 +1,11 @@
 """Route source precedence, validation, and public spec contracts."""
 import json
+from types import SimpleNamespace
 
 import pytest
 
-from stateframe import routes
+from stateframe import profiles, routes
+from stateframe.engine import kernel_route_budget as route_budget
 
 
 DEFAULT = {"endpoint": "http://127.0.0.1:8080/v1", "model": "base", "api_key_env": None,
@@ -13,6 +15,63 @@ DEFAULT = {"endpoint": "http://127.0.0.1:8080/v1", "model": "base", "api_key_env
 
 def resolve(**kwargs):
     return routes.resolve(DEFAULT, environ={}, **kwargs)
+
+
+def test_exported_product_profile_switches_do_not_activate_routes():
+    switches = profiles.load("r2hc3")
+    assert routes.resolve(DEFAULT, environ=switches) == resolve()
+
+
+@pytest.mark.parametrize("value", ["on", "off", ""])
+@pytest.mark.parametrize("replacement", [False, True])
+def test_legacy_route_budget_environment_is_refused(value, replacement):
+    environment = {"STATEFRAME_ROUTE_BUDGET": value}
+    if replacement:
+        environment["STATEFRAME_ROUTEBUDGET_MODE"] = "on"
+    with pytest.raises(routes.RouteError, match="STATEFRAME_ROUTE_BUDGET.*STATEFRAME_ROUTEBUDGET_MODE"):
+        routes.resolve(DEFAULT, environ=environment)
+
+
+def test_legacy_route_budget_profile_is_refused(tmp_path):
+    path = tmp_path / "legacy.json"
+    path.write_text(json.dumps({"schema": "stateframe-product-profile/1",
+                                "switches": {"STATEFRAME_ROUTE_BUDGET": "on"}}))
+    with pytest.raises(ValueError, match="STATEFRAME_ROUTE_BUDGET.*STATEFRAME_ROUTEBUDGET_MODE"):
+        profiles.load(str(path))
+
+
+@pytest.mark.parametrize("value", ["on", "off", ""])
+@pytest.mark.parametrize("replacement", [False, True])
+def test_legacy_route_budget_engine_setting_is_refused(monkeypatch, value, replacement):
+    monkeypatch.setenv("STATEFRAME_ROUTE_BUDGET", value)
+    monkeypatch.delenv("STATEFRAME_ROUTEBUDGET_MODE", raising=False)
+    if replacement:
+        monkeypatch.setenv("STATEFRAME_ROUTEBUDGET_MODE", "on")
+    with pytest.raises(ValueError, match="STATEFRAME_ROUTE_BUDGET.*STATEFRAME_ROUTEBUDGET_MODE"):
+        route_budget.mode()
+
+
+@pytest.mark.parametrize("value,enabled", [(None, False), ("off", False), (" ON ", True)])
+def test_renamed_route_budget_preserves_rendered_bytes(monkeypatch, value, enabled):
+    monkeypatch.delenv("STATEFRAME_ROUTE_BUDGET", raising=False)
+    monkeypatch.delenv("STATEFRAME_ROUTEBUDGET_MODE", raising=False)
+    if value is not None:
+        monkeypatch.setenv("STATEFRAME_ROUTEBUDGET_MODE", value)
+    runtime = SimpleNamespace(probe_remaining=2, completion_menu=("read", "probe"))
+    rendered = route_budget.render(runtime, SimpleNamespace(outcome="continue"), [])
+    expected = ('[STATEFRAME recovery view]\n'
+                '{"completion_outcome":"continue","denied_routes":[],"failed_routes":[],'
+                '"next_action":"read","offered_routes":["probe","read"],'
+                '"probe_budget":{"count":null,"limit":null,"remaining":2}}\n'
+                '[/STATEFRAME recovery view]')
+    assert rendered.encode("utf-8") == (expected.encode("utf-8") if enabled else b"")
+
+
+def test_renamed_route_budget_rejects_invalid_mode(monkeypatch):
+    monkeypatch.delenv("STATEFRAME_ROUTE_BUDGET", raising=False)
+    monkeypatch.setenv("STATEFRAME_ROUTEBUDGET_MODE", "invalid")
+    with pytest.raises(ValueError, match="STATEFRAME_ROUTEBUDGET_MODE must be off or on"):
+        route_budget.mode()
 
 
 def test_sources_merge_per_field_and_digest_ignores_source(tmp_path):
