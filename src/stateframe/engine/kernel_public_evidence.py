@@ -206,3 +206,158 @@ def materialized_public_check_paths(root: Path, row: dict) -> list[str] | None:
         if source.is_symlink() or not source.resolve().is_relative_to(root) or not source.is_file():
             raise ValueError(f'declared public check is absent or unsafe in workspace: {path}')
     return declared
+
+
+# --- scoped public-check truth -------------------------------------------------
+# A run_tests call that covers only some of the declared public selectors must not read
+# as "ALL TESTS PASSED" or invite `done`: the host admits done only when every declared
+# selector is green.  These helpers are pure so every renderer (model-facing result, action
+# ledger, frame, automatic verification) shares one definition, and the definition of
+# "covers" is done admission's own (kernel_verdict._covers): exact selector identity, a
+# file never stands in for a node and a node never stands in for its file.
+
+PARTIAL_PASS = "PARTIAL_PASS"
+
+
+def _selector_covers(ran: str, declared: str) -> bool:
+    from kernel_verdict import _covers
+    return _covers(ran.strip(), declared.strip())
+
+
+def declared_task_selectors(row: Mapping[str, object] | None, f2p_ids: Sequence[object],
+                            fallback: Sequence[object] = ()) -> list[str]:
+    """The task's declared public selectors: the denominator of every coverage statement.
+
+    A generic runner declares exactly its `@check` command.  Otherwise the task row's
+    failing-to-passing ids are the declaration; ``fallback`` (the active acceptance scope)
+    is used only when the task declares nothing, never to shrink the denominator.
+    """
+    if isinstance(row, Mapping) and row.get("runner_kind") == "generic":
+        if not row.get("test_command"):
+            return []
+        from kernel_generic_check import CHECK_ID
+        return [CHECK_ID]
+    out: list[str] = []
+    for source in (f2p_ids, fallback):
+        for item in source or ():
+            text = str(item).strip()
+            if text and text not in out:
+                out.append(text)
+        if out:
+            break
+    return out
+
+
+def executed_selectors(selectors: Sequence[object], codes: Sequence[object],
+                       row: Mapping[str, object] | None = None) -> list[str]:
+    """Selectors whose subprocess actually completed with an exit code.
+
+    A refused or unrun selector (``None`` / negative code) never counts as executed, so it
+    can never establish completeness.  A generic runner's identity is its `@check` command,
+    whatever target text the model requested.
+    """
+    if isinstance(row, Mapping) and row.get("runner_kind") == "generic":
+        from kernel_generic_check import CHECK_ID
+        return [CHECK_ID] if any(type(c) is int and c >= 0 for c in codes) else []
+    out: list[str] = []
+    for selector, code in zip(selectors, codes):
+        text = str(selector).strip()
+        if text and type(code) is int and code >= 0 and text not in out:
+            out.append(text)
+    return out
+
+
+def uncovered_public_selectors(declared: Sequence[str], ran: Sequence[str]) -> list[str]:
+    """Declared public selectors that no selector in ``ran`` covers, in declared order."""
+    ran_list = [str(item) for item in ran]
+    out: list[str] = []
+    for item in declared:
+        text = str(item).strip()
+        if text and text not in out and not any(_selector_covers(r, text) for r in ran_list):
+            out.append(text)
+    return out
+
+
+def scoped_check_complete(declared: Sequence[str], ran: Sequence[str]) -> bool:
+    """True when nothing is declared or the run covered every declared selector."""
+    return not uncovered_public_selectors(declared, ran)
+
+
+def scoped_result_class(result_class: str, complete: bool) -> str:
+    """An exit-0 run that covered only part of the declaration is PARTIAL_PASS, not GREEN."""
+    return PARTIAL_PASS if result_class == "GREEN" and not complete else result_class
+
+
+def _clip(text: str, limit: int = 60) -> str:
+    return text if len(text) <= limit else text[: limit - 3] + "..."
+
+
+def render_scoped_check_truth(declared: Sequence[str], ran: Sequence[str],
+                              outcomes: Mapping[str, int | None] | None = None,
+                              exit_code: int | None = None, max_listed: int = 5) -> str | None:
+    """One line saying how much of the required check set this run covered.
+
+    Returns None when the run covered every declared selector (callers then keep the
+    original text).  ``outcomes`` maps ran selector -> its exit code when known.
+    """
+    missing = uncovered_public_selectors(declared, ran)
+    if not missing:
+        return None
+    total = len({str(item).strip() for item in declared if str(item).strip()})
+    ran_list = [str(item) for item in ran if str(item).strip()]
+    covered = total - len(missing)
+    codes = dict(outcomes or {})
+    if not codes and ran_list and exit_code is not None:
+        codes = {item: exit_code for item in ran_list}
+    failed = [s for s in ran_list if codes.get(s) not in (0, None)]
+    passed = [s for s in ran_list if codes.get(s) == 0]
+    listed = ", ".join(_clip(item) for item in missing[:max_listed])
+    if len(missing) > max_listed:
+        listed += f", +{len(missing) - max_listed} more"
+    head: str
+    if failed:
+        head = (f"FAIL {', '.join(_clip(s) for s in failed[:max_listed])}"
+                + (f"; PASS {len(passed)}" if passed else ""))
+    elif passed:
+        head = f"PASS {', '.join(_clip(s) for s in passed[:max_listed])}"
+    elif ran_list:
+        head = f"RAN {', '.join(_clip(s) for s in ran_list[:max_listed])} (no pass verdict)"
+    else:
+        head = "NO required selector completed"
+    noun = "selector" if len(missing) == 1 else "selectors"
+    return (f"[kernel] {head} ({covered} of {total} required selectors); "
+            f"{len(missing)} required {noun} not run: {listed}. "
+            "This is a partial check, not a full pass.")
+
+
+def scoped_pass_ratio(declared: Sequence[str], ran: Sequence[str]) -> tuple[int, int] | None:
+    """(covered, total) required selectors when ``ran`` is a partial cover, else None."""
+    total = len({str(item).strip() for item in declared if str(item).strip()})
+    missing = uncovered_public_selectors(declared, ran)
+    return (total - len(missing), total) if missing and total else None
+
+
+def project_scoped_run(declared: Sequence[str], selectors: Sequence[object],
+                       codes: Sequence[object], row: Mapping[str, object] | None = None,
+                       ) -> tuple[str | None, bool]:
+    """(truth line, scope_complete) for one run from its structured per-selector exit codes.
+
+    Complete (None, True) when nothing is declared or every declared selector executed.
+    Refused selectors are not executed, so a refusal can never complete the scope.
+    """
+    declared_list = [str(item).strip() for item in declared if str(item).strip()]
+    if not declared_list:
+        return None, True
+    ran = executed_selectors(selectors, codes, row)
+    if scoped_check_complete(declared_list, ran):
+        return None, True
+    outcomes = {s: c for s, c in zip((str(x).strip() for x in selectors), codes)
+                if type(c) is int and c >= 0}
+    if isinstance(row, Mapping) and row.get("runner_kind") == "generic" and ran:
+        outcomes = {ran[0]: next(c for c in codes if type(c) is int and c >= 0)}
+    return render_scoped_check_truth(declared_list, ran, outcomes), False
+
+
+def render_scoped_delivery(observation: str, truth_line: str) -> str:
+    """Model-facing text for a partial run: no all-pass claim, plus the covered/required line."""
+    return observation.replace("ALL TESTS PASSED.", "PASSED (partial check).") + "\n" + truth_line

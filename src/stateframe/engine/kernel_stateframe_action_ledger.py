@@ -484,15 +484,21 @@ def _test_fact(
         or re.search(r"PYTEST EXIT [1-9]\d*", upper) is not None
         or "TESTS FAILED" in upper
     )
-    if not passed and not failed:
+    partial = re.search(r"\((\d+) of (\d+) required selectors\)", result_text)
+    if not passed and not failed and partial is None:
         return None
-    return {
+    fact: dict[str, object] = {
         "kind": "test",
         "call_ids": [call_id],
         "target": target_text,
         "verdict": "GREEN" if passed else "RED",
         "revision": candidate_revision,
     }
+    if partial is not None:
+        # A scoped run is never a green fact; keep the covered/required ratio instead.
+        fact["required_selectors"] = f"{partial.group(1)}/{partial.group(2)}"
+        fact["verdict"] = "RED" if failed else "PARTIAL_PASS"
+    return fact
 
 
 def _turn_groups(
@@ -670,7 +676,7 @@ def _prior_ledger(value: object) -> dict[str, object]:
                 not isinstance(target, str)
                 or not target.strip()
                 or not isinstance(row.get("verdict"), str)
-                or row["verdict"] not in {"GREEN", "RED"}
+                or row["verdict"] not in {"GREEN", "RED", "PARTIAL_PASS"}
                 or not isinstance(revision, str)
                 or re.fullmatch(r"sha256:[0-9a-f]{64}", revision) is None
             ):

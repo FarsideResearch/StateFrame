@@ -618,7 +618,7 @@ _EXPECTED_RESULT_CLASSES = {
     **{tool: {"RECALLED", "RECALL_REJECTED"}
        for tool in ("recall", "recall_evidence", "recall_generated_artifact")},
     "read_check_receipt": {"HOST_OBSERVED", "NOT_FOUND", "REJECTED", "ERROR", "OUT_OF_RANGE"},
-    "run_tests": {"GREEN", "RED", "FAIL_WITH_WITNESS", "HARNESS_ERROR",
+    "run_tests": {"GREEN", "PARTIAL_PASS", "RED", "FAIL_WITH_WITNESS", "HARNESS_ERROR",
                   "REFUSED_PREDISPATCH",
                   "SELECTOR_ERROR", "NO_TESTS", "NO_VERDICT", "REUSED_VERIFICATION",
                   "UNSUPPORTED_ACTION"},

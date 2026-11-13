@@ -43,6 +43,9 @@ RUN_TEST_RESULT_CLASSES_BY_EXIT = {
 }
 RUN_TEST_RESULT_CLASSES = {
     "GREEN": "settled_applied",
+    # Exit 0 that covered only part of the task's declared selectors: the effect settled
+    # and applied, but it is not a task-wide green.
+    "PARTIAL_PASS": "settled_applied",
     "RED": "settled_applied",
     "FAIL_WITH_WITNESS": "settled_applied",
     "HARNESS_ERROR": "settled_not_applied",
@@ -737,7 +740,8 @@ class HostEvidence:
                     # explicit ERROR/OUT_OF_RANGE clause above remains the
                     # auditable read/search path and must not be removed.
                     status = "not_applied"
-                elif effect.tool == "run_tests" and result in {"GREEN", "RED", "FAIL_WITH_WITNESS"}:
+                elif effect.tool == "run_tests" and result in {
+                        "GREEN", "PARTIAL_PASS", "RED", "FAIL_WITH_WITNESS"}:
                     tests = [test for test in self.scan_rows()
                              if test["kind"] == "test_subprocess_completed"
                              and test.get("producer") == "test_subprocess"
@@ -757,7 +761,8 @@ class HostEvidence:
                         # subprocess has completed.  That is a failed audit
                         # observation, not an unclosed execution: the test
                         # effect still settled and may be revalidated.
-                        if result == "FAIL_WITH_WITNESS" or green == (result == "GREEN"):
+                        if (result == "FAIL_WITH_WITNESS"
+                                or green == (result in {"GREEN", "PARTIAL_PASS"})):
                             status = "applied"
                             try:
                                 from kernel_green_evidence_owner import (
@@ -768,7 +773,7 @@ class HostEvidence:
                             if _owner_enabled is not None and _owner_enabled():
                                 record_fresh_test()
                     elif (
-                        result in {"GREEN", "RED"}
+                        result in {"GREEN", "PARTIAL_PASS", "RED"}
                         and receipt_confirms_result
                         and record.get("before_binding") == current
                         and record.get("after_binding") == current

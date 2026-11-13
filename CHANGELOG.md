@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Test results now say how many of the task's declared checks a run covered (the denominator is the task declaration, coverage is counted from the selectors that actually executed and refused selectors never count). A run that covers only part of the declaration is reported as a partial pass everywhere: the delivered result, the test action receipt, the frame and automatic verification agree, `done` is not suggested, no green fact is recorded, and the flag survives a continuation restart.
+
 ## 0.6.18 (2026-11-13)
 
 - A run that reads without editing or checking now gets one directive nudge after 35 turns (was step 100, which arrived after the time budget was spent) that names how many files it read, the most re-read files, and the required check to work toward; set `STATEFRAME_ZERO_PROGRESS_NUDGE_STEP` to change the step. Runs that already edited or checked never see it.
