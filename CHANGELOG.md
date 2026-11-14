@@ -1,8 +1,9 @@
 # Changelog
 
-## Unreleased
+## 0.6.25 (2026-11-14)
 
 - Experimental opt-in `STATEFRAME_UNIT_COALESCE=on` (requires `STATEFRAME_UNIT_PLAN_V2=on`): merge failed producer/consumer seams with bounded pooled repair attempts, retain fresh named gate evidence and passed-unit progress, and stop retries after merged-unit escalation. Off by default pending live A/B validation.
+- Tests: request-path helpers may not shadow random API names; the planner v2 preview helper is renamed accordingly (request bytes unchanged).
 
 ## 0.6.24 (2026-11-14)
 
