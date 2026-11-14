@@ -207,9 +207,12 @@ _ANSWER_FIELDS: dict[str, tuple[str, ...]] = {
         "candidate_revision", "rows", "regression_refs", "wrong_repair_control",
         "quality_check_refs", "risk_dispositions",
     ),
+    # The final verification answer asks for evidence first; the ``outcome`` enum is deliberately last so
+    # a grammar-constrained model cannot commit to the verdict before the
+    # evidence fields (properties and ``required`` both keep this order).
     "S7": (
-        "outcome", "artifact_ref", "changes", "verification_refs",
-        "unresolved_row_ids", "residual_risks", "limitations",
+        "artifact_ref", "changes", "verification_refs",
+        "unresolved_row_ids", "residual_risks", "limitations", "outcome",
     ),
 }
 
@@ -227,6 +230,9 @@ def _answer_schema(stage: str) -> dict[str, object]:
     optional = _OPTIONAL_ANSWER_FIELDS.get(stage, ())
     properties = {field: _field_schema(field) for field in (*fields, *optional)}
     if stage == "S7":
+        # Pop and re-insert so the enum is the final emitted property, after
+        # the optional ``finish_proposal`` as well as the required evidence.
+        properties.pop("outcome")
         properties["outcome"] = {
             "type": "string",
             "enum": ["VERIFIED_FIXED", "NOT_REPRODUCED", "INCOMPLETE"],
