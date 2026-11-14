@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import copy
 import json
+from types import SimpleNamespace
 
 from kernel_continuation_restart import WorkerResumeError
 from kernel_native_tools import MAX_BATCH_CALLS
@@ -151,9 +152,39 @@ def prepare_restore(runtime, saved: dict, records: list[dict], boundary: dict) -
             "pending queue lacks its expected binding")
     if result["pending"] and runtime.journal.manifest.get("stateframe_empirical_fixes") == "on":
         raise WorkerResumeError("native frozen menu replay requires reconciliation")
+    if result["pending"]:
+        _restore_read_wire(runtime, result, records)
     runtime.resume_native_state = result
     runtime.resume_native_binding = copy.deepcopy(saved["binding"])
     return bool(received)
+
+
+def _restore_read_wire(runtime, state: dict, records: list[dict]) -> None:
+    """Restore visibility from the selected response's exact submitted attempt."""
+    from kernel_continuation_state import ContinuationError
+    from kernel_native_prefix_delivery import submitted_payload
+
+    def event(reference, kind):
+        matches = [row for row in records
+                   if row.get("event_id") == reference and row.get("kind") == kind]
+        require(len(matches) == 1, "missing or duplicate originating " + kind)
+        return matches[0]
+
+    response = event(state["origin_response_event_id"], "response_received")
+    submitted = event(response.get("transport_attempt_id"), "request_submitted")
+    require(response.get("request_id") == submitted.get("request_id") == state["origin"]
+            and submitted.get("snapshot_id") == state["origin_snapshot"]
+            and submitted["sequence"] < response["sequence"], "foreign originating wire")
+    try:
+        payload = submitted_payload(SimpleNamespace(event=event), submitted)
+    except ContinuationError as error:
+        raise WorkerResumeError("invalid native originating wire: " + str(error)) from error
+    messages = payload.get("messages")
+    require(isinstance(messages, list) and all(isinstance(row, dict) for row in messages),
+            "originating wire lacks messages")
+    # Bind only the resumed owner. An unrelated active request must not acquire
+    # this old snapshot; the next physical send replaces it normally.
+    runtime._last_wire_messages_for_reads = copy.deepcopy(messages)
 
 
 def restore_batch(runtime) -> None:

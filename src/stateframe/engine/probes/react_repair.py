@@ -1836,6 +1836,47 @@ def _read_edit_source(path: pathlib.Path, verb: str) -> tuple[str, str | None]:
                     "if the task requires it.")
 
 
+def _read_span_currently_visible(measurement: object, root: object, p: object,
+                                 delivery: object, observation: object) -> bool | None:
+    """Visibility of a just-dispatched read's span in the last request wire (None=unknown)."""
+    if not isinstance(delivery, dict):
+        return None
+    if "delivery_status" in delivery:
+        byte_count = delivery.get("requested_bytes_delivered")
+        if (delivery["delivery_status"] != "DELIVERED"
+                or type(byte_count) is not int or byte_count <= 0):
+            return None
+    else:
+        # Legacy requested-byte mode omits delivery counters. Only an actual
+        # nonempty host page, never a reuse stub or error, can recover there.
+        from kernel_read_exec import _visible_read_page
+        page = _visible_read_page(observation)
+        if page is None or page.get("revision") != delivery.get("revision"):
+            return None
+    candidates: list[object] = [measurement]
+    try:
+        from kernel_pilot import ACTIVE_RUNTIME
+        candidates.insert(0, ACTIVE_RUNTIME.get())
+    except (ImportError, LookupError):
+        pass
+    for name in ("presentation_runtime", "completion_owner_runtime"):
+        candidates.append(getattr(measurement, name, None))
+    messages = None
+    for candidate in candidates:
+        messages = getattr(candidate, "_last_wire_messages_for_reads", None)
+        if messages is not None:
+            break
+    if messages is None:
+        return None
+    try:
+        from kernel_read_exec import read_span_visible
+        relative = p.resolve().relative_to(root.resolve()).as_posix()  # type: ignore[attr-defined]
+        return read_span_visible(
+            messages, relative, delivery if isinstance(delivery, dict) else None, observation)
+    except (ImportError, AttributeError, OSError, ValueError, TypeError):
+        return None
+
+
 def _read_path_is_deferred_required(measurement: object, path: str) -> bool:
     """True when the live request told the model this path's source is missing.
 
@@ -13113,12 +13154,27 @@ def work(d, *, resume=None):
                                     str(obs).encode("utf-8", "replace")).hexdigest()[:32]
                             _gaction["exempt"] = _read_path_is_deferred_required(
                                 measurement, _gpath)
+                            # Recovery: a span that is not in the request the model just
+                            # saw is never refused (see IdleGovernor._decide).
+                            _gvis = (_read_span_currently_visible(
+                                measurement, root, p, _read_delivery, obs)
+                                if _read_result == "OK" else None)
+                            if _gvis is not None:
+                                _gaction["visible"] = _gvis
                         elif _akind == "grep" and _deliver_requested:
                             _successful_source_delivery = (
                                 _grep_error is None and _grep_page is not None)
                         _gd = _igv.should_allow(_gaction)
                         _gmsg = getattr(getattr(_igv, "_last_receipt", None),
                                         "message", "") or ""
+                        if _akind == "read" and _gaction.get("visible") is False:
+                            try:
+                                measurement.journal.emit(
+                                    "read_recovery_admitted", producer="kernel_idle_governor",
+                                    step=step, path=_gpath, dispatch=False,
+                                    recovery_reads=getattr(_igv, "recovery_reads", 0))
+                            except Exception:  # noqa: BLE001 - observability only
+                                pass
                         if (_akind == "read" and _gd != GovernorDecision.DENY
                                 and getattr(_igv, "governed", False)):
                             # Live proof that a governed budget still admitted a first

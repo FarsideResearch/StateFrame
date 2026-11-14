@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.6.17 (2026-11-13)
+
+- Fixed: successful nonempty reads of source absent from the submitted request are budget-exempt recovery reads, counted separately; visible pages and clipped windows retain revision-bound line/column coverage across annotations and queued-call resume, and recovered bytes cannot claim novelty again.
+
 ## 0.6.16 (2026-11-13)
 
 - Fixed: the stable StateFrame system-message prefix was sent twice in every request under the shipped profile (once as the prefix and once embedded in the operating instructions). It now appears exactly once, at the start of the system message, saving about 1 KB per request; a test rejects any repeated block inside the system message.
