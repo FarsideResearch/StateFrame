@@ -15,6 +15,14 @@ from kernel_job_output import JobOutputCollector
 from kernel_safe_probe import ProbeCleanupError, run_probe
 from test_agent_tools import host as host
 from test_kernel_git_view import git, repo as repo, runner, view_for
+from tools.sandbox_temp import sandbox_visible_temp_dir
+
+
+@pytest.fixture
+def host_tmp_path():
+    """Security probes need fixtures that remain visible after bwrap maps /dev."""
+    with sandbox_visible_temp_dir() as directory:
+        yield Path(directory)
 
 
 def test_sealed_job_spool_never_follows_symlink(tmp_path):
@@ -112,12 +120,12 @@ def value():
 
 @pytest.mark.host_sandbox
 @pytest.mark.parametrize('executor', ['post_edit', 'obligation'])
-def test_automatic_check_import_cannot_write_or_network(tmp_path, monkeypatch, executor):
+def test_automatic_check_import_cannot_write_or_network(host_tmp_path, monkeypatch, executor):
     from kernel_post_edit_checks import import_status
     from kernel_obligation_assess import CheckDefinition, run_check
-    root = tmp_path / 'workspace'
+    root = host_tmp_path / 'workspace'
     root.mkdir()
-    outside = tmp_path / 'outside'
+    outside = host_tmp_path / 'outside'
     outside.write_text('untouched')
     monkeypatch.setenv('HOST_SECRET', 'credential')
     monkeypatch.setenv('STATEFRAME_TEST_PYTHON', sys.executable)
@@ -139,12 +147,12 @@ def test_automatic_check_import_cannot_write_or_network(tmp_path, monkeypatch, e
 
 
 @pytest.mark.host_sandbox
-def test_provisioning_startup_hook_has_no_host_write_or_network(tmp_path, monkeypatch):
+def test_provisioning_startup_hook_has_no_host_write_or_network(host_tmp_path, monkeypatch):
     from kernel_run_env import create_run_env
-    source = tmp_path / 'source'
+    source = host_tmp_path / 'source'
     subprocess.run([sys.executable, '-I', '-m', 'venv', str(source)], check=True)
     site = next(source.glob('lib/python*/site-packages'))
-    outside = tmp_path / 'outside'
+    outside = host_tmp_path / 'outside'
     outside.write_text('untouched')
     monkeypatch.setenv('HOST_SECRET', 'credential')
     with socket.socket() as server:
@@ -166,7 +174,7 @@ def test_provisioning_startup_hook_has_no_host_write_or_network(tmp_path, monkey
         info.mkdir()
         (info / 'METADATA').write_text('Name: attack-package\nVersion: 1\n')
         (info / 'top_level.txt').write_text('attack_package\n')
-        env = create_run_env(tmp_path / 'run', source / 'bin/python')
+        env = create_run_env(host_tmp_path / 'run', source / 'bin/python')
     assert env.kind == 'clone'
     assert (env.root / 'startup-ran').read_text() == 'yes'
     assert outside.read_text() == 'untouched'
@@ -216,11 +224,11 @@ def test_path_symlink_does_not_admit_target_parent(tmp_path, monkeypatch):
 
 
 @pytest.mark.host_sandbox
-def test_path_symlink_cannot_read_ssh(tmp_path, monkeypatch):
+def test_path_symlink_cannot_read_ssh(host_tmp_path, monkeypatch):
     from stateframe.shell_host import path_authority
     from kernel_exec_capability import shell_capability
     from kernel_exec_session import ExecSession
-    home, bindir, workspace, scratch, environment, session_dir = [tmp_path / name for name in
+    home, bindir, workspace, scratch, environment, session_dir = [host_tmp_path / name for name in
         ('home', 'bin', 'workspace', 'scratch', 'env', 'session')]
     for directory in (home, bindir, workspace, scratch, environment, session_dir):
         directory.mkdir()
@@ -332,10 +340,10 @@ def test_aggregate_and_entry_limits_are_enforced(tmp_path, monkeypatch):
 
 
 @pytest.mark.host_sandbox
-def test_repo_intel_never_executes_repository_config(repo, tmp_path):
+def test_repo_intel_never_executes_repository_config(repo, host_tmp_path):
     from kernel_git_view import legacy_git_query
-    marker = tmp_path / 'fsmonitor-ran'
-    hook = tmp_path / 'monitor.sh'
+    marker = host_tmp_path / 'fsmonitor-ran'
+    hook = host_tmp_path / 'monitor.sh'
     hook.write_text(f'#!/bin/sh\ntouch {marker}\n')
     hook.chmod(0o755)
     git(repo, 'config', 'core.fsmonitor', str(hook))
@@ -403,11 +411,11 @@ def test_executable_shell_rename_restores_both_sides(tmp_path):
 
 
 @pytest.mark.host_sandbox
-def test_plain_grep_cannot_follow_repository_symlink_to_host_secret(tmp_path):
+def test_plain_grep_cannot_follow_repository_symlink_to_host_secret(host_tmp_path):
     from kernel_plain_host import PlainHost
-    root = tmp_path / 'workspace'
+    root = host_tmp_path / 'workspace'
     root.mkdir()
-    secret = tmp_path / 'secret'
+    secret = host_tmp_path / 'secret'
     secret.write_text('TOKEN=private\n')
     (root / 'link').symlink_to(secret)
     # Only the path-authority adapter is supplied; the real grep executor and

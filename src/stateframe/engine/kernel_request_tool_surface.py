@@ -33,6 +33,7 @@ _CAPTURE_FIELDS = (
     "_stateframe_tool_guidance_pending",
     "final_tool_surface",
     "request_action_contract",
+    "owner_presentation",
     "request_budget_final_wire",
     "_stateframe_tool_menu_memo_frame_digest",
     "_stateframe_tool_menu_memo_frame_snapshot",

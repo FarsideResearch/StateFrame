@@ -484,7 +484,8 @@ DOCUMENTED_REJECT: dict[str, str] = {
         coverage_reminders_evidence decide2_advisory_completed decide2_advisory_episode
         decide2_checkpoint_skipped decide2_completed decide_notice_suppressed decision_cache_seeded
         decision_cache_state decision_continuity_delta_rejected decision_continuity_organ_projection_failed
-        decision_continuity_seeded decision_continuity_state decision_state_rejected decision_state_updated
+        decision_continuity_revision_unavailable decision_continuity_seeded decision_continuity_state
+        decision_state_rejected decision_state_updated
         decisive_factor_advisory decisive_factor_recheck decisive_factor_recorded declared_path_done_gate_fired
         decode_depth_accounting decode_depth_per_arm_accounting deferred_finalization_classified
         degeneration_detected delivery_audit_error delivery_audit_omitted_for_budget delivery_audit_rendered

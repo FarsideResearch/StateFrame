@@ -6876,9 +6876,18 @@ def bind_final_tool_surface(
                         )
             # Final-surface binding is a correctness boundary, not a feature flag.
             contract = rebound_contract
+        presentation = getattr(capture, "owner_presentation", None)
+        if presentation is not None:
+            from kernel_request_seal import OwnerPresentation, RequestSealError
+
+            if not isinstance(presentation, OwnerPresentation):
+                raise RequestSealError("invalid owner presentation at final surface binding")
+            presentation = presentation.rebind(source, contract)
         frozen = _freeze_contract(contract)
         setattr(runtime, "_completion_owner_request_contract", frozen)
         setattr(capture, "request_action_contract", copy.deepcopy(contract))
+        if presentation is not None:
+            setattr(capture, "owner_presentation", presentation)
         # Dispatch may only route this turn's advertised actions. The schemas equal them unless the stable
         # tool head lists the run's wider tool set (kernel_stable_tool_head).
         from kernel_stable_tool_head import enabled as stable_tool_head_enabled

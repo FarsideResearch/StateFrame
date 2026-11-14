@@ -46,6 +46,30 @@ class OwnerPresentation:
         if hashlib.sha256(freeze(contract)).hexdigest() != self.contract_digest:
             raise RequestSealError("owner presentation belongs to another contract")
 
+    def rebind(
+            self, previous: Mapping[str, object], current: Mapping[str, object],
+    ) -> OwnerPresentation:
+        """Carry immutable owner prose across an authorized contract rebind."""
+        from kernel_completion_owner import _digest
+
+        self.validate(previous)
+        limits_digest = current.get("budget_wire_digest")
+        if previous.get("budget_wire_digest") is not None and limits_digest is None:
+            raise RequestSealError("owner presentation limits removed from rebound contract")
+        if limits_digest is not None and (
+                self.continuation_limits is None
+                or _digest(self.continuation_limits) != limits_digest):
+            raise RequestSealError("owner presentation limits differ from rebound contract")
+        pin_digest = current.get("evidence_pin_wire_digest")
+        if previous.get("evidence_pin_wire_digest") is not None and pin_digest is None:
+            raise RequestSealError("owner presentation evidence removed from rebound contract")
+        if pin_digest is not None and _digest([self.evidence_pin]) != pin_digest:
+            raise RequestSealError("owner presentation evidence differs from rebound contract")
+        return OwnerPresentation(
+            hashlib.sha256(freeze(current)).hexdigest(),
+            self.continuation_limits, self.evidence_pin,
+        )
+
 
 @dataclass(frozen=True, slots=True)
 class FrameSelectionProposal:
