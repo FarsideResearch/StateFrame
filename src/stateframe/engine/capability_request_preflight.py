@@ -966,13 +966,15 @@ def preflight_presentation_or_degrade(
         active_capture = getattr(runtime, "_active_capture", None)
         sealed = getattr(active_capture, "qualified_request", None)
         if sealed is not None:
-            from kernel_request_seal import RequestSealError
+            from kernel_request_seal import RequestSealError, log_seal_violation
             if (frame_request_allocation is not sealed.allocation
                     or not isinstance(precomposed_host_text, Mapping)
                     or precomposed_host_text.get("body_digest") != sealed.body_digest
                     or precomposed_host_text.get("allocation_digest") != sealed.allocation.digest):
+                log_seal_violation("sealed host preflight binding missing or mismatched")
                 raise RequestSealError("sealed host preflight binding missing or mismatched")
             if messages != sealed.body["messages"] or list(tools or ()) != sealed.body.get("tools", []):
+                log_seal_violation("host preflight body differs from sealed input")
                 raise RequestSealError("host preflight body differs from sealed input")
             sealed.validate(active_capture, runtime)
         if precomposed_host_text is None:
@@ -1005,7 +1007,8 @@ def preflight_presentation_or_degrade(
         if (getattr(runtime, "stateframe_framefit_mode", "off") == "on"
                 or has_framefit5_state(messages)):
             _journal_framefit5_preflight_error(runtime, initial_error)
-            from kernel_request_seal import RequestSealError
+            from kernel_request_seal import RequestSealError, log_seal_violation
+            log_seal_violation("frame-only request preflight failed")
             raise RequestSealError("frame-only request preflight failed") from initial_error
         refreshed_messages = copy.deepcopy(list(messages))
         if _refresh_current_target_source(

@@ -15,9 +15,11 @@ from typing import Callable
 if __package__:
     from .kernel_exec_tracker import ProcessTable, process_cmdline_digest
     from .kernel_mutate_wire import strict_loads
+    from .kernel_reason_log import emit_kill
 else:
     from kernel_exec_tracker import ProcessTable, process_cmdline_digest
     from kernel_mutate_wire import strict_loads
+    from kernel_reason_log import emit_kill
 
 
 @dataclass(frozen=True)
@@ -162,6 +164,9 @@ def _kill_recorded(table, identity):
                 return
             if current.start != after.start:
                 raise ValueError("process identity changed during verification")
+            emit_kill("mutate_sweep", target="recorded mutation process", pid=pid,
+                      why="leftover from an earlier run, swept before reuse", level="WARN",
+                      cause_key="mutate_sweep:leftover")
             try:
                 signal.pidfd_send_signal(pidfd, signal.SIGKILL)
             except ProcessLookupError:

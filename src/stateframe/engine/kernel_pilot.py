@@ -13,6 +13,7 @@ from collections import Counter, deque
 from dataclasses import dataclass
 
 from kernel_measurement import digest
+from kernel_reason_log import emit_timeout
 
 ACTIVE_PARENT = contextvars.ContextVar("pilot_parent", default=None)
 ACTIVE_RUNTIME = contextvars.ContextVar("pilot_runtime", default=None)
@@ -277,6 +278,9 @@ class ParentMeter:
             if remaining is not None and remaining <= 0 and self.enforce:
                 self._blocked_event(permit_id=permit_id, reason="deadline_expired",
                                     journal=target, optional=optional, closure=closure)
+                emit_timeout("pilot", what="model call permit",
+                             why=f"deadline passed {-remaining:.2f}s before the permit was granted",
+                             cause_key="pilot:timeout")
                 raise ParentBudgetExhausted("model_calls", "deadline_expired")
             existing = self._permits.get(permit_id)
             if existing is not None:

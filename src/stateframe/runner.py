@@ -33,6 +33,7 @@ from .test_changes import inspect_test_changes
 from . import resume as resume_module
 from .endpoint import CHAT_SUFFIX, Endpoint, EndpointError, _is_loopback
 from .task_row import EDIT_SCOPE_WIDEN_CAP, build_row, widened_scope_paths
+from .engine import kernel_reason_log as _reason_log
 from .engine.kernel_custom_tools import CustomToolError, load_tool_files
 from .engine.kernel_mcp_tools import load_mcp_files, discover as discover_mcp
 from .engine.kernel_tool_settings import ToolSettings
@@ -51,6 +52,8 @@ PACKAGE = Path(__file__).resolve().parent
 ENGINE_DIR = PACKAGE / "engine"
 CHILD = PACKAGE / "_child.py"
 LOG_PREFIX = "[sf] "
+PROBLEMS_FILE = "problems.jsonl"
+_PROBLEM_LINE_PREFIXES = ("[stateframe] ERROR", "[stateframe] WARN")
 # Environment the engine child inherits from the parent; everything else is dropped.
 PASS_ENV = ("PATH", "HOME", "LANG", "LC_ALL", "LC_CTYPE", "TMPDIR", "USER", "LOGNAME", "SHELL",
             "SYSTEMROOT", "TERM")
@@ -314,6 +317,8 @@ class RunOptions:
     slot: int | None = None
     timeout_s: float | None = None  # None: no time limit (the product default)
     quiet: bool = False
+    # --log-level: error|warn|info|debug; None = STATEFRAME_LOG_LEVEL, else warn.
+    log_level: str | None = None
     extra_env: dict[str, str] = field(default_factory=dict)
     _cache_slot: int | None = field(default=None, init=False, repr=False)
     _cache_slot_selection: str | None = field(default=None, init=False, repr=False)
@@ -925,6 +930,9 @@ def _probe_capabilities(options: RunOptions) -> dict[str, object]:
         ):
             raise ValueError("invalid capability receipt")
     except (OSError, ValueError, subprocess.TimeoutExpired) as error:
+        _reason_log.emit_reason("fallback", "capability_probe_unavailable", "runner",
+                                "capability probe unavailable; capabilities reported as unknown",
+                                type(error).__name__, level="WARN")
         receipt = {key: {"enabled": None, "detail": "probe unavailable: " + type(error).__name__}
                    for key in labels}
     parts = []
@@ -1009,6 +1017,7 @@ def _write_hook_terminal_summary(run_dir: Path, *, runtime_outcome: str, engine_
         "exit_code": 2,
         "succeeded": False,
         "hooks": counts,
+        "problems": _problems_summary(run_dir),
     }
     _write_json_atomic(run_dir / "summary.json", summary)
     printer(f"hooks: {counts['runs']} runs, {counts['denied']} denied, "
@@ -1382,6 +1391,8 @@ def prepare(options: RunOptions, printer=print) -> tuple[Path, workcopy.WorkCopy
             )
             _write_hook_spec(run, spec)
         except hook_host.HookRunRefused as error:
+            _reason_log.emit_refusal("runner", what="hook refused the run", why=str(error)[:300],
+                                     cause_key="hook_refused", level="WARN")
             containment = _finish_prompt_refusal(options, run, spec, str(error), printer)
             if containment:
                 raise HookContainmentRunError(f"HOOK_CONTAINMENT: {containment}") from error
@@ -1389,6 +1400,8 @@ def prepare(options: RunOptions, printer=print) -> tuple[Path, workcopy.WorkCopy
             raise HookRefusedRunError(f"hook refused run: {error}", result=result) from error
         except hook_host.HookContainmentError as error:
             detail = str(error)
+            _reason_log.emit_reason("invariant", "hook_containment", "runner",
+                                    "hook containment could not be verified", detail[:300], level="ERROR")
             _write_hook_terminal_summary(
                 run,
                 runtime_outcome="hook_containment",
@@ -1470,7 +1483,10 @@ def check_slot_context(options: RunOptions, printer=print) -> None:
     endpoint = replace(options.endpoint, timeout_s=min(options.endpoint.timeout_s, _remaining(options)))
     try:
         slots = endpoint.get_slots()
-    except (OSError, TimeoutError, EndpointError, ValueError):
+    except (OSError, TimeoutError, EndpointError, ValueError) as error:
+        _reason_log.emit_reason("fallback", "slot_status_unavailable", "runner",
+                                "context slot check skipped; server slot status unavailable",
+                                type(error).__name__, level="WARN")
         return
     sizes = [s["n_ctx"] for s in slots or [] if isinstance(s, dict) and type(s.get("n_ctx")) is int]
     need = options._context_tokens
@@ -1528,7 +1544,10 @@ def _select_prompt_cache_slot(options: RunOptions, printer=print) -> None:
                            timeout_s=min(options.endpoint.timeout_s, _remaining(options)))
         try:
             slots = endpoint.get_slots()
-        except (OSError, TimeoutError, EndpointError, ValueError):
+        except (OSError, TimeoutError, EndpointError, ValueError) as error:
+            _reason_log.emit_reason("fallback", "cache_slot_status_unavailable", "runner",
+                                    "prompt-cache slot pin skipped; server slot status unavailable",
+                                    type(error).__name__, level="WARN")
             slots = None
         slot, usable = _idle_slot(slots)
         if slot is None:
@@ -1947,6 +1966,34 @@ def _warn_checkpoint_journal(run: Path, warned: set[str]) -> None:
         pass
 
 
+def _resolved_log_level(options: RunOptions) -> str:
+    raw = getattr(options, "log_level", None) or os.environ.get(_reason_log.LEVEL_ENV)
+    return _reason_log._parse_level(raw)[0].lower()
+
+
+def _problems_summary(run_dir: Path, options: RunOptions | None = None) -> dict[str, object]:
+    """summary.json "problems": counts by cause, first occurrence. Logging only."""
+    level = _resolved_log_level(options) if options is not None else "warn"
+    try:
+        return _reason_log.problems_from_file(run_dir / PROBLEMS_FILE, log_level=level)
+    except Exception:
+        return {"errors": 0, "warnings": 0, "by_cause": {}, "log_level": level}
+
+
+def _print_problems(problems: dict[str, object], printer, log_level: str) -> None:
+    by_cause = problems.get("by_cause") or {}
+    if not by_cause:
+        if log_level in {"info", "debug"}:
+            printer("[stateframe] problems: none")
+        return
+    printer(f"[stateframe] problems: {problems['errors']} ERROR, {problems['warnings']} WARN "
+            "(see summary.json \"problems\")")
+    for key, entry in list(by_cause.items())[:20]:
+        count = f" x{entry['count']}" if entry.get("count", 1) > 1 else ""
+        printer(f"[stateframe] {entry.get('level')} {entry.get('component')}: "
+                f"{entry.get('what')} ({entry.get('why')}){count}")
+
+
 def drive(run: Path, options: RunOptions, printer=print) -> int:
     """Start the engine child and stream its progress lines."""
     _validate_timeout(options.timeout_s)
@@ -1974,6 +2021,11 @@ def drive(run: Path, options: RunOptions, printer=print) -> int:
         else:
             environment.pop("STATEFRAME_RUN_TIME_ALLOWANCE_S", None)
             sources.pop("STATEFRAME_RUN_TIME_ALLOWANCE_S", None)
+        # Reason log: level and problems file reach the child only through the spec.
+        environment[_reason_log.LEVEL_ENV] = _resolved_log_level(options)
+        sources[_reason_log.LEVEL_ENV] = "cli:--log-level" if getattr(options, "log_level", None) else "wrapper:log-level"
+        environment[_reason_log.PROBLEMS_ENV] = str(run / PROBLEMS_FILE)
+        sources[_reason_log.PROBLEMS_ENV] = "wrapper:problems-file"
         # Contract with the engine: the engine runs PROJECT tests with exactly this
         # interpreter, else its own sys.executable. Through the spec, because _child.install_environment
         # drops inherited STATEFRAME_* variables.
@@ -2001,6 +2053,7 @@ def drive(run: Path, options: RunOptions, printer=print) -> int:
         else:
             environment.pop("CAPABILITY_ATTEMPT_DEADLINE_MONOTONIC", None)
         _write_run_spec_atomic(run, spec)
+    _reason_log.configure(level=_resolved_log_level(options), problems_path=run / PROBLEMS_FILE)
     # Keep the engine identity near the front of Linux argv: narrow `ps args`
     # output can truncate the absolute _child.py path even though the child is direct.
     # Start from the selected interpreter directory so Python retains venv discovery
@@ -2050,6 +2103,10 @@ def drive(run: Path, options: RunOptions, printer=print) -> int:
 
         def on_timeout() -> None:
             timed_out.set()
+            _reason_log.emit_kill(
+                "runner", target="engine process group", pid=process.pid,
+                why="run wall deadline reached; engine stopped", limit=remaining,
+                signal_name="SIGKILL", level="WARN", cause_key="run_wall_deadline")
             _stop_group(process)
 
         # A silent, hung engine must still be stopped, so the limit is a timer, not a line check.
@@ -2084,6 +2141,9 @@ def drive(run: Path, options: RunOptions, printer=print) -> int:
                     break
                 log.write(line)
                 log.flush()
+                if line.startswith(_PROBLEM_LINE_PREFIXES):
+                    printer(line.rstrip())  # reason-log line from the child (deduped there)
+                    continue
                 if line.startswith(LOG_PREFIX):
                     try:
                         event = json.loads(line[len(LOG_PREFIX):])
@@ -3399,6 +3459,8 @@ def _execute(options: RunOptions, started: float, printer, run_dir: Path, work: 
     if queue_wait_warning is not None:
         summary["provider_queue_wait_warning"] = queue_wait_warning
     printer(str(summary["cached_share_display"]))
+    summary["problems"] = _problems_summary(run_dir, options)
+    _print_problems(summary["problems"], printer, str(summary["problems"]["log_level"]))
     if commits is not None:
         summary["commits"] = commits
         if "error" in commits:

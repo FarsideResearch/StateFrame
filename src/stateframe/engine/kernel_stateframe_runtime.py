@@ -50,6 +50,18 @@ from kernel_verdict import (
     NEEDS_WORK, REFUSED, SATISFIED, UNRESOLVED, Verdict, evaluate_required_tests,
     open_work_ids, repair_action_for,
 )
+from kernel_reason_log import bind_journal, configure, emit_reason, flush_summary
+
+
+def _log_render_overflow(view: RenderOverflow, journal: object | None) -> None:
+    """Name the frame group that did not fit. One stderr line per group per run."""
+    emit_reason("refusal", "render_overflow", "stateframe_runtime",
+                f"frame render overflow on group {view.required_group}",
+                f"required {view.required_tokens} tokens exceeds available "
+                f"{view.available_tokens} ({view.reason})",
+                level="WARN", journal=False, required_group=view.required_group,
+                required_tokens=view.required_tokens, available_tokens=view.available_tokens,
+                retrievable_ref=view.retrievable_ref)
 
 
 PUBLIC_TEST_VERDICT_FACT_ENV = "STATEFRAME_PUBLIC_TEST_VERDICT_FACT"
@@ -335,6 +347,9 @@ def _reprepare_on_source_change(function):
                 **route_options,
             )
         except FrameAllocationReplanNeeded:
+            emit_reason("fallback", "frame_allocation_replan", "stateframe_runtime",
+                        "frame allocation replanned with fresh source",
+                        "first frame allocation needed replan; retrying once", level="WARN", journal=False)
             pass
         from kernel_request_reprepare import (
             SourceRevisionReplanRefused, source_replan_preparation,
@@ -352,6 +367,10 @@ def _reprepare_on_source_change(function):
                 capture._source_replan_attempted = True
             return prepared
         except FrameAllocationReplanNeeded as repeated:
+            emit_reason("refusal", "frame_allocation_replan_repeated", "stateframe_runtime",
+                        "frame allocation replan repeated after fresh source",
+                        "replan needed again after one retry; refusing the source revision",
+                        level="ERROR", journal=False)
             raise SourceRevisionReplanRefused(
                 "source_revision_replan_exhausted") from repeated
         except Exception as failure:
@@ -4888,6 +4907,8 @@ class StateFrameRuntime:
                 self.journal = resume_journal(self, output, manifest, resume)
         else:
             self.journal = AuditJournal(output, getattr(owner, "task_id"), manifest)
+        configure()  # level + problems file from the spec environment; never raises
+        bind_journal(self.journal)
         prompt_cache_degradation = os.environ.get("SF_PROMPT_CACHE_PIN_DEGRADED_REASON")
         if resume is None and isinstance(prompt_cache_degradation, str) and prompt_cache_degradation:
             self.journal.emit(
@@ -8631,6 +8652,12 @@ class StateFrameRuntime:
         termination_fields = receipt_fields(
             exit_code, memory_limit_killed=memory_limit_killed, evidence=termination_evidence)
         likely_initiator = termination_fields.pop("likely_initiator")
+        if signal_name == "SIGKILL":
+            from kernel_reason_log import emit_kill
+            emit_kill("stateframe_runtime", target="test subprocess",
+                      why=f"exit by SIGKILL, likely initiator {likely_initiator}",
+                      signal_name="SIGKILL", journal=self.journal, level="WARN",
+                      cause_key="test_subprocess_sigkill")
         event = self.journal.emit("test_subprocess_completed", producer="test_subprocess",
                                   selectors=list(selectors), exit_code=exit_code,
                                   **({"memory_limit_mechanism": memory_limit_mechanism}
@@ -20482,6 +20509,7 @@ class StateFrameRuntime:
         view = select_view(items, budget_tokens=max(1, self.frame_target - tool_cost),
                            ceiling_tokens=available, mode=self.modes["render_selection"])
         if isinstance(view, RenderOverflow) and AXES[self.modes["render_selection"]][2]:
+            _log_render_overflow(view, getattr(self, "journal", None))
             self._record_recall_render_result(view)
             view, messages = _degraded_render_plan(
                 items, messages, frame=frame,
@@ -22620,6 +22648,18 @@ class StateFrameRuntime:
             kept = len(history.messages) - 2
             dropped = (history_uncapped[2:len(history_uncapped) - kept]
                        if kept else history_uncapped[2:])
+            if dropped:
+                # Dropped messages are history_uncapped[2 .. 2+len-1] (protected prefix is 0..1).
+                first_index, last_index = 2, 2 + len(dropped) - 1
+                emit_reason("eviction", "history_exchanges_dropped", "stateframe_runtime",
+                            f"history cap evicted {len(dropped)} messages",
+                            f"history over cap {self.history_cap} tokens; kept "
+                            f"{history.kept_exchanges} exchanges",
+                            level="WARN", journal=False,
+                            dropped=f"messages[{first_index}..{last_index}]",
+                            dropped_exchanges=history.dropped_exchanges,
+                            kept_exchanges=history.kept_exchanges,
+                            total_tokens=history.total_tokens)
             for index, message in enumerate(dropped, 2):
                 identity = digest({"index": index, "message": message})
                 if identity not in self._trimmed:
@@ -22765,6 +22805,7 @@ class StateFrameRuntime:
                               view=dataclasses.asdict(candidate),
                               applied=(True if f4_on else AXES[self.modes["render_selection"]][2]))
             if isinstance(view, RenderOverflow):
+                _log_render_overflow(view, getattr(self, "journal", None))
                 overflow = {"kind": "RENDER_OVERFLOW", **dataclasses.asdict(view)}
                 from kernel_request_budget import _runtime_enabled as request_budget_enabled
                 if (framefit5_on and view.reason == "stateframe_f4_ceiling"
@@ -25789,3 +25830,6 @@ class StateFrameRuntime:
             ACTIVE_PARENT.reset(self._parent_token)
         if self.continuation is not None:
             self.journal.close()
+        # Run end: ONE problems summary (idempotent; journal.close() above already flushed it when a
+        # continuation journal exists). Logging only, never raises.
+        flush_summary(self.journal)

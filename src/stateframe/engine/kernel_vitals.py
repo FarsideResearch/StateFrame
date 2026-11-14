@@ -21,6 +21,7 @@ from dataclasses import dataclass, field
 import re
 
 from kernel_liveness import Evidence, OrganCensusSpec, TriState
+from kernel_reason_log import emit_reason
 
 
 OutputHook = Callable[[str, str | None], str | None]
@@ -410,9 +411,8 @@ class VitalsEKG:
                 turn=turn,
                 detail=f"organ_out failed: {type(exc).__name__}",
             )
-            print(
-                f"    [stateframe] vitals organ_out failed: {type(exc).__name__}"
-            )
+            emit_reason("degrade", "vitals:organ_out", "vitals",
+                        "vitals EKG organ output failed (fail-open)", type(exc).__name__)
             self.last_decision = {
                 "event": "EKG_ADVISORY",
                 "would_fire": True,

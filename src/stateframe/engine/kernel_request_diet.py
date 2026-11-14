@@ -32,6 +32,10 @@ from kernel_body_serialization_memo import memoized_value, plain_wire
 from kernel_endpoint_size import ENDPOINT_SIZE
 from kernel_obligation_assess import UnavailableEvidence
 from kernel_request_auth_identity import auth_binding_for_key as _auth_binding_for_key
+try:
+    from kernel_reason_log import emit_refusal, emit_reason, emit_timeout
+except ImportError:
+    from .kernel_reason_log import emit_refusal, emit_reason, emit_timeout
 
 
 SCHEMA = "stateframe-request-diet/1"
@@ -421,6 +425,20 @@ def _build_tokenize_opener(
     )
 
 
+def _log_tokenizer_deadline() -> None:
+    """Logging only: called immediately before each tokenizer deadline raise."""
+    emit_timeout("request_diet", what="tokenizer request", why="deadline expired",
+                 cause_key="tokenizer_deadline", journal=False)
+
+
+def _dropped_samples(records: Sequence[Mapping[str, object]], limit: int = 5) -> str | None:
+    """First `limit` dropped source ranges as `path:start-end` for the log line."""
+    parts = []
+    for record in records[:limit]:
+        parts.append(f"{record.get('path')}:{record.get('start_line')}-{record.get('end_line')}")
+    return ", ".join(parts) or None
+
+
 def _http_tokenize(content: str, url: str, *, deadline: float | None = None,
                    route_allow_remote: bool | None = None,
                    auth_key: str | None = None,
@@ -435,6 +453,7 @@ def _http_tokenize(content: str, url: str, *, deadline: float | None = None,
     except ImportError:
         from .kernel_provider_dialect import capabilities_for, require_feature
     if deadline is not None and time.monotonic() >= deadline:
+        _log_tokenizer_deadline()
         raise TimeoutError("tokenizer request deadline expired")
     tokenizer_origin = _url_origin(url)
     generation_origin = _url_origin(generation_endpoint)
@@ -449,10 +468,12 @@ def _http_tokenize(content: str, url: str, *, deadline: float | None = None,
         url, probe_key or "", deadline=probe_deadline, require_slots=False,
     )
     if deadline is not None and time.monotonic() >= deadline:
+        _log_tokenizer_deadline()
         raise TimeoutError("tokenizer request deadline expired")
     if (probe_deadline is not None and time.monotonic() >= probe_deadline
             and capabilities.props_status is None and capabilities.slots_status is None
             and not capabilities.continuation):
+        _log_tokenizer_deadline()
         raise TimeoutError("tokenizer request deadline expired")
     require_feature(capabilities, "request tokenization")
 
@@ -476,6 +497,7 @@ def _http_tokenize(content: str, url: str, *, deadline: float | None = None,
     if deadline is not None:
         remaining = deadline - time.monotonic()
         if remaining <= 0:
+            _log_tokenizer_deadline()
             raise TimeoutError("tokenizer request deadline expired")
         timeout = min(timeout, remaining)
     opener = opener or _build_tokenize_opener()
@@ -787,6 +809,10 @@ class RequestTokenMeter:
                                     generation_endpoint=self._generation_endpoint,
                                     opener=self._get_http_opener())
         else:
+            # No endpoint by design (offline/replay/tests): normal, so INFO. journal=False: request path.
+            emit_reason("fallback", "tokenizer_endpoint_unavailable", "request_diet",
+                "no tokenizer endpoint configured", "calibrated bytes used for request sizing",
+                level="INFO", journal=False)
             raise OSError("tokenizer endpoint unavailable")
         if type(result) is int:
             count = result
@@ -814,6 +840,7 @@ class RequestTokenMeter:
         self._last_attempts = 0
         for _attempt in range(TOKENIZE_MAX_CONSECUTIVE_FAILURES):
             if self._deadline is not None and time.monotonic() >= self._deadline:
+                _log_tokenizer_deadline()
                 raise TimeoutError("tokenizer request deadline expired")
             self._last_attempts += 1
             try:
@@ -825,6 +852,7 @@ class RequestTokenMeter:
                 continue
             self._last_latency_ms = (time.monotonic() - start) * 1000.0
             if self._deadline is not None and time.monotonic() >= self._deadline:
+                _log_tokenizer_deadline()
                 raise TimeoutError("tokenizer request deadline expired")
             self._failure_reason = None
             self._consecutive_failures = 0
@@ -832,6 +860,7 @@ class RequestTokenMeter:
         self._last_latency_ms = (time.monotonic() - start) * 1000.0
         self._availability = "unavailable"
         if self._deadline is not None and time.monotonic() >= self._deadline:
+            _log_tokenizer_deadline()
             raise TimeoutError("tokenizer request deadline expired")
         self._fallback_pending = True
         self._start_reprobe_schedule()
@@ -859,6 +888,7 @@ class RequestTokenMeter:
         """Internal fitting count; supplied bytes require whole-body verification."""
         self._select_namespace(body)
         if self._deadline is not None and time.monotonic() >= self._deadline:
+            _log_tokenizer_deadline()
             raise TimeoutError("tokenizer request deadline expired")
         self._last_attempts = 0
         reprobe = self._availability == "unavailable" and self._reprobe_due()
@@ -880,6 +910,7 @@ class RequestTokenMeter:
             attempt_limit = 1 if reprobe else TOKENIZE_MAX_CONSECUTIVE_FAILURES
             for _attempt in range(attempt_limit):
                 if self._deadline is not None and time.monotonic() >= self._deadline:
+                    _log_tokenizer_deadline()
                     raise TimeoutError("tokenizer request deadline expired")
                 self._last_attempts += 1
                 try:
@@ -893,6 +924,7 @@ class RequestTokenMeter:
                     continue
                 self._last_latency_ms = (time.monotonic() - start) * 1000.0
                 if self._deadline is not None and time.monotonic() >= self._deadline:
+                    _log_tokenizer_deadline()
                     raise TimeoutError("tokenizer request deadline expired")
                 self._availability = "available"
                 self._failure_reason = None
@@ -910,6 +942,7 @@ class RequestTokenMeter:
                 self._availability = "unavailable"
                 self._start_reprobe_schedule()
         if self._deadline is not None and time.monotonic() >= self._deadline:
+            _log_tokenizer_deadline()
             raise TimeoutError("tokenizer request deadline expired")
         # All fallback consumers compare this count to the prompt ceiling. A
         # tokenizer-independent rejection bound is diagnostic, not that count:
@@ -938,6 +971,13 @@ class RequestTokenMeter:
         if not self._fallback_pending or self._fallback_reported:
             return
         self._fallback_reported = True
+        # Byte sizing with no tokenizer configured is by design (INFO); a configured tokenizer
+        # that failed is a degrade (WARN). journal=False: request path, journal positions are identity-bearing.
+        configured = not self._disabled and (self._tokenizer is not None or self.endpoint is not None)
+        emit_reason("fallback", "tokenizer_calibrated_bytes" if configured else "tokenizer_calibrated_bytes_unconfigured",
+                    "request_diet", "tokenizer unavailable, request sized from calibrated bytes",
+                    f"tokenizer failure {self._failure_reason or 'unknown'}" if configured else "no tokenizer configured",
+                    level="WARN" if configured else "INFO", journal=False)
 
     def observe_response(self, request_bytes: int, prompt_n: int, cache_n: int) -> None:
         """Compatibility entry point for explicit llama.cpp uncached/cache counts."""
@@ -3442,6 +3482,7 @@ def apply_diet(
             size = removal_accounting.update(candidate["messages"])
             if size > max_request_bytes:
                 if meter._deadline is not None and time.monotonic() >= meter._deadline:
+                    _log_tokenizer_deadline()
                     raise TimeoutError("tokenizer request deadline expired")
                 # Exact byte rejection is sufficient to continue the same pop
                 # sequence. This sentinel is not measurement evidence; the
@@ -3717,6 +3758,9 @@ def apply_diet(
     after_ids = set(required_evidence_ids(after["messages"]))
     missing = sorted(set(evidence_ids) - after_ids)
     if missing:
+        emit_refusal("request_diet", what="request diet deferred",
+            why="required evidence removed", measured=len(missing),
+            cause_key="diet_deferred:required_evidence_removed", journal=False)
         raise RequestDietDeferred({
             "event_schema": SCHEMA,
             "stage": stage,
@@ -3729,6 +3773,9 @@ def apply_diet(
         [message for message in after["messages"] if isinstance(message, Mapping)]
     )
     if read_spans_retained < min(_MIN_READ_SPANS_TO_RETAIN, read_spans_available):
+        emit_refusal("request_diet", what="request diet deferred",
+            why="read span floor violated", measured=read_spans_retained, limit=min(_MIN_READ_SPANS_TO_RETAIN, read_spans_available),
+            cause_key="diet_deferred:request_diet_read_span_floor_violation", journal=False)
         raise RequestDietDeferred({
             "event_schema": SCHEMA,
             "stage": stage,
@@ -3826,6 +3873,10 @@ def apply_diet(
                 "request_diet_applied", request_id=request_id, step=step,
                 **journal_safe_fields(detail),
             )
+        emit_refusal("request_diet", what="request cannot fit the diet budget",
+            why=f"cap infeasible: {infeasibility_reason}", limit=max_request_bytes,
+            measured=request_bytes_after, dropped=", ".join(dict.fromkeys(dropped_sections)) or None,
+            cause_key=f"request_diet_cap_infeasible:{infeasibility_reason}", journal=False)
         raise RequestDietDeferred(detail)
 
     body["messages"] = after["messages"]
@@ -3861,6 +3912,13 @@ def apply_diet(
     if emit is not None:
         from kernel_continuation_journal import journal_safe_fields  # emit boundary (reserved keys)
         emit("request_diet_applied", **journal_safe_fields(audit))
+    if audit.get("reason") == "trimmed":
+        emit_reason("eviction", "request_diet_trim", "request_diet",
+            "request diet trimmed model-visible content to fit the token budget",
+            "over budget, lowest-priority sections and source ranges removed",
+            level="WARN", dropped=_dropped_samples(dropped_source_ranges),
+            request_tokens_before=request_tokens_before, request_tokens_after=request_tokens_after,
+            token_budget=token_budget, max_request_bytes=max_request_bytes, journal=False)
     return audit
 
 

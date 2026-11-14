@@ -19,6 +19,7 @@ from capability_runtime_release import (
     check_release_admission,
     verify_release,
 )
+from kernel_reason_log import emit_kill, emit_reason, emit_timeout
 
 ROOT = Path(__file__).resolve().parent
 SOURCE = Path(__file__).resolve().parent
@@ -511,7 +512,7 @@ def _make_checked_ask(original_ask, *, run, spec, fence, capacity_plan):
 
         def bound_gate(record, capture, runtime):
             from capability_request_preflight import preflight_presentation_or_degrade, PRECOMPOSED_HOST_TEXT_SCHEMA
-            from kernel_request_seal import RequestSealError
+            from kernel_request_seal import RequestSealError, log_seal_violation
             messages = record.body["messages"]
             tools = record.body.get("tools", [])
             precomposed_host_text = {
@@ -542,6 +543,7 @@ def _make_checked_ask(original_ask, *, run, spec, fence, capacity_plan):
             with (run / "presentation-preflight.jsonl").open("a") as audit:
                 audit.write(json.dumps(presentation) + "\n")
             if messages != record.body["messages"]:
+                log_seal_violation("release preflight mutated the sealed request")
                 raise RequestSealError("release preflight mutated the sealed request")
 
         if capture is None:
@@ -738,6 +740,11 @@ def _terminate_attempt(process, *, capacity_plan, process_group) -> None:
         return
     from kernel_exec_tracker import (ContainmentUnverified, child_exited_unreaped,
                                      recorded_launch_identity, signal_launch_group)
+    emit_kill("capability_release_runner", target="release attempt process group",
+              pid=getattr(process, "pid", None),
+              why="attempt wall deadline reached, SIGTERM to process group",
+              limit=ATTEMPT_DEADLINE_SECONDS, signal_name="SIGTERM", level="WARN",
+              cause_key="attempt_terminate")
     try:
         group_terminated = signal_launch_group(
             process, recorded_launch_identity(process), signal.SIGTERM)
@@ -751,6 +758,13 @@ def _terminate_attempt(process, *, capacity_plan, process_group) -> None:
     grace_deadline = time.monotonic() + 10
     while not child_exited_unreaped(process) and time.monotonic() < grace_deadline:
         time.sleep(.02)
+    leader_running = not child_exited_unreaped(process)
+    emit_kill("capability_release_runner", target="release attempt process group",
+              pid=getattr(process, "pid", None),
+              why=("still running after 10s grace, SIGKILL to process group" if leader_running
+                   else "leader exited, sweeping leftover group members with SIGKILL"),
+              limit=10, level="WARN" if leader_running else "INFO",
+              cause_key="attempt_grace_expired" if leader_running else "attempt_group_sweep")
     try:
         group_killed = signal_launch_group(
             process, recorded_launch_identity(process), signal.SIGKILL)
@@ -765,9 +779,18 @@ def _terminate_attempt(process, *, capacity_plan, process_group) -> None:
     try:
         process.wait(timeout=1)
     except subprocess.TimeoutExpired as error:
+        emit_timeout("capability_release_runner", what="release attempt leader",
+                     why="leader still alive 1s after SIGKILL, containment unverified",
+                     deadline_s=1, cause_key="leader_survived_cleanup")
+        emit_reason("invariant", "release_leader_survived", "capability_release_runner",
+                    "release attempt containment", "leader survived SIGKILL cleanup, survivors unknown",
+                    level="ERROR")
         raise ContainmentUnverified(
             "release containment unverified: leader survived cleanup") from error
     if not group_killed:
+        emit_reason("invariant", "release_group_unsignalled", "capability_release_runner",
+                    "release attempt containment", "launch group could not be signalled",
+                    level="ERROR")
         raise ContainmentUnverified(
             "release containment unverified: launch group could not be signalled")
 
@@ -825,6 +848,11 @@ def supervise(run: Path, *, resume: bool = False, follow_up: str | None = None) 
             try:
                 process.wait(timeout=max(0, attempt_deadline - time.monotonic()) if deadline_enabled else ATTEMPT_DEADLINE_SECONDS)
             except subprocess.TimeoutExpired:
+                emit_timeout("capability_release_runner", what=f"release attempt pid {process.pid}",
+                             why=f"attempt deadline reached, terminating; limit: ATTEMPT_DEADLINE_SECONDS={ATTEMPT_DEADLINE_SECONDS}s "
+                                 "(release runner constant, no override)",
+                             deadline_s=ATTEMPT_DEADLINE_SECONDS,
+                             cause_key="attempt_wait_deadline")
                 timed_out = True
                 _terminate_attempt(process, capacity_plan=capacity_plan,
                                    process_group=process_group)

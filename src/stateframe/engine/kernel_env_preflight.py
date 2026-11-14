@@ -25,6 +25,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
+from kernel_reason_log import emit_timeout
 from kernel_test_python import selected_test_python
 
 
@@ -333,6 +334,10 @@ def _run(command: tuple[str, ...], root: Path, timeout: float,
             )
             result = execution.completed
             if execution.timed_out:
+                emit_timeout("env_preflight", what="preflight command in sandbox",
+                             why=f"command exceeded its {timeout:g}s timeout and was killed; limit: env preflight per-command "
+                                 "timeout (default 120s, caller argument, no env override)",
+                             deadline_s=timeout, cause_key="env_preflight:timeout")
                 return CommandEvidence(
                     command, 124, result.stdout or "", result.stderr or "", timed_out=True,
                 )
@@ -340,6 +345,10 @@ def _run(command: tuple[str, ...], root: Path, timeout: float,
             result = runner(command, root, timeout)
         return _as_evidence(command, result)
     except subprocess.TimeoutExpired as error:
+        emit_timeout("env_preflight", what="preflight command",
+                     why=f"command exceeded its {timeout:g}s timeout; limit: env preflight per-command timeout "
+                         "(default 120s, caller argument, no env override)", deadline_s=timeout,
+                     cause_key="env_preflight:timeout")
         return CommandEvidence(command, 124, str(error.stdout or ""),
                                str(error.stderr or ""), timed_out=True)
     except (OSError, subprocess.SubprocessError) as error:

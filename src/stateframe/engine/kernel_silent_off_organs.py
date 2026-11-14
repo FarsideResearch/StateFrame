@@ -16,6 +16,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
+from kernel_reason_log import emit_reason
+
 
 EffectiveState = Literal["on", "off", "failed"]
 
@@ -237,6 +239,8 @@ def wire_composed_cognition(
             effective="failed", reason="initialization_failed",
             error_type=type(error).__name__,
         )
+        emit_reason("degrade", "silent_off_organs:composed_cognition", "silent_off_organs",
+                    "composed_cognition wiring failed; organ runs OFF", type(error).__name__, journal=journal)
         return OrganWiring(
             None, True, "failed", reason="initialization_failed",
             error_type=type(error).__name__,
@@ -267,6 +271,8 @@ def wire_expectation_ledger(journal: object) -> OrganWiring:
             effective="failed", reason="initialization_failed",
             error_type=type(error).__name__,
         )
+        emit_reason("degrade", "silent_off_organs:expectation_ledger", "silent_off_organs",
+                    "expectation_ledger wiring failed; organ runs OFF", type(error).__name__, journal=journal)
         return OrganWiring(
             None, True, "failed", reason="initialization_failed",
             error_type=type(error).__name__,
@@ -376,6 +382,8 @@ def wire_corpus_fixes(
             effective="failed", reason="initialization_failed",
             error_type=type(error).__name__,
         )
+        emit_reason("degrade", "silent_off_organs:corpus_fixes", "silent_off_organs",
+                    "corpus_fixes wiring failed; organ runs OFF", type(error).__name__, journal=journal)
         return OrganWiring(
             0, True, "failed", reason="initialization_failed",
             error_type=type(error).__name__,

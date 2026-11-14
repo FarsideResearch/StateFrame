@@ -1,5 +1,18 @@
 """Frozen schemas for host-authorized execution and observation tools."""
 
+try:
+    from kernel_reason_log import emit_reason
+except ImportError:
+    from .kernel_reason_log import emit_reason
+
+
+def _log_schema_fallback(what, method, tokens, *, configured):
+    """Byte-measured schemas with no tokenizer configured are by design (INFO); a configured
+    tokenizer that failed is a degrade (WARN). journal=False: request path, no journal event."""
+    emit_reason("fallback", "schema_measured_configured" if configured else "schema_measured_unconfigured",
+                "agent_schemas", what, f"method {method}", level="WARN" if configured else "INFO",
+                journal=False, tokens=tokens)
+
 
 def schema(name, description, properties, required):
     return {"type": "function", "function": {"name": name, "description": description,
@@ -46,11 +59,17 @@ def measure_schemas(custom_schemas=(), *, mcp_schemas=(), endpoint=None, tokeniz
     for item in (SHELL_SCHEMA, *BUILTIN_SCHEMAS):
         count, method = meter.measure({"messages": [], "tools": [item]})
         result[item["function"]["name"]] = {"tokens": count, "method": method}
+        if method != "tokenize":
+            _log_schema_fallback(f"schema {item['function']['name']} measured without tokenizer",
+                                 method, count, configured=endpoint is not None or tokenizer is not None)
         if count > 1200:
             raise CustomToolError(f"built-in {item['function']['name']} schema exceeds 1200 tokens: {count}")
     if custom_schemas or mcp_schemas:
         count, method = meter.measure({"messages": [], "tools": [*custom_schemas, *mcp_schemas]})
         result["custom_total"] = {"tokens": count, "method": method}
+        if method != "tokenize":
+            _log_schema_fallback("custom tool schemas measured without tokenizer", method, count,
+                                 configured=endpoint is not None or tokenizer is not None)
         if count > 1500:
             raise CustomToolError(f"custom tool schemas: {count} tokens exceeds 1500")
     return result

@@ -22,6 +22,7 @@ from typing import Protocol, TypeAlias
 
 from kernel_liveness import Evidence, OrganCensusSpec, TriState
 from kernel_wire_identity import wire_run_seed
+from kernel_reason_log import emit_reason
 
 
 logger = logging.getLogger(__name__)
@@ -658,7 +659,8 @@ class ExpectationLedger:
                 follow_up["receipt_id"] = f"{receipt_id}:follow-up"
                 self._receipt_sink(follow_up)
         except Exception as exc:  # noqa: BLE001 - evidence sink cannot break the index
-            logger.warning("[stateframe] expectation receipt sink failed: %s", type(exc).__name__)
+            emit_reason("degrade", "expectation_ledger:receipt_sink", "expectation_ledger",
+                        "expectation receipt sink failed (fail-open)", type(exc).__name__)
             return [f"receipt_sink:{type(exc).__name__}"]
         return []
 
@@ -687,7 +689,8 @@ class ExpectationLedger:
                 dependencies_complete=True,
             )
         except Exception as exc:  # noqa: BLE001 - cache write is advisory to comparison
-            logger.warning("[stateframe] expectation world fact failed: %s", type(exc).__name__)
+            emit_reason("degrade", "expectation_ledger:world_fact", "expectation_ledger",
+                        "expectation world fact write failed (fail-open)", type(exc).__name__)
             return [f"world_store:{type(exc).__name__}"]
         return []
 
@@ -986,6 +989,8 @@ def run_typed_suite(
                              detail=f"pytest unavailable: {type(exc).__name__}")
     except Exception as exc:  # noqa: BLE001 - runner boundary fails closed
         logger.warning("[stateframe] typed suite runner failed: %s", type(exc).__name__)
+        emit_reason("degrade", "expectation_ledger:suite_runner", "expectation_ledger",
+                    "typed suite runner failed; suite reported INFRA_ERROR", type(exc).__name__)
         return _error_result(scope=scope, status=SuiteStatus.INFRA_ERROR, selected=targets, command=command,
                              detail=f"pytest subprocess failed: {type(exc).__name__}")
     return parse_pytest_result(

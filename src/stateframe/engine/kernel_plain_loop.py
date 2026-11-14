@@ -31,6 +31,7 @@ from kernel_plain_contracts import PlainContractError, validate_pairing
 from kernel_shell_tool import SHELL_SCHEMA
 from kernel_stateframe_marker import escape_state_marker_data
 from kernel_tool_reply import Outcome, record_and_strip_receipts, tool_reply
+from kernel_reason_log import emit_timeout, flush_summary
 
 OUT_CAP = 12000  # chars of any single tool result returned to the model
 JOIN_GRACE_S = 15.0  # watchdog grace past the socket timeout before a call is abandoned
@@ -245,6 +246,10 @@ def run_loop(task_text: str, *, provider: Provider, execute: Executor, limits: L
         while True:
             if clock() - t0 > limits.wall_s:
                 result.end = "time_limit"
+                emit_timeout("plain_loop", what="plain loop episode", journal=journal,
+                             why=f"episode wall limit {limits.wall_s:g}s reached; limit: STATEFRAME_PLAIN_WALL_S "
+                                 "(default 1800s, capped by the supervisor attempt deadline); override env STATEFRAME_PLAIN_WALL_S",
+                             deadline_s=limits.wall_s, elapsed_s=clock() - t0, cause_key="plain_wall")
                 break
             if result.requests >= limits.max_requests:
                 result.end = "request_cap"
@@ -361,6 +366,7 @@ def run_loop(task_text: str, *, provider: Provider, execute: Executor, limits: L
         journal.write("loop_ended", end=result.end, requests=result.requests, tool_calls=result.tool_calls,
                       prompt_tokens=result.prompt_tokens, completion_tokens=result.completion_tokens,
                       transport_retries=result.transport_retries, wall_s=result.wall_s)
+        flush_summary(journal)  # plain run end: one problems summary (idempotent, never raises)
     return result
 
 

@@ -21,6 +21,7 @@ TESTS = Path(__file__).resolve().parent
 # These exercise process signalling, containment or a non-run helper, not a StateFrame run.
 PRIMITIVE_TESTS = {
     "test_launch_unit_kill.py",
+    "test_reason_log_kill_sites.py",  # exercises the kill primitives' log lines on its own sleepers, never a StateFrame run
     "test_orphan_guard.py",  # plants and stops detached processes, never a StateFrame run
     "test_orphan_guard_portability.py",  # plants and stops a detached launcher, never a StateFrame run
     "orphan_guard_mutants.py",  # contains deliberately incorrect process-signal mutants, never a StateFrame run

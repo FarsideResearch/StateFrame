@@ -26,6 +26,7 @@ from typing import Generic, TypeVar
 from kernel_environment_bindings import ApplicabilityResult, EnvironmentLedger
 from kernel_execution_policy import ExecutionPolicyError, finish_supervision, sandboxed_popen
 from kernel_exec_tracker import child_exited_unreaped, recorded_launch_identity, signal_launch_group
+from kernel_reason_log import emit_kill, emit_reason, emit_timeout
 from kernel_environment_recipes import RecipeRegistry, SetupRecipe
 from kernel_environment_types import RequirementBinding, ResourceFact, ResourcePredicate
 from kernel_wire_identity import seeded_content_wire_id, wire_identity_content, wire_run_seed
@@ -601,14 +602,21 @@ class EnvironmentState:
             try:
                 process.wait(timeout=0.5)
             except subprocess.TimeoutExpired:
-                pass
+                emit_timeout("kernel_environment_state", what=f"managed process {prior.launch_id}",
+                             why="exit not observed within wait after poll reported exit",
+                             deadline_s=0.5, journal=self.journal,
+                             cause_key="reconcile_wait_exit")
         reader = managed.reader
         if reader is not None and reader.is_alive():
             reader.join(timeout=0.5)
         try:
             process.wait(timeout=0.1)
-        except (AttributeError, subprocess.TimeoutExpired):
-            pass
+        except (AttributeError, subprocess.TimeoutExpired) as error:
+            if isinstance(error, subprocess.TimeoutExpired):
+                emit_timeout("kernel_environment_state", what=f"managed process {prior.launch_id}",
+                             why="exit status not collected after reconcile",
+                             deadline_s=0.1, journal=self.journal,
+                             cause_key="reconcile_collect")
         finish_supervision(process)
         code, exit_signal, terminal_kind = _exit_fields(process.returncode)
         state = "killed" if managed.cleanup_requested else ("exited" if code == 0 else "crashed")
@@ -786,6 +794,12 @@ class EnvironmentState:
             )
         for managed in managed_rows:
             managed.cleanup_requested = True
+            emit_kill("kernel_environment_state",
+                      target=f"managed process {managed.record.launch_id}",
+                      pid=getattr(managed.process, "pid", None),
+                      why="run-end cleanup, SIGTERM to process group", limit=grace_seconds,
+                      signal_name="SIGTERM", journal=self.journal, level="INFO",
+                      cause_key="env_cleanup_term")
             signalled = self._signal_group(managed, signal.SIGTERM)
             if not signalled and not child_exited_unreaped(managed.process):
                 terminate = getattr(managed.process, "terminate", None)
@@ -802,6 +816,13 @@ class EnvironmentState:
             while (not child_exited_unreaped(managed.process)
                    and time.monotonic() < deadline):
                 time.sleep(min(.02, max(0.0, deadline - time.monotonic())))
+            if not child_exited_unreaped(managed.process):
+                emit_kill("kernel_environment_state",
+                          target=f"managed process {managed.record.launch_id}",
+                          pid=getattr(managed.process, "pid", None),
+                          why=f"still running after {grace_seconds:g}s grace, SIGKILL to process group",
+                          limit=grace_seconds, journal=self.journal, level="WARN",
+                          cause_key="env_cleanup_sigkill")
             signalled = self._signal_group(managed, signal.SIGKILL)
             if not signalled:
                 unverified.append(managed.record.launch_id)
@@ -816,8 +837,13 @@ class EnvironmentState:
                        launch_id=managed.record.launch_id, signal="KILL")
             try:
                 managed.process.wait(timeout=grace_seconds)
-            except (AttributeError, subprocess.TimeoutExpired):
-                pass
+            except (AttributeError, subprocess.TimeoutExpired) as error:
+                if isinstance(error, subprocess.TimeoutExpired):
+                    emit_timeout("kernel_environment_state",
+                                 what=f"managed process {managed.record.launch_id}",
+                                 why="process not reaped after SIGKILL",
+                                 deadline_s=grace_seconds, journal=self.journal,
+                                 cause_key="cleanup_wait_after_sigkill")
             self._reconcile_one(managed.record.launch_id, wait_for_exit=True)
             if signalled and managed.process.returncode is not None:
                 managed.containment_verified = True
@@ -829,6 +855,10 @@ class EnvironmentState:
                        for row in rows
                    ))
         if unverified:
+            emit_reason("invariant", "environment_containment_unverified", "kernel_environment_state",
+                        "environment process cleanup",
+                        "launch group could not be signalled for " + ", ".join(unverified),
+                        level="ERROR", journal=self.journal)
             raise ContainmentUnverified(
                 "environment containment unverified: launch group could not be signalled for "
                 + ", ".join(unverified))

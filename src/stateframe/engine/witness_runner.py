@@ -1155,6 +1155,12 @@ class LocalWitnessRunner:
             err = (proc.stderr or "").encode("utf-8", errors="replace")
             elapsed_ms = int((time.monotonic() - started) * 1000)
             diagnostics["elapsed_ms"] = elapsed_ms
+            if killed:
+                from kernel_reason_log import emit_kill
+                emit_kill("witness_runner", target="witness probe child",
+                          why="wall clock budget exceeded, sandboxed child killed",
+                          measured=round(elapsed_ms / 1000.0, 3), limit=timeout_s,
+                          elapsed_s=elapsed_ms / 1000.0, level="WARN", cause_key="witness_wall_clock")
             diagnostics["sandbox"] = execution.capabilities.as_dict()
             diagnostics["output_truncated"] = execution.output_truncated
 

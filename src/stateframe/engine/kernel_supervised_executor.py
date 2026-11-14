@@ -17,6 +17,7 @@ import threading
 from collections.abc import Callable, Mapping, Sequence
 
 from kernel_probe import workspace_revision
+from kernel_reason_log import emit_timeout
 
 
 MODE_ENV = "STATEFRAME_SUPERVISED_EXECUTOR"
@@ -283,6 +284,9 @@ class CommandRegistry:
                 # grace period so it cannot outlive a failed owner forever.
                 entry.event.wait(deadline + 1.0)
                 if entry.running:
+                    emit_timeout("supervised_executor", what="attached waiter for supervised command",
+                                 why="owner did not finish within the deadline plus grace",
+                                 deadline_s=deadline, cause_key="supervised_executor:timeout")
                     raise subprocess.TimeoutExpired(list(key.command), deadline)
                 if entry.error is not None:
                     raise entry.error

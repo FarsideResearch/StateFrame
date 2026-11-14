@@ -179,6 +179,9 @@ def _add_task_arguments(command: argparse.ArgumentParser, *, for_run: bool = Fal
     _add_mutation_arguments(command)
     if for_run:
         command.add_argument("--quiet", action="store_true", help="no live turn log")
+        command.add_argument("--log-level", choices=("error", "warn", "info", "debug"), default=None,
+                             help="how much of the kill/refusal/timeout reason log to print "
+                                  "(default: STATEFRAME_LOG_LEVEL, else warn)")
     if for_run:
         command.add_argument("--json", action="store_true", help="print the summary as JSON")
 
@@ -348,6 +351,7 @@ def _run_options(args: argparse.Namespace, endpoint: Endpoint) -> RunOptions:
                       allow_source_tree=getattr(args, "allow_source_tree", False),
                       timeout_s=args.timeout,
                       quiet=getattr(args, "quiet", False) or getattr(args, "json", False),
+                      log_level=getattr(args, "log_level", None),
                       tool_settings=settings, skills=tuple(args.skill),
                       trust_skill_tools=args.trust_skill_tools,
                       instructions=("off" if args.no_instructions else

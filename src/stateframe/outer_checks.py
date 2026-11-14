@@ -36,6 +36,12 @@ class OuterCheckError(RuntimeError):
     """A check could not be executed within the required boundary."""
 
 
+def _timeout_cause(started: float, timeout_s: float, deadline: float | None) -> str:
+    """Which limit bounded the check: the run deadline or the check's own timeout (logging only)."""
+    own_limit = started + min(timeout_s, CHECK_TIMEOUT)
+    return "run_deadline" if deadline is not None and deadline <= own_limit else "check_timeout"
+
+
 def run(command: str, cwd: Path, *, python: str, timeout_s: float = CHECK_TIMEOUT,
         deadline: float | None = None, test_env: dict[str, str] | None = None,
         pytest_plugins: str | None = None, test_python: str | None = None,
@@ -72,6 +78,7 @@ def run(command: str, cwd: Path, *, python: str, timeout_s: float = CHECK_TIMEOU
                                    cwd=Path(__file__).resolve().parent, env=env, stdin=request,
                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                    start_new_session=True)
+    from .engine import kernel_reason_log as _reason_log
     from .engine.kernel_exec_tracker import (capture_launch_identity, child_exited_unreaped,
                                              recorded_launch_identity, signal_launch_group)
     capture_launch_identity(process, session_leader=True)
@@ -98,6 +105,12 @@ def run(command: str, cwd: Path, *, python: str, timeout_s: float = CHECK_TIMEOU
                     # Ask the helper to unwind run_sandboxed so it cleans up its
                     # separate test process group and its throwaway directory.
                     if not child_exited_unreaped(process):
+                        cause = _timeout_cause(started, timeout_s, deadline)
+                        _reason_log.emit_kill(
+                            "outer_checks", target="outer check helper", pid=process.pid,
+                            why=f"{cause.replace('_', ' ')} reached before the check finished",
+                            limit=end - started, elapsed_s=time.monotonic() - started,
+                            signal_name="SIGTERM", level="WARN", cause_key=cause)
                         process.send_signal(signal.SIGTERM)
                     drain_deadline = time.monotonic() + HELPER_CLEANUP_GRACE
                     continue
@@ -130,15 +143,28 @@ def run(command: str, cwd: Path, *, python: str, timeout_s: float = CHECK_TIMEOU
                 if process.returncode:
                     helper_exit = process.returncode
         except (ValueError, OSError, subprocess.TimeoutExpired) as error:
+            if isinstance(error, subprocess.TimeoutExpired):
+                _reason_log.emit_timeout(
+                    "outer_checks", what="outer check helper", why="helper did not exit before the deadline",
+                    deadline_s=end - started, elapsed_s=time.monotonic() - started,
+                    level="WARN", cause_key="helper_wait_timeout")
             raise OuterCheckError(f"outer check helper failed: {type(error).__name__}") from error
         finally:
             if not timed_out and not child_exited_unreaped(process):
+                _reason_log.emit_kill(
+                    "outer_checks", target="outer check helper", pid=process.pid,
+                    why="parent exited with the helper still running",
+                    signal_name="SIGTERM", level="WARN", cause_key="helper_cleanup_term")
                 process.send_signal(signal.SIGTERM)
             cleanup_deadline = (drain_deadline if timed_out
                                 else time.monotonic() + HELPER_CLEANUP_GRACE)
             while not child_exited_unreaped(process) and time.monotonic() < cleanup_deadline:
                 time.sleep(.02)
             if not child_exited_unreaped(process):
+                _reason_log.emit_kill(
+                    "outer_checks", target="outer check helper", pid=process.pid,
+                    why="helper ignored SIGTERM through the cleanup grace",
+                    signal_name="SIGKILL", level="WARN", cause_key="helper_survived_sigterm")
                 try:
                     signalled = signal_launch_group(process, recorded_launch_identity(process),
                                                     signal.SIGKILL)
@@ -149,6 +175,9 @@ def run(command: str, cwd: Path, *, python: str, timeout_s: float = CHECK_TIMEOU
             try:
                 process.wait(timeout=1)
             except subprocess.TimeoutExpired as error:
+                _reason_log.emit_timeout(
+                    "outer_checks", what="outer check helper", why="helper survived SIGKILL and wait",
+                    deadline_s=1, level="WARN", cause_key="helper_survived_cleanup")
                 raise OuterCheckError("outer check helper survived cleanup") from error
             process.stdout.close()
             process.stderr.close()
@@ -187,6 +216,7 @@ def _helper() -> int:
     os.environ.clear()
     os.environ.update(env)
     sys.path.insert(0, str(Path(__file__).resolve().parent / "engine"))
+    import kernel_reason_log as _reason_log
     import kernel_execution_policy as policy
     from kernel_check_receipts import sandbox_open_denial
 
@@ -203,10 +233,10 @@ def _helper() -> int:
         process_cleaned = False
         return spawned, capabilities
 
-    def tracked_kill_group(process, family=None, *, launch_identity=None):
+    def tracked_kill_group(process, family=None, *, launch_identity=None, **log_fields):
         nonlocal process_cleaned
         cleaned = original_kill_group(
-            process, family, launch_identity=launch_identity)
+            process, family, launch_identity=launch_identity, **log_fields)
         if process is spawned and cleaned and getattr(process, "returncode", None) is not None:
             process_cleaned = True
         return cleaned
@@ -286,9 +316,17 @@ def _helper() -> int:
         signal.setitimer(signal.ITIMER_REAL, HELPER_PROCESS_CLEANUP_S)
         if spawned is not None and not process_cleaned:
             try:
-                cleanup_ok = policy._kill_group(spawned) and cleanup_ok
+                cleanup_ok = policy._kill_group(
+                    spawned, cause="helper_process_cleanup",
+                    why="helper stopped; killing the check's own process group") and cleanup_ok
                 spawned.wait(timeout=1)
-            except (OSError, RuntimeError, subprocess.TimeoutExpired):
+            except (OSError, RuntimeError, subprocess.TimeoutExpired) as error:
+                # TimeoutError (the SIGALRM budget above) is an OSError. Logged here, not in the
+                # alarm handler: emit takes a lock the interrupted frame may already hold.
+                _reason_log.emit_timeout(
+                    "outer_check_helper", what="helper process cleanup",
+                    why=f"process group cleanup failed: {type(error).__name__}",
+                    deadline_s=HELPER_PROCESS_CLEANUP_S, level="WARN", cause_key="helper_cleanup")
                 cleanup_ok = False
         signal.setitimer(signal.ITIMER_REAL, 0)
         signal.signal(signal.SIGALRM, previous_alarm)

@@ -19,12 +19,14 @@ if __package__:
     from .kernel_exec_tracker import (Descendants, ProcessTable, capture_launch_identity,
                                        child_exited_unreaped,
                                        kill_launch_unit, recorded_launch_identity)
+    from .kernel_reason_log import emit_kill, emit_timeout
     from .kernel_test_isolation import capability_command
 else:
     from kernel_exec_session import CleanupReport, ExecResult, ExecSessionError, _host_load
     from kernel_exec_tracker import (Descendants, ProcessTable, capture_launch_identity,
                                      child_exited_unreaped,
                                      kill_launch_unit, recorded_launch_identity)
+    from kernel_reason_log import emit_kill, emit_timeout
     from kernel_test_isolation import capability_command
 
 MAX_MESSAGE = 4 << 20
@@ -204,14 +206,26 @@ class _ContainmentMonitor:
             if breach:
                 if self.failure is None:
                     self.failure = ("timeout" if breach == "wall limit exceeded" else "resource", breach)
+                cause = "mcp_wall_limit" if breach == "wall limit exceeded" else "mcp_resource_limit"
+                emit_kill("mcp_driver", target=f"MCP server pid {self.process.pid}",
+                          pid=self.process.pid, why=f"{breach}, stopping the server",
+                          level="WARN", cause_key=cause)
                 try:
                     survivors = kill_launch_unit(
                         self.process, self.family,
                         launch_identity=recorded_launch_identity(self.process))
                 except OSError as error:
+                    emit_kill("mcp_driver", target=f"MCP server pid {self.process.pid}",
+                              pid=self.process.pid,
+                              why=f"kill failed after breach ({type(error).__name__})",
+                              level="ERROR", cause_key="mcp_breach_kill_failed")
                     self.failure = ("supervision", f"cannot stop MCP server after resource breach: {error}")
                 else:
                     if survivors:
+                        emit_kill("mcp_driver", target=f"MCP server pid {self.process.pid}",
+                                  pid=self.process.pid, why="survivors after the breach kill",
+                                  measured=len(survivors), level="ERROR",
+                                  cause_key="mcp_breach_survivors")
                         self.failure = ("supervision", "MCP server survived the breach kill: "
                                         + ", ".join(str(pid) for pid in survivors))
                     else:
@@ -297,6 +311,9 @@ def converse(request: dict, cap, cwd: Path) -> object:
                 monitor.check()
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
+                    emit_timeout("mcp_driver", what="MCP server request write",
+                                 why="MCP server deadline exceeded", deadline_s=timeout,
+                                 cause_key="mcp_deadline")
                     raise TimeoutError("MCP server deadline exceeded")
                 if not select.select([], [fd], [], min(remaining, .02))[1]:
                     continue
@@ -351,6 +368,9 @@ def converse(request: dict, cap, cwd: Path) -> object:
                 raise ProtocolError("server message exceeds 4 MiB")
             remaining = deadline - time.monotonic()
             if remaining <= 0:
+                emit_timeout("mcp_driver", what="MCP server response read",
+                             why="MCP server deadline exceeded", deadline_s=timeout,
+                             cause_key="mcp_deadline")
                 raise TimeoutError("MCP server deadline exceeded")
             if not selector.select(min(remaining, .02)):
                 continue
@@ -369,6 +389,7 @@ def converse(request: dict, cap, cwd: Path) -> object:
         send({"jsonrpc": "2.0", "id": counter, "method": method, "params": params})
         return receive(counter)
 
+    completed = False
     try:
         monitor = _ContainmentMonitor(process, cap)
         monitor.start()
@@ -401,6 +422,7 @@ def converse(request: dict, cap, cwd: Path) -> object:
                     uri = resource.get("uri") if isinstance(resource, dict) else item.get("uri")
                     if not isinstance(uri, str):
                         raise ProtocolError("invalid resource content item")
+            completed = True
             return result
         listed = []
         cursor = None
@@ -415,6 +437,7 @@ def converse(request: dict, cap, cwd: Path) -> object:
                 raise ProtocolError("tools/list exceeds 512 tools")
             cursor = page.get("nextCursor")
             if cursor is None:
+                completed = True
                 return listed
             if not isinstance(cursor, str) or not cursor or cursor in cursors:
                 raise ProtocolError("invalid or repeated tools/list cursor")
@@ -426,8 +449,17 @@ def converse(request: dict, cap, cwd: Path) -> object:
         try:
             if monitor is not None:
                 monitor.stop()
+            # Routine teardown after a completed call is not logged (it runs on every MCP call).
+            # A call that failed while the server was still up is a WARN.
+            if not completed:
+                emit_kill("mcp_driver", target=f"MCP server pid {process.pid}", pid=process.pid,
+                          why="MCP call ended before the server exited, stopping the server",
+                          level="WARN", cause_key="mcp_stop_after_failed_call")
             survivors = _cleanup_launch_unit(process, monitor)
             if survivors:
+                emit_kill("mcp_driver", target=f"MCP server pid {process.pid}", pid=process.pid,
+                          why="survivors after MCP cleanup", measured=len(survivors),
+                          level="ERROR", cause_key="mcp_cleanup_survivors")
                 raise ExecSessionError("MCP server survived cleanup: "
                                        + ", ".join(str(pid) for pid in survivors))
             if monitor is not None:

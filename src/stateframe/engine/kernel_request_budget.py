@@ -21,6 +21,7 @@ from typing import TYPE_CHECKING
 from kernel_measurement import profiled_function_span
 from kernel_endpoint_size import ENDPOINT_SIZE
 from kernel_obligation_assess import UnavailableEvidence, _unavailable_evidence
+from kernel_reason_log import emit_reason, emit_refusal
 
 if TYPE_CHECKING:
     from kernel_request_diet import RequestTokenMeter
@@ -123,6 +124,28 @@ class RequestBudgetDeferred(RuntimeError):
     def __init__(self, detail: Mapping[str, object]):
         self.detail = dict(detail)
         super().__init__(str(self.detail.get("reason", "request budget deferred")))
+
+
+_DIET_DEFER_REASONS = frozenset({
+    "required_evidence_removed", "request_diet_read_span_floor_violation", "request_diet_cap_infeasible"})
+
+
+def _log_diet_deferred(detail: Mapping[str, object], *, stage: str, level: str = "WARN",
+                       cause_prefix: str = "diet_deferred") -> None:
+    """Stderr/problems line for a request-diet deferral; one per distinct reason per run."""
+    reason = str(detail.get("reason", "request diet deferred"))
+    # cause_key must come from a small fixed set, never free text.
+    cause = reason if reason in _DIET_DEFER_REASONS else "other"
+    # journal=False: request path, a journal event here would shift identity-bearing positions.
+    emit_refusal("request_budget", what=f"request diet deferred at stage {stage}", why=reason,
+                 measured=detail.get("request_bytes_after"), limit=detail.get("max_request_bytes"),
+                 level=level, cause_key=f"{cause_prefix}:{cause}", journal=False)
+
+
+def _log_lean_invariant(cause_key: str, why: str) -> None:
+    """LEAN prepared history was mutated or lost its contract: an invariant break, so ERROR."""
+    emit_reason("invariant", cause_key, "request_budget", "LEAN prepared history invariant broken",
+                why, level="ERROR", journal=False)
 
 
 class LeanHistoryCapacityError(ValueError):
@@ -904,6 +927,9 @@ def _lean_append_only_receipt(
                 first_changed_fields=changed_fields,
                 status=HOST_CONTRACT_LIMIT, dispatch=False,
             )
+        _log_lean_invariant("lean_history_mutated",
+                            f"prepared transcript changed at message index {changed_index} "
+                            f"(fields={changed_fields})")
         raise LeanHistoryMutationError(
             "LEAN downstream request stage changed the prepared transcript "
             f"at message index {changed_index} (fields={changed_fields})")
@@ -2258,6 +2284,7 @@ def _apply_budget_with_diet(
                     setattr(capture, "request_budget_owner_reexpanded", _reexpanded_owner_blocks)
     except RequestDietDeferred as error:
         detail = dict(error.detail)
+        _log_diet_deferred(detail, stage=stage)
         tools_after = body.get("tools", [])
         tool_count = len(tools_after) if isinstance(tools_after, list) else 0
         schema_bytes = _schema_bytes(tools_after) if isinstance(tools_after, list) else 0
@@ -2321,6 +2348,7 @@ def _apply_budget_with_diet(
             _run_hard_budget_diet()
         except RequestDietDeferred as hard_error:
             hard_detail = dict(hard_error.detail)
+            _log_diet_deferred(hard_detail, stage=stage)
 
             def measure_current_tokens() -> int:
                 return token_meter.measure(body)[0]
@@ -2341,6 +2369,7 @@ def _apply_budget_with_diet(
                     _run_hard_budget_diet()
                 except RequestDietDeferred as retry_error:
                     hard_detail = dict(retry_error.detail)
+                    _log_diet_deferred(hard_detail, stage=stage)
                 else:
                     recovered_after_shedding = True
                     if capture is not None:
@@ -2652,6 +2681,8 @@ def _apply_budget_with_diet(
                                 )
                             except RequestDietDeferred as candidate_error:
                                 candidate_audit = dict(candidate_error.detail)
+                                _log_diet_deferred(candidate_audit, stage=stage, level="INFO",
+                                                   cause_prefix="candidate_diet_deferred")
                                 candidate_audit["candidate_diet_deferred"] = True
                             candidate_audit["dropped_sections"] = (
                                 list(candidate_pretrimmed)
@@ -2807,6 +2838,13 @@ def _apply_budget_with_diet(
                         # source excerpts or provider payloads.
                         detail = getattr(error, "detail", None)
                         reason = detail.get("reason") if isinstance(detail, Mapping) else None
+                        reason_code = reason[:80] if isinstance(reason, str) else "none"
+                        # cause_key = exception class only (bounded); the reason text goes in why.
+                        emit_reason(
+                            "fallback", f"source_delivery_candidate:{type(error).__name__}",
+                            "request_budget", "source delivery candidate failed; partial receipt kept",
+                            f"{type(error).__name__} ({reason_code}); downstream wire gate holds the partial receipt",
+                            level="WARN", journal=False)
                         if emit is not None:
                             emit(
                                 "request_source_delivery_candidate_failed",
@@ -2837,7 +2875,9 @@ def _apply_budget_with_diet(
             if attempt == 0:
                 try:
                     _run_diet(max_request_bytes=selected_budget.max_request_bytes)
-                except RequestDietDeferred:
+                except RequestDietDeferred as owner_error:
+                    _log_diet_deferred(dict(owner_error.detail), stage=stage,
+                                       cause_prefix="owner_first_diet_deferred")
                     allocation_host_limit = host_limit_outcome(
                         owner_first_plan, request_bytes=_wire_bytes(body),
                         max_request_bytes=selected_budget.max_request_bytes,
@@ -3403,6 +3443,8 @@ def apply_capture_budget(
                  request_id=getattr(capture, "request_id", None),
                  boundary="capture_budget_input", reason="lean_action_contract_missing",
                  status=HOST_CONTRACT_LIMIT, dispatch=False)
+        _log_lean_invariant("lean_contract_missing",
+                            "LEAN prepared history reached request budget without its action contract")
         raise LeanHistoryMutationError(
             "LEAN prepared history reached request budget without its action contract")
     if isinstance(request_action_contract, Mapping):
@@ -3493,6 +3535,11 @@ def apply_capture_budget(
                 if callable(emit):
                     emit("lean_history_capacity_outcome",
                          producer="kernel_request_budget", dispatch=False, **outcome)
+                emit_refusal("request_budget", what="LEAN history exceeds request capacity",
+                             why=f"{reason}: request {request_bytes} of {request_limit} bytes, "
+                                 f"prompt {measured_prompt_tokens} of {prompt_limit} tokens",
+                             measured=request_bytes, limit=request_limit,
+                             cause_key=f"lean_capacity:{reason}", journal=False)
                 raise LeanHistoryCapacityError(outcome)
         from kernel_final_wire_budget import reconcile_frozen_budget
         reconcile_frozen_budget(capture, runtime, body)

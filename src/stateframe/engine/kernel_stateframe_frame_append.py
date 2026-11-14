@@ -13,6 +13,7 @@ import threading
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
+from kernel_reason_log import emit_reason
 from kernel_stateframe_message_layout import (
     StateFrameMessageLayoutError,
     stateframe_message_index,
@@ -690,6 +691,11 @@ def fail_open_pending(
         request_id=pending.request_id, step=pending.step, mode=pending.mode,
         reason=reason, error_type=error_type,
     )
+    # fixed cause_key: callers outside this module pass the reason, which rides in `why`.
+    emit_reason("fallback", "frame_append_failed_open", "stateframe_frame_append",
+                f"frame append projection failed open for {pending.mode} mode",
+                f"frame append not committed for this step: {reason}", level="WARN",
+                journal=False, error_type=error_type)
 
 
 def commit_after_response(capture: object, journal: object | None) -> None:

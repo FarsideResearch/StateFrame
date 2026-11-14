@@ -277,7 +277,7 @@ def test_run_sandboxed_cleanup_uses_supervisor_family_and_chains_original(
     process._stateframe_memory_supervisor = Supervisor()
     cleanup_calls = []
 
-    def record_cleanup(child, captured_family=None, *, launch_identity=None):
+    def record_cleanup(child, captured_family=None, *, launch_identity=None, **_log_fields):
         cleanup_calls.append((child, captured_family, launch_identity))
         return False
 

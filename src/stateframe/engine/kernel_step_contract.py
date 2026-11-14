@@ -2124,6 +2124,12 @@ def emit_edit_nturn_skipped_budget(
     emitter = getattr(journal, "emit", None)
     if not callable(emitter):
         raise TypeError("edit n-turn budget skip requires a host journal")
+    # Logging only; journal=False because the event below is the journal record.
+    from kernel_reason_log import emit_timeout
+    emit_timeout("edit_nturn", what="planned edit turn withheld", level="WARN", journal=False,
+                 why=f"{max(0.0, float(remaining_seconds)):.0f}s left, {float(required_seconds):.0f}s needed ({reason}); "
+                     f"limit: EDIT_NTURN_RUN_BUDGET_SECONDS={EDIT_NTURN_RUN_BUDGET_SECONDS:g}s per run, no override",
+                 deadline_s=EDIT_NTURN_RUN_BUDGET_SECONDS, cause_key="edit_nturn_budget")
     emitter("edit_nturn_skipped_budget", n_sites=n_sites, turns_used=turns_used,
             remaining_seconds=max(0.0, float(remaining_seconds)),
             required_seconds=float(required_seconds), reason=reason,

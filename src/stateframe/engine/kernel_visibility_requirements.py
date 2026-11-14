@@ -10,7 +10,7 @@ from kernel_read_reuse_visibility import (
     _candidate_is_predeclared_missing, _full_line_source_message,
     source_delivery_identity, verify_final_visibility,
 )
-from kernel_request_seal import RequestSealError
+from kernel_request_seal import RequestSealError, log_seal_violation
 
 
 _IDENTITY_FIELDS = ("path", "revision", "start_line", "end_line", "content_sha256")
@@ -22,6 +22,7 @@ def _atomic_requirements(candidates):
     for candidate in candidates:
         identity = source_delivery_identity(candidate)
         if identity is None or not isinstance(candidate.get("content"), str):
+            log_seal_violation("visibility requirement has an invalid source identity")
             raise RequestSealError("visibility requirement has an invalid source identity")
         identities.append((candidate, identity))
         boundaries.setdefault((identity["path"], identity["revision"]), set()).update(
@@ -49,6 +50,7 @@ def register_visibility_requirements(plan, candidates):
     for identity in _atomic_requirements(candidates):
         path, revision = identity["path"], identity["revision"]
         if path in revisions and revisions[path] != revision:
+            log_seal_violation("visibility requirement differs from source authority")
             raise RequestSealError("visibility requirement differs from source authority")
         handle = "unit:visibility:" + hashlib.sha256(json.dumps(
             identity, sort_keys=True, separators=(",", ":")).encode()).hexdigest()

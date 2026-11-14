@@ -198,7 +198,7 @@ def test_outer_helper_acknowledges_process_cleanup_before_tree_removal(
     monkeypatch.setattr(policy, "require_capabilities", lambda: None)
     monkeypatch.setattr(policy, "sandboxed_popen", spawn)
     monkeypatch.setattr(policy, "run_sandboxed", check)
-    monkeypatch.setattr(policy, "_kill_group", lambda _p: events.append("kill") or True)
+    monkeypatch.setattr(policy, "_kill_group", lambda _p, **_log: events.append("kill") or True)
     monkeypatch.setattr(outer_checks.signal, "setitimer",
                         lambda _which, seconds: events.append(("timer", seconds)))
     monkeypatch.setattr(outer_checks, "print", lambda packet, **_k: events.append(

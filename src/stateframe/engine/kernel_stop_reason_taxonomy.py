@@ -15,6 +15,11 @@ from collections import deque
 from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
 
+try:
+    from .kernel_reason_log import emit_reason
+except ImportError:
+    from kernel_reason_log import emit_reason
+
 MODE_ENV = "STATEFRAME_STOP_REASON_TAXONOMY"
 LAST_N_ENV = "STATEFRAME_STOP_REASON_LAST_N"
 SCHEMA = "stateframe-stop-reason-taxonomy/1"
@@ -654,7 +659,9 @@ def record(runtime: object, result: Mapping[str, object] | None) -> dict[str, ob
         emit(EVENT_KIND, producer=PRODUCER, payload_schema=SCHEMA,
              mechanism_id="stop_reason_taxonomy", **payload)
         return payload
-    except (OSError, RuntimeError, TypeError, ValueError, AttributeError):
+    except (OSError, RuntimeError, TypeError, ValueError, AttributeError) as error:
+        emit_reason("degrade", "stop_reason_taxonomy_failed", "stop_reason_taxonomy",
+                    "run-end stop reason was not recorded", type(error).__name__, level="DEBUG")
         return None
 
 

@@ -31,6 +31,7 @@ from kernel_exec_tracker import (ContainmentUnverified, Descendants, LaunchIdent
                                  ProcessIdentity, ProcessTable, capture_launch_identity,
                                  child_exited_unreaped, kill_launch_unit,
                                  recorded_launch_identity, signal_launch_group)
+from kernel_reason_log import emit_kill, emit_refusal
 from kernel_test_isolation import SandboxReadGrants, isolated_command, sandbox_executable
 from sf_launch import (
     _cgroup_leaf_pattern_status,
@@ -400,12 +401,20 @@ def _check_cpu_seconds_used(process: subprocess.Popen[bytes]) -> float | None:
 
 
 def _kill_group(process: subprocess.Popen[bytes], family: Descendants | None = None, *,
-                launch_identity: LaunchIdentity | None = None) -> bool:
+                launch_identity: LaunchIdentity | None = None,
+                cause: str = "unspecified",
+                why: str = "kill requested without a stated reason") -> bool:
+    # Defaults keep the monkeypatched signature used by outer_checks.py working.
     # The whole launch unit, not only the group: a bwrap child still setting up its
     # sandbox, or one that already left the group, must not outlive the timeout.
     identity = (launch_identity if launch_identity is not None
                 else recorded_launch_identity(process))
-    return not kill_launch_unit(process, family, launch_identity=identity)
+    pid = getattr(process, "pid", None)
+    emit_kill("exec_policy", target=f"pid {pid}", pid=pid if isinstance(pid, int) else None,
+              why=why, level="WARN", cause_key=f"exec_policy:{cause}")
+    # The tracker line is muted (DEBUG): this emit already states the cause. Survivors stay ERROR.
+    return not kill_launch_unit(process, family, launch_identity=identity,
+                                reason=cause, log_level="DEBUG")
 
 
 class _ProgressTrackingProcessTable:
@@ -680,6 +689,28 @@ class _ResidentMemorySupervisor:
                 self._last_scan_duration = duration
                 self._scan_started_at = None
 
+    def _log_stop(self, cause: str, why: str, *, level: str,
+                  measured: int | None = None, limit: int | None = None) -> None:
+        """Log-only: name which supervisor path is stopping the launch unit. Never raises.
+
+        Three paths share _stop_launch_unit, so each states its own cause here: a
+        measured breach (WARN, bytes vs limit), a supervisor error (ERROR) and post-exit
+        descendant cleanup (INFO, no limit: nothing was measured).
+        """
+        self._stop_cause = cause
+        pid = getattr(self.process, "pid", None)
+        emit_kill("memory_supervisor", target=f"launch unit pid {pid}",
+                  pid=pid if isinstance(pid, int) else None, why=why,
+                  measured=measured, limit=limit, level=level,
+                  cause_key=f"memory_supervisor:{cause}")
+
+    def _measured_bytes(self, live: list[ProcessIdentity]) -> int | None:
+        """Log-only: aggregate accounted memory of the live unit, or None if unreadable."""
+        try:
+            return sum(self.table.accounted_memory_bytes(row) for row in live)
+        except Exception:
+            return None
+
     def _stop_launch_unit(self) -> None:
         tracked = self._begin_work()
         try:
@@ -708,7 +739,8 @@ class _ResidentMemorySupervisor:
                         return supervisor._track_work(lambda: family.signal(rows, sig))
 
                 survivors = kill_launch_unit(
-                    self.process, AdmissionFamilyView(), launch_identity=self.launch_identity)
+                    self.process, AdmissionFamilyView(), launch_identity=self.launch_identity,
+                    reason=getattr(self, "_stop_cause", "supervisor_stop"), log_level="DEBUG")
                 if survivors:
                     self.cleanup_verified_no_survivors = False
                     if self.error is None:
@@ -777,6 +809,8 @@ class _ResidentMemorySupervisor:
                         self._stopped.wait(0.02)
                         continue
                     self._record_error(error)
+                    self._log_stop("supervisor_error", self.error or "supervisor error",
+                                   level="ERROR")
                     self._stop_launch_unit()
                     return
                 self._failed_samples = 0
@@ -784,6 +818,12 @@ class _ResidentMemorySupervisor:
                     self.process.memory_limit_stop_cause = "memory_limit"
                     self.process.memory_limit_killed = True
                     self.process.memory_limit_reason = breach
+                    measured = self._measured_bytes(live)
+                    self._log_stop(
+                        "rss_breach",
+                        f"resident memory {measured} bytes exceeded limit "
+                        f"{self.memory_bytes} bytes ({breach})",
+                        level="WARN", measured=measured, limit=self.memory_bytes)
                     self._stop_launch_unit()
                     return
                 if leader_exited:
@@ -791,6 +831,10 @@ class _ResidentMemorySupervisor:
                     # In the no-namespace fallback, stop every descendant recorded by
                     # the launch-unit scan before the check can report completion.
                     if live:
+                        self._log_stop(
+                            "post_exit_cleanup",
+                            f"leader exited; stopping {len(live)} remaining descendant(s)",
+                            level="INFO")
                         self._stop_launch_unit()
                     else:
                         self.family_verified_empty = post_exit_scan_completed
@@ -965,7 +1009,8 @@ def sandboxed_popen(command: Sequence[object], root: str | os.PathLike[str], *,
         mechanisms = {b"C": "cgroup_memory_max", b"D": "rlimit_data", b"A": "rlimit_as"}
         mechanism = mechanisms.get(marker)
         if mechanism is None:
-            _kill_group(process)
+            _kill_group(process, cause="memory_mechanism_missing",
+                        why="sandbox child did not report its memory limit mechanism")
             try:
                 process.wait(timeout=2)
             except (OSError, subprocess.TimeoutExpired):
@@ -985,7 +1030,8 @@ def sandboxed_popen(command: Sequence[object], root: str | os.PathLike[str], *,
             process._stateframe_memory_supervisor = supervisor
             supervisor.start()
         except (ExecutionPolicyError, OSError, RuntimeError, ValueError) as error:
-            _kill_group(process)
+            _kill_group(process, cause="memory_supervisor_start_failed",
+                        why="resident-memory supervisor failed to start")
             try:
                 process.wait(timeout=2)
             except (OSError, subprocess.TimeoutExpired):
@@ -1017,6 +1063,9 @@ def finish_supervision(process: subprocess.Popen[bytes], timeout: float = 3.0) -
 
         if getattr(process, "returncode", None) is None:
             reason = "resident-memory supervision completion requested before process exit"
+            emit_refusal("exec_policy", what="resident-memory supervision completion",
+                         why=reason, level="ERROR",
+                         cause_key="exec_policy:completion_before_exit")
             failure = ContainmentUnverified(f"containment unverified: {reason}")
             raise failure from RuntimeError(reason)
 
@@ -1063,6 +1112,8 @@ def _raise_supervision_failure(supervisor: object, reason: str,
                                cause: BaseException | None) -> None:
     if not isinstance(cause, BaseException):
         cause = RuntimeError(reason)
+    emit_refusal("exec_policy", what="resident-memory supervision", why=reason, level="ERROR",
+                 cause_key="exec_policy:supervision_failure")
     failure = ContainmentUnverified(f"containment unverified: {reason}")
     try:
         setattr(supervisor, "_completion_failure", failure)
@@ -1090,9 +1141,15 @@ def supervised_process(process: subprocess.Popen[bytes], timeout: float = 3.0
                 supervisor = getattr(process, "_stateframe_memory_supervisor", None)
                 family = getattr(supervisor, "family", None)
                 identity = getattr(supervisor, "launch_identity", None)
-                cleaned = (_kill_group(process, family, launch_identity=identity)
-                           if supervisor is not None else _kill_group(process))
+                kill_why = "supervised process still running at context exit"
+                cleaned = (_kill_group(process, family, launch_identity=identity,
+                                       cause="context_exit", why=kill_why)
+                           if supervisor is not None
+                           else _kill_group(process, cause="context_exit", why=kill_why))
                 if not cleaned:
+                    emit_refusal("exec_policy", what=f"launch unit of pid {process.pid}",
+                                 why="launch unit survived context exit", level="ERROR",
+                                 cause_key="exec_policy:context_exit_survivors")
                     raise ContainmentUnverified(
                         "containment unverified: launch unit survived context exit")
             except BaseException as error:
@@ -1196,7 +1253,9 @@ def _collect(process: subprocess.Popen[bytes], input_data: bytes | None, deadlin
         if remaining <= 0:
             timed_out = not child_exited_unreaped(process)
             if timed_out:
-                group_killed = _kill_group(process)
+                group_killed = _kill_group(
+                    process, cause="wall_deadline",
+                    why="policy wall deadline reached before the child exited")
             break
         for key, mask in selector.select(min(remaining, 0.05)):
             stream = key.fileobj
@@ -1284,13 +1343,20 @@ def _collect(process: subprocess.Popen[bytes], input_data: bytes | None, deadlin
             time.sleep(.02)
         if not child_exited_unreaped(process):
             timed_out = True
-            group_killed = _kill_group(process) or group_killed
+            group_killed = _kill_group(
+                process, cause="wall_deadline_after_grace",
+                why="child still running after the deadline and its one second exit grace") or group_killed
         else:
             # The exited leader remains waitable and pins its group identity.
             # A launch-unit sweep cannot discover its now-reparented family.
             identity = recorded_launch_identity(process)
             if identity is None or identity.pid != process.pid:
+                emit_refusal("exec_policy", what=f"completed check pid {process.pid}",
+                             why="launch identity missing, group containment unverified",
+                             level="ERROR", cause_key="exec_policy:containment_identity_missing")
                 raise ContainmentUnverified("containment unverified: completed check launch identity missing")
+            # Not logged: this sweep runs on every completed check (expected cleanup), so a line
+            # here is per-check noise. Failures of the sweep are logged below as ERROR.
             try:
                 signalled = signal_launch_group(process, identity, signal.SIGKILL)
             except PermissionError:
@@ -1300,6 +1366,9 @@ def _collect(process: subprocess.Popen[bytes], input_data: bytes | None, deadlin
             while any(row.pgid == identity.pid and not row.zombie
                       for row in table.snapshot().values()):
                 if not signalled or time.monotonic() >= sweep_deadline:
+                    emit_refusal("exec_policy", what=f"process group of pid {identity.pid}",
+                                 why="leftover members survived the completed-check sweep",
+                                 level="ERROR", cause_key="exec_policy:containment_sweep_failed")
                     raise ContainmentUnverified(
                         "containment unverified: cannot sweep completed check process group")
                 time.sleep(.02)
@@ -1431,13 +1500,20 @@ def run_sandboxed(command: Sequence[object], root: str | os.PathLike[str], *,
         if not (memory_supervisor is not None and memory_supervisor.containment_verified):
             try:
                 if memory_supervisor is None:
-                    cleaned = _kill_group(process)
+                    cleaned = _kill_group(
+                        process, cause="collect_aborted",
+                        why="policy child abandoned after an exception while collecting output")
                 else:
                     cleaned = _kill_group(
                         process, memory_supervisor.family,
                         launch_identity=memory_supervisor.launch_identity,
+                        cause="collect_aborted",
+                        why="policy child abandoned after an exception while collecting output",
                     )
                 if not cleaned:
+                    emit_refusal("exec_policy", what=f"launch unit of pid {process.pid}",
+                                 why="launch-unit survivors remain after cleanup", level="ERROR",
+                                 cause_key="exec_policy:collect_abort_survivors")
                     cleanup_error = ContainmentUnverified(
                         "containment unverified: launch-unit survivors remain after cleanup")
             except BaseException as error:
@@ -1464,6 +1540,9 @@ def run_sandboxed(command: Sequence[object], root: str | os.PathLike[str], *,
         if cgroup is not None:
             if child_reaped:
                 if not _remove_command_cgroup(cgroup):
+                    emit_refusal("exec_policy", what=f"cgroup {cgroup.name}",
+                                 why="per-command cgroup cleanup failed", level="ERROR",
+                                 cause_key="exec_policy:cgroup_cleanup_failed")
                     raise ContainmentUnverified(
                         "containment unverified: per-command cgroup cleanup failed")
             else:

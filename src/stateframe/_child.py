@@ -29,12 +29,14 @@ from pathlib import Path
 
 if __package__:
     from .cache_metrics import normalize
+    from .engine import kernel_reason_log as _reason_log
     from .engine.kernel_safe_paths import safe_home
     from .replay_tape import CheckpointUnfaithful, ReplayUnfaithful, Replayer, mask_volatile
     from .skills import SkillError, skills_digest, verify_records
     from .state_dirs import private_directory
 else:  # Executed by path under the selected project interpreter.
     from cache_metrics import normalize
+    from engine import kernel_reason_log as _reason_log
     from engine.kernel_safe_paths import safe_home
     from replay_tape import CheckpointUnfaithful, ReplayUnfaithful, Replayer, mask_volatile
     from skills import SkillError, skills_digest, verify_records
@@ -510,7 +512,13 @@ def install_token_count_warning() -> None:
         result = original(self, body)
         if result[1] == "calibrated_bytes" and not warned["done"]:
             warned["done"] = True
-            emit("token_counting_unavailable", reason=self.unavailable_reason())
+            reason = self.unavailable_reason()
+            # No tokenizer configured (no_url/disabled) is by design: INFO. A configured one that failed: WARN.
+            by_design = reason in {"no_url", "disabled"}
+            _reason_log.emit_reason("fallback", "tokenizer_unavailable_unconfigured" if by_design else "tokenizer_unavailable",
+                                    "engine_child", "token count fell back to calibrated bytes", reason,
+                                    level="INFO" if by_design else "WARN")
+            emit("token_counting_unavailable", reason=reason)
         return result
 
     measured._stateframe_fallback_warning = True
@@ -571,7 +579,7 @@ def install_checked_ask(rr, spec: dict, run: Path, hook_wiring=None) -> None:
         if classify(capture, runtime, {"messages": messages, "tools": tools}):
             def bound_gate(record, bound_capture, bound_runtime):
                 from capability_request_preflight import PRECOMPOSED_HOST_TEXT_SCHEMA
-                from kernel_request_seal import RequestSealError
+                from kernel_request_seal import RequestSealError, log_seal_violation
                 body = record.body
                 receipt = {
                     **dict(getattr(bound_capture, "release_precomposed_host_text", {}) or {}),
@@ -585,6 +593,7 @@ def install_checked_ask(rr, spec: dict, run: Path, hook_wiring=None) -> None:
                     frame_request_allocation=record.allocation, precomposed_host_text=receipt,
                 )
                 if final_messages != body["messages"]:
+                    log_seal_violation("CLI preflight mutated the sealed request")
                     raise RequestSealError("CLI preflight mutated the sealed request")
                 record_preflight(final_messages, body.get("tools", []), presentation,
                                  bound_capture=bound_capture, bound_runtime=bound_runtime)
@@ -897,6 +906,10 @@ def watch_parent() -> None:
                     # Only our own session's group (the runner starts us with start_new_session);
                     # never a group we merely belong to, such as a test runner's.
                     if os.getpgrp() == os.getpid():
+                        _reason_log.emit_kill(
+                            "engine_child", target="engine process group", pid=os.getpid(),
+                            why=f"parent runner pid {parent} is gone",
+                            signal_name="SIGKILL", level="ERROR", cause_key="parent_gone")
                         os.killpg(os.getpgrp(), signal.SIGKILL)
                 finally:
                     os._exit(137)
@@ -1102,6 +1115,9 @@ def main(argv: list[str]) -> int:
                 raise SkillError("host skill settings file differs from the run spec")
         verify_records(skill_records, skill_digest, spec.get("skills_measurements"))
     except (SkillError, OSError, KeyError, ValueError) as error:
+        _reason_log.emit_reason("invariant", "spec_skills_unusable", "engine_child",
+                                "engine refused to start: skill records unusable",
+                                f"{type(error).__name__}: {str(error)[:300]}", level="ERROR")
         emit("engine_error", error=type(error).__name__, detail=str(error)[:300])
         return 1
     engine = Path(spec["engine_dir"]).resolve(strict=True)
@@ -1178,6 +1194,9 @@ def main(argv: list[str]) -> int:
             HOST_STATE["hooks"] = hook_wiring.state
         configure_replay(run, active=bool(replayer and replayer.tape))
     except (ToolSettingsError, CustomToolError, ToolTapeError, SkillError, OSError, KeyError, ValueError) as error:
+        _reason_log.emit_reason("invariant", "engine_setup_failed", "engine_child",
+                                "engine refused to start: tool or skill setup failed",
+                                f"{type(error).__name__}: {str(error)[:300]}", level="ERROR")
         emit("engine_error", error=type(error).__name__, detail=str(error)[:300])
         return 1
     sys.argv[:] = [sys.argv[0]]  # engine modules read argv as legacy CLI input; give them none
@@ -1265,6 +1284,9 @@ def main(argv: list[str]) -> int:
         status = 0
     except BaseException as error:  # noqa: BLE001 - report every engine failure as a typed record
         atomic_bytes(run / "child-traceback.txt", traceback.format_exc().encode("utf-8"))
+        _reason_log.emit_reason("invariant", "engine_crashed", "engine_child",
+                                "engine stopped with an error",
+                                f"{type(error).__name__}: {' '.join(str(error).split())[:300]}", level="ERROR")
         emit("engine_error", error=type(error).__name__, detail=" ".join(str(error).split())[:300])
         if hook_wiring is not None:
             from kernel_hook_exec import HookContainmentError
@@ -1280,6 +1302,9 @@ def main(argv: list[str]) -> int:
             try:
                 hook_wiring.close()
             except BaseException as error:  # a failed hook cleanup is terminal
+                _reason_log.emit_reason("invariant", "hook_cleanup_failed", "engine_child",
+                                        "hook containment could not be verified at cleanup",
+                                        f"{type(error).__name__}: {str(error)[:300]}", level="ERROR")
                 emit("engine_error", error=type(error).__name__, detail=str(error)[:300])
                 result, status = {"result": "HOOK_CONTAINMENT", "error": str(error)[:300]}, 1
         try:
@@ -1287,12 +1312,16 @@ def main(argv: list[str]) -> int:
             if not cleanup.ok:
                 raise RuntimeError(f"CLEANUP_FAILED: {cleanup.detail}")
         except (RuntimeError, OSError) as error:
+            _reason_log.emit_reason("invariant", "shell_cleanup_failed", "engine_child",
+                                    "shell sessions did not stop cleanly", str(error)[:300], level="ERROR")
             emit("engine_error", error="ShellCleanupFailed", detail=str(error)[:300])
             result, status = {"result": "ENGINE_ERROR", "error": "ShellCleanupFailed"}, 1
         finally:
             try:
                 session.close()
             except (RuntimeError, OSError) as error:
+                _reason_log.emit_reason("invariant", "shell_cleanup_failed", "engine_child",
+                                        "shell sessions did not stop cleanly", str(error)[:300], level="ERROR")
                 emit("engine_error", error="ShellCleanupFailed", detail=str(error)[:300])
                 result, status = {"result": "ENGINE_ERROR", "error": "ShellCleanupFailed"}, 1
             signal.signal(signal.SIGTERM, previous_term)

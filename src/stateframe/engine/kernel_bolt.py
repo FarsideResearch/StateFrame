@@ -19,6 +19,7 @@ import kernel_effect_boundary as keb
 import kernel_workspace_truth as _workspace_truth
 from kernel_liveness import Evidence, OrganCensusSpec, TriState
 from kernel_verdict import SATISFIED
+from kernel_reason_log import emit_reason
 from kernel_history_spool import history as _history, journal_directory as _journal_directory
 from kernel_history_receipts import (
     append_receipt as _append_receipt,
@@ -1472,7 +1473,8 @@ class KernelBolt:
             try:
                 hyp.observe(legacy_retry_record)
             except Exception as _e:                                  # noqa: BLE001
-                print(f"    [stateframe] hyp.observe failed: {type(_e).__name__}")
+                emit_reason("degrade", "bolt:hyp_observe", "bolt",
+                            "hypothesis graph observe failed (fail-open)", type(_e).__name__)
         # E423: composed cognition loop (the long-horizon unlock) — every receipt
         # advances fold->hypotheses->replan->seam-actions->selector; a rendered card
         # (discriminating next action) is stashed for same-turn delivery.
@@ -1525,7 +1527,8 @@ class KernelBolt:
                     except Exception:                                # noqa: BLE001
                         pass
             except Exception as _e:                                  # noqa: BLE001
-                print(f"    [stateframe] composed advance failed: {type(_e).__name__}")
+                emit_reason("degrade", "bolt:composed_advance", "bolt",
+                            "composed cognition advance failed (fail-open)", type(_e).__name__)
         # Inspect focused evidence in the close-look component for every
         # test/edit receipt feeds the focus state machine; an OPEN decision renders the
         # microscope dossier, stashed for the orchestrator to append to the observation.
@@ -1547,14 +1550,16 @@ class KernelBolt:
                         self._rec("closelook", "dossier_opened",
                                   getattr(_dec, "trigger", "")[:80])
             except Exception as _e:                                  # noqa: BLE001
-                print(f"    [stateframe] closelook failed: {type(_e).__name__}: {_e}")
+                emit_reason("degrade", "bolt:closelook", "bolt",
+                            "close-look advance failed (fail-open)", f"{type(_e).__name__}: {_e}")
         # E350: receipts feed the vitals EKG when wired.
         ekg = getattr(self, "ekg", None)
         if ekg is not None:
             try:
                 ekg.observe(legacy_retry_record)
             except Exception as _e:                                  # noqa: BLE001
-                print(f"    [stateframe] ekg.observe failed: {type(_e).__name__}")
+                emit_reason("degrade", "bolt:ekg_observe", "bolt",
+                            "vitals EKG observe failed (fail-open)", type(_e).__name__)
         if kind == "edit" and result_class == "APPLIED":
             self.workspace_revision = getattr(self, "workspace_revision", 0) + 1
         rp = getattr(self, "receipts_path", None)
@@ -1563,7 +1568,8 @@ class KernelBolt:
                 with open(rp, "a") as fh:
                     fh.write(_json.dumps(rec) + "\n")
             except OSError as e:
-                print(f"    [stateframe] receipt persist failed: {e}")
+                emit_reason("degrade", "bolt:receipt_persist", "bolt",
+                            "receipt persist failed", f"{type(e).__name__}: {e}")
 
     def organ_out(self, name: str, line: str | None) -> str | None:
         """E332 shadow mode: the single chokepoint between an organ's decision and the
@@ -1637,8 +1643,8 @@ class KernelBolt:
                 try:
                     cogov.observe_receipt(receipt)
                 except Exception as exc:                              # noqa: BLE001
-                    print(f"    [stateframe] cog-governor delivery receipt failed: "
-                          f"{type(exc).__name__}")
+                    emit_reason("degrade", "bolt:cogov_delivery", "bolt",
+                                "cog-governor delivery receipt failed (fail-open)", type(exc).__name__)
 
     def report(self) -> str:
         lines = [f"KERNEL BOLT — task {self.task_id} ({self.fn})", "  cylinders:"]

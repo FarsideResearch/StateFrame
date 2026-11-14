@@ -37,7 +37,7 @@ def test_outer_check_interruption_forwards_recorded_family(tmp_path, monkeypatch
     process = Process()
     kill_calls = []
 
-    def kill_group(child, recorded_family=None, *, launch_identity=None):
+    def kill_group(child, recorded_family=None, *, launch_identity=None, **_log_fields):
         kill_calls.append((child, recorded_family, launch_identity))
         child.returncode = -getattr(signal, "SIGKILL", 9)
         return True

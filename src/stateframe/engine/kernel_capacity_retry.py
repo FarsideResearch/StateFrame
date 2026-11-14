@@ -224,11 +224,12 @@ def reseal_capacity_retry(capture: object, original_body: dict[str, object],
     """Fit a fresh detached candidate and publish it only after full qualification."""
     from kernel_final_wire_allocation import build_qualified_request
     from kernel_frame_allocation_capture import FrameFit5ImpossibleMinimum
-    from kernel_request_seal import RequestSealError
+    from kernel_request_seal import RequestSealError, log_seal_violation
 
     previous = getattr(capture, "qualified_request", None)
     runtime = getattr(capture, "completion_owner_runtime", None)
     if previous is None or runtime is None:
+        log_seal_violation("capacity retry requires a sealed primary request")
         raise RequestSealError("capacity retry requires a sealed primary request")
     def build(body: dict[str, object], ceiling: RetryLimits, *, compact: bool = False):
         replacement = copy.copy(capture)
@@ -301,6 +302,7 @@ def reseal_capacity_retry(capture: object, original_body: dict[str, object],
             or (limits.provider_limit_tokens is not None
                 and record.measurement.prompt_tokens + record.measurement.output_tokens
                 > limits.provider_limit_tokens * RETRY_NUMERATOR // RETRY_DENOMINATOR)):
+        log_seal_violation("capacity retry did not produce a smaller qualified request")
         raise RequestSealError("capacity retry did not produce a smaller qualified request")
     capture.__dict__.update(replacement.__dict__)
     capture._capacity_retry_input_body = copy.deepcopy(candidate_body)
