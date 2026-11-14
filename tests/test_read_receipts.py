@@ -546,7 +546,7 @@ def test_recorded_native_read_replay_on_off_request_bytes(tmp_path, monkeypatch)
         # ON adds audit and shadow working-set rows; wires and every other row stay identical.
         from kernel_working_set_state import EVENT_KINDS as shadow_kinds
         results.append((list(wires), counters, watch.streak,
-                        [e for e in events if e["kind"] not in {"read_attempt", "read_result", *shadow_kinds}]))
+                        [e for e in events if e["kind"] not in {"read_attempt", "read_result", "read_admission", *shadow_kinds}]))
         if setting == "on":
             assert any(e["kind"] == "working_set_capture" for e in events)
         attempts = [e for e in events if e["kind"] == "read_attempt"]

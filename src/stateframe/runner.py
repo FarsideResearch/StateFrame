@@ -656,7 +656,7 @@ OPT_IN_SWITCHES = {
     "STATEFRAME_KEEP_RUN_ENV": ("on", "off"),  # host-side finished-run retention policy
     "STATEFRAME_MUTATIONS": ("off", "prebuilt", "authored"),
     "STATEFRAME_CACHE_LAYOUT": ("on", "off"),
-    "STATEFRAME_WORKING_SET_ALLOCATOR": ("on", "off"),  # read capture audit only
+    "STATEFRAME_WORKING_SET_ALLOCATOR": ("on", "off"),  # read captures and read-time admission
     "STATEFRAME_EVICTFIX": ("on", "legacy"),
     "STATEFRAME_MICROGRAPH": ("on", "off"),  # experimental; the engine defaults to off
     "STATEFRAME_STABLE_TOOL_HEAD": ("on", "off"),  # append-only tool list per run; on by default

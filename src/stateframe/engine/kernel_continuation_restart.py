@@ -381,6 +381,7 @@ SAFE_TAIL = frozenset({
     "read_capture_skipped", "read_capture_failed",  # audit only; delivery is unchanged
     # SHADOW state is replayed with its reads/primary requests, without effects.
     "working_set_capture", "working_set_submission", "working_set_response", "working_set_blocked",
+    "read_admission",  # audit only; the delivered page already carries its cursor
     "continuation_writer_resumed", "rich_state_committed", "snapshot_committed",
     "history_decision", "history_exchange_removed", "selection_decision",
     "exposure_composition", "latest_exchange_decision", "request_prepared", "request_submitted",

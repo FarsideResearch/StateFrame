@@ -599,6 +599,17 @@ def execute_read(root: Path, p: Path, raw: str, display: str, start: int, *,
             )
             if stale is not None:
                 return stale
+        if (cached_page is not None and read_captures_enabled()
+                and str(cached_page[1].get("metadata", {}).get("result_class", "OK")) == "OK"):
+            # A1b: a cached page that overflows the fresh-exposure allowance is
+            # re-rendered shorter by the live path instead of being replayed whole.
+            from kernel_read_admission import fits as admission_fits, spend as admission_spend
+            cached_text = str(cached_page[1].get("observation", ""))
+            if not admission_fits(measurement, visible_messages, cached_text):
+                cached_page = None
+            elif cache_entry is not None and cache_entry.content is None:
+                # The replay below bypasses admit(); charge it so the batch total stays truthful.
+                admission_spend(measurement, visible_messages, cached_text, path=display)
         if cache_entry is not None and cache_entry.content is None and cached_page is not None:
             cached_key, page = cached_page
             cached_metadata = dict(page.get("metadata", {}))
@@ -772,6 +783,14 @@ def execute_read(root: Path, p: Path, raw: str, display: str, start: int, *,
             reuse_dispatch = None
         shaped: dict[str, object] = {}
         source = deliver_source(read_bytes, display, start, args=request, metadata_out=shaped)
+        if read_captures_enabled():
+            # A1b admission BEFORE capture: the capture covers exactly the delivered range.
+            from kernel_read_admission import admit as admit_fresh_page
+            source = admit_fresh_page(
+                measurement, raw=read_bytes, display=display, start=start, request=request,
+                source=source, visible_messages=visible_messages)
+            shaped.clear()
+            shaped.update(source.metadata)
         if read_captures_enabled() and source.result_class == "OK":
             try:
                 capture_read(
