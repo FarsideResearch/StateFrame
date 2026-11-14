@@ -4,6 +4,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from ..engine.kernel_route_budget import LEGACY_MODE_ENV, MODE_ENV, warn_legacy_switch
+
 HERE = Path(__file__).resolve().parent
 DEFAULT = "r2hc3"
 PRIVILEGED_PREFIXES = ("STATEFRAME_SHELL", "STATEFRAME_WEB", "STATEFRAME_TOOLS",
@@ -29,6 +31,10 @@ def load(name: str) -> dict[str, str]:
     switches = document["switches"]
     if not isinstance(switches, dict):
         raise ValueError(f"{path.name}: switches must be an object")
+    warn_legacy_switch(switches, source="profile")
+    if LEGACY_MODE_ENV in switches:
+        legacy = switches.pop(LEGACY_MODE_ENV)
+        switches.setdefault(MODE_ENV, legacy)
     privileged = [key for key in switches if isinstance(key, str) and key.startswith(PRIVILEGED_PREFIXES)]
     if privileged:
         raise ValueError(f"{path.name}: privileged tool settings belong on the host CLI, not in profiles: "
