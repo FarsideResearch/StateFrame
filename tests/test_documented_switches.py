@@ -34,6 +34,8 @@ PROFILE_ONLY = {
     "STATEFRAME_PROVIDER_INDEX_MAX_FILES",
     "STATEFRAME_BOUNDARY_CHECKS",
     "STATEFRAME_RESULTS_DIR",
+    "STATEFRAME_LOCALIZE_MAX_FILES",
+    "STATEFRAME_LOCALIZE_MAX_SOURCE_BYTES",
 }
 # Placeholders in the extension guide and prefixes of per-role variables, not settings.
 EXAMPLES = {"STATEFRAME_MY_SWITCH"}

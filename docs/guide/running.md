@@ -236,6 +236,8 @@ A completed batch made entirely of proved unchanged reads costs one no-progress 
 
 `STATEFRAME_RESULTS_DIR` is a test and operations override, not a product feature, and it can only be set in a profile: the engine child drops inherited `STATEFRAME_*` variables, so exporting it in the shell has no effect. It names the directory for run artifacts such as `react_live.log` and receipts when the engine runs without a run directory. Normal runs write those under the run directory and never need it; without it and without a run directory, artifacts go to a temp directory, never under the installed package or `src/`.
 
+`STATEFRAME_LOCALIZE_MAX_FILES` (default 50000, hard maximum 1000000) and `STATEFRAME_LOCALIZE_MAX_SOURCE_BYTES` (default 4194304, hard maximum 67108864) are profile-only limits on the localizer's source inventory, and the engine child drops shell exports of them. An unparseable or non-positive value falls back to the default, and a value above the maximum is clamped to it. When the file cap is reached or a source is over the byte cap, localize reports the omission as a typed `FILE_LIMIT` or `OVERSIZED` entry and its scope status is `INCOMPLETE`.
+
 ### Prompt cache: stable tool head
 
 `STATEFRAME_STABLE_TOOL_HEAD` is on when unset. Set it to `off` in the shell that starts StateFrame or in a custom profile to restore per-step tool lists. Invalid values are refused.

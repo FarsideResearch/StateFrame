@@ -31,9 +31,23 @@ CHANNELS = ("literal", "lexical", "entrypoint", "state", "public_test")
 DEFAULT_CHANNEL_LIMIT = 20
 DEFAULT_PAGE_SIZE = 5
 MAX_PAGE_SIZE = 20
-MAX_QUERY_CHARS = 2400
-MAX_SOURCE_BYTES = 512_000
-MAX_FILES = 4000
+# The whole brief and query are always scanned. MAX_QUERY_TERMS bounds only the scored term
+# list: when a query has more distinct terms, code-shaped and literal terms are kept first and
+# the result reports query_truncated with the original and used term counts.
+MAX_QUERY_TERMS = 64
+# Each literal, error and path anchor list keeps at most this many values, and a single value is
+# capped by length. The literal channel scores every source line against these lists, so the cap
+# also bounds that work. The echo of the query in a result is capped separately.
+MAX_ANCHOR_VALUES = 32
+MAX_ANCHOR_CHARS = 240
+MAX_ECHO_CHARS = 400
+# Inventory limits are read from the environment at call time (see max_files_limit).
+ENV_MAX_FILES = "STATEFRAME_LOCALIZE_MAX_FILES"
+ENV_MAX_SOURCE_BYTES = "STATEFRAME_LOCALIZE_MAX_SOURCE_BYTES"
+LOCALIZE_MAX_FILES_DEFAULT = 50_000
+LOCALIZE_MAX_FILES_HARD = 1_000_000
+LOCALIZE_MAX_SOURCE_BYTES_DEFAULT = 4 * 1024 * 1024
+LOCALIZE_MAX_SOURCE_BYTES_HARD = 64 * 1024 * 1024
 MAX_GRAPH_DEPTH = 3
 MAX_GRAPH_NODES = 96
 MAX_GRAPH_EDGES = 192
@@ -76,25 +90,38 @@ def _digest(value: object) -> str:
     return "sha256:" + hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
-def _text(value: object, limit: int = MAX_QUERY_CHARS) -> str:
+def _text(value: object, limit: int | None = None) -> str:
+    """Normalize text. ``limit=None`` keeps the full text; only id-like callers pass a bound."""
     result = str(value or "").replace("\x00", " ").strip()
-    return result[:limit]
+    return result if limit is None else result[:limit]
 
 
 def _unique(values: Iterable[str]) -> tuple[str, ...]:
     return tuple(dict.fromkeys(value for value in values if value))
 
 
-def _tokens(value: object) -> tuple[str, ...]:
-    raw = _text(value).casefold()
-    tokens: list[str] = []
-    for token in _IDENTIFIER_RE.findall(raw):
-        pieces = re.sub(r"([a-z])([A-Z])", r"\1 \2", token).casefold().split()
-        pieces = re.split(r"[_\-]+", " ".join(pieces))
-        for piece in pieces:
-            if len(piece) >= 3 and piece not in _STOPWORDS and piece not in tokens:
-                tokens.append(piece)
-    return tuple(tokens[:64])
+def _pieces(identifier: str) -> list[str]:
+    spaced = re.sub(r"([a-z])([A-Z])", r"\1 \2", identifier).casefold().split()
+    return [piece for piece in re.split(r"[_\-]+", " ".join(spaced)) if len(piece) >= 3 and piece not in _STOPWORDS]
+
+
+def _is_code_shaped(identifier: str) -> bool:
+    return "_" in identifier or any(ch.isdigit() for ch in identifier) or re.search(r"[a-z][A-Z]", identifier) is not None
+
+
+def _token_scan(value: object) -> tuple[tuple[str, ...], frozenset[str]]:
+    """Unique terms over the full text, in appearance order, plus terms from code-shaped identifiers."""
+    text = _text(value)
+    code_shaped = frozenset(
+        piece
+        for identifier in _IDENTIFIER_RE.findall(text)
+        if _is_code_shaped(identifier)
+        for piece in _pieces(identifier.casefold())
+    )
+    terms = dict.fromkeys(
+        piece for identifier in _IDENTIFIER_RE.findall(text.casefold()) for piece in _pieces(identifier)
+    )
+    return tuple(terms), code_shaped
 
 
 def _is_test_path(path: str) -> bool:
@@ -151,17 +178,45 @@ class SourceInventory:
         }
 
 
-def build_inventory(root: Path, *, max_files: int = MAX_FILES) -> SourceInventory:
+def _env_limit(name: str, default: int, *, hard: int) -> int:
+    """Positive integer from the environment: invalid or non-positive falls back, above hard clamps."""
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        logger.warning("%s is not an integer; using default %d", name, default)
+        return default
+    if value <= 0:
+        logger.warning("%s must be positive; using default %d", name, default)
+        return default
+    return min(value, hard)
+
+
+def max_files_limit() -> int:
+    """Inventory file cap for this call (STATEFRAME_LOCALIZE_MAX_FILES, default 50000, max 1000000)."""
+    return _env_limit(ENV_MAX_FILES, LOCALIZE_MAX_FILES_DEFAULT, hard=LOCALIZE_MAX_FILES_HARD)
+
+
+def max_source_bytes_limit() -> int:
+    """Per-source byte cap for this call (STATEFRAME_LOCALIZE_MAX_SOURCE_BYTES, default 4 MiB, max 64 MiB)."""
+    return _env_limit(ENV_MAX_SOURCE_BYTES, LOCALIZE_MAX_SOURCE_BYTES_DEFAULT, hard=LOCALIZE_MAX_SOURCE_BYTES_HARD)
+
+
+def build_inventory(root: Path, *, max_files: int | None = None) -> SourceInventory:
     """Read only public source files and retain explicit incompleteness."""
     root = root.resolve()
     if not root.is_dir():
         raise ValueError("localization workspace root is not a directory")
     if root.name.casefold() in _SKIP_DIRS:
         raise ValueError("localization refuses a forbidden workspace scope")
+    file_limit = max_files_limit() if max_files is None else min(max(1, int(max_files)), LOCALIZE_MAX_FILES_HARD)
+    source_limit = max_source_bytes_limit()
     files: list[SourceFile] = []
     omitted: list[dict[str, object]] = []
     for candidate in sorted(root.rglob("*"), key=lambda item: item.as_posix()):
-        if len(files) >= max_files:
+        if len(files) >= file_limit:
             omitted.append({"path": "<remaining>", "reason": "FILE_LIMIT"})
             break
         if candidate.is_symlink() or not candidate.is_file():
@@ -171,7 +226,7 @@ def build_inventory(root: Path, *, max_files: int = MAX_FILES) -> SourceInventor
             continue
         try:
             size = candidate.stat().st_size
-            if size > MAX_SOURCE_BYTES:
+            if size > source_limit:
                 omitted.append({"path": relative, "reason": "OVERSIZED", "size": size})
                 continue
             data = candidate.read_bytes()
@@ -198,22 +253,84 @@ def build_inventory(root: Path, *, max_files: int = MAX_FILES) -> SourceInventor
     return SourceInventory(root, tuple(files), tuple(omitted), manifest)
 
 
-def _query_anchors(brief: object, query: object = "") -> dict[str, tuple[str, ...]]:
+@dataclass(frozen=True)
+class QueryScan:
+    """How much of the brief/query became scoring input. ``chars`` is the full scanned length.
+
+    Only the scored term list and the anchor lists are bounded; the scanned text never is.
+    """
+
+    chars: int
+    terms_total: int
+    terms_used: int
+    anchor_totals: Mapping[str, int]
+    anchor_used: Mapping[str, int]
+
+    @property
+    def truncated(self) -> bool:
+        return self.terms_used < self.terms_total
+
+    @property
+    def anchors_truncated(self) -> bool:
+        return any(self.anchor_used[name] < total for name, total in self.anchor_totals.items())
+
+
+def _is_specific_anchor(value: str) -> bool:
+    """Code-shaped literal: underscore, digit or path separator. These survive an anchor cap first."""
+    return "_" in value or "/" in value or any(ch.isdigit() for ch in value)
+
+
+def _bounded_anchors(values: tuple[str, ...]) -> tuple[tuple[str, ...], int]:
+    """Drop over-long values, then keep at most MAX_ANCHOR_VALUES (specific first, original order).
+
+    Returns (kept, total_candidates). The caller reports both so truncation is never silent.
+    """
+    total = len(values)
+    fitting = tuple(value for value in values if len(value) <= MAX_ANCHOR_CHARS)
+    if len(fitting) <= MAX_ANCHOR_VALUES:
+        return fitting, total
+    keep = sorted(range(len(fitting)), key=lambda index: (not _is_specific_anchor(fitting[index]), index))
+    return tuple(fitting[index] for index in sorted(keep[:MAX_ANCHOR_VALUES])), total
+
+
+def _query_scan(brief: object, query: object = "") -> tuple[dict[str, tuple[str, ...]], QueryScan]:
+    # The regexes below use bounded quantifiers (quoted <=240 chars) and run in linear time,
+    # so one pass over the full text is safe; no prefix is taken.
     text = " ".join(value for value in (_text(brief), _text(query)) if value)
     quoted = [match.group(2).strip() for match in _QUOTED_RE.finditer(text)]
     errors = [match.group(0).strip() for match in _ERROR_RE.finditer(text)]
     paths = _PATH_RE.findall(text)
-    terms = list(_tokens(text))
-    for value in (*quoted, *errors, *paths):
-        for token in _tokens(value):
-            if token not in terms:
-                terms.append(token)
-    return {
-        "literals": _unique(value.casefold() for value in (*quoted, *errors, *paths) if len(value) >= 3),
-        "errors": _unique(value.casefold() for value in errors),
-        "terms": tuple(terms[:64]),
-        "paths": _unique(value.casefold() for value in paths),
+    literals, literals_total = _bounded_anchors(_unique(value.casefold() for value in (*quoted, *errors, *paths) if len(value) >= 3))
+    error_anchors, errors_total = _bounded_anchors(_unique(value.casefold() for value in errors))
+    path_anchors, paths_total = _bounded_anchors(_unique(value.casefold() for value in paths))
+    # Terms come from the full text plus only the kept literals, so literal-derived work is bounded.
+    text_terms, specific_terms = _token_scan(text)
+    terms = dict.fromkeys(text_terms)
+    specific: set[str] = set(specific_terms)
+    for value in dict.fromkeys((*literals, *error_anchors, *path_anchors)):
+        extra, _ = _token_scan(value)
+        # Literal-derived terms are explicit in the brief, so they count as specific.
+        terms.update(dict.fromkeys(extra))
+        specific.update(extra)
+    ordered = list(terms)
+    total = len(ordered)
+    if total > MAX_QUERY_TERMS:
+        keep = sorted(range(total), key=lambda index: (ordered[index] not in specific, index))[:MAX_QUERY_TERMS]
+        ordered = [ordered[index] for index in sorted(keep)]
+    anchors = {
+        "literals": literals,
+        "errors": error_anchors,
+        "terms": tuple(ordered),
+        "paths": path_anchors,
     }
+    scan = QueryScan(
+        chars=len(text),
+        terms_total=total,
+        terms_used=len(ordered),
+        anchor_totals={"literals": literals_total, "errors": errors_total, "paths": paths_total},
+        anchor_used={"literals": len(literals), "errors": len(error_anchors), "paths": len(path_anchors)},
+    )
+    return anchors, scan
 
 
 def _line_excerpt(line: str, limit: int = 220) -> str:
@@ -765,7 +882,7 @@ class LocalizeIndex:
         self.refresh()
         assert self.inventory is not None
         graph = self.graph or _EmptyGraph()
-        anchors = _query_anchors(brief, query)
+        anchors, query_scan = _query_scan(brief, query)
         raw_channels: dict[str, dict[str, dict[str, object]]] = {
             "literal": _literal_channel(self.inventory, graph, anchors),
             "lexical": _lexical_channel(self.inventory, graph, anchors),
@@ -810,7 +927,17 @@ class LocalizeIndex:
             "status": "SEARCHED",
             "snapshot_id": self.inventory.manifest_digest,
             "scope_digest": self.inventory.manifest_digest,
-            "query": _text(query),
+            # The echo goes back to the model, so it is capped; the full text was still scanned.
+            "query": _text(query, MAX_ECHO_CHARS),
+            "query_echo_truncated": len(_text(query)) > MAX_ECHO_CHARS,
+            # Typed signals: the scoring term list and the anchor lists were capped (never the scanned text).
+            "query_truncated": query_scan.truncated,
+            "query_chars": query_scan.chars,
+            "query_terms_total": query_scan.terms_total,
+            "query_terms_used": query_scan.terms_used,
+            "anchors_truncated": query_scan.anchors_truncated,
+            "anchor_totals": dict(query_scan.anchor_totals),
+            "anchor_used": dict(query_scan.anchor_used),
             "anchors": {key: list(value) for key, value in anchors.items()},
             "channels": channel_pages,
             "suspects": menu,
@@ -847,6 +974,7 @@ class LocalizeIndex:
             "channel_totals": {name: len(ranked[name]) for name in CHANNELS},
             "page": max(0, int(page)),
             "page_size": max(1, min(MAX_PAGE_SIZE, int(page_size))),
+            "query_truncated": query_scan.truncated,
             "tokens": payload["tokens"],
         }
         return payload
