@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.6.18 (2026-11-13)
 
 - A run that reads without editing or checking now gets one directive nudge after 35 turns (was step 100, which arrived after the time budget was spent) that names how many files it read, the most re-read files, and the required check to work toward; set `STATEFRAME_ZERO_PROGRESS_NUDGE_STEP` to change the step. Runs that already edited or checked never see it.
 
