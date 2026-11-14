@@ -1,5 +1,7 @@
 # Changelog
 
+## Unreleased
+
 ## 0.6.23 (2026-11-13)
 
 - Added an opt-in, read-only cross-file index of a repo (definitions with signatures, imports, references, scope-aware name resolution and dangling-reference detection), off by default behind `STATEFRAME_CROSSFILE_INDEX` and not yet used by any engine step.
