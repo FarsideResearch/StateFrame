@@ -28,7 +28,7 @@ from collections.abc import Callable, Mapping, Sequence
 
 from kernel_context import token_estimate
 from kernel_measurement import profiled_function_span
-from kernel_body_serialization_memo import plain_wire
+from kernel_body_serialization_memo import memoized_value, plain_wire
 from kernel_endpoint_size import ENDPOINT_SIZE
 from kernel_obligation_assess import UnavailableEvidence
 from kernel_request_auth_identity import auth_binding_for_key as _auth_binding_for_key
@@ -263,6 +263,19 @@ def _has_prompt_countdown_marker(projection: Mapping[str, object]) -> bool:
 
 
 def _tokenization_content(body: Mapping[str, object]) -> str:
+    # Pure function of the body; the structural-stamp memo makes repeat measurements of an
+    # unchanged candidate skip the countdown projection walk and the JSON dump.
+    import kernel_countdown_slot
+
+    # The projection also depends on the countdown field pattern, so a replaced pattern gets its own slot.
+    content = memoized_value(
+        body, f"tokenization_content:{id(kernel_countdown_slot._TIME_FIELD)}",
+        lambda: _tokenization_content_uncached(body))
+    assert isinstance(content, str)
+    return content
+
+
+def _tokenization_content_uncached(body: Mapping[str, object]) -> str:
     from kernel_request_measurement import prompt_projection_body
     from kernel_countdown_slot import canonical_countdown
 
@@ -744,7 +757,14 @@ class RequestTokenMeter:
     def _count_tokens(self, content: str) -> int:
         # Identical content is tokenized once per meter: re-measuring an unchanged (or normalized-to-identical)
         # request must not cost a second /tokenize round trip on the request path.
-        key = hashlib.sha256(content.encode("utf-8")).hexdigest()
+        # The memoized projection hands back the same str object for an unchanged body, so the
+        # digest of the last-seen object is reused instead of re-encoding and re-hashing it.
+        last = self.__dict__.get("_count_key_last")
+        if last is not None and last[0] is content:
+            key = last[1]
+        else:
+            key = hashlib.sha256(content.encode("utf-8")).hexdigest()
+            self.__dict__["_count_key_last"] = (content, key)
         cache = self.__dict__.setdefault("_count_cache", OrderedDict())
         if key in cache:
             cache.move_to_end(key)

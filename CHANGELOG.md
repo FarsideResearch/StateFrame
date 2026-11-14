@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.6.6 (2026-11-13)
+
+- Token metering now memoizes the countdown-canonical tokenization text of an unchanged request body behind the existing structural-stamp guard and reuses the digest of the last measured text, so re-measuring an unchanged candidate no longer rebuilds and re-hashes it (about 3.5 ms to 0.9 ms per repeat on a 120-message body). Token counts, fit decisions and request bytes are unchanged.
+
+## 0.6.5 (2026-11-13)
+
+- Checkpoint saves walk the environment tree with one stat per unchanged file instead of three (about 2.7x faster on a 9,000-file tree), and files that changed since the previous checkpoint go into a per-run content-addressed store under `checkpoints/env-objects` that snapshots hard-link and that is pruned when no checkpoint references an object. Saves were already limited to one per new model send; resume output is unchanged and is now covered by a SIGKILL replay test.
+
+## 0.6.4 (2026-11-13)
+
+- Replay and checkpoint refusals now explain that this version cannot replay the recording and tell you to start a fresh run, including in the final CLI summary and JSON output.
+
 ## 0.6.3 (2026-11-13)
 
 - Fixed: check receipts now size their stdout, stderr and assertion context from the same normalised text the model sees (durations and object addresses masked), so a rerun's wall-clock time no longer changes the receipt line or the evidence pin on the wire; same-seed requests are byte-identical again and the cached prompt prefix survives a check.
