@@ -1,16 +1,17 @@
-"""Omission carriers require an executable, interval-bound frozen read route."""
-from dataclasses import replace
+"""Recovery routes are executable; unavailable read surfaces are explicit."""
 import hashlib
 import json
+from dataclasses import replace
 
 import pytest
-
 from kernel_read_receipts import DecodedSpan, ReceiptIdentity, line_digests_with_numbers
 from kernel_source_delivery import deliver_source
-from kernel_working_set_snapshot import SourceSlot
+from kernel_working_set_allocator import DEFERRED
+from kernel_working_set_prepare import PreparedCandidate, prepare_candidate
+from kernel_working_set_proof import verify_certificate
 from kernel_working_set_recovery import RecoveryRouteUnavailable, validate_recovery
-from kernel_working_set_prepare import Blocked, PreparedCandidate, prepare_candidate
-from kernel_working_set_stop import ReasonCode
+from kernel_working_set_render import render_assignment
+from kernel_working_set_snapshot import SourceSlot
 from test_working_set_prepare import snapshot, source
 
 
@@ -117,15 +118,83 @@ def test_recovery_reexecutes_the_actual_pager_at_the_captured_column(lossy):
     assert recovered.metadata["effective_range"] == page.metadata["effective_range"]
 
 
-def test_recovery_failure_remains_a_typed_shadow_diagnostic():
-    captured = source("a", state="RETIRING")
-    result = prepare_candidate(replace(snapshot(captured), recovery_owner_allowed=False))
-    assert isinstance(result, Blocked)
-    assert result.reason is ReasonCode.RECOVERY_ROUTE_UNAVAILABLE
+@pytest.mark.parametrize("raw,original,path", [
+    (b"hello world\n", {"start_line": 1}, "a.py"),
+    (b"x" * 1000 + b"\n", {"start_line": 1}, "a.py"),
+    (b"head\n" + b"x" * 3000 + b"\n",
+     {"start_line": 2, "max_chars": 1513}, "a.py"),
+    (b"head\n" + b"x" * 3000 + b"\n",
+     {"start_line": 2, "column": 731, "max_chars": 1513}, "a.py"),
+    (("head\n" + "\u03bb" * 2000 + "\n").encode(),
+     {"start_line": 2, "column": 19, "max_chars": 1513}, "a.py"),
+    (b"head\n" + b"x\n" * 130 + b"tail\n",
+     {"start_line": 2, "end_line": 131}, "a.py"),
+    (b"x" * 2000 + b"\n", {"start_line": 1, "max_chars": 1513},
+     "/".join(["long_directory" * 3] * 6) + "/a.py"),
+    (b"x" * 70000 + b"\n", {"start_line": 1, "max_chars": 64000}, "a.py"),
+], ids=["complete-small", "complete-1001", "partial-1001", "partial-column",
+        "partial-unicode", "complete-many-lines", "long-path", "maximum-page"])
+def test_recovery_restores_exact_complete_and_partial_intervals(raw, original, path):
+    original = {"path": path, **original}
+    page = deliver_source(raw, path, 0, args=original)
+    assert page.result_class == "OK"
+    effective = page.metadata["effective_range"]
+    identity = ReceiptIdentity(path, page.metadata["revision"],
+        effective["start_line"], effective["end_line"],
+        effective["byte_start"], effective["byte_end"],
+        hashlib.sha256(page.content.encode()).hexdigest(), None)
+    digests, numbers = line_digests_with_numbers(page.content, identity.first_line)
+    captured = SourceSlot("a", ("a",), identity, page.content, page.text,
+        digests, numbers, json.dumps(original).encode(), 1, 1, "RESIDENT")
+
+    rendered = render_assignment(snapshot(captured), {captured.key: DEFERRED})
+    assert verify_certificate(rendered.wire, rendered.certificate)
+    arguments = json.loads(rendered.certificate.witnesses[0].recovery_arguments)
+    recovered = deliver_source(raw, path, 0, args=arguments)
+
+    assert recovered.result_class == "OK"
+    assert recovered.content == page.content
+    assert recovered.metadata["effective_range"] == effective
+    assert recovered.metadata["revision"] == identity.revision
 
 
-def test_optional_without_an_executable_omission_route_keeps_full_bytes():
+def test_recovery_refuses_payload_that_only_fits_without_header_reserve():
+    captured = source("a", "x" * (64000 - 511))
+    with pytest.raises(RecoveryRouteUnavailable, match="exceeds a single read page"):
+        validate_recovery(snapshot(captured), captured)
+
+
+def test_recovery_refuses_schema_that_cannot_budget_the_whole_page():
     captured = source("a")
+    read_schema = json.loads(schema("path", "start_line", "end_line", "max_chars"))
+    read_schema["properties"]["max_chars"]["maximum"] = len(captured.payload)
+    snap = replace(snapshot(captured), recovery_schema=json.dumps(read_schema).encode())
+    with pytest.raises(RecoveryRouteUnavailable):
+        validate_recovery(snap, captured)
+
+
+@pytest.mark.parametrize("state,previous", [("DEGRADED", "D"), ("RETIRING", "F")])
+def test_retirement_without_owner_read_has_a_nonrecoverable_notice(state, previous):
+    captured = replace(source("a", state=state), previous_mode=previous)
+    result = prepare_candidate(replace(snapshot(captured), recovery_owner_allowed=False))
+    assert isinstance(result, PreparedCandidate)
+    assert dict(result.rendered.certificate.assignment) == {"a": "DEFERRED"}
+    assert b"Read recovery unavailable" in result.wire
+
+
+def test_retiring_resident_without_a_route_is_kept_full():
+    # Wave G1 (A7): reserve retirement without a valid retirement representation
+    # keeps the resident instead of proving an empty domain.
+    captured = replace(source("a", state="RETIRING"), previous_mode="F")
+    snap = replace(snapshot(captured),
+                   recovery_schema=schema("path", required=("path", "unavailable")))
+    result = prepare_candidate(snap)
+    assert isinstance(result, PreparedCandidate)
+    assert dict(result.rendered.certificate.assignment) == {"a": "FULL"}
+
+
+def test_due_without_an_executable_omission_route_keeps_full_bytes():
+    captured = source("a", state="DUE")
     result = prepare_candidate(replace(snapshot(captured), recovery_owner_allowed=False))
     assert isinstance(result, PreparedCandidate)
     assert dict(result.rendered.certificate.assignment) == {"a": "FULL"}

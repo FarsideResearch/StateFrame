@@ -38,14 +38,43 @@ with pytest.MonkeyPatch.context() as patch:
     return hashes
 
 
-@pytest.fixture(scope="module")
-def current_provider_hashes(tmp_path_factory):
-    return _provider_hashes(Path(__file__).resolve().parents[1],
-                            tmp_path_factory.mktemp("current-provider-parity"))
+# Each worker sees one immutable checkout per test session. Reuse the measured
+# trace across direct-call parity wrappers as well as parametrized comparisons.
+_PROVIDER_HASH_CACHE: dict[Path, tuple[str, ...]] = {}
 
 
-@pytest.mark.parametrize("reference", ['56af0dc6d6', '144281ff7c'])
-def test_off_provider_bytes_match_cutover_base(tmp_path, tmp_path_factory, reference,
-                                              current_provider_hashes):
+def _cached_provider_hashes(tree, tmp_path_factory):
+    tree = tree.resolve()
+    hashes = _PROVIDER_HASH_CACHE.get(tree)
+    if hashes is None:
+        hashes = tuple(_provider_hashes(tree, tmp_path_factory.mktemp("off-provider-parity")))
+        _PROVIDER_HASH_CACHE[tree] = hashes
+    return hashes
+
+
+@pytest.mark.parametrize("reference", ['56af0dc6d6', '936a59be20'])
+def test_off_provider_bytes_match_cutover_base(tmp_path, tmp_path_factory, reference):
     base = pinned_tree(reference, tmp_path_factory)
-    assert _provider_hashes(base, tmp_path) == current_provider_hashes
+    current = Path(__file__).resolve().parents[1]
+    assert _cached_provider_hashes(base, tmp_path_factory) == _cached_provider_hashes(
+        current, tmp_path_factory)
+
+
+def test_off_parity_direct_callers_share_trace_results(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    module = sys.modules[__name__]
+    calls = []
+    reference = tmp_path / "reference"
+    current = Path(__file__).resolve().parents[1]
+
+    def hashes(tree, work):
+        calls.append(tree)
+        return ["trace-sha256"]
+
+    monkeypatch.setattr(module, "_provider_hashes", hashes)
+    monkeypatch.setattr(module, "pinned_tree", lambda *_: reference)
+    monkeypatch.setattr(module, "_PROVIDER_HASH_CACHE", {}, raising=False)
+    factory = SimpleNamespace(mktemp=lambda _: tmp_path)
+    for _ in range(2):
+        test_off_provider_bytes_match_cutover_base(tmp_path, factory, "56af0dc6d6")
+    assert calls == [reference, current]

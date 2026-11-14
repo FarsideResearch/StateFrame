@@ -128,6 +128,12 @@ class WorkingSetState:
 
     @property
     def shadow_complete(self) -> bool:
+        """True while the active index is within the live identity limit.
+
+        overflow_count is the live overshoot past MAX_ACTIVE_OBLIGATIONS. It
+        never hides a capture: every capture is indexed, and the overshoot is
+        cleared by the accepted O carriers that reserve retirement queues.
+        """
         return self.overflow_count == 0
 
     @property
@@ -160,7 +166,10 @@ class WorkingSetState:
                 raise ValueError("invalid working-set counter")
             setattr(state, name, value)
         active = document["active"]
-        if not isinstance(active, list) or len(active) > MAX_ACTIVE_OBLIGATIONS:
+        # Refuse legacy incomplete indexes: their dropped captures can only be
+        # recovered by journal replay, never by clearing the overflow counter.
+        if (not isinstance(active, list)
+                or state.overflow_count != max(0, len(active) - MAX_ACTIVE_OBLIGATIONS)):
             raise ValueError("invalid active working-set index")
         admissions = set()
         identities = set()
@@ -306,19 +315,18 @@ class WorkingSetState:
         self.admission_ordinal += 1
         oid = f"read-obligation-{self.admission_ordinal}"
         # A validated successful capture proves the raw revision changed. Old
-        # unexposed bytes remain historical debt until an accepted F exposure.
+        # bytes of that path are obsolete whether or not they were exposed: an
+        # unexposed one is never owed at the wrong revision (the capture row
+        # stays in the journal), an exposed one is never carried again.
         for old in tuple(self._active.values()):
             if old.identity.path == identity.path and old.identity.revision != identity.revision:
                 old.superseded_by = oid
-                if old.state != "DUE":
-                    old.state = "SUPERSEDED"
-                    del self._active[old.obligation_id]
-        if len(self._active) >= MAX_ACTIVE_OBLIGATIONS:
-            # Shadow must not change read behavior or invent a BLOCKED reason.
-            # Every overflow capture is durable, never falsely retired/exposed.
-            # Rebuilding the full history retains this explicit incomplete flag.
-            self.overflow_count += 1
-            return
+                old.state = "SUPERSEDED"
+                del self._active[old.obligation_id]
+        # The capture is always indexed: dropping it would advertise bytes the
+        # model saw as never delivered. Past the limit the index overshoots
+        # (more captures than the reserve between two accepted boundaries) and
+        # reserve retirement queues enough O carriers to clear it.
         self._active[oid] = ReadObligation(oid, (capture_id,), identity,
             self.next_due_ordinal, "DUE", self.admission_ordinal, self.use_ordinal,
             event["recovery_pin"])
@@ -333,6 +341,7 @@ class WorkingSetState:
         assignment removes it. A reread makes that lifetime DUE again and queues
         another eligible resident instead.
         """
+        self.overflow_count = max(0, len(self._active) - MAX_ACTIVE_OBLIGATIONS)
         needed = (len(self._active) - MAX_RETAINED_RESIDENTS
                   - sum(o.state == "RETIRING" for o in self._active.values()))
         if needed <= 0:
@@ -356,8 +365,11 @@ class WorkingSetState:
                 raise ValueError("invalid working-set mode")
             if (entry.state == "DUE" or entry.recovery_pin) and mode != "F":
                 raise ValueError("fresh debt and recovery pins are F-only")
-            if entry.state == "RETIRING" and mode != "O":
-                raise ValueError("reserve retirement requires an O assignment")
+            if entry.state == "RETIRING" and mode == "D":
+                # Retirement is O; a resident without a valid retirement
+                # representation (protected, or no recovery route) stays F and
+                # the next accepted response queues another resident.
+                raise ValueError("reserve retirement is an O or kept F assignment")
             ranks = {"F": 3, "D": 2, "O": 1}
             if ((entry.state == "DEGRADED" and mode == "F")
                     or (entry.state != "DUE" and entry.previous_mode is not None
@@ -379,11 +391,14 @@ class WorkingSetState:
             raise ValueError("invalid response disposition")
         if disposition == "accepted":
             self.accepted_exposure_id = event["response_id"]
+            kept = []
             for oid, assignment in submitted["assignments"].items():
                 entry = self._active.get(oid)
                 if entry is None or tuple(assignment["capture_ids"]) != entry.capture_ids:
                     continue  # a newer read cannot be paid by an older wire
                 mode = assignment["mode"]
+                if entry.state == "RETIRING" and mode == "F":
+                    kept.append(entry)
                 entry.previous_mode = mode
                 self.use_ordinal += 1
                 entry.last_use_ordinal = self.use_ordinal
@@ -392,6 +407,12 @@ class WorkingSetState:
                 if entry.superseded_by is not None or mode == "O":
                     entry.state = "SUPERSEDED" if entry.superseded_by is not None else "DISCHARGED"
                     del self._active[oid]
+            # A resident kept FULL instead of retiring had no valid retirement
+            # representation on this wire; make it the most recently used so
+            # the reserve queues the next oldest resident rather than it again.
+            for entry in kept:
+                self.use_ordinal += 1
+                entry.last_use_ordinal = self.use_ordinal
             self._reserve_retirements()
         del self.pending[request_id]
 

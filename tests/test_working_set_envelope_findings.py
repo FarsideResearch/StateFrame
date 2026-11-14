@@ -70,7 +70,7 @@ def test_off_pretrim_matches_pinned_base_bytes(tmp_path, monkeypatch):
     monkeypatch.setenv("STATEFRAME_HEADCARRY", "on")
     root = Path(__file__).resolve().parents[1]
     original = subprocess.check_output(["git", "show",
-        "4a475493b43b561bf53597c98df0ce3ef0c1426c:src/stateframe/engine/kernel_request_budget.py"], cwd=root)
+        "56af0dc6d6:src/stateframe/engine/kernel_request_budget.py"], cwd=root)
     baseline = ModuleType("_astra_budget_base")
     baseline.__file__ = str(root / "src/stateframe/engine/kernel_request_budget.py")
     monkeypatch.setitem(sys.modules, baseline.__name__, baseline)

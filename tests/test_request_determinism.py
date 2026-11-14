@@ -1861,6 +1861,8 @@ def _run_scripted_example(monkeypatch, example: str, task: str, work: Path,
 
     from stateframe import cli, runner
     from stateframe.scripted_endpoint import Script, serve
+    monkeypatch.setattr(runner.test_interpreter, "choose",
+                        lambda *args, **kwargs: (sys.executable, "scripted test interpreter"))
 
     work.mkdir(parents=True, exist_ok=True)
     repo = work / "repo"

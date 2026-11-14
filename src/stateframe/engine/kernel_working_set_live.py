@@ -33,13 +33,36 @@ def certified_visibility(prepared):
     return check, receipt
 
 
-def _blocked(runtime, snapshot, result):
-    from kernel_read_receipts import _blob
-    from kernel_working_set_state import state_for
-    from kernel_working_set_stop import MANDATORY_ENVELOPE_REASONS, ReasonCode, Suspension, suspend
+class ReadAdmissionUnbounded(RequestSealError):
+    """A pending producer has no host-enforced result bound; end admission."""
+
+
+class ReadAdmissionUnavailable(RequestSealError):
+    """Read admission could not freeze its allocator snapshot; ``reason`` is typed.
+
+    Callers degrade to the conservative envelope estimate with this reason.
+    Closing the batch here would strand every later read behind a cursor.
+    """
+    def __init__(self, reason: str) -> None:
+        self.reason = reason
+        super().__init__("read admission lacks a complete allocator snapshot: " + reason)
+
+
+def _snapshot_failure_reason(failure):
+    from kernel_working_set_stop import ReasonCode
+    # A failed freeze has no measured floor. Unknown or misplaced solver
+    # reasons cannot grant floor authority or bypass the non-floor contract.
+    reasons = {reason.value: reason for reason in (
+        ReasonCode.ACTIVE_OBLIGATION_LIMIT, ReasonCode.SOURCE_SNAPSHOT_UNSTABLE,
+        ReasonCode.CAPTURE_BLOB_UNAVAILABLE, ReasonCode.PREPARATION_CONTRACT_FAILURE)}
+    return reasons.get(getattr(failure, "reason", None), ReasonCode.PREPARATION_CONTRACT_FAILURE)
+
+
+def _recovery_conditions():
+    from kernel_working_set_stop import ReasonCode
     # All refusals stop durably. Search exhaustion is not infeasibility and
     # has neither a mandatory proof nor a fabricated minimum candidate.
-    recovery = {
+    return {
         ReasonCode.BYTE_POLICY_DOMAIN_EXHAUSTED: "retry with a wider byte-policy search or more capacity",
         ReasonCode.TOKEN_ADMISSION_SEARCH_EXHAUSTED: "retry token admission with more search budget or capacity",
         ReasonCode.RECOVERY_ROUTE_UNAVAILABLE: "restore an authorized recovery route and retry",
@@ -48,6 +71,33 @@ def _blocked(runtime, snapshot, result):
         ReasonCode.CAPTURE_BLOB_UNAVAILABLE: "restore the captured source blobs and retry preparation",
         ReasonCode.PREPARATION_CONTRACT_FAILURE: "repair the preparation contract and retry",
     }
+
+
+def _snapshot_failed(runtime, failure, *, request_id: str):
+    """Snapshot construction failed: a durable, typed, non-floor suspension.
+
+    No snapshot exists, so there is no measured floor, no proof and no trials.
+    The digest binds the typed diagnostic only; nothing fabricates infeasibility.
+    """
+    from kernel_read_receipts import _blob
+    from kernel_working_set_state import state_for
+    from kernel_working_set_stop import Suspension, suspend
+    reason = _snapshot_failure_reason(failure)
+    error_type = getattr(failure, "error_type", "missing")
+    state = state_for(runtime)
+    diagnostic = {"request_id": request_id, "reason": reason.value, "error_type": error_type}
+    suspend(runtime, Suspension(reason, request_id, state.next_due_ordinal,
+        hashlib.sha256(json.dumps(diagnostic, sort_keys=True).encode()).hexdigest(),
+        hashlib.sha256(json.dumps(state.checkpoint(), sort_keys=True).encode()).hexdigest(),
+        (), None, None, _blob(runtime, "[]"), _recovery_conditions()[reason],
+        detail=f"snapshot construction failed: {error_type}: {reason.value}"))
+
+
+def _blocked(runtime, snapshot, result):
+    from kernel_read_receipts import _blob
+    from kernel_working_set_state import state_for
+    from kernel_working_set_stop import MANDATORY_ENVELOPE_REASONS, Suspension, suspend
+    recovery = _recovery_conditions()
     state = state_for(runtime)
     trials = _blob(runtime, json.dumps([asdict(t) for t in result.trials]))
     minimum = (_blob(runtime, result.proof.mandatory_wire.decode())
@@ -63,36 +113,11 @@ def _blocked(runtime, snapshot, result):
         cap=result.cap, section_breakdown=result.section_breakdown, detail=result.detail))
 
 
-def prepare_live(capture, runtime, body, *, dialect, reasoning_mode):
-    """Prepare once; legacy fitters and cache selectors never enter this path."""
+def live_measure(meter):
+    """The one token authority: preparation and read admission measure alike."""
     from kernel_context import token_estimate
-    from kernel_frame_allocation_capture import (
-        FrozenRequestCounter, calibrated_estimate, _remember_exact_pair,
-    )
-    from kernel_frame_optional_allocation import snapshot_optional_inputs
-    from kernel_frame_source_snapshot import frame_source_snapshot
-    from kernel_request_budget import _request_token_meter
-    from kernel_request_candidate import candidate_source_plan
-    from kernel_request_source_window import verify_final_source_delivery, source_delivery_satisfied
-    from kernel_stateframe_framefit5 import _state_payload, _workspace_root
-    from kernel_working_set_prepare import Blocked, Measurement, prepare_candidate
-    from kernel_working_set_shadow import freeze_shadow, SnapshotFailure
-
-    plan = copy.deepcopy(candidate_source_plan(capture, runtime))
-    runtime._request_source_closure = plan
-    snapshot = freeze_shadow(body, runtime, request_id=capture.request_id,
-                             dialect=dialect, reasoning_mode=reasoning_mode)
-    if isinstance(snapshot, SnapshotFailure) or snapshot is None:
-        raise RequestSealError("working-set snapshot: " + getattr(snapshot, "reason", "missing"))
-    ceiling = getattr(runtime, "frame_ceiling", None)
-    from kernel_cache_layout_candidate import final_layout_mode
-    snapshot = replace(snapshot, frame_limit=ceiling if type(ceiling) is int and ceiling > 0 else None,
-                       layouts=("plain", "final_cache") if final_layout_mode() == "on" else ("plain",))
-    meter = _request_token_meter(runtime, capture)
-    limits = getattr(capture, "_capacity_retry_limits", None)
-    if limits is not None:
-        snapshot = replace(snapshot, byte_cap=min(snapshot.byte_cap, limits.max_request_bytes),
-                           prompt_limit=min(snapshot.prompt_limit, limits.max_prompt_tokens))
+    from kernel_frame_allocation_capture import calibrated_estimate, _remember_exact_pair
+    from kernel_working_set_prepare import Measurement
 
     def measure(wire):
         value = json.loads(wire)
@@ -104,40 +129,129 @@ def prepare_live(capture, runtime, body, *, dialect, reasoning_mode):
         return Measurement(tokens, token_estimate(value), method,
                            meter.tokenizer_identity(value))
 
+    return measure
+
+
+def read_admission_measure(runtime):
+    """Admission's measurer, built like preparation's; None keeps the frozen offline ratio."""
+    from kernel_request_budget import _request_token_meter
+
+    capture = getattr(runtime, "_active_capture", None)
+    try:
+        meter = _request_token_meter(runtime, capture)
+    except Exception:
+        return None
+    return live_measure(meter) if meter is not None else None
+
+
+# Admitted pages replace a pending read's row; the placeholder only reserves protocol bytes.
+PENDING_READ_PLACEHOLDER = " " * 192
+
+
+def pending_result_reserve(call):
+    """Wire bytes a not-yet-executed non-read call may still add to the next frame.
+
+    Returns None when no host bound exists for that result.  Only LEAN mode
+    bounds tool replies at the append boundary (kernel_lean.BoundedToolMessages),
+    so the enforceable ceiling is the largest bounded reply, escaped on the wire.
+    """
+    from kernel_lean import MAX_TOOL_RESULT_CHARS, bound_tool_result, enabled as lean_enabled
+
+    if not lean_enabled():
+        return None
+    # Two-byte UTF-8 characters satisfy the byte bound and escape at six wire bytes each.
+    return bound_tool_result("é" * MAX_TOOL_RESULT_CHARS)
+
+
+def prepare_live(capture, runtime, body, *, dialect, reasoning_mode):
+    """Prepare a certified wire, retrying plain if its cache-layout proof fails."""
+    from kernel_frame_allocation_capture import FrozenRequestCounter
+    from kernel_frame_optional_allocation import snapshot_optional_inputs
+    from kernel_frame_source_snapshot import frame_source_snapshot
+    from kernel_request_budget import _request_token_meter
+    from kernel_request_candidate import candidate_source_plan
+    from kernel_request_source_window import verify_final_source_delivery, source_delivery_satisfied
+    from kernel_stateframe_framefit5 import _state_payload, _workspace_root
+    from kernel_working_set_prepare import Blocked, prepare_candidate
+    from kernel_working_set_shadow import freeze_shadow, SnapshotFailure
+
+    plan = copy.deepcopy(candidate_source_plan(capture, runtime))
+    runtime._request_source_closure = plan
+    snapshot = freeze_shadow(body, runtime, request_id=capture.request_id,
+                             dialect=dialect, reasoning_mode=reasoning_mode)
+    if isinstance(snapshot, SnapshotFailure) or snapshot is None:
+        # Persist an orderly, resumable stop before publishing any request.
+        _snapshot_failed(runtime, snapshot, request_id=capture.request_id)
+        raise RequestSealError("working-set snapshot: " + getattr(snapshot, "reason", "missing"))
+    ceiling = getattr(runtime, "frame_ceiling", None)
+    from kernel_cache_layout_candidate import final_layout_mode
+    snapshot = replace(snapshot, frame_limit=ceiling if type(ceiling) is int and ceiling > 0 else None,
+                       layouts=("plain", "final_cache") if final_layout_mode() == "on" else ("plain",))
+    meter = _request_token_meter(runtime, capture)
+    limits = getattr(capture, "_capacity_retry_limits", None)
+    if limits is not None:
+        snapshot = replace(snapshot, byte_cap=min(snapshot.byte_cap, limits.max_request_bytes),
+                           prompt_limit=min(snapshot.prompt_limit, limits.max_prompt_tokens))
+
+    measure = live_measure(meter)
+
+    def qualify(prepared):
+        """Bind the closure proof to this certified body and its assignment."""
+        body = json.loads(prepared.wire)
+        assert_certified_body(body, prepared)
+        certificate = prepared.rendered.certificate
+        capture._working_set_certificate = certificate
+        selected = dict(certificate.assignment)
+        closure = copy.deepcopy(plan)
+        sources = frame_source_snapshot(runtime, closure)
+        # CARRY-NOTE: bind closure proof to this certified assignment, never a legacy selector.
+        from kernel_working_set_facts import _covered
+        full = [slot for slot in certificate.snapshot.sources if selected[slot.key] == "FULL"]
+        # Every plan unit not covered FULL by whole lines is deferred. The
+        # renderer declares the same set via uncovered_plan_unit_paths, so
+        # late-deferral reconciliation finds each notice on re-verification.
+        deferred = set(closure.get("deferred_paths", ()))
+        revisions = dict(certificate.snapshot.current_revisions)
+        for unit in closure.get("units", ()):
+            path = unit["path"]
+            if not _covered(full, path, revisions.get(path), unit["start_line"], unit["end_line"]):
+                deferred.add(path)
+        closure["deferred_paths"] = sorted(deferred)
+        closure["source_contents"] = sources
+        capture._request_source_closure_override = closure
+        receipt = verify_final_source_delivery(closure, body["messages"], sources=sources,
+                                               payload=prepared.wire)
+        return body, closure, sources, receipt
+
+    def proof_failures(receipt):
+        return sorted({str(row.get("kind", "unknown")) for row in
+                       receipt.get("proof_failures", ()) if isinstance(row, dict)})
+
     prepared = prepare_candidate(snapshot, measure=measure)
     if isinstance(prepared, Blocked):
         _blocked(runtime, snapshot, prepared)
-    body = json.loads(prepared.wire)
-    assert_certified_body(body, prepared)
-    certificate = prepared.rendered.certificate
-    capture._working_set_certificate = certificate
-    selected = dict(certificate.assignment)
-    plan = copy.deepcopy(plan)
-    sources = frame_source_snapshot(runtime, plan)
-    # Bind closure proof to this assignment, never to a legacy path selector.
-    from kernel_working_set_facts import _covered
-    full = [slot for slot in certificate.snapshot.sources if selected[slot.key] == "FULL"]
-    # CARRY-NOTE: every plan unit the assignment does not cover FULL is marked
-    # deferred here even when no allocator slot (and so no deferred notice) is on
-    # the wire. Mainline late-deferral reconciliation (reconcile_owner_source_delivery)
-    # judges deferrals by notice presence; a re-verify on retry/resume may flag these.
-    # Left as-is so the allocator stays authoritative under ON; fixer item.
-    deferred = set(plan.get("deferred_paths", ()))
-    revisions = dict(certificate.snapshot.current_revisions)
-    for unit in plan.get("units", ()):
-        path = unit["path"]
-        if not _covered(full, path, revisions.get(path), unit["start_line"], unit["end_line"]):
-            deferred.add(path)
-    plan["deferred_paths"] = sorted(deferred)
-    plan["source_contents"] = sources
-    capture._request_source_closure_override = plan
-    receipt = verify_final_source_delivery(plan, body["messages"], sources=sources,
-                                           payload=prepared.wire)
+    body, closure, sources, receipt = qualify(prepared)
+    retried_plain = False
+    if (not source_delivery_satisfied(receipt)
+            and prepared.rendered.certificate.layout == "final_cache"
+            and "plain" in snapshot.layouts):
+        # Match the legacy cache-layout fail-open without invoking its selectors.
+        # Narrow the search so the failed cache layout cannot win again; the plain
+        # wire needs its own budget measurement, certificate and closure proof.
+        retried_plain = True
+        capture.journal.emit("final_cache_layout_failed_open", request_id=capture.request_id,
+            reason="closure_proof_failed", vital=True, status=str(receipt.get("status")),
+            failures=proof_failures(receipt))
+        snapshot = replace(snapshot, layouts=("plain",))
+        prepared = prepare_candidate(snapshot, measure=measure)
+        if isinstance(prepared, Blocked):
+            _blocked(runtime, snapshot, prepared)
+        body, closure, sources, receipt = qualify(prepared)
     if not source_delivery_satisfied(receipt):
-        failures = sorted({str(row.get("kind", "unknown")) for row in
-                           receipt.get("proof_failures", ()) if isinstance(row, dict)})
-        raise RequestSealError("certified working-set failed closure proof: " +
-                               str(receipt.get("status")) + ":" + ",".join(failures))
+        raise RequestSealError(("cache_layout_refused: " if retried_plain else "") +
+                               "certified working-set failed closure proof: " +
+                               str(receipt.get("status")) + ":" + ",".join(proof_failures(receipt)))
+    certificate = prepared.rendered.certificate
     capture.request_source_final_delivery = receipt
     from kernel_cache_layout_view import semantic_messages
     frame = next(_state_payload(m)[1]["framefit5"] for m in semantic_messages(body["messages"])
@@ -148,7 +262,7 @@ def prepare_live(capture, runtime, body, *, dialect, reasoning_mode):
         body, meter, measured.prompt_tokens, measured.method, str(capture.request_id))
     capture._frame_candidate_fallback_fit = measured.method == "calibrated_bytes"
     capture._frame_candidate_inputs = {
-        "source_plan": plan, "sources": sources, "receipt": copy.deepcopy(receipt),
+        "source_plan": closure, "sources": sources, "receipt": copy.deepcopy(receipt),
         "optional_inputs": optional, "byte_ceiling": certificate.snapshot.byte_cap,
         "token_ceiling": certificate.snapshot.prompt_limit, "measurement_identity": measured.method,
     }
@@ -199,16 +313,25 @@ def read_admission_snapshot(runtime, visible_messages, *, byte_cap):
               "function": copy.deepcopy(call["function"])}
              for call in pending if isinstance(call, dict)]
     if calls:
-        # Refused calls still occupy protocol bytes. Reserve their cursor replies
+        # Refused reads still occupy protocol bytes. Reserve their cursor replies
         # before spending any fresh allowance; admitted pages replace these rows.
+        # Every other pending call reserves its enforceable result bound: an
+        # admitted page cannot be dropped once a later shell/check result lands.
         exchange = []
         for call in calls:
+            name = call["function"]["name"]
+            if name == "read":
+                content = PENDING_READ_PLACEHOLDER
+            else:
+                content = pending_result_reserve(call)
+                if content is None:
+                    raise ReadAdmissionUnbounded(
+                        f"read admission cannot bound the pending {name} result")
             # NativeBatch normalizes execution as individual assistant/tool
             # pairs; one grouped assistant would underprice repeated shells.
             exchange.extend([
                 {"role": "assistant", "content": None, "tool_calls": [call]},
-                {"role": "tool", "tool_call_id": call["id"], "name": call["function"]["name"],
-                 "content": " " * 192}])
+                {"role": "tool", "tool_call_id": call["id"], "name": name, "content": content}])
         end = len(body["messages"]) - 1
         body["messages"][end:end] = exchange
     certificate = getattr(capture, "_working_set_certificate", None)
@@ -219,8 +342,9 @@ def read_admission_snapshot(runtime, visible_messages, *, byte_cap):
                              reasoning_mode=getattr(authority, "reasoning_mode", "on"))
     if snapshot is None or isinstance(snapshot, SnapshotFailure):
         # A known envelope that cannot be frozen is not permission to expose
-        # unaccounted bytes. The caller refuses with an executable cursor.
-        raise RequestSealError("read admission lacks a complete allocator snapshot")
+        # unaccounted bytes. The caller degrades to the conservative envelope
+        # estimate under this typed reason instead of closing the batch (S3).
+        raise ReadAdmissionUnavailable(_snapshot_failure_reason(snapshot).value)
     limits = getattr(capture, "_capacity_retry_limits", None)
     ceiling = getattr(runtime, "frame_ceiling", None)
     return replace(snapshot,
@@ -232,8 +356,12 @@ def read_admission_snapshot(runtime, visible_messages, *, byte_cap):
 
 
 @transaction
-def read_admission_floor(snapshot, pages=(), *, require_feasible=False):
-    """Render the allocator floor with every proposed fresh page FULL-only."""
+def read_admission_floor(snapshot, pages=(), *, require_feasible=False, measure=None):
+    """Render the allocator floor with every proposed fresh page FULL-only.
+
+    ``measure`` is preparation's live meter (see ``live_measure``); without it
+    feasibility falls back to the frozen offline ratio.
+    """
     from kernel_working_set_prepare import (
         _minimum_completion,
         _offline_measure,
@@ -253,8 +381,12 @@ def read_admission_floor(snapshot, pages=(), *, require_feasible=False):
     trial = replace(snapshot, fixed_body=json.dumps(body).encode(), sources=tuple(sources))
     _, floor = _minimum_completion(trial, tuple(propose_slots(trial)))
     verify_certificate(floor.wire, floor.certificate)
-    if require_feasible and _violations(trial, floor, _offline_measure(trial, floor.wire)):
-        return None
+    if require_feasible:
+        from kernel_working_set_prepare import Measurement
+        raw = measure(floor.wire) if measure is not None else _offline_measure(trial, floor.wire)
+        measured = raw if isinstance(raw, Measurement) else Measurement(*raw)
+        if _violations(trial, floor, measured):
+            return None
     return floor
 
 

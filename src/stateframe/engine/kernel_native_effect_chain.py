@@ -107,6 +107,28 @@ def insertion_change(path: str, source: str, args: dict) -> tuple[int, int, str]
     return start, start, replacement
 
 
+def historical_page_anchor(messages: list[dict], path: str, source: str,
+                           bound: str, anchor: str) -> bool:
+    """Qualify whole-line read pages against the same bound source as windows."""
+    from kernel_request_source_window import _READ_PAGE_HEADER, _read_page_source_range
+
+    if not anchor:
+        return False
+    for message in messages:
+        content = message.get("content")
+        if message.get("role") not in {"user", "tool"} or not isinstance(content, str):
+            continue
+        header = _READ_PAGE_HEADER.fullmatch(content.partition("\n")[0].removesuffix("\r"))
+        if header is None or header["revision"] != bound:
+            continue
+        verified = _read_page_source_range(content, {path: source}, {path: bound})
+        if verified is not None and verified[0] == path:
+            first, last = verified[1]
+            if anchor in "".join(source.splitlines(keepends=True)[first - 1:last]):
+                return True
+    return False
+
+
 class OrderedSources:
     def __init__(self, events, prepared, payload, origin_binding, *, final_delivery,
                  source_evidence=None, edit_mode: object = None):
@@ -137,6 +159,50 @@ class OrderedSources:
                 source = _acquired_source(events, path, bound, self.prepared["sequence"])
             self.texts[path] = self.original[path] = source
         return self.texts[path]
+
+    def historical_anchor(self, path: str, anchor: str) -> bool:
+        """Accepted, immutable past wires retain authority after source eviction."""
+        from kernel_working_set_state import enabled
+        from kernel_native_prefix import one
+        from kernel_native_prefix_delivery import submitted_payload, validate_prepared_delivery
+
+        if not enabled() or self.source_evidence is None:
+            return False
+        evidence = self.source_evidence
+        bound, source = self.origin["product_files"][path], self.original[path]
+        receipts = evidence.events_of_kinds(frozenset({"working_set_response"}))
+        for receipt in reversed(receipts):
+            if (receipt.get("disposition") != "accepted"
+                    or not isinstance(receipt.get("body_sha256"), str)
+                    or receipt["sequence"] >= self.prepared["sequence"]):
+                continue
+            try:
+                response = evidence.event(receipt.get("response_id"), "response_received")
+                submitted = evidence.event(response.get("transport_attempt_id"), "request_submitted")
+                require(submitted["sequence"] < response["sequence"] < receipt["sequence"]
+                        and receipt.get("request_id") == response.get("request_id")
+                        == submitted.get("request_id")
+                        and submitted.get("payload_hash") == "sha256:" + receipt.get("body_sha256", ""),
+                        "historical exposure identity differs")
+                payload = submitted_payload(evidence, submitted)
+                prepared = one([event for event in evidence.native_validation_events(receipt["request_id"])
+                                if event["kind"] == "request_prepared"],
+                               "missing or duplicate historical prepared request")
+                require(validate_prepared_delivery(evidence.final_delivery_events(submitted),
+                        prepared, submitted, payload), "historical final delivery is missing")
+            except ContinuationError:
+                continue  # An incomplete/rejected carrier cannot grant authority.
+            messages = payload.get("messages", [])
+            if (_anchor_delivered(messages, path, source, bound, anchor)
+                    or historical_page_anchor(messages, path, source, bound, anchor)):
+                return True
+            try:
+                delivered_source(messages, path, bound)
+            except ContinuationError:
+                continue
+            if anchor and anchor in source:
+                return True
+        return False
 
     def apply(self, tool: str, args: dict, number: int, *, pending: bool) -> str | None:
         if tool not in EDIT_TOOLS:
@@ -173,7 +239,8 @@ class OrderedSources:
         if pending and path not in self.visible:
             anchor = source[start:end] if start != end else source[max(0, start-32):start+32]
             require(_anchor_delivered(self.payload.get("messages", []), path, self.original[path],
-                    self.origin["product_files"][path], anchor), "pending exact-edit anchor was not delivered")
+                    self.origin["product_files"][path], anchor)
+                    or self.historical_anchor(path, anchor), "pending exact-edit anchor was not delivered")
         regions = self.regions.setdefault(path, [])
         for prior, left, right in regions:
             overlap = (start < right and end > left) if start != end and left != right else (

@@ -24757,8 +24757,8 @@ class StateFrameRuntime:
                     # admitted request really dropped is a loss. Anything else
                     # is journaled as a typed harden8 advisory, not a crash.
                     # CARRY-NOTE: under working-set ON the receipt comes from the certified
-                    # allocator closure (capture._request_source_closure_override) whose
-                    # deferred_paths may lack a wire notice; see kernel_working_set_live.
+                    # allocator closure (capture._request_source_closure_override). Its
+                    # deferred_paths carry matching wire notices; see kernel_working_set_live.
                     reconcile_owner_source_delivery(
                         self, capture, previous_source_delivery, final_source_delivery,
                         tools=tools,

@@ -8,6 +8,8 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, replace
 import hashlib
 import json
+from pathlib import Path
+import re
 from typing import Literal
 
 if __package__:
@@ -232,6 +234,42 @@ def _merge_source(sources, proposed):
     sources.append(proposed)
 
 
+def _check_output_paths(output: str, runtime: object, editable: set[str]) -> set[str]:
+    """Map diagnostic locations to safe, editable workspace identities."""
+    from kernel_request_source_window import _safe_framefit_path
+
+    root_value = getattr(getattr(runtime, "owner", None), "root", None)
+    root = None
+    if root_value is not None:
+        try:
+            root = Path(root_value).resolve()
+        except (OSError, TypeError, ValueError):
+            return set()
+    paths = set()
+    # Keep quoted traceback names whole; never recover a relative suffix from
+    # an unsafe absolute, traversal or Windows-drive diagnostic location.
+    locations = re.finditer(
+        r'File "([^"\r\n]+)", line [0-9]+|'
+        r'(?<!\S)((?:[A-Za-z]:)?[\w./\\-]+\.[\w]+):[0-9]+', output)
+    for match in locations:
+        value = (match.group(1) or match.group(2)).replace("\\", "/")
+        try:
+            if value.startswith("/"):
+                if root is None:
+                    continue
+                value = Path(value).relative_to(root).as_posix()
+            path = _safe_framefit_path(value)
+            if path is None:
+                continue
+            if root is not None:
+                path = _safe_framefit_path((root / path).resolve().relative_to(root).as_posix())
+        except (OSError, ValueError):
+            continue
+        if path is not None and (not editable or path in editable):
+            paths.add(path)
+    return paths
+
+
 def freeze_preparation(body, runtime, *, request_id: str, byte_cap: int,
                        prompt_limit: int = 33_344, frame_limit: int | None = None,
                        layouts=("plain",), dialect="llama.cpp",
@@ -253,8 +291,8 @@ def freeze_preparation(body, runtime, *, request_id: str, byte_cap: int,
     messages = snapshot_semantic_messages(frozen["messages"])
     sources = []
     state = getattr(runtime, "working_set_state", None)
-    if state is not None and state.overflow_count:
-        raise SnapshotConstructionError("ACTIVE_OBLIGATION_LIMIT")
+    # An index past the live limit is complete (no capture is ever dropped);
+    # its overshoot is retired by the O carriers the allocator must select.
     ledger = getattr(runtime, "read_capture_ledger", None)
     captures = {c.capture_id: c for c in ledger.all()} if ledger is not None else {}
     for obligation in state.active_obligations() if state is not None else ():
@@ -429,9 +467,8 @@ def freeze_preparation(body, runtime, *, request_id: str, byte_cap: int,
     if isinstance(private, dict):
         for check in reversed(tuple(private.values())):
             if isinstance(check, dict) and check.get("exit_code") not in {None, 0}:
-                import re
                 output = str(check.get("stdout", "")) + "\n" + str(check.get("stderr", ""))
-                protected.update(re.findall(r'(?:File ")?([\w./-]+\.[\w]+)(?:", line |:)[0-9]+', output))
+                protected.update(_check_output_paths(output, runtime, editable))
                 break
     return PreparationSnapshot(json.dumps(frozen).encode(), tuple(sources), request_id,
         state.next_due_ordinal if state is not None else 1, byte_cap,

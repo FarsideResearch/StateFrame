@@ -14,7 +14,8 @@ from kernel_stateframe_framefit5 import _serialize_state_message, build_typed_st
 from kernel_working_set_proof import verify_certificate
 
 
-def seal_case(tmp_path, monkeypatch, scenario):
+def seal_fixture(tmp_path, monkeypatch):
+    """Real runtime, capture, contract and sealed body up to the read batch."""
     import kernel_read_admission as admission
     import kernel_wire_truth_gate as truth
     from kernel_provider_dialect import ProviderCapabilities
@@ -60,6 +61,11 @@ def seal_case(tmp_path, monkeypatch, scenario):
     from kernel_request_seal import OwnerPresentation
     capture.owner_presentation = OwnerPresentation.capture(rt, capture.request_action_contract, body["messages"])
     admission.note_sealed_request(rt, body["messages"], tools)
+    return capture, rt, body, plan, journal, tools
+
+
+def seal_case(tmp_path, monkeypatch, scenario):
+    capture, rt, body, plan, journal, tools = seal_fixture(tmp_path, monkeypatch)
     contents = {"giant.py": ("# " + "λ" * 100 + "\n") * 100}
     if scenario == "K2":
         contents = {"first.py": ("# " + "x" * 100 + "\n") * 40,

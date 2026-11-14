@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import copy
-from dataclasses import asdict, replace
 import hashlib
 import io
 import json
@@ -105,10 +104,12 @@ def test_revision_preserves_unexposed_history_then_supersedes():
     old, = ws.state_for(rt).active_obligations()
     ws.record_capture(rt, capture(2, revision="b"))
     current = ws.state_for(rt).active_obligations()[-1]
-    assert old.state == "DUE" and old.superseded_by == current.obligation_id
+    # Wave G1 (S7): unexposed debt at a superseded revision is never owed as a
+    # stale page; the capture row stays in the journal.
+    assert old.state == "SUPERSEDED" and old.superseded_by == current.obligation_id
+    assert ws.state_for(rt).active_obligations() == (current,)
     submit(rt)
     accept(rt)
-    assert old.state == "SUPERSEDED"
     assert ws.state_for(rt).active_obligations() == (current,)
     ws.record_capture(rt, capture(3, revision="c"))
     assert current.state == "SUPERSEDED"
@@ -145,7 +146,8 @@ def test_limit_is_explicit_and_capture_history_not_truncated():
     for n in range(ws.MAX_ACTIVE_OBLIGATIONS + 3):
         ws.record_capture(rt, capture(n, path=f"file{n}.py"))
     state = ws.state_for(rt)
-    assert len(state.active_obligations()) == ws.MAX_ACTIVE_OBLIGATIONS
+    # Wave G1 (S5): every capture is indexed; the counter is the live overshoot.
+    assert len(state.active_obligations()) == ws.MAX_ACTIVE_OBLIGATIONS + 3
     assert state.overflow_count == 3 and not state.shadow_complete
     assert len([e for e in rt.journal.events if e["kind"] == "working_set_capture"]) == ws.MAX_ACTIVE_OBLIGATIONS + 3
     assert rt.journal.events[-1]["capture"]["capture_id"] == f"capture-{ws.MAX_ACTIVE_OBLIGATIONS + 2}"

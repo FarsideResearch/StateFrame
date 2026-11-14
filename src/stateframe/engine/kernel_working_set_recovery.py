@@ -11,12 +11,22 @@ import re
 
 if __package__:
     from .kernel_completion_owner import validate_json_schema
-    from .kernel_source_delivery import (MAX_READ_CHARS, MAX_READ_LINES,
-                                         MIN_READ_CHARS, normalize_read_request)
+    from .kernel_source_delivery import (
+        MAX_READ_CHARS,
+        MAX_READ_LINES,
+        MIN_READ_CHARS,
+        normalize_read_request,
+        read_page_header_reserve,
+    )
 else:
     from kernel_completion_owner import validate_json_schema
-    from kernel_source_delivery import (MAX_READ_CHARS, MAX_READ_LINES,
-                                        MIN_READ_CHARS, normalize_read_request)
+    from kernel_source_delivery import (
+        MAX_READ_CHARS,
+        MAX_READ_LINES,
+        MIN_READ_CHARS,
+        normalize_read_request,
+        read_page_header_reserve,
+    )
 
 
 class RecoveryRouteUnavailable(ValueError):
@@ -100,10 +110,13 @@ def validate_recovery(snapshot, slot) -> dict[str, object]:
     if current is not None and current != identity.revision:
         raise RecoveryRouteUnavailable("captured interval is not at the frozen current revision")
     line_count = identity.last_line - identity.first_line + 1
-    if not 1 <= line_count <= MAX_READ_LINES or len(slot.payload) > MAX_READ_CHARS:
+    # max_chars bounds the whole page, not just its source body. Use the same
+    # reserve as the pager so the advertised route restores the entire receipt.
+    reserve = read_page_header_reserve(identity.path, identity.revision)
+    max_chars = max(MIN_READ_CHARS, len(slot.payload) + reserve)
+    if not 1 <= line_count <= MAX_READ_LINES or max_chars > MAX_READ_CHARS:
         raise RecoveryRouteUnavailable("captured interval exceeds a single read page")
     column = _start_column(slot, original)
-    max_chars = max(MIN_READ_CHARS, len(slot.payload))
     extras = {key: value for key, value in original.items() if key not in _COORDINATES}
     common = {**extras, "path": identity.path, "max_chars": max_chars}
     if column:
@@ -130,7 +143,8 @@ def validate_recovery(snapshot, slot) -> dict[str, object]:
         normalized = normalize_read_request(guarded)
         if normalized.mode not in {"lines", "cursor"} or normalized.max_lines < line_count:
             continue
-        if normalized.max_chars < len(slot.payload):
+        overhead = min(normalized.max_chars - 1, reserve)
+        if normalized.max_chars - overhead < len(slot.payload):
             continue
         return guarded
     raise RecoveryRouteUnavailable("final read schema cannot recover the captured interval")

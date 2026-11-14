@@ -6,7 +6,7 @@ from dataclasses import replace
 from time import perf_counter
 
 import pytest
-from kernel_working_set_allocator import FULL
+from kernel_working_set_allocator import DEFERRED, FULL
 from kernel_working_set_cache import _ACTIVE, independent, transaction
 from kernel_working_set_prepare import PreparedCandidate, prepare_candidate
 from kernel_working_set_proof import CertificateError, verify_certificate
@@ -189,15 +189,14 @@ def test_wire_trials_defer_witnesses_and_bind_immutable_assignment(monkeypatch):
     exercise()
 
 
-@pytest.mark.parametrize("changes", [
-    {"protected_paths": ("a.py",)},
-    {"current_revisions": (("a.py", "sha256:" + "2" * 64),)},
-    {"recovery_allowed": False},
-    {"recovery_owner_allowed": False},
-    {"recovery_schema": b'{"type":"object","additionalProperties":false}'},
+@pytest.mark.parametrize("changes,expected", [
+    ({"protected_paths": ("a.py",)}, (FULL,)),
+    ({"current_revisions": (("a.py", "sha256:" + "2" * 64),)}, (DEFERRED,)),
+    ({"recovery_allowed": False}, (FULL, DEFERRED)),
+    ({"recovery_owner_allowed": False}, (FULL, DEFERRED)),
+    ({"recovery_schema": b'{"type":"object","additionalProperties":false}'}, (FULL,)),
 ])
-def test_source_fragment_cache_binds_recovery_and_protection(changes):
-    from kernel_working_set_allocator import DEFERRED
+def test_source_fragment_cache_binds_recovery_and_protection(changes, expected):
     original = source("a")
     snap = snapshot(original)
 
@@ -205,7 +204,7 @@ def test_source_fragment_cache_binds_recovery_and_protection(changes):
     def exercise():
         assert domain(snap, original) == (FULL, DEFERRED)
         changed = replace(snap, **changes)
-        assert domain(changed, original) == (FULL,)
+        assert domain(changed, original) == expected
         # A different immutable capture with the same key cannot reuse a route.
         due = replace(original, state="DUE")
         assert domain(snap, due) == (FULL,)

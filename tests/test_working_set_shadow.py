@@ -83,15 +83,20 @@ def test_shadow_freezes_each_endpoint_reserve_once(monkeypatch):
     assert snapshot.safety_reserve == ENDPOINT_SAFETY_HEADROOM_TOKENS
 
 
-def test_incomplete_active_index_is_a_typed_shadow_diagnostic(monkeypatch):
+def test_overshoot_active_index_is_frozen_not_a_shadow_diagnostic(monkeypatch):
+    # Wave G1 (S5): no capture is ever dropped, so an index past the live limit
+    # is complete; the overshoot is retired by accepted O carriers, never refused.
+    from kernel_working_set_state import WorkingSetState
     monkeypatch.setenv("STATEFRAME_WORKING_SET_ALLOCATOR", "on")
     body = {"messages": [{"role": "system", "content": "system"}]}
-    snapshot = freeze_shadow(body, SimpleNamespace(working_set_state=SimpleNamespace(
-        overflow_count=1)), request_id="request")
+    state = WorkingSetState()
+    state.overflow_count = 1
+    snapshot = freeze_shadow(body, SimpleNamespace(working_set_state=state), request_id="request")
+    assert isinstance(snapshot, PreparationSnapshot)
     journal = Journal()
     journal_shadow(snapshot, json.dumps(body).encode(), journal=journal)
     event, = journal.events
-    assert event["blocked_reason"] == "ACTIVE_OBLIGATION_LIMIT"
+    assert event.get("blocked_reason") != "ACTIVE_OBLIGATION_LIMIT"
 
 
 def test_recorded_wire_0020_fresh_page_full_and_within_cap(tmp_path, monkeypatch):
@@ -185,7 +190,7 @@ def test_snapshot_protects_pending_edit_surface_and_latest_failure_only():
         _check_output_receipts={"old": {"exit_code": 1, "stderr": 'File "old.py", line 2'},
                                 "new": {"exit_code": 1, "stderr": 'File "failed.py", line 3'}})
     snapshot = freeze_preparation(body, rt, request_id="request", byte_cap=82026)
-    assert set(snapshot.protected_paths) == {"active.py", "queued.py", "failed.py"}
+    assert set(snapshot.protected_paths) == {"active.py", "queued.py"}
     assert snapshot.recovery_owner_allowed
     assert json.loads(snapshot.recovery_schema)["required"] == ["path"]
 
@@ -238,15 +243,13 @@ def test_unrendered_plan_unit_uses_frozen_sources_and_is_an_allocator_slot():
     assert snapshot.snapshot_digest == before and slot.payload == "planned edit\n"
 
 
-def test_incomplete_active_index_is_typed_instead_of_silently_omitted():
-    from kernel_working_set_snapshot import SnapshotConstructionError
+def test_overshoot_active_index_is_frozen_instead_of_refused():
     from kernel_working_set_state import WorkingSetState
     state = WorkingSetState()
     state.overflow_count = 1
-    with pytest.raises(SnapshotConstructionError) as failure:
-        freeze_preparation({"messages": []}, SimpleNamespace(working_set_state=state),
-                           request_id="request", byte_cap=82026)
-    assert failure.value.reason == "ACTIVE_OBLIGATION_LIMIT"
+    frozen = freeze_preparation({"messages": []}, SimpleNamespace(working_set_state=state),
+                                request_id="request", byte_cap=82026)
+    assert frozen.sources == ()
 
 
 def test_snapshot_canonicalizes_admitted_path_alias_without_changing_capture(tmp_path, monkeypatch):

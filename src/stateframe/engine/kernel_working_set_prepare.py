@@ -180,15 +180,90 @@ def _compact_history(frame: dict[str, object], *, minimum: bool) -> None:
             _seal_byte_count(panel)
 
 
+# Tool calls whose replies are opaque process observations. Their delivery may
+# be shortened because the tool tape retains the whole observation; every
+# other tool row (read pages, source carriers, custom tools) stays verbatim.
+EXECUTION_TOOLS = frozenset({"shell", "job_wait", "job_output"})
+# Descending per-row byte allowances, priced as envelope variants. Replies and
+# narrative rows at or under the legacy 512-byte threshold are never bounded.
+EXCHANGE_ALLOWANCES = (4096, 1024, 256)
+_EXECUTION_MARKER = "[execution output delivery:"
+_TRANSCRIPT_MARKER = "[transcript delivery:"
+_HOST_USER_PREFIXES = ("Task:", "[")
+
+
+def _excerpt(output: bytes, allowance: int) -> tuple[str, str, int]:
+    half = allowance // 2
+    left = output[:half].decode("utf-8", "ignore")
+    right = output[-half:].decode("utf-8", "ignore") if half else ""
+    return left, right, len(output) - len(left.encode()) - len(right.encode())
+
+
+def _bound_exchange(body: dict[str, object], boundary: int, allowance: int) -> bool:
+    """Bound oversized execution replies and narrative rows in place.
+
+    This is the allocator's priced counterpart of the legacy fit_execution_
+    replies and optional-message trim, which ON skips. Markers match the legacy
+    delivery grammar so downstream readers see one vocabulary. Task rows,
+    host-marker user rows, the opaque user suffix, non-execution tool rows and
+    already-bounded rows are never rewritten. Returns whether anything changed.
+    """
+    from kernel_execution_reply_budget import _parts
+
+    messages = body["messages"]
+    calls: dict[object, object] = {}
+    for row in messages:
+        if row.get("role") != "assistant":
+            continue
+        for call in row.get("tool_calls") or ():
+            if isinstance(call, Mapping) and isinstance(call.get("function"), Mapping):
+                calls[call.get("id")] = call["function"].get("name")
+    threshold = max(allowance, 512)
+    changed = False
+    for index, row in enumerate(messages):
+        role, content = row.get("role"), row.get("content")
+        if not isinstance(content, str):
+            continue
+        if role == "tool":
+            call_id = row.get("tool_call_id")
+            name = calls.get(call_id)
+            if name not in EXECUTION_TOOLS or _EXECUTION_MARKER in content:
+                continue
+            head, output, tail, prior_omitted = _parts(content, str(name))
+            if len(output) <= threshold:
+                continue
+            left, right, omitted = _excerpt(output, allowance)
+            marker = (f"\n{_EXECUTION_MARKER} {omitted} observation bytes omitted; "
+                      f"process output bytes already omitted: "
+                      f"{prior_omitted if prior_omitted is not None else 'unknown'}; "
+                      f"full observation in tool-tape.jsonl call {call_id}; "
+                      f"sha256 {hashlib.sha256(content.encode()).hexdigest()}]\n")
+            row["content"] = head + left + marker + right + "\n" + tail
+            changed = True
+        elif role == "assistant" or (role == "user" and index < boundary
+                                     and not content.startswith(_HOST_USER_PREFIXES)):
+            encoded = content.encode()
+            if len(encoded) <= threshold or _TRANSCRIPT_MARKER in content:
+                continue
+            left, right, omitted = _excerpt(encoded, allowance)
+            marker = (f"\n{_TRANSCRIPT_MARKER} {omitted} bytes omitted; "
+                      f"sha256 {hashlib.sha256(encoded).hexdigest()}]\n")
+            row["content"] = left + marker + right
+            changed = True
+    return changed
+
+
 @lru_cache(maxsize=8)
 def _envelope_bodies(fixed_body: bytes, boundary: int, recovery: bool,
                      recovery_schema: bytes) -> tuple[bytes, ...]:
     """Freeze rich, compact-site, compact-history and minimum representations.
 
     This cache only memoizes immutable JSON transformations. It never calls a
-    legacy fitter, reads workspace state, or publishes coverage. Opaque suffix
-    and native-exchange rows at/after boundary are outside the host envelope.
-    Every variant is subsequently priced by render_assignment, not JSON size.
+    legacy fitter, reads workspace state, or publishes coverage. The opaque
+    user suffix is outside the host envelope; oversized execution replies and
+    narrative rows get bounded variants (see _bound_exchange) so the floor can
+    use the most compact exchange and FLOOR_INFEASIBLE fires only when even
+    that cannot fit. Every variant is priced by render_assignment, not JSON size.
     """
     from kernel_completion_owner import validate_json_schema
     from kernel_frame_optional_allocation import singleton_alias_candidate
@@ -227,6 +302,19 @@ def _envelope_bodies(fixed_body: bytes, boundary: int, recovery: bool,
                     _compact_history(frame, minimum=history)
                 row["content"] = "[StateFrame]\n" + json.dumps(
                     payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+            value = json.dumps(body).encode()
+            if value not in variants:
+                variants.append(value)
+    # Execution replies and narrative rows are bounded only when they are
+    # oversized, so ordinary snapshots keep exactly the frame variants above.
+    # Preference follows the legacy order: bound the exchange before pricing
+    # the frame's compaction, on both the richest and the smallest frame.
+    frame_variants = tuple(variants)
+    for allowance in EXCHANGE_ALLOWANCES:
+        for base in (frame_variants[0], min(frame_variants, key=len)):
+            body = json.loads(base)
+            if not _bound_exchange(body, boundary, allowance):
+                continue
             value = json.dumps(body).encode()
             if value not in variants:
                 variants.append(value)
@@ -500,8 +588,12 @@ def prepare_candidate(snapshot: PreparationSnapshot, *, measure: Measure | None 
             # independent immutable lower bound can certify impossibility.
             # Shared metadata can hide an unsearched subset even after
             # coordinate/group minimization.
+            # The bound is taken over the most compact priced envelope: a
+            # bounded execution reply or narrative row is a legal delivery,
+            # so an unbounded flood never certifies impossibility by itself.
+            compact = min(_envelope_variants(snapshot), key=lambda variant: len(variant.fixed_body))
             mandatory = (floor.wire if all(len(slot.allowed) == 1 for slot in slots)
-                         else _mandatory_lower_bound(snapshot, slots))
+                         else _mandatory_lower_bound(compact, slots))
             if len(mandatory) <= snapshot.byte_cap:
                 return blocked(ReasonCode.BYTE_POLICY_DOMAIN_EXHAUSTED,
                                detail="policy minimum exceeds cap without an impossibility proof")

@@ -383,6 +383,8 @@ SAFE_TAIL = frozenset({
     "working_set_capture", "working_set_submission", "working_set_response", "working_set_blocked",
     "read_admission",  # audit only; the delivered page already carries its cursor
     "working_set_prepared",  # proved candidate; submission owns lifecycle transitions
+    # Preparation diagnostics only; certification/submission retain authority.
+    "final_cache_layout_failed_open", "context_claim_reconciled",
     "working_set_shadow_plan",  # observational candidate proof, never dispatch authority
     "continuation_writer_resumed", "rich_state_committed", "snapshot_committed",
     "history_decision", "history_exchange_removed", "selection_decision",
@@ -946,6 +948,10 @@ DOCUMENTED_REJECT.update({
     if classification == "REJECT"
 })
 DOCUMENTED_REJECT.update({
+    "stable_wire_refused": (
+        "Allocator/stable-wire incompatibility requires a new run with compatible switches; "
+        "the refused combination has no submitted layout to replay."
+    ),
     "intake_orientation_failed": (
         "The failure omits orientation from the first request, so replay can rebuild different request bytes."
     ),

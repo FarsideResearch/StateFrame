@@ -221,6 +221,10 @@ def build_qualified_request(capture, runtime, body, *, endpoint, key, deadline=N
         return previous
     if deadline is not None and time.monotonic() >= deadline:
         raise TimeoutError("request deadline expired before qualification")
+    from kernel_read_receipts import enabled as working_set_enabled
+    if working_set_enabled():
+        from kernel_stable_wire import require_allocator_compatibility
+        require_allocator_compatibility(capture)
     # Availability is a logical-request service, not detached candidate
     # authority. Even a failed first candidate must consume the same retries.
     from kernel_request_budget import _request_token_meter
@@ -244,7 +248,6 @@ def build_qualified_request(capture, runtime, body, *, endpoint, key, deadline=N
             body["messages"].append({"role": "user", "content": capsule})
     from kernel_read_once import append_final_message
     body["messages"] = append_final_message(context, body["messages"])
-    from kernel_read_receipts import enabled as working_set_enabled
     if working_set_enabled():
         # Receipt witnesses replace the path-based legacy pin/forgiveness loop.
         visibility = {"candidates": [], "missing_ranges": [], "pins_added": 0}
@@ -304,18 +307,15 @@ def build_qualified_request(capture, runtime, body, *, endpoint, key, deadline=N
     body = compose_stable_guidance(candidate, body)
     maybe_append_greenfact(body["messages"], context, journal=candidate.journal,
                            turn=candidate.step, request_id=candidate.request_id)
-    from kernel_read_receipts import enabled as working_set_enabled
     allocated = None
     from kernel_cache_layout_candidate import pending_publication
     from kernel_cache_layout_view import semantic_messages
     before_fit_bytes = len(json.dumps(body).encode())
     if working_set_enabled():
-        # CARRY-NOTE: ON takes the allocator path only. Mainline stable wire
-        # (render_cache_candidate/render_final_cache_candidate), the cache-layout
-        # fail-open plain fallback and _recover_post_fit_growth run solely in the
-        # OFF branch below, so OFF stays byte-identical to 0.6.49 and ON keeps the
-        # allocator authoritative. Integrating those mechanisms with the certified
-        # body is left to the follow-up fixers.
+        # Stable wire was explicitly refused before candidate construction: its
+        # append-only source placement is not certified by the allocator yet.
+        # CARRY-NOTE: legacy cache-layout fail-open and _recover_post_fit_growth
+        # remain in the 0.6.23 OFF branch; ON keeps the allocator authoritative.
         from kernel_working_set_live import prepare_live
         from kernel_working_set_stop import WorkingSetSuspended
         try:
@@ -327,6 +327,11 @@ def build_qualified_request(capture, runtime, body, *, endpoint, key, deadline=N
             # authority without publishing any unsent source/layout changes.
             runtime.working_set_state = copy.deepcopy(context.working_set_state)
             raise
+        from kernel_frame_source_snapshot import reconciled_source_coverage_suffix
+        # Allocation ownership must describe the same healed suffix as the wire.
+        candidate._framefit5_newest_user_suffix = reconciled_source_coverage_suffix(
+            semantic_messages(body["messages"]),
+            getattr(candidate, "_framefit5_newest_user_suffix", ()))
         projection_recovered = False
     else:
         before_fit_bytes = len(json.dumps(body).encode())
@@ -422,6 +427,12 @@ def build_qualified_request(capture, runtime, body, *, endpoint, key, deadline=N
     budget = dict(getattr(candidate, "request_budget_final_wire", None) or {})
     budget["max_request_bytes"] = candidate._frame_candidate_inputs["byte_ceiling"]
     candidate.request_budget_final_wire = budget
+    if allocated is not None:
+        from kernel_frame_source_snapshot import verify_source_coverage_claims
+        # The allocator healed each rendered assignment before certification.
+        # This seam is read-only even in production: never heal certified bytes.
+        verify_source_coverage_claims(body["messages"], strict=True,
+                                      journal=candidate.journal, request_id=candidate.request_id)
     # Keep classification metadata on the candidate for allocation readers, but
     # prove capacity and bind the seal against the exact provider wire copy.
     wire_body = _finalize_provider_request_body(capture, body, provider_capabilities)

@@ -44,6 +44,8 @@ class CarrierWitness:
     carrier_sha256: str
     payload_start: int | None
     payload_end: int | None
+    # Deferred carriers bind either concrete read arguments or an explicit
+    # UNAVAILABLE status under the frozen tool/owner surface.
     recovery_arguments: bytes
 
 
@@ -61,6 +63,30 @@ def deferred_plan_slot(slot: SourceSlot) -> bool:
     return (slot.plan_only and slot.state in {"PLAN", "CLOSURE"}
             and not slot.capture_ids and slot.previous_mode is None
             and not slot.recovery_pin)
+
+
+def plan_unit_slot(slot: SourceSlot) -> bool:
+    """A slot that stands for a closure plan unit: a frozen proposal, or a
+    capture the proposal merged into (it then carries the standalone page)."""
+    return slot.plan_only or slot.standalone_page is not None
+
+
+def uncovered_plan_unit_paths(snapshot: PreparationSnapshot, full, revisions) -> set[str]:
+    """Plan unit paths the FULL carriers do not cover with whole lines.
+
+    Same predicate as the live closure proof (kernel_working_set_live), so the
+    deferred notice on the wire declares every path the receipt will defer.
+    """
+    if __package__:
+        from .kernel_working_set_facts import _covered
+    else:
+        from kernel_working_set_facts import _covered
+    return {
+        slot.identity.path for slot in snapshot.slots
+        if plan_unit_slot(slot) and not _covered(
+            full, slot.identity.path, revisions.get(slot.identity.path),
+            slot.identity.first_line, slot.identity.last_line)
+    }
 
 
 @dataclass(frozen=True)
@@ -156,15 +182,21 @@ def _rebind_preview(result, snapshot, modes, layout):
     return _ProjectedPreview(result.wire, snapshot, assignment, layout)
 
 
-@source_frozen
-def _slot_modes(snapshot: PreparationSnapshot, slot: SourceSlot) -> tuple[core.Mode, ...]:
+def stale_resident(snapshot: PreparationSnapshot, slot: SourceSlot) -> bool:
+    """An exposed (or carried) capture whose revision the model has since changed.
+
+    Fresh DUE debt and recovery pins are never stale: the model has not seen
+    them yet, so they are owed at their captured revision. An edit commits a
+    revision change without a capture, so the index cannot supersede the old
+    residency itself; the frozen current revision observation retires it.
+    """
     if slot.state == "DUE" or slot.recovery_pin:
-        return (core.FULL,)
-    if (slot.state in {"RETIRING", "DISCHARGED", "SUPERSEDED", "DEGRADED"}
-            or slot.previous_mode in {"D", "O"}):
-        return (core.DEFERRED,)
-    if slot.identity.path in snapshot.protected_paths:
-        return (core.FULL,)
+        return False
+    current = dict(snapshot.current_revisions).get(slot.identity.path)
+    return current is not None and current != slot.identity.revision
+
+
+def _recoverable(snapshot: PreparationSnapshot, slot: SourceSlot) -> bool:
     if __package__:
         from .kernel_working_set_recovery import RecoveryRouteUnavailable, validate_recovery
     else:
@@ -172,6 +204,36 @@ def _slot_modes(snapshot: PreparationSnapshot, slot: SourceSlot) -> tuple[core.M
     try:
         validate_recovery(snapshot, slot)
     except RecoveryRouteUnavailable:
+        return False
+    return True
+
+
+@source_frozen
+def _slot_modes(snapshot: PreparationSnapshot, slot: SourceSlot) -> tuple[core.Mode, ...]:
+    if slot.state == "DUE" or slot.recovery_pin:
+        return (core.FULL,)
+    if stale_resident(snapshot, slot):
+        # Obsolete bytes are never carried again, protected path or not: the
+        # typed stale notice retires them without a recovery route.
+        return (core.DEFERRED,)
+    if slot.state == "RETIRING" and slot.previous_mode not in {"D", "O"}:
+        # Reserve retirement needs a valid retirement representation: a
+        # callable route or explicit unavailable-read notice for an unprotected
+        # resident. Otherwise keep it FULL and queue the next oldest instead.
+        if (slot.identity.path in snapshot.protected_paths
+                or (_recovery_unavailable_reason(snapshot) is None
+                    and not _recoverable(snapshot, slot))):
+            return (core.FULL,)
+        return (core.DEFERRED,)
+    if (slot.state in {"RETIRING", "DISCHARGED", "SUPERSEDED", "DEGRADED"}
+            or slot.previous_mode in {"D", "O"}):
+        return (core.DEFERRED,)
+    if slot.identity.path in snapshot.protected_paths:
+        return (core.FULL,)
+    if _recovery_unavailable_reason(snapshot) is not None:
+        # Missing read permission does not manufacture fresh delivery debt.
+        return (core.FULL, core.DEFERRED)
+    if not _recoverable(snapshot, slot):
         # An omission without a callable recovery route is outside the legal
         # domain. Its available FULL carrier may still fit the complete wire.
         return (core.FULL,)
@@ -218,17 +280,47 @@ def _assignment(snapshot: PreparationSnapshot,
 
 @source_frozen
 def _recovery_arguments(snapshot: PreparationSnapshot, slot: SourceSlot) -> bytes:
+    if stale_resident(snapshot, slot):
+        # This certifies obsolete residency, not an executable recovery route.
+        # In particular, the current owner may not admit read at all.
+        return b"{}"
+    reason = _recovery_unavailable_reason(snapshot)
+    if reason is not None:
+        return json.dumps({"status": "UNAVAILABLE", "reason": reason},
+                          sort_keys=True, separators=(",", ":")).encode()
     if __package__:
         from .kernel_working_set_recovery import validate_recovery
     else:
         from kernel_working_set_recovery import validate_recovery
-    return json.dumps(validate_recovery(snapshot, slot),
-                      sort_keys=True, separators=(",", ":")).encode()
+    arguments = validate_recovery(snapshot, slot)
+    return json.dumps(arguments, sort_keys=True, separators=(",", ":")).encode()
+
+
+def _recovery_unavailable_reason(snapshot: PreparationSnapshot) -> str | None:
+    if not snapshot.recovery_allowed:
+        return "READ_TOOL_UNAVAILABLE"
+    if not snapshot.recovery_owner_allowed:
+        return "OWNER_READ_UNAVAILABLE"
+    return None
 
 
 @source_frozen
 def _notice(snapshot: PreparationSnapshot, slot: SourceSlot) -> str:
     identity = slot.identity
+    if stale_resident(snapshot, slot):
+        return ("[Source page deferred]\n"
+                f"path={json.dumps(identity.path, ensure_ascii=False)} "
+                f"revision={identity.revision} "
+                f"lines={identity.first_line}-{identity.last_line} "
+                f"digest={identity.payload_sha256}\n"
+                "These bytes are stale since your edit; re-read current source if needed.")
+    reason = _recovery_unavailable_reason(snapshot)
+    if reason is not None:
+        return ("[Source page deferred]\n"
+                f"path={json.dumps(identity.path, ensure_ascii=False)} "
+                f"revision={identity.revision} lines={identity.first_line}-{identity.last_line} "
+                f"digest={identity.payload_sha256}\n"
+                f"Read recovery unavailable in this request: {reason}.")
     arguments = json.loads(_recovery_arguments(snapshot, slot))
     # Preserve positional/cursor recovery arguments, including lossy columns.
     call = "read(" + ", ".join(f"{key}={json.dumps(value, ensure_ascii=False)}"
@@ -391,8 +483,6 @@ def _render_assignment(snapshot: PreparationSnapshot,
                 categories[len(generated) - 1] = "full_source"
             locations[slot.key] = shared[key] = location
         else:
-            if not snapshot.recovery_allowed:
-                raise ValueError("frozen tool/owner surface refuses source recovery")
             if deferred_plan_slot(slot):
                 deferred_plan.append(slot.key)
                 continue
@@ -413,6 +503,11 @@ def _render_assignment(snapshot: PreparationSnapshot,
         generated.append({"role": "user", "content": facts})
     deferred_paths = set(snapshot.deferred_paths)
     deferred_paths.update(s.identity.path for s in ordered if modes[s.key] != core.FULL)
+    # Mirror the live closure proof: every plan unit the FULL carriers do not
+    # cover with whole lines (clipped page, lossy span) is a plan deferral and
+    # must be declared here, or the mainline late-deferral reconciliation
+    # (reconcile_owner_source_delivery) judges it lost for want of a notice.
+    deferred_paths.update(uncovered_plan_unit_paths(snapshot, full, revisions))
     if deferred_paths:
         if __package__:
             from .kernel_request_source_window import _render_truthful_deferred_source_notice
@@ -420,10 +515,14 @@ def _render_assignment(snapshot: PreparationSnapshot,
             from kernel_request_source_window import _render_truthful_deferred_source_notice
         deferred_notice_index = len(generated)
         categories[len(generated)] = "deferred_notices"
-        generated.append({"role": "user", "content": _render_truthful_deferred_source_notice(
+        notice = _render_truthful_deferred_source_notice(
             sorted(deferred_paths), delivered_source_ranges=tuple(
                 (s.identity.path, s.identity.revision, s.identity.first_line, s.identity.last_line)
-                for s in current))})
+                for s in current))
+        reason = _recovery_unavailable_reason(snapshot)
+        if reason is not None:
+            notice += f"\nRead recovery unavailable in this request: {reason}."
+        generated.append({"role": "user", "content": notice})
     # Counts are derived after deduplication and escape with the whole body.
     carriers = {(locations[s.key][0], locations[s.key][1]) for s in full}
     counted = set()
@@ -446,6 +545,15 @@ def _render_assignment(snapshot: PreparationSnapshot,
     truth_indexes = tuple(i + len(generated) if i >= insertion else i
                           for i in snapshot.truth_message_indexes)
     rebuild_delivery_truth(body, snapshot, full, message_indexes=truth_indexes)
+    if __package__:
+        from .kernel_frame_source_snapshot import reconcile_source_coverage
+    else:
+        from kernel_frame_source_snapshot import reconcile_source_coverage
+    # Heal against this assignment before byte/token costs and certification.
+    # Deleted advisory blocks must not shift fixed-tool witness coordinates.
+    unhealed_messages = tuple(body["messages"])
+    reconcile_source_coverage(body["messages"])
+    healed_indexes = {id(message): index for index, message in enumerate(body["messages"])}
     plain = _normalize(body, snapshot)
     if layout == "final_cache":
         if __package__:
@@ -478,6 +586,9 @@ def _render_assignment(snapshot: PreparationSnapshot,
             if match is not None:
                 physical_indexes[index] = match
                 used.add(match)
+    physical_indexes = {index: physical_indexes[healed_indexes[id(message)]]
+                        for index, message in enumerate(unhealed_messages)
+                        if healed_indexes.get(id(message)) in physical_indexes}
     classified = set()
     for generated_index, category in categories.items():
         index = physical_indexes.get(insertion + generated_index)

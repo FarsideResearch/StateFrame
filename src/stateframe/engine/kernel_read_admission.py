@@ -64,6 +64,10 @@ def note_sealed_request(runtime: object, messages: Sequence[Mapping[str, object]
     fixed = max(0, total - fresh)
     try:
         setattr(runtime, _SEALED_ATTR, fixed)
+        # A sealed request ends the previous admission batch. Pending bytes never
+        # survive into the next request, whatever the restored request clock says.
+        if hasattr(runtime, _STATE_ATTR):
+            delattr(runtime, _STATE_ATTR)
         body = {"messages": list(messages), "tools": list(tools or ())}
         active = getattr(runtime, "_active_capture", None)
         qualified = getattr(active, "qualified_request", None)
@@ -119,11 +123,16 @@ class _RequestState:
     batch_identity: object = None
     snapshot: PreparationSnapshot | None = None
     floor_bytes: int = 0
+    # Typed reason when the allocator snapshot could not be frozen for this
+    # request; admission then runs on the conservative envelope estimate.
+    degraded_reason: str | None = None
     pages: list[tuple[SourceSlot, str | None]] = field(default_factory=list)
     # Cache exact floor results, including infeasibility, only for this request.
     # Whole immutable slots bind ranges, payloads and native carrier call IDs.
     floor_results: dict[tuple[str, tuple[tuple[SourceSlot, str | None], ...]], int | None] = field(
         default_factory=dict)
+    # Preparation's live token meter (kernel_working_set_live.live_measure); None = offline ratio.
+    measure: object = None
 
 
 def _request_index(runtime: object) -> int:
@@ -141,20 +150,42 @@ def _state(runtime: object, visible_messages: Sequence[Mapping[str, object]] | N
             or state.batch_identity != batch_identity):
         from kernel_request_seal import RequestSealError
         from kernel_working_set_live import (
+            ReadAdmissionUnavailable,
+            ReadAdmissionUnbounded,
             read_admission_floor,
+            read_admission_measure,
             read_admission_snapshot,
         )
+        degraded = None
+        measure = None
+        unbounded = False
         try:
             snapshot = read_admission_snapshot(runtime, visible_messages, byte_cap=request_byte_cap())
             floor_bytes = len(read_admission_floor(snapshot).wire) if snapshot is not None else 0
-            allowance = (max(0, snapshot.byte_cap - floor_bytes) if snapshot is not None else
-                fresh_exposure_allowance(request_byte_cap(),
-                                         fixed_envelope_estimate(runtime, visible_messages), ()))
-        except (RequestSealError, ValueError, TypeError, KeyError, OSError, RuntimeError):
-            snapshot, floor_bytes, allowance = None, 0, 0
+            if snapshot is not None:
+                measure = read_admission_measure(runtime)
+        except ReadAdmissionUnbounded:
+            # Policy refusal is distinct from a failed freeze: no estimate can
+            # reserve an output for which the host enforces no bound.
+            snapshot, floor_bytes = None, 0
+            unbounded = True
+        except (RequestSealError, ValueError, TypeError, KeyError, OSError, RuntimeError) as error:
+            # Snapshot failure has no floor authority. Fall back to the existing
+            # conservative envelope; final preparation still needs certification.
+            snapshot, floor_bytes, measure = None, 0, None
+            degraded = (error.reason if isinstance(error, ReadAdmissionUnavailable)
+                        else "PREPARATION_CONTRACT_FAILURE")
+        allowance = (max(0, snapshot.byte_cap - floor_bytes) if snapshot is not None else
+            fresh_exposure_allowance(request_byte_cap(),
+                                     fixed_envelope_estimate(runtime, visible_messages), ()))
+        if unbounded:
+            allowance = 0
         state = _RequestState(request_index=index, allowance=allowance,
                               batch_identity=batch_identity, snapshot=snapshot, floor_bytes=floor_bytes,
-                              closed=allowance == 0)
+                              closed=allowance == 0, degraded_reason=degraded, measure=measure)
+        if degraded is not None:
+            _journal(runtime, state, decision="DEGRADED", page_bytes=0, admitted_bytes=0,
+                     admitted_lines=None, path="", reason=degraded)
         try:
             setattr(runtime, _STATE_ATTR, state)
         except (AttributeError, TypeError):
@@ -176,7 +207,8 @@ def _wire_bytes(text: str) -> int:
 
 
 def _journal(runtime: object, state: _RequestState, *, decision: str, page_bytes: int,
-             admitted_bytes: int, admitted_lines: int | None, path: str) -> None:
+             admitted_bytes: int, admitted_lines: int | None, path: str,
+             reason: str | None = None) -> None:
     journal = getattr(runtime, "journal", None)
     if journal is None:
         return
@@ -187,7 +219,7 @@ def _journal(runtime: object, state: _RequestState, *, decision: str, page_bytes
                 admitted_bytes if decision != REFUSED_ADMISSION else 0),
             page_bytes=page_bytes, admitted_bytes=admitted_bytes, admitted_lines=admitted_lines,
             admitted_count=state.admitted_count, truncated_count=state.truncated_count,
-            refused_count=state.refused_count)
+            refused_count=state.refused_count, **({"reason": reason} if reason is not None else {}))
     except Exception:  # audit only; never fail a delivery
         pass
 
@@ -295,7 +327,11 @@ def admit(runtime: object, *, raw: bytes, display: str, start: int,
         pages = (*state.pages, (slot, call_id))
         key = (state.snapshot.snapshot_digest, pages)
         if key not in state.floor_results:
-            floor = read_admission_floor(state.snapshot, pages, require_feasible=True)
+            try:
+                floor = read_admission_floor(state.snapshot, pages, require_feasible=True,
+                                             measure=state.measure)
+            except (TimeoutError, OSError, ValueError, RuntimeError):
+                floor = None  # the live meter failed: no feasibility proof, so no admission
             state.floor_results[key] = len(floor.wire) if floor is not None else None
         floor_bytes = state.floor_results[key]
         if floor_bytes is None:

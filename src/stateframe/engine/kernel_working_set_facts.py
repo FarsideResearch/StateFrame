@@ -21,22 +21,26 @@ def _whole_lines(slot) -> bool:
     return not re.search(r"clip=(?:max_chars|max_bytes)(?: |$)", header)
 
 
-def _covered(slots, path, revision, first, last) -> bool:
+def _shown_intervals(slots, path, revision) -> list[tuple[int, int]]:
+    """Merged whole-line ranges of ``path``@``revision`` carried by ``slots``."""
     if not isinstance(path, str) or not isinstance(revision, str):
-        return False
+        return []
+    merged: list[tuple[int, int]] = []
+    for start, stop in sorted((s.identity.first_line, s.identity.last_line) for s in slots
+                              if s.identity.path == path and s.identity.revision == revision
+                              and _whole_lines(s)):
+        if merged and start <= merged[-1][1] + 1:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], stop))
+        else:
+            merged.append((start, stop))
+    return merged
+
+
+def _covered(slots, path, revision, first, last) -> bool:
     if type(first) is not int or type(last) is not int or first < 1 or last < first:
         return False
-    end = first - 1
-    intervals = sorted((s.identity.first_line, s.identity.last_line) for s in slots
-                       if s.identity.path == path and s.identity.revision == revision
-                       and _whole_lines(s))
-    for start, stop in intervals:
-        if start > end + 1:
-            break
-        end = max(end, stop)
-        if end >= last:
-            return True
-    return False
+    return any(start <= first and last <= stop
+               for start, stop in _shown_intervals(slots, path, revision))
 
 
 def _path_complete(full, path, revision) -> bool:
@@ -85,33 +89,46 @@ def _update_frame(frame, snapshot, full):
         if not isinstance(fact, dict):
             continue
         path, revision = fact.get("path"), fact.get("read_revision")
+        # Plan-only proposals are not captures: they neither prove nor deny a
+        # read. The fact represents the captured identities at its revision.
         represented = [s for s in all_sources if s.identity.path == path
-                       and s.identity.revision == revision]
+                       and s.identity.revision == revision and not s.plan_only]
         lines = fact.get("lines")
         lines = lines if isinstance(lines, dict) else {}
         # A per-path fact represents all known captures at that revision, not
-        # whichever same-path excerpt happens to remain. Historical aggregates
-        # with unknown receipt coordinates fail closed rather than inheriting
-        # authority from the current range.
-        history = fact.get("historical_receipts")
-        unknown_history = isinstance(history, dict) and bool(history.get("count", 0))
+        # whichever same-path excerpt happens to remain. Receipts whose capture
+        # retired from the snapshot have unknown coordinates: they cannot be
+        # claimed present, but they take nothing away from the ranges that are
+        # physically on the wire. Compacted receipt history (historical_receipts)
+        # keeps receipt_count, so compaction alone never demotes a present fact.
         receipts = fact.get("receipts")
         declared_count = fact.get("receipt_count", len(receipts) if isinstance(receipts, list) else 1)
         captured_count = sum(max(1, len(s.capture_ids)) for s in represented)
         unrepresented_receipts = (type(declared_count) is not int or declared_count < 1
                                   or declared_count > captured_count)
-        present = (bool(represented) and not unknown_history
-                   and not unrepresented_receipts
+        current_revision = revision == revisions.get(path)
+        # Range-scoped truth: whatever whole-line FULL carrier of this path and
+        # revision is on the wire is "shown", whether or not it proves the fact.
+        shown = _shown_intervals(full, path, revision) if current_revision else []
+        present = (bool(represented) and not unrepresented_receipts
                    and all(s in full for s in represented)
-                   and revision == revisions.get(path)
+                   and current_revision
                    and _covered(full, path, revision, lines.get("start"), lines.get("end")))
-        fact["body_delivery"] = "present" if present else "not_shown"
         fact.pop("visible_symbols", None)
         current = revisions.get(path, fact.get("current_revision", revision))
         if present:
+            fact["body_delivery"] = "present"
             fact.pop("delivery_notice", None)
             notices[path] = "fresh"
+        elif shown:
+            fact["body_delivery"] = "partial"
+            ranges = ", ".join(f"lines {first}-{last} shown" for first, last in shown)
+            notice = (f"[partly shown] {path} @rev {current or 'unavailable'}: {ranges}; "
+                      "the rest not shown: re-read to see it")
+            fact["delivery_notice"] = notice
+            notices[path] = notice
         else:
+            fact["body_delivery"] = "not_shown"
             notice = f"[not shown] {path} @rev {current or 'unavailable'}: re-read to see it"
             fact["delivery_notice"] = notice
             notices[path] = notice
@@ -156,8 +173,8 @@ def _update_frame(frame, snapshot, full):
                 for path, notice in notices.items():
                     if line.startswith((f"- {path} ", f"- {path}::")):
                         lines[index] = re.sub(
-                            r" \| (?:fresh|\[not shown\].*?: re-read to see it|\[bookmark shown\][^|]*) \| (read@\d+)",
-                            lambda match: f" | {notice} | {match[1]}", line)
+                            r" \| (?:fresh|\[(?:not|partly) shown\].*?: re-read to see it|\[bookmark shown\][^|]*) \| (read@\d+)",
+                            lambda match, notice=notice: f" | {notice} | {match[1]}", line)
                         break
         updated = "".join(lines)
         if updated != content:

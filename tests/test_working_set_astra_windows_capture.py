@@ -55,7 +55,7 @@ def test_live_head_still_requires_current_revision(tmp_path):
 
 
 @pytest.mark.parametrize("previously_exposed", [False, True])
-def test_revision_change_preserves_due_capture_but_not_historical_pin_authority(tmp_path, previously_exposed):
+def test_new_revision_capture_supersedes_old_debt_and_historical_pin_authority(tmp_path, previously_exposed):
     rt = runtime(tmp_path)
     rt.owner = SimpleNamespace(root=tmp_path)
     path = tmp_path / "source.txt"
@@ -80,7 +80,10 @@ def test_revision_change_preserves_due_capture_but_not_historical_pin_authority(
         "revision": old.identity.revision, "lines": {"start": 1, "end": 1}, "pinned_range": "old\n"}]},
         read_facts=[{"path": path.name, "current_revision": current.identity.revision}])
     frozen = freeze_preparation(body, rt, request_id="current", byte_cap=100_000)
-    assert {s.payload for s in frozen.sources} == ({"new\n"} if previously_exposed else {"old\n", "new\n"})
+    # A new capture supersedes old debt even before exposure; both captures
+    # remain in durable history, without turning the historical pin into source.
+    assert {s.payload for s in frozen.sources} == {"new\n"}
+    assert len(rt.read_capture_ledger.all()) == 2
     assert all(s.state == "DUE" for s in frozen.sources)
     assert dict(frozen.current_revisions)[path.name] == current.identity.revision
     prepared = prepare_candidate(frozen)

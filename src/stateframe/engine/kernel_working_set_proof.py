@@ -68,7 +68,7 @@ def verify_certificate(wire: bytes, certificate: AssignmentCertificate) -> bool:
                     or aggregate.carrier_sha256 != digest(raw)):
                 raise CertificateError("deferred plan carrier differs")
             # Path-level prose never authorizes omission by itself. Each unit
-            # still needs its executable route under the frozen tool schema.
+            # needs a route or explicit unavailability under frozen authority.
             for key in aggregate_ids:
                 _recovery_arguments(snapshot, slots[key])
         elif aggregate is not None:

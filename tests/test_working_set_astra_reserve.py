@@ -130,6 +130,8 @@ def test_reserve_uses_last_use_before_admission_order(tmp_path):
     retiring, = [o for o in state.active_obligations() if o.state == "RETIRING"]
     assert retiring.identity.path == "source1.py"
     assert first.state == "RESIDENT"
-    with pytest.raises(ValueError, match="O assignment"):
+    # Wave G1 (A7): a retiring resident is O, or kept F when it has no valid
+    # retirement representation; a degraded carrier is never a retirement.
+    with pytest.raises(ValueError, match="O or kept F"):
         ws.record_submission(rt, request_id="bad-retirement", body_sha256="3" * 64,
-                             modes={retiring.obligation_id: "F"})
+                             modes={retiring.obligation_id: "D"})

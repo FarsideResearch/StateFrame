@@ -1,14 +1,13 @@
 """Host-owned spans, rather than paths or notice prose, authorize delivery."""
-from dataclasses import replace
 import hashlib
 import json
+from dataclasses import replace
 
 import pytest
-
-from kernel_working_set_allocator import FULL, DEFERRED
+from kernel_working_set_allocator import DEFERRED, FULL
 from kernel_working_set_proof import CertificateError, verify_certificate
 from kernel_working_set_render import render_assignment
-from test_working_set_render import source, snapshot
+from test_working_set_render import snapshot, source
 
 
 def test_same_payload_at_disjoint_ranges_requires_distinct_carriers():
@@ -110,8 +109,8 @@ def test_deferred_assignment_rebuilds_frame_read_truth_and_source_access():
 
 
 def test_cache_overlay_reconstructs_and_proves_physical_carriers():
-    from test_final_cache_layout import _body
     from kernel_cache_layout_view import semantic_messages
+    from test_final_cache_layout import _body
     slot = source()
     snap = snapshot(slot, body=_body(exchange=True), layouts=("plain", "final_cache"), insertion_index=2)
     plain = render_assignment(snap, {slot.key: FULL}, "plain")
@@ -130,7 +129,8 @@ def test_full_range_does_not_prove_disjoint_per_path_read_fact():
     body = json.loads(snapshot(first).fixed_body)
     body["messages"].insert(2, {"role": "user", "content": "[StateFrame]\n" + json.dumps(frame)})
     snap = snapshot(first, second, body=body, current_revisions=(("a.py", first.identity.revision),))
-    for modes, expected in [({"first": FULL, "second": DEFERRED}, "not_shown"),
+    # Range-scoped: the attached 1-1 range is shown, the deferred 20-20 is not.
+    for modes, expected in [({"first": FULL, "second": DEFERRED}, "partial"),
                             ({"first": FULL, "second": FULL}, "present")]:
         result = render_assignment(snap, modes)
         rendered = next(m["content"] for m in json.loads(result.wire)["messages"]
@@ -187,7 +187,10 @@ def test_retired_receipts_cannot_inherit_new_same_path_full_coverage():
     result = render_assignment(snap, {slot.key: FULL})
     rendered = next(m["content"] for m in json.loads(result.wire)["messages"]
                     if m.get("content", "").startswith("[StateFrame]\n"))
-    assert json.loads(rendered.split("\n", 1)[1])["state"]["framefit5"]["read_facts"][0]["body_delivery"] == "not_shown"
+    fact = json.loads(rendered.split("\n", 1)[1])["state"]["framefit5"]["read_facts"][0]
+    # The retired receipt is not claimed; the attached 1-1 range is not denied.
+    assert fact["body_delivery"] == "partial"
+    assert "lines 1-1 shown; the rest not shown" in fact["delivery_notice"]
 
 
 def test_witness_or_assignment_mode_flip_on_mixed_candidate_is_rejected():
