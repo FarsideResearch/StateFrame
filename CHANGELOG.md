@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.6.11 (2026-11-13)
 
 - Tool receipts are now labelled by what actually happened: a test run that executed and reported failures is RED, a successful list_files or grep is APPLIED, and only calls refused before dispatch are REJECTED (errored runs are ERROR).
 
