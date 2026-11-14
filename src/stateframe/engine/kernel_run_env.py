@@ -42,7 +42,9 @@ def _run(argv: list[str], *, workspace: Path, destination: Path,
         from kernel_safe_probe import run_probe
         from kernel_exec_session import ExecSessionError
     try:
-        with tempfile.TemporaryDirectory(prefix="stateframe-provision-") as directory:
+        # Scratch lives beside the destination (inside the run directory), not in the system temp directory.
+        with tempfile.TemporaryDirectory(prefix="stateframe-provision-",
+                                         dir=str(Path(destination).parent)) as directory:
             result = run_probe(argv, Path(directory), timeout=120, env=env,
                                write_roots=(destination,), read_roots=read_roots)
     except (OSError, ExecSessionError) as error:

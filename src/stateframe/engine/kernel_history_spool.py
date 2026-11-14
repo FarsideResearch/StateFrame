@@ -102,9 +102,10 @@ class HistorySpool(Sequence):
         self._owned_directory = None
         self._directory = str(Path(directory).resolve()) if directory is not None else None
         if directory is None:
-            # Standalone/pre-runtime holders get an owned run directory. Ignore
-            # TMPDIR and tempfile's cwd fallback entirely.
-            base = '/private/tmp' if Path('/private/tmp').is_dir() else '/tmp'
+            # Standalone/pre-runtime holders get an owned run directory under the
+            # bound temp root so a holder that outlives a killed child stays in its run.
+            # gettempdir() honours a bound tempfile.tempdir (the engine child's run scratch) and TMPDIR.
+            base = tempfile.gettempdir()
             self._owned_directory = tempfile.TemporaryDirectory(prefix='sf-history-run-', dir=base)
             directory = self._owned_directory.name
         try:
