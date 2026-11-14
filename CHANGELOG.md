@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.6.18 (2026-11-13)
+
+- A run that reads without editing or checking now gets one directive nudge after 35 turns (was step 100, which arrived after the time budget was spent) that names how many files it read, the most re-read files, and the required check to work toward; set `STATEFRAME_ZERO_PROGRESS_NUDGE_STEP` to change the step. Runs that already edited or checked never see it.
+
 ## 0.6.17 (2026-11-13)
 
 - Fixed: successful nonempty reads of source absent from the submitted request are budget-exempt recovery reads, counted separately; visible pages and clipped windows retain revision-bound line/column coverage across annotations and queued-call resume, and recovered bytes cannot claim novelty again.

@@ -7388,7 +7388,7 @@ def work(d, *, resume=None):
         from kernel_stall_observation import observe_stall_in_place
         from kernel_lean import (
             enabled as lean_enabled, history_compaction_enabled,
-            should_deliver_zero_progress_advisory,
+            should_deliver_zero_progress_advisory, render_zero_progress_nudge,
         )
         from kernel_progress_facts import (
             derive_host_progress_facts, host_truth_progress_enabled,
@@ -7753,9 +7753,17 @@ def work(d, *, resume=None):
             _restored.get("zero_progress_advised_checkpoints", ())
             if resume is not None and isinstance(_restored, Mapping) else ()
         )
+        # Served reads per workspace-relative path: host facts for the one no-progress nudge.
+        _restored_reads = (
+            _restored.get("zero_progress_read_counts", {})
+            if resume is not None and isinstance(_restored, Mapping) else {})
+        _read_path_counts: dict[str, int] = {
+            path: count for path, count in _restored_reads.items()
+            if isinstance(path, str) and type(count) is int and count > 0
+        } if _host_truth_progress_enabled and isinstance(_restored_reads, Mapping) else {}
         _zero_progress_advised_checkpoints: set[int] = {
             item for item in _restored_advisories
-            if type(item) is int and item in {50, 100, 150}
+            if type(item) is int and item > 0
         } if _host_truth_progress_enabled and isinstance(
             _restored_advisories, (list, tuple, set, frozenset)) else set()
 
@@ -8251,9 +8259,15 @@ def work(d, *, resume=None):
                     (_checkpoint_progress.product_edits if _host_truth_progress_enabled
                      else _checkpoint_progress.edits),
                     _checkpoint_progress.checks,
-                    interventions=interventions, lean_mode=_lean_run)
-                    and step not in _zero_progress_advised_checkpoints):
+                    interventions=interventions, lean_mode=_lean_run,
+                    already_advised=bool(_zero_progress_advised_checkpoints))):
                 _zero_progress_advised_checkpoints.add(step)
+                try:
+                    _nudge_selectors = list(measurement.required_public_selectors())
+                except Exception:                                    # noqa: BLE001
+                    _nudge_selectors = []
+                _nudge_text = render_zero_progress_nudge(
+                    step, _read_path_counts, _nudge_selectors)
                 _advisory_delivered = False
                 if getattr(bolt, "composed", None) is not None:
                     try:
@@ -8269,22 +8283,15 @@ def work(d, *, resume=None):
                         if _aid:
                             bolt._rec("composed", "zero_progress_advisory", f"step {step}")
                             msgs.append({"role": "user", "content":
-                                         "[kernel] You have taken ZERO actions in "
-                                         f"{step} steps of pure reading. Stop "
-                                         "deliberating. Concrete next action: "
-                                         f"{_aid} — re-read the target function "
-                                         "against the oracle's demanded values, "
-                                         "then make ONE edit and run the tests."})
+                                         render_zero_progress_nudge(
+                                             step, _read_path_counts, _nudge_selectors,
+                                             next_action=_aid)})
                             _advisory_delivered = True
                     except Exception:                                # noqa: BLE001
                         pass
                 if not _advisory_delivered:
                     bolt._rec("gate", "zero_progress_advisory", f"step {step}")
-                    msgs.append({"role": "user", "content":
-                                 "[kernel] You have taken ZERO actions in "
-                                 f"{step} steps of pure reading. Pick one concrete "
-                                 "product edit or run the relevant tests now. "
-                                 "Continue with the task; this checkpoint does not stop the run."})
+                    msgs.append({"role": "user", "content": _nudge_text})
                 print(f"    [checkpoint] {fn}: no host-recorded edit/check by step {step} — advisory delivered")
             line = None
             # Components support three states: on, off, and passthrough.
@@ -8422,7 +8429,7 @@ def work(d, *, resume=None):
             if getattr(measurement, "long_horizon_depth_tracker", None) is not None:
                 measurement.long_horizon_depth_tracker.observe(msgs)
             if measurement.restart_enabled:
-                from kernel_continuation_restart import checkpoint
+                from kernel_continuation_restart import bounded_read_counts, checkpoint
                 _checkpoint_state = {
                     "edits": edits, "tests": tests, "unparsed_streak": unparsed_streak,
                     "harness_suspect": harness_suspect, "last_line": last_line,
@@ -8443,6 +8450,7 @@ def work(d, *, resume=None):
                         "host_progress_facts": _checkpoint_progress.to_record(),
                         "zero_progress_advised_checkpoints": tuple(
                             sorted(_zero_progress_advised_checkpoints)),
+                        "zero_progress_read_counts": bounded_read_counts(_read_path_counts),
                     })
                 if _progress_watch is not None:
                     _checkpoint_state["unbounded_progress_watch"] = _progress_watch.snapshot()
@@ -12107,6 +12115,8 @@ def work(d, *, resume=None):
                 if _read_result == "OK":
                     try:
                         _pointer_read_path = p.resolve().relative_to(root.resolve()).as_posix()
+                        _read_path_counts[_pointer_read_path] = (
+                            _read_path_counts.get(_pointer_read_path, 0) + 1)
                         _pointer_read_delivery = _read_delivery
                     except (OSError, ValueError):
                         _pointer_read_path = None

@@ -76,21 +76,77 @@ def history_compaction_enabled(environ: Mapping[str, str] | None = None) -> bool
     }
 
 
+ZERO_PROGRESS_STEP_ENV = "STATEFRAME_ZERO_PROGRESS_NUDGE_STEP"
+# Measured on the T22 reference runs: a loop step is one tool call, and the model makes ~5 of them per
+# request on average (batched reads), so step 35 lands on model request 5-8 (median 7) and step 25 on 4-13.
+# The old step 100 arrived after the wall budget was spent. The step count is what the model is told ("turns").
+DEFAULT_ZERO_PROGRESS_STEP = 35
+MAX_NUDGE_TEXT = 120
+
+
+def zero_progress_nudge_step(environ: Mapping[str, str] | None = None) -> int:
+    """Step at which a run with no host-recorded edit or check gets its one nudge.
+
+    A positive whole number (commas and underscores allowed, as in the runner). The runner refuses a bad shell
+    value; an engine started without the runner falls back to the default instead of failing the run.
+    """
+    source = os.environ if environ is None else environ
+    raw = str(source.get(ZERO_PROGRESS_STEP_ENV, "")).strip().replace(",", "").replace("_", "")
+    try:
+        value = int(raw)      # the runner's _positive_int rule: int() on the stripped text, then > 0
+    except ValueError:
+        value = 0
+    return value if value > 0 else DEFAULT_ZERO_PROGRESS_STEP
+
+
 def should_deliver_zero_progress_advisory(
         step: object, edits: object, checks: object, *,
         interventions: object, lean_mode: bool,
+        already_advised: bool = False, threshold: int | None = None,
 ) -> bool:
-    """Select legacy zero-progress checkpoints for an advisory only."""
+    """True once per run when no host-recorded edit or check exists by the threshold step."""
+    limit = zero_progress_nudge_step() if threshold is None else threshold
     return (
         not lean_mode
         and bool(interventions)
+        and not already_advised
         and type(step) is int
-        and step in {50, 100, 150}
+        and step >= limit
         and type(edits) is int
         and edits == 0
         and type(checks) is int
         and checks == 0
     )
+
+
+def _one_line(text: object, limit: int = MAX_NUDGE_TEXT) -> str:
+    """Single-line, bounded rendering of a host fact (a path or selector can hold anything)."""
+    flat = " ".join(str(text).split())
+    return flat if len(flat) <= limit else flat[: limit - 3] + "..."
+
+
+def render_zero_progress_nudge(
+        step: int, read_counts: Mapping[str, int], selectors: Sequence[str] = (),
+        next_action: object = None,
+) -> str:
+    """Directive nudge built only from host facts: reads so far and the required checks."""
+    files = len(read_counts)
+    total = sum(read_counts.values())
+    top = sorted(read_counts.items(), key=lambda item: (-item[1], item[0]))[:3]
+    most = ", ".join(f"{_one_line(path)} x{count}" for path, count in top if count > 1)
+    text = (f"[kernel] No edit or check yet after {step} turns: you read {files} "
+            f"file{'s' if files != 1 else ''} {total} time{'s' if total != 1 else ''}"
+            + (f" (most: {most})" if most else "") + ". ")
+    if selectors:
+        extra = len(selectors) - 1
+        text += (f"Name the first failing required selector ({_one_line(selectors[0])}"
+                 + (f" and {extra} more" if extra else "") + ") and make one edit toward it, "
+                 "then run the checks. ")
+    else:
+        text += "Name the first failing required check and make one edit toward it, then run the checks. "
+    if next_action:
+        text += f"Next action: {_one_line(next_action, 160)}. "
+    return text + "This does not stop the run."
 
 
 def stall_observation_enabled(environ: Mapping[str, str] | None = None) -> bool:
@@ -1249,6 +1305,7 @@ __all__ = [
     "history_compaction_enabled", "is_source_content", "is_truth_content", "message_digest",
     "plain_loop_messages", "plain_tool_surface",
     "render_sibling_site_facts", "request_size_bytes", "should_deliver_zero_progress_advisory",
+    "render_zero_progress_nudge", "zero_progress_nudge_step", "ZERO_PROGRESS_STEP_ENV",
     "runtime_lean_snapshot", "sanitize_tool_references", "shared_prefix_ratio",
     "stack_enabled", "stack_snapshot", "stack_tail_blocks", "stall_observation_enabled",
     "validate_deferred_reads", "restate_requirement_stack_enabled",
