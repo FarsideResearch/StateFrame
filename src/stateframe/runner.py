@@ -1966,6 +1966,14 @@ def drive(run: Path, options: RunOptions, printer=print) -> int:
         else:
             environment.pop("STATEFRAME_RUN_WALL_SECONDS", None)
             sources.pop("STATEFRAME_RUN_WALL_SECONDS", None)
+        # The run's declared --timeout, as configuration: the limits line the model reads states
+        # this constant, never the live countdown (which differs between same-seed runs).
+        if options.timeout_s is not None:
+            environment["STATEFRAME_RUN_TIME_ALLOWANCE_S"] = str(float(options.timeout_s))
+            sources["STATEFRAME_RUN_TIME_ALLOWANCE_S"] = "wrapper:run-deadline"
+        else:
+            environment.pop("STATEFRAME_RUN_TIME_ALLOWANCE_S", None)
+            sources.pop("STATEFRAME_RUN_TIME_ALLOWANCE_S", None)
         # Contract with the engine: the engine runs PROJECT tests with exactly this
         # interpreter, else its own sys.executable. Through the spec, because _child.install_environment
         # drops inherited STATEFRAME_* variables.

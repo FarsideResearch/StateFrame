@@ -373,6 +373,12 @@ def install_wire_recorder(run: Path, chat_url: str, replayer: Replayer | None = 
             atomic_bytes(stem.with_suffix(".request.json"), wire)
         else:
             atomic_bytes(stem.with_suffix(".request.json"), wire)
+        # The live countdown is not on the wire; a resume reads it from this private sidecar.
+        from kernel_read_fixes import sandbox_time_left
+        time_left = sandbox_time_left()
+        if time_left is not None:
+            atomic_bytes(stem.with_suffix(".time-left.json"), json.dumps(
+                time_left, sort_keys=True, separators=(",", ":")).encode())
         started = time.monotonic()
         replayed = None
         # An in-flight request to verify keeps the replayer in the path even with no tail left to answer.

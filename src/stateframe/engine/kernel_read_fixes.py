@@ -7,10 +7,9 @@ bytes.
 from __future__ import annotations
 
 from kernel_step_limits import UNBOUNDED_GUIDANCE, limit_text, reached, remaining
-from kernel_countdown_slot import render_time_slot
-
 import os
 import time
+import weakref
 from dataclasses import dataclass
 from collections.abc import Iterable, Mapping
 
@@ -18,6 +17,21 @@ from collections.abc import Iterable, Mapping
 # A resumed run's deadline once its replayed steps are done: the time that was left at the
 # last completed step, counted from when the run goes live again. None outside a resume.
 _RESUMED_DEADLINE_MONOTONIC: float | None = None
+# The newest continuation ledger of this process: the wire record asks it for the live
+# countdown so a resume keeps the run's time without that countdown ever reaching the model.
+_LIVE_LIMITS: "weakref.ReferenceType[ResponseBudget] | None" = None
+
+
+def sandbox_time_left() -> dict[str, float | None] | None:
+    """Private seconds left (and the declared allowance) for the run record; None when no limit."""
+    limits = _LIVE_LIMITS() if _LIVE_LIMITS is not None else None
+    if limits is None:
+        return None
+    seconds = limits._sandbox_seconds_remaining()
+    if seconds is None:
+        return None
+    return {"seconds_left": float(seconds),
+            "time_allowance_seconds": limits.sandbox_time_allowance_seconds}
 
 
 def resume_sandbox_deadline(seconds_left: float, *, now: float | None = None) -> None:
@@ -209,6 +223,9 @@ class ResponseBudget:
     terminal_reserve_limit: int = 2
     output_reservation_tokens: int = 4000
     sandbox_deadline_monotonic: float | None = None
+    # The run's declared wall allowance (its --timeout), rendered for the model in place of the
+    # live countdown. Configuration, so same-seed runs and resumes render identical bytes.
+    sandbox_time_allowance_seconds: float | None = None
     automatic_checks_used: int = 0
     terminal_reserves_used: int = 0
     _deadline_reported: bool = False
@@ -238,6 +255,17 @@ class ResponseBudget:
                 self.sandbox_deadline_monotonic = float(self.sandbox_deadline_monotonic)
             except (TypeError, ValueError) as error:
                 raise ValueError("sandbox deadline must be numeric") from error
+        if self.sandbox_time_allowance_seconds is not None:
+            try:
+                self.sandbox_time_allowance_seconds = float(self.sandbox_time_allowance_seconds)
+            except (TypeError, ValueError) as error:
+                raise ValueError("sandbox time allowance must be numeric") from error
+            if not self.sandbox_time_allowance_seconds > 0:
+                raise ValueError("sandbox time allowance must be positive seconds")
+        if self.sandbox_deadline_monotonic is not None:
+            # Only a deadline-bearing ledger is the run's; helper ledgers never shadow it.
+            global _LIVE_LIMITS
+            _LIVE_LIMITS = weakref.ref(self)
 
     @property
     def tool_call_cap(self) -> int | None:
@@ -381,8 +409,13 @@ class ResponseBudget:
                           tool_attempts: int = 0,
                           automatic_checks: int = 0,
                           terminal_reserves: int = 0,
-                          output_tokens: int | None = None) -> bool:
-        """Check every requested continuation unit against this single object."""
+                          output_tokens: int | None = None,
+                          include_deadline: bool = True) -> bool:
+        """Check every requested continuation unit against this single object.
+
+        ``include_deadline=False`` leaves the wall clock out: the rendered limits line uses it
+        so model-facing text never depends on when the request was assembled.
+        """
         if any(type(value) is not int or value < 0 for value in (
                 model_decisions, tool_attempts, automatic_checks, terminal_reserves)):
             raise ValueError("continuation admission counts must be non-negative integers")
@@ -399,6 +432,8 @@ class ResponseBudget:
             raise ValueError("output token admission must be a non-negative integer")
         if output_tokens is not None and output_tokens > self.output_reservation_tokens:
             return False
+        if not include_deadline:
+            return True
         deadline = self._sandbox_seconds_remaining()
         return deadline is None or deadline > 0
 
@@ -427,7 +462,8 @@ class ResponseBudget:
         seconds = snapshot["sandbox_seconds_remaining"]
         deadline = _time_left_text(self, seconds)
         admission = self.qualify_admission(model_decisions=1, tool_attempts=1,
-                                           output_tokens=self.output_reservation_tokens)
+                                           output_tokens=self.output_reservation_tokens,
+                                           include_deadline=False)
         return (
             "[CONTINUATION LIMITS | stateframe-continuation-limits/1] "
             f"model_decisions_remaining={limit_text(snapshot['model_decisions_remaining'])}; "
@@ -457,8 +493,19 @@ class ResponseBudget:
 
 
 def _time_left_text(limits: object, seconds: object) -> str:
-    """Compatibility entry point for the bounded visible countdown."""
-    return render_time_slot(limits, seconds)
+    """The model-facing time field: the declared allowance, never a live countdown.
+
+    A countdown rendered from the clock differed between two same-seed runs (and between a
+    run and its resume), which broke request determinism and the cached prompt prefix. The
+    deadline still stops the run (``continuation_deadline_exhausted``); the model is told that
+    a wall allowance exists and how large it was declared.
+    """
+    if seconds is None:
+        return "unbounded"
+    allowance = getattr(limits, "sandbox_time_allowance_seconds", None)
+    if not isinstance(allowance, (int, float)) or isinstance(allowance, bool):
+        return "limited (wall allowance undeclared)"
+    return f"limited (wall allowance {float(allowance):.0f}s)"
 
 
 @dataclass
@@ -568,10 +615,10 @@ class ContinuationLimits(ResponseBudget):
         deadline = _time_left_text(self, seconds)
         ordinary_admission = self.qualify_admission(
             model_decisions=1, tool_attempts=1,
-            output_tokens=self.output_reservation_tokens)
+            output_tokens=self.output_reservation_tokens, include_deadline=False)
         terminal_admission = self.qualify_admission(
             model_decisions=0, tool_attempts=1, terminal_reserves=1,
-            output_tokens=self.output_reservation_tokens)
+            output_tokens=self.output_reservation_tokens, include_deadline=False)
         return (
             "[CONTINUATION LIMITS | stateframe-continuation-limits/1] "
             f"model_decisions_remaining={limit_text(snapshot['model_decisions_remaining'])}; "
@@ -604,6 +651,7 @@ __all__ = [
     "read_receipt_enabled",
     "read_receipt_mode",
     "read_unchanged_receipt",
+    "sandbox_time_left",
     "short_revision",
     "source_header",
     "source_header_variants",

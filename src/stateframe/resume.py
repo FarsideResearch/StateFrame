@@ -684,7 +684,7 @@ def _resumed_time(tape: list[dict[str, object]], pending: dict[str, object] | No
     requests = [Path(str(item["request"])) for item in tape if item.get("request")]
     if pending is not None and pending.get("request"):
         requests.append(Path(str(pending["request"])))
-    seconds = [value for value in (replay_tape.recorded_countdown_seconds(path.read_bytes())
+    seconds = [value for value in (replay_tape.recorded_time_left(path)
                                    for path in requests if path.is_file()) if value is not None]
     if not seconds:
         window = replay_tape.recorded_countdown_window(wire_dir)

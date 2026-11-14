@@ -186,8 +186,9 @@ def test_structural_host_environment_identity_never_reaches_model(
         ("environment-planted", tuple(map(canonical, planted))),
     ):
         for body in capture:
+            # The limits line states the declared allowance (or unbounded), never a live clock.
             assert all(
-                slot == kernel_countdown_slot.CANONICAL_TIME_SLOT
+                slot == "unbounded" or re.fullmatch(r"limited \(wall allowance \d+s\)", slot)
                 for slot in countdown_slots(body)
             ), f"{capture_name} request retained a live countdown slot"
 
