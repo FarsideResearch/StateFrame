@@ -164,7 +164,7 @@
   "kernel_completion_status.py": "21d7cd5595ce26c7fa4ab68ed766f2062b1a42f684079bb692fec485aef8e9c6",
   "kernel_conclusion_cache.py": "3c7ebe5d5ccb6ca145722aae77c9ecb0650ee7ff8415049a1fd7498403334d14",
   "kernel_context.py": "93acccdbad02daab138692e124eebb48faaa50e8d3f2e04c92a97c72cc9b3b47",
-  "kernel_context_capacity.py": "42c57aa2ffafa6f00e1b622724094e9b400de848360f5c2facf2838f302f522d",
+  "kernel_context_capacity.py": "85f288ac7801cdde04c52e241d61bccd849c820f2b885cf5076aa809903baa4a",
   "kernel_context_floor.py": "50df7a9018ec3fb9081e3b4aa5c20bb6bee32854998340e359bd7e78ee161c83",
   "kernel_context_scope.py": "3aadfe93ac16e1961d4a2b8d8cacd362b83b549250286875268e049d7d195374",
   "kernel_continuation_evidence.py": "08d64427074c484399dd2bfd66bb28b39f0b8e1ff39ed624edca40156d5d824e",
