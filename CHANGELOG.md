@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.6.14 (2026-11-13)
 
 - View ladder renderer (`engine/kernel_view_ladder/`): pure, deterministic `[read view]` carriers for the range/relevant, symbols/outline and stub rungs of a delivered read, with exact line slices of the delivered text, explicit `omitted:` records, `L<a>-<b>` anchors on every structure row, a one-line difflib change notice and the `READ_RESULT_DEGRADED sha= lines=` stub statement. Not wired into the request path yet; nothing on the wire changes.
 - View ladder: `kernel_view_ladder/relevance.py` selects the lines a FOCUS (`relevant`) view keeps from an older read: seeds in priority order (model-chosen ranges, closure units and requested ranges, failing frames and tests, edited definitions, ticket symbols and literals, then one-hop call sites), filled against a byte budget, merged within two lines, labelled `observed`/`resolved`/`unresolved`, and frozen per artifact revision so a rendered view never changes across requests. Pure module, not yet wired into the request diet.
