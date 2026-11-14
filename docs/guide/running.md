@@ -220,6 +220,12 @@ A completed batch made entirely of proved unchanged reads costs one no-progress 
 
 `STATEFRAME_READ_LOCKOUT=on` is an independent optional profile switch; it is off by default and requires bookmarks. After a completed batch of unchanged reads, the current failing check must still apply, editable bookmarked source must be visible, and an edit and check route must be available. The next request then hides source-reading routes. The restriction lasts at most two requests and releases sooner when new evidence appears or the repair route disappears. If the no-progress watch is one step from its limit, the run can stop before this restriction takes effect.
 
+### Profile-only settings
+
+`STATEFRAME_BOUNDARY_CHECKS` is a profile switch that the shipped product profile sets to `on`; the engine treats it as `off` when a custom profile leaves it out. When on, StateFrame compiles extra checks from public material only: the task brief, the declared public product files and the declared public tests. It never reads private task files. Those checks run through the same check executor as every other check. Public files that are not Python, such as `TASK.md` or `pyproject.toml`, are used as context and skipped by the compiler; unsafe paths are refused. Accepted values are `on` and `off`; anything else is refused at startup. Set it in a profile, not as a shell variable.
+
+`STATEFRAME_RESULTS_DIR` is a test and operations override, not a product feature, and it can only be set in a profile: the engine child drops inherited `STATEFRAME_*` variables, so exporting it in the shell has no effect. It names the directory for run artifacts such as `react_live.log` and receipts when the engine runs without a run directory. Normal runs write those under the run directory and never need it; without it and without a run directory, artifacts go to a temp directory, never under the installed package or `src/`.
+
 ### Prompt cache: stable tool head
 
 `STATEFRAME_STABLE_TOOL_HEAD` is on when unset. Set it to `off` in the shell that starts StateFrame or in a custom profile to restore per-step tool lists. Invalid values are refused.

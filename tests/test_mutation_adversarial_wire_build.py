@@ -164,7 +164,7 @@ def test_mutation_validator_smoke_import_and_obfuscated_code_isolation(mutation_
     sys.platform != "linux",
     reason="Linux bubblewrap mounts the unit at /sf/unit for repair diagnostics",
 )
-def test_mutation_mike_syntax_error_is_repairable_not_executed(mutation_root, tmp_path):
+def test_mutation_syntax_error_is_repairable_not_executed(mutation_root, tmp_path):
     import kernel_mutate_build as build
     import kernel_mutate_exec as execution
 
@@ -189,7 +189,7 @@ def test_mutation_mike_syntax_error_is_repairable_not_executed(mutation_root, tm
     sys.platform != "linux",
     reason="Linux bubblewrap/seccomp execute mutation contract checks",
 )
-def test_mutation_mike_wrong_contract_is_rejected(mutation_root):
+def test_mutation_wrong_contract_is_rejected(mutation_root):
     import kernel_mutate_build as build
     import kernel_mutate_exec as execution
     import kernel_mutate_wire as wire

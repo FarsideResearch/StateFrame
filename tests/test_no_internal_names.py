@@ -227,3 +227,16 @@ def test_guard_detects_full_project_name_in_prose():
 def test_guard_does_not_confuse_permission_control_with_project_name():
     context = _Context("planted.py", 1, "comment", "# permission control")
     assert _find_private_labels([context], enforce_allowlist=False) == []
+
+
+def test_guard_detects_private_labels_in_docstrings_and_test_names():
+    label = "r" + "10"
+    source = f'"""Regression {label}."""\ndef test_{label}_behavior():\n    pass\n'
+    for path, expected_kinds in (
+        ("src/planted.py", {"docstring"}),
+        ("tests/test_planted.py", {"test-literal", "test-name"}),
+    ):
+        found = _find_private_labels(_contexts(Path(path), source), enforce_allowlist=False)
+        assert len(found) == len(expected_kinds)
+        for kind in expected_kinds:
+            assert any(f"[{kind}] run_label: {label}" in item for item in found)

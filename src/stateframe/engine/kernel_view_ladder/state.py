@@ -80,7 +80,7 @@ class ArtifactState:
         rung_level(rung)
         self.rung, self.reason = rung, reason
         if rung == "stub":
-            self.held_text = None  # R10: drop held text once nothing verbatim is on the wire
+            self.held_text = None  # Drop held text once nothing verbatim is on the wire.
 
     def to_json(self) -> dict[str, object]:
         data = asdict(self)

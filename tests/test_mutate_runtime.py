@@ -1083,19 +1083,19 @@ def _ready_reader(runtime, repo):
     assert "READY" in reply, reply
 
 
-def test_r10_use_without_inputs_reads_the_files_it_was_smoke_tested_on(tmp_path, monkeypatch):
-    """r10: `use` with input but no inputs list failed; it now mounts the admitted smoke inputs."""
+def test_use_without_inputs_reads_the_files_it_was_smoke_tested_on(tmp_path, monkeypatch):
+    """Use with input but no inputs list mounts the admitted smoke inputs."""
     runtime, repo, executor = _authoring_runtime(tmp_path, monkeypatch)
     _ready_reader(runtime, repo)
     reply = runtime.dispatch({"op": "use", "id": "events_reader",
-                              "args": json.dumps({"input": {"input_id": "in0"}})}, "use-r10")
+                              "args": json.dumps({"input": {"input_id": "in0"}})}, "use-smoke-inputs")
     assert not reply.startswith("REFUSED"), reply
     payload = [spec for spec in executor.calls if spec.role == "payload"][-1]
     assert list(payload.inputs) == ["in0"]
 
 
-def test_r10_use_failure_carries_the_error_frame_diagnostic(tmp_path, monkeypatch):
-    """r10: a failed `use` said only "payload did not complete"; it now shows the handler error."""
+def test_use_failure_carries_the_error_frame_diagnostic(tmp_path, monkeypatch):
+    """A failed use shows the handler error rather than only a completion failure."""
     runtime, repo, executor = _authoring_runtime(tmp_path, monkeypatch)
     _ready_reader(runtime, repo)
     original = executor.run

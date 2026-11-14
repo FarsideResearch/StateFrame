@@ -27,6 +27,8 @@ PROFILE_ONLY = {
     "STATEFRAME_PAGE_LOG",
     "STATEFRAME_PROVIDER_LIVENESS_S",
     "STATEFRAME_PUBLIC_CHECK_CPU_SECONDS",
+    "STATEFRAME_BOUNDARY_CHECKS",
+    "STATEFRAME_RESULTS_DIR",
 }
 # Placeholders in the extension guide and prefixes of per-role variables, not settings.
 EXAMPLES = {"STATEFRAME_MY_SWITCH"}

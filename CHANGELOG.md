@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.6.32 (2026-11-14)
+
+- Tests: the shipped-main allowlist covers the mutation boot and fetch entry points.
+- Removed private provenance from source comments and regression test names and values.
+- The running guide now documents `STATEFRAME_BOUNDARY_CHECKS` and `STATEFRAME_RESULTS_DIR` as profile-only settings and says what each one does.
+
 ## 0.6.31 (2026-11-14)
 
 - Updated the isolated HTTP child import check to recognize its shared redirect and capacity helpers, verify both helpers in an installed wheel, and keep rejecting unavailable dependencies.

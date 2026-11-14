@@ -254,7 +254,7 @@ def test_host_identity_skips_foreign_same_tick_process(monkeypatch, tmp_path):
 
 
 def test_sdk_input_resolves_id_or_unambiguous_file_name(tmp_path):
-    """r10/r11: units passed 'data/events.b64' instead of 'in0'; resolve it, and say what exists."""
+    """Resolve input paths as well as IDs, and report available inputs on failure."""
     from sf_mutate_sdk import MutationContext, MutationError
 
     (tmp_path / "in0").write_bytes(b"alpha")
