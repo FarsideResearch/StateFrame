@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.6.10 (2026-11-13)
 
 - Fixed: with `--timeout`, the engine now stops its model loop a finalize reserve (10% of the limit, at most 120 s) before the run deadline, so it can seal and export its result instead of being killed at the same instant.
 
