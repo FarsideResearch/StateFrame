@@ -7177,6 +7177,45 @@ def work(d, *, resume=None):
             step_limit=_budget.tool_attempt_limit,
             multi_file=multifile, edit_contract=_edit_contract, workspace=continuation_workspace, resume=resume)
         measurement.run_limitations = run_limitations
+
+        def _free(getter: Callable[[], object], default: object = None) -> object:
+            # A closure cell for a local the host has not assigned yet raises NameError; treat it as absent.
+            try:
+                return getter()
+            except NameError:
+                return default
+
+        def _terminal_fact_hook(terminal_result: Mapping[str, object]) -> None:
+            """Record final_product_no_candidate through the journal before finish() closes the writer.
+
+            Before this hook the fact was recorded from work()'s finally block, after finish() had
+            closed the journal, so every run landed it in the post_finish_facts.jsonl sidecar that no
+            journal consumer reads. The clean Stage 6 manifest block still runs after finish(); while it
+            is pending for this run the fact stays with the post-finish path (manifest_written is unknown).
+            """
+            manifest_pending = (bool(d.get("_bridge_capture"))
+                                and done_accepted(measurement)
+                                and measurement.system_outcome is None
+                                and _free(lambda: _finish_result) == "PASS")
+            if manifest_pending:
+                return
+            result = terminal_result.get("result")
+            if not isinstance(result, str):
+                result = str(getattr(measurement, "system_outcome", None) or "unknown")
+            current_sources = _free(lambda: final_sources)
+            changed = _product_files_changed_count(
+                _free(lambda: root), _free(lambda: fileset), d,
+                target=_free(lambda: target),
+                current_sources=current_sources if isinstance(current_sources, Mapping) else None,
+                initial_sources=_free(lambda: _initial_product_sources),
+            )
+            host_crash = (bool(_free(lambda: _final_product_host_crash, False))
+                          or _is_final_product_host_crash_result(result))
+            _record_final_product_no_candidate(
+                measurement, result=result, product_files_changed=changed,
+                manifest_written=False, manifest_write_failed=False, host_crash=host_crash)
+
+        measurement.register_terminal_fact_hook(_terminal_fact_hook)
         try:
             if os.environ.get("STATEFRAME_MUTATIONS", "off") in {"prebuilt", "authored"}:
                 from kernel_mutate_projection import observe_tool_reply
@@ -14369,6 +14408,9 @@ def work(d, *, resume=None):
                         _host_crash = True
                     if _is_final_product_host_crash_result(_terminal_result):
                         _host_crash = True
+                    # Normally already journaled by _terminal_fact_hook inside finish() (idempotent); this
+                    # post-finish path only still records the clean-finish manifest outcome and host crashes
+                    # that bypassed the hook.
                     try:
                         _record_final_product_no_candidate(
                             measurement,

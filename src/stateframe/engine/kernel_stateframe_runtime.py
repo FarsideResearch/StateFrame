@@ -5611,6 +5611,8 @@ class StateFrameRuntime:
         self._trimmed: set[str] = set()
         self.system_outcome: str | None = None
         self._finished = False
+        # Host terminal-fact hooks run inside finish() while the journal writer is still open.
+        self._terminal_fact_hooks: list[Callable[[Mapping[str, object]], None]] = []
         self.continuation_terminal = False
         from kernel_completion_disposition import V2Disposition
         self.v2_disposition = V2Disposition() if self.disposition_v2 else None
@@ -25467,6 +25469,27 @@ class StateFrameRuntime:
         self._active_capture = prepared.capture
         return ACTIVE_REQUEST.set(prepared.capture)
 
+    def register_terminal_fact_hook(self, hook: Callable[[Mapping[str, object]], None]) -> None:
+        """Register a host callback that records terminal facts BEFORE finish() closes the journal.
+
+        Hosts used to record facts such as final_product_no_candidate after finish() had already
+        closed the writer, so the fact fell to a sidecar that no journal consumer reads. Hooks run
+        once, with the final terminal result, just before attempt_terminated; they are fail-open.
+        """
+        self._terminal_fact_hooks.append(hook)
+
+    def _run_terminal_fact_hooks(self, terminal_result: Mapping[str, object]) -> None:
+        hooks = tuple(getattr(self, "_terminal_fact_hooks", ()))
+        self._terminal_fact_hooks = []
+        for hook in hooks:
+            try:
+                hook(terminal_result)
+            except Exception as error:  # a host bookkeeping fault must never cost the verdict
+                self.journal.emit(
+                    "terminal_fact_hook_error", producer="kernel_stateframe_runtime",
+                    hook=getattr(hook, "__qualname__", type(hook).__name__)[:120],
+                    error_type=type(error).__name__, message=str(error)[:240], dispatch=False)
+
     @_host_phase("finalize", boundary="terminal_drain")
     def finish(self, result: Mapping[str, object], *, messages: Sequence[dict] | None = None) -> None:
         if self._finished:
@@ -25687,6 +25710,7 @@ class StateFrameRuntime:
                     message=f"{type(error).__name__}: {(str(error).splitlines() or ['<no message>'])[0][:240]}",
                     dispatch=False,
                 )
+        self._run_terminal_fact_hooks(terminal_result)
         self.journal.emit("attempt_terminated", result=dict(terminal_result),
                           wire_truth_blocks=getattr(self.journal, "wire_truth_blocks", 0),
                           wire_truth_degrades=getattr(self.journal, "wire_truth_degrades", 0),
