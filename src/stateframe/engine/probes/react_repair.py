@@ -5569,11 +5569,32 @@ def _run_tests_impl(root: pathlib.Path, fn: str, explicit: str | None,
     else:
         result = "pytest exit %d — %s\n%s" % (p.returncode, meaning, body)
     if (p.returncode == 0 and _runtime is not None
-            and getattr(_runtime, "stateframe_first_green_disclosure_mode", "off") == "on"):
+            and getattr(_runtime, "stateframe_first_green_disclosure_mode", "off") == "on"
+            and _run_covers_declared_selectors(_runtime, row, targets)):
+        # Coverage first: one passing selector of several is not the first green.
         from kernel_first_green_disclosure import decorate_test_result
         with _profile_phase("final_result_enrichment"):
             result = decorate_test_result(_runtime, result)
     return result
+
+
+def _run_covers_declared_selectors(runtime: object, row: object, targets: Sequence[object]) -> bool:
+    """Authoritative coverage check shared with the outer result projection."""
+    try:
+        from kernel_public_evidence import declared_task_selectors, scoped_check_complete
+        owner = getattr(runtime, "owner", None)
+        fallback: Sequence[str] = ()
+        getter = getattr(runtime, "required_public_selectors", None)
+        if callable(getter):
+            fallback = tuple(str(item) for item in getter())
+        declared = declared_task_selectors(
+            row if isinstance(row, Mapping) else None,
+            tuple(getattr(owner, "f2p_ids", ()) or ()), fallback)
+        if isinstance(row, Mapping) and row.get("runner_kind") == "generic":
+            return True
+        return scoped_check_complete(declared, [str(t) for t in targets])
+    except Exception:                                                # noqa: BLE001
+        return True
 
 
 def run_tests(root: pathlib.Path, fn: str, explicit: str | None,
@@ -5616,6 +5637,45 @@ def _record_prepared_provider_not_dispatched(
     from kernel_completion_owner import record_provider_request_not_dispatched
     record_provider_request_not_dispatched(
         runtime, request_id=request_id, reason_code=reason_code)
+
+
+def _scoped_check_truth_for_run(measurement: object, bolt: object, obs: str,
+                                ran: Sequence[str], codes: Sequence[object] | None = None,
+                                row: Mapping[str, object] | None = None) -> tuple[str | None, bool]:
+    """(truth line, scope_complete) for one run_tests result.
+
+    The denominator is the task's declared public selectors (never the active intention's
+    subset); coverage comes from the selectors whose subprocess actually completed, so a
+    refused selector never counts.  Complete (None, True) whenever nothing is declared or the
+    run covered every declared selector: those results render exactly as before.
+    """
+    try:
+        from kernel_public_evidence import declared_task_selectors, project_scoped_run
+        fallback: Sequence[str] = ()
+        getter = getattr(measurement, "required_public_selectors", None)
+        if callable(getter):
+            fallback = tuple(str(item) for item in getter())
+        if row is None:
+            row = getattr(bolt, "task_row", None)
+        declared = declared_task_selectors(
+            row if isinstance(row, Mapping) else None,
+            tuple(getattr(bolt, "f2p_ids", ()) or ()), fallback)
+        ran_list = tuple(str(item) for item in ran)
+        if codes is None:
+            refused = (obs.startswith(HOST_REFUSED_PREFIX)
+                       or obs.startswith("[selector] REFUSED_PREDISPATCH"))
+            code = None if refused else _selector_exit_code(obs)
+            codes = tuple(code for _ in ran_list)
+        return project_scoped_run(declared, ran_list, tuple(codes),
+                                  row if isinstance(row, Mapping) else None)
+    except Exception:                                                # noqa: BLE001
+        return None, True
+
+
+def _render_scoped_delivery(observation: str, truth_line: str) -> str:
+    """Model-facing text for a partial run: no all-pass claim, plus the covered/required line."""
+    from kernel_public_evidence import render_scoped_delivery
+    return render_scoped_delivery(observation, truth_line)
 
 
 def run_tests_for_selectors(root: pathlib.Path, fn: str, selectors: Sequence[str],
@@ -11813,7 +11873,7 @@ def work(d, *, resume=None):
                     continue
                 if getattr(measurement, "portfolio", None) is not None:
                     measurement.portfolio_preserve_candidate(
-                        public_green=bolt.last_test_exit == 0,
+                        public_green=bolt.last_test_green,
                         public_suite=tuple(getattr(measurement, "test_receipts", ())),
                         reason=f"accepted-done:step-{step}")
                     measurement.portfolio_select()
@@ -12748,10 +12808,11 @@ def work(d, *, resume=None):
                 _test_selectors = (tuple(requested_check_targets(root, rest)) if rest else
                                    tuple(getattr(bolt, "f2p_ids", ())))
                 if multifile and _test_selectors:
-                    obs, _ = run_tests_for_selectors(
+                    obs, _test_codes = run_tests_for_selectors(
                         root, fn, _test_selectors, d["rel"], row=d)
                 else:
                     obs = run_tests(root, fn, rest or None, d["rel"], row=d)
+                    _test_codes = None
                 plain_observation = obs
                 if os.environ.get("STATEFRAME_EMPIRICAL_FIXES", "off") == "on":
                     from kernel_empirical_fixes import flag_brief_traceback_lines
@@ -12775,6 +12836,15 @@ def work(d, *, resume=None):
                         )
                 plain_observation = obs
                 tests += 1
+                _scope_truth_line, _scope_complete = _scoped_check_truth_for_run(
+                    measurement, bolt, obs, _test_selectors, _test_codes, d)
+                bolt.last_test_scope_complete = _scope_complete
+                if _scope_truth_line:
+                    # The observation itself carries the scoped truth, so every host record
+                    # (receipt, ledger, frame) and the model see the same text: no all-pass
+                    # claim, plus the covered/required line.
+                    obs = _render_scoped_delivery(obs, _scope_truth_line)
+                    plain_observation = obs
                 from kernel_wire_identity import public_wire_text
                 obs = public_wire_text(obs, measurement.journal)
                 # E409: the exit parse + traceback signal were
@@ -12810,7 +12880,9 @@ def work(d, *, resume=None):
                         _pvo = bolt.pivot.observe({
                             "kind": "test",
                             "fingerprint": _sig or f"exit:{bolt.last_test_exit}",
-                            "result_class": ("GREEN" if bolt.last_test_exit == 0
+                            # A passing scoped run is neither GREEN nor a product failure.
+                            "result_class": ("GREEN" if bolt.last_test_green
+                                             else "PARTIAL_PASS" if bolt.last_test_exit == 0
                                              else "PRODUCT_RED"),
                             "turn": step,
                         })
@@ -12904,6 +12976,10 @@ def work(d, *, resume=None):
                     from kernel_real04_bugs import classify_real04_run_test_result
                     run_test_result_class = classify_real04_run_test_result(
                         obs, bolt.last_test_exit, default=run_test_result_class)
+                if not _scope_complete:
+                    # One-of-N passing never persists a host GREEN action receipt.
+                    from kernel_public_evidence import scoped_result_class
+                    run_test_result_class = scoped_result_class(run_test_result_class, False)
                 bolt.receipt("test", rest or "bare-run", rest or "bare",
                              run_test_result_class,
                              anchor=_anch, test_output=obs)
@@ -12965,7 +13041,7 @@ def work(d, *, resume=None):
                 # JobQueue completion: the first current public green automatically runs the
                 # small frozen public-brief audit.  It is host evidence, not a model
                 # proposal, and is deliberately shared by history and frame arms.
-                if (bolt.last_test_exit == 0 and target is not None
+                if (bolt.last_test_green and target is not None
                         and getattr(measurement, "jq_finish_enabled", False)):
                     try:
                         _jq_row = d if isinstance(d, Mapping) else {}
@@ -13029,7 +13105,7 @@ def work(d, *, resume=None):
                 # E313: structured test record for the orientation round
                 bolt.sure_observe({"kind": "test", "step": step,
                                    "exit": bolt.last_test_exit,
-                                   "verdict": ("pass" if bolt.last_test_exit == 0 else
+                                   "verdict": ("pass" if bolt.last_test_green else
                                                "red" if bolt.last_test_exit == 1 else
                                                "no_verdict"),
                                    "primary_anchor": (locals().get("_sig") or {}).get(
@@ -13217,7 +13293,8 @@ def work(d, *, resume=None):
                     elif _akind == "test":
                         _igv.observe_receipt({
                             "kind": "test", "turn": step,
-                            "result_class": ("GREEN" if bolt.last_test_exit == 0
+                            "result_class": ("GREEN" if bolt.last_test_green
+                                             else "PARTIAL_PASS" if bolt.last_test_exit == 0
                                              else "RED")})
                 except Exception:                                    # noqa: BLE001
                     pass
@@ -13332,7 +13409,7 @@ def work(d, *, resume=None):
             # E306 — the two advisory nudges wiring audit called for. Bounded (one per
             # generation/streak in the kernel), advisory (append to the OBSERVATION, never
             # block), and structural (green-after-edit / edits-without-verification).
-            if line.startswith("test") and bolt.last_test_exit == 0:
+            if line.startswith("test") and bolt.last_test_green:
                 edits_since_test = 0
                 bolt._last_green_step = step
                 bolt._last_green_revision = None
@@ -13346,7 +13423,9 @@ def work(d, *, resume=None):
                             _green_nag_runtime)
                 except Exception:  # noqa: BLE001 - advisory revision capture is fail-closed
                     pass
-                _fn_nudge = bolt.finish_nudge(_progress_facts().edits)
+                _fn_nudge = bolt.finish_nudge(
+                    _progress_facts().edits,
+                    scope_complete=locals().get("_scope_complete", True))
                 if _fn_nudge:
                     obs = obs + "\n" + _fn_nudge
             elif line.startswith("test"):
@@ -13355,7 +13434,7 @@ def work(d, *, resume=None):
                 # E391: a fresh RED re-arms the post-green freeze (red->green->edit
                 # cycles each get their own one challenge).
                 bolt._green_gen = getattr(bolt, "_green_gen", 0) + 1
-                if bolt.last_test_exit == 0:
+                if getattr(bolt, "last_test_green", bolt.last_test_exit == 0):
                     bolt._last_green_step = step
                 # On a failing test, extract contract atoms (order/bounds/
                 # polarity/window/default) from the failing output + test source and
@@ -13480,7 +13559,7 @@ def work(d, *, resume=None):
 
             if not interventions:
                 obs = plain_observation
-            if line.startswith("test") and bolt.last_test_exit == 0:
+            if line.startswith("test") and bolt.last_test_green:
                 obs = measurement.green_lock.decorate_test_result(obs)
                 if getattr(measurement, "stateframe_first_green_disclosure_mode", "off") == "on":
                     from kernel_first_green_disclosure import decorate_test_result
@@ -13608,9 +13687,20 @@ def work(d, *, resume=None):
             delivered_obs = obs
             if line.split() and line.split()[0] == "test":
                 from kernel_stateframe_framefit5 import has_framefit5_state
+                _scope_line = locals().get("_scope_truth_line")
+                if _scope_line and delivered_obs.endswith("\n" + _scope_line):
+                    # The truth line is reserved inside the result budget, never clipped.
+                    delivered_obs = delivered_obs[:-len("\n" + _scope_line)]
+                else:
+                    _scope_line = None
                 if has_framefit5_state(msgs):
                     from kernel_frame_tool_result_budget import bound_frame_tool_result
-                    delivered_obs = bound_frame_tool_result(obs, msgs, kind="test")
+                    delivered_obs = bound_frame_tool_result(
+                        delivered_obs, msgs, kind="test",
+                        trailer=("\n" + _scope_line) if _scope_line else "")
+                elif _scope_line:
+                    delivered_obs = delivered_obs + "\n" + _scope_line
+                _scope_truth_line = None
             # Read/search helpers have already applied their shared bounded delivery
             # contract.  A second unconditional character slice here made receipts and
             # model-visible bytes disagree, especially for long lines and later pages.
@@ -13681,7 +13771,7 @@ def work(d, *, resume=None):
                     _args if toolcall_mode and isinstance(_args, Mapping) else None
                 ),
             )
-            if (line.startswith("test") and bolt.last_test_exit == 0
+            if (line.startswith("test") and bolt.last_test_green
                     and getattr(measurement, "portfolio", None) is not None):
                 measurement.portfolio_preserve_candidate(
                     public_green=True,

@@ -51,6 +51,8 @@ class KernelBolt:
         self.repeats = 0
         self.edits = 0
         self.last_test_exit: int | None = None
+        # False when the last run covered only part of the declared public selectors.
+        self.last_test_scope_complete: bool = True
         self._last_relevant_match = True
         self.oracle_preflight: Mapping[str, object] = {}
         self._reg = None
@@ -1096,9 +1098,18 @@ class KernelBolt:
                 "in response to it; re-run or pick a test that does not need that service.")
 
     # ---------------------------------------------------- E306 advisory nudges
-    def finish_nudge(self, edits: int) -> str | None:
+    @property
+    def last_test_green(self) -> bool:
+        """Exit 0 that also covered every declared public selector."""
+        return self.last_test_exit == 0 and self.last_test_scope_complete
+
+    def finish_nudge(self, edits: int, scope_complete: bool = True) -> str | None:
         """Gate, forward gear: tests green + edits landed + nothing edited
-        since -> ONE bounded 'consider done' per edit generation. Advisory, never forced."""
+        since -> ONE bounded 'consider done' per edit generation. Advisory, never forced.
+        A green that covered only part of the declared public selectors is not a reason
+        to finish: stay silent and keep the one-shot unspent for the full run."""
+        if not scope_complete:
+            return None
         if (self.last_test_exit == 0 and edits > 0
                 and self._challenged.get("finish_gen") != edits):
             self._challenged["finish_gen"] = edits

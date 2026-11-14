@@ -957,6 +957,55 @@ def _next_site(runtime: object, action_context: Mapping[str, object]) -> dict[st
     return sites[0] if sites else None
 
 
+def _run_check_receipts(records: Sequence[object]) -> list[Mapping[str, object]]:
+    """The latest run's canonical check receipts: the trailing contiguous check_receipt group."""
+    rows = list(records)
+    end = next((i for i in range(len(rows) - 1, -1, -1)
+                if isinstance(rows[i], Mapping) and rows[i].get("kind") == "check_receipt"), None)
+    if end is None:
+        return []
+    start = end
+    while start > 0 and isinstance(rows[start - 1], Mapping) \
+            and rows[start - 1].get("kind") == "check_receipt":
+        start -= 1
+    return [row for row in rows[start:end + 1] if isinstance(row, Mapping)]
+
+
+def _receipt_selectors(check: Mapping[str, object]) -> list[str]:
+    scope = check.get("selector_scope")
+    if isinstance(scope, (list, tuple)) and scope:
+        return [str(item).strip() for item in scope if str(item).strip()]
+    return [part.strip() for part in str(check.get("selector") or "").split(",") if part.strip()]
+
+
+def _scoped_ratio(runtime: object, checks: Sequence[Mapping[str, object]]) -> tuple[int, int] | None:
+    """(covered, required) when the run's passing receipts covered only part of the task's
+    declared selectors.  Coverage aggregates every receipt of the run, never just the last."""
+    from kernel_public_evidence import declared_task_selectors, scoped_pass_ratio
+
+    owner = getattr(runtime, "owner", None)
+    fallback: list[str] = []
+    getter = getattr(runtime, "required_public_selectors", None)
+    if callable(getter):
+        try:
+            fallback = [str(item) for item in getter()]
+        except Exception:  # noqa: BLE001 - advisory projection must not break frame build
+            return None
+    row = getattr(owner, "task_row", None)
+    declared = declared_task_selectors(
+        row if isinstance(row, Mapping) else None,
+        tuple(getattr(owner, "f2p_ids", ()) or ()), fallback)
+    ran: list[str] = []
+    for check in checks:
+        status = str(check.get("status") or "").strip().upper()
+        if status not in {"PASS", "PASSED", "GREEN", "FAIL", "FAILED", "RED", "BEHAVIOR_FAIL"}:
+            continue  # refused / unknown receipts never count as executed
+        for name in _receipt_selectors(check):
+            if name not in ran:
+                ran.append(name)
+    return scoped_pass_ratio(declared, ran) if ran else None
+
+
 def build_typed_state(
         messages: Sequence[Mapping[str, object]], action_context: Mapping[str, object],
         runtime: object,
@@ -968,18 +1017,27 @@ def build_typed_state(
         action_context, runtime, messages,
     )
     ledger["applied_edits"] = applied_edits
-    ledger["journal_verdict"] = copy.deepcopy(last_verdict)
-    latest_check = next(
-        (record for record in reversed(action_context["journal_receipt_records"])
-         if isinstance(record, Mapping) and record.get("kind") == "check_receipt"),
-        None,
-    )
+    run_checks = _run_check_receipts(action_context["journal_receipt_records"])
+    latest_check = run_checks[-1] if run_checks else None
     if isinstance(latest_check, Mapping):
         latest_test = ledger.get("last_test")
         latest_test = dict(latest_test) if isinstance(latest_test, Mapping) else {}
         receipt_status = str(latest_check.get("status") or "UNKNOWN").strip().upper()
+        if receipt_status in {"PASS", "PASSED", "GREEN"} and any(
+                str(check.get("status") or "").strip().upper() in {"FAIL", "FAILED", "RED", "BEHAVIOR_FAIL"}
+                for check in run_checks):
+            receipt_status = "FAIL"  # one failing selector makes the run red
         if receipt_status in {"PASS", "PASSED", "GREEN"}:
             latest_test["verdict"] = "GREEN"
+            ratio = _scoped_ratio(runtime, run_checks)
+            if ratio is not None:
+                # Scoped pass: carry covered/required, never a green fact.
+                latest_test["verdict"] = "PARTIAL_PASS"
+                latest_test["required_selectors"] = f"{ratio[0]}/{ratio[1]}"
+                last_verdict["status"] = "PARTIAL_PASS"
+                last_verdict["required_selectors"] = latest_test["required_selectors"]
+                last_verdict["line"] = str(last_verdict.get("line") or "").replace(
+                    "LAST PASS", f"LAST PARTIAL_PASS ({ratio[0]} of {ratio[1]} required selectors)", 1)
         elif receipt_status in {"FAIL", "FAILED", "RED", "BEHAVIOR_FAIL"}:
             latest_test["verdict"] = "RED"
         latest_test["revision"] = last_verdict["tested_revision"] or "UNKNOWN"
@@ -987,6 +1045,8 @@ def build_typed_state(
         if isinstance(selector, str) and selector:
             latest_test["target"] = selector
         ledger["last_test"] = latest_test
+    # The shared verdict is final here: both projections carry the same status.
+    ledger["journal_verdict"] = copy.deepcopy(last_verdict)
     source_ledger = action_context.get("ledger")
     source_rows = source_ledger.get("rows") if isinstance(source_ledger, Mapping) else None
     if isinstance(source_rows, list):

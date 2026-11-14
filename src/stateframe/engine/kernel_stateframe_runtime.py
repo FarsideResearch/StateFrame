@@ -6231,7 +6231,8 @@ class StateFrameRuntime:
         if public_suite is None:
             public_suite = tuple(getattr(self, "test_receipts", ())[-16:])
         if public_green is None:
-            public_green = getattr(self.owner, "last_test_exit", None) == 0
+            public_green = bool(getattr(self.owner, "last_test_green",
+                                        getattr(self.owner, "last_test_exit", None) == 0))
         assessments = tuple(getattr(self, "host_closure_assessments", ()))
         current_receipts = []
         for assessment in assessments:
@@ -6268,7 +6269,8 @@ class StateFrameRuntime:
         if portfolio is None:
             return ()
         refusal = dict(refusal or {})
-        refusal.setdefault("verified_progress", getattr(self.owner, "last_test_exit", None) == 0)
+        refusal.setdefault("verified_progress", bool(getattr(
+            self.owner, "last_test_green", getattr(self.owner, "last_test_exit", None) == 0)))
         refusal.setdefault("host_payload", getattr(self, "host_closure_payload", None))
         branches = portfolio.fork(
             Path(self.owner.root), refusal=refusal, request=request,
@@ -8977,6 +8979,40 @@ class StateFrameRuntime:
                     or "/test_" in normalized
                     or normalized.endswith("/conftest.py"))
 
+    def _scoped_auto_verify_truth(
+            self, selectors: Sequence[str], exit_code: object,
+            canonical_check_receipts: Sequence[Mapping[str, object]]) -> tuple[str | None, bool]:
+        """(truth line, scope_complete) for an automatic run, from its canonical receipts."""
+        try:
+            from kernel_public_evidence import declared_task_selectors, project_scoped_run
+            row = getattr(self.owner, "task_row", None)
+            declared = declared_task_selectors(
+                row if isinstance(row, Mapping) else None,
+                tuple(getattr(self.owner, "f2p_ids", ()) or ()),
+                tuple(self.required_public_selectors()))
+            executed: dict[str, int] = {}
+            for receipt in canonical_check_receipts:
+                if not isinstance(receipt, Mapping) or receipt.get("execution_complete") is not True:
+                    continue
+                outcome = str(receipt.get("outcome", "")).upper()
+                code = 0 if outcome == "PASS" else 1 if outcome == "BEHAVIOR_FAIL" else None
+                if code is None:
+                    continue
+                scope = receipt.get("selector_scope")
+                names = ([str(s) for s in scope] if isinstance(scope, (list, tuple)) and scope
+                         else [str(receipt.get("selector") or "")])
+                for name in names:
+                    if name.strip():
+                        executed.setdefault(name.strip(), code)
+            if not executed and type(exit_code) is int and exit_code >= 0 and not canonical_check_receipts:
+                executed = {str(s): exit_code for s in selectors}
+            names = list(executed)
+            return project_scoped_run(
+                declared, names, [executed[n] for n in names],
+                row if isinstance(row, Mapping) else None)
+        except Exception:  # noqa: BLE001 - advisory projection never breaks verification
+            return None, True
+
     def _run_auto_verify(
             self, edit_receipt: Mapping[str, object], *,
             expected_effect_id: str | None = None,
@@ -9091,6 +9127,15 @@ class StateFrameRuntime:
             if environment_reason:
                 result_class = "ENVIRONMENT_BLOCKED"
             target = str(result.get("target") or ", ".join(selectors))
+            # Automatic verification takes the same scoped-truth path as run_tests: an
+            # all-pass over a subset of the task's declared selectors is a partial check.
+            scope_line, scope_complete = self._scoped_auto_verify_truth(
+                selectors, exit_code, canonical_check_receipts)
+            self.owner.last_test_scope_complete = scope_complete
+            if scope_line:
+                from kernel_public_evidence import render_scoped_delivery, scoped_result_class
+                observation = render_scoped_delivery(observation, scope_line)
+                result_class = scoped_result_class(result_class, False)
             self._auto_verify_selector = target
             self._auto_verify_observation = observation
             self.owner.receipt("test", "auto public verification", target,

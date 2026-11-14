@@ -136,7 +136,7 @@ def _valid_worker_state_fields(value: object) -> bool:
 
 
 OWNER_FIELDS = (
-    "_receipts", "trace", "edits", "last_test_exit", "product_edits",
+    "_receipts", "trace", "edits", "last_test_exit", "last_test_scope_complete", "product_edits",
     "workspace_revision", "_last_relevant_match", "_self_oracle_tainted",
     "f2p_ids", "f2p_names", "f2p_inworld", "oracle_file_ids",
     "oracle_selector_counts", "_selector_error_fallback_files", "_futile_answered",

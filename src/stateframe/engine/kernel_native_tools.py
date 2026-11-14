@@ -72,6 +72,8 @@ def validate_configuration() -> bool:
 _RECEIPT_APPLIED = frozenset({
     "APPLIED", "OK", "ACCEPTED", "PASS", "PASSED", "GREEN", "SUCCESS", "CERTIFIED",
     "REUSED_VERIFICATION", "NO_OP",
+    # A scoped exit-0 run executed and applied; its coverage truth is in the result.
+    "PARTIAL_PASS",
 })
 # Extra success codes of read-only lookups and observations (never edits).
 _RECEIPT_APPLIED_LOOKUP = frozenset({"HOST_OBSERVED", "HITS", "NO_HITS",

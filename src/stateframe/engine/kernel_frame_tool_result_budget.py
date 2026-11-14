@@ -35,17 +35,24 @@ def read_page_byte_limit(
 
 def bound_frame_tool_result(
     content: str, messages: Sequence[Mapping[str, object]], *, kind: str,
+    trailer: str = "",
 ) -> str:
-    """Keep test output useful while giving the model a truthful retrieval route."""
+    """Keep test output useful while giving the model a truthful retrieval route.
+
+    ``trailer`` is host truth that must survive verbatim (the scoped-check line); its bytes
+    are reserved inside the budget so the delivered result never exceeds the cap.
+    """
     limit = frame_only_page_byte_limit(messages)
+    if trailer:
+        limit = max(0, limit - len(trailer.encode("utf-8")))
     raw = content.encode("utf-8")
     if len(raw) <= limit:
-        return content
+        return content + trailer
     if kind != "test":
-        return content
+        return content + trailer
     notice = ("\n[TEST OUTPUT CLIPPED: full result remains in the check receipt; "
               "use read_check_receipt for details or rerun a narrower test target.]\n")
     room = max(0, limit - len(notice.encode("utf-8")))
     head = raw[:room // 2].decode("utf-8", errors="ignore")
     tail = raw[-(room - len(head.encode("utf-8"))):].decode("utf-8", errors="ignore") if room else ""
-    return head + notice + tail
+    return head + notice + tail + trailer
