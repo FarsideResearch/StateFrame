@@ -67,7 +67,7 @@
   "detreason/world_knowledge_extractors.py": "2722668435c5ac0e20f31444707fa5bbdb3ac530c0e779f66b61da08a162f995",
   "detreason/world_model.py": "d76e2da1e90b98c187809b2ae725418c4a880dac7266f03e42c3013501ec3330",
   "detreason/zoom_slice.py": "e065ca3211c86520080a73a87371d2a5da9ca342632ce6af0fa5469ee29d1406",
-  "edit_sets.py": "71f8f0dbade3c385d4b60f3ec610acc41ccf2f711078368455ef82fd6fd07998",
+  "edit_sets.py": "557b9092fdf9b722944ed906925481b7c5f7e357cf8822b4050784bf9cb50ff9",
   "expectation_ledger.py": "cf5ab430fce1592feb794d956a7a95d0396284a85db93ee1cb1670fb6b1f23b4",
   "experiment_protocol.py": "63a0fb242ffa1419d4f520936b5b2174fa9d3066e7ce6c662afaa924223cc7c0",
   "fixer.py": "423e7029446f691135ddd7c1dd2989d1c296ff225b9a97b366dfa01813143c59",

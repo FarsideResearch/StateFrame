@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- The corpus provider index now reads up to 5000 files by default, up from 600, so larger corpora are no longer cut short for import evidence. `STATEFRAME_PROVIDER_INDEX_MAX_FILES` sets the cap in a custom profile, clamped to 200000; a capped index still reports `truncated` and `files_scanned`.
 - Context-size probes now read `/slots` and `/props` bodies up to 16 MiB, and a larger body is reported as a typed refusal instead of silently ignored.
 
 ## 0.7.0 (2026-11-15)
