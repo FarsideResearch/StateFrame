@@ -1,8 +1,9 @@
 # Changelog
 
-## Unreleased
+## 0.6.36 (2026-11-14)
 
 - Fixed: clipped source previews now provide read-only recovery guidance, and edits copied from omission markers explain how to re-read the original source while preserving literal marker text in files.
+- Tests: the host-provision tests read the run-environment-off notice from stderr, where it now goes.
 
 ## 0.6.35 (2026-11-14)
 
