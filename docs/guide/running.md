@@ -47,6 +47,15 @@
 
 Hook files named with `--hooks` are explicitly trusted by that command. Project hook files need a separate digest trust step, and edits to the file or its pinned scripts require trust again. The [hooks guide](hooks.md) describes the event contract and the sandbox boundary.
 
+## Experimental unit planning and seam recall
+
+`STATEFRAME_UNIT_PLAN_V2` and `STATEFRAME_SEAM_RECALL` are **off by default** and
+accept `on` or `off`. `STATEFRAME_UNIT_PLAN_V2=on` orders multi-file work into units
+from a cross-file index, folds import cycles into joint units, and gates each unit on
+its tests plus a seam check. `STATEFRAME_SEAM_RECALL=on` reports seam violations
+found through that index: untyped locals, relative imports, and unverified
+attributes at info level.
+
 ## Hosted and OpenAI-compatible endpoints
 
 StateFrame chooses the dialect for each selected endpoint, including routed endpoints. It makes bounded `GET /props` and `GET /slots` requests to that endpoint's origin using the request's API key and does not follow redirects. A 200 `/props` response identifies llama.cpp only when it has `default_generation_settings` plus `n_ctx` or `model_path`. A populated `/slots` array with distinct nonnegative integer IDs, positive integer `n_ctx`, and boolean `is_processing` also proves llama.cpp when `/props` is missing or unrecognized. Without either proof or the explicit `STATEFRAME_PROVIDER=llama.cpp` override, StateFrame selects `openai-strict`. The first run line and final summary show each chosen dialect, the reason, and how reasoning controls were handled.

@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.6.24 (2026-11-14)
+
+- Planner v2 and seam recall can now be turned on: STATEFRAME_UNIT_PLAN_V2 and STATEFRAME_SEAM_RECALL accept on/off.
+
 ## 0.6.23 (2026-11-13)
 
 - Added an opt-in, read-only cross-file index of a repo (definitions with signatures, imports, references, scope-aware name resolution and dangling-reference detection), off by default behind `STATEFRAME_CROSSFILE_INDEX` and not yet used by any engine step.
