@@ -86,6 +86,9 @@ def _start_resumed_deadline() -> None:
     emit("resume_time_left_started", seconds_left=float(seconds))
 CHECKPOINT_RESTORE_ENV = "STATEFRAME_CHECKPOINT_RESTORE"
 RUNNER_HOME_IDENTITY_ENV = "STATEFRAME_RUNNER_HOME_IDENTITY"
+# New-process authority, deliberately outside HOST_STATE/checkpoint participants.
+_RUNNER_HOME_IDENTITY_CAPTURED = False
+_RUNNER_HOME_IDENTITY_PIN: str | None = None
 
 ENGINE_PREFIXES = ("DS_", "KERNEL_", "STATEFRAME_", "REACT_", "PILOT_", "UNIT_PLAN_")
 LOG_PREFIX = "[sf]"
@@ -143,7 +146,22 @@ def emit_resume_pending_check(spec: dict, resume: dict | None) -> None:
         emit("routes_resume_pending_check_skipped", **check)
 
 
+def _runner_home_identity_pin() -> str | None:
+    """Capture inherited authority once, before any run-spec environment is installed.
+
+    Interpreter wrappers may bootstrap the environment before main(). Retain that
+    original pin privately, including its absence; later installs cannot replace it.
+    """
+    global _RUNNER_HOME_IDENTITY_CAPTURED, _RUNNER_HOME_IDENTITY_PIN
+    inherited = os.environ.pop(RUNNER_HOME_IDENTITY_ENV, None)
+    if not _RUNNER_HOME_IDENTITY_CAPTURED:
+        _RUNNER_HOME_IDENTITY_PIN = inherited
+        _RUNNER_HOME_IDENTITY_CAPTURED = True
+    return _RUNNER_HOME_IDENTITY_PIN
+
+
 def install_environment(spec: dict) -> None:
+    _runner_home_identity_pin()
     checkpoint_off = os.environ.get("STATEFRAME_CHECKPOINT", "").strip().lower() in {"off", "0"}
     routed_keys: dict[str, str] = {}
     if isinstance(spec.get("routes"), dict):
@@ -1082,7 +1100,7 @@ def main(argv: list[str]) -> int:
     if len(argv) != 2:
         print("usage: _child.py <run-dir>", file=sys.stderr)
         return 2
-    startup_home_identity = os.environ.pop(RUNNER_HOME_IDENTITY_ENV, None)
+    startup_home_identity = _runner_home_identity_pin()
     run = Path(argv[1]).resolve(strict=True)
     watch_parent()
     lock = hold_engine_lock(run)  # noqa: F841 - held until exit

@@ -389,8 +389,11 @@ def test_killed_second_save_restores_previous_complete_journal(
             if mode == "journal":
                 chunk = Path(fault["temporary"])
                 assert chunk.is_file() and chunk.stat().st_size > 0
-                assert chunk.parent == root / "journal-cache"
+                # Unverified chunks stay private until the snapshot's identity recheck.
+                assert chunk.parent == pending[0] / "artifacts" / "journal-cache"
                 assert chunk.name.startswith(".file-") and chunk.name.endswith(".tmp")
+                assert not (root / "journal-cache" / chunk.name).exists()
+                assert not (root / "journal-cache" / chunk.name[1:-4]).exists()
             else:
                 clone = Path(fault["cloned"])
                 assert fault["files"] >= 2 and clone.is_file()

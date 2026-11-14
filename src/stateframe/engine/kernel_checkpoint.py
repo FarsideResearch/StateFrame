@@ -3659,9 +3659,14 @@ def engine_fingerprint() -> str:
                 continue
             digest.update(str(path.relative_to(root)).encode() + b"\0")
             digest.update(hashlib.sha256(path.read_bytes()).digest())
-        host = getattr(sys.modules.get(HOST_MODULE), "__file__", None)
-        if isinstance(host, str):  # the product wrapper and its helpers sit beside the child script
-            for path in sorted(Path(host).resolve().parent.glob("*.py")):
+        # The installed CLI, a wrapper and the child must identify the same product
+        # host code. Standalone engine embeddings retain their own host directory.
+        host_root: Path | None = root.parent
+        if not (host_root / "_child.py").is_file():
+            host = getattr(sys.modules.get(HOST_MODULE), "__file__", None)
+            host_root = Path(host).resolve().parent if isinstance(host, str) else None
+        if host_root is not None:
+            for path in sorted(host_root.glob("*.py")):
                 digest.update(b"host:" + path.name.encode() + b"\0")
                 digest.update(hashlib.sha256(path.read_bytes()).digest())
         _FINGERPRINT = digest.hexdigest()

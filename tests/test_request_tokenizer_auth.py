@@ -1238,3 +1238,16 @@ def test_restored_inherited_router_probe_refuses_primary_env_name_mismatch(
     assert restored.journal.events[-1][0] == "provider_probe_skipped"
     assert restored.journal.events[-1][1]["reason"] == (
         "router_primary_credential_env_mismatch")
+
+
+def test_probe_skip_journal_failure_is_logged_without_exception_secrets(caplog):
+    from probes import react_repair
+
+    def broken_emit(*_args, **_kwargs):
+        raise RuntimeError("private-provider-key-must-not-escape")
+
+    capture = SimpleNamespace(journal=SimpleNamespace(emit=broken_emit), request_id="probe")
+    react_repair._record_probe_destination_skip(capture, "missing_live_credential")
+    assert capture._provider_probe_unavailable_reason == "missing_live_credential"
+    assert "provider probe skip event could not be recorded" in caplog.text
+    assert "private-provider-key-must-not-escape" not in caplog.text

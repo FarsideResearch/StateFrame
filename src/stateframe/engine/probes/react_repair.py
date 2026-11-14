@@ -3272,7 +3272,7 @@ def _record_probe_destination_skip(capture, reason: str) -> None:
                  request_id=getattr(capture, "request_id", None),
                  reason=reason, dispatch=False)
         except Exception:  # noqa: BLE001 - a probe refusal must not hide the transport failure
-            pass
+            logger.warning("provider probe skip event could not be recorded")
 
 
 def _failed_request_destination(capture) -> tuple[str, str] | None:
