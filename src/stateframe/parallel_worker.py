@@ -1113,7 +1113,10 @@ def _child_environment(spec: Mapping[str, object]) -> dict[str, str]:
     env = {key: value for key, value in os.environ.items()
            if key in CHILD_ENV_ALLOWLIST and key != "SF_SUBFRAME_INCARNATION"}
     # These run-local settings are recorded in the spec and override ambient copies when present.
-    for name in ("LLAMA_CPP_TOKENIZE_URL", "STATEFRAME_TEST_PYTHON", "PYTHONHASHSEED"):
+    # The installation-identity pin is the runner's startup authority for the run: every
+    # engine child, subframes included, verifies the installation home against it.
+    for name in ("LLAMA_CPP_TOKENIZE_URL", "STATEFRAME_TEST_PYTHON", "PYTHONHASHSEED",
+                 "STATEFRAME_RUNNER_HOME_IDENTITY"):
         value = environment.get(name)
         if isinstance(value, str):
             if value.strip() or name == "PYTHONHASHSEED":

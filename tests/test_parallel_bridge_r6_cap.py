@@ -140,6 +140,7 @@ def test_child_cleanup_reports_typed_handoff_failure_without_closing_lease() -> 
         "signal": signal,
         "emit": lambda *args, **kwargs: events.append((args, kwargs)),
         "SlotHandoffDurabilityError": parallel_resources.SlotHandoffDurabilityError,
+        "_reason_log": _child._reason_log,
     }
     exec(compile(ast.Module(body=outer.finalbody, type_ignores=[]),
                  "<child cleanup>", "exec"), namespace)

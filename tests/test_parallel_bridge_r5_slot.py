@@ -52,6 +52,7 @@ def test_unverified_child_cleanup_hands_slot_ownership_to_host() -> None:
         "previous_term": None,
         "signal": SimpleNamespace(SIGTERM=15, signal=lambda *args: None),
         "emit": lambda *args, **kwargs: events.append((args, kwargs)),
+        "_reason_log": SimpleNamespace(emit_reason=lambda *args, **kwargs: None),
     }
 
     exec(compile(ast.Module(body=_main_cleanup_finalbody(), type_ignores=[]),

@@ -153,6 +153,28 @@ APPROVED_TEST_SIGNALS: dict[tuple[str, str, str], tuple[int, str]] = {
     ("e2e/test_parallel_interrupt_safety.py", "test_signal_helpers_verify_launch_identity_before_delivery",
      "signal_owned(process, signal.SIGKILL)"):
         (1, "bounded cleanup if the standalone fixture ignores SIGTERM"),
+    ("test_e2e_parallel_r7_slot_proof.py",
+     "test_sigkilled_child_mid_handoff_keeps_slot_until_family_exit_proof",
+     "os.kill(child.pid, signal.SIGKILL)"):
+        (1, "SIGKILLs the held slot-handoff fixture child this test launched; no StateFrame run is signalled"),
+    ("test_e2e_parallel_r7_slot_proof.py",
+     "test_sigkilled_child_mid_handoff_keeps_slot_until_family_exit_proof", "child.kill()"):
+        (1, "teardown of the same held fixture child"),
+    ("test_probe_supervisor_loss.py", "_rpc", "os.kill(pid, signal.SIGKILL)"):
+        (1, "host-side kill of the probe's own exec supervisor, the fault under test; not a StateFrame run"),
+    ("test_parallel_bridge_r7_slot3.py",
+     "test_sigkill_during_permanent_handoff_failure_keeps_slot_until_family_proof",
+     "child.send_signal(signal.SIGTERM)"):
+        (1, "stops the held slot-handoff fixture child this test launched"),
+    ("test_parallel_bridge_r7_slot3.py",
+     "test_sigkill_during_permanent_handoff_failure_keeps_slot_until_family_proof", "child.kill()"):
+        (2, "SIGKILL and teardown of the held slot-handoff fixture child"),
+    ("test_parallel_bridge_r6_slot2.py",
+     "test_failed_handoff_keeps_slot_unavailable_until_claim_or_family_proof", "child.terminate()"):
+        (1, "stops the held slot-handoff fixture child this test launched"),
+    ("test_parallel_bridge_r6_slot2.py",
+     "test_failed_handoff_keeps_slot_unavailable_until_claim_or_family_proof", "child.kill()"):
+        (1, "teardown of the held slot-handoff fixture child"),
 }
 
 

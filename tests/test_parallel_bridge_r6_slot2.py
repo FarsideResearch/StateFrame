@@ -82,7 +82,7 @@ def test_failed_handoff_keeps_slot_unavailable_until_claim_or_family_proof(
         "namespace = {'mutation_runtime': None, 'hook_wiring': None, 'session': session,",
         "    'slot_lease': lease, 'result': {'result': 'SUBMITTED'}, 'status': 0,",
         "    'previous_term': signal.getsignal(signal.SIGTERM), 'signal': signal,",
-        "    'emit': _child.emit, '_handoff_slot_lease': getattr(_child, '_handoff_slot_lease', None)}",
+        "    'emit': _child.emit, '_reason_log': _child._reason_log, '_handoff_slot_lease': getattr(_child, '_handoff_slot_lease', None)}",
         "exec(compile(ast.Module(body=outer.finalbody, type_ignores=[]), '<child cleanup>', 'exec'), namespace)",
         "payload = {'identity': identity, 'result': namespace['result'], 'status': namespace['status']}",
         "print(json.dumps(payload), flush=True)",

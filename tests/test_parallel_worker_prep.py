@@ -941,7 +941,7 @@ def test_prepare_worker_leases_the_resolved_subframe_endpoint(tmp_path):
 
 
 @pytest.mark.host_sandbox
-def test_routed_worker_sends_unit_class_provider_credential(monkeypatch, tmp_path):
+def test_routed_worker_sends_unit_class_provider_credential(monkeypatch, tmp_path, tmp_path_factory):
     from stateframe.scripted_endpoint import Script, serve
 
     script = Script({"chat": {"require_key": "fake-unit-key"},
@@ -965,6 +965,15 @@ def test_routed_worker_sends_unit_class_provider_credential(monkeypatch, tmp_pat
         child_home = tmp_path / "child-home"
         child_home.mkdir()
         parent_spec["environment"]["HOME"] = str(child_home)
+        # The runner records the installation-identity pin and home in a real parent's spec.
+        from stateframe.engine import kernel_request_auth_identity
+        # The pinned home must lie outside the run directory and the repository (tmp_path).
+        stateframe_home = tmp_path_factory.mktemp("stateframe-home")
+        stateframe_home.chmod(0o700)
+        parent_spec["environment"]["STATEFRAME_HOME"] = str(stateframe_home)
+        parent_spec["environment"]["STATEFRAME_RUNNER_HOME_IDENTITY"] = json.dumps(
+            kernel_request_auth_identity.protected_home_identity(stateframe_home, initialize=True),
+            sort_keys=True, separators=(",", ":"))
         parent_spec["routes"] = routes.resolve(
             {"endpoint": endpoint, "model": "scripted", "api_key_env": "SF_TEST_PARENT_KEY"},
             cli=[f"unit.{spec.contract.model_class}.api_key_env=SF_TEST_UNIT_KEY"],
@@ -1237,6 +1246,9 @@ def test_parallel_off_keeps_main_run_spec_keys_and_child_env(tmp_path, monkeypat
         "PATH": "/usr/bin", "HOME": str(tmp_path),
         "LLAMA_CPP_TOKENIZE_URL": "http://127.0.0.1:8080/tokenize",
         "PYTHONDONTWRITEBYTECODE": "1", "PYTHONUNBUFFERED": "1",
+        # 0.6.38: every runner child receives the installation-identity pin.
+        "STATEFRAME_RUNNER_HOME_IDENTITY": json.dumps(
+            options._stateframe_home_identity, sort_keys=True, separators=(",", ":")),
     }
     assert "parallel" not in summarize(run, 0.0)
 

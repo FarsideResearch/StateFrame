@@ -488,6 +488,14 @@ def test_worker_environment_never_inherits_parent_force_manifest(monkeypatch, tm
     assert "STATEFRAME_PARALLEL_FORCE_MANIFEST" not in environment
 
 
+def test_worker_environment_carries_recorded_home_identity_pin_not_ambient(monkeypatch):
+    pin = '{"home_st_dev":1,"home_st_ino":2,"key_st_ctime_ns":3,"key_st_dev":1,"key_st_ino":4,"realpath":"/h"}'
+    monkeypatch.setenv("STATEFRAME_RUNNER_HOME_IDENTITY", "ambient-must-not-leak")
+    assert "STATEFRAME_RUNNER_HOME_IDENTITY" not in _child_environment({"environment": {}})
+    environment = _child_environment({"environment": {"STATEFRAME_RUNNER_HOME_IDENTITY": pin}})
+    assert environment["STATEFRAME_RUNNER_HOME_IDENTITY"] == pin
+
+
 @pytest.mark.parametrize("override", [None, "unit", "unit.patch"])
 def test_worker_environment_forwards_effective_route_credentials(monkeypatch, override):
     credentials = {"SF_TEST_PARENT_KEY": "fake-parent", "SF_TEST_READ_KEY": "fake-read",

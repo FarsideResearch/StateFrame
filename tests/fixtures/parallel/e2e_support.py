@@ -14,7 +14,7 @@ from pathlib import Path
 
 from _journal import measurement_events, measurement_journal_paths
 from engine_run import EngineProcess, run_monitored, start_monitored
-from process_signals import signal_run_owned
+from fixtures.process_signals import signal_run_owned
 
 from stateframe.engine.kernel_parallel_records import ParallelResult
 
