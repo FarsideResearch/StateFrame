@@ -12146,31 +12146,33 @@ def work(d, *, resume=None):
                     obs = f"Search failed: {_grep_error}. Correct the query or scope and retry."
                 elif _grep_page is not None:
                     _grep_symbol_fact = None
-                    if _grep_total == 0:
-                        # The symbol registry remains a useful Python-only aid, but it no
-                        # longer defines repository search completeness or suppresses pages.
+                    if _grep_total == 0 and interventions:
+                        # Definitions help localize a failed scoped search;
+                        # registry misses cannot establish symbol absence.
                         try:
-                            reg = _registry_for(root)
                             token = re.sub(r"^(def|class|async def)\s+", "", pat).strip()
                             token = re.split(r"[^\w]", token)[0] if token else ""
-                            if token and interventions:
-                                _grep_symbol_fact = (token, reg.answer(token))
+                            if token:
+                                reg = _registry_for(root)
+                                _grep_symbol_fact = (token, reg.where(token))
                         except Exception:                            # noqa: BLE001
                             pass
                     from kernel_owner_first import coordinates_enabled
-                    if coordinates_enabled():
+                    if coordinates_enabled() or _workspace_truth.enabled():
                         from kernel_navigation_pages import render_grep_result
                         obs = render_grep_result(
                             _grep_page,
                             symbol=_grep_symbol_fact[0] if _grep_symbol_fact else None,
-                            symbol_result=_grep_symbol_fact[1] if _grep_symbol_fact else None,
+                            symbol_definitions=_grep_symbol_fact[1] if _grep_symbol_fact else (),
                             workspace_root=root,
                             journal=measurement.journal,
                         )
                     else:
                         obs = _grep_page.text
-                        if _grep_symbol_fact:
-                            obs += "\n(no grep matches)\n" + _grep_symbol_fact[1]
+                        if _grep_symbol_fact and _grep_symbol_fact[1]:
+                            obs += "\n(no grep matches)\n" + _workspace_truth.render_legacy_symbol_answer(
+                                _grep_symbol_fact[0], _grep_symbol_fact[1], (), 0, 0, 0,
+                            )
                     # Q6: the second identical zero grep at one revision changes the route.
                     from kernel_repeated_zero import observe as _rz_observe
                     obs = _rz_observe(

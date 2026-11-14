@@ -219,31 +219,43 @@ class KernelBolt:
             return out
         self.seen[key] = obs
 
-        # CYLINDER 1 — symbol ground truth on a dead search.
-        # E306: this NEVER FIRED in production — it watched the literal
-        # "(no matches)" while the loop's actual empty-grep marker is "(no grep matches)",
-        # and presentation text is the wrong trigger anyway. The loop now sets
-        # self.last_grep_hits STRUCTURALLY before calling observe; fire on hit_count == 0,
-        # accept either legacy marker as fallback.
+        # CYLINDER 1: a dead search can still benefit from a known definition.
+        # Registry misses are not absence evidence for attributes, locals or
+        # other languages. Append only a positive fact with source locations.
         _dead_grep = (getattr(self, "last_grep_hits", None) == 0
                       or "(no matches)" in obs or "(no grep matches)" in obs)
         if self._reg is not None and cmd.startswith("grep") and _dead_grep:
-            if _workspace_truth.enabled():
-                query = re.sub(r"^grep\s+", "", cmd).strip().strip("\"'`")
-                if query:
+            tok = re.sub(r"^grep\s+", "", cmd)
+            tok = re.sub(r"^(def|class|async def)\s+", "", tok.strip("\"'`"))
+            tok = re.split(r"[^\w]", tok)[0] if tok else ""
+            if tok or _workspace_truth.enabled():
+                answer = None
+                if _workspace_truth.enabled():
+                    query = re.sub(r"^grep\s+", "", cmd).strip().strip("\"'`")
                     probe = "invalid-grep-command" if query.startswith("-") else "literal"
                     fact = _workspace_truth.probe_live_workspace(
                         self.root, probe, query, journal=self,
                     )
-                    out = obs + "\n[kernel] " + _workspace_truth.render_fact(fact)
-                    self._rec("symbol", "answered_dead_grep", query[:160])
-            else:
-                tok = re.sub(r"^grep\s+", "", cmd)
-                tok = re.sub(r"^(def|class|async def)\s+", "", tok.strip("\"'`"))
-                tok = re.split(r"[^\w]", tok)[0] if tok else ""
-                if tok:
-                    out = obs + "\n[kernel] " + self._reg.answer(tok)
-                    self._rec("symbol", "answered_dead_grep", tok)
+                    if fact.exists is True and fact.status == "matches" and fact.matches:
+                        # The literal fact carries a count. Include bounded live
+                        # search rows too, so occurrence help has source locations.
+                        from kernel_navigation_pages import search_repository
+                        try:
+                            page = search_repository(self.root, query, mode="literal")
+                        except (OSError, TypeError, ValueError):
+                            page = None
+                        if page is not None and page.metadata.get("total", 0) > 0:
+                            answer = _workspace_truth.render_fact(fact) + "\n" + page.text
+                    if answer is None and tok:
+                        fact = _workspace_truth.symbol_defined(self.root, tok, journal=self)
+                        if fact.exists is True and fact.status == "indexed" and fact.definitions:
+                            answer = _workspace_truth.render_fact(fact)
+                elif self._reg.where(tok):
+                    answer = self._reg.answer(tok)
+                if answer:
+                    out = obs + "\n[kernel] " + answer
+                    self._rec("symbol", "answered_dead_grep",
+                              query[:160] if _workspace_truth.enabled() else tok)
         return out
 
     # --------------------------------------------------------- cylinder 4
