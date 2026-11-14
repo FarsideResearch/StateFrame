@@ -4083,6 +4083,21 @@ def str_replace_edit(path: pathlib.Path, old_str: str, new_str: str, *,
         # a false "matches N places" repair loop. It is a schema error, not an ambiguity.
         return ("str_replace REJECTED: old_str is required and must be non-empty: copy the "
                 "exact current text to replace. Nothing was changed.")
+    from kernel_edit_guard import contains_source_omission, omission_anchor_rejection
+    if contains_source_omission(old_str):
+        if _nonpy_edit_applies(path):
+            try:
+                source = path.read_bytes()
+            except OSError as error:
+                return (f"str_replace REJECTED: could not read {path.name}: "
+                        f"{type(error).__name__}.")
+        else:
+            source, refusal = _read_edit_source(path, "str_replace")
+            if refusal is not None:
+                return refusal
+        rejection = omission_anchor_rejection(old_str, source=source)
+        if rejection is not None:
+            return "str_replace REJECTED: " + rejection
     if old_str == new_str:
         # ack s57 (E330 lineage): a no-op means the model believes the CURRENT text is
         # already the fix — redirect that belief instead of just rejecting the edit.

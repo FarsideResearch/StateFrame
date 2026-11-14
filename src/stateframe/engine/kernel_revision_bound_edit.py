@@ -513,6 +513,8 @@ class EditAuthority:
         return diagnostics
 
     def admit(self, plan: EditPlan, sources: Mapping[str, BytesLike] | None = None) -> AdmissionResult:
+        from kernel_edit_guard import omission_anchor_rejection
+
         current = {_path(key): _as_bytes(value) for key, value in (sources or self.sources).items()}
         diagnostics: list[str] = []
         indexes: list[int] = []
@@ -539,6 +541,10 @@ class EditAuthority:
                         )
                     else:
                         diagnostics.append(f"SOURCE[{index}]: legacy source is missing")
+                    indexes.append(index)
+                elif (rejection := omission_anchor_rejection(
+                        edit.legacy_old or "", source=current[edit.legacy_path])) is not None:
+                    diagnostics.append(f"OMISSION_MARKER[{index}]: {rejection}")
                     indexes.append(index)
                 elif edit.legacy_old is None or current[edit.legacy_path].count(edit.legacy_old.encode()) != 1:
                     diagnostics.append(f"MATCH[{index}]: legacy old_str must match exactly once")

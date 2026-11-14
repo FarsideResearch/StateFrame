@@ -1944,6 +1944,8 @@ def validate_batch(root: str | Path, edits: Sequence[object], *,
                    plan: Mapping[str, object] | None = None,
                    journal: object = None) -> BatchValidation:
     """Preflight every edit and only the affected Python import/export edges."""
+    from kernel_edit_guard import contains_source_omission, omission_anchor_rejection
+
     if plan is not None:
         return validate_typed_plan(root, plan, journal=journal)
     root_path = Path(root).resolve()
@@ -1963,7 +1965,7 @@ def validate_batch(root: str | Path, edits: Sequence[object], *,
         if relative in protected or path.name.startswith("test_") and "tests" in path.parts:
             failures.append(BatchFailure(index, relative, "PROTECTED", "target is protected"))
             continue
-        if edit.old == edit.new:
+        if edit.old == edit.new and not contains_source_omission(edit.old):
             failures.append(BatchFailure(index, relative, "NO_OP", "old and new text are identical"))
             continue
         edit_indexes.setdefault(relative, index)
@@ -1976,6 +1978,15 @@ def validate_batch(root: str | Path, edits: Sequence[object], *,
                 continue
             candidates[relative] = originals[relative].decode("utf-8", errors="surrogateescape")
         current = candidates[relative]
+        # A rejected overlay is not published; recovery reads see original bytes.
+        rejection = omission_anchor_rejection(
+            edit.old, source=current, recovery_source=originals[relative])
+        if rejection is not None:
+            failures.append(BatchFailure(index, relative, "OMISSION_MARKER", rejection))
+            continue
+        if edit.old == edit.new:
+            failures.append(BatchFailure(index, relative, "NO_OP", "old and new text are identical"))
+            continue
         expected = edit.expected_revision.strip()
         if expected:
             actual = _sha_bytes(originals[relative])

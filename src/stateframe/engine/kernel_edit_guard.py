@@ -3,12 +3,52 @@ from __future__ import annotations
 
 import ast
 import os
+import re
 from collections.abc import Iterable
 
 from kernel_stub_gate import duplicate_definitions, unimplemented_functions
 
 
 MODE_ENV = "STATEFRAME_EDIT_GUARD"
+
+
+# Recognize distinctive marker phrases even when a response clipped their
+# delimiters or wrapped a line. Avoid generic words such as "omitted" alone.
+_SOURCE_OMISSION = re.compile(
+    r"Real04\s+source\s+window\s+omitted\s+middle(?:\s+lines)?"
+    r"(?:;\s+use\s+reference\s+for\s+the\s+complete\s+file)?"
+    r"|\[\s*\.\.\.\s+middle\s+omitted(?:\s+\.\.\.\s*\])?"
+    r"|Source\s+window\s+read-only/non-editable"
+    r"|LEAN\s+tool\s+output\s+bounded;\s+\d+\s+UTF-8\s+bytes,\s+middle\s+omitted"
+    r"|\[(?:observation|panel)\s+excerpt\b"
+    r"|\[\.\.\.\s+draft\s+truncated;\s+recall\s+with\s+read"
+)
+
+
+def contains_source_omission(anchor: str) -> bool:
+    """Recognize source/feedback gap signatures independently of guard switches."""
+    return _SOURCE_OMISSION.search(anchor) is not None
+
+
+def omission_anchor_rejection(anchor: str, *, source: str | bytes,
+                              recovery_source: str | bytes | None = None) -> str | None:
+    """Reject synthetic gaps, preserving genuine marker literals and exact matching.
+
+    Batches match their current overlay, but a rejection's recovery range must
+    describe the unchanged file that a subsequent read will actually return.
+    """
+    matches = tuple(_SOURCE_OMISSION.finditer(anchor))
+    if not matches:
+        return None
+    text = source.decode("utf-8", errors="surrogateescape") if isinstance(source, bytes) else source
+    if all(match.group() in text for match in matches):
+        return None
+    recovery = source if recovery_source is None else recovery_source
+    recovery_text = (recovery.decode("utf-8", errors="surrogateescape")
+                     if isinstance(recovery, bytes) else recovery)
+    end = max(1, len(recovery_text.splitlines()))
+    return (f"the marker is not file content; re-read lines 1-{end}. "
+            "Copy an exact anchor from the current read page. Nothing was changed.")
 
 
 def edit_guard_mode() -> str:

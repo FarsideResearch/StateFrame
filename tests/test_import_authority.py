@@ -90,7 +90,7 @@ def denied_provision(tmp_path, monkeypatch, capsys):
     spec = {'repo': str(repo), 'capabilities': options._capabilities}
     provision(options, run, spec)
     assert not options.tool_settings.run_env
-    assert 'run environment off: external import path lacks host read authorization' in capsys.readouterr().out
+    assert 'run environment off: external import path lacks host read authorization' in capsys.readouterr().err
     saved = json.loads((run / 'spec.json').read_text())
     assert 'run_env' not in saved
     assert all(not secret.is_relative_to(Path(root)) for root in saved['shell_read_roots'])

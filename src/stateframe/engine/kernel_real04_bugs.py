@@ -90,6 +90,11 @@ def _window_body(source: str, start: int, end: int) -> str:
     return "\n".join([*before, *target, *after])
 
 
+def _read_only_window(start: int, end: int) -> str:
+    return (f"[Source window read-only/non-editable; "
+            f"re-read lines {start}-{end} before editing.]")
+
+
 def verify_bounded_window(text: str, *, path: str, source: str) -> bool:
     """Confirm a rendered bounded-source marker's BODY derives from CURRENT
     workspace bytes at its own declared span.  The prior preflight check only
@@ -98,9 +103,8 @@ def verify_bounded_window(text: str, *, path: str, source: str) -> bool:
     passed, including one whose body was replaced with stale or arbitrary text
     (fix round, rv_real04_bugs_REPORT.md finding 2).  This reconstructs the
     exact expected body via the same ``_window_body`` the producer uses and
-    requires the message body to equal it exactly, or to be a genuine
-    prefix+omission-marker+suffix truncation of it (the only shrink pattern
-    the producer emits) -- never an unrelated or edited body.
+    requires the message body to equal it exactly, or to be the explicit
+    read-only notice for this span. Synthetic gaps are never editable source.
     """
     if BOUNDED_SOURCE_HEADER not in text:
         return False
@@ -127,15 +131,7 @@ def verify_bounded_window(text: str, *, path: str, source: str) -> bool:
     if body.startswith("\n"):
         body = body[1:]
     expected = _window_body(source, start, end)
-    if body == expected:
-        return True
-    omission_wrapped = "\n" + OMISSION_MARKER + "\n"
-    if omission_wrapped not in body:
-        return False
-    prefix, _, suffix = body.partition(omission_wrapped)
-    return (bool(prefix or suffix)
-            and len(prefix) + len(suffix) < len(expected)
-            and expected.startswith(prefix) and expected.endswith(suffix))
+    return body in (expected, _read_only_window(start, end))
 
 
 def _window_text(path: str, source: str, target_fn: str, reference: str,
@@ -147,27 +143,21 @@ def _window_text(path: str, source: str, target_fn: str, reference: str,
     marker = (f"{BOUNDED_SOURCE_HEADER} path={path!r} lines={start}-{end} "
               f"reference={reference!r}")
     body = _window_body(source, start, end)
-    omission = OMISSION_MARKER
 
     def render(value: str) -> str:
         return f"{header}\n{marker}\n{value}"
 
     content = render(body)
-    # Keep both the declaration and the tail of a large target while shrinking
-    # deterministically against the same estimator used by StateFrame.  The
-    # fixed marker has a nonzero cost, so use a bounded loop and never retry an
-    # unchanged body when a caller supplies an impossibly small budget.
     for _ in range(24):
         if token_estimate({"role": "user", "content": content}) <= max(1, max_tokens):
             return content
-        if len(body) <= 32:
-            next_body = body[:max(0, len(body) // 2)]
-        else:
-            keep = max(4, (len(body) - len(omission) - 2) // 4)
-            next_body = body[:keep] + "\n" + omission + "\n" + body[-keep:]
-        if next_body == body:
-            next_body = body[:max(0, len(body) // 2)]
-        body = next_body
+        if len(body) > 32:
+            # This is precisely the old marker-insertion branch. Never expose
+            # its split source as editable; defer to exact read pages instead.
+            # Admission still owns the minimum cost of this fixed notice.
+            return render(_read_only_window(start, end))
+        # Preserve the legacy tiny-body path, which never inserted a marker.
+        body = body[:len(body) // 2]
         content = render(body)
     return content
 
