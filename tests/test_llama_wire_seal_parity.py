@@ -69,6 +69,7 @@ def _scripted_environment(tmp_path: Path) -> dict[str, str]:
                    if not name.startswith(("STATEFRAME_", "REACT_"))}
     environment.update({
         "PYTHONPATH": str(ROOT / "src"), "STATEFRAME_FINAL_CACHE_LAYOUT": "off",
+        "STATEFRAME_WORKING_SET_ALLOCATOR": "off",
         "STATEFRAME_PAGE_LOG": "off", "STATEFRAME_HOME": str(tmp_path / "state-home"),
         "PYTHONHASHSEED": "0", "PYTHONDONTWRITEBYTECODE": "1",
         PROVIDER_OVERRIDE_ENV: LLAMA_CPP,

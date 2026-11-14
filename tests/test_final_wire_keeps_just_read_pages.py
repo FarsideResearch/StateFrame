@@ -62,20 +62,21 @@ def _replay(tmp_path: Path, turns: int, allocator: str = "off") -> Path:
             "--runner-kind", "generic", "--protect-tests", "off",
             "--max-turns", str(turns), "--timeout", str(budget), "--quiet",
         ]
-        if allocator == "on":
-            # The harness strips ambient switches. Persist ON through the run
-            # profile so resume/replay sees the same explicit selection.
+        if allocator == "off":
+            environment["STATEFRAME_WORKING_SET_ALLOCATOR"] = "off"
+        else:
+            # Exercise the shipped default, with no allocator switch or custom profile.
+            assert "STATEFRAME_WORKING_SET_ALLOCATOR" not in environment
             profile = json.loads((ROOT / "src/stateframe/profiles/r2hc3.json").read_text())
-            profile["switches"]["STATEFRAME_WORKING_SET_ALLOCATOR"] = "on"
-            profile_path = tmp_path / "allocator-on.json"
-            profile_path.write_text(json.dumps(profile))
-            command.extend(["--profile", str(profile_path)])
+            assert profile["switches"]["STATEFRAME_WORKING_SET_ALLOCATOR"] == "on"
         run_monitored(command, expected_seconds=budget + 120, run_dir=run_dir,
                       step="retention replay", env=environment,
                       progress_probe=lambda: endpoint.request_count)
         # An aborted or stalled run would audit only a prefix and could pass vacuously.
         assert endpoint.request_count >= turns, (
             f"replay served {endpoint.request_count} of {turns} recorded turns")
+    spec = json.loads((run_dir / "spec.json").read_text())
+    assert spec["environment"]["STATEFRAME_WORKING_SET_ALLOCATOR"] == allocator
     result = _engine_result(run_dir)
     assert result is not None and not result.startswith("ERR"), (
         f"replay ended with engine result {result!r}, not a completed run")

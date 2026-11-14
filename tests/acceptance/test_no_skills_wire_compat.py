@@ -67,6 +67,8 @@ def _run_tree(root: Path, case: Path, repo: Path, script: Path, *,
 
     run_dir = case / "run"
     env = environment()
+    # Allocator default flipped ON in this release; this legacy no-skills wire test pins OFF bytes on purpose (approved).
+    env["STATEFRAME_WORKING_SET_ALLOCATOR"] = "off"
     env.pop("PYTHONPATH", None)
     env.pop("STATEFRAME_STABLE_TOOL_HEAD", None)
     env.pop("STATEFRAME_FINAL_CACHE_LAYOUT", None)

@@ -123,6 +123,8 @@ def test_tiny_site_scripted_run_preserves_whole_stable_messages(tmp_path):
     environment = {**os.environ, "PYTHONPATH": str(ROOT / "src")}
     environment["STATEFRAME_FINAL_CACHE_LAYOUT"] = "on"
     environment["STATEFRAME_STABLE_WIRE"] = "on"
+    # Stable-wire and allocator ON are deliberately incompatible.
+    environment["STATEFRAME_WORKING_SET_ALLOCATOR"] = "off"
     environment["STATEFRAME_STABLE_WIRE_HEADROOM"] = "16000"
     environment["STATEFRAME_PAGE_LOG"] = "off"
     try:
