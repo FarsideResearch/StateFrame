@@ -4750,9 +4750,9 @@
       "file": "src/stateframe/engine/probes/react_repair.py",
       "function": "work",
       "except_clause": "except Exception:",
-      "fingerprint": "31629c1d691d07d7f789e5f3",
+      "fingerprint": "0b8833ad3d77ba8f4de65c2e",
       "ordinal": 1,
-      "reason": "baseline debt 2026-11-05, see inventory",
+      "reason": "optional zero-hit grep help: a registry lookup failure only omits the positive definition hint and never produces an absence claim",
       "risk": "unclassified"
     },
     {
