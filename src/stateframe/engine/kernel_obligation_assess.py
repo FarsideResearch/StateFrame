@@ -2773,9 +2773,14 @@ def repair_packet(payload: Mapping[str, object] | None, *,
                     shortcut.pop("label", None)
     if scope is not None:
         from kernel_bound_edit import bind_target, enabled as bound_edit_enabled
+        from kernel_edit_affordance import _product_paths, whole_set_editable
         editable_paths = set(_strings(scope.get("editable_paths", ())))
+        whole_set = whole_set_editable(scope)
         for row in files:
-            row["editable"] = str(row.get("path", "")) in editable_paths
+            path = str(row.get("path", ""))
+            # A whole-product-set scope carries no list: every product file in the row is editable.
+            row["editable"] = (bool(_product_paths([path])) if whole_set
+                               else path in editable_paths)
         if bound_edit_enabled():
             bound_targets: dict[str, object] = {}
             for row in files:

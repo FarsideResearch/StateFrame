@@ -170,6 +170,10 @@ def auto_scope(task: str, product: dict[str, str], checks: dict[str, str]) -> li
 # is still present in the engine's sandbox as read-only context (see _child.py).
 DECLARE_ALL_LIMIT = 200
 
+# A fallback_full row lists at most this many extra tests/ files in public_tests (the checks the
+# run was given are always listed); the count of the rest is row["public_tests_omitted"].
+FALLBACK_PUBLIC_TESTS_CAP = 25
+
 # Where a row's editable scope came from, recorded as row["scope_source"] so a run shows it.
 SCOPE_EXPLICIT = "explicit"          # --target and/or --edit given
 SCOPE_INFERRED = "inferred"          # over the limit: auto_scope found files from the task/checks
@@ -301,11 +305,18 @@ def build_row(work: WorkCopy, *, task: str, checks: list[str] | None = None,
     # sandbox as context. Other tests stay in the repository copy, not the row.
     product, scoped, scope_source = resolve_edit_scope(
         task, all_product, target=target, edits=edits, steering=steering)
+    omitted_tests = 0
     if not scoped:
         # Other tests under tests/ (fixtures, conftest, helpers) stay visible as public test files.
-        for path, text in texts.items():
-            if path.startswith("tests/") and path not in public_tests:
-                public_tests[path] = text
+        # A whole-product-set fallback in a large repo keeps only a capped sample in the row (the
+        # full tests/ tree is still in the sandbox and protected there); omitted_tests counts the rest.
+        extra = [path for path in texts if path.startswith("tests/") and path not in public_tests]
+        if scope_source == SCOPE_FALLBACK_FULL:
+            extra.sort()
+            omitted_tests = max(0, len(extra) - FALLBACK_PUBLIC_TESTS_CAP)
+            extra = extra[:FALLBACK_PUBLIC_TESTS_CAP]
+        for path in extra:
+            public_tests[path] = texts[path]
     entry = target or guess_entry(product, {p: public_tests[p] for p in declared_checks})
     if entry is None:
         entry = _output_hint(task, product)
@@ -347,6 +358,8 @@ def build_row(work: WorkCopy, *, task: str, checks: list[str] | None = None,
         "test_src": public_tests[first_check],
         "_skip_db": True,
     }
+    if omitted_tests:
+        row["public_tests_omitted"] = omitted_tests
     if protect_tests != "all":
         row.update(protect_tests=protect_tests,
                    test_file_paths=sorted(test_files),

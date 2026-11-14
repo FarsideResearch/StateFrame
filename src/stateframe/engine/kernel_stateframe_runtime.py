@@ -20887,6 +20887,10 @@ class StateFrameRuntime:
         editable_paths = ()
         if isinstance(scope, Mapping):
             raw_paths = scope.get("editable_paths", ())
+            if scope.get("editable_all") is True:
+                from kernel_edit_affordance import resolve_editable_paths
+                raw_paths = resolve_editable_paths(
+                    scope, getattr(getattr(self, "owner", None), "task_row", None))
             if isinstance(raw_paths, Sequence) and not isinstance(raw_paths, (str, bytes)):
                 editable_paths = tuple(str(item).replace("\\", "/").lstrip("./")
                                        for item in raw_paths)

@@ -753,8 +753,50 @@ class FileSet:
         return ""
 
 
+# Above this many declared files a snapshot is stat-validated: unchanged files reuse the text and
+# digest read earlier, so a 6,800-file fallback_full run pays one stat per file per call and reads
+# only files that changed.  At or below it the plain read path is unchanged.  Mirrors
+# kernel_edit_affordance.COMPACT_EDIT_SCOPE_LIMIT.
+_SNAPSHOT_STAT_LIMIT = 200
+_SNAPSHOT_CACHE: dict[str, tuple[tuple[int, int, int], str, str]] = {}
+
+
+class _StatSnapshot(dict):
+    """A path -> text snapshot that also knows each file's sha256 (see _source_map_digest)."""
+
+    shas: dict[str, str | None]
+
+
+def _stat_source_snapshot(root: pathlib.Path, paths: Sequence[str]) -> "_StatSnapshot":
+    snapshot = _StatSnapshot()
+    snapshot.shas = {}
+    for path in paths:
+        target = root / path
+        try:
+            info = target.stat()
+            is_file = stat.S_ISREG(info.st_mode)
+        except OSError:
+            is_file = False
+        if not is_file:
+            snapshot[path] = None
+            snapshot.shas[path] = None
+            continue
+        signature = (info.st_mtime_ns, info.st_size, info.st_ino)
+        key = f"{root}\0{path}"
+        cached = _SNAPSHOT_CACHE.get(key)
+        if cached is None or cached[0] != signature:
+            text = target.read_text(errors="ignore")
+            cached = (signature, text, hashlib.sha256(text.encode("utf-8")).hexdigest())
+            _SNAPSHOT_CACHE[key] = cached
+        snapshot[path] = cached[1]
+        snapshot.shas[path] = cached[2]
+    return snapshot
+
+
 def _source_snapshot(root: pathlib.Path, paths: Sequence[str]) -> dict[str, str | None]:
     """Read declared files without turning a missing target into a harness crash."""
+    if len(paths) > _SNAPSHOT_STAT_LIMIT:
+        return _stat_source_snapshot(root, paths)
     snapshot: dict[str, str | None] = {}
     for path in paths:
         target = root / path
@@ -1018,6 +1060,11 @@ def _apply_revision_bound_insertion(
 
 
 def _source_map_digest(sources: Mapping[str, str | None]) -> str:
+    shas = getattr(sources, "shas", None)
+    if isinstance(shas, dict) and set(shas) == set(sources):
+        # Stat snapshot: same digest, without re-hashing unchanged files.
+        payload = [(path, shas[path]) for path in sorted(shas)]
+        return hashlib.sha256(json.dumps(payload, separators=(",", ":")).encode()).hexdigest()
     payload = [(path, hashlib.sha256(source.encode("utf-8")).hexdigest()
                 if isinstance(source, str) else None)
                for path, source in sorted(sources.items())]
@@ -1564,6 +1611,16 @@ def _attach_failure_tail(bolt, failure_tail: str) -> None:
             measurement.amend_receipt(receipts[-1])
 
 
+def _bounded_receipt_paths(paths: Sequence[str]) -> dict[str, object]:
+    """Receipt path evidence; a whole-product-set run keeps a sample and a count, not 6,800 paths.
+
+    The before/after digests still cover every declared file, so the evidence stays complete.
+    """
+    if len(paths) <= _SNAPSHOT_STAT_LIMIT:
+        return {"paths": list(paths)}
+    return {"paths": list(paths[:_SNAPSHOT_STAT_LIMIT]), "paths_count": len(paths)}
+
+
 def _annotate_receipt(bolt, *, paths: Sequence[str], scope: Sequence[str],
                       before: Mapping[str, str | None],
                       after: Mapping[str, str | None],
@@ -1573,7 +1630,7 @@ def _annotate_receipt(bolt, *, paths: Sequence[str], scope: Sequence[str],
     if not receipts:
         return
     receipts[-1].update({
-        "paths": list(paths),
+        **_bounded_receipt_paths(paths),
         "scope": list(scope),
         "before_digest": _source_map_digest(before),
         "after_digest": _source_map_digest(after),
@@ -1611,7 +1668,7 @@ def _record_rejected_edit_receipt(bolt, *, root: pathlib.Path, path: pathlib.Pat
     receipts = getattr(bolt, "_receipts", None)
     if receipts:
         receipts[-1].update({
-            "paths": list(paths),
+            **_bounded_receipt_paths(paths),
             "scope": list(scope),
             "before_digest": _source_map_digest(before),
             "after_digest": _source_map_digest(_source_snapshot(root, paths)),
@@ -6675,13 +6732,16 @@ def work(d, *, resume=None):
                                 "work_update", "note_update"}]
         from kernel_retained_context import tool_surface as retained_tool_surface
         tool_surface = retained_tool_surface(tool_surface)
-        from kernel_edit_affordance import (contract as edit_contract,
+        from kernel_edit_affordance import (COMPACT_EDIT_SCOPE_LIMIT, contract as edit_contract,
                                             measure_product_sizes, tool_surface as edit_surface)
         from kernel_green_lock import is_product_path as _is_product_path
         _declared_product_paths = tuple(path for path in fileset.paths
                                         if _is_product_path(path))
+        # Over the compact limit the contract never lists or measures files (it carries a
+        # whole-product-set marker), so reading every declared file here would be wasted I/O.
         _product_sizes = (measure_product_sizes(root, _declared_product_paths)
                           if multifile and not (fileset.entry_path and fileset.entry_fn)
+                          and len(_declared_product_paths) <= COMPACT_EDIT_SCOPE_LIMIT
                           else None)
         _edit_contract = edit_contract(multi_file=multifile,
                                        entry_path=fileset.entry_path, entry_fn=fileset.entry_fn,
@@ -6994,7 +7054,8 @@ def work(d, *, resume=None):
                                   if isinstance(_contract, dict) else None)
                     _listed = (_authority.get("editable_paths")
                                if isinstance(_authority, dict) else None)
-                    if isinstance(_listed, list) and relative not in _listed:
+                    if (isinstance(_listed, list) and not _authority.get("editable_all")
+                            and relative not in _listed):
                         _listed.append(relative)
                 _scope_widen_notes.append(note)
             return note
