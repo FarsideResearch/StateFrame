@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Fixed: clipped source previews now provide read-only recovery guidance, and edits copied from omission markers explain how to re-read the original source while preserving literal marker text in files.
+
 ## 0.6.35 (2026-11-14)
 
 - Fixed: with `STATEFRAME_FINAL_CACHE_LAYOUT=on`, a tool result or assistant message that happened to contain the text `[CONTINUATION LIMITS |` or `[StateFrame authority]`, or a user message before the tool exchange that started with `[StateFrame]`, could end the run with "final cache authority is not unique or physically final" or "requires the canonical frame input". Both final-layout entry points now find the frame and the authority row by where the host placed them (the row before the tool exchange and the final row), and never read text inside assistant, tool or earlier user messages as a host marker. A host-owned frame or authority row that is genuinely malformed still fails as before.

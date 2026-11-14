@@ -371,6 +371,11 @@ def validated_str_replace(path: pathlib.Path, old_str: str, new_str: str, *,
             return "str_replace REJECTED: " + _workspace_truth.render_fact(fact)
         return f"str_replace REJECTED: {path.name} does not exist."
     current = _read_source(path, nonpy=_v21_nonpy_enabled(path))
+    from kernel_edit_guard import omission_anchor_rejection
+    rejection = omission_anchor_rejection(old_str, source=current)
+    if rejection is not None:
+        # Presentation gaps are recovery instructions, never resubmittable drafts.
+        return "str_replace REJECTED: " + rejection
     count = current.count(old_str)
     if count != 1:
         reason = ("old_str not found. Copy the exact current text (check whitespace)"
