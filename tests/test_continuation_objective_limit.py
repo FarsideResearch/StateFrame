@@ -170,3 +170,13 @@ def test_long_dependency_path_uses_bounded_digest_key() -> None:
     assert all(len(key) <= 1024 for key in dependencies)
     changed = {"product_files": {path: "sha256:" + "b" * 64}, "harness_files": {}}
     assert binding_versions(changed)["product_files:*"] != dependencies["product_files:*"]
+
+
+def test_long_objective_with_lone_surrogate_is_bounded_and_deterministic() -> None:
+    task = "x" * 5000 + "\ud800"
+    first = _bounded_objective(task)
+    second = _bounded_objective(task)
+
+    assert isinstance(first, str)
+    assert len(first) <= MAX_CONTINUATION_TEXT_CHARS
+    assert first == second

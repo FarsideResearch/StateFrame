@@ -103,7 +103,7 @@ def bounded_objective(value: object) -> str:
     if len(value) <= MAX_CONTINUATION_TEXT_CHARS:
         return text(value, "objective")
 
-    checksum = hashlib.sha256(value.encode("utf-8")).hexdigest()
+    checksum = hashlib.sha256(value.encode("utf-8", "surrogatepass")).hexdigest()
     marker = f"\n\n[Objective truncated; full_length={len(value)}; sha256={checksum}]"
     prefix_limit = MAX_CONTINUATION_TEXT_CHARS - len(marker)
     cut = value[:prefix_limit]

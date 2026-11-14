@@ -173,7 +173,7 @@
   "kernel_continuation_retention.py": "0f03f5c77a885814daf52bbf76afc5f3162bbef7e72fcab1868f771d2adc277b",
   "kernel_continuation_runtime.py": "f8cd83ced08a3d35a3810e29848ea47846c85e3a54b92b600117cb8bda75733c",
   "kernel_continuation_source.py": "12ff87addf1f6bcbdb173b875273136231f172ebce3b48c516605fd4e868bd6c",
-  "kernel_continuation_state.py": "ea956bc2254990db2dd39b5ea395dfd28b708ff664b4d5e2048c39b22b1dc192",
+  "kernel_continuation_state.py": "67796c3da67006b18f592c953746d78e1efb8b7efe8e3c80b4bab01fb960a0ae",
   "kernel_continuation_workspace.py": "10b53558f822a6955989a3334fd32d5f3718ae80627fceec1a15f48f7b988264",
   "kernel_control_plane_audit.py": "f8b78b849f1239eca99257e07a1db7b436dae052908e919149f7298d37c75a2a",
   "kernel_control_plane_receipts.py": "debdb4b06e03e13d49d29c816d6fa689caa03305674a879e8302e4fe2828760b",
