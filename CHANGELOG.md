@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.6.17 (2026-11-13)
 
 - Fixed: successful nonempty reads of source absent from the submitted request are budget-exempt recovery reads, counted separately; visible pages and clipped windows retain revision-bound line/column coverage across annotations and queued-call resume, and recovered bytes cannot claim novelty again.
 
