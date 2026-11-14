@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.6.37 (2026-11-14)
 
 - The shipped `r2hc3` profile now omits the tool-call ids (`history_digest.call_ids`) from the state-frame history digest sent to the model; `STATEFRAME_HISTORY_DIGEST_IDS=on` restores them. The ids stay in the host ledger and journal proofs, and a paired temperature-0 replay of 30 recorded steps showed model behaviour unchanged without them.
 
