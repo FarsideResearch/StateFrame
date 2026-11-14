@@ -287,7 +287,7 @@ def test_off_provider_bytes_match_group_base(tmp_path, tmp_path_factory):
     import sys
     from tools.pinned_tree import pinned_tree
 
-    baseline = pinned_tree("936a59be20", tmp_path_factory)
+    baseline = pinned_tree("1f6b7e9bc1", tmp_path_factory)
     current = Path(__file__).resolve().parents[1]
     driver = '''
 import json, sys

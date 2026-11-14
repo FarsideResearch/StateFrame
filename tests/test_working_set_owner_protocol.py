@@ -155,7 +155,7 @@ def test_permission_transitions_do_not_reuse_a_cached_recovery_promise():
 
 @pytest.mark.parametrize("reference", [
     "56af0dc6d6",
-    "936a59be20",
+    "1f6b7e9bc1",
 ])
 def test_off_request_bytes_match_assigned_g2_base(tmp_path, tmp_path_factory, reference):
     from tools.pinned_tree import pinned_tree

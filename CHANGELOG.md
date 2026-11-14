@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Tests: working-set reference results are frozen as deterministic JSON fixtures so single-branch clones can run parity checks without retired branch objects; a guard requires Git oracle revisions to be ancestors of HEAD. Read metadata stays bound to 0.6.23, with later-source metadata preserved as provenance. The guard also checks working-set pinned-tree calls, parity delegates and reference parameters.
 - Read-loop fixer wave: retire obsolete exposed source without reintroducing stale pages, preserve overflow exposure debt, and certify explicit unavailable-read notices. Reserve retirement retains protected pages and pages lacking a valid omission representation.
 - Read admission reserves bounded pending results, refuses unbounded producers, shares preparation's token authority, and resets at each sealed request. Snapshot failures use typed suspension and conservative read admission; cache proof failures retry plain layout once. Allocator requests price bounded execution/transcript variants and explicitly refuse incompatible stable-wire mode.
 - Accepted historical source exposure remains valid for native edit anchors. Traceback protection follows workspace/edit authority; coverage heals before certification; every plan deferral has a wire notice; read facts describe the ranges actually attached, including after receipt compaction. Preparation audit events have explicit safe resume policies. Added regression coverage and a test-only view-ladder ownership contract; no production ladder hook exists on this base.

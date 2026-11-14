@@ -1,8 +1,14 @@
-"""Deterministic randomized checks and wall limits for the recorded 98-slot layout."""
+"""Exact baseline differential and wall limits for the recorded 98-slot layout."""
+import gzip
 import itertools
 import json
+import os
 import random
-from dataclasses import replace
+import subprocess
+import sys
+from dataclasses import asdict, dataclass, fields, is_dataclass, replace
+from enum import Enum
+from pathlib import Path
 from time import perf_counter
 
 import pytest
@@ -12,7 +18,12 @@ from kernel_working_set_prepare import PreparedCandidate, prepare_candidate
 from kernel_working_set_proof import CertificateError, verify_certificate
 from kernel_working_set_render import domain, render_assignment
 from test_working_set_prepare import snapshot, source
-from working_set_benchmark import admission, admit_request, recorded_snapshot
+from tools.pinned_tree import pinned_tree
+from working_set_benchmark import admission, admit_request, recorded_read, recorded_snapshot
+
+ROOT = Path(__file__).resolve().parents[1]
+FIXTURES = ROOT / "tests/fixtures"
+
 
 def random_cases():
     rng = random.Random(50834)
@@ -53,17 +64,105 @@ def random_cases():
     return cases
 
 
-def test_randomized_assignments_are_deterministic_and_certified():
+def oracle_value(value):
+    """Lossless JSON projection: include every field, byte and container/type tag."""
+    kind = type(value).__module__ + "." + type(value).__qualname__
+    if isinstance(value, Enum):
+        return {"$enum": kind, "value": oracle_value(value.value)}
+    if is_dataclass(value):
+        return {"$type": kind, "fields": {
+            field.name: oracle_value(getattr(value, field.name)) for field in fields(value)}}
+    if isinstance(value, bytes):
+        return {"$bytes": value.hex()}
+    if isinstance(value, tuple):
+        return {"$tuple": [oracle_value(item) for item in value]}
+    if isinstance(value, list):
+        return [oracle_value(item) for item in value]
+    if isinstance(value, dict):
+        assert all(isinstance(key, str) for key in value), "oracle requires string keys"
+        return {key: oracle_value(item) for key, item in value.items()}
+    if value is None or isinstance(value, (str, bool, int, float)):
+        return value
+    raise TypeError(f"unsupported oracle value: {kind}")
+
+
+@pytest.mark.parametrize("baseline", ["7467debf1", "911db220e"])
+def test_pinned_baseline_exact_results_and_randomized_assignments(baseline):
+    # Captured once by the old isolated reference_results path, before its removal.
+    # JSON is sorted/compact; gzip mtime=0 follows the recorded 98-slot fixture.
+    expected = json.loads(gzip.decompress(
+        (FIXTURES / f"working_set_reference_{baseline}.json.gz").read_bytes()))
+    assert expected["schema"] == "working-set-reference/1"
+    assert expected["baseline"].startswith(baseline)
+    # Keep the old allocator oracle, with read metadata bound to the target
+    # release. Its four later text-inspection fields remain in provenance.
+    assert expected["read_base"] == "1de34aa46b01deb0aecf2d43287e45df4134809f"
+    assert set(expected["source_read_metadata"]) == {
+        "bom", "newline_style", "newline_styles", "valid_utf8"}
     cases = [(recorded_snapshot(), ()), *random_cases()]
-    for snap, assignments in cases:
+    for index, ((snap, assignments), reference) in enumerate(zip(cases, expected["cases"], strict=True)):
         actual = prepare_candidate(snap)
-        assert actual == prepare_candidate(snap)
-        assert tuple(render_assignment(snap, assignment, layout)
-                     for assignment in assignments for layout in snap.layouts) == tuple(
-            render_assignment(snap, assignment, layout)
-            for assignment in assignments for layout in snap.layouts)
+        assert oracle_value(actual) == reference["prepared"], (baseline, index)
+        renders = (render_assignment(snap, assignment, layout)
+                   for assignment in assignments for layout in snap.layouts)
+        for ordinal, (rendered, pinned) in enumerate(zip(renders, reference["renders"], strict=True)):
+            assert oracle_value(rendered) == pinned, (baseline, index, ordinal)
         if isinstance(actual, PreparedCandidate):
             assert verify_certificate(actual.wire, actual.rendered.certificate)
+    assert oracle_value(admission(cases[0][0])) == expected["admission"]
+    assert oracle_value(admit_request(cases[0][0])) == expected["read"]
+    print(f"exact differential: {len(cases)} preparations, "
+          f"{sum(len(a) for _, a in cases)} assignments, cold and fresh admission floors")
+
+
+def test_recorded_read_matches_target_release_in_every_field(tmp_path_factory):
+    base = pinned_tree("56af0dc6d6", tmp_path_factory)
+    raw, display, request, page = recorded_read()
+    driver = '''
+import json, sys
+from dataclasses import asdict
+from kernel_source_delivery import deliver_source, normalize_read_request
+data = json.loads(sys.stdin.read())
+page = deliver_source(bytes.fromhex(data["raw"]), data["display"], 1,
+                      args=normalize_read_request(data["arguments"]))
+print(json.dumps(asdict(page), sort_keys=True))
+'''
+    environment = {key: value for key, value in os.environ.items()
+                   if not key.startswith("STATEFRAME_")}
+    environment["PYTHONPATH"] = os.pathsep.join(map(str, (
+        base / "src/stateframe/engine", base / "src")))
+    result = subprocess.run([sys.executable, "-c", driver], cwd=base, env=environment,
+                            input=json.dumps({"raw": raw.hex(), "display": display,
+                                              "arguments": dict(request.arguments)}),
+                            capture_output=True, text=True, timeout=30, check=True)
+    assert json.loads(result.stdout) == asdict(page)
+
+
+def test_oracle_value_preserves_fields_types_and_exact_bytes():
+    class Mode(str, Enum):
+        FULL = "FULL"
+
+    @dataclass(frozen=True)
+    class Result:
+        wire: bytes
+        details: tuple
+
+    value = Result(b'"\\\x00\xff', (Mode.FULL, ["λ", None, True, 1, -0.0]))
+    encoded = oracle_value(value)
+    assert encoded == {
+        "$type": type(value).__module__ + "." + type(value).__qualname__,
+        "fields": {"wire": {"$bytes": "225c00ff"}, "details": {"$tuple": [
+            {"$enum": Mode.__module__ + "." + Mode.__qualname__, "value": "FULL"},
+            ["λ", None, True, 1, -0.0]]}}}
+    assert json.loads(json.dumps(encoded, sort_keys=True, allow_nan=False)) == encoded
+    assert oracle_value(("a",)) != oracle_value(["a"])
+    assert oracle_value(Mode.FULL) != oracle_value("FULL")
+    assert oracle_value(replace(value, wire=value.wire + b" ")) != encoded
+    assert oracle_value({"result": value}) == {"result": encoded}
+    with pytest.raises(TypeError, match="unsupported oracle value"):
+        oracle_value(object())
+    with pytest.raises(AssertionError, match="string keys"):
+        oracle_value({1: "not a JSON key"})
 
 
 def test_recorded_98_slot_wall_limits():

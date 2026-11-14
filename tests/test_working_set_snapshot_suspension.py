@@ -213,4 +213,4 @@ def test_invalid_snapshot_failure_cannot_claim_a_floor(tmp_path, monkeypatch, fa
 def test_off_request_bytes_match_carried_3b(tmp_path, tmp_path_factory):
     from test_working_set_astra_off_parity import test_off_provider_bytes_match_cutover_base
 
-    test_off_provider_bytes_match_cutover_base(tmp_path, tmp_path_factory, "936a59be20")
+    test_off_provider_bytes_match_cutover_base(tmp_path, tmp_path_factory, "1f6b7e9bc1")
