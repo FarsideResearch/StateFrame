@@ -1356,6 +1356,7 @@ def _finalize_frame_candidate(
 
     seen: set[tuple[tuple[str, ...], str]] = set()
     candidate_wire = b""
+    layout_reserve_released = False
     # Each selected path may first defer its omitted closure units and later
     # lose its retained read pages under pressure. The initial candidate may
     # also contain retained pages before any path is deferred.
@@ -1513,11 +1514,30 @@ def _finalize_frame_candidate(
                     and request_bytes <= byte_limit
                     and frame_token_count <= runtime.frame_ceiling):
                 exact_tokens, exact_method = decision(3, candidate, lambda: meter.measure(candidate))
+                from kernel_endpoint_size import ENDPOINT_SIZE, DEFAULT_CONTEXT_TOKENS
+                plain_minimum_fits = (
+                    ENDPOINT_SIZE.context_tokens < DEFAULT_CONTEXT_TOKENS
+                    and layout_token_reserve > 0
+                    and token_limit < exact_tokens <= token_ceiling
+                )
                 if (exact_method == "tokenize"
-                        and exact_tokens <= token_limit
+                        and (exact_tokens <= token_limit or plain_minimum_fits)
                         and within_protected_capacity(
                             candidate, protected, exact_tokenizer=True,
                         )):
+                    if plain_minimum_fits:
+                        # Optional cache-layout headroom must not reject a
+                        # source-qualified plain minimum that actually fits.
+                        # The final renderer will measure its projection and
+                        # publish an honest plain fallback if it cannot fit.
+                        capture.journal.emit(
+                            "frame_layout_reserve_released", request_id=capture.request_id,
+                            prompt_tokens=exact_tokens, max_prompt_tokens=token_ceiling,
+                            released_tokens=layout_token_reserve, dispatch=False,
+                        )
+                        token_limit = token_ceiling
+                        layout_token_reserve = 0
+                        layout_reserve_released = True
                     tokens = exact_tokens
                     _remember_exact_pair(candidate, meter, tokens)
                     break
@@ -1530,6 +1550,7 @@ def _finalize_frame_candidate(
                     "frame_tokens": frame_token_count,
                     "max_request_bytes": byte_limit,
                     "max_prompt_tokens": token_limit,
+                    "layout_token_reserve": layout_token_reserve,
                     "frame_ceiling": runtime.frame_ceiling,
                     "read_unavailable": not read_available,
                     "protected_request_bytes": protected_bytes(candidate, protected),
@@ -1636,6 +1657,7 @@ def _finalize_frame_candidate(
             "request_bytes": request_bytes, "prompt_tokens": tokens,
             "measure_method": method, "max_request_bytes": byte_limit,
             "max_prompt_tokens": token_limit,
+            "layout_token_reserve": layout_token_reserve,
         })
     # Bind the fitted body while retaining the method and ratio captured before
     # trimming. Later tokenizer availability cannot change this allocation.
@@ -1669,7 +1691,7 @@ def _finalize_frame_candidate(
     candidate_module = sys.modules.get("kernel_cache_layout_candidate")
     replay_decision_fn = getattr(candidate_module, "replay_final_layout_decision", None)
     replay_decision = replay_decision_fn() if callable(replay_decision_fn) else None
-    if layout_enabled and replay_decision != "plain":
+    if layout_enabled and replay_decision != "plain" and not layout_reserve_released:
         base_token_limit = token_ceiling
         base_byte_limit = byte_limit
         trim_calls = 0

@@ -10412,6 +10412,11 @@ def work(d, *, resume=None):
                     finish_pending(measurement, error=sys.exc_info()[1])
                     measurement.finish(outcome, messages=msgs)
                     return _attach_env_receipt(outcome, measurement)
+                # Capacity exhaustion is host control flow. Let the outer
+                # terminal owner finish it before this legacy crash reporter.
+                from kernel_frame_allocation_capture import FrameFit5ImpossibleMinimum
+                if isinstance(e, FrameFit5ImpossibleMinimum):
+                    raise
                 # earlier run: never lose the cause of an ERR:* outcome (smoke 295 ran blind).
                 import traceback as _err_tb
                 _err_trace = _err_tb.format_exc()[-6000:]
@@ -14950,6 +14955,30 @@ def work(d, *, resume=None):
                 finish_transcript=finish_native_batch_transcript,
                 attach=_attach_env_receipt,
             )
+        from kernel_frame_allocation_capture import FrameFit5ImpossibleMinimum
+        if isinstance(exc, FrameFit5ImpossibleMinimum):
+            from kernel_context_floor import context_floor
+            if measurement is not None:
+                measurement.journal.emit(
+                    "frame_minimum_exhausted", minimum_detail=exc.detail, dispatch=False,
+                )
+            capacity_stop = context_floor(exc.detail)
+            if capacity_stop is not None:
+                outcome = dict(
+                    fn=fn, steps=_exception_steps, edits=_reported_edits,
+                    tests=_reported_checks, behaviour="unverified",
+                    **capacity_stop.terminal_fields(),
+                )
+                if measurement is not None:
+                    measurement.system_outcome = "context_too_small"
+                    measurement.journal.emit(
+                        "context_too_small", **capacity_stop.terminal_fields(),
+                        minimum_detail=exc.detail, dispatch=False,
+                    )
+                    _messages = locals().get("msgs")
+                    finish_native_batch_transcript(_messages)
+                    measurement.finish(outcome, messages=_messages)
+                return _attach_env_receipt(outcome, measurement)
         if not isinstance(exc, ParentBudgetExhausted):
             if os.environ.get('REACT_STEP_CONTRACT', '0') != '1':
                 # prior run: this re-raise left NO journal row while finish() closed the

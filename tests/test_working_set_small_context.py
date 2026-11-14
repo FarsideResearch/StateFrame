@@ -51,14 +51,28 @@ def test_allocator_on_16k_context_runs_or_stops_typed(tmp_path):
     for error in ("FrameRequestAllocationError", "FrameFit5ImpossibleMinimum"):
         assert error not in output, output[-12000:]
     summary = json.loads(completed.stdout)
-    assert summary["runtime_outcome"] in {"completed", "incomplete", "budget_stop", "suspended"}, summary
+    assert summary["runtime_outcome"] in {
+        "completed", "incomplete", "budget_stop", "suspended", "context_too_small",
+    }, summary
     assert summary["engine_result"] and not summary["engine_result"].startswith("ERR"), summary
-    assert completed.returncode in (0, 1), summary
-    if summary["engine_result"] == "BLOCKED":
+    if summary["runtime_outcome"] == "context_too_small":
+        terminal = summary["engine_terminal"]
+        assert completed.returncode == 2, summary
+        assert summary["engine_result"] != "BLOCKED", summary
+        assert terminal["reason_code"] == "CONTEXT_TOO_SMALL", terminal
+        assert terminal.get("resumable") is not True, terminal
+        assert "suspension" not in terminal, terminal
+        assert terminal["configured_context_tokens"] == 16_384
+        assert terminal["minimum_context_tokens"] > 16_384
+        assert not script.requests
+        assert summary["provider_sends"] == 0
+    elif summary["engine_result"] == "BLOCKED":
+        assert completed.returncode == 1, summary
         terminal = summary["engine_terminal"]
         assert summary["runtime_outcome"] == "suspended"
         assert terminal["resumable"] is True
         assert terminal["reason_code"] == "WORKING_SET_ALLOCATION_BLOCKED"
         assert terminal["suspension"]["proof"]["verified"] is True
     else:
+        assert completed.returncode == 0, summary
         assert script.requests, "run neither reached the provider nor returned a typed suspension"

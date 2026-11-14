@@ -385,6 +385,8 @@ SAFE_TAIL = frozenset({
     "working_set_prepared",  # proved candidate; submission owns lifecycle transitions
     # Preparation diagnostics only; certification/submission retain authority.
     "final_cache_layout_failed_open", "context_claim_reconciled",
+    # Frame-fit preparation audits (dispatch=False); the request is re-derived on replay.
+    "frame_layout_reserve_released", "frame_minimum_exhausted",
     "working_set_shadow_plan",  # observational candidate proof, never dispatch authority
     "continuation_writer_resumed", "rich_state_committed", "snapshot_committed",
     "history_decision", "history_exchange_removed", "selection_decision",
@@ -973,6 +975,9 @@ DOCUMENTED_REJECT.update({
     ),
     "wire_truth_fact_evidence_failure": (
         "Unavailable wire-truth evidence changes request facts or aborts dispatch preparation."
+    ),
+    "context_too_small": (
+        "A typed context-floor stop finishes the run before dispatch; a checkpoint tail cannot resume past it."
     ),
 })
 

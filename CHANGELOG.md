@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Small model contexts now exhaust safe frame compaction and source deferral before returning a clean `CONTEXT_TOO_SMALL` result with the measured minimum context, configured size, and an actionable message; zero-line source reservations retain their revision-bound read obligation and put its deferral notice on the measured wire. With the allocator enabled, a proven mandatory floor that exceeds a reduced context slot maps to the same pre-dispatch terminal instead of a resumable suspension; non-context floor failures remain resumable.
+
 - The working-set allocator is now on by default in the shipped profile. Set `STATEFRAME_WORKING_SET_ALLOCATOR=off` to opt out.
 ## 0.6.45 (2026-11-15)
 

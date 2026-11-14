@@ -24737,6 +24737,25 @@ class StateFrameRuntime:
                     source_plan = getattr(self, "_request_source_closure", None)
                 if isinstance(source_plan, Mapping):
                     previous_source_delivery = getattr(capture, "request_source_final_delivery", None)
+                    deferred_paths = source_plan.get("deferred_paths", ())
+                    if (isinstance(deferred_paths, Sequence)
+                            and not isinstance(deferred_paths, (str, bytes, bytearray))
+                            and deferred_paths):
+                        # Final host composition may retire a notice that was
+                        # present in the measured draft. Reconcile it on the
+                        # admitted body before the exact final receipt and
+                        # downstream wire-capacity fit.
+                        from kernel_request_source_window import upsert_deferred_source_notice
+                        from kernel_workspace_truth import enabled as workspace_truth_enabled
+                        if workspace_truth_enabled():
+                            from kernel_read_reuse_visibility import _runtime_workspace_context
+                            workspace_root, revision, journal = _runtime_workspace_context(self)
+                            upsert_deferred_source_notice(
+                                prepared, deferred_paths, workspace_root=workspace_root,
+                                revision=revision, journal=journal,
+                            )
+                        else:
+                            upsert_deferred_source_notice(prepared, deferred_paths)
                     source_contents = {
                         str(path): str(row.get("content"))
                         for path, row in getattr(self, "_empirical_frame_sources", {}).items()
