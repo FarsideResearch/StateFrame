@@ -8,6 +8,7 @@ The journal's validated replay reconstructs this cache after restart.
 from __future__ import annotations
 
 import copy
+import os
 from collections.abc import Mapping, Sequence
 
 from kernel_stateframe_capacity import _fold, _sha
@@ -195,13 +196,56 @@ def validate_context(context: Mapping[str, object]) -> Mapping[str, object] | No
     return history
 
 
+# Model-facing digest ids. "on" (the engine default, legacy bytes) renders the recent
+# tool-call id frontier inside the StateFrame block; "off" omits it. The ids stay in the
+# host ledger and its journal proofs either way: under the coverage contract the frontier
+# is a display, and coverage is proven by call_count, the id chain and the host index.
+HISTORY_DIGEST_IDS_SWITCH = "STATEFRAME_HISTORY_DIGEST_IDS"
+
+
+def history_digest_ids_enabled(environ: Mapping[str, str] | None = None) -> bool:
+    values = os.environ if environ is None else environ
+    value = str(values.get(HISTORY_DIGEST_IDS_SWITCH, "on") or "on").strip().lower()
+    if value not in {"on", "off"}:
+        raise ValueError(f"{HISTORY_DIGEST_IDS_SWITCH} must be on or off")
+    return value == "on"
+
+
+def model_facing_digest(digest: Mapping[str, object],
+                        environ: Mapping[str, str] | None = None) -> dict[str, object]:
+    """A copy of the ledger digest as the model sees it.
+
+    With the switch off, a coverage-contract digest drops its ``call_ids`` frontier.
+    A legacy digest enumerates every id as the coverage authority, so it is never cut.
+    """
+    projected = copy.deepcopy(dict(digest))
+    if not history_digest_ids_enabled(environ) and "coverage_contract" in projected:
+        projected.pop("call_ids", None)
+    return projected
+
+
+def model_facing_payload(payload: Mapping[str, object]) -> Mapping[str, object]:
+    """Project at serialization too: capacity folding can rebuild the frontier."""
+    state = payload.get("state")
+    frame = state.get("framefit5") if isinstance(state, Mapping) else None
+    ledger = frame.get("action_ledger") if isinstance(frame, Mapping) else None
+    digest = ledger.get("history_digest") if isinstance(ledger, Mapping) else None
+    if (not isinstance(digest, Mapping) or "coverage_contract" not in digest
+            or history_digest_ids_enabled()):
+        return payload
+    # Copy only the path to the digest; the host's candidate and proof stay intact.
+    return {**payload, "state": {**state, "framefit5": {
+        **frame, "action_ledger": {**ledger, "history_digest": model_facing_digest(digest)},
+    }}}
+
+
 def attach_history(state: dict[str, object], context: Mapping[str, object]) -> None:
     history = validate_context(context)
     if history is None:
         return
     digest = history.get("history_digest")
     if isinstance(digest, Mapping):
-        state["action_ledger"]["history_digest"] = copy.deepcopy(dict(digest))
+        state["action_ledger"]["history_digest"] = model_facing_digest(digest)
     for name in ("historical_read_facts", "historical_applied_edits"):
         if history[name]["count"]:
             state[name] = copy.deepcopy(history[name])

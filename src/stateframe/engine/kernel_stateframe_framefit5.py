@@ -56,7 +56,9 @@ def _json_text(value: object) -> str:
 
 def _serialize_state_message(payload: Mapping[str, object]) -> str:
     """Serialize one complete StateFrame payload after its structured fields are assembled."""
-    return serialize_stateframe_payload(payload)
+    from kernel_framefit_receipt_history import model_facing_payload
+
+    return serialize_stateframe_payload(model_facing_payload(payload))
 
 
 def _json_value(value: object) -> object:
