@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 from dataclasses import replace
 from pathlib import Path
 
@@ -48,7 +49,8 @@ def provision(options, run_dir: Path, spec: dict) -> None:
                 authorized_read_roots=tuple(Path(path).resolve(strict=True) for path in settings.shell_read),
                 allow_source_tree=getattr(options, "allow_source_tree", False))
         except RunEnvError as error:
-            print(f"run environment off: {error}; dependency installs will not persist for checks")
+            print(f"run environment off: {error}; dependency installs will not persist for checks",
+                  file=sys.stderr)
             settings = replace(settings, run_env=False)
             options.tool_settings = settings
             spec["tool_settings"] = settings.as_dict()

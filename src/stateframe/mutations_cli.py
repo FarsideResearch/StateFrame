@@ -621,9 +621,14 @@ def dispatch(args: argparse.Namespace) -> int:
         return _command(args)
     except _Refusal as error:
         print(f"refused: {error}", file=sys.stderr)
+        if getattr(args, "json", False):
+            _json({"error": f"refused: {error}", "exit_code": 2, "succeeded": False})
         return 2
     except (KeyboardInterrupt, SystemExit):
         raise
     except BaseException as error:
         print(f"error: {type(error).__name__}: {error}", file=sys.stderr)
+        if getattr(args, "json", False):
+            _json({"error": f"error: {type(error).__name__}: {error}",
+                   "exit_code": 1, "succeeded": False})
         return 1
