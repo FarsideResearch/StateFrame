@@ -108,5 +108,71 @@ def frozen_plan_windows(runtime, existing, current_revisions):
         proposed.append(SourceSlot(key, (key,), identity, payload, page, *evidence,
             json.dumps({"path": path, "start_line": first, "end_line": last}).encode(),
             ordinal, 0, state, kind="tests" if path.startswith("tests/") else "context",
-            payload_start=len(page[:payload_start].encode())))
+            payload_start=len(page[:payload_start].encode()), plan_only=True))
+    return tuple(proposed), revisions
+
+
+def frozen_embedded_windows(runtime, messages, existing, current_revisions):
+    """Offer embedded heads and edit frontiers to the same solver.
+
+    These bytes used to escape source budgeting inside typed JSON. Freeze their
+    raw revision here, before rendering; the oracle never reads workspace files.
+    """
+    from kernel_read_receipts import DecodedSpan, ReceiptIdentity, line_digests_with_numbers
+    from kernel_stateframe_framefit5 import _workspace_root
+    from kernel_stateframe_action_ledger import _read_open_site_file_bytes
+    from kernel_working_set_snapshot import SourceSlot, SnapshotConstructionError
+    from kernel_request_source_window import _safe_framefit_path
+
+    proposed, revisions = [], {}
+    ordinal = max((slot.admission_ordinal for slot in existing), default=0)
+    for message in messages:
+        content = message.get("content")
+        if not isinstance(content, str) or not content.startswith("[StateFrame]\n"):
+            continue
+        frame = json.loads(content.split("\n", 1)[1]).get("state", {}).get("framefit5", {})
+        heads = frame.get("headcarry", {}).get("heads", ())
+        sites = list(frame.get("open_sites", ()))
+        if isinstance(frame.get("next_site"), dict):
+            sites.append(frame["next_site"])
+        rows = [(row, "content", "line_range") for row in heads]
+        rows += [(row, "current_bytes", "lines") for row in sites]
+        # Ledger pins are historical evidence, not current source proposals.
+        # Active read obligations already have frozen capture-backed slots;
+        # retired pins must never be revalidated against today's workspace.
+        for row, field, coordinate in rows:
+            payload, bounds = row.get(field), row.get(coordinate)
+            if not isinstance(payload, str) or not payload or not isinstance(bounds, dict):
+                continue
+            path, revision = row.get("path"), row.get("revision")
+            first, last = bounds.get("start"), bounds.get("end")
+            if (not isinstance(path, str) or _safe_framefit_path(path) != path
+                    or type(first) is not int or type(last) is not int or not 1 <= first <= last):
+                raise SnapshotConstructionError("SOURCE_SNAPSHOT_UNSTABLE")
+            if any(slot.identity.path == path and slot.identity.revision == revision
+                   and slot.identity.first_line <= first and slot.identity.last_line >= last
+                   and payload in slot.payload for slot in (*existing, *proposed)):
+                continue
+            try:
+                raw = _read_open_site_file_bytes(_workspace_root(runtime), path)
+            except (OSError, RuntimeError, ValueError) as error:
+                raise SnapshotConstructionError("SOURCE_SNAPSHOT_UNSTABLE") from error
+            if ("sha256:" + hashlib.sha256(raw).hexdigest() != revision
+                    or (path in current_revisions and current_revisions[path] != revision)):
+                raise SnapshotConstructionError("SOURCE_SNAPSHOT_UNSTABLE")
+            lines = raw.decode("utf-8").splitlines(keepends=True)
+            if last > len(lines) or "".join(lines[first - 1:last]) != payload:
+                raise SnapshotConstructionError("SOURCE_SNAPSHOT_UNSTABLE")
+            revisions[path] = revision
+            identity = ReceiptIdentity(path, revision, first, last, None, None,
+                hashlib.sha256(payload.encode()).hexdigest(),
+                DecodedSpan(0, len(lines[last - 1]), "model-source-window/1"))
+            key = "embedded:" + hashlib.sha256(repr(identity).encode()).hexdigest()
+            page, start = render_frozen_span({"path": path, "revision": revision,
+                "total_lines": len(lines)}, {"start_line": first, "end_line": last}, payload)
+            ordinal += 1
+            proposed.append(SourceSlot(key, (key,), identity, payload, page,
+                *line_digests_with_numbers(payload, first),
+                json.dumps({"path": path, "start_line": first, "end_line": last}).encode(),
+                ordinal, 0, "CLOSURE", payload_start=start))
     return tuple(proposed), revisions

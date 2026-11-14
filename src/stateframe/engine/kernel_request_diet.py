@@ -3391,6 +3391,15 @@ def apply_diet(
     paths may be deferred only when the request carries the ``read`` tool and an
     exact host notice. ``None`` keeps the legacy bounded-window protection.
     """
+    from kernel_read_receipts import enabled as allocator_enabled
+    allocator_on = allocator_enabled()
+    # Source bodies remain proposals until the complete-wire allocator assigns
+    # them. Diet may compact narrative, but cannot select/defer source or veto
+    # the allocator with a source subbudget.
+    if allocator_on and isinstance(body, dict) and isinstance(body.get("messages"), list):
+        protected_messages = tuple(protected_messages) + tuple(
+            message for index, message in enumerate(body.get("messages", ()))
+            if isinstance(message, Mapping) and section_name(message, index) in _READ_EVIDENCE_SECTIONS)
     initial_protected_messages = protected_messages
     required_source_order = tuple(dict.fromkeys(
         str(path).replace("\\", "/").strip()
@@ -3531,7 +3540,7 @@ def apply_diet(
                 return allocation_plan
     owner_first_changed = False
     owner_first_dropped_ranges: list[dict[str, object]] = []
-    if allocation_plan is not None:
+    if allocation_plan is not None and not allocator_on:
         from kernel_owner_first import allocation_enabled, protected_priority_messages
         if allocation_enabled():
             protected_messages = tuple(protected_messages) + protected_priority_messages(
@@ -3571,6 +3580,9 @@ def apply_diet(
         messages, evidence_ids, protected_contents, protected_messages,
         native_tools, required_source_paths,
     )
+    if allocator_on:
+        normalized = copy.deepcopy(messages)
+        duplicate_items, stale_indices, stale_source_ranges = [], [], []
     allowlist = _stage_allowlist(stage)
     kept: list[dict[str, object]] = []
     dropped_sections: list[str] = []
@@ -3653,7 +3665,7 @@ def apply_diet(
         except _MeasurementModeChanged:
             return restart_with_stable_method()
 
-    while True:
+    while not allocator_on:
         groups = _read_working_set_groups(
             after["messages"],
             protected_contents=protected_contents,
@@ -3793,7 +3805,7 @@ def apply_diet(
                 protected_paths=protected_paths,
             ),
         })
-    if over_limit(after, request_tokens_after):
+    if not allocator_on and over_limit(after, request_tokens_after):
         try:
             request_tokens_after, deferred_paths = _defer_required_source_paths(
                 after,
@@ -3807,7 +3819,7 @@ def apply_diet(
         except _MeasurementModeChanged:
             return restart_with_stable_method()
 
-    if over_limit(after, request_tokens_after):
+    if not allocator_on and over_limit(after, request_tokens_after):
         protected_request_bytes, protected_sections_bytes = _protected_request_sizes(
             after,
             protected_contents=protected_contents,

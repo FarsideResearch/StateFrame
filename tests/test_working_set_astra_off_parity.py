@@ -44,7 +44,7 @@ def current_provider_hashes(tmp_path_factory):
                             tmp_path_factory.mktemp("current-provider-parity"))
 
 
-@pytest.mark.parametrize("reference", ['56af0dc6d6', '76a38627ca'])
+@pytest.mark.parametrize("reference", ['56af0dc6d6', '144281ff7c'])
 def test_off_provider_bytes_match_cutover_base(tmp_path, tmp_path_factory, reference,
                                               current_provider_hashes):
     base = pinned_tree(reference, tmp_path_factory)

@@ -1,7 +1,7 @@
-"""Durable, typed working-set suspension. No production caller invokes suspend.
+"""Durable, typed suspension at the certified preparation boundary.
 
-Only a measured mandatory envelope over its byte cap is a BLOCKED condition.
-Search exhaustion and the other diagnostic codes are not impossibility proofs.
+Every preparation refusal is resumable BLOCKED. Only mandatory-envelope
+overflow carries an impossibility proof; search exhaustion never does.
 """
 from __future__ import annotations
 
@@ -32,8 +32,11 @@ class ReasonCode(str, Enum):
     PREPARATION_CONTRACT_FAILURE = "PREPARATION_CONTRACT_FAILURE"
 
 
-# Only measured impossibility proofs may stop a run; everything else is diagnostic.
-BLOCKING_REASONS = frozenset({ReasonCode.MANDATORY_ENVELOPE_OVER_CAP, ReasonCode.FLOOR_INFEASIBLE})
+BLOCKING_REASONS = frozenset(ReasonCode)
+MANDATORY_ENVELOPE_REASONS = frozenset({
+    ReasonCode.MANDATORY_ENVELOPE_OVER_CAP, ReasonCode.FLOOR_INFEASIBLE})
+_VIOLATED_LIMITS = frozenset({"serialized_bytes", "token_count_unavailable", "prompt_tokens",
+    "frame_tokens", "output_allocation", "context_tokens", "protected_capacity"})
 
 
 @dataclass(frozen=True)
@@ -94,27 +97,53 @@ class Suspension:
     snapshot_digest: str
     active_obligation_digest: str
     violated_limits: tuple[str, ...]
-    proof: MandatoryEnvelopeProof | MandatoryEnvelopeEvidence
-    minimum_policy_candidate_ref: str
+    proof: MandatoryEnvelopeProof | MandatoryEnvelopeEvidence | None
+    minimum_policy_candidate_ref: str | None
     trials_ref: str
     recovery_condition: str
+    floor_bytes: int = 0
+    cap: int = 0
+    section_breakdown: tuple[tuple[str, int], ...] = ()
+    detail: str = ""
 
     def validate(self) -> None:
+        if (type(self.floor_bytes) is not int or self.floor_bytes < 0
+                or type(self.cap) is not int or self.cap < 0
+                or not isinstance(self.detail, str)
+                or not isinstance(self.section_breakdown, tuple)
+                or any(not isinstance(row, tuple) or len(row) != 2
+                       or not isinstance(row[0], str) or not row[0]
+                       or type(row[1]) is not int or row[1] < 0
+                       for row in self.section_breakdown)
+                or len(dict(self.section_breakdown)) != len(self.section_breakdown)):
+            raise ValueError("invalid suspension byte diagnostics")
         if (not isinstance(self.reason_code, ReasonCode)
                 or self.reason_code not in BLOCKING_REASONS):
-            raise ValueError("BLOCKED requires typed mandatory-envelope-over-cap")
-        if (not self.logical_request_id or type(self.due_ordinal) is not int
-                or self.due_ordinal < 1 or not self.minimum_policy_candidate_ref
-                or not self.trials_ref or not self.recovery_condition
-                or self.violated_limits != ("serialized_bytes",)):
+            raise ValueError("BLOCKED requires a typed preparation reason")
+        if (type(self.due_ordinal) is not int or self.due_ordinal < 1
+                or not all(isinstance(value, str) and value for value in (
+                    self.logical_request_id, self.trials_ref, self.recovery_condition))
+                or (self.minimum_policy_candidate_ref is not None and (
+                    not isinstance(self.minimum_policy_candidate_ref, str)
+                    or not self.minimum_policy_candidate_ref))):
             raise ValueError("invalid suspension boundary or evidence references")
+        if (not isinstance(self.violated_limits, tuple)
+                or not all(isinstance(limit, str) and limit in _VIOLATED_LIMITS
+                           for limit in self.violated_limits)
+                or len(set(self.violated_limits)) != len(self.violated_limits)):
+            raise ValueError("invalid suspension violated limits")
         for digest in (self.snapshot_digest, self.active_obligation_digest):
             if (not isinstance(digest, str) or len(digest) != 64
                     or any(c not in "0123456789abcdef" for c in digest)):
                 raise ValueError("invalid suspension digest")
-        if not isinstance(self.proof, (MandatoryEnvelopeProof, MandatoryEnvelopeEvidence)):
-            raise ValueError("suspension requires typed mandatory-envelope evidence")
-        self.proof.validate()
+        if self.reason_code in MANDATORY_ENVELOPE_REASONS:
+            if (not isinstance(self.proof, (MandatoryEnvelopeProof, MandatoryEnvelopeEvidence))
+                    or not self.minimum_policy_candidate_ref
+                    or self.violated_limits != ("serialized_bytes",)):
+                raise ValueError("suspension requires typed mandatory-envelope evidence")
+            self.proof.validate()
+        elif self.proof is not None:
+            raise ValueError("non-floor suspension cannot carry mandatory-envelope evidence")
 
     def document(self) -> dict[str, object]:
         self.validate()
@@ -122,20 +151,25 @@ class Suspension:
                 "logical_request_id": self.logical_request_id, "due_ordinal": self.due_ordinal,
                 "snapshot_digest": self.snapshot_digest,
                 "active_obligation_digest": self.active_obligation_digest,
-                "violated_limits": list(self.violated_limits), "proof": self.proof.document(),
+                "violated_limits": list(self.violated_limits),
+                "proof": self.proof.document() if self.proof is not None else None,
                 "minimum_policy_candidate_ref": self.minimum_policy_candidate_ref,
-                "trials_ref": self.trials_ref, "recovery_condition": self.recovery_condition}
+                "trials_ref": self.trials_ref, "recovery_condition": self.recovery_condition,
+                "floor_bytes": self.floor_bytes, "cap": self.cap,
+                "section_breakdown": dict(self.section_breakdown), "detail": self.detail}
 
     @classmethod
     def from_document(cls, value: Mapping[str, object]) -> Suspension:
         fields = dict(value)
         fields["reason_code"] = ReasonCode(fields["reason_code"])
         fields["violated_limits"] = tuple(fields["violated_limits"])
-        proof = dict(fields["proof"])
-        if proof.pop("verified", None) is not True or proof.pop("mandatory_only", None) is not True:
-            raise ValueError("unverified mandatory envelope evidence")
-        proof["breakdown"] = tuple(proof["breakdown"].items())
-        fields["proof"] = MandatoryEnvelopeEvidence(**proof)
+        fields["section_breakdown"] = tuple(dict(fields.get("section_breakdown", {})).items())
+        if fields["proof"] is not None:
+            proof = dict(fields["proof"])
+            if proof.pop("verified", None) is not True or proof.pop("mandatory_only", None) is not True:
+                raise ValueError("unverified mandatory envelope evidence")
+            proof["breakdown"] = tuple(proof["breakdown"].items())
+            fields["proof"] = MandatoryEnvelopeEvidence(**proof)
         suspension = cls(**fields)
         suspension.validate()
         return suspension
@@ -183,24 +217,26 @@ def suspend(runtime: object, suspension: Suspension) -> None:
     if not enabled():
         return
     suspension.validate()
-    if not isinstance(suspension.proof, MandatoryEnvelopeProof):
-        raise ValueError("a new suspension requires freshly verified mandatory bytes")
-    if __package__:
-        from .kernel_read_receipts import _blob
-    else:
-        from kernel_read_receipts import _blob
+    evidence_refs = {}
+    if suspension.reason_code in MANDATORY_ENVELOPE_REASONS:
+        if not isinstance(suspension.proof, MandatoryEnvelopeProof):
+            raise ValueError("a new suspension requires freshly verified mandatory bytes")
+        if __package__:
+            from .kernel_read_receipts import _blob
+        else:
+            from kernel_read_receipts import _blob
+        # Only proven floor overflow has exact mandatory bytes to persist.
+        evidence_refs["mandatory_envelope_blob_ref"] = _blob(
+            runtime, suspension.proof.mandatory_wire.decode("utf-8"))
     state = state_for(runtime)
     # capture_read writes blobs and its lifecycle event synchronously before
     # returning a successful page. There are no deferred capture writes to flush.
-    # Persist the exact measured candidate too, before the durable blocked event.
-    candidate_blob = _blob(runtime, suspension.proof.mandatory_wire.decode("utf-8"))
     counts = {"active_count": len(state.active_obligations()),
               "due_count": sum(o.state == "DUE" for o in state.active_obligations()),
               "pinned_count": sum(o.recovery_pin for o in state.active_obligations())}
     signal = WorkingSetSuspended(suspension, counts=counts)
     emit_event(runtime, "working_set_blocked", suspension=suspension.document(),
-               active_index=state.checkpoint(), mandatory_envelope_blob_ref=candidate_blob,
-               **counts)
+               active_index=state.checkpoint(), **evidence_refs, **counts)
     # emit_event sets state.suspension only AFTER the event has been fsynced.
     record_problem(runtime, signal.outcome()["problems"][0])
     raise signal

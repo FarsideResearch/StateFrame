@@ -59,6 +59,27 @@ def _path_complete(full, path, revision) -> bool:
 def _update_frame(frame, snapshot, full):
     revisions = dict(snapshot.current_revisions)
     all_sources = snapshot.sources
+    def backed(row, field, coordinate):
+        bounds = row.get(coordinate, {})
+        text = row.get(field)
+        return (isinstance(text, str) and isinstance(bounds, dict)
+                and _covered(full, row.get("path"), row.get("revision"),
+                             bounds.get("start"), bounds.get("end"))
+                and any(text in slot.payload and slot.identity.path == row.get("path")
+                        and slot.identity.revision == row.get("revision") for slot in full))
+    panel = frame.get("headcarry")
+    if isinstance(panel, dict) and isinstance(panel.get("heads"), list):
+        heads = panel["heads"]
+        panel["heads"] = [row for row in heads if backed(row, "content", "line_range")]
+        removed = len(heads) - len(panel["heads"])
+        if removed:
+            panel["omitted_count"] = panel.get("omitted_count", 0) + removed
+            panel["omitted_line"] = f"omitted {panel['omitted_count']} heads"
+            from kernel_stateframe_headcarry import _seal_byte_count
+            _seal_byte_count(panel)
+    for row in frame.get("action_ledger", {}).get("reads", ()):
+        if "pinned_range" in row and not backed(row, "pinned_range", "lines"):
+            row.pop("pinned_range")
     notices = {}
     for fact in frame.get("read_facts", ()):
         if not isinstance(fact, dict):
@@ -144,9 +165,18 @@ def _update_frame(frame, snapshot, full):
             row["content_sha256"] = hashlib.sha256(updated.encode()).hexdigest()
 
 
-def rebuild_delivery_truth(body, snapshot, full):
-    """Update typed host fields in an already detached semantic body."""
-    for message in body["messages"]:
+def rebuild_delivery_truth(body, snapshot, full, *, message_indexes=None):
+    """Update only explicitly owned host fields in a detached semantic body.
+
+    Coordinates come from snapshot ownership and are remapped by the renderer,
+    never rediscovered from marker strings in task/suffix/source/tool content.
+    """
+    # Direct callers operate on the frozen body; rendering supplies coordinates
+    # remapped across its generated source block.
+    if message_indexes is None:
+        message_indexes = snapshot.truth_message_indexes
+    for index in message_indexes:
+        message = body["messages"][index]
         content = message.get("content")
         if not isinstance(content, str) or message.get("role") != "user":
             continue

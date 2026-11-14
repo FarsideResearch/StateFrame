@@ -1,4 +1,4 @@
-"""Pure complete-candidate oracle for the default-off working-set shadow.
+"""Pure complete-candidate oracle for the default-off working-set allocator.
 
 Every evaluation starts from frozen JSON and captured text. No discovery, LRU
 touch, journal publication or workspace read is permitted here. Marginal costs
@@ -20,9 +20,11 @@ if TYPE_CHECKING:
 
 if __package__:
     from . import kernel_working_set_allocator as core
+    from .kernel_working_set_cache import frozen, source_frozen, trial_render, wire_bytes
     from .kernel_read_receipts import ReceiptIdentity, line_digests_with_numbers
 else:
     import kernel_working_set_allocator as core
+    from kernel_working_set_cache import frozen, source_frozen, trial_render, wire_bytes
     from kernel_read_receipts import ReceiptIdentity, line_digests_with_numbers
 
 
@@ -46,6 +48,22 @@ class CarrierWitness:
 
 
 @dataclass(frozen=True)
+class DeferredPlanWitness:
+    slot_ids: tuple[str, ...]
+    message_index: int
+    content_start: int
+    content_end: int
+    carrier_sha256: str
+
+
+def deferred_plan_slot(slot: SourceSlot) -> bool:
+    """Only never-delivered plan proposals may share a path-level omission."""
+    return (slot.plan_only and slot.state in {"PLAN", "CLOSURE"}
+            and not slot.capture_ids and slot.previous_mode is None
+            and not slot.recovery_pin)
+
+
+@dataclass(frozen=True)
 class AssignmentCertificate:
     # snapshot is a trusted host object, not deserialized from model prose.
     snapshot: PreparationSnapshot
@@ -55,6 +73,7 @@ class AssignmentCertificate:
     assignment_digest: str
     body_sha256: str
     witnesses: tuple[CarrierWitness, ...]
+    deferred_plan_witness: DeferredPlanWitness | None = None
 
 
 @dataclass(frozen=True)
@@ -64,10 +83,85 @@ class RenderedCandidate:
     section_breakdown: tuple[tuple[str, int], ...]
 
 
+@dataclass
+class _WirePreview:
+    """Exact trial bytes; construct witnesses only when a candidate is used."""
+    wire: bytes
+    snapshot: PreparationSnapshot
+    assignment: tuple[tuple[str, core.Mode], ...]
+    candidate: RenderedCandidate | None = None
+
+    def materialize(self) -> RenderedCandidate:
+        if self.candidate is None:
+            candidate = render_assignment(self.snapshot, dict(self.assignment), "plain")
+            if candidate.wire != self.wire:
+                raise ValueError("trial bytes differ from complete candidate")
+            self.candidate = candidate
+        return self.candidate
+
+    @property
+    def certificate(self):
+        return self.materialize().certificate
+
+    @property
+    def section_breakdown(self):
+        return self.materialize().section_breakdown
+
+
+@dataclass
+class _ProjectedPreview:
+    """A projected-layout trial carried over from a sibling snapshot.
+
+    The bytes were fully rendered and carrier-reconciled against a snapshot
+    that differs only in tokenizer identity, so they are exact for this one.
+    Witnesses and the certificate are rendered against this snapshot on use.
+    """
+    wire: bytes
+    snapshot: PreparationSnapshot
+    assignment: tuple[tuple[str, core.Mode], ...]
+    layout: str
+    candidate: RenderedCandidate | None = None
+
+    def materialize(self) -> RenderedCandidate:
+        if self.candidate is None:
+            candidate = render_assignment(self.snapshot, dict(self.assignment), self.layout)
+            if candidate.wire != self.wire:
+                raise ValueError("trial bytes differ from complete candidate")
+            self.candidate = candidate
+        return self.candidate
+
+    @property
+    def certificate(self):
+        return self.materialize().certificate
+
+    @property
+    def section_breakdown(self):
+        return self.materialize().section_breakdown
+
+
+def materialize(candidate):
+    return (candidate.materialize() if isinstance(candidate, (_WirePreview, _ProjectedPreview))
+            else candidate)
+
+
+def _rebind_preview(result, snapshot, modes, layout):
+    """Carry a cached trial to a sibling snapshot of the same byte family."""
+    bound = (result.snapshot if isinstance(result, (_WirePreview, _ProjectedPreview))
+             else result.certificate.snapshot)
+    if bound is snapshot:
+        return result
+    assignment = tuple(modes.items())
+    if layout == "plain":
+        return _WirePreview(result.wire, snapshot, assignment)
+    return _ProjectedPreview(result.wire, snapshot, assignment, layout)
+
+
+@source_frozen
 def _slot_modes(snapshot: PreparationSnapshot, slot: SourceSlot) -> tuple[core.Mode, ...]:
     if slot.state == "DUE" or slot.recovery_pin:
         return (core.FULL,)
-    if slot.state in {"RETIRING", "DISCHARGED", "SUPERSEDED", "DEGRADED"}:
+    if (slot.state in {"RETIRING", "DISCHARGED", "SUPERSEDED", "DEGRADED"}
+            or slot.previous_mode in {"D", "O"}):
         return (core.DEFERRED,)
     if slot.identity.path in snapshot.protected_paths:
         return (core.FULL,)
@@ -94,25 +188,35 @@ def _tier(snapshot: PreparationSnapshot, slot: SourceSlot) -> core.PriorityTier:
         return core.PriorityTier.FRESH
     if slot.recovery_pin or slot.identity.path in snapshot.protected_paths:
         return core.PriorityTier.PROTECTED
+    if slot.previous_mode is not None:
+        return core.PriorityTier.CARRIED
     return core.PriorityTier.OPTIONAL
+
+
+@frozen
+def _assignment_domains(snapshot: PreparationSnapshot):
+    keys = frozenset(s.key for s in snapshot.slots)
+    if len(keys) != len(snapshot.slots):
+        raise ValueError("duplicate frozen slot key")
+    return keys, tuple((slot.key, _slot_modes(snapshot, slot)) for slot in snapshot.slots)
 
 
 def _assignment(snapshot: PreparationSnapshot,
                 assignment: Mapping[str, core.Mode] | core.Assignment) -> dict[str, core.Mode]:
     modes = assignment.modes if isinstance(assignment, core.Assignment) else assignment
-    if not isinstance(modes, Mapping) or set(modes) != {s.key for s in snapshot.slots}:
+    keys, domains = _assignment_domains(snapshot)
+    if not isinstance(modes, Mapping) or set(modes) != keys:
         raise ValueError("assignment must select every frozen slot exactly once")
-    if len({s.key for s in snapshot.slots}) != len(snapshot.slots):
-        raise ValueError("duplicate frozen slot key")
     result = {}
-    for slot in snapshot.slots:
-        mode = modes[slot.key]
-        if mode not in _slot_modes(snapshot, slot):
+    for key, allowed in domains:
+        mode = modes[key]
+        if mode not in allowed:
             raise ValueError("assignment violates frozen slot domain")
-        result[slot.key] = mode
+        result[key] = mode
     return result
 
 
+@source_frozen
 def _recovery_arguments(snapshot: PreparationSnapshot, slot: SourceSlot) -> bytes:
     if __package__:
         from .kernel_working_set_recovery import validate_recovery
@@ -122,18 +226,25 @@ def _recovery_arguments(snapshot: PreparationSnapshot, slot: SourceSlot) -> byte
                       sort_keys=True, separators=(",", ":")).encode()
 
 
+@source_frozen
 def _notice(snapshot: PreparationSnapshot, slot: SourceSlot) -> str:
     identity = slot.identity
     arguments = json.loads(_recovery_arguments(snapshot, slot))
     # Preserve positional/cursor recovery arguments, including lossy columns.
     call = "read(" + ", ".join(f"{key}={json.dumps(value, ensure_ascii=False)}"
                                for key, value in sorted(arguments.items())) + ")"
-    return ("[Source page deferred]\n"
-            f"path={identity.path} revision={identity.revision} "
-            f"lines={identity.first_line}-{identity.last_line} digest={identity.payload_sha256}\n"
+    metadata = []
+    if arguments.get("expected_revision") != identity.revision:
+        metadata.append(f"revision={identity.revision}")
+    if (arguments.get("start_line"), arguments.get("end_line")) != (
+            identity.first_line, identity.last_line):
+        metadata.append(f"lines={identity.first_line}-{identity.last_line}")
+    metadata.append(f"digest={identity.payload_sha256}")
+    return ("[Source page deferred]\n" + " ".join(metadata) + "\n"
             f"Retrieve current bytes with: {call}.")
 
 
+@frozen
 def _payload_interval(slot: SourceSlot) -> tuple[int, int]:
     payload = slot.payload.encode("utf-8")
     page = slot.page.encode("utf-8")
@@ -155,6 +266,17 @@ def _payload_interval(slot: SourceSlot) -> tuple[int, int]:
     return start, start + len(payload)
 
 
+def _fixed_tool_carrier(messages, page: str) -> int | None:
+    """Reuse exact read bytes even when the host appended an advisory line."""
+    for index, message in enumerate(messages):
+        content = message.get("content")
+        if (message.get("role") == "tool" and isinstance(content, str)
+                and (content == page or content.startswith(page + "\n"))):
+            return index
+    return None
+
+
+@frozen
 def snapshot_digest(snapshot: PreparationSnapshot) -> str:
     # Dataclasses are recursively frozen; represent all authority, including
     # presentation/carrier coordinates, rather than just the fixed envelope.
@@ -191,8 +313,13 @@ def _normalize(body, snapshot):
         from kernel_launch_identity_cost import enforce_provider_body, ReasoningProfile
         from kernel_measurement import _without_private_message_keys
     body = _without_private_message_keys(body)
-    result = enforce_provider_body(body, profile=ReasoningProfile(snapshot.reasoning_mode, "snapshot"),
-                                   dialect=snapshot.dialect, environ={})
+    # The llama.cpp reasoning-on contract is exactly a deepcopy. Each render
+    # owns its body and message dictionaries; nested fixed values are opaque
+    # and read-only. Other profiles still run their full provider transform.
+    result = (body if snapshot.dialect == "llama.cpp" and snapshot.reasoning_mode == "on"
+              else enforce_provider_body(body,
+                  profile=ReasoningProfile(snapshot.reasoning_mode, "snapshot"),
+                  dialect=snapshot.dialect, environ={}))
     # Output is normalized before costing. Never mutate it after certification.
     output_key = "max_completion_tokens" if "max_completion_tokens" in result else "max_tokens"
     output = result.get(output_key)
@@ -205,50 +332,70 @@ def _normalize(body, snapshot):
     return result
 
 
-def render_assignment(snapshot: PreparationSnapshot,
-                      assignment: Mapping[str, core.Mode] | core.Assignment,
-                      layout: str = "plain") -> RenderedCandidate:
+@frozen
+def _fixed_body(snapshot: PreparationSnapshot):
+    return json.loads(snapshot.fixed_body)
+
+
+def _render_assignment(snapshot: PreparationSnapshot,
+                       assignment: Mapping[str, core.Mode] | core.Assignment,
+                       layout: str = "plain", *, wire_only: bool = False):
     """Render selected payloads, their dependent truth and provider bytes once.
 
     Slot order is admission order, independent of solver decision order. FULL
     carriers can share only exact identity+page material or a frozen native tool
-    result whose whole page is equal to the captured page. No path-only lookup.
+    result whose exact page prefix equals the captured page. No path-only lookup.
     """
     modes = _assignment(snapshot, assignment)
     if layout not in snapshot.layouts or layout not in {"plain", "final_cache"}:
         raise ValueError("layout not admitted by snapshot")
-    body = json.loads(snapshot.fixed_body)
+    body = dict(_fixed_body(snapshot))
     messages = body.get("messages")
     if not isinstance(messages, list) or any(not isinstance(m, dict) for m in messages):
         raise ValueError("frozen provider body requires messages")
+    # Truth projection replaces content in these rows. Nested native call and
+    # content-part objects remain opaque; provider/layout transforms copy them.
+    messages = [dict(message) for message in messages]
     insertion = _insertion_index(snapshot, messages)
     generated = []
     locations = {}
     shared = {}
     categories = {}
     ordered = sorted(snapshot.slots, key=lambda s: (s.admission_ordinal, s.key))
+    deferred_plan = []
     for slot in ordered:
         mode = modes[slot.key]
         if mode == core.FULL:
             payload_start, payload_end = _payload_interval(slot)
-            key = (slot.identity, slot.page)
+            key = (slot.identity, slot.page, slot.standalone_page, slot.standalone_payload_start)
             if key in shared:
                 locations[slot.key] = shared[key]
                 continue
-            # Only a whole captured tool page is a reusable fixed carrier.
-            # User prose cannot mint ownership by including a source string.
-            fixed = next((i for i, m in enumerate(messages)
-                          if m.get("role") == "tool" and m.get("content") == slot.page), None)
+            # Match the complete captured page at offset zero, never a path or
+            # arbitrary substring. Advisory suffixes stay inside the witness's
+            # whole-carrier hash; payload coordinates remain byte-exact.
+            fixed = _fixed_tool_carrier(messages, slot.page)
             if fixed is not None:
                 location = ("fixed", fixed, payload_start, payload_end)
             else:
+                page = slot.page
+                if slot.standalone_page is not None:
+                    # Reuse the closure's existing user-role grammar without
+                    # inventing an unpaired native tool result. The certificate
+                    # still authenticates the original capture's exact payload.
+                    page = slot.standalone_page
+                    payload_start = slot.standalone_payload_start
+                    payload_end = payload_start + len(slot.payload.encode())
                 location = ("generated", len(generated), payload_start, payload_end)
-                generated.append({"role": "user", "content": slot.page})
+                generated.append({"role": "user", "content": page})
                 categories[len(generated) - 1] = "full_source"
             locations[slot.key] = shared[key] = location
         else:
             if not snapshot.recovery_allowed:
                 raise ValueError("frozen tool/owner surface refuses source recovery")
+            if deferred_plan_slot(slot):
+                deferred_plan.append(slot.key)
+                continue
             locations[slot.key] = ("generated", len(generated), None, None)
             generated.append({"role": "user", "content": _notice(snapshot, slot)})
             categories[len(generated) - 1] = "deferred_notices"
@@ -271,6 +418,7 @@ def render_assignment(snapshot: PreparationSnapshot,
             from .kernel_request_source_window import _render_truthful_deferred_source_notice
         else:
             from kernel_request_source_window import _render_truthful_deferred_source_notice
+        deferred_notice_index = len(generated)
         categories[len(generated)] = "deferred_notices"
         generated.append({"role": "user", "content": _render_truthful_deferred_source_notice(
             sorted(deferred_paths), delivered_source_ranges=tuple(
@@ -293,7 +441,11 @@ def render_assignment(snapshot: PreparationSnapshot,
         from .kernel_working_set_facts import rebuild_delivery_truth
     else:
         from kernel_working_set_facts import rebuild_delivery_truth
-    rebuild_delivery_truth(body, snapshot, full)
+    # Carry fixed-owner coordinates across insertion. Generated carriers and
+    # opaque fixed messages never enter the truth parser, even by marker.
+    truth_indexes = tuple(i + len(generated) if i >= insertion else i
+                          for i in snapshot.truth_message_indexes)
+    rebuild_delivery_truth(body, snapshot, full, message_indexes=truth_indexes)
     plain = _normalize(body, snapshot)
     if layout == "final_cache":
         if __package__:
@@ -303,7 +455,13 @@ def render_assignment(snapshot: PreparationSnapshot,
         body = _checked_final_cache_projection(plain)
     else:
         body = plain
-    wire = json.dumps(body).encode()
+    wire = wire_bytes(body, snapshot, layout)
+    if wire_only:
+        # Plain normalization preserves whole source rows and their indexes.
+        # Validate snapshot serialization now, including malformed authority;
+        # no trial may hide a contract error until after policy selection.
+        snapshot_digest(snapshot)
+        return wire
     witnesses = []
     sections = {"full_source": 0, "deferred_notices": 0, "host_facts": 0, "coverage": 0}
     physical = body["messages"]
@@ -311,12 +469,15 @@ def render_assignment(snapshot: PreparationSnapshot,
     # Cache projection preserves source/notice carriers as whole rows; derive
     # physical indexes by whole-row identity, never by source path or interval.
     physical_indexes = {}
-    used = set()
-    for index, message in enumerate(plain_messages):
-        match = next((i for i, m in enumerate(physical) if i not in used and m == message), None)
-        if match is not None:
-            physical_indexes[index] = match
-            used.add(match)
+    if layout == "plain":
+        physical_indexes = dict(enumerate(range(len(plain_messages))))
+    else:
+        used = set()
+        for index, message in enumerate(plain_messages):
+            match = next((i for i, m in enumerate(physical) if i not in used and m == message), None)
+            if match is not None:
+                physical_indexes[index] = match
+                used.add(match)
     classified = set()
     for generated_index, category in categories.items():
         index = physical_indexes.get(insertion + generated_index)
@@ -324,6 +485,8 @@ def render_assignment(snapshot: PreparationSnapshot,
             sections[category] += len(json.dumps(physical[index]).encode())
             classified.add(index)
     for slot in ordered:
+        if slot.key in deferred_plan:
+            continue
         owner, index, payload_start, payload_end = locations[slot.key]
         semantic_index = (index + insertion if owner == "generated" else
                           index + len(generated) if index >= insertion else index)
@@ -346,9 +509,41 @@ def render_assignment(snapshot: PreparationSnapshot,
     selected = tuple(sorted((key, mode.name) for key, mode in modes.items()))
     snap_digest = snapshot_digest(snapshot)
     assignment_digest = digest(json.dumps([snap_digest, layout, selected], separators=(",", ":")).encode())
+    aggregate = None
+    if deferred_plan:
+        index = physical_indexes.get(insertion + deferred_notice_index)
+        if index is None:
+            raise ValueError("layout changed the deferred plan carrier")
+        raw = physical[index]["content"].encode()
+        aggregate = DeferredPlanWitness(tuple(deferred_plan), index, 0, len(raw), digest(raw))
     certificate = AssignmentCertificate(snapshot, selected, layout, snap_digest,
-                                        assignment_digest, digest(wire), tuple(witnesses))
+        assignment_digest, digest(wire), tuple(witnesses), aggregate)
     return RenderedCandidate(wire, certificate, tuple(sections.items()))
+
+
+def render_assignment(snapshot: PreparationSnapshot,
+                      assignment: Mapping[str, core.Mode] | core.Assignment,
+                      layout: str = "plain") -> RenderedCandidate:
+    """Render the whole candidate and its carrier-bound certificate."""
+    return _render_assignment(snapshot, assignment, layout)
+
+
+def preview_assignment(snapshot, assignment, layout="plain"):
+    """Price exact plain wires without building unused witness inventories.
+
+    FULL payload evidence and omission routes are still validated by the body
+    builder. Projected layouts require physical-carrier reconciliation even
+    for trials and therefore retain the full renderer. Every selected preview
+    is fully rendered and independently proved before measurement or exposure.
+    """
+    if layout != "plain":
+        return render_assignment(snapshot, assignment, layout)
+    wire = _render_assignment(snapshot, assignment, layout, wire_only=True)
+    modes = assignment.modes if isinstance(assignment, core.Assignment) else assignment
+    return _WirePreview(wire, snapshot, tuple(modes.items()))
+
+
+preview_assignment.rebind = _rebind_preview
 
 
 def propose_slots(snapshot: PreparationSnapshot) -> tuple[core.Slot, ...]:
@@ -361,10 +556,13 @@ def propose_slots(snapshot: PreparationSnapshot) -> tuple[core.Slot, ...]:
     baseline = {s.key: _slot_modes(snapshot, s)[-1] for s in snapshot.slots}
     result = []
     for slot in snapshot.slots:
-        measured = [(mode, len(render_assignment(snapshot, {**baseline, slot.key: mode}, "plain").wire))
+        measured = [(mode, len(trial_render(snapshot, {**baseline, slot.key: mode},
+                                           "plain", preview_assignment).wire))
                     for mode in _slot_modes(snapshot, slot)]
         offset = min(cost for _mode, cost in measured)
         result.append(core.Slot(slot.key, slot.kind, _tier(snapshot, slot),
             slot.admission_ordinal, slot.last_use_ordinal,
-            tuple((mode, cost - offset) for mode, cost in measured)))
+            tuple((mode, cost - offset) for mode, cost in measured),
+            previous_mode={"F": core.FULL, "D": core.DEGRADED,
+                           "O": core.DEFERRED}.get(slot.previous_mode)))
     return tuple(result)

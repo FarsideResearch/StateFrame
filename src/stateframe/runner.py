@@ -656,7 +656,7 @@ OPT_IN_SWITCHES = {
     "STATEFRAME_KEEP_RUN_ENV": ("on", "off"),  # host-side finished-run retention policy
     "STATEFRAME_MUTATIONS": ("off", "prebuilt", "authored"),
     "STATEFRAME_CACHE_LAYOUT": ("on", "off"),
-    "STATEFRAME_WORKING_SET_ALLOCATOR": ("on", "off"),  # read captures and read-time admission
+    "STATEFRAME_WORKING_SET_ALLOCATOR": ("on", "off"),  # certified working-set allocation and read-time admission
     "STATEFRAME_EVICTFIX": ("on", "legacy"),
     "STATEFRAME_MICROGRAPH": ("on", "off"),  # experimental; the engine defaults to off
     "STATEFRAME_STABLE_TOOL_HEAD": ("on", "off"),  # append-only tool list per run; on by default
@@ -2790,7 +2790,7 @@ def summarize(run: Path, started: float) -> dict[str, object]:
     summary["engine_result"] = result.get("result")
     summary["engine_terminal"] = {key: result[key] for key in (
         "result", "reason_code", "error", "error_type", "error_message", "failure_origin", "behaviour",
-        "done_facts", "submission", "labels", "claims", "resumable", "suspension")
+        "done_facts", "submission", "labels", "claims", "resumable", "suspension", "problems")
         if key in result}
     # Replay refusals keep their actionable detail in the event, not the terminal receipt.
     # Preserve it for the final CLI summary and --json, which suppresses live events.

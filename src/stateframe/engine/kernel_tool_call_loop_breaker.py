@@ -357,13 +357,19 @@ class UnboundedProgressWatch:
         """Discount only after every action in the completed batch is known."""
         if not receipts:
             return False
+        from kernel_read_receipts import enabled as allocator_enabled
         for receipt in receipts:
             delivery = receipt.get("delivery")
+            delivery = delivery if isinstance(delivery, Mapping) else {}
+            legacy_repeat = (delivery.get("unchanged_since_request") is True
+                             and delivery.get("requested_bytes_delivered") == 0)
+            captured_repeat = (allocator_enabled()
+                and delivery.get("working_set_repeat_capture") is True
+                and type(delivery.get("requested_bytes_delivered")) is int
+                and delivery["requested_bytes_delivered"] > 0)
             if (receipt.get("kind") != "read"
                     or receipt.get("result_class") != "OK"
-                    or not isinstance(delivery, Mapping)
-                    or delivery.get("unchanged_since_request") is not True
-                    or delivery.get("requested_bytes_delivered") != 0
+                    or not (legacy_repeat or captured_repeat)
                     or not isinstance(delivery.get("effective_range"), Mapping)):
                 return False
         return True

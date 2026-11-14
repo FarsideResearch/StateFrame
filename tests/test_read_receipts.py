@@ -388,7 +388,7 @@ def test_executor_typed_host_failures(tmp_path, monkeypatch, error, status):
     assert "identity" not in result and "payload_blob_ref" not in result
 
 
-def test_dedup_stub_keeps_original_capture(tmp_path, monkeypatch):
+def test_allocator_reread_keeps_full_bytes_and_original_capture(tmp_path, monkeypatch):
     monkeypatch.setenv("STATEFRAME_CODE_BOOKMARKS", "on")
     monkeypatch.setenv("STATEFRAME_DELIVER_REQUESTED_BYTES", "on")
     monkeypatch.setenv("STATEFRAME_REREAD_RESULT_TRUTH", "off")
@@ -408,10 +408,11 @@ def test_dedup_stub_keeps_original_capture(tmp_path, monkeypatch):
     second = dispatch()
     receipts.finish_pending(rt)
     results = [e for e in rt.journal.events if e["kind"] == "read_result"]
-    assert [e["status"] for e in results] == ["OK", "DEDUP_STUB"]
-    assert "alpha" not in second[1]
+    assert [e["status"] for e in results] == ["OK", "OK"]
+    assert "alpha" in second[1]
+    assert "unchanged since request" not in second[1]
     assert results[0]["payload_blob_ref"] == results[1]["payload_blob_ref"]
-    assert results[1]["source"] == "dedup_stub"
+    assert results[1]["source"] == "read"
     assert rt.read_capture_ledger.all()[0].identity == rt.read_capture_ledger.all()[1].identity
     assert all("alpha" not in canonical_bytes(e).decode() for e in results)
 
@@ -448,7 +449,8 @@ def test_saved_golden_request_bytes_and_selection_stay_unchanged(tmp_path, monke
     monkeypatch.setenv("STATEFRAME_WORKING_SET_ALLOCATOR", "on")
     second_result = _live_read(b, "req-one", "pkg/service.py", {"path": "pkg/service.py"})
     second_menu = _menu(b, "req-one")
-    assert first_result == second_result
+    assert first_result[:3] == second_result[:3]
+    assert second_result[3]["working_set_repeat_capture"] is False
     assert first_menu == second_menu
 
 
@@ -513,8 +515,12 @@ def test_transcript_cleanup_reuses_settled_selected_attempt(tmp_path):
     assert len(rows) == 1 and rows[0]["status"] == "INTERRUPTED"
 
 
-def test_recorded_native_read_replay_on_off_request_bytes(tmp_path, monkeypatch):
-    """Run the existing recorded multi-call fixture through the real selector."""
+def test_recorded_native_read_replay_off_selection_and_on_captures(tmp_path, monkeypatch):
+    """OFF keeps recorded reuse; ON delivers bytes and retains every capture.
+
+    Complete OFF wire parity lives in test_working_set_cutover. The former
+    shadow-only ON/OFF byte equality is intentionally no longer the contract.
+    """
     import test_pin_bm6diag_replay as replay
     original_runtime = replay._runtime
     original_menu = replay._menu
@@ -532,6 +538,20 @@ def test_recorded_native_read_replay_on_off_request_bytes(tmp_path, monkeypatch)
     def dispatch(rt, case, index):
         receipts.begin_read_attempt(rt, case["calls"][index], call_id=f"call-{index}")
         try:
+            if receipts.enabled():
+                row = case["receipts"][index] if index < len(case["receipts"]) else None
+                path = case["calls"][index]["path"]
+                rt.current_request_id = (row["request_id"] if row else
+                    f"request-{case['request']}-action-{index + 1}")
+                status, observation, _, delivery = reads.dispatch_live_read(
+                    rt.owner.root, rt.owner.root / path, path, path, 0,
+                    args=case["calls"][index], measurement=rt,
+                    step=row["turn"] if row else 1000 + index,
+                    bolt=rt.owner, policy=None, resolved_path=path)
+                assert status == "OK" and observation.startswith("[read page]")
+                assert delivery["unchanged_since_request"] is False
+                assert delivery["requested_bytes_delivered"] > 0
+                return rt.owner._receipts[-1]
             return original_dispatch(rt, case, index)
         finally:
             receipts.finish_pending(rt, error=sys.exc_info()[1])
@@ -543,7 +563,7 @@ def test_recorded_native_read_replay_on_off_request_bytes(tmp_path, monkeypatch)
         monkeypatch.setenv("STATEFRAME_WORKING_SET_ALLOCATOR", setting)
         wires.clear()
         rt, watch, events, cases, counters = replay._replay(tmp_path / "recorded", monkeypatch)
-        # ON adds audit and shadow working-set rows; wires and every other row stay identical.
+        # The cutover adds capture authority and no longer emits counter-based reuse stubs.
         from kernel_working_set_state import EVENT_KINDS as shadow_kinds
         results.append((list(wires), counters, watch.streak,
                         [e for e in events if e["kind"] not in {"read_attempt", "read_result", "read_admission", *shadow_kinds}]))
@@ -553,9 +573,9 @@ def test_recorded_native_read_replay_on_off_request_bytes(tmp_path, monkeypatch)
         outcomes = [e for e in events if e["kind"] == "read_result"]
         assert len(attempts) == len(outcomes) == (30 if setting == "on" else 0)
         if setting == "on":
-            assert all(e["status"] in {"OK", "DEDUP_STUB"} for e in outcomes)
+            assert all(e["status"] == "OK" for e in outcomes)
             assert len(rt.read_capture_ledger.all()) >= 30
-    assert results[0] == results[1]
+    assert len(results[0][0]) == len(results[1][0]) == 4
 
 
 def test_attempt_ids_survive_a_fresh_runtime_on_existing_journal(tmp_path):

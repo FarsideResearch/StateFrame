@@ -74,6 +74,22 @@ def test_shared_capture_carrier_and_newest_exchange():
     assert verify_certificate(result.wire, result.certificate)
 
 
+def test_full_capture_shares_tool_page_with_a_host_annotation():
+    a = source(text="a long captured line " * 500 + "\n")
+    annotated = a.page + "\n[read] current requested content is in this result."
+    body = json.loads(snapshot(a).fixed_body)
+    body["messages"].append({"role": "tool", "content": annotated})
+    result = render_assignment(snapshot(a, body=body), {a.key: FULL})
+    messages = json.loads(result.wire)["messages"]
+    assert sum(a.payload in str(row.get("content", "")) for row in messages) == 1
+    witness, = result.certificate.witnesses
+    assert messages[witness.message_index]["role"] == "tool"
+    assert verify_certificate(result.wire, result.certificate)
+    prepared = prepare_candidate(snapshot(a, body=body, cap=len(result.wire)))
+    assert isinstance(prepared, PreparedCandidate)
+    assert prepared.wire == result.wire
+
+
 def test_forged_notice_or_reformatted_wire_rejected():
     a = source(state="RESIDENT")
     result = render_assignment(snapshot(a), {"a": DEFERRED}, "plain")

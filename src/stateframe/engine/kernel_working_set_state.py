@@ -1,8 +1,8 @@
-"""Default-off, SHADOW obligation reducer. Never consulted by prompt selectors.
+"""Default-off durable exposure debt and certified source residency.
 
 Captures live in the append-only journal/blob store; this index holds only live
-exposure debt and residency. Item 3 will supply wire certificates. Until then an
-observed submission has no assignments and cannot claim exposure by substring.
+exposure debt and residency. Only a certified submission followed by an adopted
+response changes residency; delivery counters and substrings grant no authority.
 """
 from __future__ import annotations
 
@@ -20,8 +20,8 @@ else:
     from kernel_read_receipts import (CaptureLedger, DecodedSpan, ReadCapture,
                                       ReceiptIdentity, enabled)
 
-# 256 live identities, with 16 (one maximum native batch) reserved by the future
-# allocator. This is an index bound, never a source-window selection limit.
+# 256 live identities, with 16 (one maximum native batch) reserved between
+# accepted boundaries. Retirement still requires a certified, accepted O carrier.
 MAX_ACTIVE_OBLIGATIONS = 256
 NATIVE_BATCH_RESERVE = 16
 MAX_RETAINED_RESIDENTS = MAX_ACTIVE_OBLIGATIONS - NATIVE_BATCH_RESERVE
@@ -91,6 +91,7 @@ class ReadObligation:
     last_use_ordinal: int
     recovery_pin: bool = False
     superseded_by: str | None = None
+    previous_mode: Mode | None = None
 
     def validate(self) -> None:
         if (not self.obligation_id or not self.capture_ids
@@ -99,6 +100,7 @@ class ReadObligation:
                 or self.state not in {"DUE", "RESIDENT", "DEGRADED", "RETIRING"}
                 or any(type(n) is not int or n < 1 for n in (
                     self.due_ordinal, self.admission_ordinal, self.last_use_ordinal))
+                or self.previous_mode not in {None, "F", "D", "O"}
                 or type(self.recovery_pin) is not bool
                 or (self.recovery_pin and self.state != "DUE")
                 or (self.superseded_by is not None and not isinstance(self.superseded_by, str))):
@@ -164,6 +166,8 @@ class WorkingSetState:
         identities = set()
         for row in active:
             fields = dict(row)
+            fields.setdefault("previous_mode", {"RESIDENT": "F", "DEGRADED": "D",
+                                                 "RETIRING": "O"}.get(fields.get("state")))
             fields["identity"] = identity_from_document(fields["identity"])
             fields["capture_ids"] = tuple(fields["capture_ids"])
             entry = ReadObligation(**fields)
@@ -297,6 +301,7 @@ class WorkingSetState:
                 existing.due_ordinal = self.next_due_ordinal
                 existing.last_use_ordinal = self.use_ordinal
                 existing.recovery_pin |= event["recovery_pin"]
+            self._reserve_retirements()
             return
         self.admission_ordinal += 1
         oid = f"read-obligation-{self.admission_ordinal}"
@@ -317,6 +322,26 @@ class WorkingSetState:
         self._active[oid] = ReadObligation(oid, (capture_id,), identity,
             self.next_due_ordinal, "DUE", self.admission_ordinal, self.use_ordinal,
             event["recovery_pin"])
+        self._reserve_retirements()
+
+    def _reserve_retirements(self) -> None:
+        """Queue oldest residency for O without discharging any exposure debt.
+
+        Captures may consume the native-batch reserve, but the next allocator
+        assignment must replenish it. RETIRING stays in the active index through
+        preparation, failed sends and discarded responses; only an accepted O
+        assignment removes it. A reread makes that lifetime DUE again and queues
+        another eligible resident instead.
+        """
+        needed = (len(self._active) - MAX_RETAINED_RESIDENTS
+                  - sum(o.state == "RETIRING" for o in self._active.values()))
+        if needed <= 0:
+            return
+        residents = sorted((o for o in self._active.values()
+                            if o.state in {"RESIDENT", "DEGRADED"} and not o.recovery_pin),
+                           key=lambda o: (o.last_use_ordinal, o.admission_ordinal, o.obligation_id))
+        for entry in residents[:needed]:
+            entry.state = "RETIRING"
 
     def _submission(self, event: Mapping[str, object]) -> None:
         request_id = event["request_id"]
@@ -331,7 +356,12 @@ class WorkingSetState:
                 raise ValueError("invalid working-set mode")
             if (entry.state == "DUE" or entry.recovery_pin) and mode != "F":
                 raise ValueError("fresh debt and recovery pins are F-only")
-            if entry.state == "DEGRADED" and mode == "F":
+            if entry.state == "RETIRING" and mode != "O":
+                raise ValueError("reserve retirement requires an O assignment")
+            ranks = {"F": 3, "D": 2, "O": 1}
+            if ((entry.state == "DEGRADED" and mode == "F")
+                    or (entry.state != "DUE" and entry.previous_mode is not None
+                        and ranks[mode] > ranks[entry.previous_mode])):
                 raise ValueError("promotion requires a reread or recovery")
             assignments[oid] = {"mode": mode, "capture_ids": list(entry.capture_ids)}
         self.logical_ordinal += 1
@@ -354,6 +384,7 @@ class WorkingSetState:
                 if entry is None or tuple(assignment["capture_ids"]) != entry.capture_ids:
                     continue  # a newer read cannot be paid by an older wire
                 mode = assignment["mode"]
+                entry.previous_mode = mode
                 self.use_ordinal += 1
                 entry.last_use_ordinal = self.use_ordinal
                 entry.recovery_pin = False
@@ -361,6 +392,7 @@ class WorkingSetState:
                 if entry.superseded_by is not None or mode == "O":
                     entry.state = "SUPERSEDED" if entry.superseded_by is not None else "DISCHARGED"
                     del self._active[oid]
+            self._reserve_retirements()
         del self.pending[request_id]
 
 
@@ -412,8 +444,24 @@ def observe_submission(runtime: object, capture: object, wire: bytes) -> None:
     else:
         from kernel_request_kind import is_auxiliary
     if not is_auxiliary(capture):
+        certificate = getattr(capture, "_working_set_certificate", None)
+        modes = {}
+        if certificate is not None:
+            from kernel_working_set_proof import verify_certificate
+            if certificate.snapshot.request_id != capture.request_id:
+                raise ValueError("certificate request identity differs")
+            verify_certificate(wire, certificate)
+            names = {"FULL": "F", "DEGRADED": "D", "DEFERRED": "O"}
+            selected = dict(certificate.assignment)
+            active = {o.obligation_id for o in state_for(runtime).active_obligations()}
+            for slot in certificate.snapshot.sources:
+                for oid in slot.obligation_ids:
+                    if oid in active:
+                        modes[oid] = names[selected[slot.key]]
+            if set(modes) != active:
+                raise ValueError("certificate does not cover active obligations")
         record_submission(runtime, request_id=capture.request_id,
-                          body_sha256=hashlib.sha256(wire).hexdigest(), modes={})
+                          body_sha256=hashlib.sha256(wire).hexdigest(), modes=modes)
 
 
 def observe_response(runtime: object, capture: object, *, disposition: str,

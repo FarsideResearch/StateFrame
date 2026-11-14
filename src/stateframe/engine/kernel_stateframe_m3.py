@@ -421,6 +421,9 @@ def apply_m3_working_context_budget(
         protected_source_paths: Sequence[str] = (),
         enabled_value: bool | None = None) -> dict[str, object]:
     """Bound current source and metadata while leaving every omission actionable."""
+    from kernel_read_receipts import enabled as allocator_enabled
+    if allocator_enabled():
+        enabled_value = False  # source units are proposed to the complete-wire allocator
     active = m3_working_context_enabled() if enabled_value is None else bool(enabled_value)
     if not active:
         return {

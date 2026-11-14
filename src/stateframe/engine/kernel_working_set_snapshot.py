@@ -5,7 +5,7 @@ runtime, workspace, environment, journal, clock or residency index.
 """
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 import hashlib
 import json
 from typing import Literal
@@ -45,6 +45,14 @@ class SourceSlot:
     # Each carrier contains exactly one captured interval; never merge pages.
     capture_ids: tuple[str, ...] = ()
     payload_start: int | None = None
+    previous_mode: str | None = None
+    # An identical closure interval can supply its existing user-role grammar
+    # when the captured native tool result is no longer in the newest exchange.
+    standalone_page: str | None = None
+    standalone_payload_start: int | None = None
+    # Plan-only proposals were absent from the source panels at freeze time.
+    # Their omission can share a path notice; capture debt never can.
+    plan_only: bool = False
 
     def __post_init__(self) -> None:
         for name in ("obligation_ids", "capture_ids", "line_digests", "line_numbers"):
@@ -60,7 +68,9 @@ class SourceSlot:
                 or not isinstance(self.recovery_arguments, bytes)
                 or type(self.admission_ordinal) is not int or self.admission_ordinal < 1
                 or type(self.last_use_ordinal) is not int or self.last_use_ordinal < 0
+                or self.previous_mode not in {None, "F", "D", "O"}
                 or type(self.recovery_pin) is not bool
+                or type(self.plan_only) is not bool
                 or self.state not in {"DUE", "RESIDENT", "DEGRADED", "RETIRING",
                                       "DISCHARGED", "SUPERSEDED", "CLOSURE", "PLAN", "OPTIONAL"}):
             raise ValueError("source slot lacks immutable source authority")
@@ -76,6 +86,15 @@ class SourceSlot:
             if (type(self.payload_start) is not int or self.payload_start < 0
                     or raw[self.payload_start:self.payload_start + len(payload)] != payload):
                 raise ValueError("source payload interval differs")
+        if self.standalone_page is None:
+            if self.standalone_payload_start is not None:
+                raise ValueError("standalone payload lacks a carrier")
+        elif (not isinstance(self.standalone_page, str)
+              or type(self.standalone_payload_start) is not int
+              or self.standalone_payload_start < 0
+              or self.standalone_page.encode()[self.standalone_payload_start:
+                  self.standalone_payload_start + len(self.payload.encode())] != self.payload.encode()):
+            raise ValueError("standalone payload interval differs")
 
 
 @dataclass(frozen=True)
@@ -104,6 +123,9 @@ class PreparationSnapshot:
     recovery_allowed: bool = True
     recovery_schema: bytes = b""
     recovery_owner_allowed: bool = True
+    # Fixed-message coordinates, explicitly owned by assignment-derived truth.
+    # Other fixed messages remain opaque regardless of host-looking contents.
+    truth_message_indexes: tuple[int, ...] | None = None
 
     @property
     def slots(self) -> tuple[SourceSlot, ...]:
@@ -140,6 +162,15 @@ class PreparationSnapshot:
                 or type(self.recovery_allowed) is not bool
                 or type(self.recovery_owner_allowed) is not bool):
             raise ValueError("invalid preparation snapshot")
+        indexes = self.truth_message_indexes
+        if indexes is None:
+            # Direct snapshot callers have no captured suffix ownership. Only
+            # the canonical StateFrame position is unambiguous in that case.
+            indexes = _canonical_truth_indexes(body["messages"])
+        if (not isinstance(indexes, (tuple, list)) or len(set(indexes)) != len(indexes)
+                or any(type(i) is not int or not 0 <= i < len(body["messages"]) for i in indexes)):
+            raise ValueError("invalid delivery-truth ownership")
+        object.__setattr__(self, "truth_message_indexes", tuple(indexes))
         for name in ("frame_limit", "context_limit", "output_tokens", "insertion_index"):
             value = getattr(self, name)
             if value is not None and (type(value) is not int or value < 0):
@@ -165,6 +196,40 @@ class PreparationSnapshot:
     def ledger_digest(self) -> str:
         return digest(json.dumps([asdict(s) for s in self.sources],
                     default=lambda value: value.decode(), sort_keys=True).encode())
+
+
+def _canonical_truth_indexes(messages):
+    """The host StateFrame follows the leading system messages and task."""
+    # Snapshot-only host projections can contain just the StateFrame. Live
+    # suffix ownership is still checked before admitting this coordinate.
+    if (len(messages) == 1 and messages[0].get("role") == "user"
+            and str(messages[0].get("content", "")).startswith("[StateFrame]\n")):
+        return (0,)
+    task = next((i for i, m in enumerate(messages) if m.get("role") != "system"), len(messages))
+    state = task + 1
+    if (state < len(messages) and messages[task].get("role") == "user"
+            and str(messages[task].get("content", "")).startswith("Task:")
+            and messages[state].get("role") == "user"
+            and str(messages[state].get("content", "")).startswith("[StateFrame]\n")):
+        return (state,)
+    return ()
+
+
+def _merge_source(sources, proposed):
+    """Keep read lifecycle authority while retaining identical closure grammar."""
+    for index, slot in enumerate(sources):
+        if (slot.identity.path == proposed.identity.path
+                and slot.identity.revision == proposed.identity.revision
+                and slot.identity.first_line == proposed.identity.first_line
+                and slot.identity.last_line == proposed.identity.last_line
+                and slot.payload == proposed.payload
+                and (slot.identity.lossy_span is None or
+                     slot.identity.lossy_span.presentation_version == "model-source-window/1")):
+            if slot.capture_ids:
+                sources[index] = replace(slot, standalone_page=proposed.page,
+                                         standalone_payload_start=proposed.payload_start)
+            return
+    sources.append(proposed)
 
 
 def freeze_preparation(body, runtime, *, request_id: str, byte_cap: int,
@@ -210,21 +275,40 @@ def freeze_preparation(body, runtime, *, request_id: str, byte_cap: int,
             "tests" if obligation.identity.path.startswith("tests/") else "product",
             tuple(c.capture_id for c in owned),
             payload_start=(len(page.encode()) - len(payload.encode())
-                           if page.endswith(payload) else page.encode().find(payload.encode()))))
+                           if page.endswith(payload) else page.encode().find(payload.encode())),
+            previous_mode=obligation.previous_mode))
 
     # Only assembler-owned user windows before the suffix can be optional.
     try:
         _exchange, boundary, _tail = _validated_exchange_and_volatile_tail(messages)
     except (ValueError, FrameFit5Error):
+        default_boundary = len(messages)
+        if messages and str(messages[-1].get("content", "")).startswith("[WIRE VOLATILE TAIL]"):
+            default_boundary -= 1
         boundary = next((i for i, m in enumerate(messages)
-                         if m.get("role") in {"assistant", "tool"}), len(messages) - 1)
+                         if m.get("role") in {"assistant", "tool"}), default_boundary)
+    suffix = list(getattr(getattr(runtime, "_active_capture", None),
+                          "_framefit5_newest_user_suffix", ()))
+    suffix_start = boundary - len(suffix)
+    if suffix and (suffix_start < 0 or messages[suffix_start:boundary] != suffix):
+        raise SnapshotConstructionError("SOURCE_SNAPSHOT_UNSTABLE")
     fixed = []
+    truth_indexes = []
+    owned_truth = {i for i in _canonical_truth_indexes(messages)
+                   if i < (suffix_start if suffix else boundary)}
+    # Tail ownership is positional, after the newest exchange. A suffix can
+    # quote the same marker and must not hide or acquire the real tail owner.
+    if (messages and len(messages) - 1 >= boundary
+            and messages[-1].get("role") == "user"
+            and str(messages[-1].get("content", "")).startswith("[WIRE VOLATILE TAIL]")):
+        owned_truth.add(len(messages) - 1)
     revisions = {}
     # Typed current revision observations survive even when their source body
     # was not selected into the legacy source panel.
     owner_actions = None
     pending_site_paths = set()
-    for message in messages:
+    for index in sorted(owned_truth):
+        message = messages[index]
         content = str(message.get("content", ""))
         if not content.startswith("[StateFrame]\n"):
             continue
@@ -240,10 +324,14 @@ def freeze_preparation(body, runtime, *, request_id: str, byte_cap: int,
         actions = frame.get("owner_protocol", {}).get("admitted_actions")
         if isinstance(actions, list):
             owner_actions = tuple(actions)
-    deferred = set()
+    plan = getattr(runtime, "_request_source_closure", None)
+    deferred = set(plan.get("deferred_paths", ())) if isinstance(plan, dict) else set()
     insertion = None
     for index, message in enumerate(messages):
         content = message.get("content")
+        if suffix_start <= index < boundary and suffix:
+            fixed.append(message)
+            continue  # opaque user ownership outranks every host/source grammar
         metadata = ((parse_model_source_window(content) or parse_window(content))
                     if message.get("role") == "user" and index < boundary else None)
         if isinstance(metadata, dict) and metadata.get("ranges"):
@@ -268,15 +356,11 @@ def freeze_preparation(body, runtime, *, request_id: str, byte_cap: int,
                 identity = ReceiptIdentity(path, revision, first, last, None, None,
                     digest(payload.encode()), DecodedSpan(0, last_column, "model-source-window/1"))
                 key = "closure:" + digest((path + revision + str(first) + str(last) + payload).encode())
-                if any(s.identity.path == path and s.identity.revision == revision
-                       and s.identity.first_line == first and s.identity.last_line == last
-                       and s.payload == payload for s in sources):
-                    continue
                 from kernel_working_set_windows import render_frozen_span
                 page, payload_start = render_frozen_span(metadata, descriptor, payload)
                 digests, numbers = line_digests_with_numbers(payload, first)
                 ordinal = max((s.admission_ordinal for s in sources), default=0) + 1
-                sources.append(SourceSlot(key, (key,), identity, payload, page, digests, numbers,
+                _merge_source(sources, SourceSlot(key, (key,), identity, payload, page, digests, numbers,
                     json.dumps({"path": path, "start_line": first, "end_line": last}).encode(),
                     ordinal, 0, "CLOSURE", kind="tests" if path.startswith("tests/") else "context",
                     payload_start=payload_start))
@@ -291,17 +375,29 @@ def freeze_preparation(body, runtime, *, request_id: str, byte_cap: int,
                                    "[Source coverage]\n")) or content.startswith("kept "):
                 continue
         if index == boundary:
-            # Keep the StateFrame/suffix adjacent to the newest exchange.
-            insertion = next((i for i, m in enumerate(fixed)
-                if str(m.get("content", "")).startswith("[StateFrame]\n")), len(fixed))
+            # Source follows StateFrame and precedes the opaque user suffix/exchange.
+            insertion = next((i + 1 for i in truth_indexes
+                if str(fixed[i].get("content", "")).startswith("[StateFrame]\n")), len(fixed))
+        if index in owned_truth:
+            truth_indexes.append(len(fixed))
         fixed.append(message)
     if insertion is None:
-        insertion = next((i for i, m in enumerate(fixed)
-            if str(m.get("content", "")).startswith("[StateFrame]\n")), len(fixed))
-    from kernel_working_set_windows import frozen_plan_windows
-    proposed, plan_revisions = frozen_plan_windows(runtime, tuple(sources), revisions)
-    sources.extend(proposed)
+        insertion = next((i + 1 for i in truth_indexes
+            if str(fixed[i].get("content", "")).startswith("[StateFrame]\n")), len(fixed))
+    from kernel_working_set_windows import frozen_plan_windows, frozen_embedded_windows
+    # Include capture duplicates as presentation proposals. _merge_source keeps
+    # the retained obligation's mode/domain; a closure cannot promote it.
+    proposed, plan_revisions = frozen_plan_windows(runtime,
+        tuple(s for s in sources if not s.capture_ids), revisions)
+    for proposal in proposed:
+        _merge_source(sources, replace(proposal,
+            admission_ordinal=max((s.admission_ordinal for s in sources), default=0) + 1))
     revisions.update(plan_revisions)
+    if getattr(runtime, "owner", None) is not None:
+        embedded, embedded_revisions = frozen_embedded_windows(runtime,
+            [messages[i] for i in sorted(owned_truth)], tuple(sources), revisions)
+        sources.extend(embedded)
+        revisions.update(embedded_revisions)
     frozen["messages"] = fixed
     # Protection follows the pending edit surface, rather than every file the
     # workspace-wide edit authority would permit modifying.
@@ -342,6 +438,7 @@ def freeze_preparation(body, runtime, *, request_id: str, byte_cap: int,
         tuple(sorted(protected)), tuple(sorted(revisions.items())), tuple(sorted(deferred)),
         prompt_limit, frame_limit, layouts=tuple(layouts), insertion_index=insertion,
         dialect=dialect, reasoning_mode=reasoning_mode,
+        truth_message_indexes=tuple(truth_indexes),
         recovery_allowed=any(isinstance(t, dict) and isinstance(t.get("function"), dict)
             and t["function"].get("name") == "read" for t in frozen.get("tools", ())),
         recovery_owner_allowed=owner_actions is not None and "read" in owner_actions,

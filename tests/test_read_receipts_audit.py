@@ -130,7 +130,9 @@ def test_capture_skip_is_typed_and_switch_gated(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize("cache", ["disk", "file_cache", "page_cache"])
-def test_capture_metadata_failure_keeps_delivery_unchanged(tmp_path, monkeypatch, cache):
+@pytest.mark.parametrize("switch", ["on", "off"])
+def test_capture_metadata_failure_withholds_delivery_only_when_on(tmp_path, monkeypatch, cache, switch):
+    monkeypatch.setenv("STATEFRAME_WORKING_SET_ALLOCATOR", switch)
     path = tmp_path / "source.py"
     path.write_text("def present():\n    return 1\n")
     args = {"path": "source.py"}
@@ -153,13 +155,27 @@ def test_capture_metadata_failure_keeps_delivery_unchanged(tmp_path, monkeypatch
             return replace(page, metadata={**page.metadata, "byte_start": None})
         monkeypatch.setattr(reads, "deliver_source", malformed)
     output = _dispatch(rt, tmp_path, path, args)
-    assert output[:3] == expected[:3]
+    if switch == "off":
+        assert output[:3] == expected[:3]
+        assert [e["kind"] for e in rt.journal.events] == ["read_repeat_assessed"]
+        assert not hasattr(rt, "read_capture_ledger")
+        return
+    assert output[0] == "ERROR" and output[2] is None
+    assert "Retry" in output[1] and "def present" not in output[1]
+    delivery = output[3]
+    assert delivery["result_class"] == "ERROR"
+    assert delivery["failure_class"] == "capture_failed"
+    assert delivery["delivery_status"] == "WITHHELD"
+    assert delivery["effective_range"] is None
+    assert delivery["requested_bytes_delivered"] == 0
+    assert not [e for e in rt.journal.events if e["kind"] == "working_set_capture"]
     result, = _results(rt)
-    assert result["status"] == "OK_UNCAPTURED" and result["reason"] == "capture_failed"
+    assert result["status"] == "ERROR" and result["reason"] == "capture_failed"
     failed, = [e for e in rt.journal.events if e["kind"] == "read_capture_failed"]
     assert failed["error_type"] == "ValueError" and len(failed["message"]) <= 160
     assert "def present" not in json.dumps(failed)
     assert "payload_blob_ref" not in result
+    assert "identity" not in result
 
 
 @pytest.mark.parametrize("command,first,last,payload", [

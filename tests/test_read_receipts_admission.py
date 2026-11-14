@@ -1,6 +1,7 @@
 """A1b read-time admission at the read boundary (K1/K2), OFF parity and journal shape."""
 from __future__ import annotations
 
+import json
 import re
 from pathlib import Path
 from types import SimpleNamespace
@@ -83,7 +84,11 @@ def test_k1_giant_read_is_paginated_not_blocked(tmp_path, on, monkeypatch):
     assert "BLOCKED" not in observation
     [event] = [e for e in rt.journal.events if e["kind"] == "read_admission"]
     assert event["decision"] == "TRUNCATE" and event["allowance"] == 20_000
-    assert event["admitted_bytes"] == len(observation.encode())
+    # This caller has no composed provider body: charge its JSON string bytes,
+    # including escaped newlines, rather than raw UTF-8 payload bytes.
+    charged = len(json.dumps(observation).encode()) - 2
+    assert event["admitted_bytes"] == charged > len(observation.encode())
+    assert charged <= event["allowance"]
     assert event["admitted_lines"] == delivered_end
 
 
@@ -282,9 +287,13 @@ def test_cached_replay_is_charged_against_the_batch(tmp_path, on, monkeypatch):
     assert r2 == r3 == "OK" and d2.get("read_dedup", {}).get("status") == "CACHED_BYTES"
     events = [e for e in rt.journal.events if e["kind"] == "read_admission" and e["request_index"] == 4]
     assert [e["decision"] for e in events] == ["CACHED", "CACHED"], events
-    assert events[-1]["pending_before"] == len(o1.encode())
-    assert admission.remaining_allowance(rt, None) == 50_000 - 2 * len(o1.encode())
+    assert o1 == o2 == o3
+    charged = len(json.dumps(o1).encode()) - 2
+    assert charged > len(o1.encode())
+    assert [e["admitted_bytes"] for e in events] == [charged, charged]
+    assert events[-1]["pending_before"] == charged
+    assert admission.remaining_allowance(rt, None) == 50_000 - 2 * charged
     # The fresh third page now overflows and is shortened; without the charge it would be whole.
     (r4, o4, _), d4 = read(rt, tmp_path, "b.py", args_b)
     assert r4 == "OK" and d4.get("truncated") and CURSOR.search(o4)
-    assert 2 * len(o1.encode()) + len(o4.encode()) <= 50_000
+    assert 2 * charged + len(json.dumps(o4).encode()) - 2 <= 50_000

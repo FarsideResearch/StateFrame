@@ -3844,6 +3844,9 @@ def ask_tools(messages, mt=4000, temp=None, tools=None, known_refs=None):
             if attempt == POLICY.transport_attempts - 1:
                 raise TimeoutError("LLM call exceeded configured wall-clock allowance")
             continue
+        except WorkingSetSuspended:
+            _ex.shutdown(wait=False)
+            raise
         except Exception as _te:                                 # noqa: BLE001
             _ex.shutdown(wait=False)
             from kernel_frame_request_allocation import FrameRequestAllocationError
@@ -4159,6 +4162,9 @@ def ask(messages, mt=4000, temp=None):
             if attempt == POLICY.transport_attempts - 1:
                 raise TimeoutError("LLM call exceeded configured wall-clock allowance")
             continue
+        except WorkingSetSuspended:
+            _ex.shutdown(wait=False)
+            raise
         except Exception as _te:                                  # noqa: BLE001
             _ex.shutdown(wait=False)
             if timeout_retry_active and is_provider_request_timeout_error(_te):

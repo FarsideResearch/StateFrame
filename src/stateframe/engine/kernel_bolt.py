@@ -164,6 +164,9 @@ class KernelBolt:
         # a bounded reminder must never replace source content.
         if cmd.split()[0] == "read":
             from kernel_stateframe_m3 import m3_working_context_enabled
+            from kernel_read_receipts import enabled as allocator_enabled
+            if allocator_enabled():
+                return obs  # the certificate, not repeat history, owns source claims
             if m3_working_context_enabled():
                 previous = self.seen.get(key)
                 if previous == obs and key in self.seen:

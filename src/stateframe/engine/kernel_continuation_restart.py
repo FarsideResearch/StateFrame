@@ -382,6 +382,7 @@ SAFE_TAIL = frozenset({
     # SHADOW state is replayed with its reads/primary requests, without effects.
     "working_set_capture", "working_set_submission", "working_set_response", "working_set_blocked",
     "read_admission",  # audit only; the delivered page already carries its cursor
+    "working_set_prepared",  # proved candidate; submission owns lifecycle transitions
     "working_set_shadow_plan",  # observational candidate proof, never dispatch authority
     "continuation_writer_resumed", "rich_state_committed", "snapshot_committed",
     "history_decision", "history_exchange_removed", "selection_decision",
