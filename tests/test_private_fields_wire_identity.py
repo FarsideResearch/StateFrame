@@ -33,6 +33,7 @@ import kernel_countdown_slot
 import kernel_exec_session as exec_session
 import kernel_exec_supervisor as exec_supervisor
 import kernel_execution_policy as execution_policy
+import kernel_kill_attribution
 import kernel_stateframe_runtime as stateframe_runtime
 import kernel_verdict
 import kernel_wire_identity
@@ -205,7 +206,7 @@ def _field_is_private_or_audit(name: str, metadata: object = None,
     normalized = name.lower()
     if name.startswith("_") or any(token in normalized for token in (
             "private", "audit", "non_wire", "memory_limit", "cgroup",
-            "fallback_reason", "kill_reason")):
+            "fallback_reason", "kill_reason", "termination_")):
         return True
     if isinstance(metadata, Mapping):
         if metadata.get("wire") is False or metadata.get("public") is False:
@@ -313,6 +314,7 @@ def _private_field_inventory() -> tuple[set[str], dict[str, dataclasses.Field]]:
         check_receipts.record_check_output,
         stateframe_runtime.StateFrameRuntime.test_observation,
         stateframe_runtime.StateFrameRuntime._record_test_completion_receipt,
+        kernel_kill_attribution.Termination.as_fields,
     )
     for builder in builders:
         try:
@@ -389,6 +391,9 @@ def _supervisor_status(cgroup: object = None) -> dict[str, object]:
     process.ended = 1.0
     process.memory_limit_mechanism = None
     process.cgroup = cgroup
+    # status() also reads the output cap and an optional deadline.
+    process.cap = SimpleNamespace(limits=SimpleNamespace(kill_on_output=False))
+    process.timeout_at = None
     return process.status()
 
 
@@ -547,6 +552,8 @@ def test_private_fields_do_not_change_check_wire_identity(monkeypatch):
         "memory_limit_reason", "cgroup_leaf_pattern",
         "memory_limit_samples_skipped", "memory_limit_sample_skip_reason",
         "memory_limit_stop_cause",
+        # Which host limit stopped a check is kill attribution, not check identity.
+        "termination_limit", "termination_detail",
     }
     assert set(kernel_wire_identity.WIRE_AUDIT_ONLY_FIELDS) <= fields
     assert {"_stateframe_memo_generation", "_receipt_identity_content"} <= fields

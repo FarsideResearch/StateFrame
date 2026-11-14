@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.6.28 (2026-11-14)
+
+- Tests: the private-fields wire-identity test covers the kill-attribution fields and its process double matches the current status reads.
+
 ## 0.6.27 (2026-11-14)
 
 - Fixed: the [CONTINUATION LIMITS] line no longer renders the live wall-clock countdown (`sandbox_seconds_remaining=02372.2 (about 0040 minutes left, ~---- turns at your pace)`); it states the run's declared allowance (`limited (wall allowance 2400s)`, or `unbounded`) and its admission text no longer depends on the clock, so two same-seed runs, or a run and its resume, send byte-identical requests and the cached prompt prefix survives. The deadline still stops the run. The engine child records the live seconds left in a private `NNNN.time-left.json` next to each request; resume reads that first and the legacy countdown text for older tapes. New spec environment key `STATEFRAME_RUN_TIME_ALLOWANCE_S` (the run's --timeout). A whole-request class test runs the scripted example twice under different clocks and requires identical bytes.
