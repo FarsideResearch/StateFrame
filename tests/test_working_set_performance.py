@@ -18,6 +18,7 @@ from kernel_working_set_prepare import PreparedCandidate, prepare_candidate
 from kernel_working_set_proof import CertificateError, verify_certificate
 from kernel_working_set_render import domain, render_assignment
 from test_working_set_prepare import snapshot, source
+from _stateframe_home import isolated_stateframe_home
 from tools.pinned_tree import pinned_tree
 from working_set_benchmark import admission, admit_request, recorded_read, recorded_snapshot
 
@@ -129,6 +130,7 @@ print(json.dumps(asdict(page), sort_keys=True))
 '''
     environment = {key: value for key, value in os.environ.items()
                    if not key.startswith("STATEFRAME_")}
+    environment["STATEFRAME_HOME"] = isolated_stateframe_home()
     environment["PYTHONPATH"] = os.pathsep.join(map(str, (
         base / "src/stateframe/engine", base / "src")))
     result = subprocess.run([sys.executable, "-c", driver], cwd=base, env=environment,

@@ -16,6 +16,7 @@ import test_read_admission_qualification as qualification
 from kernel_final_wire_allocation import build_qualified_request
 from kernel_request_seal import RequestSealError
 from test_stable_wire import Journal
+from _stateframe_home import isolated_stateframe_home
 from tools.pinned_tree import pinned_tree
 
 REASON = "working_set_allocator_incompatible"
@@ -132,6 +133,7 @@ with pytest.MonkeyPatch.context() as patch:
     for label, tree in (("base", base), ("current", root)):
         destination = tmp_path / f"{label}.json"
         environment = {k: v for k, v in os.environ.items() if not k.startswith("STATEFRAME_")}
+        environment["STATEFRAME_HOME"] = isolated_stateframe_home()
         environment["STATEFRAME_STABLE_WIRE"] = stable_mode
         environment["PYTHONPATH"] = os.pathsep.join(str(tree / path) for path in
             ("src", "src/stateframe/engine", "tests"))

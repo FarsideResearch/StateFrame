@@ -16,6 +16,7 @@ from kernel_working_set_render import _slot_modes, render_assignment
 from kernel_working_set_proof import verify_certificate
 from test_working_set_render import snapshot, source
 from test_working_set_state import accept, capture, runtime, submit
+from _stateframe_home import isolated_stateframe_home
 
 REV1, REV2 = "sha256:" + "1" * 64, "sha256:" + "2" * 64
 
@@ -313,7 +314,7 @@ with pytest.MonkeyPatch.context() as patch:
         destination = tmp_path / f"{label}.json"
         request_log = tmp_path / f"{label}-requests.jsonl"
         environment = {k: v for k, v in os.environ.items() if not k.startswith("STATEFRAME_")}
-        environment["STATEFRAME_HOME"] = str(tmp_path / f"{label}-home")
+        environment["STATEFRAME_HOME"] = isolated_stateframe_home()
         environment["PYTHONPATH"] = os.pathsep.join(str(tree / path) for path in
             ("src", "src/stateframe/engine", "tests"))
         completed = subprocess.run([sys.executable, "-c", driver, str(tmp_path / label),

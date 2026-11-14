@@ -14,6 +14,7 @@ from kernel_working_set_prepare import Blocked, PreparedCandidate, prepare_candi
 from kernel_working_set_proof import CertificateError, verify_certificate
 from kernel_working_set_render import domain, render_assignment
 from kernel_working_set_stop import ReasonCode
+from _stateframe_home import isolated_stateframe_home
 from kernel_working_set_snapshot import freeze_preparation
 from test_working_set_render import snapshot, source
 
@@ -187,6 +188,7 @@ with pytest.MonkeyPatch.context() as patch:
     for label, tree in (("base", base), ("current", current)):
         destination = tmp_path / f"{label}.json"
         env = {k: v for k, v in os.environ.items() if not k.startswith("STATEFRAME_")}
+        env["STATEFRAME_HOME"] = isolated_stateframe_home()
         env["PYTHONPATH"] = os.pathsep.join(str(tree / path) for path in
             ("src", "src/stateframe/engine", "tests"))
         result = subprocess.run([sys.executable, "-c", driver, str(tmp_path / label),
