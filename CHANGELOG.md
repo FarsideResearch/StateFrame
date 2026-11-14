@@ -1,5 +1,7 @@
 # Changelog
 
+## Unreleased
+
 ## 0.6.21 (2026-11-13)
 
 - Fixed: with `--json`, stdout is always exactly one JSON document. The "run environment off" notice now goes to stderr, and argument errors, startup refusals, resume refusals and interruptions print a JSON error object.
