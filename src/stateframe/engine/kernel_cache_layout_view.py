@@ -33,7 +33,7 @@ def _final_layout(messages):
     from kernel_stateframe_page_log import (
         _partition_authority, _payload_has_authority_keys, _restore_authority,
     )
-    from kernel_stateframe_message_layout import stateframe_message_index
+    from kernel_stateframe_message_layout import STATEFRAME_PREFIX
     from kernel_stable_wire_ownership import CanonicalMessages
 
     if not isinstance(messages, list) or len(messages) < 4:
@@ -48,13 +48,25 @@ def _final_layout(messages):
     marker_index = content.index(marker)
     wire_prefix = content[:marker_index]
     encoded = content[marker_index + len(marker):]
+    # The frame is located by host ownership: the row the host recorded, or
+    # the row directly before the native exchange. Text inside assistant, tool
+    # or other user rows never selects it.
+    from kernel_stateframe_framefit5 import FrameFit5Error, _validated_exchange_and_volatile_tail
+    try:
+        _exchange, exchange_start, _tail = _validated_exchange_and_volatile_tail(messages)
+    except FrameFit5Error as error:
+        raise CacheLayoutError(str(error)) from error
+    if isinstance(messages, CanonicalMessages) and messages.frame_index is not None:
+        state_index = messages.frame_index
+    else:
+        state_index = exchange_start - 1
+    frame = messages[state_index] if 0 <= state_index < len(messages) else {}
+    if (frame.get("role") != "user" or not isinstance(frame.get("content"), str)
+            or not frame["content"].startswith(STATEFRAME_PREFIX)):
+        raise CacheLayoutError("final cache frame must precede the native exchange")
     try:
         overlay, consumed = json.JSONDecoder().raw_decode(encoded)
-        if isinstance(messages, CanonicalMessages) and messages.frame_index is not None:
-            state_index = messages.frame_index
-        else:
-            state_index = stateframe_message_index(messages)
-        base = json.loads(messages[state_index]["content"].split("\n", 1)[1])
+        base = json.loads(frame["content"].split("\n", 1)[1])
     except (ValueError, TypeError, KeyError, IndexError) as error:
         raise CacheLayoutError("final cache layout has invalid typed data") from error
     if (not isinstance(overlay, dict) or overlay.get("schema") != "stateframe-authority-overlay/1"
@@ -71,13 +83,15 @@ def _final_layout(messages):
             or not str(messages[system_end].get("content", "")).startswith("Task:")
             or any(row.get("role") != "user" for row in messages[system_end:state_index + 1])):
         raise CacheLayoutError("final cache layout must put stable user rows before the frame")
-    from kernel_stateframe_framefit5 import _validated_exchange_and_volatile_tail
-    _exchange, exchange_start, _tail = _validated_exchange_and_volatile_tail(messages)
     if state_index != exchange_start - 1:
         raise CacheLayoutError("final cache frame must precede the native exchange")
-    if (sum(str(row.get("content", "")).count("[CONTINUATION LIMITS |") for row in messages) != 1
-            or "[CONTINUATION LIMITS |" not in content
-            or any(AUTHORITY_OVERLAY_HEADER in str(row.get("content", "")) for row in messages[:-1])):
+    # Authority is decided from host-owned rows only: the system preface, the
+    # stable user rows, the frame and the final row the host emitted. Rows of
+    # the native exchange carry model and tool text and are never scanned.
+    host_owned = messages[:state_index + 1]
+    if (content.count("[CONTINUATION LIMITS |") != 1
+            or any("[CONTINUATION LIMITS |" in str(row.get("content", "")) for row in host_owned)
+            or any(AUTHORITY_OVERLAY_HEADER in str(row.get("content", "")) for row in host_owned)):
         raise CacheLayoutError("final cache authority is not unique or physically final")
 
     order = overlay.get("order")

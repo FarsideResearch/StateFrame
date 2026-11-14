@@ -472,13 +472,13 @@ def _project_final_cache_layout(body):
         raise ValueError("final cache layout requires a message array")
     _exchange, exchange_start, _tail_index = _validated_exchange_and_volatile_tail(messages)
     system_end = next((i for i, row in enumerate(messages) if row.get("role") != "system"), len(messages))
-    frame_indexes = [index for index, row in enumerate(messages[system_end:exchange_start], start=system_end)
-                     if str(row.get("content", "")).startswith("[StateFrame]\n")]
-    if (len(frame_indexes) != 1 or system_end >= len(messages)
+    # The frame is located by host ownership (the row the host placed directly
+    # before the native exchange, or its unique owned interval), so earlier
+    # user text that looks like a frame is never a candidate.
+    from kernel_stable_wire_ownership import request_frame_index
+    state_index = request_frame_index(messages, exchange_start=exchange_start)
+    if (system_end >= len(messages) or state_index <= system_end
             or not str(messages[system_end].get("content", "")).startswith("Task:")):
-        raise ValueError("final cache layout requires the canonical frame input")
-    state_index = frame_indexes[0]
-    if state_index <= system_end:
         raise ValueError("final cache layout requires the canonical frame input")
     payload = json.loads(messages[state_index]["content"].split("\n", 1)[1])
     cacheable, fields = _partition_authority(payload, final=True)
@@ -560,8 +560,7 @@ def _project_final_cache_layout(body):
     restored = semantic_messages(projected["messages"])
     if restored != list(body.get("messages", [])):
         raise ValueError("final cache layout message reconstruction differs")
-    restored_frame = next((row for row in restored
-                           if str(row.get("content", "")).startswith("[StateFrame]\n")), None)
+    restored_frame = restored[state_index] if state_index < len(restored) else None
     if not isinstance(restored_frame, Mapping) or restored_frame.get("content") != original_frame_content:
         raise ValueError("final cache layout frame reconstruction differs")
     return projected
