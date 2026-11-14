@@ -11,7 +11,8 @@ import sys
 import threading
 
 
-_AUTH_BINDING_SECRET_CACHE: dict[str, bytes] = {}
+# key path -> (key file fingerprint at load, or None for the fallback salt, secret).
+_AUTH_BINDING_SECRET_CACHE: dict[str, tuple[tuple[int, ...] | None, bytes]] = {}
 _AUTH_BINDING_FALLBACK_SECRET: bytes | None = None
 _AUTH_BINDING_SECRET_LOCK = threading.RLock()
 
@@ -161,17 +162,35 @@ def _installation_secret(configured_home: str | Path | None = None) -> bytes:
 
     with _AUTH_BINDING_SECRET_LOCK:
         cached = _AUTH_BINDING_SECRET_CACHE.get(cache_key)
-        if cached is not None:
-            _register_checkpoint_secret(cached)
-            return cached
+        # A path is not an identity: a long-lived process can see the key at the same path
+        # replaced, rotated or deleted (home recreated between runs). Reuse the cached secret
+        # only while the file is the one it was loaded from; otherwise reload, so the secret
+        # registered for checkpoint redaction is always the key actually on disk.
+        if cached is not None and cached[0] == _key_fingerprint(key_path):
+            _register_checkpoint_secret(cached[1])
+            return cached[1]
         secret = _read_secret(key_path)
         if secret is None:
             secret = _create_secret(key_path)
+        fingerprint = _key_fingerprint(key_path) if secret is not None else None
+        if fingerprint is not None and _read_secret(key_path) != secret:
+            fingerprint = None  # replaced while loading: never matches a valid file, so reload
         if secret is None:
             secret = _fallback_secret()
-        _AUTH_BINDING_SECRET_CACHE[cache_key] = secret
+        _AUTH_BINDING_SECRET_CACHE[cache_key] = (fingerprint, secret)
         _register_checkpoint_secret(secret)
         return secret
+
+
+def _key_fingerprint(path: Path) -> tuple[int, ...] | None:
+    """Identity of the key file as loaded; None when there is no valid file to identify."""
+    try:
+        info = os.lstat(path)
+    except OSError:
+        return None
+    if not _valid_secret_file(info, uid=os.getuid()):
+        return None
+    return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
 
 
 def protected_home_identity(

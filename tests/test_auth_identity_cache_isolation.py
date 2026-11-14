@@ -18,7 +18,7 @@ _LEAKED = Path("/nonexistent-stateframe-cache-isolation/home/identity.key")
 
 
 def test_a_leaves_an_entry_in_the_identity_cache():
-    auth._AUTH_BINDING_SECRET_CACHE[os.fspath(_LEAKED)] = b"x" * 32
+    auth._AUTH_BINDING_SECRET_CACHE[os.fspath(_LEAKED)] = (None, b"x" * 32)
     auth._AUTH_BINDING_FALLBACK_SECRET = b"y" * 32
 
 
