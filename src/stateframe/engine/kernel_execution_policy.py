@@ -122,6 +122,7 @@ class PolicyResult:
     # RLIMIT_CPU requested for the check, and the CPU its whole launch unit used.
     cpu_limit_seconds: float | None = None
     cpu_seconds_used: float | None = None
+    cleanup_finding: str | None = None
 
 
 def policy_read_grants(result: object) -> SandboxReadGrants | None:
@@ -926,6 +927,9 @@ def _prepared(command: Sequence[object], root: Path, env: Mapping[object, object
         isolation_options["nproc_budget"] = int(_limit_value("nproc", nproc, maximum=256))
     if read_grants_out is not None:
         isolation_options["read_grants_out"] = read_grants_out
+    if (platform.system() == "Linux" and internal_env
+            and "STATEFRAME_CHECK_TOKEN" in internal_env):
+        isolation_options["private_pid_check"] = True
     isolated, clean = isolation_builder(arguments, root, _safe_environment(env),
                                         **isolation_options)
     for key, value in (internal_env or {}).items():
@@ -1211,6 +1215,7 @@ def _collect(process: subprocess.Popen[bytes], input_data: bytes | None, deadlin
              output_limit: int, *, observer_fd: int | None = None,
              observer_buffer: bytearray | None = None,
              trace: dict[str, int] | None = None,
+             pre_reap_cleanup: Callable[[], None] | None = None,
              on_leader_reaped: Callable[[], None] | None = None
              ) -> tuple[str, str, bool, bool, bool]:
     if input_data is not None and len(input_data) > MAX_INPUT_BYTES:
@@ -1374,6 +1379,8 @@ def _collect(process: subprocess.Popen[bytes], input_data: bytes | None, deadlin
                 time.sleep(.02)
             group_killed = True
     process.check_cpu_seconds_used = _exited_unit_cpu_seconds(process)
+    if pre_reap_cleanup is not None:
+        pre_reap_cleanup()
     process.wait(timeout=1)
     if on_leader_reaped is not None:
         on_leader_reaped()
@@ -1401,7 +1408,8 @@ def run_sandboxed(command: Sequence[object], root: str | os.PathLike[str], *,
                   file_bytes: int = DEFAULT_FILE_BYTES,
                   nofile: int = DEFAULT_NOFILE,
                   nproc: int = DEFAULT_NPROC,
-                  observe_pytest: bool = False) -> PolicyResult:
+                  observe_pytest: bool = False,
+                  pre_reap_cleanup: Callable[[], str | None] | None = None) -> PolicyResult:
     """Run one bounded child; every failure is a refusal or typed result."""
     timeout = float(_limit_value("timeout", timeout, maximum=MAX_WALL_SECONDS))
     output_limit = int(_limit_value("output_limit", output_limit, maximum=4 * 1024 * 1024))
@@ -1472,6 +1480,19 @@ def run_sandboxed(command: Sequence[object], root: str | os.PathLike[str], *,
         except OSError:
             pass
         profile_writer = None
+    cleanup_finding: str | None = None
+    cleanup_error: BaseException | None = None
+    if pre_reap_cleanup is not None:
+        def collect_cleanup() -> None:
+            nonlocal cleanup_finding, cleanup_error
+            try:
+                cleanup_finding = pre_reap_cleanup()
+                if cleanup_finding is not None and not isinstance(cleanup_finding, str):
+                    raise ExecutionPolicyError("pre-reap cleanup finding must be text")
+            except BaseException as error:
+                cleanup_error = error
+    else:
+        collect_cleanup = None
     try:
         deadline = time.monotonic() + timeout
         memory_supervisor = getattr(process, "_stateframe_memory_supervisor", None)
@@ -1484,12 +1505,13 @@ def run_sandboxed(command: Sequence[object], root: str | os.PathLike[str], *,
                            if callable(on_leader_reaped) else {})
         if trace is None:
             stdout, stderr, timed_out, truncated, group_killed = _collect(
-                process, payload, deadline, output_limit, **collect_options)
+                process, payload, deadline, output_limit,
+                pre_reap_cleanup=collect_cleanup, **collect_options)
         else:
             stdout, stderr, timed_out, truncated, group_killed = _collect(
                 process, payload, deadline, output_limit,
                 observer_fd=profile_reader, observer_buffer=profile_buffer, trace=trace,
-                **collect_options)
+                pre_reap_cleanup=collect_cleanup, **collect_options)
         finish_supervision(process, timeout=3.0)
         child_reaped = True
     except BaseException as original_error:
@@ -1550,6 +1572,8 @@ def run_sandboxed(command: Sequence[object], root: str | os.PathLike[str], *,
                     "retaining per-command cgroup %s because its child was not reaped",
                     cgroup.name,
                 )
+    if cleanup_error is not None:
+        raise cleanup_error
     profile_payload = bytes(profile_buffer) if profile_buffer else None
     return PolicyResult(
         completed=subprocess.CompletedProcess(
@@ -1571,6 +1595,7 @@ def run_sandboxed(command: Sequence[object], root: str | os.PathLike[str], *,
         memory_limit_stop_cause=getattr(process, "memory_limit_stop_cause", None),
         cpu_limit_seconds=float(math.ceil(cpu_seconds)),
         cpu_seconds_used=_check_cpu_seconds_used(process),
+        cleanup_finding=cleanup_finding,
     )
 
 

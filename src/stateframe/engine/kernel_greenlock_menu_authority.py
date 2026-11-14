@@ -46,7 +46,7 @@ EMPTY_EVENT = "green_lock_menu_authority_empty"
 EMPTY_OUTCOME = "green_lock_no_permitted_action"
 EMPTY_OVERFLOW_KIND = "GREEN_LOCK_NO_PERMITTED_ACTION"
 EDIT_ACTIONS = frozenset({
-    "edit", "str_replace", "file_create", "file_delete", "file_move", "shell", "replace_module", "write", "replace",
+    "edit", "str_replace", "file_create", "file_delete", "file_move", "shell", "replace_module", "write", "replace", "parallel",
 })
 VERIFY_ACTIONS = frozenset({"run_tests", "test", "pytest", "predict"})
 WINDOW_ACTIONS = frozenset({"read", "probe"})

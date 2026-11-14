@@ -518,7 +518,9 @@ def capture_candidate(
     from kernel_stateframe_framefit5 import _state_payload
     from kernel_stateframe_envelope import STATE_HEADER
     from kernel_stateframe_f4 import latest_complete_tool_exchange
-    from kernel_frame_allocation_validation import template_environment
+    from kernel_frame_allocation_validation import (
+        allocation_ledger_authority, template_environment,
+    )
     from kernel_request_budget import HARD_MAX_REQUEST_BYTES
 
     if not source_delivery_satisfied(receipt):
@@ -537,6 +539,9 @@ def capture_candidate(
     )
     _payload, state = _state_payload(semantic_messages(messages)[state_index])
     frame = state["framefit5"]
+    ledger_authority = allocation_ledger_authority(runtime, frame)
+    if not isinstance(ledger_authority, Mapping):
+        raise FrameRequestAllocationError("allocation ledger authority is unavailable")
     exchange = latest_complete_tool_exchange(messages)
     if exchange is None:
         raise FrameRequestAllocationError(
@@ -654,8 +659,8 @@ def capture_candidate(
                 binding.get("product_revision") or binding.get("artifact")
             ),
             "task_digest": identity(messages[state_index - 1]),
-            "journal_semantic_cutoff": identity(frame.get("action_ledger", {})),
-            "ledger_digest": identity(frame.get("action_ledger", {})),
+            "journal_semantic_cutoff": identity(ledger_authority),
+            "ledger_digest": identity(ledger_authority),
             "newest_exchange_digest": identity(exchange),
         },
         capacity={
@@ -856,12 +861,19 @@ def _finalize_frame_candidate(
         source_delivery_satisfied,
         partial_source_paths_for_deferred_delivery,
     )
-    from kernel_stateframe_framefit5 import _state_payload, _workspace_root
+    from kernel_stateframe_framefit5 import (
+        _inline_unmatched_site_references, _state_payload, _workspace_root,
+    )
     from kernel_stateframe_envelope import STATE_HEADER
     from kernel_frame_optional_allocation import snapshot_optional_inputs
 
     layout_reallocation_enabled = _final_layout_reallocation_enabled()
     candidate = copy.deepcopy(body)
+    from kernel_stateframe_framefit5 import carry_scoped_continuation_limits
+
+    # This changes the serialized child frame. Do it before freezing token and
+    # body measurements so the eventual request seal binds the same bytes.
+    carry_scoped_continuation_limits(candidate["messages"])
     meter = _request_token_meter(runtime, capture)
     authority = None
     if _initial_authority:
@@ -925,9 +937,12 @@ def _finalize_frame_candidate(
             active.validate()
             binding = runtime.binding()
             revision = str(binding.get("product_revision") or binding.get("artifact"))
+            from kernel_frame_allocation_validation import allocation_ledger_authority
+
+            ledger_authority = allocation_ledger_authority(runtime, frame)
             if active.identity["product_revision"] != revision or active.identity[
                 "ledger_digest"
-            ] != identity(frame.get("action_ledger", {})):
+            ] != identity(ledger_authority):
                 raise FrameAllocationReplanNeeded("allocation semantic authority changed")
         from kernel_stateframe_framefit5 import _serialize_state_message
         for message in candidate["messages"]:
@@ -1035,6 +1050,14 @@ def _finalize_frame_candidate(
                            if isinstance(unit, Mapping) and isinstance(unit.get("path"), str))
     required_paths = tuple(dict.fromkeys((*required_paths,
         *getattr(capture, "_visibility_required_paths", ()))))
+    # Run authority comes from the installed parent service, never an env switch
+    # or a disposition carried in an otherwise ordinary frame.
+    fanout_enabled = any(
+        module is not None and module.available()
+        for module in (sys.modules.get("kernel_parallel"),
+                       sys.modules.get("stateframe.engine.kernel_parallel"))
+    )
+    fanout_events_seen: set[str] = set()
     def trim_optional_candidate() -> int:
         nonlocal semantic, protected
         from kernel_stateframe_capacity import fit_protected_frame
@@ -1058,6 +1081,9 @@ def _finalize_frame_candidate(
             audit = fit_protected_frame(
                 candidate, semantic_messages=semantic,
                 action_context=getattr(runtime, "_framefit_action_context", None),
+                # W6b hook: source windows are read from this attempt's working copy.
+                workspace_root=_workspace_root(runtime),
+                fanout_enabled=fanout_enabled,
                 protected_messages=protected,
                 required_deferred_paths=(
                     plan.get("deferred_paths", ())
@@ -1073,6 +1099,18 @@ def _finalize_frame_candidate(
             )
             journal = getattr(capture, "journal", None)
             emit = getattr(journal, "emit", None)
+            if callable(emit):
+                for event in audit.get("fanout_continuation_events", ()):
+                    if not isinstance(event, Mapping) or not isinstance(event.get("kind"), str):
+                        continue
+                    event_key = json.dumps(event, ensure_ascii=False, sort_keys=True,
+                                           separators=(",", ":"))
+                    if event_key in fanout_events_seen:
+                        continue
+                    fanout_events_seen.add(event_key)
+                    emit(event["kind"], request_id=capture.request_id,
+                         **{key: value for key, value in event.items() if key != "kind"},
+                         dispatch=False)
             if audit.get("changed") and callable(emit):
                 emit("framefit5_capacity_compacted", request_id=capture.request_id,
                      before_bytes=audit["before"], after_bytes=audit["after"],
@@ -1180,6 +1218,33 @@ def _finalize_frame_candidate(
     )
     from kernel_frame_source_snapshot import frame_source_snapshot
     sources = frame_source_snapshot(runtime, plan)
+    suggestion = None
+    suggested_paths: set[str] = set()
+    from kernel_parallel_suggest import enabled as suggestion_enabled
+    if suggestion_enabled():
+        from kernel_parallel_suggest import frame_suggestion
+        suggestion = frame_suggestion(
+            runtime, plan, candidate.get("tools", ()),
+            frame_budget_tokens=min(token_limit, int(runtime.frame_ceiling)),
+            previously_read_paths=tuple(row.get("path") for row in ordinary_recent_windows
+                                        if isinstance(row.get("path"), str)),
+        )
+        if suggestion is not None and suggestion[1].recommend:
+            suggested_paths = {path for unit in suggestion[0]
+                               for path in (unit.source, unit.test)}
+            recent_windows = [row for row in recent_windows
+                              if row.get("path") not in suggested_paths]
+            ordinary_recent_windows = [row for row in ordinary_recent_windows
+                                       if row.get("path") not in suggested_paths]
+            product_windows = [row for row in product_windows
+                               if row.get("path") not in suggested_paths]
+            from kernel_request_source_window import parse_model_source_window
+            public_windows = [row for row in public_windows
+                              if not any(
+                                  isinstance(meta := parse_model_source_window(row.get(level)), Mapping)
+                                  and meta.get("path") in suggested_paths
+                                  for level in ("full", "excerpt", "assertions")
+                              )]
     from kernel_completion_owner import _current_tool_admission
     from kernel_request_source_window import _executable_deferred_read_route
     from kernel_stateframe_framefit5 import assemble_framefit5_request
@@ -1195,6 +1260,14 @@ def _finalize_frame_candidate(
             owner_presentation=getattr(capture, "owner_presentation", None),
             host_text_messages=candidate["messages"],
         )
+        if suggested_paths and suggestion is not None:
+            from kernel_parallel_suggest import apply_suggestion
+            apply_suggestion(candidate["messages"], plan, suggestion[2],
+                             suggestion[0], suggestion[1],
+                             protected_messages=protected)
+
+    if suggested_paths:
+        assemble_selection()
 
     # Closure deferral does not discard verified editable read pages before the
     # complete-envelope fit. Their other units remain deferred; actual pressure
@@ -1633,6 +1706,17 @@ def _finalize_frame_candidate(
             raise source_refusal(plan, receipt, sources)
         tokens, method = measured_tokens(candidate, wire_bytes=len(candidate_wire))
         byte_limit = request_byte_limit(method)
+    if _inline_unmatched_site_references(candidate["messages"], _workspace_root(runtime)):
+        candidate_wire = json.dumps(candidate).encode()
+        receipt = verify_final_source_delivery(
+            plan, candidate["messages"], payload=candidate_wire, sources=sources,
+        )
+        if not source_delivery_satisfied(receipt):
+            raise source_refusal(plan, receipt, sources)
+        tokens, method = final_request_tokens(
+            candidate, meter, capture, wire_bytes=len(candidate_wire),
+        )
+        byte_limit = request_byte_limit(method)
     # This per-finalize source snapshot is shared by the plan and later readers;
     # those consumers inspect its path→text entries without mutating them.
     plan["source_contents"] = sources
@@ -1642,6 +1726,7 @@ def _finalize_frame_candidate(
     request_bytes = len(candidate_wire)
     if (tokens > token_limit or request_bytes > byte_limit):
         byte_limit = trim_optional_candidate()
+        _inline_unmatched_site_references(candidate["messages"], _workspace_root(runtime))
         candidate_wire = json.dumps(candidate).encode()
         receipt = verify_final_source_delivery(
             plan, candidate["messages"], payload=candidate_wire, sources=sources)
@@ -1854,6 +1939,7 @@ def _finalize_frame_candidate(
             finally:
                 token_limit = base_token_limit
                 layout_byte_ceiling = None
+            _inline_unmatched_site_references(candidate["messages"], _workspace_root(runtime))
             selection = None
             if before_trim is not None:
                 from kernel_stable_wire_selection import removed_candidates

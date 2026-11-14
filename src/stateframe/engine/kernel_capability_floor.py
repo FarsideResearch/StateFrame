@@ -13,6 +13,7 @@ CAPABILITY_GROUPS: tuple[tuple[str, ...], ...] = (
     ("read",),
     ("grep",),
     ("str_replace", "edit"),
+    ("parallel",),
     ("file_delete", "file_move"),
     ("shell",),
     ("run_tests", "authored_check"),
@@ -58,9 +59,13 @@ def admissible_floor_names(
 ) -> tuple[str, ...]:
     """Return only floor capabilities backed by a current, dispatchable schema."""
     available = {_name(tool) for tool in _tools(available_tools)}
+    import sys
+    unit_module = sys.modules.get("kernel_unit_policy")
+    unit_policy = unit_module.active() if unit_module is not None else None
     allowed = {
         name for name in CAPABILITY_NAMES
-        if name in available and (admissible is None or _safe_admission(admissible, name))
+        if name in available and (unit_policy is None or name in unit_policy.allowed_tools)
+        and (admissible is None or _safe_admission(admissible, name))
     }
     return tuple(name for group in CAPABILITY_GROUPS for name in group if name in allowed)
 

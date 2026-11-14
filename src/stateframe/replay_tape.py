@@ -316,7 +316,26 @@ def build(wire_dir: Path, sends_path: Path, *, routes_required: bool = False) ->
         record = records.get(index)
         if record is not None and record.get("request_sha256") != hashlib.sha256(request).hexdigest():
             raise TapeError(f"wire/{request_path.name} does not match its sends.jsonl record")
-        if (wire_dir / f"{index:04d}.error.txt").is_file():
+        error_path = wire_dir / f"{index:04d}.error.txt"
+        failed_send = error_path.is_file()
+        identity_path = wire_dir / f"{index:04d}.endpoint.json"
+        identity = None
+        if identity_path.exists():
+            if identity_path.is_symlink():
+                raise TapeError(f"wire/{identity_path.name} is a symlink")
+            try:
+                identity = json.loads(identity_path.read_bytes())
+            except (ValueError, OSError) as error:
+                raise TapeError(f"wire/{identity_path.name} is invalid: {error}") from error
+            if (not isinstance(identity, dict) or set(identity) != {"url", "model"}
+                    or any(not isinstance(value, str) or not value for value in identity.values())):
+                raise TapeError(f"wire/{identity_path.name} has an invalid endpoint identity")
+            if record is not None and record.get("endpoint_identity") != identity:
+                # Older failed-send records predate endpoint_identity. They cannot be
+                # replayed because the error artifact is skipped, so preserve compatibility.
+                if not (failed_send and "endpoint_identity" not in record):
+                    raise TapeError(f"wire/{identity_path.name} differs from its sends.jsonl record")
+        if failed_send:
             continue
         last = index == indexes[-1]
         if not response_path.is_file():
@@ -328,11 +347,15 @@ def build(wire_dir: Path, sends_path: Path, *, routes_required: bool = False) ->
             if last:
                 break  # torn write at the kill
             raise TapeError(f"wire/{response_path.name} is not a valid chat response")
-        tape.append({"send": index, "request": str(request_path), "response": str(response_path),
-                      "request_digest": normalized_digest(request),
-                      "response_sha256": hashlib.sha256(response).hexdigest(),
-                      **_stable_wire_record(stem, record),
-                      **({"route": route} if route is not None else {})})
+        item = {"send": index, "request": str(request_path), "response": str(response_path),
+                "request_digest": normalized_digest(request),
+                "response_sha256": hashlib.sha256(response).hexdigest(),
+                **_stable_wire_record(stem, record)}
+        if identity is not None:
+            item["endpoint_identity"] = identity
+        if route is not None:
+            item["route"] = route
+        tape.append(item)
     return tape
 
 
@@ -356,11 +379,25 @@ def pending_request(wire_dir: Path, *, routes_required: bool = False) -> dict[st
     if response.is_file() and _response_ok(response.read_bytes()):
         return None
     request = stem.with_suffix(".request.json")
-    return {"send": indexes[-1], "request": str(request),
-            "request_digest": normalized_digest(request.read_bytes()),
-            **_stable_wire_record(stem),
-            **({"route": _route_record(_route_path(wire_dir, indexes[-1]))}
-               if _route_path(wire_dir, indexes[-1]).is_file() else {})}
+    pending = {"send": indexes[-1], "request": str(request),
+               "request_digest": normalized_digest(request.read_bytes()),
+               **_stable_wire_record(stem)}
+    identity_path = wire_dir / f"{indexes[-1]:04d}.endpoint.json"
+    if identity_path.exists():
+        if identity_path.is_symlink() or not identity_path.is_file():
+            raise TapeError(f"wire/{identity_path.name} is not a regular endpoint record")
+        try:
+            identity = json.loads(identity_path.read_bytes())
+        except (ValueError, OSError) as error:
+            raise TapeError(f"wire/{identity_path.name} is invalid: {error}") from error
+        if (not isinstance(identity, dict) or set(identity) != {"url", "model"}
+                or any(not isinstance(value, str) or not value for value in identity.values())):
+            raise TapeError(f"wire/{identity_path.name} has an invalid endpoint identity")
+        pending["endpoint_identity"] = identity
+    route_path = _route_path(wire_dir, indexes[-1])
+    if route_path.is_file():
+        pending["route"] = _route_record(route_path)
+    return pending
 
 
 class Replayer:
@@ -431,7 +468,8 @@ class Replayer:
                     allowed["endpoint_host"] = urlsplit(value).netloc
         return allowed == actual
 
-    def answer(self, request: bytes, *, route: dict[str, object] | None = None) -> bytes | None:
+    def answer(self, request: bytes, *, route: dict[str, object] | None = None,
+               endpoint_identity: dict[str, str] | None = None) -> bytes | None:
         """The recorded response for this request, or None to send it live."""
         if not self.active:
             if self.pending is not None and self.diverged is None:
@@ -447,22 +485,42 @@ class Replayer:
                     return None
                 recorded = Path(str(expected["request"])).read_bytes()
                 compared = request
-                if request != recorded:
-                    swapped = with_recorded_model(request, recorded,
-                                                  self._route_model_swap(expected.get("route")))
-                    if swapped is not None:
-                        compared = swapped
-                    compared = with_recorded_countdown(compared, recorded) or compared
-                if compared != recorded:
+                identity_mismatch = ("endpoint_identity" in expected and
+                                     endpoint_identity != expected["endpoint_identity"])
+                if identity_mismatch and request == recorded:
                     self.pending_mismatch = True
                     self.diverged = {
                         "tape_position": self.cursor + 1, "tape_total": len(self.tape),
-                        "recorded_send": expected["send"], "recorded_digest": self._digest(recorded),
-                        "replayed_digest": self._digest(compared),
-                        "reason": "the engine's rebuilt request differs from the request in flight when the "
-                                  "attempt stopped",
-                        "first_difference": first_difference(recorded, compared)}
+                        "recorded_send": expected["send"],
+                        "reason": "subframe route destination or model differs",
+                        "recorded_endpoint_identity": expected["endpoint_identity"],
+                        "replayed_endpoint_identity": endpoint_identity,
+                    }
                     return None
+                if request != recorded:
+                    swapped = with_recorded_model(request, recorded,
+                                                  self._route_model_swap(expected.get("route")))
+                    if swapped == recorded and not identity_mismatch:
+                        compared = recorded
+                    else:
+                        if swapped is not None:
+                            compared = swapped
+                        compared = with_recorded_countdown(compared, recorded) or compared
+                        if compared != recorded or identity_mismatch:
+                            self.pending_mismatch = True
+                            self.diverged = {
+                                "tape_position": self.cursor + 1, "tape_total": len(self.tape),
+                                "recorded_send": expected["send"], "recorded_digest": self._digest(recorded),
+                                "replayed_digest": self._digest(compared),
+                                "reason": "the engine's rebuilt request or subframe route differs from the request "
+                                          "in flight when the attempt stopped" if identity_mismatch else
+                                          "the engine's rebuilt request differs from the request in flight when the "
+                                          "attempt stopped",
+                                "first_difference": first_difference(recorded, compared)}
+                            if identity_mismatch:
+                                self.diverged.update(recorded_endpoint_identity=expected["endpoint_identity"],
+                                                     replayed_endpoint_identity=endpoint_identity)
+                            return None
                 self.pending_verified = {"send": expected["send"],
                                          "request_sha256": hashlib.sha256(recorded).hexdigest(),
                                          "recorded_route": expected.get("route"), "route": route}
@@ -474,32 +532,52 @@ class Replayer:
             self.diverged = {"reason": "routed send destination or model differs",
                              "recorded_send": item["send"]}
             return None
+        identity_mismatch = ("endpoint_identity" in item and
+                             endpoint_identity != item["endpoint_identity"])
         recorded = Path(str(item["request"])).read_bytes()
+        if identity_mismatch and request == recorded:
+            self.active = False
+            self.pending = None
+            self.diverged = {
+                "tape_position": self.cursor + 1, "tape_total": len(self.tape),
+                "recorded_send": item["send"],
+                "reason": "subframe route destination or model differs",
+                "recorded_endpoint_identity": item["endpoint_identity"],
+                "replayed_endpoint_identity": endpoint_identity,
+            }
+            return None
         recorded_digest = self._digest(recorded)
         digest = self._digest(request)
         compared = request
         if request != recorded:
             swapped = with_recorded_model(request, recorded,
                                           self._route_model_swap(item.get("route")))
-            if swapped is not None:
-                compared, digest = swapped, self._digest(swapped)
-                if swapped == recorded:
-                    self.model_swapped += 1
-            countdown = with_recorded_countdown(compared, recorded)
-            if countdown is not None and countdown != compared:
-                compared, digest = countdown, self._digest(countdown)
-        if compared != recorded:
-            self.active = False
-            self.pending = None  # the later in-flight request belongs to the abandoned replay path
-            self.diverged = {"tape_position": self.cursor + 1, "tape_total": len(self.tape),
-                             "recorded_send": item["send"],
-                             "recorded_digest": recorded_digest, "replayed_digest": digest,
-                             "reason": "the engine's rebuilt request differs from the recorded request",
-                             # With a model swap, the window shows the difference beyond the model name.
-                             "first_difference": first_difference(recorded, compared)}
-            if self.model_swap is not None:
-                self.diverged["model_swap"] = dict(self.model_swap, swapped_matches=self.model_swapped)
-            return None
+            if swapped == recorded and not identity_mismatch:
+                compared = recorded
+                self.model_swapped += 1
+            else:
+                if swapped is not None:
+                    compared, digest = swapped, self._digest(swapped)
+                countdown = with_recorded_countdown(compared, recorded)
+                if countdown is not None and countdown != compared:
+                    compared, digest = countdown, self._digest(countdown)
+                if compared != recorded or identity_mismatch:
+                    self.active = False
+                    self.pending = None  # the later in-flight request belongs to the abandoned replay path
+                    self.diverged = {"tape_position": self.cursor + 1, "tape_total": len(self.tape),
+                                     "recorded_send": item["send"],
+                                     "recorded_digest": recorded_digest, "replayed_digest": digest,
+                                     "reason": ("the engine's rebuilt request or subframe route differs from the "
+                                                "recorded request" if identity_mismatch else
+                                                "the engine's rebuilt request differs from the recorded request"),
+                                     # With a model swap, the window shows the difference beyond the model name.
+                                     "first_difference": first_difference(recorded, compared)}
+                    if self.model_swap is not None:
+                        self.diverged["model_swap"] = dict(self.model_swap, swapped_matches=self.model_swapped)
+                    if identity_mismatch:
+                        self.diverged.update(recorded_endpoint_identity=item.get("endpoint_identity"),
+                                             replayed_endpoint_identity=endpoint_identity)
+                    return None
         response = Path(str(item["response"])).read_bytes()
         if hashlib.sha256(response).hexdigest() != item["response_sha256"]:
             raise TapeError(f"recorded response for send {item['send']} changed after resume started")

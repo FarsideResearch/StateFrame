@@ -27,47 +27,116 @@ def terminal_receipt(run: Path) -> dict[str, object]:
     result = envelope.get("result") if isinstance(envelope, dict) else None
     if not isinstance(result, dict) or not isinstance(result.get("result"), str):
         return journal_submission(run)
+    recovery_fields = ("check_receipt", "source_map_path", "final_source_paths")
+    if (result.get("result") == "SUBMITTED"
+            and any(result.get(key) is None for key in recovery_fields)):
+        recovered = journal_submission(run)
+        submission = result.get("submission")
+        recovered_submission = recovered.get("submission")
+        if (isinstance(submission, dict) and isinstance(recovered_submission, dict)
+                and submission.get("seal_id") == recovered_submission.get("seal_id")
+                and submission.get("artifact_digest") == recovered_submission.get("artifact_digest")):
+            recovered_fields = {
+                key: recovered[key] for key in recovery_fields
+                if result.get(key) is None and recovered.get(key) is not None
+            }
+            if recovered_fields:
+                return {**result, **recovered_fields}
     return result
 
 
 def journal_submission(run: Path) -> dict[str, object]:
+    return _journal_submission_details(run)[0]
+
+
+def _journal_submission_details(
+        run: Path) -> tuple[dict[str, object], dict[str, object] | None]:
     """A stored DoneSeal from the engine journal, for an engine stopped before its terminal receipt.
 
     In one long run the engine sealed and stored its submission inside its wall, then was killed while
     finishing up, so engine-result.json never appeared. Recovery requires a stored done_sealed and a
     matching done_submission_stored; the export still re-verifies the artifact bytes against the digest.
+    Auto-finished subframes also retain their candidate-bound check receipt in the journal.
     """
     from .engine.kernel_journal_store import journal_paths, open_journal
 
     journals = journal_paths(run / "worker" / "measurement-runs")
     if len(journals) != 1:
-        return {}
+        return {}, None
     sealed: dict[str, object] | None = None
     stored: dict[str, object] | None = None
+    latest_auto_finish_receipt: dict[str, object] | None = None
+    sealed_check_receipt: dict[str, object] | None = None
+    latest_final_sources: dict[str, object] | None = None
     try:
         with open_journal(journals[0]) as source:
             lines = source.read().splitlines()
     except (OSError, UnicodeError):
-        return {}
+        return {}, None
     for line in lines:
         try:
             event = json.loads(line)
         except ValueError:
             continue
-        if not isinstance(event, dict) or event.get("stored") is not True:
+        if not isinstance(event, dict):
             continue
-        if event.get("kind") == "done_sealed":
+        kind = event.get("kind")
+        # These evidence records are durable journal events but do not carry the
+        # `stored` marker used by the submission pair below. Their association
+        # with a submission is established by event order and the sealed digest.
+        metadata_is_durable = event.get("stored") is None or event.get("stored") is True
+        if kind == "subframe_auto_finished" and metadata_is_durable:
+            receipt = event.get("check_receipt")
+            latest_auto_finish_receipt = receipt if isinstance(receipt, dict) else None
+        elif kind == "subframe_final_sources" and metadata_is_durable:
+            artifact_digest = event.get("artifact_digest")
+            source_map_path = event.get("source_map_path")
+            final_source_paths = event.get("final_source_paths")
+            if (isinstance(artifact_digest, str) and isinstance(source_map_path, str)
+                    and isinstance(final_source_paths, list)
+                    and all(isinstance(path, str) for path in final_source_paths)):
+                latest_final_sources = {
+                    "artifact_digest": artifact_digest,
+                    "source_map_path": source_map_path,
+                    "final_source_paths": final_source_paths,
+                }
+            else:
+                latest_final_sources = None
+        elif kind == "done_sealed" and event.get("stored") is True:
             sealed, stored = event, None
-        elif event.get("kind") == "done_submission_stored" and sealed is not None:
+            sealed_check_receipt = latest_auto_finish_receipt
+        elif (kind == "done_submission_stored" and event.get("stored") is True
+              and sealed is not None):
             stored = event
     if sealed is None or stored is None:
-        return {}
+        return {}, None
     digest, seal_id = sealed.get("artifact_digest"), sealed.get("seal_id")
     if stored.get("artifact_digest") != digest:
-        return {}
+        return {}, None
     submission = {"stored": True, "seal_id": seal_id, "artifact_digest": digest}
-    terminal = {"result": "SUBMITTED", "reason_code": RECOVERED_FROM_JOURNAL, "submission": submission}
-    return terminal if sealed_artifact_digest(terminal) else {}
+    terminal = {"result": "SUBMITTED", "reason_code": RECOVERED_FROM_JOURNAL,
+                "submission": submission}
+    if sealed.get("schema") == "stateframe-done-seal/2":
+        if (stored.get("schema") != sealed.get("schema")
+                or stored.get("file_digests") != sealed.get("file_digests")
+                or not isinstance(sealed.get("file_digests"), dict)
+                or not isinstance(sealed.get("labels"), dict)):
+            return {}, None
+        submission.update({
+            "schema": sealed["schema"], "source": sealed.get("source"),
+            "label": sealed.get("label"), "file_digests": sealed["file_digests"],
+        })
+        terminal["labels"] = sealed["labels"]
+    if not sealed_artifact_digest(terminal):
+        return {}, None
+    check_receipt = sealed_check_receipt if sealed.get("source") == "host" else None
+    if check_receipt is not None:
+        terminal["check_receipt"] = check_receipt
+    if (latest_final_sources is not None
+            and latest_final_sources.get("artifact_digest") == digest):
+        terminal["source_map_path"] = latest_final_sources["source_map_path"]
+        terminal["final_source_paths"] = latest_final_sources["final_source_paths"]
+    return terminal, check_receipt
 
 
 def sealed_artifact_digest(terminal: dict[str, object]) -> str | None:
@@ -108,6 +177,8 @@ def project(summary: dict[str, object], *, cancelled: bool = False,
         runtime = "completed"
     elif timed_out:
         runtime = "budget_stop"
+    elif status == "RECOVERY_REQUIRED":
+        runtime = "recovery_required"
     elif (child != 0 or summary.get("candidate_error") or status == "ENGINE_ERROR" or status in SEAL_FAILURES
           or (isinstance(status, str) and status.startswith("ERR:"))):
         runtime = "engine_error"
@@ -198,7 +269,7 @@ def exit_code(summary: dict[str, object]) -> int:
     runtime = summary.get("runtime_outcome")
     if runtime == "cancelled":
         return 130
-    if runtime == "hook_containment":
+    if runtime in {"recovery_required", "hook_containment"}:
         return 2
     if runtime == "hook_blocked":
         return 1

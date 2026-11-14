@@ -344,6 +344,13 @@ def reconcile_frozen_budget(capture, runtime, body, *, frozen_inputs=None):
 
     def dispatchable(name, arguments):
         try:
+            unit_policy = getattr(runtime, "_unit_policy", None)
+            if (unit_policy is not None and name == "run_tests"
+                    and any(key in arguments for key in
+                            ("unknown_id", "check_id", "check_identity"))
+                    and not unit_policy.matches_check_resolver(
+                        arguments, getattr(runtime, "test_receipts", ()))):
+                return False
             dispatch_tool_call(dispatch_surface, name, arguments)
             return True
         except (AttributeError, OSError, RuntimeError, TypeError, ValueError):

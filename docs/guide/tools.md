@@ -13,6 +13,12 @@ By default, `STATEFRAME_STABLE_TOOL_HEAD` keeps provider-visible tool definition
 
 When a run selects a [skill](skills.md), `skill_load(name)` is also offered. It loads a bounded user-role instruction body and creates a settled observation. It grants no source-read or check evidence. Skill command definitions are offered only with `--trust-skill-tools` and follow the custom command rules below.
 
+The parent can also receive `parallel` when subframes are enabled. It admits independent, explicitly owned file work,
+then validates and publishes each proposal before dependents or the parent observe it. Subframes receive a narrower
+tool surface; deletes, moves, shell, Git, web, custom tools, MCP tools, `skill_load` and nested `parallel` calls stay
+parent-only. See
+[Subframes](subframes.md) for the contract, admission checks, wire-visible request behavior, and recovery rules.
+
 ## Shell and jobs
 
 `shell(command, timeout_seconds?, background?)` runs `/bin/sh -c` in the run's execution session. `command` is required, nonempty text of at most 16,384 characters. A foreground call defaults to 120 seconds; `timeout_seconds` accepts 1 through 600. `background: true` starts a job, with a 600-second default and the same 1 through 600 range. At most four jobs may run at once. The shell tool is offered unless `--shell off` is set. Each foreground call starts at the workspace root with a fresh environment, unless `STATEFRAME_SHELL_STATE=on` keeps the directory and exported variables between calls (see [Running](running.md)).

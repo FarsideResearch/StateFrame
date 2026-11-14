@@ -132,6 +132,8 @@ WIRE_ID_PATHS = (
     (("messages", "*", "content"), "check_execution_ref", "check_execution_ref: ", (20,)),
     # The generated deferred-read notice lists the same read-fact receipt IDs.
     (("messages", "*", "content"), "receipt_id", "journal receipts ", (20,)),
+    # v0.4.5 changed this one reference's derivation to remove package-set identity from the wire.
+    (("messages", "*", "content"), "unified_stop_snapshot", "snapshot=unified:", (24,)),
     # Traceback paths can include the generated continuation-workspace ID; fixtures use <workspace>.
     (("messages", "*", "content"), "continuation_workspace_dir",
      "continuation-workspaces/", (20, 32)),
@@ -467,7 +469,7 @@ MOVED_ID_FIELDS = frozenset({
     "tool_call_id", "wire_truth_handle(request_id)", "request_id", "native_call_id(request_id)",
     "edit_receipt", "check_receipt", "check_execution", "check_execution_ref",
     "check_finding_id", "receipt_id", "continuation_workspace_dir", "expectation_receipt",
-    "historical_applied_edits_sha256(edit_ids)",
+    "historical_applied_edits_sha256(edit_ids)", "unified_stop_snapshot",
 })
 DERIVED_RESULT_FIELDS = frozenset({"result_sha256(tool_result)"})
 

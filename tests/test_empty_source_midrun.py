@@ -409,3 +409,15 @@ def test_t8_no_deferral_producer_records_a_zero_byte_path(tmp_path):
     assert plan["deferred_paths"] == [EMPTY, "app/a.py"]
     receipt = _deferred_receipt(plan)
     assert receipt["proof_failures"] == [] and plan["deferred_paths"] == ["app/a.py"]
+
+
+@pytest.mark.parametrize("visible", [False, True])
+def test_subframe_empty_source_obeys_unit_visibility(tmp_path, visible):
+    plan, root = _plan(tmp_path)
+    runtime = _runtime(root)
+    runtime._unit_policy = SimpleNamespace(visible=lambda path: path != EMPTY or visible)
+    if visible:
+        assert frame_source_snapshot(runtime, plan)[EMPTY] == ""
+    else:
+        with pytest.raises(FrameAllocationReplanNeeded, match="withheld path"):
+            frame_source_snapshot(runtime, plan)

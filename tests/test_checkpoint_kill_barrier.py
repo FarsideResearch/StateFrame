@@ -11,10 +11,13 @@ import time
 from pathlib import Path
 
 import pytest
-
 from _timeouts import scaled
-from fixtures.process_signals import signal_run_owned, wait_for_checkpoint_saved
-
+from fixtures.process_signals import (
+    record_identity,
+    signal_run_owned,
+    signal_run_verified,
+    wait_for_checkpoint_saved,
+)
 
 TESTS = Path(__file__).resolve().parent
 
@@ -49,18 +52,111 @@ PRIMITIVE_TESTS = {
     "test_cgroup_leaf_pattern.py",
 }
 
-# Reviewed exceptions are tied to the exact source call, not the whole test file.
+# Preserve the release's exact file/function/line/column authority for these
+# mutation fixtures; the bridge's standalone fixtures use scoped counts below.
 REVIEWED_RAW_SIGNALS = {
     ("test_mutation_linux_regressions.py", "_stop_process_group", 329, 8,
-     "os.killpg(process.pid, signal.SIGTERM)"): "Test-harness process-group cleanup.",
+     "os.killpg(process.pid, signal.SIGTERM)"),
     ("test_mutation_linux_regressions.py", "_stop_process_group", 333, 12,
-     "os.killpg(process.pid, signal.SIGKILL)"): "Test-harness process-group cleanup.",
+     "os.killpg(process.pid, signal.SIGKILL)"),
     ("test_mutation_linux_regressions.py", "_interrupt_and_resume", 380, 8,
-     "os.kill(sender_pid, signal.SIGKILL)"): "The interrupt is the behaviour under test.",
+     "os.kill(sender_pid, signal.SIGKILL)"),
+}
+
+APPROVED_TEST_SIGNALS: dict[tuple[str, str, str], tuple[int, str]] = {
+    ('test_parallel_bridge_process.py', 'test_process_integration_sixteen_channels_thirtytwo_workers', 'process.terminate()'):
+        (1, 'Stops only a command-verified standalone journal/seal helper after runtime shutdown.'),
+    ('test_parallel_cursor_recovery.py', '_kill_recorded_child', 'os.kill(process.pid, signal.SIGKILL)'):
+        (1, 'Stops the held cursor-write fixture child after checking its command marker.'),
+    ('test_parallel_tick_table.py', 'test_pid_that_dies_between_ticks_leaves_the_family', 'os.kill(child, signal.SIGKILL)'):
+        (1, 'Kills the child created by the held synthetic worker to test family eviction.'),
+    ('test_parallel_tick_table.py', 'test_raw_stat_identity_handles_a_comm_with_parentheses_and_spaces', 'os.killpg(process.pid, signal.SIGKILL)'):
+        (1, 'Reaps the held standalone stat-parser fixture process group.'),
+    ('test_parallel_tick_table.py', 'procs', 'os.killpg(process.pid, signal.SIGKILL)'):
+        (1, 'Reaps the fixture-owned synthetic worker groups, without model requests.'),
+    ('test_parallel_bridge_recorded.py', '_kill_leader', 'process.kill()'):
+        (1, 'Stops a held standalone sleeper after verifying its command on Linux.'),
+    ('test_parallel_supervisor_scale.py', 'test_live_unit_reports_a_dead_unit_from_the_same_single_scan', 'os.killpg(handle.pgid, signal.SIGKILL)'):
+        (1, 'Kills the held synthetic worker to test the shared process scan.'),
+    ('test_parallel_supervisor_scale.py', 'test_siblings_are_polled_from_one_scan', 'os.killpg(handle.pgid, signal.SIGKILL)'):
+        (1, 'Kills and reaps each held synthetic sibling before testing shared polling.'),
+    ('test_parallel_supervisor_scale.py', 'procs', 'os.killpg(process.pid, signal.SIGKILL)'):
+        (1, 'Reaps only the standalone sleeper groups created by this fixture.'),
+    ("test_unit_checks.py", "process_boundary", "signal_owned(leader, 9)"):
+        (1, "test-only process-boundary fixture cleanup"),
+    ("test_unit_checks.py", "test_check_command_refuses_reaped_leader_with_live_child",
+     "signal_verified(child_pid[0], child_identity[0], 0)"):
+        (1, "identity-checked liveness probe in a process-boundary test"),
+    ("test_unit_checks.py", "test_check_command_refuses_reaped_leader_with_live_child",
+     "signal_verified(child_pid[0], child_identity[0], 9)"):
+        (1, "identity-checked descendant cleanup in a process-boundary test"),
+    ("test_unit_checks.py", "test_linux_check_ignores_unreadable_unrelated_environ",
+     "unrelated.terminate()"):
+        (1, "stop the unrelated sleeper created by this test"),
+    ("test_unit_checks.py", "test_detached_check_child_cannot_publish_pass_or_write_later",
+     "signal_verified(pid, identity, signal.SIGKILL)"):
+        (1, "identity-checked cleanup of the detached test child"),
+    ("test_parallel_signal_identity.py", "test_unreaped_worker_leader_with_wrong_birth_is_never_signalled",
+     "process.kill()"):
+        (1, "cleanup the held child after asserting wrong-birth rejection"),
+    ("test_parallel_signal_identity.py", "test_macos_audit_token_signal_checks_birth_and_stops_owned_process",
+     "process.kill()"):
+        (1, "cleanup the held test child after signal identity assertions"),
+    ("test_parallel_worker_prep.py", "_run_scripted_engine", "endpoint_process.terminate()"):
+        (1, "stop the local scripted endpoint server"),
+    ("test_parallel_worker_prep.py", "_run_scripted_engine", "endpoint_process.kill()"):
+        (1, "bounded escalation for the local scripted endpoint server"),
+    ("test_parallel_worker_prep.py", "test_spawn_to_process_record_crash_keeps_durable_launch_intent",
+     "process.kill()"):
+        (1, "stop the synthetic worker process used by the launch crash test"),
+    ("test_parallel_resources.py",
+     "test_slot_lease_is_exclusive_across_processes_and_released_when_holder_is_killed",
+     "process.kill()"):
+        (2, "stop the synthetic lease holders after the exclusivity assertions"),
+    ("test_parallel_host.py", "test_real_scripted_worker_submission_seals_recorded_bytes_and_receipt",
+     "endpoint_process.terminate()"):
+        (1, "stop the local scripted endpoint server"),
+    ("test_parallel_host.py",
+     "test_interrupted_worker_resume_replays_exact_wire_without_authorizing_replayed_sends",
+     "endpoint_process.terminate()"):
+        (1, "stop the local scripted endpoint server"),
+    ("test_parallel_host.py", "test_macos_process_argv_preserves_run_path_spaces",
+     "signal_owned(process, signal.SIGTERM)"):
+        (1, "stop the standalone argv fixture process"),
+    ("test_parallel_host.py", "test_parent_exit_cancels_and_reaps_a_real_worker_process_tree",
+     "signal_owned(process, 9)"):
+        (1, "test teardown after verifying worker process-tree containment"),
+    ("test_parallel_host.py", "test_exited_child_keeps_subframe_unsealable_until_process_group_is_gone",
+     "signal_verified(pid, identity, signal.SIGKILL)"):
+        (1, "identity-checked teardown of a synthetic worker descendant"),
+    ("test_unit_visibility.py", "test_real_oversized_subframe_has_typed_terminal_and_zero_sends",
+     "endpoint_process.terminate()"):
+        (1, "stop the local scripted endpoint server"),
+    ("test_check_permits.py", "test_two_processes_are_exclusive_and_kill_releases",
+     "first.kill()"):
+        (1, "stop the synthetic permit holder after the lock assertion"),
+    ("test_check_permits.py", "test_two_permits_allow_two_holders_and_refuse_third",
+     "child.kill()"):
+        (1, "stop the synthetic permit holder after the lock assertion"),
+    ("e2e/test_parallel_interrupt_safety.py", "test_signal_helpers_verify_launch_identity_before_delivery",
+     "signal_verified(process.pid, type(identity)(process.pid, identity.started_epoch, 'different command', identity.kernel_identity), signal.SIGTERM)"):
+        (1, "assert that a mismatched command cannot signal the standalone fixture"),
+    ("e2e/test_parallel_interrupt_safety.py", "test_signal_helpers_verify_launch_identity_before_delivery",
+     "signal_verified(process.pid, type(identity)(process.pid, identity.started_epoch, identity.command, 'darwin:0:0'), signal.SIGTERM)"):
+        (1, "assert that a mismatched kernel birth cannot signal the standalone fixture"),
+    ("e2e/test_parallel_interrupt_safety.py", "test_signal_helpers_verify_launch_identity_before_delivery",
+     "signal_verified(os.getpid(), type(identity)(os.getpid(), identity.started_epoch, identity.command), signal.SIGTERM)"):
+        (1, "assert that self-signalling is rejected"),
+    ("e2e/test_parallel_interrupt_safety.py", "test_signal_helpers_verify_launch_identity_before_delivery",
+     "signal_owned(process, signal.SIGTERM)"):
+        (1, "stop the standalone fixture after identity assertions"),
+    ("e2e/test_parallel_interrupt_safety.py", "test_signal_helpers_verify_launch_identity_before_delivery",
+     "signal_owned(process, signal.SIGKILL)"):
+        (1, "bounded cleanup if the standalone fixture ignores SIGTERM"),
 }
 
 
-def _raw_run_signals(source: str, relative: Path) -> list[tuple[int, str]]:
+def _raw_run_signals(source: str, relative: Path) -> list[tuple[int, str, str]]:
     """Find direct signals in run tests, including imported aliases."""
     tree = ast.parse(source)
     parents = {child: parent for parent in ast.walk(tree)
@@ -85,6 +181,16 @@ def _raw_run_signals(source: str, relative: Path) -> list[tuple[int, str]]:
                 raw_names.update(alias.asname or alias.name for alias in node.names
                                  if alias.name in {"signal_verified", "signal_owned"})
     violations = []
+    parents = {id(child): node for node in ast.walk(tree) for child in ast.iter_child_nodes(node)}
+
+    def function_name(node: ast.AST) -> str:
+        current = node
+        while id(current) in parents:
+            current = parents[id(current)]
+            if isinstance(current, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                return current.name
+        return "<module>"
+
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
             continue
@@ -110,28 +216,41 @@ def _raw_run_signals(source: str, relative: Path) -> list[tuple[int, str]]:
                          and func.value.value.id == "self" and func.value.attr == "process")
             raw |= not endpoint
         if raw:
-            call = ast.unparse(node)
-            parent = parents.get(node)
-            while parent is not None and not isinstance(parent, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                parent = parents.get(parent)
-            function = parent.name if parent is not None else None
-            if (relative.as_posix(), function, node.lineno, node.col_offset, call) not in REVIEWED_RAW_SIGNALS:
-                violations.append((node.lineno, call))
+            owner, call = function_name(node), ast.unparse(node)
+            site = (relative.as_posix(), owner, node.lineno, node.col_offset, call)
+            if site not in REVIEWED_RAW_SIGNALS:
+                violations.append((node.lineno, owner, call))
     return violations
 
 
 def _unbarriered_signals(root: Path) -> dict[str, list[tuple[int, str]]]:
-    violations = {}
+    violations: dict[str, list[tuple[int, str]]] = {}
+    actual: dict[tuple[str, str, str], list[int]] = {}
+    scanned_paths: set[str] = set()
     for path in root.rglob("*.py"):
         relative = path.relative_to(root)
+        scanned_paths.add(relative.as_posix())
         # The monitor owns and reaps its engine process group after the leader exits; run-kill decisions stay in tests.
         # The orphan guard only stops launchd-adopted leftovers, after their run has ended.
         if relative.as_posix() in {"fixtures/process_signals.py", "engine_run.py", "_orphan_guard.py"} or (
                 relative.parts[0] != "acceptance" and path.name in PRIMITIVE_TESTS):
             continue
         found = _raw_run_signals(path.read_text(encoding="utf-8"), relative)
-        if found:
-            violations[relative.as_posix()] = found
+        for line, owner, call in found:
+            actual.setdefault((relative.as_posix(), owner, call), []).append(line)
+    for key, lines in actual.items():
+        relative, _owner, call = key
+        approved = APPROVED_TEST_SIGNALS.get(key)
+        if approved is None:
+            violations.setdefault(relative, []).extend((line, call) for line in lines)
+        elif len(lines) != approved[0]:
+            violations.setdefault(relative, []).append(
+                (min(lines), f"reviewed signal count {len(lines)} != {approved[0]}: {call}"))
+    for key, (expected, reason) in APPROVED_TEST_SIGNALS.items():
+        relative, _owner, call = key
+        if relative in scanned_paths and len(actual.get(key, ())) != expected:
+            violations.setdefault(relative, []).append(
+                (0, f"reviewed signal count {len(actual.get(key, ()))} != {expected}: {call} ({reason})"))
     return violations
 
 
@@ -167,6 +286,18 @@ def test_orphan_guard_primitive_exemptions_are_path_exact(tmp_path: Path) -> Non
     }
 
 
+@pytest.mark.parametrize("filename,function,call", [
+    ("test_check_permits.py", "test_two_processes_are_exclusive_and_kill_releases", "first.kill()"),
+    ("test_parallel_bridge_recorded.py", "_kill_leader", "process.kill()"),
+])
+def test_reviewed_test_signal_sites_reject_added_calls(tmp_path: Path, filename, function, call) -> None:
+    source = tmp_path / filename
+    source.write_text(f"def {function}():\n    {call}\n    {call}\n", encoding="utf-8")
+    violations = _unbarriered_signals(tmp_path)
+    assert any(f"reviewed signal count 2 != 1: {call}" in detail
+               for _, detail in violations[filename])
+
+
 def test_group_existence_probe_is_not_a_run_kill() -> None:
     assert not _raw_run_signals("import os\nos.killpg(pgid, 0)\n", Path("test_engine_run.py"))
 
@@ -182,12 +313,12 @@ def test_reviewed_raw_signals_are_call_site_exact(function: str, line: int,
               + "\n" * (line - 3) + f"{' ' * column}{call}\n")
     path = Path("test_mutation_linux_regressions.py")
     assert _raw_run_signals(source, path) == []
-    assert _raw_run_signals(source, Path("other.py")) == [(line, call)]
-    assert _raw_run_signals(source.replace(f"def {function}", "def other"), path) == [(line, call)]
-    assert _raw_run_signals("\n" + source, path) == [(line + 1, call)]
+    assert _raw_run_signals(source, Path("other.py")) == [(line, function, call)]
+    assert _raw_run_signals(source.replace(f"def {function}", "def other"), path) == [(line, "other", call)]
+    assert _raw_run_signals("\n" + source, path) == [(line + 1, function, call)]
     duplicate = source.replace(f"{' ' * column}{call}\n",
                                f"{' ' * column}{call}; {call}\n")
-    assert _raw_run_signals(duplicate, path) == [(line, call)]
+    assert _raw_run_signals(duplicate, path) == [(line, function, call)]
 
 
 @pytest.mark.parametrize("source", (
@@ -286,6 +417,24 @@ def test_explicit_opt_out_signals_before_first_save(tmp_path: Path) -> None:
     try:
         signal_run_owned(run, child, signal.SIGKILL, deadline=time.monotonic(),
                          what="pre-checkpoint interruption", require_checkpoint_saved=False)
+        assert child.wait(timeout=scaled(5)) == -signal.SIGKILL
+        assert not (run / "checkpoints" / "events.jsonl").exists()
+    finally:
+        if child.poll() is None:
+            child.kill()
+            child.wait(timeout=scaled(5))
+
+
+def test_verified_mid_request_interruption_needs_no_checkpoint(tmp_path: Path) -> None:
+    run = tmp_path / "run"
+    launched = time.time()
+    child = _child(tmp_path, "import time\ntime.sleep(30)\n")
+    try:
+        identity = record_identity(child.pid, launched_after=launched,
+                                   command_fragment=str(tmp_path / "checkpoint_control_writer.py"))
+        signal_run_verified(run, child.pid, identity, signal.SIGKILL,
+                            deadline=time.monotonic() + scaled(1),
+                            what="held first provider request", require_checkpoint_saved=False)
         assert child.wait(timeout=scaled(5)) == -signal.SIGKILL
         assert not (run / "checkpoints" / "events.jsonl").exists()
     finally:

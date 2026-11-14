@@ -1,0 +1,1 @@
+{"artifact_digest":"sha256:445bf1ca29a5e2285d978553983c12e60939e5badadfe9cb59086fed04a8cc63","deletes":[],"schema":"stateframe-done-artifact/2","writes":{"pkg/a.py":"VALUE = 'café'\n","pkg/new.py":"NEW = True\n"}}

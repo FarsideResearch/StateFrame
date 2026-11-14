@@ -124,6 +124,68 @@ def test_pending_request_check_takes_the_recorded_countdown(tmp_path, recorded):
     assert planted.pending_mismatch
 
 
+@pytest.mark.parametrize("strict", [False, True])
+@pytest.mark.parametrize("pending", [False, True])
+@pytest.mark.parametrize("model_swap", [False, True])
+@pytest.mark.parametrize("with_identity", [False, True])
+def test_countdown_replay_accepts_only_permitted_normalization(
+    tmp_path, strict, pending, model_swap, with_identity,
+):
+    recorded = json.dumps({"model": "original", **json.loads(RECORDED)}).encode()
+    rebuilt = json.dumps({"model": "renamed" if model_swap else "original",
+                          **json.loads(_limits("unbounded"))}).encode()
+    item = _tape(tmp_path, recorded)[0]
+    identity = {"url": "http://unit.invalid/v1/chat/completions", "model": "original"}
+    if with_identity:
+        item["endpoint_identity"] = identity
+    replayer = Replayer(
+        [] if pending else [item], strict=strict, pending=item if pending else None,
+        model_swap={"served": "renamed", "recorded": ["original"]} if model_swap else None,
+    )
+    response = replayer.answer(rebuilt, endpoint_identity=identity if with_identity else None)
+    assert replayer.diverged is None
+    assert not replayer.pending_mismatch
+    if pending:
+        assert response is None
+        assert replayer.pending_verified is not None
+        assert replayer.pending_verified["send"] == item["send"]
+    else:
+        assert response == Path(item["response"]).read_bytes()
+        assert replayer.cursor == 1
+
+
+@pytest.mark.parametrize("strict", [False, True])
+@pytest.mark.parametrize("pending", [False, True])
+@pytest.mark.parametrize("difference", ["url", "model", "missing_identity", "content", "unapproved_model"])
+def test_countdown_replay_keeps_endpoint_model_and_content_guards(
+    tmp_path, strict, pending, difference,
+):
+    recorded = json.dumps({"model": "original", **json.loads(RECORDED)}).encode()
+    rebuilt = json.dumps({
+        "model": "unapproved" if difference == "unapproved_model" else "renamed",
+        **json.loads(_limits("unbounded", decisions=6 if difference == "content" else 7)),
+    }).encode()
+    item = _tape(tmp_path, recorded)[0]
+    identity = {"url": "http://unit.invalid/v1/chat/completions", "model": "original"}
+    item["endpoint_identity"] = identity
+    actual_identity = dict(identity)
+    if difference in {"url", "model"}:
+        actual_identity[difference] = "different"
+    replayer = Replayer(
+        [] if pending else [item], strict=strict, pending=item if pending else None,
+        model_swap={"served": "renamed", "recorded": ["original"]},
+    )
+    assert replayer.answer(
+        rebuilt, endpoint_identity=None if difference == "missing_identity" else actual_identity,
+    ) is None
+    assert replayer.diverged is not None
+    assert replayer.pending_verified is None
+    if pending:
+        assert replayer.pending_mismatch
+    else:
+        assert replayer.cursor == 0 and not replayer.active
+
+
 def test_resumed_time_prefers_the_in_flight_request(tmp_path):
     from stateframe.resume import _resumed_time
 

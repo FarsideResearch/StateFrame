@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import os
+import json
+from pathlib import Path
 from collections.abc import MutableSequence
 
 from kernel_step_limits import runtime_unbounded
@@ -9,6 +11,9 @@ from kernel_step_limits import runtime_unbounded
 
 MODE_ENV = "STATEFRAME_HARD_BUDGET_ONLY_TERMINALS"
 _STATE_ATTR = "_hard_budget_terminal_advisories"
+_SUBFRAME_BLOCK_PENDING = "_subframe_block_dispatch_pending"
+_SUBFRAME_BLOCK_CONSUMED = "_subframe_block_dispatch_consumed"
+_SUBFRAME_BLOCK_AUTHORITY = object()
 
 HARD_BUDGET_OUTCOMES = frozenset({
     "attempt_budget_exhausted", "bounded", "budget_exhausted", "ceiling_reached",
@@ -20,8 +25,76 @@ FATAL_OUTCOMES = frozenset({
     "boundary_unrecoverable", "env_broken", "harness_contract", "harness_error",
     "harness_transport", "harden8_contract_error", "harden8_evidence_pin_error",
     "harden8_owner_finalization_error", "harden8_route_error", "invalidate_attempt",
-    "quarantine_harness", "run_incomplete", "continuation_blocked",
+    "quarantine_harness", "run_incomplete", "continuation_blocked", "unit_context_too_large",
 })
+_SUBFRAME_BLOCK_REASONS = frozenset({
+    "NEEDS_UNOWNED_FILE", "INTERFACE_WRONG", "CONTRACT_IMPOSSIBLE", "CHECK_WRONG", "OTHER",
+})
+
+
+def authorize_subframe_block(runtime: object, reason: str, detail: str) -> None:
+    """Issue one terminal authorization after validated tool dispatch."""
+    dispatch_id = getattr(runtime, "current_tool_call_id", None)
+    marker = _subframe_block_marker(runtime)
+    if (getattr(runtime, "_unit_policy", None) is None
+            or not isinstance(reason, str) or reason not in _SUBFRAME_BLOCK_REASONS
+            or not isinstance(detail, str) or len(detail) > 300
+            or not isinstance(dispatch_id, str) or not dispatch_id
+            or marker is None or marker.exists()
+            or getattr(runtime, _SUBFRAME_BLOCK_CONSUMED, None) is not None):
+        raise ValueError("invalid subframe_blocked terminal authorization")
+    object.__setattr__(runtime, _SUBFRAME_BLOCK_PENDING,
+                       (_SUBFRAME_BLOCK_AUTHORITY, dispatch_id, reason, detail))
+
+
+def _subframe_block_marker(runtime: object) -> Path | None:
+    journal_path = getattr(getattr(runtime, "journal", None), "path", None)
+    return Path(journal_path).parent / "subframe-blocked.json" if journal_path is not None else None
+
+
+def _consume_subframe_block(runtime: object, dispatch_id: str, reason: str, detail: str) -> bool:
+    marker = _subframe_block_marker(runtime)
+    if marker is None:
+        return False
+    payload = json.dumps({"dispatch_id": dispatch_id, "reason_code": reason, "detail": detail},
+                         sort_keys=True, separators=(",", ":")).encode("utf-8")
+    try:
+        descriptor = os.open(marker, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except FileExistsError:
+        return False
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        directory = os.open(marker.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+    except OSError:
+        # A marker left by a failed write still denies a second authorization.
+        raise
+    return True
+
+
+def consume_subframe_block(runtime: object) -> bool:
+    """Durably spend a validated dispatch when its terminal outcome is assigned."""
+    reason = getattr(runtime, "unit_blocked_reason", None)
+    detail = getattr(runtime, "unit_blocked_detail", None)
+    dispatch_id = getattr(runtime, "current_tool_call_id", None)
+    pending = getattr(runtime, _SUBFRAME_BLOCK_PENDING, None)
+    if (getattr(runtime, "_unit_policy", None) is None
+            or not isinstance(dispatch_id, str) or not dispatch_id
+            or not isinstance(reason, str) or reason not in _SUBFRAME_BLOCK_REASONS
+            or not isinstance(detail, str) or len(detail) > 300
+            or pending != (_SUBFRAME_BLOCK_AUTHORITY, dispatch_id, reason, detail)):
+        return False
+    object.__delattr__(runtime, _SUBFRAME_BLOCK_PENDING)
+    if not _consume_subframe_block(runtime, dispatch_id, reason, detail):
+        return False
+    object.__setattr__(runtime, _SUBFRAME_BLOCK_CONSUMED, dispatch_id)
+    return True
 # User-configured hook policy ends the run: a stop hook's veto limit, or lost hook containment. These are
 # explicit user decisions or safety stops, never heuristics, so they stay authoritative under hard-budget mode.
 USER_POLICY_OUTCOMES = frozenset({"hook_blocked", "hook_containment"})
@@ -74,13 +147,26 @@ def terminal_category(outcome: object, runtime: object | None = None) -> str:
         return "done"
     if value in FATAL_OUTCOMES:
         return "fatal"
+    if value == "unit_blocked" and runtime is not None:
+        reason = getattr(runtime, "unit_blocked_reason", None)
+        detail = getattr(runtime, "unit_blocked_detail", None)
+        if (getattr(runtime, "_unit_policy", None) is not None
+                and isinstance(reason, str) and reason in _SUBFRAME_BLOCK_REASONS
+                and isinstance(detail, str) and len(detail) <= 300):
+            pending = getattr(runtime, _SUBFRAME_BLOCK_PENDING, None)
+            dispatch_id = getattr(runtime, "current_tool_call_id", None)
+            if (pending == (_SUBFRAME_BLOCK_AUTHORITY, dispatch_id, reason, detail)
+                    and isinstance(dispatch_id, str) and dispatch_id
+                    and (marker := _subframe_block_marker(runtime)) is not None
+                    and not marker.exists()):
+                return "subframe"
     if value in USER_POLICY_OUTCOMES:
         return "policy"
     return "heuristic"
 
 
 def terminal_outcome_permitted(outcome: object, runtime: object | None = None) -> bool:
-    return terminal_category(outcome, runtime) in {"budget", "done", "fatal", "policy", "stuck"}
+    return terminal_category(outcome, runtime) in {"budget", "done", "fatal", "policy", "stuck", "subframe"}
 
 
 def advisory_message(trigger: str) -> str:
@@ -173,6 +259,7 @@ def record_terminal(runtime: object, outcome: object, *, trigger: str,
 
 __all__ = [
     "DONE_OUTCOMES", "FATAL_OUTCOMES", "HARD_BUDGET_OUTCOMES", "MODE_ENV", "USER_POLICY_OUTCOMES",
-    "advisory_message", "deliver_pending_advisories", "enabled", "queue_advisory",
+    "advisory_message", "authorize_subframe_block", "consume_subframe_block",
+    "deliver_pending_advisories", "enabled", "queue_advisory",
     "record_terminal", "terminal_category", "terminal_outcome_permitted",
 ]

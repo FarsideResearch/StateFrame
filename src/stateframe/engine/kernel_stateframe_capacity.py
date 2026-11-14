@@ -9,6 +9,7 @@ import copy
 import hashlib
 import json
 from collections.abc import Callable, Mapping, Sequence
+from pathlib import Path
 
 from kernel_stateframe_call_coverage import (
     CONTRACT, FRONTIER_BYTES, FRONTIER_COUNT, FRONTIER_ID_BYTES, CoverageSession, context_index,
@@ -64,7 +65,9 @@ def ledger_ids(ledger: Mapping[str, object], action_context: object = None) -> s
     """Literal frame identities, plus proven historical IDs when host-owned."""
     rows = [row for name in ("reads", "edits", "unclassified_actions")
             for row in ledger.get(name, ()) if isinstance(row, Mapping)]
-    rows += [row for name in ("last_test", "history_digest")
+    rows += [row for name in (
+        "last_test", "history_digest", "latest_parallel_disposition",
+    )
              if isinstance((row := ledger.get(name)), Mapping)]
     result = set().union(*(row_ids(row) for row in rows))
     digest = ledger.get("history_digest")
@@ -419,6 +422,8 @@ def refresh_read_ranges(messages: list[dict[str, object]],
 def fit_protected_frame(body: dict[str, object], *,
                         semantic_messages: Sequence[Mapping[str, object]] = (),
                         action_context: Mapping[str, object] | None = None,
+                        workspace_root: str | Path | None = None,
+                        fanout_enabled: bool = False,
                         protected_messages: Sequence[Mapping[str, object]] = (),
                         max_request_bytes: int | None = None,
                         max_wire_bytes: int | None = None,
@@ -462,6 +467,31 @@ def fit_protected_frame(body: dict[str, object], *,
         refresh_messages(
             body.get("messages", []), required_deferred_paths=known_deferred_paths,
         )
+    messages = body.get("messages", [])
+    states = [row for row in messages if isinstance(row, Mapping)
+              and str(row.get("content", "")).startswith(STATE_HEADER + "\n")
+              and '"framefit5"' in str(row.get("content", ""))]
+    fanout_events: list[dict[str, object]] = []
+    if fanout_enabled and len(states) == 1:
+        payload, state = _state_payload(states[0])
+        frame = state.get("framefit5")
+        if isinstance(frame, dict):
+            from kernel_fanout_continuation import attach_to_frame
+
+            unset = object()
+            prior_continuation = (
+                frame.get("fanout_continuation", unset),
+                frame.get("fanout_continuation_pin", unset),
+            )
+            # W6b hook: derive the protected continuation from W6's typed disposition.
+            fanout_events = attach_to_frame(
+                frame, action_context, workspace_root,
+                semantic_messages=semantic_messages,
+            )
+            if prior_continuation != (
+                    frame.get("fanout_continuation", unset),
+                    frame.get("fanout_continuation_pin", unset)):
+                states[0]["content"] = _serialize_state_message(payload)
     limit = protected_limit(body, exact_tokenizer=exact_tokenizer)
     if (max_request_tokens is None) != (measure_request_tokens is None):
         raise ValueError("capacity token limit and measurement must be supplied together")
@@ -506,8 +536,8 @@ def fit_protected_frame(body: dict[str, object], *,
         "before": original_bytes, "after": before, "limit": limit,
         "changed": body != target,
         "measurement_calls": tokenizer_calls,
+        "fanout_continuation_events": fanout_events,
     }
-    messages = body.get("messages", [])
     states = [row for row in messages if isinstance(row, Mapping)
               and str(row.get("content", "")).startswith(STATE_HEADER + "\n")
               and '"framefit5"' in str(row.get("content", ""))]

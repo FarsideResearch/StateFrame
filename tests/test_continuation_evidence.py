@@ -190,6 +190,19 @@ def test_denied_pre_tool_hook_edit_is_settled_without_execution():
     assert evidence.effect_outcome(state, data) == "not_applied"
 
 
+def test_fanout_with_no_file_changes_settles_without_stranding_the_parent():
+    evidence, state, data = _shell_outcome(
+        receipt_kind="parallel", result="APPLIED", tool="parallel")
+    assert evidence.effect_outcome(state, data) == "not_applied"
+
+
+def test_fanout_without_a_correlated_final_receipt_stays_unknown():
+    evidence, state, data = _shell_outcome(
+        receipt_kind="parallel", result="APPLIED", tool="parallel",
+        receipt_fields={"continuation_effect_id": "different-effect"})
+    assert evidence.effect_outcome(state, data) == "unknown"
+
+
 def test_net_zero_edit_without_correlated_applied_receipt_stays_unknown():
     evidence, state, data = _shell_outcome(
         receipt_kind="str_replace", result="APPLIED", tool="str_replace",

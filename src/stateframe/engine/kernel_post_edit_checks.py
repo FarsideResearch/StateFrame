@@ -61,6 +61,8 @@ class ImportStatus:
     module: str
     failed: bool
     detail: str = ""
+    outcome: str = ""
+    probe_evidence: dict[str, object] | None = None
 
     def finding(self, file: str) -> Finding | None:
         if not self.failed:
@@ -450,7 +452,7 @@ def import_status(checkout: Path, path: Path, *, source: str | None = None) -> I
     module = module_name_for_path(path, checkout)
     if module is None:
         return None
-    from kernel_safe_probe import run_probe
+    from kernel_safe_probe import run_probe, probe_evidence
     from kernel_exec_session import ExecSessionError
     prefix = "import sys; sys.path.insert(0, sys.argv[1]); "
     if source is None:
@@ -469,12 +471,14 @@ def import_status(checkout: Path, path: Path, *, source: str | None = None) -> I
         result = run_probe(command, checkout, timeout=10,
                            stdin=source.encode() if source is not None else None)
     except (OSError, ExecSessionError) as error:
-        return ImportStatus(module, True, f"{type(error).__name__}: {error}")
+        return ImportStatus(module, False, f"{type(error).__name__}: {error}",
+                            outcome="ENGINE_ERROR", probe_evidence=probe_evidence(error))
+    evidence = probe_evidence(result)
     if result.exit_code == 0 and not result.timed_out:
-        return ImportStatus(module, False, "")
+        return ImportStatus(module, False, "", probe_evidence=evidence)
     detail = ("import timed out" if result.timed_out else
               result.output.decode("utf-8", "replace").strip() or f"exit {result.exit_code}")
-    return ImportStatus(module, True, detail[:900])
+    return ImportStatus(module, True, detail[:900], probe_evidence=evidence)
 
 
 def _bounded(records: Iterable[Finding], maximum: int = MAX_FINDINGS) -> tuple[list[dict], int]:
@@ -497,6 +501,7 @@ class PostEditTracker:
     def evaluate(self, path: Path, before: str | None, after: str,
                  *, baseline_import: ImportStatus | None = None) -> dict[str, object]:
         relative = _relative_file(path, self.checkout)
+        pre_import = baseline_import
         before_overrides = {relative: before}
         after_overrides = {relative: after}
         before_findings = (_static_findings(before, path, self.checkout, before_overrides)
@@ -517,14 +522,18 @@ class PostEditTracker:
             finding = post_import.finding(relative)
             if finding is not None:
                 after_findings.add(finding)
+        import_unverified = any(status is not None and status.outcome == "ENGINE_ERROR"
+                                for status in (pre_import, post_import))
         if not self.active:
             self.active.update(before_findings)
         introduced = after_findings - before_findings
         # A still-active issue is not repeated on every later edit.  A newly
         # introduced issue with an identical identity is likewise suppressed.
-        introduced = {finding for finding in introduced if finding not in self.active}
+        introduced = {finding for finding in introduced if finding not in self.active
+                      and not (import_unverified and finding.kind == "import_fails")}
         resolved = {finding for finding in self.active - after_findings
-                    if finding not in self.resolved_emitted}
+                    if finding not in self.resolved_emitted
+                    and not (import_unverified and finding.kind == "import_fails")}
         ignored_then_failed = {
             finding for finding in after_findings - before_findings
             if any(old.file == finding.file and old.symbol == finding.symbol
@@ -545,6 +554,19 @@ class PostEditTracker:
             "counts": {"introduced": len(introduced), "resolved": len(resolved),
                        "ignored_then_failed": len(ignored_then_failed)},
         }
+        import_probe = {}
+        for phase, status in (("baseline", pre_import), ("candidate", post_import)):
+            if status is None or (status.probe_evidence is None and not status.outcome
+                                  and not import_unverified):
+                continue
+            evidence = dict(status.probe_evidence or {"attempt_count": 1, "failures": []})
+            if status.outcome:
+                evidence.update(outcome=status.outcome, error=status.detail)
+            elif import_unverified:
+                evidence.update(outcome="FAIL" if status.failed else "PASS", error=status.detail)
+            import_probe[phase] = evidence
+        if import_probe:
+            result["import_probe"] = import_probe
         return result
 
 

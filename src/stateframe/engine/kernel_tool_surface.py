@@ -169,6 +169,13 @@ def runner_dispatchable(name: str, *, runtime: object | None = None) -> bool:
     from kernel_agent_schemas import OBSERVATION_NAMES
     from kernel_git_commit import registered_names
     host = agent_tools_service()
+    if name == "parallel":
+        import sys
+        return any(
+            module is not None and module.available() and module.writable_workspace()
+            for module in (sys.modules.get("kernel_parallel"),
+                           sys.modules.get("stateframe.engine.kernel_parallel"))
+        )
     if name in OBSERVATION_NAMES or name in registered_names() or (host is not None and name in host.custom):
         return host is not None and host.offered(name)
     if name == "shell":

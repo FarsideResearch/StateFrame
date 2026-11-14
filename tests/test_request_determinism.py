@@ -181,6 +181,21 @@ RANDOM_CALL_ALLOWLIST = {
             1, "Creates an unguessable validation nonce for worker sink verification, not a request ID."
         ),
     },
+    "src/stateframe/engine/kernel_parallel.py": {
+        "secrets.token_hex": (
+            2, "Names private receipt-cache and snapshot staging paths; published receipt handles and snapshot digests use content only."
+        ),
+    },
+    "src/stateframe/parallel_seals.py": {
+        "secrets.token_hex": (
+            2, "Fences private seal helper attempts and staging files; published proposals use stable paths and content digests, not the nonce."
+        ),
+    },
+    "src/stateframe/engine/kernel_unit_policy.py": {
+        "secrets.token_hex": (
+            1, "Creates the private STATEFRAME_CHECK_TOKEN for descendant cleanup; check receipt identities bind the frozen recipe and candidate content."
+        ),
+    },
     "src/stateframe/engine/kernel_pilot.py": {
         "uuid.uuid4": (
             2, "Creates parent/permit accounting IDs; run-seeded UUIDs keep same-seed records stable."
@@ -335,6 +350,14 @@ WIRE_ID_SOURCE_ALLOWLIST = {
     ("src/stateframe/engine/kernel_mutate_exec.py", "MutationExecutor.run",
      "handle", "uuid.uuid4"): (
         2, "Local JobHandle is a supervisor control object; its private nonce never enters a provider wire ID."
+    ),
+    ("src/stateframe/parallel_worker.py", "launch_worker",
+     "handle", "time.time"): (
+        1, "WorkerHandle is a host process object; its wall-clock start is process-record metadata, not a rendered wire handle."
+    ),
+    ("src/stateframe/parallel_worker.py", "launch_worker",
+     "handle", "time.monotonic"): (
+        1, "WorkerHandle keeps a host watchdog start clock; it is not serialized into provider requests or receipt IDs."
     ),
     ("src/stateframe/engine/kernel_test_run_spans.py", "TestRunProfile.__init__",
      "execution_id", "uuid.uuid4"): (
@@ -500,6 +523,14 @@ def test_request_path_randomness_rejects_a_new_unreviewed_secrets_call(tmp_path,
     assert "secrets.token_bytes" in str(changed_count.value)
     assert "'expected': 2, 'scanned': 3" in str(changed_count.value)
 
+    seal_relative = "src/stateframe/parallel_seals.py"
+    with (tmp_path / seal_relative).open("a", encoding="utf-8") as seal_source:
+        seal_source.write("\nsecrets.token_hex(16)\n")
+    with pytest.raises(AssertionError, match="unreviewed or changed") as seal_count:
+        test_request_path_randomness_is_reviewed()
+    assert seal_relative in str(seal_count.value)
+    assert "'expected': 2, 'scanned': 3" in str(seal_count.value)
+
 
 def _target_names(node: ast.AST) -> set[str]:
     if isinstance(node, ast.Name):
@@ -639,6 +670,25 @@ def test_wire_id_source_scan_rejects_sequence_derivation():
     scanned = _scan_wire_id_sources(planted)
     assert scanned[("planted.py", "build", "request_id", "_sequence")] >= 1
     assert _wire_id_source_violations(scanned)
+
+
+@pytest.mark.parametrize("clock", ["time.time", "time.monotonic"])
+def test_worker_handle_clock_review_rejects_wire_ids_and_extra_calls(clock):
+    relative = "src/stateframe/parallel_worker.py"
+    source = (
+        "def launch_worker():\n"
+        f"    handle = WorkerHandle({clock}())\n"
+        f"    request_id = str({clock}())\n"
+    )
+    scanned = _scan_wire_id_sources({relative: source})
+    violations = _wire_id_source_violations(scanned)
+    handle_key = (relative, "launch_worker", "handle", clock)
+    request_key = (relative, "launch_worker", "request_id", clock)
+    assert handle_key not in violations
+    assert violations[request_key] == {"expected": 0, "scanned": 1}
+
+    scanned = _scan_wire_id_sources({relative: source + f"    handle = {clock}()\n"})
+    assert _wire_id_source_violations(scanned)[handle_key] == {"expected": 1, "scanned": 2}
 
 
 def test_wire_id_source_scan_tracks_unstable_aliases():
@@ -1864,6 +1914,9 @@ def _run_scripted_example(monkeypatch, example: str, task: str, work: Path,
     monkeypatch.setattr(runner.test_interpreter, "choose",
                         lambda *args, **kwargs: (sys.executable, "scripted test interpreter"))
 
+    # The scripted endpoint serves llama.cpp controls. Keep discovery timeouts
+    # under host load from changing the dialect between same-seed runs.
+    monkeypatch.setenv("STATEFRAME_PROVIDER", "llama.cpp")
     work.mkdir(parents=True, exist_ok=True)
     repo = work / "repo"
     shutil.copytree(ROOT / "examples" / example, repo)
@@ -1962,6 +2015,28 @@ def test_cached_prefix_guard_rejects_a_changed_system_message_or_reordered_tools
     assert _cached_prefix_problems([base, changed_system])
     reordered = {**grown, "tools": [{"name": "edit"}, {"name": "read"}, {"name": "run_tests"}]}
     assert _cached_prefix_problems([base, reordered])
+
+
+@pytest.mark.host_sandbox
+def test_scripted_example_keeps_reasoning_controls_after_props_probe_timeout(tmp_path, monkeypatch):
+    from stateframe.engine import kernel_provider_dialect
+
+    monkeypatch.delenv("STATEFRAME_PROVIDER", raising=False)
+    original_probe = kernel_provider_dialect.bounded_json_probe
+    failed_probes = []
+
+    def probe(endpoint, key, path, **kwargs):
+        if path == "/props":
+            failed_probes.append(path)
+            return None
+        return original_probe(endpoint, key, path, **kwargs)
+
+    monkeypatch.setattr(kernel_provider_dialect, "bounded_json_probe", probe)
+    _, requests, _ = _run_scripted_example(
+        monkeypatch, "discount_bug", EXAMPLES["discount_bug"], tmp_path / "run")
+    assert failed_probes, "the provider discovery timeout was not injected"
+    assert requests
+    assert all(request.get("reasoning_budget_tokens") == 4096 for request in requests)
 
 
 @pytest.mark.host_sandbox

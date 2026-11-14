@@ -218,8 +218,18 @@ class NativeToolBatch:
                 self.journal.emit('native_batch_rejected', request_id=capture.request_id,
                                   reason='batch exceeds 16 calls or lacks function name and serialized arguments', dispatch=False, **response_lineage)
                 return 'Invalid tool-call batch. Return named tools with JSON arguments.', []
+            unit_policy = getattr(runtime, "_unit_policy", None)
+            if unit_policy is not None:
+                forbidden = tuple(call["function"]["name"] for call in calls
+                                  if unit_policy.authorize_tool(call["function"]["name"]) is not None)
+                if forbidden:
+                    for name in forbidden:
+                        self.journal.emit("unit_tool_refused", tool=name,
+                                          reason="SCOPE_VIOLATION")
+                    return ("REFUSED SCOPE_VIOLATION: native batch includes a forbidden subframe tool", [])
+            terminal_names = {"done", "subframe_blocked"} if unit_policy is not None else {"done"}
             done_positions = [index for index, call in enumerate(calls)
-                              if call["function"]["name"] == "done"]
+                              if call["function"]["name"] in terminal_names]
             if done_positions and done_positions != [len(calls) - 1]:
                 if self._integrity_enabled():
                     for call in calls:
@@ -316,6 +326,10 @@ class NativeToolBatch:
         self._note_same_file_edit(record, result, closed)
         if self._integrity_enabled():
             self._record_closed_receipt(record, result)
+        if self.inflight["function"]["name"] == "parallel" and self.pending:
+            count = len(self.pending)
+            self.discard_pending("parallel_batch_discarded", receipt_prefix="PARALLEL_BATCH_DISCARDED")
+            self.journal.emit("parallel_batch_discarded", count=count)
         from kernel_native_prefix import enabled as prefix_enabled
         from kernel_continuation_menu_authority import EDIT_TOOLS
         if prefix_enabled() and self.inflight["function"]["name"] in EDIT_TOOLS and result != "APPLIED":
@@ -641,12 +655,20 @@ class NativeToolBatch:
         tool = str(self.inflight.get("function", {}).get("name", "")) if isinstance(
             self.inflight, dict) else ""
         status = closed_receipt_status(tool, result)
+        detail = ""
+        if tool == "parallel" and status == "APPLIED":
+            observation = record.get("observation")
+            if isinstance(observation, str):
+                detail = next((line for line in observation.splitlines()
+                               if line.startswith("subframe_request_cap=") and
+                               line.removeprefix("subframe_request_cap=").isdecimal()), "")
         self._record_receipt(
             self.inflight, status,
             "" if status == "APPLIED" else self._failure_reason(record, result),
+            detail=detail,
         )
 
-    def _record_receipt(self, call: dict, status: str, reason: str) -> None:
+    def _record_receipt(self, call: dict, status: str, reason: str, *, detail: str = "") -> None:
         if not self._integrity_enabled():
             return
         call = call if isinstance(call, dict) else {}
@@ -658,6 +680,8 @@ class NativeToolBatch:
             "status": str(status),
             "reason": str(reason),
         }
+        if detail:
+            receipt["detail"] = detail
         self._frame_integrity_receipts.append(receipt)
         if self.journal is not None:
             self.journal.emit(
@@ -702,6 +726,9 @@ class NativeToolBatch:
             status = str(receipt.get("status", "UNKNOWN"))
             reason = str(receipt.get("reason", ""))
             suffix = f"(reason={reason})" if reason else ""
+            detail = receipt.get("detail", "")
+            if detail:
+                suffix += f"; {detail}"
             lines.append(
                 f"call {receipt.get('batch_index', '?')} {receipt.get('tool', 'unknown')}: "
                 f"{status}{suffix}"

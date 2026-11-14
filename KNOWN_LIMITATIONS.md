@@ -145,6 +145,31 @@ Large tasks or repositories can require more state and source context than fits.
 - Workspace reconciliation stops without promoting command effects when any regular file exceeds 16 MiB, aggregate regular-file bytes exceed 256 MiB, or the tree exceeds 20,000 entries. These bounds also apply before execution when the snapshot is captured.
 - The shipped product profile uses the composed loop. The plain loop accepts foreground shell but refuses background jobs and Git, web or custom tool settings before execution. Lean mode is not supported by the product profile.
 
+## Parallel subframes
+
+Subframes are opt-in through `--parallel`, which defaults to `off`. They do not promise a general speedup. Concurrent
+requests share the model server's capacity, and each subframe adds setup and verification work. See the
+[subframes guide](docs/guide/subframes.md) for the contract, limits, and result records.
+
+- Slot leases are cooperative advisory leases. They do not reserve a model server against clients that do not use
+  StateFrame's lease files.
+- A subframe's check runs on a full copy of the snapshot, so withheld files are present in its workspace. When the
+  subframe's view withholds any file, or a withheld frame appears, its pytest output is projected fail-closed: only
+  the exit code, counts, node ids, exception type names and visible frame locations survive, and message bodies,
+  captured streams and parametrize ids become `[... withheld]` markers; a command-kind check then reports only its
+  exit status, counts and `[command output withheld]`. Full detail is kept only when the workspace holds no
+  withheld files and every frame is owned. Best-effort filtering applies only to that no-withheld command case.
+- Deletes and moves are parent-only. Subframes may edit owned files and create declared files; their tool menu
+  does not include shell commands or nested subframes.
+- Static export signature verification supports only certain Python definitions. Unsupported Python forms and
+  other languages can return `UNKNOWN`; an unknown export requires a passing check on the composed changes before
+  the parent can commit it.
+- Enabling `--parallel` offers the tool rather than forcing its use. A run can legitimately use zero subframes.
+  Check subframe request counts in the run summary instead of treating the flag as evidence that work ran in parallel.
+- When coupling between subframes is unknown, an otherwise valid composition with no final check recipe reports
+  `NOT_RUN` for the final check and `UNVERIFIED` for integration. Supply a task-level `--test-cmd` to check the combined
+  changes. Passing subframe checks alone does not prove the whole task passes.
+
 ## Lifecycle hooks
 
 Hooks always use the execution sandbox. There is no host-execution option or unsandboxed fallback; a sandbox startup failure is a hook error. Windows is unsupported. Linux desktop notifications cannot reach the user's D-Bus session from the sandbox; use an explicitly configured webhook instead. On Linux, network mode `loopback` gives a hook its own private loopback, so a service listening on the host's loopback needs `full`. The macOS notification and webhook samples are examples and are not exercised by the automated end-to-end tests.

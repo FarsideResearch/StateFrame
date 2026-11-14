@@ -471,10 +471,12 @@ def test_killed_writer_leaves_no_published_partial_checkpoint_and_replays(tmp_pa
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=environment())
     runner = None
     writer_pid = None
+    writer_identity = None
     try:
         assert endpoint.stdout is not None
         url = endpoint.stdout.readline().strip()
         assert url.startswith("http://127.0.0.1:")
+        launched_after = time.time()
         runner = start_monitored(
             _run_command(launcher, repo, run_dir, url),
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
@@ -485,22 +487,25 @@ def test_killed_writer_leaves_no_published_partial_checkpoint_and_replays(tmp_pa
         _wait_for(writer_marker, runner)
         _assert_injection_ok(tmp_path, minimum_saves=1)
         writer_pid = int(writer_marker.read_text())
+        writer_identity = record_identity(writer_pid, launched_after=launched_after,
+                                          command_fragment="_child.py")
         _wait_for(paused_request, runner)
         assert _wire(run_dir)[1] == _wire(control.run_dir)[1]
         pointer = run_dir / "checkpoints" / "LATEST"
         assert not pointer.exists()
         child = _engine_child(runner.pid)
-        child_identity = record_identity(child, launched_after=0, command_fragment="_child.py")
+        child_identity = record_identity(child, launched_after=launched_after,
+                                         command_fragment="_child.py")
         # This fault injection must kill while the checkpoint writer is stopped mid-save.
         signal_run_verified(run_dir, child, child_identity, signal.SIGKILL,
                             deadline=time.monotonic(), what="mid-save engine fault",
                             require_checkpoint_saved=False)
         try:
-            writer_identity = record_identity(writer_pid, launched_after=0,
-                                              command_fragment="_child.py")
-            signal_run_verified(run_dir, writer_pid, writer_identity, signal.SIGKILL,
-                                deadline=time.monotonic(), what="mid-save writer fault",
-                                require_checkpoint_saved=False)
+            if writer_pid != child:
+                assert writer_identity is not None
+                signal_run_verified(run_dir, writer_pid, writer_identity, signal.SIGKILL,
+                                    deadline=time.monotonic(), what="mid-save writer fault",
+                                    require_checkpoint_saved=False)
         except ProcessLookupError:
             pass
         writer_pid = None
@@ -521,10 +526,8 @@ def test_killed_writer_leaves_no_published_partial_checkpoint_and_replays(tmp_pa
             signal_run_owned(run_dir, runner, signal.SIGKILL, deadline=time.monotonic(),
                              what="mid-save run cleanup", require_checkpoint_saved=False)
             runner.wait(timeout=scaled(5))
-        if writer_pid is not None:
+        if writer_pid is not None and writer_identity is not None:
             try:
-                writer_identity = record_identity(writer_pid, launched_after=0,
-                                                  command_fragment="_child.py")
                 # The writer is deliberately stopped before any save event.
                 signal_run_verified(run_dir, writer_pid, writer_identity, signal.SIGKILL,
                                     deadline=time.monotonic(), what="mid-save writer cleanup",
@@ -647,3 +650,38 @@ def test_low_disk_skips_checkpoints_without_changing_wire_requests(tmp_path: Pat
     assert len(skipped) == 1
     assert skipped[0]["floor_bytes"] == 1 << 63
     assert _wire(constrained.run_dir) == _wire(control.run_dir)
+
+
+@pytest.mark.parametrize("mode", ["pause", "env"])
+def test_fault_copy_adapter_preserves_content_object_store(tmp_path, monkeypatch, mode):
+    from types import ModuleType, SimpleNamespace
+
+    checkpoint = ModuleType("kernel_checkpoint")
+    calls = []
+    expected = {"linked": 1, "copied": 0, "cloned": 0}
+
+    def copy_tree(*args, **kwargs):
+        calls.append((args, kwargs))
+        return expected
+
+    original_clone = lambda *_args: False
+    checkpoint.save = lambda *_args, **_kwargs: None
+    checkpoint._snapshot_appended_file = lambda *_args, **_kwargs: False
+    checkpoint._copy_tree = copy_tree
+    checkpoint._clonefile = original_clone
+    checkpoint._restore_files = lambda *_args: None
+    checkpoint.zlib = SimpleNamespace(compressobj=lambda *_args: None)
+    monkeypatch.setitem(sys.modules, "kernel_checkpoint", checkpoint)
+    monkeypatch.setenv("CKPT_FAULT_MODE", mode)
+    _fault_files(tmp_path)
+    injection = tmp_path / "injection/sitecustomize.py"
+    namespace = {}
+    exec(compile(injection.read_text(), str(injection), "exec"), namespace)
+    namespace["_save_count"] = 2 if mode == "env" else 0
+    source, target = tmp_path / "env", tmp_path / "snapshot"
+    seed, objects = tmp_path / "seed", tmp_path / "objects"
+    durable = set()
+    result = checkpoint._copy_tree(source, target, None, durable, seed=seed, objects=objects)
+    assert result is expected
+    assert calls == [((source, target, None, durable), {"seed": seed, "objects": objects})]
+    assert checkpoint._clonefile is original_clone

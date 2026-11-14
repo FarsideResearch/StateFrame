@@ -168,6 +168,12 @@ def test_wire_id_drift_names_moved_fields_and_rejects_other_changes(tmp_path):
     assert wire_id_drift([refs_before], [no_ordinal]) == (
         [], {"check_execution_ref": 2})
     assert wire_id_drift([refs_before], [no_ordinal.replace(b"check_execution_ref", b"changed_ref")])[0]
+    stop_before = json.dumps({"messages": [{"role": "user", "content":
+        "[Unified stop authority]\nsnapshot=unified:" + "a" * 24 + "\nassessment=UNKNOWN"}]}).encode()
+    stop_after = json.dumps({"messages": [{"role": "user", "content":
+        "[Unified stop authority]\nsnapshot=unified:" + "b" * 24 + "\nassessment=UNKNOWN"}]}).encode()
+    assert wire_id_drift([stop_before], [stop_after]) == ([], {"unified_stop_snapshot": 1})
+    assert wire_id_drift([stop_before], [stop_after.replace(b"UNKNOWN", b"CHANGED")])[0]
     def finding(finding_id):
         frame = {"state": {"history_findings": {"latest": {"id": finding_id}}}}
         return json.dumps({"messages": [{"role": "user", "content":
@@ -438,7 +444,9 @@ def test_wire_id_paths_match_real_captured_request_fixtures():
                               {"role": "tool", "tool_call_id": native_call,
                                "content": ("CHECK_FAILURE_SUMMARY execution_id=check-execution:"
                                            + "a" * 20 + " full_output_handle=check-receipt:"
-                                           + "b" * 24)}],
+                                           + "b" * 24)},
+                              {"role": "user", "content":
+                               "[Unified stop authority]\nsnapshot=unified:" + "a" * 24}],
                  "tools": [], "presentation": {}}
     _, path_values = _mask_wire_ids_with_values(json.dumps(preflight).encode())
     for index, (_kind, values) in enumerate(path_values):

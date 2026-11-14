@@ -1679,6 +1679,11 @@ def _edit_applied(record: Receipt) -> bool:
 def _check_settled(record: Receipt) -> bool:
     if type(record.get("settled")) is bool:
         return bool(record["settled"])
+    if str(record.get("status") or "").upper() == "INVALID":
+        # A subframe's frozen check that the host invalidated (it wrote files, its cleanup
+        # failed, resources were unavailable) is a final host verdict on the check; its
+        # untyped outcome must not leave the continuation waiting on the result.
+        return True
     return _status(record) in {
         "PASS", "PASSED", "GREEN", "FAIL", "FAILED", "BEHAVIOR_FAIL", "ERROR",
         "INVALID_CHECK", "ENVIRONMENT", "RESOURCE_LIMIT", "NOT_RUN",

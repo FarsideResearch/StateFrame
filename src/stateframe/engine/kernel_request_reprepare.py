@@ -651,9 +651,16 @@ def _prepare_replacement_candidate(runtime: object, original: object, preparatio
         validate_product_request,
     )
     task_row = getattr(getattr(runtime, "owner", None), "task_row", None)
-    generic_framefit_preassembly = (
+    from kernel_completion_owner import _no_host_checks
+    framefit5_preassembly = (
         has_framefit5_state(messages) and isinstance(task_row, Mapping)
-        and task_row.get("runner_kind") == "generic"
+        and (
+            task_row.get("runner_kind") == "generic"
+            or (
+                getattr(runtime, "stateframe_completion_owner_mode", "off") == "on"
+                and _no_host_checks(runtime)
+            )
+        )
     )
     from kernel_read_lockout import append_frame_line, filter_tools as filter_locked_reads
     tools = filter_locked_reads(runtime, tools)
@@ -670,7 +677,7 @@ def _prepare_replacement_candidate(runtime: object, original: object, preparatio
         contract = establish_request_action_contract(runtime, messages, tools,
             request_id=fresh.request_id, provider_request=True,
             preserve_input_surface=boundary_recovery,
-            framefit5_preassembly=generic_framefit_preassembly)
+            framefit5_preassembly=framefit5_preassembly)
     if boundary_recovery:
         from kernel_greenlock_menu_authority import (
             applies as greenlock_menu_applies,

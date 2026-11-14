@@ -531,6 +531,22 @@ def execute_read(root: Path, p: Path, raw: str, display: str, start: int, *,
                  page_byte_limit: int | None = None,
                  ) -> tuple[str, str, bytes | None]:
     """Read ``p`` exactly as the runner does.  Returns (result_class, observation, bytes)."""
+    import sys
+    unit_module = sys.modules.get("kernel_unit_policy")
+    unit_policy = unit_module.active() if unit_module is not None else None
+    if unit_policy is not None:
+        try:
+            relative = p.relative_to(root).as_posix()
+        except ValueError:
+            relative = raw
+        if not (unit_policy.visible_scope(relative) if p.is_dir()
+                else unit_policy.visible(relative)):
+            journal = getattr(measurement, "journal", None)
+            if journal is not None:
+                journal.emit("unit_hidden_path", producer="read", path=relative)
+            if delivery is not None:
+                delivery.update({"host_outcome": "REFUSED", "failure_class": "HIDDEN_PATH"})
+            return "HIDDEN_PATH", f"REFUSED HIDDEN_PATH: {relative} is withheld", None
     read_bytes: bytes | None = None
     from kernel_reread_result_truth import enabled as result_truth_enabled, result_note
     from kernel_read_receipts import enabled as allocator_enabled
@@ -561,12 +577,13 @@ def execute_read(root: Path, p: Path, raw: str, display: str, start: int, *,
                 delivery["read_reuse"] = _ordinary_read_receipt(step, raw, start, "source_missing")
             return "MISSING", missing_path_message(root, display), None
         if p.is_dir():
-            page = directory_page(
-                p, display,
-                cursor=args.get("cursor") if isinstance(args, Mapping) else None,
-                requested_page_size=(args.get("page_size") if isinstance(args, Mapping) else None),
-                policy=policy,
-            )
+            _cursor = args.get("cursor") if isinstance(args, Mapping) else None
+            _page_size = args.get("page_size") if isinstance(args, Mapping) else None
+            page = (unit_policy.directory_page(root, p, display, cursor=_cursor,
+                                               page_size=_page_size)
+                    if unit_policy is not None else directory_page(
+                        p, display, cursor=_cursor, requested_page_size=_page_size,
+                        policy=policy))
             if delivery is not None:
                 delivery.update(page.metadata)
                 delivery["host_outcome"] = "OBSERVED"

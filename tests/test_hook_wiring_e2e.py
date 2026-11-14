@@ -307,6 +307,7 @@ def test_six_event_lifecycle_survives_kill_and_resume(tmp_path):
     ]
     process = None
     try:
+        launched_after = time.time()
         process = start_monitored(
             command, env=environment, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             text=True, run_dir=run, expected_seconds=scaled(600),
@@ -329,7 +330,7 @@ def test_six_event_lifecycle_survives_kill_and_resume(tmp_path):
         ).split()
         assert len(child_pids) == 1, child_pids
         child = int(child_pids[0])
-        identity = record_identity(child, launched_after=0, command_fragment="_child.py")
+        identity = record_identity(child, launched_after=launched_after, command_fragment="_child.py")
         signal_run_verified(run, child, identity, signal.SIGKILL,
                             deadline=time.monotonic() + scaled(120), what="hook lifecycle resume")
         script.release.set()

@@ -10,6 +10,8 @@ A diagram of how these fit together is in [ARCHITECTURE.md](../../ARCHITECTURE.m
 | `skills.py` | Skill directory parsing, installation, path resolution and pinned digest checks. |
 | `instructions.py` | Project instructions: AGENTS.md / CLAUDE.md discovery, size bound and resume digest pin. |
 | `runner.py` | One run: preflight, run directory, spec, driving the engine child, before/after checks, the outcome. |
+| `parallel_resources.py` | Cooperative slot leases, server slot discovery, and subframe send/check resource ledgers. |
+| `parallel_host.py`, `parallel_worker.py` | Process supervision and preparation of isolated subframe engine runs. |
 | `hook_host.py` | Project hook trust and loading, pinned bundles, runner lifecycle events, terminal records and resume checks. |
 | `test_interpreter.py` | Choosing the Python that runs your tests (`--test-python`, project venv, `python3` on PATH). |
 | `_child.py` | The engine child process: installs the run's environment and runs one task. |
@@ -56,6 +58,7 @@ The engine is a flat package of modules, each owning one mechanism; `release-man
 | `kernel_execution_policy.py`, `kernel_test_isolation.py` | Sandboxed command and test execution. |
 | `kernel_git_view.py` | Pinned, sanitized Git history observations, commit-rooted `show`, run-baseline diffs and offline Git queries for repository indexing. |
 | `kernel_plain_host.py`, `kernel_plain_loop.py` | The alternate plain loop: foreground shell only from the new tool set; selected skills and Git, web, custom and MCP settings are refused. |
+| `kernel_parallel*.py` | Parent-side contract admission, dependency projection, proposal validation, transaction publication, replay, and summary records for subframes. |
 | `kernel_safe_probe.py`, `kernel_ship_tree_smoke.py` | Sandboxed, read-only repository-code diagnostics and provisioning, including imports before the first request and after edits; cleanup failures stop the run. |
 | `kernel_web_fetch.py` | Direct-IP, SSRF-checked web observations with bounded text extraction. |
 | `kernel_release_switch_registry.py` | Which `STATEFRAME_*` switches this engine reads; a setting with no reader is refused. |

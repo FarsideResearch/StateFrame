@@ -131,6 +131,9 @@ def _bounded_action_receipt(
     *,
     turn_index: int | None = None,
     journal: object = None,
+    result_summary: str | None = None,
+    omitted_committed: int = 0,
+    outcome: str | None = None,
 ) -> dict[str, object]:
     from kernel_wire_identity import public_wire_text
 
@@ -141,12 +144,13 @@ def _bounded_action_receipt(
     )
     path = _safe_path(raw_path)
     receipt: dict[str, object] = {
-        "schema": "stateframe-bounded-action-receipt/1",
+        "schema": ("stateframe-bounded-action-receipt/2" if result_summary is not None
+                   else "stateframe-bounded-action-receipt/1"),
         "kind": "bounded_action_receipt",
         "call_id": call_id[:160],
         "tool": name[:120] or "unknown",
         "path": path if path and len(path.encode("utf-8")) <= 512 else None,
-        "outcome": _bounded_action_outcome(name, path, result_text),
+        "outcome": outcome or _bounded_action_outcome(name, path, result_text),
         "argument_size_bytes": len(argument_bytes),
         "argument_sha256": hashlib.sha256(argument_bytes).hexdigest(),
     }
@@ -164,6 +168,12 @@ def _bounded_action_receipt(
         "result_size_bytes": len(result_bytes),
         "result_sha256": hashlib.sha256(result_bytes).hexdigest(),
     })
+    if result_summary is not None:
+        receipt.update({
+            "result_summary": result_summary,
+            "result_chars": len(result_text),
+            "omitted_committed": omitted_committed,
+        })
     return receipt
 
 

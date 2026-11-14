@@ -15,11 +15,12 @@ import re
 import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 MODE_ENV = "STATEFRAME_DONE_IS_SUBMIT"
 ADVISORY_ENV = "STATEFRAME_DONE_ADVISORY"
 SCHEMA = "stateframe-done-seal/1"
+FILE_DIGEST_SCHEMA = "stateframe-done-seal/2"
 _ADVISORY_SPECS = {
     "CLAUSE_COVERAGE": (
         "stateframe_check_generator_fixes",
@@ -71,6 +72,7 @@ class DoneSeal:
     label: str
     artifact_digest: str
     labels_json: str
+    file_digests_json: str = ""
 
 
 def mode(environ: Mapping[str, str] | None = None) -> str:
@@ -488,7 +490,8 @@ def store_candidate(destination: str | Path, task_id: object,
 
 def seal_submission(runtime: object, *, source: str, artifact_digest_value: object,
                     label: str, labels: Mapping[str, object] | None = None,
-                    artifact_stored: bool = True) -> DoneSeal:
+                    artifact_stored: bool = True,
+                    file_digests: Mapping[str, str] | None = None) -> DoneSeal:
     """Create the one immutable submission seal after durable artifact storage."""
     existing = done_sealed(runtime)
     if existing is not None:
@@ -501,21 +504,36 @@ def seal_submission(runtime: object, *, source: str, artifact_digest_value: obje
     normalized_labels = _safe_labels(labels or {})
     labels_json = json.dumps(normalized_labels, sort_keys=True, ensure_ascii=False,
                              separators=(",", ":"))
+    normalized_file_digests = (_safe_file_digests(file_digests)
+                               if file_digests is not None else None)
+    file_digests_json = (json.dumps(normalized_file_digests, sort_keys=True, ensure_ascii=False,
+                                    separators=(",", ":"))
+                         if normalized_file_digests is not None else "")
     label_value = _safe_label(label)
+    schema = FILE_DIGEST_SCHEMA if normalized_file_digests is not None else SCHEMA
     payload = {
-        "schema": SCHEMA, "source": source, "label": label_value,
+        "schema": schema, "source": source, "label": label_value,
         "artifact_digest": digest, "labels": normalized_labels,
     }
+    if normalized_file_digests is not None:
+        payload["file_digests"] = normalized_file_digests
     seal_id = "sha256:" + hashlib.sha256(json.dumps(
         payload, sort_keys=True, ensure_ascii=False, separators=(",", ":")
     ).encode("utf-8")).hexdigest()
-    seal = DoneSeal(SCHEMA, seal_id, source, label_value, digest, labels_json)
+    seal = DoneSeal(schema, seal_id, source, label_value, digest, labels_json,
+                    file_digests_json)
     setattr(runtime, "_done_is_submit_seal", seal)
     setattr(runtime, "completion_accepted", True)
     setattr(runtime, "v2_accepted_done", True)
     setattr(runtime, "_done_submit_pending", None)
-    _emit(runtime, "done_sealed", source=source, label=label_value,
-          artifact_digest=digest, seal_id=seal_id, stored=True)
+    event_fields: dict[str, object] = {
+        "source": source, "label": label_value, "artifact_digest": digest,
+        "seal_id": seal_id, "stored": True,
+    }
+    if normalized_file_digests is not None:
+        event_fields.update(schema=schema, labels=normalized_labels,
+                            file_digests=normalized_file_digests)
+    _emit(runtime, "done_sealed", **event_fields)
     refusal_count = getattr(runtime, "_done_submit_ownerless_early_refusals", 0)
     if (isinstance(refusal_count, int) and not isinstance(refusal_count, bool)
             and refusal_count == OWNERLESS_EARLY_DONE_REFUSAL_LIMIT):
@@ -565,16 +583,21 @@ def capture_and_seal(runtime: object, *, destination: str | Path, task_id: objec
         _emit(runtime, "done_labels_unavailable",
               reason=f"completion label generation failed: {type(error).__name__}",
               error_type=type(error).__name__)
+    file_digests = _parallel_file_digests(runtime, sources)
     seal = seal_submission(
         runtime, source=intent.source, artifact_digest_value=stored["artifact_digest"],
         label=label, labels=labels, artifact_stored=stored.get("stored") is True,
+        file_digests=file_digests,
     )
     setattr(runtime, "_done_submit_artifact_digest", seal.artifact_digest)
-    _emit(
-        runtime, "done_submission_stored", source=seal.source, label=seal.label,
-        artifact_digest=seal.artifact_digest, stored=True,
-        pending_mutation_count=getattr(runtime, "_done_submit_pending_mutation_count", 0),
-    )
+    stored_fields: dict[str, object] = {
+        "source": seal.source, "label": seal.label,
+        "artifact_digest": seal.artifact_digest, "stored": True,
+        "pending_mutation_count": getattr(runtime, "_done_submit_pending_mutation_count", 0),
+    }
+    if seal.file_digests_json:
+        stored_fields.update(schema=seal.schema, file_digests=json.loads(seal.file_digests_json))
+    _emit(runtime, "done_submission_stored", **stored_fields)
     return seal
 
 
@@ -677,6 +700,14 @@ def terminal_from_seal(runtime: object) -> dict[str, object] | None:
         },
         "labels": labels,
     }
+    if seal.file_digests_json:
+        try:
+            file_digests = json.loads(seal.file_digests_json)
+        except (TypeError, ValueError) as error:
+            raise DoneCaptureError("sealed per-file digests are malformed") from error
+        if not isinstance(file_digests, dict):
+            raise DoneCaptureError("sealed per-file digests are not an object")
+        terminal["done_seal"]["file_digests"] = file_digests
     lines = advisory_lines(runtime)
     if lines:
         terminal["detail"] = "\n".join(lines)
@@ -774,6 +805,9 @@ def completion_labels(runtime: object, *, certification: object = None) -> dict[
 def _required_candidate_tools(runtime: object, tools: object) -> tuple[str, ...]:
     if not enabled(runtime) or not candidate_exists(runtime):
         return ()
+    unit_policy = getattr(runtime, "_unit_policy", None)
+    if unit_policy is not None:
+        return tuple(sorted(unit_policy.mutating_tools)) + ("done",)
     offered_names = {
         _tool_name(item) for item in tools
         if isinstance(item, Mapping)
@@ -800,6 +834,7 @@ def _project_candidate_tools(
     # permanently remove a candidate action from later requests.
     sources = (
         full_tools,
+        getattr(runtime, "_unit_tool_schemas", None),
         getattr(runtime, "_completion_owner_full_tools", None),
         getattr(runtime, "_completion_owner_dispatch_tools", None),
         getattr(runtime, "_readiness_full_tools", None),
@@ -886,6 +921,87 @@ def _safe_labels(values: Mapping[str, object]) -> dict[str, object]:
     return safe
 
 
+def _safe_file_digests(values: Mapping[str, str]) -> dict[str, str]:
+    if not isinstance(values, Mapping):
+        raise DoneCaptureError("sealed file digests must be a mapping")
+    normalized: dict[str, str] = {}
+    for path, digest in values.items():
+        if (not isinstance(path, str) or not path or path.startswith("/")
+                or "\\" in path or PurePosixPath(path).as_posix() != path
+                or any(part in {"", ".", ".."} for part in path.split("/"))
+                or not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest)):
+            raise DoneCaptureError("sealed file digests contain an invalid path or sha256")
+        if path in normalized:
+            raise DoneCaptureError("sealed file digests contain a duplicate path")
+        normalized[path] = digest
+    return dict(sorted(normalized.items()))
+
+
+def _parallel_file_digests(
+        runtime: object, sources: Mapping[str, str | bytes | None]) -> dict[str, str] | None:
+    """Bind subframe candidate file bytes without changing ordinary-run seals."""
+    policy = getattr(runtime, "_unit_policy", None)
+    if policy is None:
+        return None
+    owned = set(policy.spec.contract.owns) | set(policy.spec.contract.creates)
+    return {
+        path: hashlib.sha256(source.encode("utf-8") if isinstance(source, str) else source).hexdigest()
+        for path, source in _normalized_sources(sources).items()
+        if path in owned and source is not None
+    }
+
+
+def parallel_final_source_fields(
+        sources: Mapping[str, str | bytes | None], *, source_map_path: str | Path,
+) -> dict[str, object]:
+    """Bind recovery metadata to the same candidate representation as its seal."""
+    normalized = _normalized_sources(sources)
+    return {
+        "artifact_digest": artifact_digest(normalized),
+        "source_map_path": str(source_map_path),
+        "final_source_paths": [path for path, source in normalized.items() if source is not None],
+    }
+
+
+def authenticated_file_digests(terminal: Mapping[str, object]) -> dict[str, str] | None:
+    """Return only file hashes bound to an authenticated current DoneSeal."""
+    submission = terminal.get("submission")
+    if not isinstance(submission, Mapping):
+        return None
+    schema = submission.get("schema")
+    if schema is None or schema == SCHEMA:
+        return None
+    if schema != FILE_DIGEST_SCHEMA:
+        raise DoneCaptureError("unknown done seal schema")
+    source, label = submission.get("source"), submission.get("label")
+    artifact = submission.get("artifact_digest")
+    seal_id = submission.get("seal_id")
+    raw_digests = submission.get("file_digests")
+    raw_labels = terminal.get("labels")
+    if (not isinstance(source, str) or source not in {"model", "host"}
+            or not isinstance(label, str)
+            or label != _safe_label(label) or not isinstance(artifact, str)
+            or not _SHA256.fullmatch(artifact) or not isinstance(seal_id, str)
+            or not _SHA256.fullmatch(seal_id) or submission.get("stored") is not True
+            or not isinstance(raw_digests, Mapping) or not isinstance(raw_labels, Mapping)):
+        raise DoneCaptureError("done seal with file digests has invalid fields")
+    file_digests = _safe_file_digests(raw_digests)
+    labels = _safe_labels(raw_labels)
+    if labels != raw_labels:
+        raise DoneCaptureError("done seal labels are not canonical")
+    payload = {
+        "schema": FILE_DIGEST_SCHEMA, "source": source, "label": label,
+        "artifact_digest": artifact, "labels": labels,
+        "file_digests": file_digests,
+    }
+    expected = "sha256:" + hashlib.sha256(json.dumps(
+        payload, sort_keys=True, ensure_ascii=False, separators=(",", ":")
+    ).encode("utf-8")).hexdigest()
+    if seal_id != expected:
+        raise DoneCaptureError("done seal authentication failed")
+    return file_digests
+
+
 def _emit(runtime: object, kind: str, **fields: object) -> None:
     journal = getattr(runtime, "journal", None)
     emit = getattr(journal, "emit", None)
@@ -897,10 +1013,12 @@ def _emit(runtime: object, kind: str, **fields: object) -> None:
 
 
 __all__ = [
-    "ADVISORY_ENV", "DoneCaptureError", "DoneSeal", "DoneSubmitIntent", "MODE_ENV", "SCHEMA",
+    "ADVISORY_ENV", "DoneCaptureError", "DoneSeal", "DoneSubmitIntent", "FILE_DIGEST_SCHEMA",
+    "MODE_ENV", "SCHEMA",
     "OWNERLESS_EARLY_DONE_REASON", "OWNERLESS_EARLY_DONE_REFUSAL_LIMIT",
     "accepted_decision", "advisory_enabled", "advisory_lines", "advisory_mode",
-    "artifact_digest", "candidate_changed", "candidate_exists", "capture_advisory_downgrades",
+    "artifact_digest", "authenticated_file_digests", "candidate_changed", "candidate_exists",
+    "capture_advisory_downgrades",
     "capture_and_seal", "completion_labels", "done_sealed", "enabled", "label_for_candidate", "mode",
     "ownerless_early_done_refusal", "pending_decision", "record_ownerless_gate_skipped",
     "project_candidate_tools", "project_final_candidate_tools", "request_submission",

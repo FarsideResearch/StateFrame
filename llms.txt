@@ -12,6 +12,7 @@
 - [Request lifecycle](docs/guide/request-lifecycle.md): how a run and each request are built
 - [Code map](docs/guide/code-map.md): which module owns what
 - [Running](docs/guide/running.md): commands, flags, test interpreter, profiles, resume
+- [Subframes](docs/guide/subframes.md): contract, admission, measured conditions, flags, wire records, resume, limits
 - [Agent tools](docs/guide/tools.md): shell policy, background jobs, file effects, Git, web, custom commands, budget-aware replies, reconciliation limits, replay
 - [Extending](docs/guide/extending.md): profiles, tools, switches, tests
 - [Troubleshooting](docs/guide/troubleshooting.md): errors and fixes

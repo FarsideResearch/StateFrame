@@ -20,7 +20,7 @@ MODE_ENV = "STATEFRAME_GREENLOCK_MENU_AUTHORITY_CONTINUATION"
 PREDICT_MODE_ENV = "STATEFRAME_CONTINUATION_PREDICT"
 CONTROL_TOOLS = frozenset({"done", "continuation_detour", "continuation_reobserve",
                            "work_update", "note_update", "work"})
-EDIT_TOOLS = frozenset({"edit", "str_replace", "file_create", "file_delete", "file_move", "shell", "insert_before"})
+EDIT_TOOLS = frozenset({"edit", "str_replace", "file_create", "file_delete", "file_move", "shell", "insert_before", "parallel"})
 AUTHORED_CHECK_TOOLS = frozenset({"authored_check"})
 EFFECT_TOOLS = frozenset({
     *OBSERVATION_TOOLS, "text", *EDIT_TOOLS, "run_tests", *AUTHORED_CHECK_TOOLS,

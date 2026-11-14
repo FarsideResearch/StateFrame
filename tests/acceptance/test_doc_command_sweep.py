@@ -8,11 +8,10 @@ from pathlib import Path
 import pytest
 
 from ._support import assert_tree_imports, tree_python
-from .doc_command_sweep import commands, outcome, sweep
+from .doc_command_sweep import commands, installed_run_arguments, outcome, sweep
 
 
 ROOT = Path(__file__).resolve().parents[2]
-pytestmark = pytest.mark.host_sandbox
 
 
 def test_unmapped_documented_example_fails_collection(tmp_path):
@@ -37,6 +36,30 @@ def test_unmapped_documented_repository_fails_collection(tmp_path):
         commands(tmp_path)
 
 
+def test_parallel_example_uses_its_documented_opt_in():
+    case = next(case for case in commands(ROOT) if case.example == "parallel_fixes")
+    parallel_index = case.arguments.index("--parallel")
+    assert case.arguments[parallel_index + 1] == "2"
+
+
+def test_clean_install_sweep_pins_the_example_check_interpreter(tmp_path):
+    case = next(case for case in commands(ROOT) if case.example == "parallel_fixes")
+    interpreter = tmp_path / "venv" / "bin" / "python"
+    run_dir = tmp_path / "run-3"
+    arguments = installed_run_arguments(case, ROOT, run_dir, "http://127.0.0.1:9000/v1", interpreter)
+
+    assert arguments[arguments.index("--test-python") + 1] == str(interpreter)
+    assert arguments[arguments.index("--repo") + 1] == str(ROOT / "examples" / "parallel_fixes")
+    assert arguments[arguments.index("--parallel") + 1] == "2"
+    assert arguments[arguments.index("--run-dir") + 1] == str(run_dir)
+
+    other = next(case for case in commands(ROOT) if case.example != "parallel_fixes")
+    other_arguments = installed_run_arguments(other, ROOT, run_dir, "http://127.0.0.1:9000/v1",
+                                              interpreter)
+    assert "--test-python" not in other_arguments
+
+
+@pytest.mark.host_sandbox
 def test_documented_and_bundled_examples_submit_from_clean_install(tmp_path):
     cases = commands(ROOT)
     assert {case.example for case in cases} == {
@@ -51,6 +74,7 @@ def test_documented_and_bundled_examples_submit_from_clean_install(tmp_path):
     assert all(outcome(requests, result) for _, requests, result in results), results
 
 
+@pytest.mark.host_sandbox
 def test_doc_sweep_rejects_broken_release_before_first_request(tmp_path):
     """The released failure is a positive control for the full installed sweep."""
     archive = subprocess.run(

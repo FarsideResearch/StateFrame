@@ -16,6 +16,7 @@ from . import routes
 from .task_row import TaskRowError
 from .workcopy import WorkCopyError
 from .engine.kernel_tool_settings import ToolSettings, ToolSettingsError
+from .engine.kernel_parallel_records import PARALLEL_LIMIT_OPTIONS, display_limit_name
 from . import instructions as project_instructions
 from .skills import install as install_skill, list_installed, remove as remove_skill
 from datetime import datetime, timezone
@@ -53,6 +54,12 @@ def _positive(value: str) -> int:
     return number
 
 
+def _parallel_mode(value: str) -> str:
+    if value in {"off", "auto"}:
+        return value
+    if value.isascii() and value.isdecimal() and int(value) > 0:
+        return value
+    raise argparse.ArgumentTypeError("must be off, auto, or a positive integer")
 def _nonnegative(value: str) -> int:
     number = int(value)
     if number < 0:
@@ -89,6 +96,15 @@ def _add_task_arguments(command: argparse.ArgumentParser, *, for_run: bool = Fal
                          help="environment variable holding the API key (never the key itself)")
     command.add_argument("--max-turns", type=_turns, default=None,
                          help="model turn limit; 0 = no limit (default: the profile's step limit)")
+    command.add_argument("--parallel", type=_parallel_mode, default="off",
+                         help="concurrent subframes: off (default), auto, or a positive integer")
+    command.add_argument("--parallel-slots", metavar="LIST", default=None,
+                         help="restrict subframe leases to comma-separated slot ids, e.g. 2,5")
+    for setting, option in PARALLEL_LIMIT_OPTIONS.items():
+        flag = option["flag"]
+        label = display_limit_name(setting)
+        command.add_argument(flag, type=_positive, default=None, dest=setting, metavar="N",
+                             help=f"{label.replace('_', ' ')} limit")
     command.add_argument("--test-cmd",
                          help="command that decides pass/fail before, during and after "
                                "(default: python -m pytest -q <checks>)")
@@ -346,6 +362,11 @@ def _run_options(args: argparse.Namespace, endpoint: Endpoint) -> RunOptions:
                       run_dir=getattr(args, "run_dir", None),
                       in_place=getattr(args, "in_place", False),
                       profile=args.profile, python=args.python or sys.executable,
+                      parallel_mode=args.parallel,
+                      parallel_slots=args.parallel_slots,
+                      parallel_cli={setting: getattr(args, setting)
+                                    for setting in PARALLEL_LIMIT_OPTIONS
+                                    if getattr(args, setting) is not None},
                       python_explicit=args.python is not None, test_python=args.test_python,
                       slot=args.slot, keep_checkpoints=args.keep_checkpoints,
                       keep_run_env=getattr(args, "keep_run_env", False),
@@ -498,6 +519,13 @@ def _print_summary(summary: dict) -> None:
     if "applied_in_place" in summary:
         rows.append(("applied to repo", ", ".join(summary["applied_in_place"]) or
                      summary.get("in_place_skipped", "nothing")))
+    parallel = summary.get("parallel")
+    if isinstance(parallel, dict):
+        measured = parallel.get("measured") or {}
+        rows.append(("subframes", len(parallel.get("subframes") or [])))
+        rows.append(("subframe speedup", measured.get("speedup")))
+        for degraded in parallel.get("degraded") or []:
+            rows.append(("subframe degrade", f"{degraded['reason']}: {degraded['detail']}"))
     for label, value in rows:
         print(f"{label:>22}: {value}")
     costs = summary.get("route_costs")

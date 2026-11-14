@@ -127,6 +127,29 @@ flowchart TB
 
 The product package (`src/stateframe/`) is standard library only and owns the command line, the run directory, the working copy and the checks around a run. The engine (`src/stateframe/engine/`) runs in its own child process and owns everything about a request: the agent loop and tools, building and fitting the frame, sandboxed execution and checkpoints. [docs/guide/code-map.md](docs/guide/code-map.md) lists each module.
 
+## Parallel subframes
+
+```mermaid
+flowchart LR
+    P[Parent parallel call] --> A[Admit contracts and dependency DAG]
+    A --> R[Project ready subframe inputs]
+    R --> W[Fresh engine child]
+    W --> S[Seal proposal]
+    S --> V[Validate scope, contracts, and checks]
+    V --> D[Durable DECIDED transaction]
+    D --> M[Materialize every file]
+    M --> U[Publish receipt into parent state]
+    U -->|producer committed| R
+    U -->|all work complete| F[Final parent verification]
+    X[Resume] -->|complete or replay transaction| D
+```
+
+The parent stays blocked in one `parallel` tool step while the host supervises separate engine children. Each child
+gets a compiled frame and its own run directory; it never appends to the parent's journal. The host accepts only a
+sealed proposal whose owned paths and before-digests match the current parent tree. The redo transaction is durable
+before materialization, and the parent receives file-effect publication only after every file is in place. Dependents
+start from the committed export projection. Replay and crash recovery use the same transaction publication path.
+See [Subframes](docs/guide/subframes.md) for the contract, measured conditions, records, and limits.
 ## Lifecycle hooks
 
 Hook configuration and project digest trust are resolved by the runner. Start and end events run in the host process through the same execution sandbox. Child events pass through one wiring module that records gate results, notes and scoped formatter changes. The typed `[USER HOOKS]` panel is optional request context; no hook modules are loaded in the child when no hook source is enabled. See [Lifecycle hooks](docs/guide/hooks.md) for the contract and limits.

@@ -24,9 +24,10 @@ from stateframe import runner
 from stateframe.engine import kernel_exec_session, kernel_safe_probe
 from stateframe.engine.kernel_exec_session import ExecSession, ExecSessionError
 from stateframe.engine.kernel_exec_tracker import ProcessTable
-from stateframe.engine.kernel_safe_probe import ProbeCleanupError
+from stateframe.engine.kernel_safe_probe import ProbeEngineError as StartupProbeEngineError
 from kernel_exec_session import ExecSession as SmokeExecSession
-from kernel_ship_tree_smoke import ImportSmokeCleanupError, _execute_smoke
+from kernel_ship_tree_smoke import _execute_smoke
+from kernel_safe_probe import ProbeEngineError as SmokeProbeEngineError, probe_evidence
 
 
 def _retained_process_status_pattern():
@@ -141,13 +142,20 @@ def test_supervisor_death_before_start_keeps_exit_status_log_tail_and_base_error
     monkeypatch.setattr(kernel_safe_probe, "ExecSession", DiedBeforeStartSession)
 
     launched_after = time.time()
-    with pytest.raises(ProbeCleanupError) as caught:
+    with pytest.raises(runner.RunError) as caught:
         runner._startup_probe(sys.executable, "pass", label="engine interpreter test")
 
     message = str(caught.value)
-    assert type(caught.value) is ProbeCleanupError
+    assert type(caught.value) is runner.RunError
+    assert type(caught.value.__cause__) is StartupProbeEngineError
     assert message.startswith(
-        "automatic probe cleanup failed: execution supervisor communication failed:")
+        "engine interpreter test startup probe could not run safely: ENGINE_ERROR:")
+    evidence = probe_evidence(caught.value.__cause__)
+    assert evidence["attempt_count"] == 2
+    assert len(evidence["failures"]) == 2
+    assert all(row["classification"] == "PROBE_SUPERVISOR_LOST"
+               and row["status"] == "INVALID" and marker in row["error"]
+               for row in evidence["failures"])
     assert "primary error:" not in message
     assert re.search(_retained_process_status_pattern(), message)
     assert "supervisor.log tail (up to 8192 bytes):" in message
@@ -370,10 +378,17 @@ def test_import_smoke_supervisor_death_includes_diagnostics(monkeypatch, tmp_pat
     (tmp_path / "smoke.py").write_text("VALUE = 1\n", encoding="utf-8")
 
     launched_after = time.time()
-    with pytest.raises(ImportSmokeCleanupError) as caught:
+    with pytest.raises(SmokeProbeEngineError) as caught:
         _execute_smoke(tmp_path, ("smoke.py",), (str(tmp_path),), 3)
 
     message = str(caught.value)
+    assert type(caught.value) is SmokeProbeEngineError
+    evidence = probe_evidence(caught.value)
+    assert evidence["attempt_count"] == 2
+    assert len(evidence["failures"]) == 2
+    assert all(row["classification"] == "PROBE_SUPERVISOR_LOST"
+               and row["status"] == "INVALID" and marker in row["error"]
+               for row in evidence["failures"])
     assert "execution supervisor communication failed:" in message
     assert "startup supervisor diagnostics:" in message
     assert re.search(_retained_process_status_pattern(), message)

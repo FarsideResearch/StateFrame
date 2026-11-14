@@ -232,6 +232,11 @@ class ManagedProcess:
             value["output_overflow"] = self.output_overflow
         if self.timeout_at is not None:
             value["timeout_at"] = self.timeout_at
+        # A probe can lose its supervisor while descendant cleanup is pending.
+        # Keep an already observed code/limit failure from becoming retryable.
+        if (getattr(self.cap, "purpose", None) == "probe"
+                and (self.limit_detail or self.exit_code not in (None, 0))):
+            value["probe_retry_forbidden"] = True
         return value
 
 

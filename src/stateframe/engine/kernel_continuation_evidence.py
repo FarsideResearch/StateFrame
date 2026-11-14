@@ -110,6 +110,8 @@ def result_class_disposition(producer: str, result: object) -> str:
         return "unknown"
     if producer == "run_tests":
         return RUN_TEST_RESULT_CLASSES.get(result, "unknown")
+    if producer == "parallel":
+        return {"APPLIED": "settled_applied", "REFUSED": "settled_not_applied"}.get(result, "unknown")
     if producer in {"host_obligation_check", "host_repair_check"}:
         return HOST_OBLIGATION_RESULT_DISPOSITIONS.get(result, "unknown")
     if producer == "probe":
@@ -206,6 +208,7 @@ READ_RECEIPT_KINDS = {tool: ("read" if tool in {
 # Read routes are checked against all three registries below.
 EXECUTION_RECEIPT_CONTRACTS = {
     "done": "completion_control",
+    "parallel": "edit_action_receipt",
     "continuation_detour": "continuation_control",
     "continuation_reobserve": "continuation_control",
     "work_update": "work_record_control",
@@ -732,6 +735,15 @@ class HostEvidence:
                         # A post-tool hook can rewrite an admitted edit back to
                         # its original bytes. The authenticated action ran, but
                         # no tracked workspace effect remains to reconcile.
+                        status = "not_applied"
+                    elif (effect.tool == "parallel"
+                          and record.get("before_binding") == current
+                          and any(r.get("kind") == "parallel"
+                                  and r.get("result_class") == "APPLIED" for r in matching)):
+                        # The fan-out reached its final host disposition but no subframe
+                        # changed a tracked file (every one refused, blocked, or made no
+                        # edit).  Nothing is left to reconcile, so the parent must not be
+                        # stranded on an unsettled effect.
                         status = "not_applied"
                 elif (effect.read_only and record.get("before_binding") == current
                       and not record.get("changes")

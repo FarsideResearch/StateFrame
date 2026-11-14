@@ -557,6 +557,7 @@ class RequestTokenMeter:
             template_overhead_tokens: int = TEMPLATE_OVERHEAD_TOKENS,
             route_allow_remote: bool | None = None,
             disabled: bool = False,
+            usage_feedback_enabled: bool = True,
             auth_key: str | None = None,
             generation_endpoint: str | None = None,
     ) -> None:
@@ -564,6 +565,9 @@ class RequestTokenMeter:
             raise ValueError("template overhead must be a non-negative integer")
         if type(disabled) is not bool:
             raise ValueError("tokenizer disabled flag must be a boolean")
+        if type(usage_feedback_enabled) is not bool:
+            raise ValueError("usage feedback policy must be a boolean")
+        self.usage_feedback_enabled = usage_feedback_enabled
         self._tokenizer = tokenizer
         self._tokenizer_auth_key: str | None = None
         self._generation_endpoint: str | None = None
@@ -651,6 +655,58 @@ class RequestTokenMeter:
         self._generation_endpoint = (
             generation_endpoint if isinstance(generation_endpoint, str) and generation_endpoint else None
         )
+
+    def calibration_snapshot(self) -> dict[str, object]:
+        """Return redacted usage observations for deterministic worker handoff."""
+        try:
+            contract = json.loads(self.provider_identity)
+        except (TypeError, ValueError):
+            contract = {}
+        if not isinstance(contract, Mapping):
+            contract = {}
+        observed = self._minimum_bytes_per_token
+        samples = self._calibration_samples
+        return {
+            "schema": "stateframe-request-meter-calibration/1",
+            "source": "calibrated_usage" if samples else "calibrated_bytes",
+            "bytes_per_token": observed if observed is not None else INITIAL_BYTES_PER_TOKEN,
+            "samples": samples,
+            "residual_tokens": 0,
+            "key": {
+                "route": contract.get("route"),
+                "model": contract.get("model"),
+                "template": contract.get("chat_template", contract.get("template")),
+            },
+        }
+
+    @classmethod
+    def from_calibration(
+            cls, snapshot: Mapping[str, object], *, endpoint: str | None = None,
+            route_allow_remote: bool | None = None, auth_key: str | None = None,
+            generation_endpoint: str | None = None,
+    ) -> "RequestTokenMeter":
+        """Restore bounded usage observations without making them cap authority."""
+        if not isinstance(snapshot, Mapping) or snapshot.get("schema") != "stateframe-request-meter-calibration/1":
+            raise ValueError("request meter calibration snapshot has an unsupported schema")
+        source = snapshot.get("source")
+        ratio = snapshot.get("bytes_per_token")
+        samples = snapshot.get("samples")
+        residual = snapshot.get("residual_tokens")
+        key = snapshot.get("key")
+        if (source not in {"calibrated_bytes", "calibrated_usage", "local_tokenizer"}
+                and not (isinstance(source, str) and source.startswith("tokenize_"))):
+            raise ValueError("request meter calibration source is invalid")
+        if (type(ratio) not in (int, float) or not math.isfinite(ratio) or ratio <= 0
+                or type(samples) is not int or samples < 0
+                or type(residual) is not int or residual < 0
+                or not isinstance(key, Mapping)):
+            raise ValueError("request meter calibration values are invalid")
+        meter = cls(endpoint=endpoint, route_allow_remote=route_allow_remote,
+                    auth_key=auth_key, generation_endpoint=generation_endpoint)
+        if samples:
+            meter._minimum_bytes_per_token = float(ratio)
+            meter._calibration_samples = samples
+        return meter
 
     def begin_request(self, request_id: object) -> None:
         """Keep a tokenizer outage sticky and schedule bounded later probes."""
@@ -882,6 +938,56 @@ class RequestTokenMeter:
     def measure(self, body: Mapping[str, object]) -> tuple[int, str]:
         return self._measure_with_wire_bytes(body, None)
 
+    def measure_subframe_cap(
+            self, body: Mapping[str, object], *, tokens_per_byte: float,
+            residual_tokens: int = 0,
+    ) -> tuple[int, str]:
+        """Measure exact without changing run-level diet or feedback state."""
+        if (type(tokens_per_byte) not in (int, float) or not math.isfinite(tokens_per_byte)
+                or tokens_per_byte <= 0 or type(residual_tokens) is not int or residual_tokens < 0):
+            raise ValueError("subframe byte-token calibration is invalid")
+        if (not self._disabled and (self._tokenizer is not None or self.endpoint is not None)):
+            content = _tokenization_content(body)
+            identity = self.tokenizer_identity(body)
+            cache_key = hashlib.sha256((identity + "\0" + content).encode("utf-8")).hexdigest()
+            cache = self.__dict__.setdefault("_subframe_token_cache", OrderedDict())
+            if cache_key in cache:
+                cache.move_to_end(cache_key)
+                return cache[cache_key] + self.template_overhead_tokens, "tokenize"
+            for _attempt in range(TOKENIZE_MAX_CONSECUTIVE_FAILURES):
+                if self._deadline is not None and time.monotonic() >= self._deadline:
+                    raise TimeoutError("tokenizer request deadline expired")
+                try:
+                    if self._tokenizer is not None:
+                        result = self._tokenizer(content)
+                    else:
+                        result = _http_tokenize(
+                            content, self.endpoint, deadline=self._deadline,
+                            route_allow_remote=self.route_allow_remote,
+                            auth_key=self._tokenizer_auth_key,
+                            generation_endpoint=self._generation_endpoint)
+                    if type(result) is int:
+                        token_count = result
+                    elif isinstance(result, Sequence) and not isinstance(
+                            result, (str, bytes, bytearray)):
+                        if any(type(token) is not int or token < 0 for token in result):
+                            raise ValueError("invalid subframe tokenizer response")
+                        token_count = len(result)
+                    else:
+                        raise TypeError("subframe tokenizer must return a count or token sequence")
+                    if token_count < 0:
+                        raise ValueError("subframe tokenizer returned a negative count")
+                except Exception:
+                    continue
+                if self._deadline is not None and time.monotonic() >= self._deadline:
+                    raise TimeoutError("tokenizer request deadline expired")
+                cache[cache_key] = token_count
+                while len(cache) > _EXACT_TOKEN_COUNT_CACHE_ENTRIES:
+                    cache.popitem(last=False)
+                return token_count + self.template_overhead_tokens, "tokenize"
+        size = _wire_bytes(body)
+        return math.ceil(size * tokens_per_byte + residual_tokens), "calibrated_bytes"
+
     def _measure_with_wire_bytes(
             self, body: Mapping[str, object], wire_bytes: int | None,
     ) -> tuple[int, str]:
@@ -988,6 +1094,9 @@ class RequestTokenMeter:
         self._observe_prompt_total(request_bytes, prompt_n + cache_n)
 
     def _observe_prompt_total(self, request_bytes: int, token_total: int) -> None:
+        # Older checkpoints predate the explicit policy and retain historical feedback.
+        if not getattr(self, "usage_feedback_enabled", True):
+            return
         if (type(request_bytes) is not int or request_bytes <= 0
                 or type(token_total) is not int or token_total <= 0):
             return

@@ -66,10 +66,12 @@ MAX_STATE_BYTES = 2 << 30
 # Hook bundles are pinned read-only inputs. Hook records, delivery history and scratch are live
 # per-attempt data; the hook tape keeps the logical-run history across attempts. None may be
 # replaced by an older snapshot. The tool tape and engine log are live for the same reason.
+# Subframe decisions and supervisor channels are live host authority too: moving
+# their directory races the supervisor and can roll back durable transactions.
 SKIP_RUN_ENTRIES = frozenset({"checkpoints", "attempts", "parent", ".engine.lock", ".run.lock",
                               "spec.json", "child-traceback.txt", "engine-result.json", "summary.json",
                               "engine.log", "checkpoint-refused.json", "tool-tape.jsonl",
-                              "hook-tape.jsonl", "hook-bundle", "hooks", "hook-scratch"})
+                              "hook-tape.jsonl", "hook-bundle", "hooks", "hook-scratch", "parallel"})
 
 # Keep writer diagnostics independent of the mutable errno.errorcode table and exception text.
 _OS_ERROR_NAMES = types.MappingProxyType({

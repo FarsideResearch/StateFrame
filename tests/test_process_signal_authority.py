@@ -30,6 +30,8 @@ REVIEWED_SIGNALS = {
         "The driver signals its own unreaped Popen child (session leader).",
     ("stateframe/outer_checks.py", "process.send_signal(signal.SIGTERM)"):
         "The helper is this parent's unreaped Popen child.",
+    ("stateframe/parallel_worker.py", "os.kill(process.pid, signal.SIGKILL)"):
+        "The failed launch is a direct child held unreaped; Popen.kill would poll and release its PID.",
 }
 
 REVIEWED_INDIRECT = {

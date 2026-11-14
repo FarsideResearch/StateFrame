@@ -8,6 +8,7 @@ import os
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 import re
+import sys
 
 from kernel_measurement import digest
 from kernel_test_isolation import SandboxReadGrants
@@ -802,6 +803,12 @@ def record_check_output(
     stdout_text = _text(stdout)
     stderr_text = _text(stderr)
     context_text = _text(assertion_context)
+    unit_module = sys.modules.get("kernel_unit_policy")
+    unit_policy = unit_module.active() if unit_module is not None else None
+    if unit_policy is not None:
+        stdout_text = unit_policy.project_check_output(stdout_text, "pytest")
+        stderr_text = unit_policy.project_check_output(stderr_text, "pytest")
+        context_text = unit_policy.project_check_output(context_text, "pytest")
     typed = typed_observation if isinstance(typed_observation, Mapping) else {}
     if counts is None:
         counts = typed.get("counts")
