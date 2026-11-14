@@ -1,6 +1,6 @@
 {
  "dropped_lab_only": 1,
- "file_count": 781,
+ "file_count": 786,
  "files": {
   "architecture/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
   "architecture/domain_ids.py": "b0aefd60ec4b876a45ff77f2badfdf12a4902af02cbb6506398b46da368106fd",
@@ -702,6 +702,11 @@
   "kernel_vacuity_truth.py": "0577134e907a743b13c852fab5ad749bdd22c8dbc9bb4c5f7e30c292e76f7807",
   "kernel_verdict.py": "10332a7913beffd3dc602131a9aff58e2c20b75b9cef6d17d3a35a1c60ec846d",
   "kernel_verdict_identity.py": "eb9d6dd6b66234af9a0ea243fef731070fad276130db9c510b0b98fc082a5f5d",
+  "kernel_view_ladder/__init__.py": "7eddd23f7f21435698c3dc40f44300baaf0976bdb048a1c4ca17f4bdad317044",
+  "kernel_view_ladder/relevance.py": "21f149e363ba4e1f163e37a83fabb915ca8920b2578746359b9c156d45341aa4",
+  "kernel_view_ladder/render.py": "0accc2e33c66fbf4834fe13471a83e0299ecd8cc0be087a3ce844012b116160d",
+  "kernel_view_ladder/state.py": "ad7b9cf11f419d63fbb8dc6f52fa11b60d26ea5b00c0cd98ba040f7d6a703ac7",
+  "kernel_view_ladder/structure.py": "722efb05ce6cd5d133cdde80992b76723c5afa9ce8cff345214509ed91045f0f",
   "kernel_visibility_requirements.py": "319e5f9b7d2e8518da9b410ef1f49528df4e78a948d6c3b8bd82e5bc2cab0164",
   "kernel_vitals.py": "e93595f9115678ed99dfdfa997b77377a480a8296153788a52ccbe8a9b3c26a5",
   "kernel_wave3.py": "7f0337cc3ae8f9088da9e68c779ec9fe5a094450bb8c1a3c9dba774cf74b4a27",
@@ -749,7 +754,7 @@
   "protected_tree_guard.py": "bd5bec6033b7f4e0bfaaf108e40a4686c36e0d5e5f4a9429aa33975c0af17846",
   "realtask_benchmark.py": "06f9c437a4f0258d4b0e40721bca9cd2ee13e7fac26bc4513b422ca8a5d3b5a9",
   "realtask_worker_receipts.py": "7f358362d2b839957f2541961ce11b6e65bcb26fa60e5f3d28de22144d47421f",
-  "release-manifest.json": "50ba9e2d360cb56b329e6b8eabc0eb8f857966c91dea8a24de5107fcf8fbd69b",
+  "release-manifest.json": "4eacfc103d15741f1039967764ba86b4ed6fab24bc432893a01e2d4aed95038c",
   "sampler_config.py": "1549b3a60e0ebc8fbbad8ed5256f52477cd1bb2491a8da350c64c01e01c81b2d",
   "sf_launch.py": "0e0d792f923a3cbcb68cd22cbb06c7f14dcfc470c8b7c24ed78eacd79990ea5c",
   "sf_mutate_boot.py": "a213bba08b5171f830ba8c1afbcfbcf66b7768ab15961e167a9bcba368d97786",
@@ -759,7 +764,7 @@
   "spec_exec.py": "0a80d5488bc812718b4608e086c12c1b8999604cd075f01217eb9bf172424768",
   "swarm/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
   "swarm/client2.py": "fa141060de5346b46678660fe770c8adcef6b30f579417a52c013d3219d08c70",
-  "switch-registry.json": "288149b356b5315102173c75edb38fd5d4fc60e1ea6ee7cf6819963eb321c945",
+  "switch-registry.json": "d7464a2802a75abd8ee2542a77080d2853318ef55eca43d685eb226d986f5950",
   "symbol_registry.py": "28986ae33ad691dd89c201130e1982334d56542c2e162d7fc9ff5b59073ea15f",
   "sys1/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
   "sys1/adapter.py": "633e61b3fcd43dc6a07d628a3c8eb4d4d1e54e53de078cbe9dd74ed677847ab1",
@@ -4717,7 +4722,7 @@
  "release_listed_but_absent_in_source": [],
  "release_manifest": "37f11a29d4ceccbc5ea3aa95d1e60249e41b93974fe1da74e347ccfad28f1374",
  "schema": "stateframe-engine-source/1",
- "shipped_hash": "4cbfd9402818599fb9d42df7044e970a224bc52e66c44b7524850c5d42ef32a2",
+ "shipped_hash": "df598ad13d37ab92695dcd8334c4e61d823ce33d94bf92ba6f63afa91fa51560",
  "source_hash": "1a75f27c6197deed9df5acd441902846aced5fd358729dab308577e184a077c4",
  "source_tree": "37f11a29d4ceccbc5ea3aa95d1e60249e41b93974fe1da74e347ccfad28f1374"
 }
