@@ -25604,6 +25604,9 @@ class StateFrameRuntime:
             return
         boundary_terminated = str(result.get("result", "")).upper() in {
             "HOOK_BLOCKED", "HOOK_CONTAINMENT", "CONTINUATION_BLOCKED"}
+        from kernel_working_set_stop import is_suspended_result
+        suspended = is_suspended_result(result)
+        boundary_terminated = boundary_terminated or suspended
         if (not boundary_terminated
                 and getattr(self, "stateframe_completion_owner_mode", "off") == "on"):
             from kernel_completion_owner import reconcile_submitted_request, request_pending
@@ -25628,7 +25631,9 @@ class StateFrameRuntime:
             cleanup_environment(self)
         from kernel_done_is_submit_authority import terminal_from_seal
         sealed_terminal = terminal_from_seal(self)
-        host_done_facts_on = getattr(self, "stateframe_host_done_facts_mode", "off") == "on"
+        # A suspension is an unsent boundary, not a completion: no done facts.
+        host_done_facts_on = (getattr(self, "stateframe_host_done_facts_mode", "off") == "on"
+                              and not suspended)
         from kernel_repair_blocks_done import terminal_stop_active
         repair_blocks_done_stopped = (
             False if sealed_terminal is not None else terminal_stop_active(self))

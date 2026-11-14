@@ -397,7 +397,9 @@ def test_shell_on_off_delivery_request_bytes_and_non_audit_journal_match_base(sh
     bodies = [canonical_bytes({"messages": [{"role": "tool", "content": r.observation}]})
               for r in (original, current, audited)]
     assert bodies[0] == bodies[1] == bodies[2]
-    audit_kinds = {"read_attempt", "read_result", "read_capture_skipped", "read_capture_failed"}
+    audit_kinds = {"read_attempt", "read_result", "read_capture_skipped", "read_capture_failed",
+                   "working_set_capture"}
+    assert len([e for e in rt.journal.events if e["kind"] == "working_set_capture"]) == 1
     assert canonical_bytes([e for e in rt.journal.events if e["kind"] not in audit_kinds]) == original_journal
     assert len(_results(rt)) == 1
 

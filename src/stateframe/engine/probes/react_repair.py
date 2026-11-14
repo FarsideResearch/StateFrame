@@ -32,6 +32,7 @@ from typing import Callable
 
 from kernel_shell_tool import SHELL_SCHEMA
 from unit_planner_v2 import capture_incomplete_gate_observation
+from kernel_working_set_stop import WorkingSetSuspended
 
 if __package__:
     from .decoy_tools import (
@@ -9129,6 +9130,8 @@ def work(d, *, resume=None):
                         )
 
             try:
+                from kernel_working_set_stop import check_test_injection
+                check_test_injection(measurement)
                 if toolcall_mode:
                     if not _frame_routes.ROUTES_ACTIVE:
                         content, calls = _provider_request_once()
@@ -10349,6 +10352,10 @@ def work(d, *, resume=None):
                         note_model_action(measurement, "")
                     measurement.start_action("text", {})
                     msgs.append({"role": "assistant", "content": reply})
+            except WorkingSetSuspended:
+                # Orderly typed stop: durable working_set_blocked already journaled.
+                # The outer worker handler finishes it as BLOCKED, never ERR:<type>.
+                raise
             except Exception as e:                              # noqa: BLE001
                 if os.environ.get("STATEFRAME_MUTATIONS", "off") in {"prebuilt", "authored"}:
                     from kernel_mutate_projection import MutationSendRefused
@@ -14763,6 +14770,18 @@ def work(d, *, resume=None):
                  edits=_finish_progress.edits, tests=_finish_progress.checks,
                  behaviour=behaviour, **_done_facts_fields,
                  **_done_submit_fields, **_multi_result), measurement)
+    except WorkingSetSuspended as exc:
+        # BLOCKED is a resumable boundary terminal (allocator §7): the suspension
+        # record travels on the outcome so summary.json keeps resumable/suspension.
+        outcome = dict(fn=fn, steps=locals().get("step", -1), **exc.outcome())
+        if measurement is not None:
+            measurement.system_outcome = "working_set_suspended"
+            _messages = locals().get("msgs")
+            finish_native_batch_transcript(_messages)
+            from kernel_read_receipts import finish_pending
+            finish_pending(measurement, error=exc)
+            measurement.finish(outcome, messages=_messages)
+        return _attach_env_receipt(outcome, measurement)
     except Exception as exc:
         if locals().get("_hook_wiring_for_run") is not None:
             from kernel_hook_exec import HookContainmentError

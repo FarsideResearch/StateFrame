@@ -280,6 +280,11 @@ def capture_read(runtime: object, *, path: str | None, metadata: Mapping[str, ob
         ordinal, json.dumps(dict(arguments), sort_keys=True, separators=(",", ":")).encode(),
         index, index + 1, *line_digests_with_numbers(payload, identity.first_line))
     ledger.add(capture)
+    if __package__:
+        from .kernel_working_set_state import record_capture
+    else:
+        from kernel_working_set_state import record_capture
+    record_capture(runtime, capture)
     if attempt is not None:
         attempt.capture = capture
     return capture

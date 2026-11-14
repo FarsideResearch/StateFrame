@@ -3213,7 +3213,7 @@ class RequestCapture:
         submitted_body = (self.qualified_request.body
                           if self.qualified_request is not None else retried_body)
         retry_temperature = submitted_body.get("temperature", 1.0)
-        self.journal.emit(
+        discarded = self.journal.emit(
             "degeneration_detected",
             request_id=self.request_id,
             step=self.step,
@@ -3227,6 +3227,14 @@ class RequestCapture:
                 logical_completion_tokens=self.v43g_logical_completion_tokens,
             )),
         )
+        discarded_runtime = (getattr(self, "_wire_truth_runtime", None)
+                             or getattr(self, "completion_owner_runtime", None))
+        if discarded_runtime is not None:
+            # Shadow only: the discarded reply closes its pending submission before
+            # the retry (a fresh request id) opens the next one.
+            from kernel_working_set_state import observe_response
+            observe_response(discarded_runtime, self, response_id=discarded["event_id"],
+                             disposition="discarded")
         self.v43g_degradation_retry_used = True
         return self.send(retried_body, endpoint, key, deadline=deadline, side_call_contract=side_call_contract)
 
@@ -4036,6 +4044,8 @@ class RequestCapture:
                     runtime = getattr(self, "completion_owner_runtime", None)
                 from kernel_request_kind import is_auxiliary
                 if runtime is not None and not is_auxiliary(self):
+                    from kernel_working_set_state import observe_submission
+                    observe_submission(runtime, self, wire)
                     from kernel_completion_owner import note_request_submitted
                     submitted_tool_names = _submitted_tool_names(body)
                     note_request_submitted(
@@ -4354,6 +4364,16 @@ class RequestCapture:
                     attempt_reasons=list(attempt_reasons),
                     **host_fact_fields)
                 self.transport_errors.append(error)
+                if not retry_scheduled:
+                    # The pending working-set submission is closed as failed (shadow
+                    # only); an unobserved failure would otherwise linger until the
+                    # next primary submission replaced it.
+                    failed_runtime = (getattr(self, "_wire_truth_runtime", None)
+                                      or getattr(self, "completion_owner_runtime", None))
+                    if failed_runtime is not None:
+                        from kernel_working_set_state import observe_response
+                        observe_response(failed_runtime, self, response_id=error["event_id"],
+                                         disposition="failed")
                 if retry_scheduled:
                     if capacity_retry_scheduled:
                         assert capacity_retry_wire is not None
@@ -7301,6 +7321,9 @@ class RequestCapture:
             delivery_runtime = (getattr(self, "_wire_truth_runtime", None)
                                 or getattr(self, "completion_owner_runtime", None))
             if delivery_runtime is not None:
+                from kernel_working_set_state import observe_response
+                observe_response(delivery_runtime, self, response_id=received["event_id"],
+                                 disposition="accepted")
                 from kernel_step_contract import commit_environment_notice_delivery
                 commit_environment_notice_delivery(
                     delivery_runtime, getattr(self, "_evictfix_final_wire_messages", ()))

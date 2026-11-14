@@ -98,6 +98,9 @@ def project(summary: dict[str, object], *, cancelled: bool = False,
         runtime = "hook_blocked"
     elif status == "CONTINUATION_BLOCKED":
         runtime = "continuation_blocked"
+    elif status == "BLOCKED" and terminal.get("resumable") is True:
+        # Working-set suspension: a typed, resumable stop at an unsent request boundary.
+        runtime = "suspended"
     elif cancelled or child in (130, -2) or status in ("CANCELLED", "CANCELED"):
         runtime = "cancelled"
     elif recovered:
@@ -198,6 +201,8 @@ def exit_code(summary: dict[str, object]) -> int:
     if runtime == "hook_blocked":
         return 1
     if runtime == "continuation_blocked":
+        return 1
+    if runtime == "suspended":
         return 1
     if summary.get("apply_error"):
         return 2

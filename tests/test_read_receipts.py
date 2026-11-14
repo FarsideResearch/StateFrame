@@ -543,8 +543,12 @@ def test_recorded_native_read_replay_on_off_request_bytes(tmp_path, monkeypatch)
         monkeypatch.setenv("STATEFRAME_WORKING_SET_ALLOCATOR", setting)
         wires.clear()
         rt, watch, events, cases, counters = replay._replay(tmp_path / "recorded", monkeypatch)
+        # ON adds audit and shadow working-set rows; wires and every other row stay identical.
+        from kernel_working_set_state import EVENT_KINDS as shadow_kinds
         results.append((list(wires), counters, watch.streak,
-                        [e for e in events if e["kind"] not in {"read_attempt", "read_result"}]))
+                        [e for e in events if e["kind"] not in {"read_attempt", "read_result", *shadow_kinds}]))
+        if setting == "on":
+            assert any(e["kind"] == "working_set_capture" for e in events)
         attempts = [e for e in events if e["kind"] == "read_attempt"]
         outcomes = [e for e in events if e["kind"] == "read_result"]
         assert len(attempts) == len(outcomes) == (30 if setting == "on" else 0)

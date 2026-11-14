@@ -8443,7 +8443,9 @@ def terminal_result(runtime: object, result: Mapping[str, object]) -> dict[str, 
             runtime, sealed, writer="kernel_completion_owner.terminal_result",
         )
     hook_terminal = str(result.get("result", "")).upper()
-    if hook_terminal in {"HOOK_BLOCKED", "HOOK_CONTAINMENT", "CONTINUATION_BLOCKED"}:
+    from kernel_working_set_stop import is_suspended_result
+    if (hook_terminal in {"HOOK_BLOCKED", "HOOK_CONTAINMENT", "CONTINUATION_BLOCKED"}
+            or is_suspended_result(result)):
         terminal = dict(result)
         terminal["accepted"] = False
         terminal["certified"] = False

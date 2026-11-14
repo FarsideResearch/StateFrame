@@ -1,6 +1,6 @@
 {
  "schema": "stateframe-switch-registry/1",
- "sources_sha256": "sha256:f24a60f9fd09dc30350c55a5c29e379fc8be4987cd008e0c2acb891d8cfc96a1",
+ "sources_sha256": "sha256:41fd90d2fe90a094831645aed8c3be68933a0e9e74640ba8883262ef8e29cfb3",
  "switches": [
   "STATEFRAME_",
   "STATEFRAME_ACTION_SCHEMA",

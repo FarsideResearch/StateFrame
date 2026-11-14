@@ -2790,7 +2790,7 @@ def summarize(run: Path, started: float) -> dict[str, object]:
     summary["engine_result"] = result.get("result")
     summary["engine_terminal"] = {key: result[key] for key in (
         "result", "reason_code", "error", "error_type", "error_message", "failure_origin", "behaviour",
-        "done_facts", "submission", "labels", "claims")
+        "done_facts", "submission", "labels", "claims", "resumable", "suspension")
         if key in result}
     # Replay refusals keep their actionable detail in the event, not the terminal receipt.
     # Preserve it for the final CLI summary and --json, which suppresses live events.

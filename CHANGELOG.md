@@ -3,6 +3,7 @@
 ## Unreleased
 
 - Added opt-in read captures and read attempt/result audit events for source pages, shell reads, grep and check output, with typed outcomes and non-fatal capture failures, without changing read selection or request content.
+- Working-set allocator item 2 (opt-in, shadow): journaled read obligation lifecycle rebuilt on continuation restart (post-checkpoint captures, INTERRUPTED trailing reads), plus typed resumable BLOCKED suspension plumbing (runtime_outcome suspended, exit 1); OFF behaviour unchanged.
 
 ## 0.6.44 (2026-11-14)
 

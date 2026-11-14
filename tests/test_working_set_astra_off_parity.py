@@ -9,7 +9,7 @@ import pytest
 from tools.pinned_tree import pinned_tree
 
 
-@pytest.mark.parametrize("reference", ['56af0dc6d6'])
+@pytest.mark.parametrize("reference", ['56af0dc6d6', '473af33688'])
 def test_off_provider_bytes_match_cutover_base(tmp_path, tmp_path_factory, reference):
     base = pinned_tree(reference, tmp_path_factory)
     current = Path(__file__).resolve().parents[1]

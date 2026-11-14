@@ -307,7 +307,9 @@ DROP_ATTRS = {
     ("kernel_continuation_journal", "ContinuationJournal"): frozenset({
         "_warm_host_span_pause_counts", "_warm_host_span_resume_counts",
     }),
-    ("kernel_stateframe_runtime", "StateFrameRuntime"): frozenset({"_model_router_projection_cache"}),
+    ("kernel_stateframe_runtime", "StateFrameRuntime"): frozenset({
+        "_model_router_projection_cache", "_working_set_test_injection",
+    }),
     # Tokenizer auth is rebound from the new child process on every meter lookup;
     # generation credentials and derived SSL state do not belong in checkpoints.
     ("kernel_request_diet", "RequestTokenMeter"): frozenset({
