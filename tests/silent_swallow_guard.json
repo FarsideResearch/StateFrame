@@ -3304,14 +3304,6 @@
     },
     {
       "file": "src/stateframe/engine/kernel_stateframe_runtime.py",
-      "function": "StateFrameRuntime._view",
-      "except_clause": "except ImportError:",
-      "ordinal": 2,
-      "reason": "baseline debt 2026-11-05, see inventory",
-      "risk": "med"
-    },
-    {
-      "file": "src/stateframe/engine/kernel_stateframe_runtime.py",
       "function": "StateFrameRuntime._raising_h_note_observation",
       "except_clause": "except (OSError, UnicodeDecodeError):",
       "ordinal": 1,

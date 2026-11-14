@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Fix: a broken engine install that cannot import the hypothesis projection now fails loudly instead of silently dropping the hypothesis block from the lean state frame.
+- Fix: `decision_continuity_revision_unavailable` journal events now carry a reason (lookup failure, multi-part revision, or no revision recorded).
 - Fix: the decision handoff now marks a decision as stale when a later edit invalidated it, and shows the revision it was based on instead of the current one.
 - The decision handoff now reads "STALE since edit to <files>; recheck" for invalidated decisions, and decision snapshots record a `bound_revision` (shown as a 12-character prefix) for the revision each decision was written against; older snapshots without it show "revision unknown".
 

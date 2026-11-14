@@ -6865,6 +6865,7 @@ class StateFrameRuntime:
         (the fallback chain used at the S1 draft above).  Unavailable -> journal event.
         """
         value: object = None
+        lookup_error: str | None = None
         try:
             from kernel_stateframe_f4 import frame_revision
             hashes = dict(getattr(self, "artifact_hashes", None) or {})
@@ -6874,16 +6875,24 @@ class StateFrameRuntime:
             if not value:
                 binding = self.binding()
                 value = binding.get("product_revision") or binding.get("artifact")
-        except (AttributeError, KeyError, RuntimeError, TypeError, ValueError, OSError):
+        except (AttributeError, KeyError, RuntimeError, TypeError, ValueError, OSError) as error:
             value = None
+            lookup_error = type(error).__name__
         # A multi-part revision ("a|b", several artifacts and no target path) is not a
         # single revision to bind to: treat it as unavailable.
         if isinstance(value, str) and value.strip() and "|" not in value:
             return value.strip()
+        if lookup_error is not None:
+            reason = f"revision lookup failed: {lookup_error}"
+        elif isinstance(value, str) and "|" in value:
+            reason = "multi-part revision is not a single revision to bind"
+        else:
+            reason = "no artifact or product revision recorded"
         self.journal.emit(
             "decision_continuity_revision_unavailable",
             step=getattr(self.owner, "current_step", None),
             producer="stateframe_decision_continuity",
+            reason=reason,
         )
         return None
 
@@ -20069,11 +20078,10 @@ class StateFrameRuntime:
             if frame_clarity:
                 from kernel_frame_clarity import project_serialized_stateframe
                 facts = project_serialized_stateframe(facts)
-            try:
-                from kernel_hypothesis_projection import append_block
-                facts = append_block(facts, lean_frame, runtime=self)
-            except ImportError:
-                pass
+            # kernel_hypothesis_projection ships with the engine: a failed import is a
+            # broken install and must surface, not silently drop the hypothesis block.
+            from kernel_hypothesis_projection import append_block
+            facts = append_block(facts, lean_frame, runtime=self)
         else:
             facts_frame = frame
             if gear_projection is not None:
