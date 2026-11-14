@@ -561,11 +561,17 @@ def _snapshot_home_identity(
         raise CheckpointError("STATEFRAME_HOME_IDENTITY_CHANGED")
     try:
         if __package__:
-            from .kernel_request_auth_identity import protected_home_identity
+            from .kernel_request_auth_identity import _installation_home, protected_home_identity
         else:
-            from kernel_request_auth_identity import protected_home_identity
+            from kernel_request_auth_identity import _installation_home, protected_home_identity
 
         expected = startup_identity if runner_bound else recorded_identity
+        # Only the child binds process authority. The parent CLI may validate a
+        # profile/extra-env home different from its own ambient installation home.
+        if _RUNNER_HOME_IDENTITY_CONFIGURED and (
+                not _valid_home_identity(_RUNNER_HOME_IDENTITY_PIN)
+                or os.path.realpath(_installation_home()) != _RUNNER_HOME_IDENTITY_PIN["realpath"]):
+            raise ValueError("effective process HOME differs from startup")
         if runner_bound and (recorded_identity != expected
                              or os.path.realpath(selected_home) != expected["realpath"]):
             raise ValueError("live HOME pin differs from startup")
@@ -3310,7 +3316,7 @@ def _save_into(payload, ctx, step, run_dir, root, final, tmp, clocks, started, c
     meta = {
         "schema": SCHEMA, "step": step, "sends": _sends(run_dir), "entries": entries,
         "python": list(sys.version_info[:3]), "engine_root": _engine_root(),
-        "engine_files_sha256": engine_fingerprint(), "pid": os.getpid(),
+        "engine_files_sha256": engine_fingerprint(bind_host=True), "pid": os.getpid(),
         "created": time.time(), "seq": seq, "clocks": clocks, "files": copied,
         "blob_manifest_sha256": hashlib.sha256(manifest_bytes).hexdigest(),
         "pool_sha256": pool_sha256,
@@ -3646,11 +3652,27 @@ def _next_seq(root: Path) -> int:
 
 
 _FINGERPRINT: str | None = None
+_PRODUCT_HOST = False
+_HOST_IDENTITY_BOUND = False
 
 
-def engine_fingerprint() -> str:
-    """Hash of every engine .py file (path + bytes): a checkpoint only loads into the same code."""
-    global _FINGERPRINT
+def configure_product_host() -> None:
+    """Declare product startup: CLI validators and children share the package host.
+
+    Embeddings leave this unset so HOST_MODULE still identifies their own code,
+    even when the engine is imported from an installed StateFrame package.
+    Once a checkpoint uses that identity, a late declaration cannot change it.
+    This process authority is excluded from checkpoint state with this module.
+    """
+    global _PRODUCT_HOST, _FINGERPRINT
+    if not _PRODUCT_HOST and not _HOST_IDENTITY_BOUND:
+        _PRODUCT_HOST = True
+        _FINGERPRINT = None
+
+
+def engine_fingerprint(*, bind_host: bool = False) -> str:
+    """Hash engine/host code; checkpoint use binds host ownership for this process."""
+    global _FINGERPRINT, _HOST_IDENTITY_BOUND
     if _FINGERPRINT is None:
         digest = hashlib.sha256()
         root = Path(_engine_root())
@@ -3659,10 +3681,11 @@ def engine_fingerprint() -> str:
                 continue
             digest.update(str(path.relative_to(root)).encode() + b"\0")
             digest.update(hashlib.sha256(path.read_bytes()).digest())
-        # The installed CLI, a wrapper and the child must identify the same product
-        # host code. Standalone engine embeddings retain their own host directory.
-        host_root: Path | None = root.parent
-        if not (host_root / "_child.py").is_file():
+        # Startup declares who owns the wrappers; package layout cannot distinguish
+        # a product child from an embedding using the installed engine.
+        if _PRODUCT_HOST:
+            host_root: Path | None = root.parent
+        else:
             host = getattr(sys.modules.get(HOST_MODULE), "__file__", None)
             host_root = Path(host).resolve().parent if isinstance(host, str) else None
         if host_root is not None:
@@ -3670,6 +3693,10 @@ def engine_fingerprint() -> str:
                 digest.update(b"host:" + path.name.encode() + b"\0")
                 digest.update(hashlib.sha256(path.read_bytes()).digest())
         _FINGERPRINT = digest.hexdigest()
+    if bind_host:
+        # Bind before the background writer forks, and independently of restorable state
+        # or the digest cache. Parent-side selection must honor an in-process writer.
+        _HOST_IDENTITY_BOUND = True
     return _FINGERPRINT
 
 
@@ -3895,7 +3922,7 @@ def _validate(checkpoint: Path) -> tuple[dict, bytes]:
     meta, raw = _authenticate_state(checkpoint)
     if list(sys.version_info[:3]) != meta.get("python"):
         raise CheckpointError("checkpoint was written by another Python version")
-    if meta.get("engine_files_sha256") != engine_fingerprint():
+    if meta.get("engine_files_sha256") != engine_fingerprint(bind_host=True):
         raise CheckpointError("checkpoint was written by another engine build")
     for name in meta.get("entries", ()):
         if not (checkpoint / "run" / name).exists():

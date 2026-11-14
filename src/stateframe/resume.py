@@ -604,6 +604,7 @@ def select_checkpoint(run: Path, tape: list[dict[str, object]], wire_dir: Path) 
     recorded = {int(item["send"]) for item in tape}
     from .engine import kernel_checkpoint
 
+    kernel_checkpoint.configure_product_host()
     if pending is not None and int(pending["send"]) <= max(recorded, default=0):
         pending = None  # already verified against a carried-forward recorded exchange
     candidates = []

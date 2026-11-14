@@ -1169,6 +1169,7 @@ def main(argv: list[str]) -> int:
     except ImportError:
         pass  # An older engine may not ship checkpoint support.
     else:
+        kernel_checkpoint.configure_product_host()
         kernel_checkpoint.configure_runner_home_identity_pin(startup_home_identity)
         try:
             # Register the installation key before any model/tool activity, including no-key runs.

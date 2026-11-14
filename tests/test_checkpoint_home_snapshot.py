@@ -383,6 +383,7 @@ def test_key_rewrite_before_publication_cannot_add_a_new_unscanned_secret(tmp_pa
     monkeypatch.setattr(checkpoint, "_RUNNER_HOME_IDENTITY_PIN", pin)
     monkeypatch.setattr(checkpoint, "_STATE", {})
     monkeypatch.setattr(checkpoint, "_SIGNING_KEY", [b"late-key-signing-fixture-0123456789"])
+    monkeypatch.setenv("STATEFRAME_HOME", str(home))
     (run / "spec.json").write_text(json.dumps({
         "repo": str(repo), "environment": {"STATEFRAME_HOME": str(home)},
         "stateframe_home_identity": pin,
@@ -426,6 +427,7 @@ def test_key_rewrite_before_publication_cannot_add_a_new_unscanned_secret(tmp_pa
     monkeypatch.setattr(checkpoint, "_fsync_snapshot", rewrite_key_at_publication)
     with pytest.raises(checkpoint.CheckpointError, match="STATEFRAME_HOME_IDENTITY_CHANGED"):
         checkpoint.save(types.SimpleNamespace(), 1, run)
+    assert (home / "identity.key").read_bytes() == replacement
     assert not (run / "checkpoints" / "LATEST").exists()
     assert all(replacement not in data for _path, data in
                _artifact_contents(run / "checkpoints"))
@@ -448,6 +450,7 @@ def test_capture_failure_discards_staged_pool_files(tmp_path, monkeypatch):
     monkeypatch.setattr(checkpoint, "_RUNNER_HOME_IDENTITY_PIN", pin)
     monkeypatch.setattr(checkpoint, "_STATE", {})
     monkeypatch.setattr(checkpoint, "_SIGNING_KEY", [b"capture-test-signing-key-0123456789"])
+    monkeypatch.setenv("STATEFRAME_HOME", str(home))
     (run / "spec.json").write_text(json.dumps({
         "repo": str(repo), "environment": {"STATEFRAME_HOME": str(home)},
         "stateframe_home_identity": pin,
@@ -499,6 +502,7 @@ def test_failed_artifact_publication_rolls_back_partial_targets(tmp_path, monkey
         "failed": 0, "consecutive_failed": 0, "disabled": False,
     })
     monkeypatch.setattr(checkpoint, "_SIGNING_KEY", [b"publication-test-signing-key-0123456789"])
+    monkeypatch.setenv("STATEFRAME_HOME", str(home))
     (run / "spec.json").write_text(json.dumps({
         "repo": str(repo), "environment": {"STATEFRAME_HOME": str(home)},
         "stateframe_home_identity": pin,

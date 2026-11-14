@@ -33,6 +33,8 @@ def _legacy_direct_engine_checkpoint(tmp_path, monkeypatch):
     monkeypatch.setenv(checkpoint.LEGACY_DIRECT_ENGINE_ENV, "1")
     monkeypatch.setattr(checkpoint, "_RUNNER_HOME_IDENTITY_CONFIGURED", False)
     monkeypatch.setattr(checkpoint, "_RUNNER_HOME_IDENTITY_PIN", None)
+    monkeypatch.setattr(checkpoint, "_PRODUCT_HOST", False)
+    monkeypatch.setattr(checkpoint, "_FINGERPRINT", None)
     monkeypatch.setattr(checkpoint, "_STATE", {})
     monkeypatch.setattr(checkpoint, "_SIGNING_KEY", [])
     monkeypatch.setattr(checkpoint, "_SECRETS", [])
@@ -351,6 +353,8 @@ def test_truncation_and_rebuild_start_fresh_chunk_lineages(tmp_path, case, label
 
 def test_saved_chunked_indexes_pass_preflight_and_authentication_with_signed_control(
         tmp_path, monkeypatch, _legacy_direct_engine_checkpoint):
+    # This writer feeds the product resume selector, so use the child startup contract.
+    checkpoint.configure_product_host()
     run = tmp_path / "run"
     root = run / "checkpoints"
     journal = _new_owner("journal_hashes", tmp_path / "journal")
@@ -409,6 +413,7 @@ def test_saved_chunked_indexes_pass_preflight_and_authentication_with_signed_con
 def _write_signed_checkpoint(tmp_path, monkeypatch, raw: bytes, index: dict,
                              missing_name: str | None = None, *,
                              checkpoint_name: str = "0001-index-chunk", seq: int = 1) -> Path:
+    checkpoint.configure_product_host()
     root = tmp_path / "run" / "checkpoints"
     folder = root / checkpoint_name
     checkpoint._private_dir(root)

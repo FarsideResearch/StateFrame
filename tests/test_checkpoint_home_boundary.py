@@ -669,6 +669,7 @@ def test_home_guard_runs_with_only_stdlib_and_engine_on_import_path(tmp_path):
         "run.mkdir(); repo.mkdir()",
         "pin = protected_home_identity(home, initialize=True)",
         "(run / 'spec.json').write_text(json.dumps({'repo': str(repo), 'environment': {'STATEFRAME_HOME': str(home)}, 'stateframe_home_identity': pin}))",
+        "os.environ['STATEFRAME_HOME'] = str(home)",
         "checkpoint.configure_runner_home_identity_pin(json.dumps(pin))",
         "checkpoint.verify_stateframe_home_identity(run)",
         "assert (home / 'identity.key').read_bytes() in checkpoint._SECRETS",
