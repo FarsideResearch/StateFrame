@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- The running guide now documents `STATEFRAME_BOUNDARY_CHECKS` and `STATEFRAME_RESULTS_DIR` as profile-only settings and says what each one does.
 - Removed private provenance from source comments and regression test names and values.
 - Removed private provenance from source comments and regression tests, and made the Node memory-limit test find Node on PATH instead of using a personal installation path.
 ## 0.6.31 (2026-11-14)
