@@ -28,6 +28,32 @@ def canonical_path(path: object) -> str:
     return path
 
 
+def edit_authority_mode(origin: dict, recorded_mode: object = None) -> str:
+    """The EditAuthority mode the executor honoured for `edit` in the proposing frame.
+
+    New batches journal the host contract alongside their origin binding. Older
+    bindings may carry it directly. Tool prose and model arguments are not authority.
+    """
+    if isinstance(recorded_mode, str):
+        return recorded_mode.replace("-", "_").lower()
+    authority = origin.get("edit_authority")
+    if isinstance(authority, dict) and isinstance(authority.get("mode"), str):
+        return authority["mode"].replace("-", "_").lower()
+    return "definition"
+
+
+def whole_file_change(path: str, source: str, args: dict) -> tuple[int, int, str]:
+    """Mirror the executor's whole-file replacement: function_source becomes the file, byte-exact."""
+    replacement = args.get("function_source")
+    require(isinstance(replacement, str), "invalid whole-file edit")
+    if PurePosixPath(path).suffix == ".py":
+        try:
+            ast.parse(replacement)
+        except SyntaxError as error:
+            raise ContinuationError("native prefix: invalid whole-file source") from error
+    return 0, len(source), replacement
+
+
 def definition_change(path: str, source: str, args: dict) -> tuple[int, int, str]:
     """Use the executor's complete-definition normalizer, preserving exterior bytes."""
     from kernel_edit_normalization import NormalizedEdit, normalize_edit
@@ -82,10 +108,12 @@ def insertion_change(path: str, source: str, args: dict) -> tuple[int, int, str]
 
 
 class OrderedSources:
-    def __init__(self, events, prepared, payload, origin_binding, *, final_delivery, source_evidence=None):
+    def __init__(self, events, prepared, payload, origin_binding, *, final_delivery,
+                 source_evidence=None, edit_mode: object = None):
         self.events, self.prepared, self.payload = events, prepared, payload
         self.source_evidence = source_evidence
         self.origin = origin_binding
+        self.edit_mode = edit_authority_mode(origin_binding, edit_mode)
         self.final_delivery = final_delivery
         self.texts: dict[str, str] = {}
         self.original: dict[str, str] = {}
@@ -136,6 +164,8 @@ class OrderedSources:
             require(source.count(old) == 1,
                     f"call {number + 1} not applied: old_str is no longer unique; re-issue against current text")
             start, end = source.index(old), source.index(old) + len(old)
+        elif tool == "edit" and self.edit_mode == "whole_file":
+            start, end, replacement = whole_file_change(path, source, args)
         elif tool == "edit":
             start, end, replacement = definition_change(path, source, args)
         else:

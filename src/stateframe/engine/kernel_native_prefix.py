@@ -145,7 +145,7 @@ def validate(evidence, state, data):
     require(isinstance(expected, dict), "missing origin binding")
     from kernel_native_effect_chain import OrderedSources, revision
     sources = OrderedSources(events, prepared, payload, expected, final_delivery=final_delivery,
-                             source_evidence=evidence)
+                             source_evidence=evidence, edit_mode=batch.get("edit_authority_mode"))
     prior_sequence = batch["sequence"]
     for number in range(index + 1):
         selection = one([e for e in events if e["kind"] == "native_batch_action_selected"

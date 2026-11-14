@@ -74,6 +74,9 @@ AUTHORITY_WHOLE_FILE_EDIT_DESCRIPTION = (
     'function_source is the complete desired file for the selected path. '
     'Omitted file content is intentionally removed.')
 AUTHORITY_SYSTEM_LINE = 'The single EditAuthority in the current frame describes editable paths and shortcuts.'
+# Exact wire text of edit.function_source under whole-file authority. Host replay
+# authority is journaled separately because capacity retries may remove this prose.
+WHOLE_FILE_SOURCE_DESCRIPTION = 'Entire desired file content.'
 
 
 def enabled() -> bool:
@@ -259,7 +262,7 @@ def tool_surface(tools: list[dict], scope: dict | None, *, authority: bool = Fal
             else:
                 tool['function']['description'] = scope['instruction']
             if scope['mode'] == 'whole_file':
-                source_description = 'Entire desired file content.'
+                source_description = WHOLE_FILE_SOURCE_DESCRIPTION
             elif scope['mode'] == 'qualified_function':
                 source_description = (
                     'Complete unindented qualified function definition; the current source '
