@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.6.16 (2026-11-13)
 
 - Fixed: the stable StateFrame system-message prefix was sent twice in every request under the shipped profile (once as the prefix and once embedded in the operating instructions). It now appears exactly once, at the start of the system message, saving about 1 KB per request; a test rejects any repeated block inside the system message.
 
