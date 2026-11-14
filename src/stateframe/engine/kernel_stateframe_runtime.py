@@ -24665,7 +24665,7 @@ class StateFrameRuntime:
             capture.request_action_contract = copy.deepcopy(request_action_contract)
             try:
                 from kernel_request_source_window import (
-                    source_delivery_satisfied, verify_final_source_delivery,
+                    reconcile_owner_source_delivery, verify_final_source_delivery,
                 )
                 source_plan = getattr(capture, "_request_source_closure_override", None)
                 if not isinstance(source_plan, Mapping):
@@ -24687,10 +24687,14 @@ class StateFrameRuntime:
                         sources=source_contents or None,
                     )
                     capture.request_source_final_delivery = final_source_delivery
-                    if (not source_delivery_satisfied(final_source_delivery)
-                            and isinstance(previous_source_delivery, Mapping)
-                            and source_delivery_satisfied(previous_source_delivery)):
-                        raise RuntimeError("final source delivery lost after owner admission")
+                    # The earlier receipt may predate a deferral that window
+                    # fitting discovered late; only a page or read route the
+                    # admitted request really dropped is a loss. Anything else
+                    # is journaled as a typed harden8 advisory, not a crash.
+                    reconcile_owner_source_delivery(
+                        self, capture, previous_source_delivery, final_source_delivery,
+                        tools=tools,
+                    )
             except (ImportError, AttributeError, OSError, TypeError, ValueError):
                 # The budget boundary already records unavailable host source
                 # verification; do not manufacture completion here.
