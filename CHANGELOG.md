@@ -1,6 +1,8 @@
 # Changelog
 
-## Unreleased
+## 0.6.24 (2026-11-14)
+
+- Planner v2 and seam recall can now be turned on: STATEFRAME_UNIT_PLAN_V2 and STATEFRAME_SEAM_RECALL accept on/off.
 
 ## 0.6.23 (2026-11-13)
 
