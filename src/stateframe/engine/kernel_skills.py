@@ -14,6 +14,10 @@ except ModuleNotFoundError:  # engine child started by path: the host helper is 
     from skills import (SkillError, catalog_lines,
                         read_skill_file, validate_measurements, verify_records, MAX_BODY_BYTES)
 from kernel_request_diet import RequestTokenMeter
+try:
+    from kernel_reason_log import emit_reason
+except ImportError:
+    from .kernel_reason_log import emit_reason
 
 MAX_CATALOG_TOKENS = 1200
 MAX_BODY_TOKENS = 8000
@@ -31,6 +35,10 @@ def note_budget_omission(messages: list[dict[str, object]], removed: object) -> 
     if match is None:
         raise SkillError("skill body lost its name during request fitting")
     name = match.group(1)
+    # cause_key is fixed (skill names are unbounded); the name rides in `what`. journal=False: request path.
+    emit_reason("eviction", "skill_omitted", "skill_catalog",
+                f"skill {name} body omitted from request", "removed to fit the request budget",
+                level="WARN", journal=False)
     for message in messages:
         if str(message.get("content") or "").startswith(_NOTICE_PREFIX):
             notice = str(message["content"])

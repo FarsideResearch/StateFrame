@@ -1660,15 +1660,6 @@
       "risk": "unclassified"
     },
     {
-      "file": "src/stateframe/engine/kernel_job_watch.py",
-      "function": "JobWatch.job_kill",
-      "except_clause": "except (AttributeError, subprocess.TimeoutExpired):",
-      "fingerprint": "b077db1b7d4a171267e992a6",
-      "ordinal": 1,
-      "reason": "baseline debt 2026-11-05, see inventory",
-      "risk": "unclassified"
-    },
-    {
       "file": "src/stateframe/engine/kernel_jq_class_edit.py",
       "function": "_relative",
       "except_clause": "except (OSError, ValueError):",

@@ -26,6 +26,7 @@ from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import NoReturn
+from kernel_reason_log import emit_timeout
 from kernel_test_python import selected_test_python
 
 
@@ -3562,6 +3563,9 @@ def run_check(root: str | Path, check: CheckDefinition | Mapping[str, object], *
              "import sys; sys.path.insert(0, sys.argv[1]); " + _script_for_check(check), str(root)],
             Path(root), timeout=timeout)
         if process.timed_out:
+            emit_timeout("obligation_assess", what="sandboxed obligation check",
+                         why="check exceeded its timeout", deadline_s=timeout,
+                         cause_key="obligation_assess:timeout")
             raise subprocess.TimeoutExpired("obligation check", timeout)
         stdout = process.output.decode("utf-8", "replace")[-MAX_OUTPUT_CHARS:]
         if process.exit_code != 0:
@@ -3652,6 +3656,9 @@ def run_check(root: str | Path, check: CheckDefinition | Mapping[str, object], *
             observed_values=observed,
         )
     except subprocess.TimeoutExpired:
+        emit_timeout("obligation_assess", what="obligation check",
+                     why="check exceeded its timeout", deadline_s=timeout,
+                     cause_key="obligation_assess:timeout")
         receipt = CheckReceipt(**common, status=HARNESS_ERROR,
                                reason=f"TIMEOUT:{timeout:g}s",
                                counterexample={"error": "TIMEOUT"})

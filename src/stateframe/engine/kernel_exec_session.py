@@ -24,12 +24,14 @@ if __package__:
     from .kernel_exec_capability import ExecCapability
     from .kernel_exec_tracker import (ProcessTable, capture_launch_identity, kill_launch_unit,
                                       process_cmdline_digest, recorded_launch_identity)
+    from .kernel_reason_log import emit_timeout
     from .kernel_test_isolation import sandbox_executable
     from .sf_launch import _current_cgroup
 else:
     from kernel_exec_capability import ExecCapability
     from kernel_exec_tracker import (ProcessTable, capture_launch_identity, kill_launch_unit,
                                      process_cmdline_digest, recorded_launch_identity)
+    from kernel_reason_log import emit_timeout
     from kernel_test_isolation import sandbox_executable
     from sf_launch import _current_cgroup
 
@@ -518,6 +520,9 @@ class ExecSession:
                         except socket.timeout as error:
                             load, cpus = _host_load()
                             seconds = self._control.gettimeout()
+                            emit_timeout("exec_session", what="supervisor rpc",
+                                         why="execution supervisor did not answer",
+                                         deadline_s=seconds, cause_key="rpc_timeout")
                             raise self._supervisor_error(
                                 f"execution supervisor did not answer within {seconds:g} s "
                                 f"(host load {load:g} on {cpus} CPUs); retry when the machine is less busy "
@@ -631,6 +636,8 @@ class ExecSession:
                                      tuple(sorted({p for r in reports for p in r.survivors})),
                                      "; ".join(r.detail for r in reports if r.detail))
             time.sleep(0.02)
+        emit_timeout("exec_session", what="session cleanup", why="cleanup deadline exceeded",
+                     deadline_s=grace_seconds + 4, cause_key="cleanup_deadline")
         return CleanupReport(False, 0, (), "session cleanup deadline exceeded")
 
     def close(self) -> None:
@@ -703,7 +710,9 @@ class ExecSession:
                     self._close_force_kill = True
                     survivors = kill_launch_unit(
                         self._process, deadline_seconds=5,
-                        launch_identity=recorded_launch_identity(self._process))
+                        launch_identity=recorded_launch_identity(self._process),
+                        reason=("session_close_unattested" if exited
+                                else "session_close_deadline"))
                     self._close_unit_killed = True
                     self._close_process_reaped = not survivors
                     if not survivors:

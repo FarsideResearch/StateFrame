@@ -20,6 +20,7 @@ import sys
 import time
 from typing import IO
 
+from kernel_reason_log import emit_kill
 
 MODE_ENV = "CAPABILITY_HOST_CAPACITY"
 LOCK_DIR_ENV = "CAPABILITY_HOST_CAPACITY_LOCK_DIR"
@@ -582,6 +583,9 @@ def terminate_process_group(
     identity = recorded_launch_identity(process)
     group_signalled = False
     if identity is not None and pgid == identity.pid:
+        emit_kill("capability_host_capacity", target=f"process group {pgid}", pid=identity.pid,
+                  why="cleanup requested, SIGTERM to process group", limit=grace_s,
+                  signal_name="SIGTERM", level="WARN", cause_key="capacity_cleanup_term")
         try:
             group_signalled = signal_launch_group(process, identity, signal.SIGTERM)
         except (AttributeError, OSError, ProcessLookupError):
@@ -599,6 +603,14 @@ def terminate_process_group(
 
     group_killed = False
     if identity is not None and pgid == identity.pid:
+        if not child_exited_unreaped(process):
+            emit_kill("capability_host_capacity", target=f"process group {pgid}", pid=identity.pid,
+                      why=f"still running after {float(grace_s):g}s grace, SIGKILL to process group",
+                      limit=grace_s, level="WARN", cause_key="capacity_grace_expired")
+        else:
+            emit_kill("capability_host_capacity", target=f"process group {pgid}", pid=identity.pid,
+                      why="leader exited, sweeping leftover group members with SIGKILL",
+                      level="INFO", cause_key="capacity_group_sweep")
         try:
             group_killed = signal_launch_group(process, identity, signal.SIGKILL)
         except (AttributeError, OSError, ProcessLookupError):

@@ -14,6 +14,7 @@ import re
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 
+from kernel_reason_log import emit_reason
 from kernel_stateframe_final_message import (
     AUTHORITY_OVERLAY_HEADER,
     PAGE_LOG_FINAL_MESSAGE_NAME,
@@ -1905,6 +1906,11 @@ def _emit_shadow_budget_mismatch(
         prompt_tokens: int, observed_action: str,
 ) -> None:
     raw_step = getattr(capture, "step", None)
+    # Shadow-mode comparison only (nothing reaches the model): DEBUG. journal=False: request path.
+    emit_reason("degrade", "page_log_shadow_budget_mismatch", "stateframe_page_log",
+                "page log shadow budget disagreed with legacy path",
+                f"shadow observed {observed_action}", level="DEBUG", journal=False,
+                measured=prompt_tokens, limit=cap)
     _emit_budget_event(
         journal, request_id=getattr(capture, "request_id", None),
         step=raw_step if type(raw_step) is int else None,
@@ -2469,6 +2475,11 @@ def fail_open_pending(capture: object, journal: object | None, *, reason: str,
     setattr(capture, _PENDING_ATTR, None)
     _emit(journal, "stateframe_page_log_failed_open", request_id=pending.request_id,
           step=pending.step, mode=pending.mode, reason=reason, error_type=error_type, vital=True)
+    cause = reason if reason in {"concurrent_page_log_state_advance", "page_log_state_commit_failed"} else "other"
+    emit_reason("fallback", f"page_log:{cause}", "stateframe_page_log",
+                f"page log projection failed open for {pending.mode} mode",
+                f"page log step not committed: {reason}", level="WARN", journal=False,
+                error_type=error_type)
 
 
 def commit_after_response(capture: object, journal: object | None) -> None:

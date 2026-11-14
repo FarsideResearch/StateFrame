@@ -2389,6 +2389,13 @@ class ContinuationJournal(AuditJournal):
                 except Exception:
                     # Request cache telemetry cannot prevent journal closure.
                     pass
+                try:
+                    from kernel_reason_log import flush_summary
+
+                    flush_summary(self)
+                except Exception:
+                    # The reason-log summary is logging only.
+                    pass
             try:
                 if self._cold_start_root is not None:
                     self._finish_cold_start_host_spans()

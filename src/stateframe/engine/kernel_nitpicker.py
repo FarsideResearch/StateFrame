@@ -20,6 +20,7 @@ from typing import TypeAlias
 
 from kernel_semantic_ir import SourceSpan, canonical_json
 from kernel_liveness import Evidence, OrganCensusSpec, TriState
+from kernel_reason_log import emit_reason
 
 
 ANALYZER_VERSION = "nitpicker/1"
@@ -2692,7 +2693,8 @@ class NitpickerState:
         try:
             callback("nitpicker", event, str(entry["detail"]))
         except Exception as exc:  # noqa: BLE001 - observability cannot control work
-            print(f"[stateframe] nitpicker trace failed: {type(exc).__name__}")
+            emit_reason("degrade", "nitpicker:trace_cb", "nitpicker",
+                        "nitpicker trace callback failed; trace disabled", type(exc).__name__)
             self.trace_cb = None
 
     def arm(self) -> None:

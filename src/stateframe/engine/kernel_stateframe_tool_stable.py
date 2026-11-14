@@ -13,6 +13,7 @@ import os
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 
+from kernel_reason_log import emit_reason
 
 TOOL_MODE_ENV = "STATEFRAME_TOOL_STABLE"
 MENU_MODE_ENV = "STATEFRAME_MENU_FREEZE"
@@ -706,6 +707,11 @@ def fail_open_pending(capture: object, journal: object | None, *, reason: str) -
             journal, "stateframe_menu_freeze_rebase_failed_open",
             request_id=pending.request_id, mode=pending.rebase_mode, reason=reason,
         )
+    cause = reason if reason in {"concurrent_tool_state_advance", "tool_state_commit_failed"} else "other"
+    emit_reason("fallback", f"tool_stable:{cause}", "stateframe_tool_stable",
+                "tool surface freeze failed open",
+                f"tool identity not committed for this step: {reason}", level="WARN",
+                journal=False, menu_mode=pending.menu_mode, rebase_mode=pending.rebase_mode)
 
 
 def commit_after_response(capture: object, journal: object | None) -> None:

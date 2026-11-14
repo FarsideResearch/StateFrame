@@ -14,6 +14,11 @@ from typing import Callable, Mapping
 from urllib.parse import urljoin, urlsplit, urlunsplit
 import zlib
 
+try:
+    from .kernel_reason_log import emit_refusal, emit_timeout
+except ImportError:
+    from kernel_reason_log import emit_refusal, emit_timeout
+
 
 @dataclass(frozen=True)
 class WebPolicy:
@@ -328,6 +333,45 @@ def _read_body(response: http.client.HTTPResponse, connection: _PinnedHTTP,
     return b"".join(chunks), raw_total
 
 
+# Ordered: first match wins. Keys become stable cause_keys, so they never carry hosts or counts.
+_REFUSAL_CAUSES = (
+    ("deadline", "deadline"),
+    ("timed out", "timeout"),
+    ("timeout", "timeout"),
+    ("dns", "dns"),
+    ("capacity", "dns"),
+    ("redirect", "redirect"),
+    ("content type", "content_type"),
+    ("charset", "charset"),
+    ("encoding", "encoding"),
+    ("compressed", "encoding"),
+    ("exceeds", "size_limit"),
+    ("non-public", "non_public_address"),
+    ("allow list", "host_policy"),
+    ("port", "port_policy"),
+    ("url", "url_policy"),
+)
+
+
+def _refusal_cause(reason: str) -> str:
+    lowered = reason.lower()
+    for needle, cause in _REFUSAL_CAUSES:
+        if needle in lowered:
+            return cause
+    return "other"
+
+
+def _log_refusal(reason: str) -> None:
+    """Logging only: one stderr line per cause per run for refusals that reach the model as a result."""
+    cause = _refusal_cause(reason)
+    if cause in {"deadline", "timeout"}:
+        emit_timeout("web_fetch", what="web fetch timed out (refused)", why=reason,
+                     cause_key=f"web_fetch:{cause}")
+    else:
+        emit_refusal("web_fetch", what="web fetch refused", why=reason,
+                     cause_key=f"web_fetch:{cause}")
+
+
 def _raw_error_code(reason: str) -> str:
     lowered = reason.lower()
     if "non-public address" in lowered:
@@ -440,12 +484,10 @@ def fetch(url: str, policy: WebPolicy, *, resolver: Callable = socket.getaddrinf
         accept="text/html,text/plain,application/json,application/xml,text/*",
         max_bytes=max(policy.max_body, policy.max_decoded),
         reject_non_text=True, resolver=resolver)
-    if raw.error == "redirect_refused":
-        return WebResult(False, None, None, None, "", 0,
-                         raw.refusal or raw.error)
     if raw.error is not None:
-        return WebResult(False, None, None, None, "", 0,
-                         raw.refusal or raw.error)
+        reason = raw.refusal or raw.error
+        _log_refusal(reason)
+        return WebResult(False, None, None, None, "", 0, reason)
     if raw.status is None:
         return WebResult(False, None, None, None, "", 0, "invalid web response")
     content_type_header = raw.headers.get("content-type", "")
@@ -474,6 +516,7 @@ def fetch(url: str, policy: WebPolicy, *, resolver: Callable = socket.getaddrinf
                          raw.transferred_bytes, None)
     except (WebRefusal, ValueError, OSError, TimeoutError, http.client.HTTPException, ssl.SSLError) as exc:
         reason = str(exc) or type(exc).__name__
+        _log_refusal(reason)
         return WebResult(False, None, None, None, "", 0, reason)
 
 

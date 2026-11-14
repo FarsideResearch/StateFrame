@@ -11,6 +11,10 @@ import re
 from collections.abc import Mapping, Sequence
 
 from kernel_stateframe_envelope import STATE_HEADER, serialize_stateframe_payload
+try:
+    from kernel_reason_log import emit_reason
+except ImportError:
+    from .kernel_reason_log import emit_reason
 
 MODE_ENV = "STATEFRAME_PROMPT_COMPACT"
 MANIFEST_KEY = "stateframe_prompt_compact"
@@ -484,6 +488,9 @@ def emit_passive_withheld_dropped(journal: object, *, request_id: object) -> boo
     count, _PASSIVE_DROP_PENDING[0] = _PASSIVE_DROP_PENDING[0], 0
     if not count or not hasattr(journal, "emit"):
         return False
+    emit_reason("eviction", "passive_withheld_dropped", "prompt_compact",
+                f"withheld {count} passive rows from request", "passive rows dropped by prompt compaction",
+                level="INFO", journal=False, rows_dropped=count)
     journal.emit(PASSIVE_WITHHELD_DROP_EVENT, producer=PRODUCER, dispatch=False,
                  request_id=request_id, rows_dropped=count)
     return True
@@ -640,6 +647,10 @@ def emit_applied(journal: object, prepared: Sequence[Mapping[str, object]], *,
         "bytes_before": sum(int(row["bytes_before"]) for row in blocks),
         "bytes_after": sum(int(row["bytes_after"]) for row in blocks),
     }
+    emit_reason("eviction", "prompt_compact_applied", "prompt_compact",
+                f"prompt compaction rewrote {len(blocks)} blocks",
+                f"{payload['bytes_before']} -> {payload['bytes_after']} bytes (model sees the compact form)",
+                level="INFO", journal=False)
     journal.emit(EVENT, producer=PRODUCER, dispatch=False, **payload)
     return payload
 

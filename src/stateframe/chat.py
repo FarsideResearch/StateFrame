@@ -301,6 +301,20 @@ def default_home(repo: Path) -> Path:
     return state_root / ".stateframe" / "sessions" / f"{repo.resolve().name}-{stamp}"
 
 
+def _print_problems_line(summary_path: Path, printer) -> None:
+    """One line when the run logged ERROR/WARN causes; silent when clean. Logging only."""
+    try:
+        summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return
+    problems = summary.get("problems") if isinstance(summary, dict) else None
+    if not isinstance(problems, dict):
+        return
+    errors, warnings = problems.get("errors", 0), problems.get("warnings", 0)
+    if isinstance(errors, int) and isinstance(warnings, int) and (errors or warnings):
+        printer(f"[stateframe] problems: {errors} ERROR, {warnings} WARN (see summary.json \"problems\")")
+
+
 def repl(session: Session, read=input, printer=print, print_summary=None) -> int:
     session.start(printer=printer)
     printer(f"stateframe chat (preview) on {session.repo}  [session copy: {session.copy}]")
@@ -359,6 +373,7 @@ def repl(session: Session, read=input, printer=print, print_summary=None) -> int
                     print_summary(Path(record.run_dir) / "summary.json")
                 except OSError as error:
                     printer(f"cannot read run summary: {_one_line(error)}")
+                _print_problems_line(Path(record.run_dir) / "summary.json", printer)
             printer(f"=> attempt {record.attempt}: {record.error or record.result}; "
                     f"{record.outcome_label()}; "
                     f"{'kept on the session copy' if record.kept else 'session copy unchanged; attempt path ' + record.run_dir}"

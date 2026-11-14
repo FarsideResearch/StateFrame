@@ -44,6 +44,8 @@ import os
 import hashlib
 from typing import Callable, Iterable
 
+from kernel_reason_log import emit_reason
+
 # Bounded rendering budgets. The E321 capsule has a ~400-token budget for the WHOLE
 # kernel state; four short lines is the graph's entire share of it.
 _KILL_MAX_LINES = 4
@@ -174,7 +176,9 @@ class HypothesisTracker:
         """One line, naming the exception, then permanent silence (#113)."""
         if not self.degraded:
             self.degraded = True
-            print(f"[stateframe] hypotheses degraded: {type(exc).__name__}: {exc}")
+            emit_reason("degrade", "hypotheses:degraded", "hypotheses",
+                        "hypothesis tracker degraded; disabled for this run",
+                        f"{type(exc).__name__}: {exc}")
             self._trace("hypotheses_disarmed", f"{type(exc).__name__}: {exc}")
         self._mg = None
         self._consumer = None

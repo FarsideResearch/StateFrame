@@ -20,6 +20,8 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from kernel_reason_log import emit_kill, emit_refusal, emit_timeout
+
 
 MODE_ENV = "STATEFRAME_JOB_WATCH"
 MAX_CONCURRENT_JOBS = 2
@@ -645,6 +647,9 @@ class JobWatch:
             process = managed.process
             signalled = False
             pid = getattr(process, "pid", None)
+            emit_kill("job_watch", target=f"job {managed.record.job_id}", pid=pid,
+                      why="model requested job_kill, sending SIGTERM to the job group",
+                      level="WARN", cause_key="job_watch:model_requested", journal=self.journal)
             if os.name == "posix" and isinstance(pid, int) and pid > 0:
                 try:
                     from kernel_exec_tracker import recorded_launch_identity, signal_launch_group
@@ -653,6 +658,10 @@ class JobWatch:
                 except (OSError, ProcessLookupError):
                     pass
             if not signalled and not child_exited_unreaped(process):
+                emit_kill("job_watch", target=f"job {managed.record.job_id}", pid=pid,
+                          why="group not signalled, terminating the job process directly",
+                          level="WARN", cause_key="job_watch:direct_terminate_fallback",
+                          journal=self.journal)
                 try:
                     terminate = getattr(process, "terminate", None)
                     if callable(terminate):
@@ -672,6 +681,10 @@ class JobWatch:
         escalated = False
         pid = getattr(process, "pid", None)
         if os.name == "posix" and isinstance(pid, int) and pid > 0:
+            if not child_exited_unreaped(process):
+                emit_kill("job_watch", target=f"job {managed.record.job_id}", pid=pid,
+                          why="job did not exit within 1s of SIGTERM, escalating to SIGKILL",
+                          level="WARN", cause_key="job_watch:escalated_sigkill", journal=self.journal)
             try:
                 from kernel_exec_tracker import recorded_launch_identity, signal_launch_group
                 escalated = signal_launch_group(
@@ -681,14 +694,25 @@ class JobWatch:
         if not escalated and not child_exited_unreaped(process):
             kill = getattr(process, "kill", None)
             if callable(kill):
+                emit_kill("job_watch", target=f"job {managed.record.job_id}", pid=pid,
+                          why="launch group not signalled, killing the job process directly",
+                          level="ERROR", cause_key="job_watch:direct_kill_fallback",
+                          journal=self.journal)
                 try:
                     kill()
                 except OSError:
                     pass
         try:
             process.wait(timeout=1.0)
-        except (AttributeError, subprocess.TimeoutExpired):
-            pass
+        except AttributeError:
+            emit_refusal("job_watch", what=f"job {managed.record.job_id} exit wait unavailable",
+                         why="process handle does not provide an exit wait; reconciling status",
+                         level="INFO", cause_key="job_watch:wait_unavailable", journal=self.journal)
+        except subprocess.TimeoutExpired:
+            emit_timeout("job_watch", what=f"job {managed.record.job_id} exit after kill",
+                         why="job process did not exit within 1s of the kill",
+                         deadline_s=1.0, cause_key="job_watch:wait_after_kill",
+                         journal=self.journal)
         reader = managed.reader
         if reader is not None and reader.is_alive():
             reader.join(timeout=1.0)
@@ -696,6 +720,10 @@ class JobWatch:
             managed.cleanup_in_progress = False
         self._reconcile(managed.record.job_id, wait_for_exit=True)
         if not escalated:
+            emit_refusal("job_watch", what=f"job {managed.record.job_id}",
+                         why="launch group could not be signalled, containment unverified",
+                         level="ERROR", cause_key="job_watch:containment_unverified",
+                         journal=self.journal)
             raise JobWatchError(
                 "job containment unverified: launch group could not be signalled",
                 code="CONTAINMENT_UNVERIFIED")

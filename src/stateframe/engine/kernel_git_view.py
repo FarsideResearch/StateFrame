@@ -465,6 +465,13 @@ def legacy_git_query(repository: Path, args: list[str], *, timeout: float = 10) 
         result = run_probe(
             [executable, "--no-pager", *args], repository, timeout=timeout,
             env=view.env(), read_roots=(view.git_dir, *view.object_dirs))
+        if result.timed_out:
+            # Quiet degrade today: the caller gets None and its signal is silently missing.
+            from kernel_reason_log import emit_timeout
+            emit_timeout("git_view", what=f"git {args[0] if args else 'query'} for repo intel", level="WARN",
+                         why=f"git query exceeded {float(timeout):g}s, result omitted; limits: repo signals 3s "
+                             "(blame/log 5s), call_graph 20s, default 10s; no override (caller argument)",
+                         deadline_s=float(timeout), cause_key="git_query_timeout", journal=False)
         if result.timed_out or result.exit_code != 0:
             return None
         if result.output_truncated:

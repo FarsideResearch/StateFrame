@@ -10,7 +10,7 @@ from collections.abc import Mapping
 
 import kernel_frame_routes as _frame_routes
 
-from kernel_request_seal import QualifiedRequest, OwnerPresentation, RequestSealError, freeze
+from kernel_request_seal import QualifiedRequest, OwnerPresentation, RequestSealError, log_seal_violation, freeze
 
 
 def _final_cache_message_label(message):
@@ -77,6 +77,8 @@ def _stable_wire_record_for_publication(candidate, body):
         return None
     record = validate_reserves_record(value)
     if record["epoch"] != layout[1]:
+        log_seal_violation("stable wire trim epoch changed before publication",
+                           f"trim record epoch {record['epoch']}, qualified layout epoch {layout[1]}")
         raise RequestSealError("stable wire trim epoch changed before publication")
     return record
 
@@ -210,9 +212,11 @@ def build_qualified_request(capture, runtime, body, *, endpoint, key, deadline=N
     previous = getattr(capture, "qualified_request", None)
     if previous is not None:
         if input_digest != previous.input_digest:
+            log_seal_violation("retry input differs from sealed request")
             raise RequestSealError("retry input differs from sealed request")
         previous.validate(capture, runtime)
         if gate_required(capture) and not capture._qualified_request_gate_passed:
+            log_seal_violation("sealed request did not pass its bound host gate")
             raise RequestSealError("sealed request did not pass its bound host gate")
         return previous
     if deadline is not None and time.monotonic() >= deadline:
@@ -256,6 +260,7 @@ def build_qualified_request(capture, runtime, body, *, endpoint, key, deadline=N
                               bind_current_surface=tool_mode() in {"on", "shadow"},
                               final_fit_pending=True)
     if not isinstance(candidate.request_action_contract, Mapping):
+        log_seal_violation("qualified request lacks owner authority")
         raise RequestSealError("qualified request lacks owner authority")
     # Freeze from admitted owner input before any semantic filtering. A final
     # menu rebind may change contract identity, but may not change its limits.
@@ -384,6 +389,8 @@ def build_qualified_request(capture, runtime, body, *, endpoint, key, deadline=N
     budget = reconcile_frozen_budget(candidate, context, wire_body,
                                     frozen_inputs=snapshot_revalidation_inputs(candidate, context, wire_body))
     if budget.get("final_validation_failures"):
+        log_seal_violation("candidate failed final budget/source/menu proof",
+                           ",".join(budget["final_validation_failures"]))
         raise RequestSealError("candidate failed final budget/source/menu proof: " +
                                ",".join(budget["final_validation_failures"]))
     candidate._frame_candidate_inputs.update(
@@ -400,6 +407,8 @@ def build_qualified_request(capture, runtime, body, *, endpoint, key, deadline=N
             frozen_inputs=snapshot_revalidation_inputs(candidate, context, body),
         )
         if budget.get("final_validation_failures"):
+            log_seal_violation("capacity retry failed final provider budget proof",
+                               ",".join(budget["final_validation_failures"]))
             raise RequestSealError("capacity retry failed final provider budget proof: " +
                                    ",".join(budget["final_validation_failures"]))
         candidate._frame_candidate_inputs.update(
@@ -453,6 +462,7 @@ def build_qualified_request(capture, runtime, body, *, endpoint, key, deadline=N
         ).to_bytes()
         raise
     if check.wire != wire or check.verdict not in {"PASS", "DISABLED"}:
+        log_seal_violation("candidate wire truth changed or rejected the proven bytes")
         raise RequestSealError("candidate wire truth changed or rejected the proven bytes")
     # Every body producer and proof above precedes the sole allocation capture.
     allocation = capture_candidate(runtime=context, capture=candidate, body=body,
@@ -565,11 +575,12 @@ def publish_code_bookmark_transition(runtime, transition) -> None:
 
 def qualify_final_wire_allocation(capture, runtime, body, preparation, *, deadline=None):
     """Compatibility boundary: validate the existing seal, never reconstruct it."""
-    from kernel_request_seal import RequestSealError
+    from kernel_request_seal import RequestSealError, log_seal_violation
     if deadline is not None and time.monotonic() >= deadline:
         raise TimeoutError("request deadline expired before final wire binding")
     record = getattr(capture, "qualified_request", None)
     if record is None:
+        log_seal_violation("final wire has no qualified request")
         raise RequestSealError("final wire has no qualified request")
     record.validate(capture, runtime, body)
     return body

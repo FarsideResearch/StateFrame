@@ -82,7 +82,9 @@ def execute_probe(root: Path, product_files: dict, source: str, output: Path, *,
                         time.sleep(.02)
                     timed_out = not child_exited_unreaped(process)
                     kill_launch_unit(process, deadline_seconds=5,
-                                     launch_identity=recorded_launch_identity(process))
+                                     launch_identity=recorded_launch_identity(process),
+                                     reason="probe_deadline" if timed_out else "probe_cleanup",
+                                     log_level="WARN" if timed_out else "INFO")
                     code = -1 if timed_out else process.returncode
         if any(not path.is_file() or hashlib.sha256(path.read_bytes()).hexdigest() != value
                for path, value in before.items()):

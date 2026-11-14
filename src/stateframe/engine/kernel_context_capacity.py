@@ -22,6 +22,8 @@ import threading
 import urllib.parse
 from collections.abc import Mapping
 
+from kernel_reason_log import emit_refusal
+
 ESTIMATE_MARGIN = 1.02
 DEFAULT_MIN_OUTPUT_TOKENS = 512
 _PROBE_TIMEOUT_S = 3.0
@@ -135,12 +137,20 @@ def enforce_context_capacity(capture: object, body: dict[str, object], *,
     live_slot = None
     if ENDPOINT_SIZE.configured:
         if not isinstance(endpoint, str):
+            emit_refusal("context_capacity", what="request refused: context setting without endpoint",
+                         why="STATEFRAME_CONTEXT_TOKENS requires a serving endpoint",
+                         limit=ENDPOINT_SIZE.context_tokens, level="ERROR",
+                         cause_key="context_setting_no_endpoint", journal=False)
             raise ContextCapacityError(
                 f"STATEFRAME_CONTEXT_TOKENS={ENDPOINT_SIZE.context_tokens} requires a live "
                 f"server slot of {ENDPOINT_SIZE.context_tokens} tokens; endpoint is missing. "
                 "Set a serving endpoint or unset the context setting.")
         live_slot = probe_n_ctx(endpoint, key)
         if live_slot is None or live_slot != ENDPOINT_SIZE.context_tokens:
+            emit_refusal("context_capacity", what="request refused: context setting mismatch",
+                         why="STATEFRAME_CONTEXT_TOKENS requires a matching live server slot",
+                         limit=ENDPOINT_SIZE.context_tokens, measured=live_slot,
+                         level="ERROR", cause_key="context_setting_slot_mismatch", journal=False)
             raise ContextCapacityError(
                 f"STATEFRAME_CONTEXT_TOKENS={ENDPOINT_SIZE.context_tokens} requires a live "
                 f"server slot of {ENDPOINT_SIZE.context_tokens} tokens; observed "
@@ -185,6 +195,11 @@ def enforce_context_capacity(capture: object, body: dict[str, object], *,
                                f"{min(min_output, max_output)} output tokens of n_ctx {n_ctx}"],
                      outcome="HARNESS_CONTRACT", failure_origin="harness",
                      transport_class="capacity", **fields)
+    emit_refusal("context_capacity", what="request refused: exceeds context",
+                 why=f"output floor does not fit: only {allowed} of {min(min_output, max_output)} "
+                     f"output tokens fit n_ctx {n_ctx}",
+                 measured=math.ceil(estimate * ESTIMATE_MARGIN) + max_output, limit=n_ctx,
+                 level="ERROR", cause_key="n_ctx_overflow", journal=False)
     raise ContextCapacityError(
         f"request overflows n_ctx {n_ctx}: estimate {estimate}*{ESTIMATE_MARGIN} + "
         f"{max_output} output; only {allowed} output tokens fit")

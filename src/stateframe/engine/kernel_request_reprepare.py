@@ -13,6 +13,7 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 import time
 
+from kernel_reason_log import emit_timeout
 from kernel_frame_request_allocation import (
     FrameRequestAllocation,
     FrameRequestAllocationError,
@@ -466,6 +467,9 @@ def _prepare_replacement_candidate(runtime: object, original: object, preparatio
             or original.response_event_id is not None or original.transport_attempt_id is not None):
         raise RequestPreparationContractError("replacement requires the original active unsent preparation")
     if deadline is not None and (not math.isfinite(deadline) or deadline <= time.monotonic()):
+        emit_timeout("request_reprepare", what="wire recovery replacement request",
+                     why="request deadline expired before wire recovery",
+                     cause_key="request_reprepare:timeout", journal=False)
         raise TimeoutError("request deadline expired before wire recovery")
     for owner in (runtime, runtime.owner):
         if owner.current_request_id != preparation.request_id:

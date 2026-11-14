@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Literal, TypeAlias, cast
 
 from task_manifest import RunnerName, TaskManifest, load_task_manifest
+from kernel_reason_log import emit_timeout
 from kernel_tool_paths import AmbiguousToolPath, unique_tool_match
 
 
@@ -186,6 +187,8 @@ def run_pytest(
             env=process_env,
         )
     except subprocess.TimeoutExpired:
+        emit_timeout("task_runners", what="pytest task", why=f"pytest timed out after {timeout}s; limit: task runner timeout argument (no env override)",
+                     deadline_s=timeout, cause_key="pytest:timeout")
         return _result(
             "pytest", "TIMEOUT", None, selected, f"pytest timed out after {timeout}s"
         )
@@ -244,6 +247,8 @@ def run_vitest(
             env=process_env,
         )
     except subprocess.TimeoutExpired:
+        emit_timeout("task_runners", what="vitest task", why=f"vitest timed out after {timeout}s; limit: task runner timeout argument (no env override)",
+                     deadline_s=timeout, cause_key="vitest:timeout")
         return _result(
             "vitest", "TIMEOUT", None, selected, f"vitest timed out after {timeout}s"
         )

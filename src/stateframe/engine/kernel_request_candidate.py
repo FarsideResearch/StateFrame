@@ -52,7 +52,8 @@ def candidate_source_plan(capture, runtime):
     if not isinstance(plan, Mapping):
         plan = getattr(runtime, "_request_source_closure", None)
     if not isinstance(plan, Mapping):
-        from kernel_request_seal import RequestSealError
+        from kernel_request_seal import RequestSealError, log_seal_violation
+        log_seal_violation("candidate lacks source authority")
         raise RequestSealError("candidate lacks source authority")
     return plan
 
@@ -114,7 +115,7 @@ def render_visibility_sources(capture, runtime, body, check):
     """
     from kernel_frame_source_snapshot import frame_source_snapshot
     from kernel_request_source_window import _render_ranges, project_source_window, source_revision
-    from kernel_request_seal import RequestSealError
+    from kernel_request_seal import RequestSealError, log_seal_violation
     from kernel_stateframe_framefit5 import _framefit_source_identity
     from kernel_read_reuse_visibility import _source_message, editable_read_paths
 
@@ -144,10 +145,12 @@ def render_visibility_sources(capture, runtime, body, check):
             continue
         source = sources.get(path)
         if not isinstance(source, str) or source_revision(source) != candidate["revision"]:
+            log_seal_violation("visibility source snapshot differs from verified revision")
             raise RequestSealError("visibility source snapshot differs from verified revision")
         lines = source.splitlines(keepends=True)
         start, end = candidate["start_line"], candidate["end_line"]
         if not 1 <= start <= end <= len(lines):
+            log_seal_violation("visibility source range exceeds verified snapshot")
             raise RequestSealError("visibility source range exceeds verified snapshot")
         rendered = project_source_window(_render_ranges(
             lines, [{"start_line": start, "end_line": end,
@@ -155,6 +158,7 @@ def render_visibility_sources(capture, runtime, body, check):
             path=path, revision=candidate["revision"], total_lines=len(lines)),
             owner="read_reuse_visibility")
         if rendered is None:
+            log_seal_violation("visibility source could not be canonically rendered")
             raise RequestSealError("visibility source could not be canonically rendered")
         message = {"role": "user", "content": rendered}
         if message not in result["messages"]:
@@ -168,9 +172,10 @@ def render_visibility_sources(capture, runtime, body, check):
 def selected_visibility(check, delivery, *, wire=None, sources=None):
     """Choose delivery requirements before sealing; source proof owns deferral."""
     from kernel_request_source_window import source_delivery_satisfied
-    from kernel_request_seal import RequestSealError
+    from kernel_request_seal import RequestSealError, log_seal_violation
 
     if not source_delivery_satisfied(delivery):
+        log_seal_violation("visibility selection lacks a verified source proof")
         raise RequestSealError("visibility selection lacks a verified source proof")
     deferred = set(delivery.get("deferred_paths", ()))
     result = copy.deepcopy(check)

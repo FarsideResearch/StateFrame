@@ -20,6 +20,11 @@ import sys
 import time
 import weakref
 
+try:
+    from .kernel_reason_log import emit_kill, emit_reason
+except ImportError:
+    from kernel_reason_log import emit_kill, emit_reason
+
 
 @dataclass(frozen=True)
 class ProcessIdentity:
@@ -49,6 +54,11 @@ def _boot_id() -> str | None:
 
 class ContainmentUnverified(RuntimeError):
     """The supervisor cannot prove that every launched process was contained."""
+
+
+def _log_containment_unverified(cause_key: str, why: str) -> None:
+    """Containment could not be proven: an invariant break (ERROR). Logging only."""
+    emit_reason("invariant", cause_key, "exec_tracker", "process containment unverified", why, level="ERROR")
 
 
 def capture_launch_identity(process, table: ProcessTable | None = None, *,
@@ -220,9 +230,11 @@ def signal_mac_verified_process(expected: ProcessIdentity, sig: signal.Signals) 
     try:
         lib = _libproc()
     except OSError as error:
+        _log_containment_unverified("macos_libproc_unavailable", "macOS libproc unavailable: cannot read process identity")
         raise ContainmentUnverified("macOS libproc unavailable: cannot read process identity") from error
     proc_pidinfo = getattr(lib, "proc_pidinfo", None)
     if proc_pidinfo is None:
+        _log_containment_unverified("macos_libproc_unavailable", "macOS libproc unavailable: cannot read process identity")
         raise ContainmentUnverified("macOS libproc unavailable: cannot read process identity")
     proc_pidinfo.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_uint64,
                              ctypes.c_void_p, ctypes.c_int]
@@ -233,6 +245,8 @@ def signal_mac_verified_process(expected: ProcessIdentity, sig: signal.Signals) 
         if count == 0 and ctypes.get_errno() in (errno.ESRCH, errno.ENOENT):
             return None
         if count != ctypes.sizeof(info):
+            _log_containment_unverified("macos_pid_version_unreadable",
+                                        "cannot read macOS process birth and PID version together")
             raise ContainmentUnverified("cannot read macOS process birth and PID version together")
         return info
 
@@ -740,9 +754,38 @@ class Descendants:
         return signalled
 
 
+def _log_kill_unit(process, reason: str, log_level: str, deadline_seconds: float, started: float,
+                   survivors: tuple[int, ...]) -> None:
+    """Log-only: why the launch unit was killed, and survivors as ERROR. Never raises.
+
+    log_level is WARN for kills of live or abandoned work; callers that kill an already
+    exited unit for routine cleanup pass INFO.
+    """
+    elapsed = time.monotonic() - started
+    # deadline_seconds is the SIGKILL wait, not a resource limit, so it is never limit=.
+    emit_kill("exec_tracker", target=f"launch unit pid {process.pid}", why=reason,
+              pid=process.pid, elapsed_s=elapsed, level=log_level,
+              cause_key=f"kill_unit:{reason}")
+    if survivors:
+        emit_kill("exec_tracker", target=f"launch unit pid {process.pid}",
+                  why=f"{len(survivors)} descendant(s) survived SIGKILL after a "
+                      f"{deadline_seconds:g}s wait",
+                  pid=process.pid, measured=len(survivors), elapsed_s=elapsed, level="ERROR",
+                  cause_key="kill_survivors")
+
+
+def _log_unverified_containment(process, reason: str) -> None:
+    """Log-only: containment could not be verified, so the kill is an invariant failure."""
+    emit_reason("invariant", "containment_unverified", "exec_tracker",
+                f"kill of launch unit pid {process.pid}",
+                "launch identity or descendant family unavailable; survivors unknown",
+                level="ERROR", reason=reason)
+
+
 def kill_launch_unit(process, family: Descendants | None = None,
                      deadline_seconds: float = 2.0, *,
-                     launch_identity: LaunchIdentity | None) -> tuple[int, ...]:
+                     launch_identity: LaunchIdentity | None,
+                     reason: str = "unspecified", log_level: str = "WARN") -> tuple[int, ...]:
     """SIGKILL a launched process and every descendant; return the PIDs that survived.
 
     Killing only the launcher is not containment. A bwrap launcher killed while its inner
@@ -752,6 +795,7 @@ def kill_launch_unit(process, family: Descendants | None = None,
     left its process group or session are still linked by parent PID; a monitor's family
     adds anything it saw earlier. Identities guard every signal against PID reuse.
     """
+    started = time.monotonic()
     table = family.table if family is not None else ProcessTable()
     if launch_identity is None:
         family = None
@@ -815,14 +859,18 @@ def kill_launch_unit(process, family: Descendants | None = None,
             family.signal(live, signal.SIGKILL)
         if not live and process.poll() is not None:
             if family is None:
+                _log_unverified_containment(process, reason)
                 raise ContainmentUnverified(
                     "containment unverified: launch identity or descendant family unavailable; survivors unknown")
+            _log_kill_unit(process, reason, log_level, deadline_seconds, started, ())
             return ()
         if time.monotonic() >= until:
             survivors = {row.pid for row in live}
             if process.poll() is None:
                 survivors.add(process.pid)
             if family is None:
+                _log_unverified_containment(process, reason)
                 raise ContainmentUnverified(
                     "containment unverified: launch identity or descendant family unavailable; survivors unknown")
+            _log_kill_unit(process, reason, log_level, deadline_seconds, started, tuple(sorted(survivors)))
             return tuple(sorted(survivors))

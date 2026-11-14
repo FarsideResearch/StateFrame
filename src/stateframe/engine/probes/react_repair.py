@@ -155,6 +155,7 @@ if os.environ.get("STATEFRAME_MUTATIONS", "off") in {"prebuilt", "authored"}:
                 and callback is not None and isinstance(call_id, str) and call_id):
             callback(messages, call_id)
         return reply
+from kernel_reason_log import emit_reason  # noqa: E402
 from kernel_silent_off_organs import (  # noqa: E402
     expectation_subject as _expectation_subject,
     observe_expectation_suite as _observe_expectation_suite,
@@ -3620,8 +3621,8 @@ def ask_tools(messages, mt=4000, temp=None, tools=None, known_refs=None):
             # for recovery instead of spending attempts on a dead endpoint.  An
             # HTTPError carries a real status from a LIVE server: never await it.
             if _is_connection_failure(_te):
-                print(f"    [stateframe] endpoint failure ({type(_te).__name__}) — "
-                      f"awaiting recovery")
+                emit_reason("degrade", "react_repair:endpoint_failure", "react_repair",
+                            "endpoint connection failed; awaiting recovery", type(_te).__name__)
                 if _await_endpoint(*_failed_request_destination(capture)):
                     continue                     # recovered: retry, attempt not wasted
             if attempt == POLICY.transport_attempts - 1:
@@ -4970,8 +4971,8 @@ def _host_refusal_observation(runtime, refusal: "_HostExecutionRefused", *, sele
                          error_type=type(refusal.error).__name__, detail=detail,
                          selector=selector[:300], dispatch=False)
         except Exception as emit_error:                              # noqa: BLE001
-            print(f"    [stateframe] run_tests_host_refused emit failed: "
-                  f"{type(emit_error).__name__}")
+            emit_reason("degrade", "react_repair:run_tests_journal", "react_repair",
+                        "run_tests_host_refused journal write failed", type(emit_error).__name__)
     try:
         from kernel_check_truth_adapter import record_native_observation
         record_native_observation(
@@ -6843,7 +6844,8 @@ def work(d, *, resume=None):
             bolt.world = WorldKnowledgeStore(sandbox_id=d["sha"][:8])
         except Exception as _e:                                      # noqa: BLE001
             bolt.world = None
-            print(f"    [stateframe] world cache OFF: {type(_e).__name__}: {_e}")
+            emit_reason("degrade", "react_repair:organ_off:world_cache", "react_repair",
+                        "world cache OFF (fail-open)", f"{type(_e).__name__}: {_e}")
         bolt.product_edits = 0        # E307: the done-gate's test-only-edits evidence
         bolt.target_path = d["rel"]   # E313: get_sure orientation target
         # E317 test-navigation oracle: names of the discriminating regression nodes and
@@ -6863,8 +6865,8 @@ def work(d, *, resume=None):
             bolt.f2p_names = ()
             bolt.f2p_ids = ()
             bolt.oracle_file_ids = ()
-            print(f"    [stateframe] f2p name resolution failed (nav oracle OFF): "
-                  f"{type(_e).__name__}: {_e}")
+            emit_reason("degrade", "react_repair:organ_off:f2p_names", "react_repair",
+                        "f2p name resolution failed (nav oracle OFF)", f"{type(_e).__name__}: {_e}")
         bolt.oracle_preflight = {} if information.strict else d.get("_oracle_preflight", {})
         bolt.f2p_inworld = ()
         bolt.oracle_selector_counts = {}
@@ -6892,8 +6894,9 @@ def work(d, *, resume=None):
                             _inworld.add(f"{_tf.relative_to(root)}::{_n}")
                 bolt.f2p_inworld = tuple(_inworld)
             except Exception as _e:                                  # noqa: BLE001
-                print(f"    [stateframe] in-world f2p scan failed (held-out msgs "
-                      f"only): {type(_e).__name__}: {_e}")
+                emit_reason("degrade", "react_repair:organ_off:f2p_inworld", "react_repair",
+                            "in-world f2p scan failed (held-out messages only)",
+                            f"{type(_e).__name__}: {_e}")
         bolt._rec("gate", "nav_armed",
                   f"names={len(bolt.f2p_names)} inworld={len(bolt.f2p_inworld)}")
         # E335 (measured on ack, commit 252c12de: "the test was masking it"): every
@@ -6924,35 +6927,40 @@ def work(d, *, resume=None):
                                       organ_out=bolt.organ_out)
         except Exception as _e:                                      # noqa: BLE001
             bolt.sem = None
-            print(f"    [stateframe] semantic bridge OFF: {type(_e).__name__}: {_e}")
+            emit_reason("degrade", "react_repair:organ_off:semantic_bridge", "react_repair",
+                        "semantic bridge OFF (fail-open)", f"{type(_e).__name__}: {_e}")
         # E350: vitals EKG (behavioral early warning; degrades to None cleanly).
         try:
             from kernel_vitals import VitalsEKG
             bolt.ekg = VitalsEKG()
         except Exception as _e:                                      # noqa: BLE001
             bolt.ekg = None
-            print(f"    [stateframe] vitals EKG OFF: {type(_e).__name__}: {_e}")
+            emit_reason("degrade", "react_repair:organ_off:vitals_ekg", "react_repair",
+                        "vitals EKG OFF (fail-open)", f"{type(_e).__name__}: {_e}")
         # E342: hypothesis tracker (kill-list/frontier; degrades to None cleanly).
         try:
             from kernel_hypotheses import HypothesisTracker
             bolt.hyp = HypothesisTracker(d["sha"][:8], trace_cb=bolt._rec)
         except Exception as _e:                                      # noqa: BLE001
             bolt.hyp = None
-            print(f"    [stateframe] hypothesis tracker OFF: {type(_e).__name__}: {_e}")
+            emit_reason("degrade", "react_repair:organ_off:hypothesis_tracker", "react_repair",
+                        "hypothesis tracker OFF (fail-open)", f"{type(_e).__name__}: {_e}")
         # E393: nit-picker (contract-atom attention; degrades to None cleanly).
         try:
             from kernel_nitpicker import NitpickerState
             bolt.nit = NitpickerState(task_id=d["sha"][:8], target_symbol=fn)
         except Exception as _e:                                      # noqa: BLE001
             bolt.nit = None
-            print(f"    [stateframe] nit-picker OFF: {type(_e).__name__}: {_e}")
+            emit_reason("degrade", "react_repair:organ_off:nitpicker", "react_repair",
+                        "nit-picker OFF (fail-open)", f"{type(_e).__name__}: {_e}")
         # E415: close-look organ (anchor-stability -> microscope dossier).
         try:
             from kernel_close_look import CloseLookKernel
             bolt.closelook = CloseLookKernel(task_id=d["sha"][:8])
         except Exception as _e:                                      # noqa: BLE001
             bolt.closelook = None
-            print(f"    [stateframe] close-look OFF: {type(_e).__name__}: {_e}")
+            emit_reason("degrade", "react_repair:organ_off:closelook", "react_repair",
+                        "close-look OFF (fail-open)", f"{type(_e).__name__}: {_e}")
         # E428: pivot organ (tiers + pre-graph + loop ban). The fallback order is
         # declared UP FRONT; only a new failing fingerprint moves us along an edge,
         # and a (approach, fingerprint) pair already burned is BANNED (no loops).

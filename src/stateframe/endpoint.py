@@ -28,6 +28,23 @@ class EndpointError(RuntimeError):
     """The endpoint is unusable for a run (bad URL, unreachable, auth refused)."""
 
 
+def _is_timeout(error: BaseException) -> bool:
+    return isinstance(error, TimeoutError) or isinstance(getattr(error, "reason", None), TimeoutError)
+
+
+def _report_timeout(what: str, deadline_s: float | None, elapsed_s: float | None = None) -> None:
+    """Write one reason line for a probe timeout. Logging must never change the probe outcome."""
+    try:
+        try:
+            from kernel_reason_log import emit_timeout
+        except ImportError:
+            from stateframe.engine.kernel_reason_log import emit_timeout
+        emit_timeout("endpoint", what=what, why="endpoint probe timed out",
+                     deadline_s=deadline_s, elapsed_s=elapsed_s, cause_key="endpoint:timeout")
+    except Exception:  # noqa: BLE001 - the log helper is best effort by contract
+        return
+
+
 def _read_bounded(response, deadline: float) -> bytes:
     """At most MAX_JSON_BYTES of the body, raising TimeoutError once ``deadline`` passes."""
     data = bytearray()
@@ -193,6 +210,9 @@ class Endpoint:
             except (TimeoutError, urllib.error.URLError) as error:
                 timed_out = isinstance(error, TimeoutError) or isinstance(getattr(error, "reason", None),
                                                                            TimeoutError)
+                if timed_out and attempt == 2:
+                    _report_timeout(f"GET {redact_url(url)}", self.timeout_s,
+                                    time.monotonic() - (deadline - self.timeout_s))
                 if attempt == 2 or not timed_out or isinstance(error, urllib.error.HTTPError):
                     raise
         raise AssertionError("unreachable")
@@ -222,7 +242,9 @@ class Endpoint:
         try:
             payload = self._read_json(opener, url)
         except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError,
-                ConnectionError, OSError, EndpointError, json.JSONDecodeError, UnicodeError):
+                ConnectionError, OSError, EndpointError, json.JSONDecodeError, UnicodeError) as error:
+            if _is_timeout(error):
+                _report_timeout(f"optional slots probe {redact_url(url)}", self.timeout_s)
             return None
         return payload if isinstance(payload, list) else None
 
@@ -242,6 +264,8 @@ class Endpoint:
             raise EndpointError(f"endpoint answered HTTP {error.code} on GET /models") from None
         except (urllib.error.URLError, TimeoutError, ConnectionError, OSError) as error:
             reason = getattr(error, "reason", error)
+            if _is_timeout(error):
+                _report_timeout(f"GET /models at {redact_url(self.base_url)}", self.timeout_s)
             raise EndpointError(f"endpoint unreachable at {redact_url(self.base_url)}: "
                                 f"{type(reason).__name__}") from None
         except json.JSONDecodeError:

@@ -22,6 +22,7 @@ import subprocess
 import tempfile
 from collections.abc import Mapping, Sequence
 
+from kernel_reason_log import emit_timeout
 from kernel_observation_contract import (
     CallableIdentity,
     EffectObservation,
@@ -657,6 +658,9 @@ def execute_fixture(
                 check=False,
             )
         except subprocess.TimeoutExpired as error:
+            emit_timeout("aha11_fixture", what="native honesty fixture process",
+                         why="fixture exceeded its timeout", deadline_s=max(0.1, float(timeout_seconds)),
+                         cause_key="aha11_fixture:timeout")
             return FixtureExecution(adapter_id, ObservationStatus.ENVIRONMENT, None, stderr=str(error), reason="fixture timeout")
         except OSError as error:
             return FixtureExecution(adapter_id, ObservationStatus.ENVIRONMENT, None, reason=type(error).__name__)

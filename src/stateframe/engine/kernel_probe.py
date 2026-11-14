@@ -454,10 +454,12 @@ sys.exit(_exit)
 """ % (_SNAPSHOT_ROOT_ENV, _META_FD_ENV, tuple(_EXCLUDED_PARTS), code)
 
 
-def _kill_group(process: subprocess.Popen) -> bool:
+def _kill_group(process: subprocess.Popen, *, reason: str = "unspecified",
+                log_level: str = "WARN") -> bool:
     # The whole launch unit, not only the group: a bwrap child still setting up its
     # sandbox, or one that already left the group, must not outlive the timeout.
-    return not kill_launch_unit(process, launch_identity=recorded_launch_identity(process))
+    return not kill_launch_unit(process, launch_identity=recorded_launch_identity(process),
+                                reason=reason, log_level=log_level)
 
 
 def _collect_process(process: subprocess.Popen, wall_seconds: float,
@@ -481,7 +483,7 @@ def _collect_process(process: subprocess.Popen, wall_seconds: float,
         if remaining <= 0:
             timed_out = not child_exited_unreaped(process)
             if timed_out:
-                group_killed = _kill_group(process) or group_killed
+                group_killed = _kill_group(process, reason="probe_deadline") or group_killed
             break
         events = selector.select(min(remaining, 0.05))
         if not events and child_exited_unreaped(process):
@@ -544,7 +546,8 @@ def _collect_process(process: subprocess.Popen, wall_seconds: float,
             time.sleep(.02)
         if not child_exited_unreaped(process):
             timed_out = True
-    cleaned = _kill_group(process)
+    cleaned = _kill_group(process, reason="probe_deadline" if timed_out else "probe_cleanup",
+                          log_level="WARN" if timed_out else "INFO")
     if timed_out:
         group_killed = cleaned or group_killed
     return bytes(buffers["stdout"]), bytes(buffers["stderr"]), truncated, timed_out, group_killed

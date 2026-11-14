@@ -44,6 +44,7 @@ from kernel_journal_store import (  # noqa: F401
 
 from kernel_effect_boundary import Mode
 from kernel_frame_request_allocation import FrameRequestAllocation
+from kernel_reason_log import emit_refusal
 from kernel_launch_identity_cost import (
     ENVIRONMENT,
     PhaseMeter,
@@ -301,6 +302,14 @@ def _request_bytes_for_capture(
     token = ACTIVE_REQUEST.set(capture)
     try:
         return request_bytes(wire, endpoint, key, **kwargs)
+    except TimeoutError as error:
+        # kernel_bounded_http (stdlib-only by guard) cannot log; it terminates its child at these deadlines.
+        from kernel_reason_log import emit_timeout
+        emit_timeout("bounded_http", what="provider HTTP request (bounded child)",
+                     why=f"{str(error) or 'HTTP deadline exceeded'}; {REQUEST_TIMEOUT_LIMIT_NOTE}",
+                     cause_key="http_deadline",
+                     journal=False)
+        raise
     finally:
         ACTIVE_REQUEST.reset(token)
 
@@ -848,11 +857,22 @@ def _safe_timeout_endpoint(endpoint: str) -> str:
         return safe.split("?", 1)[0].split("#", 1)[0][:512]
 
 
+REQUEST_TIMEOUT_LIMIT_NOTE = (
+    "limit: model request timeout, default 300s socket / 420s wall; override "
+    "REACT_REQUEST_TIMEOUT_S (socket; wall = +120s) or STATEFRAME_PER_REQUEST_TIMEOUT_S (both)")
+
+
 def journal_provider_request_timeout(
         journal: object | None, *, request_id: str | None, step: int | None,
         timeout_seconds: float, attempt: int, endpoint: str,
         retry_scheduled: bool) -> object | None:
     """Persist a provider timeout as a host fact, never as a model verdict."""
+    # Logging only; journal=False because the host-fact event below is the journal record.
+    from kernel_reason_log import emit_timeout
+    emit_timeout("provider_request", what="model request", level="WARN", journal=False,
+                 why=f"no response within {float(timeout_seconds):g}s on attempt {attempt}"
+                     f"{', retry scheduled' if retry_scheduled else ', no retry'}; {REQUEST_TIMEOUT_LIMIT_NOTE}",
+                 deadline_s=float(timeout_seconds), cause_key="provider_request_timeout")
     emitter = getattr(journal, "emit", None)
     if not callable(emitter):
         return None
@@ -3309,10 +3329,11 @@ class RequestCapture:
                                 dialect=provider_dialect)
             sealed = self.qualified_request
             if sealed is not None:
-                from kernel_request_seal import RequestSealError
+                from kernel_request_seal import RequestSealError, log_seal_violation
                 sealed.validate(self, self._wire_truth_runtime, body)
                 from kernel_request_kind import gate_required
                 if wire != sealed.wire or (gate_required(self) and not self._qualified_request_gate_passed):
+                    log_seal_violation("transport retry lacks the exact qualified wire")
                     raise RequestSealError("transport retry lacks the exact qualified wire")
             if json.dumps(body).encode() != wire:
                 first_wire = getattr(self, "_one_snapshot_first_wire", None)
@@ -4129,7 +4150,7 @@ class RequestCapture:
                             # evidence when its protected minimum cannot shrink.
                             capacity_retry_refit_error = type(refit_error).__name__
                             detail = getattr(refit_error, "detail", None)
-                            from kernel_request_seal import RequestSealError
+                            from kernel_request_seal import RequestSealError, log_seal_violation
                             self.journal.emit(
                                 "capacity_retry_refit_failed",
                                 producer="kernel_measurement", fact_owner="HOST",
@@ -6264,6 +6285,9 @@ class RequestCapture:
                     try:
                         enforce_context_capacity(self, body, endpoint=endpoint, key=key)
                     except ContextCapacityError as error:
+                        emit_refusal("kernel_context_capacity", what="request refused: exceeds context window",
+                                     why=str(error), journal=False,
+                                     level="ERROR", cause_key="n_ctx_overflow")
                         if _one_snapshot_record(
                                 "final_context_capacity", type(error).__name__,
                                 json.dumps(body).encode()):
@@ -6331,6 +6355,9 @@ class RequestCapture:
             try:
                 enforce_context_capacity(self, body, endpoint=endpoint, key=key)
             except ContextCapacityError as error:
+                emit_refusal("kernel_context_capacity", what="request refused: exceeds context window",
+                             why=str(error), journal=False,
+                             level="ERROR", cause_key="n_ctx_overflow")
                 if _one_snapshot_record(
                         "final_context_capacity", type(error).__name__,
                         json.dumps(body).encode()):
@@ -6904,7 +6931,8 @@ class RequestCapture:
             if self.qualified_request is not None:
                 self.qualified_request.validate(self, wire_truth_runtime, body)
                 if wire != self.qualified_request.wire:
-                    from kernel_request_seal import RequestSealError
+                    from kernel_request_seal import RequestSealError, log_seal_violation
+                    log_seal_violation("transport bytes differ from the qualified request")
                     raise RequestSealError("transport bytes differ from the qualified request")
             _assert_framefit5_provider_boundary(
                 self, wire, framefit5_assembler_messages,

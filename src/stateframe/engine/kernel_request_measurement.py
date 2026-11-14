@@ -104,19 +104,22 @@ class RequestMeasurement:
 
     def validate(self, body: Mapping[str, object], receipt: Mapping[str, object], *,
                  request_id: str, logical_request_id: str, tokenizer_identity: str) -> None:
-        from kernel_request_seal import RequestSealError
+        from kernel_request_seal import RequestSealError, log_seal_violation
         if not self.matches(body, tokenizer_identity=tokenizer_identity,
                             request_id=request_id, logical_request_id=logical_request_id):
+            log_seal_violation("measurement body/projection/provider identity changed")
             raise RequestSealError("measurement body/projection/provider identity changed")
         if (self.request_bytes != len(json.dumps(body).encode())
                 or receipt.get("body_sha256") != self.body_sha256
                 or receipt.get("request_bytes") != self.request_bytes
                 or any(receipt.get(key) != value for key, value in self.receipt_fields().items())):
+            log_seal_violation("measurement and final budget receipt disagree")
             raise RequestSealError("measurement and final budget receipt disagree")
         if (self.method not in {"tokenize", "calibrated_bytes"}
                 or type(self.prompt_tokens) is not int or self.prompt_tokens < 0
                 or self.prompt_tokens > self.max_prompt_tokens
                 or self.request_bytes > self.max_request_bytes):
+            log_seal_violation("measurement does not establish request capacity")
             raise RequestSealError("measurement does not establish request capacity")
         from kernel_request_budget import (
             ENDPOINT_CONTEXT_TOKENS, ENDPOINT_OUTPUT_BUDGET_TOKENS,
@@ -130,4 +133,5 @@ class RequestMeasurement:
                 or self.safety_tokens != ENDPOINT_SAFETY_HEADROOM_TOKENS
                 or self.max_prompt_tokens > max(0, ENDPOINT_CONTEXT_TOKENS - output
                                                - self.thinking_tokens - self.safety_tokens)):
+            log_seal_violation("measurement output/thinking/safety reserves disagree")
             raise RequestSealError("measurement output/thinking/safety reserves disagree")

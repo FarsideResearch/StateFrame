@@ -6878,9 +6878,10 @@ def bind_final_tool_surface(
             contract = rebound_contract
         presentation = getattr(capture, "owner_presentation", None)
         if presentation is not None:
-            from kernel_request_seal import OwnerPresentation, RequestSealError
+            from kernel_request_seal import OwnerPresentation, RequestSealError, log_seal_violation
 
             if not isinstance(presentation, OwnerPresentation):
+                log_seal_violation("invalid owner presentation at final surface binding")
                 raise RequestSealError("invalid owner presentation at final surface binding")
             presentation = presentation.rebind(source, contract)
         frozen = _freeze_contract(contract)

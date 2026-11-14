@@ -218,7 +218,7 @@ def test_cleanup_update_cannot_admit_or_signal_a_new_group_row(monkeypatch):
     )
     signalled: list[int] = []
 
-    def inspect_cleanup(_process, family, *, launch_identity):
+    def inspect_cleanup(_process, family, *, launch_identity, **_log_fields):
         live = family.update({reused.pid: reused})
         signalled.extend(row.pid for row in live)
         return ()

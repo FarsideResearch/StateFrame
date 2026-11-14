@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.6.30 (2026-11-14)
+
+- Refusals, fallbacks and degrades now say why: budget and cap refusals with the measured value against the limit, evictions and omissions naming what was dropped, failed-open frame paths, tokenizer fallbacks, and seal or containment failures. Nothing on a healthy run prints at the default level.
+- Timeouts of probes, model requests, git queries and test runs log one line naming the limit, its value and the setting that overrides it, if there is one.
+- A memory stop of a check now says which kind it was: a measured overrun (WARN, memory used against the limit in bytes), a supervisor error (ERROR, with the error), or routine cleanup of leftover processes after the check exited (INFO). Cleanup is no longer reported as a memory kill, and the SIGKILL wait is no longer shown as a limit.
+- Process kills now report who was stopped, by which part of the engine, why (the measured value against its limit, or the deadline) and how long it ran. Each cause prints one `[stateframe] WARN` or `[stateframe] ERROR` line per run and lands in the run journal.
+- Failed process containment and hook or HTTP timeouts now log their reason once per run instead of failing silently.
+- New `--log-level` flag and `STATEFRAME_LOG_LEVEL` setting (error, warn, info, debug; default warn). `summary.json` gains a `problems` section with a count per cause and the first occurrence, printed at the end of the run. Request bytes are unchanged.
+
 ## 0.6.29 (2026-11-14)
 
 - Fixed: when the engine cannot tell whether a test run covered every declared selector, it now withholds the completion hint and logs the error type instead of assuming full coverage.

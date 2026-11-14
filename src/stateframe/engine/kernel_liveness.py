@@ -22,6 +22,8 @@ except ImportError:  # Python 3.9 compatibility for postponed aliases.
     TypeAlias = object
 from typing import Union
 
+from kernel_reason_log import emit_reason
+
 
 JSONScalar: TypeAlias = Union[str, int, float, bool, type(None)]
 JSONValue: TypeAlias = Union[JSONScalar, Mapping[str, "JSONValue"], Sequence["JSONValue"]]
@@ -595,13 +597,16 @@ def _emit_receipt(
                 handle.write(json.dumps(dict(receipt), sort_keys=True) + "\n")
         except OSError as exc:
             errors.append(f"receipt_persist_failed:{type(exc).__name__}")
-            print(f"[stateframe] liveness census receipt persist failed: {type(exc).__name__}")
+            emit_reason("degrade", "liveness:census_persist", "liveness",
+                        "census receipt persist failed", type(exc).__name__)
     if receipt_sink is not None:
         try:
             receipt_sink(receipt)
         except Exception as exc:  # noqa: BLE001 - census must not break task finalization
             errors.append(f"receipt_sink_failed:{type(exc).__name__}")
             print(f"[stateframe] liveness census receipt sink failed: {type(exc).__name__}")
+            emit_reason("degrade", "liveness:census_sink", "liveness",
+                        "census receipt sink failed", type(exc).__name__)
     return tuple(errors)
 
 

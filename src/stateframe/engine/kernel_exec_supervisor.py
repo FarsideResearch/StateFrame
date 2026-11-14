@@ -27,6 +27,7 @@ from kernel_execution_policy import (
     _remove_command_cgroup,
 )
 from kernel_job_output import JobOutputCollector
+from kernel_reason_log import emit_kill
 from kernel_test_isolation import capability_command
 from sf_launch import (
     _cgroup_leaf_pattern_status,
@@ -128,8 +129,12 @@ class ManagedProcess:
             self.stop(0.1)
         if self.stop_at is not None:
             fresh = [p for p in live if p.pid not in self.term_sent]
+            if fresh:
+                self._log_stop("SIGTERM", now)
             self.term_sent |= self.family.signal(fresh, signal.SIGTERM)
             if now >= self.kill_at:
+                if any(p.pid not in self.killed for p in live):
+                    self._log_stop("SIGKILL", now)
                 self.killed |= self.family.signal(live, signal.SIGKILL)
             try:
                 # Signalling and reaping can change liveness within this tick.
@@ -167,7 +172,26 @@ class ManagedProcess:
                 detail = "descendants survived SIGKILL"
                 if details:
                     detail += ": " + "; ".join(details) + suffix
+                emit_kill("supervisor", target=f"job {self.id} descendants", why="descendants survived SIGKILL",
+                          measured=len(live), elapsed_s=now - self.started, level="ERROR",
+                          cause_key="supervisor:survived_sigkill")
                 self.complete(False, tuple(p.pid for p in live), detail[:600])
+
+    def _log_stop(self, signal_name: str, now: float) -> None:
+        """Log-only: why this job's group is being signalled. Never raises or changes flow."""
+        if self.containment_failed:
+            kind, why = "output_failed", self.limit_detail or "output collection failed"
+        elif self.limit_detail:
+            kind, why = "limit_breach", self.limit_detail
+        elif self.timed_out:
+            kind, why = "wall_limit", "wall time limit exceeded"
+        else:
+            kind, why = "leader_exit", "leader exited; stopping remaining group members"
+        # SIGKILL escalation gets its own cause so the escalation line is not swallowed by the SIGTERM line.
+        cause = f"supervisor:{kind}" if signal_name == "SIGTERM" else f"supervisor:{kind}:sigkill"
+        wall = self.cap.limits.wall_seconds if kind == "wall_limit" else None
+        emit_kill("supervisor", target=f"job {self.id} group", why=why, limit=wall,
+                  elapsed_s=now - self.started, signal_name=signal_name, level="WARN", cause_key=cause)
 
     def complete(self, ok, survivors, detail=""):
         if survivors and self.family.signal_errors:
@@ -400,6 +424,9 @@ class Supervisor:
             if process is not None:
                 try:
                     if process.poll() is None:
+                        emit_kill("supervisor", target="job process", pid=process.pid,
+                                  why="command launch failed before it was running", level="WARN",
+                                  cause_key="supervisor:launch_failed")
                         process.kill()
                     process.wait(timeout=2)
                 except (OSError, subprocess.TimeoutExpired):
@@ -628,6 +655,9 @@ class Supervisor:
                         if current is not None and current.start == row.start:
                             # serve() alone reaps this direct child; its PID stays
                             # reserved until that waitpid, including after exit.
+                            emit_kill("supervisor", target="unattributed namespace descendant",
+                                      pid=row.pid, why="unattributed namespace descendant; session stopped",
+                                      level="ERROR", cause_key="supervisor:unattributed_descendant")
                             os.kill(row.pid, signal.SIGKILL)
                         for job in self.jobs.values():
                             if job.cleanup is None:

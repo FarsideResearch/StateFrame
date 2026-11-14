@@ -26,6 +26,7 @@ if __package__:
         python_runtime_read_roots, symlink_hops,
     )
     from .kernel_exec_session import ExecSession, ExecSessionError
+    from .kernel_reason_log import emit_kill
     from .kernel_hooks import (
         GATING_EVENTS, HookArgvError, HookConfigError, HookDefinition,
         HookOutcome, HookSet, PanelEntry, build_payload, check_operands,
@@ -42,6 +43,7 @@ else:
         python_runtime_read_roots, symlink_hops,
     )
     from kernel_exec_session import ExecSession, ExecSessionError
+    from kernel_reason_log import emit_kill
     from kernel_hooks import (
         GATING_EVENTS, HookArgvError, HookConfigError, HookDefinition,
         HookOutcome, HookSet, PanelEntry, build_payload, check_operands,
@@ -1079,6 +1081,18 @@ class HookRunner:
             raise HookContainmentError(
                 f"{hook.name}: malformed driver envelope"
             ) from error
+        # The driver child cannot log (sandbox reads only its own file), so its kills are logged here.
+        if isinstance(envelope, dict):
+            if envelope.get("timed_out") is True:
+                emit_kill("hook_driver", target=f"hook {hook.name} process group",
+                          why="hook timeout reached, SIGKILL to its process group",
+                          limit=hook.timeout, elapsed_s=result.wall_seconds,
+                          level="WARN", cause_key="hook_timeout")
+            if envelope.get("cleanup_ok") is False:
+                emit_kill("hook_driver", target=f"hook {hook.name} process group",
+                          why="hook cleanup failed, group kill or reap unverified",
+                          elapsed_s=result.wall_seconds, level="ERROR",
+                          cause_key="hook_cleanup_failed")
         outcome = parse_outcome(hook.event, envelope)
         if outcome.decision == "containment":
             raise HookContainmentError(f"{hook.name}: {outcome.reason}")
