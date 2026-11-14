@@ -196,3 +196,90 @@ def test_real_fallback_row_yields_a_bounded_contract_that_authorizes_any_file(tm
                                    product_paths=declared)
     assert len(parity.serialize(contract)) < EDIT_SCOPE_BOUND
     assert affordance.path_editable(contract, "pkg/mod_204.py", row=row)
+
+
+# --- Compact-scope follow-ups: bundle targets, whole-set membership, widening, racy stat cache,
+# --- and the repair-packet request audit. ---
+
+def _compact_contract_and_row(extra=50):
+    paths = parity.paths_for(DECLARE_ALL_LIMIT + extra)
+    contract = affordance.contract(multi_file=True, entry_path=None, entry_fn=None,
+                                   product_paths=paths)
+    row = {"files": {p: {"parent_src": ""} for p in paths}}
+    return paths, contract, row
+
+
+def test_widened_path_key_is_the_react_repair_spelling():
+    assert affordance.WIDENED_PATHS_KEY == rr.EDIT_SCOPE_WIDENED_KEY
+
+
+def test_compact_row_yields_nonempty_bundle_targets_for_input_preservation():
+    paths, contract, row = _compact_contract_and_row()
+    assert "editable_paths" not in row and contract.get("editable_all") is True
+    targets = affordance.bundle_editable_targets(row, contract)
+    assert targets and set(targets) == set(paths)
+    # A row that carries its own list still wins, exactly as before.
+    assert affordance.bundle_editable_targets({"editable_paths": ["pkg/a.py"]}, contract) == ["pkg/a.py"]
+
+
+def test_whole_set_repair_packet_marks_only_declared_files_editable():
+    import kernel_obligation_assess as obligations
+    paths, contract, row = _compact_contract_and_row()
+    declared, undeclared = paths[0], "pkg/undeclared_module.py"
+    packet = obligations.repair_packet(
+        {"focus_obligation": "obl-1"},
+        edit_scope=contract, task_row=row,
+        source_bytes={declared: "A = 1\n", undeclared: "B = 2\n"})
+    editable = {item["path"]: item["editable"] for item in packet["current_source"]["files"]}
+    assert editable == {declared: True, undeclared: False}
+
+
+def test_widened_path_is_in_resolved_list_under_whole_set():
+    _paths, contract, row = _compact_contract_and_row()
+    widened = "docs_extra/widened_module.py"
+    row["_edit_scope_widened"] = [widened]
+    assert widened in affordance.resolve_editable_paths(contract, row)
+    assert affordance.path_editable(contract, widened, row=row)
+    assert not affordance.path_editable(contract, "docs_extra/other_module.py", row=row)
+
+
+def test_racy_same_size_rewrite_with_same_mtime_is_reread(tmp_path):
+    target = tmp_path / "racy.py"
+    target.write_text("X = 'aaaa'\n")
+    mtime_ns = os.stat(target).st_mtime_ns
+    first = rr._stat_source_snapshot(tmp_path, ["racy.py"])
+    target.write_text("X = 'bbbb'\n")  # same size, same inode
+    os.utime(target, ns=(mtime_ns, mtime_ns))
+    second = rr._stat_source_snapshot(tmp_path, ["racy.py"])
+    assert second["racy.py"] == "X = 'bbbb'\n"
+    assert rr._source_map_digest(second) != rr._source_map_digest(first)
+
+
+def test_stat_cache_is_bounded(tmp_path, monkeypatch):
+    monkeypatch.setattr(rr, "_SNAPSHOT_CACHE", {})
+    monkeypatch.setattr(rr, "_SNAPSHOT_CACHE_LIMIT", 3)
+    names = [f"c{index}.py" for index in range(5)]
+    for name in names:
+        (tmp_path / name).write_text(f"V = '{name}'\n")
+    snapshot = rr._stat_source_snapshot(tmp_path, names)
+    assert dict(snapshot) == {name: f"V = '{name}'\n" for name in names}
+    assert len(rr._SNAPSHOT_CACHE) <= 3
+
+
+def test_request_audit_checks_only_request_paths_by_membership(monkeypatch):
+    from types import SimpleNamespace as NS
+    import kernel_stateframe_runtime as runtime_mod
+    paths, contract, row = _compact_contract_and_row()
+    declared, undeclared = paths[0], "pkg/undeclared_module.py"
+    import kernel_obligation_assess as obligations
+    packet = obligations.repair_packet(
+        {"focus_obligation": "obl-1"}, edit_scope=contract, task_row=row,
+        source_bytes={declared: "A = 1\n", undeclared: "B = 2\n"})
+    emitted = []
+    fake = NS(stateframe_host_closure_mode="on", owner=NS(task_row=row),
+              journal=NS(emit=lambda name, **kw: emitted.append(kw)))
+    tools = [{"function": {"name": "edit", "description": affordance.AUTHORITY_EDIT_DESCRIPTION}}]
+    runtime_mod.StateFrameRuntime._audit_repair_packet_request(
+        fake, {"repair_packet": packet}, [{"role": "user", "content": "x"}], tools, "rid-1")
+    audit = emitted[0]["audit"]
+    assert audit["edit_tool_allows_path"] == {declared: True, undeclared: False}

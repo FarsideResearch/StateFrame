@@ -758,13 +758,23 @@ class FileSet:
 # only files that changed.  At or below it the plain read path is unchanged.  Mirrors
 # kernel_edit_affordance.COMPACT_EDIT_SCOPE_LIMIT.
 _SNAPSHOT_STAT_LIMIT = 200
-_SNAPSHOT_CACHE: dict[str, tuple[tuple[int, int, int], str, str]] = {}
+# Cache entries: key -> (stat signature, stored wall-clock ns, text, sha256).
+_SNAPSHOT_CACHE: dict[str, tuple[tuple[int, int, int], int, str, str]] = {}
+_SNAPSHOT_CACHE_LIMIT = 50_000
+# An entry stored within this window of its file's mtime is racy: a same-size rewrite inside one
+# timestamp tick keeps (mtime_ns, size, ino) unchanged, so such an entry is re-read, not trusted.
+_SNAPSHOT_RACY_NS = 2_000_000_000
 
 
 class _StatSnapshot(dict):
     """A path -> text snapshot that also knows each file's sha256 (see _source_map_digest)."""
 
     shas: dict[str, str | None]
+
+
+def _snapshot_racy(mtime_ns: int, stored_ns: int) -> bool:
+    """True when a cache entry was stored close enough to the file's mtime to be ambiguous."""
+    return abs(stored_ns - mtime_ns) <= _SNAPSHOT_RACY_NS
 
 
 def _stat_source_snapshot(root: pathlib.Path, paths: Sequence[str]) -> "_StatSnapshot":
@@ -784,12 +794,23 @@ def _stat_source_snapshot(root: pathlib.Path, paths: Sequence[str]) -> "_StatSna
         signature = (info.st_mtime_ns, info.st_size, info.st_ino)
         key = f"{root}\0{path}"
         cached = _SNAPSHOT_CACHE.get(key)
-        if cached is None or cached[0] != signature:
-            text = target.read_text(errors="ignore")
-            cached = (signature, text, hashlib.sha256(text.encode("utf-8")).hexdigest())
-            _SNAPSHOT_CACHE[key] = cached
-        snapshot[path] = cached[1]
-        snapshot.shas[path] = cached[2]
+        if (cached is not None and cached[0] == signature
+                and not _snapshot_racy(info.st_mtime_ns, cached[1])):
+            snapshot[path] = cached[2]
+            snapshot.shas[path] = cached[3]
+            continue
+        stored_ns = time.time_ns()
+        text = target.read_text(errors="ignore")
+        if cached is not None and cached[2] == text:
+            # Racy but unchanged: keep the earlier string object and digest, so callers see no churn.
+            text, digest = cached[2], cached[3]
+        else:
+            digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
+        if key not in _SNAPSHOT_CACHE and len(_SNAPSHOT_CACHE) >= _SNAPSHOT_CACHE_LIMIT:
+            _SNAPSHOT_CACHE.clear()
+        _SNAPSHOT_CACHE[key] = (signature, stored_ns, text, digest)
+        snapshot[path] = text
+        snapshot.shas[path] = digest
     return snapshot
 
 

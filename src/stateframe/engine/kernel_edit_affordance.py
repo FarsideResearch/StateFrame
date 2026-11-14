@@ -12,6 +12,9 @@ from pathlib import Path
 # the two together).  At or below the limit every contract is byte-identical to the listed form.
 COMPACT_EDIT_SCOPE_LIMIT = 200
 EDIT_SCOPE_SAMPLE_SIZE = 8
+# Task-row key that opt-in edit scope widening appends admitted files to.  Mirrors
+# probes.react_repair.EDIT_SCOPE_WIDENED_KEY (a test pins the two spellings together).
+WIDENED_PATHS_KEY = '_edit_scope_widened'
 
 
 def is_compact(count: int) -> bool:
@@ -34,11 +37,22 @@ def _compact_fields(paths: Sequence[str]) -> dict:
     }
 
 
+def _widened_paths(row: object) -> list[str]:
+    """Files admitted by opt-in edit scope widening, carried on the task row."""
+    if not isinstance(row, Mapping):
+        return []
+    raw = row.get(WIDENED_PATHS_KEY, ())
+    if isinstance(raw, (str, bytes, bytearray)) or not isinstance(raw, Sequence):
+        return []
+    return [str(path).replace('\\', '/').lstrip('./') for path in raw if str(path).strip()]
+
+
 def resolve_editable_paths(holder: object, row: object = None) -> list[str]:
     """Editable paths of a scope/authority; for a whole-set marker, the task row's product set.
 
     The row's ``files`` keys are the engine's declared product set, so membership and iteration
-    stay exact without the contract (and therefore the frame) carrying the list.
+    stay exact without the contract (and therefore the frame) carrying the list.  Files widened
+    into scope during the run (``WIDENED_PATHS_KEY``) are unioned in, so they stay editable.
     """
     if not isinstance(holder, Mapping):
         return []
@@ -48,9 +62,8 @@ def resolve_editable_paths(holder: object, row: object = None) -> list[str]:
             return [str(path) for path in raw]
         return []
     files = row.get('files') if isinstance(row, Mapping) else None
-    if isinstance(files, Mapping):
-        return _product_paths(list(files))
-    return []
+    product = _product_paths(list(files)) if isinstance(files, Mapping) else []
+    return sorted({*product, *_widened_paths(row)})
 
 
 def path_editable(holder: object, path: str, product_paths: Sequence[str] | frozenset[str] | None = None,
@@ -62,9 +75,20 @@ def path_editable(holder: object, path: str, product_paths: Sequence[str] | froz
         if product_paths is not None:
             return path in product_paths
         files = row.get('files') if isinstance(row, Mapping) else None
-        return isinstance(files, Mapping) and path in files
+        return (isinstance(files, Mapping) and path in files) or path in _widened_paths(row)
     raw = holder.get('editable_paths', ())
     return isinstance(raw, Sequence) and not isinstance(raw, (str, bytes, bytearray)) and path in raw
+
+
+def bundle_editable_targets(row: object, contract: object) -> list[str]:
+    """Editable targets for the input-preservation bundle: the row's own list, else the scope's.
+
+    A whole-set scope carries no list, so the targets come from the row's product set instead.
+    """
+    listed = row.get('editable_paths') if isinstance(row, Mapping) else None
+    if listed:
+        return list(listed) if isinstance(listed, Sequence) and not isinstance(listed, str) else []
+    return resolve_editable_paths(contract, row)
 
 
 def _product_paths(paths: object) -> list[str]:

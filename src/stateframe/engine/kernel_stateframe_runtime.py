@@ -10214,9 +10214,8 @@ class StateFrameRuntime:
         fixture = next((row.get(key) for key in (
             "input_fixture", "public_fixture", "fixture")
                         if isinstance(row.get(key), Mapping)), None)
-        targets = row.get("editable_paths", ())
-        if not targets and isinstance(getattr(self, "edit_contract", None), Mapping):
-            targets = self.edit_contract.get("editable_paths", ())
+        from kernel_edit_affordance import bundle_editable_targets
+        targets = bundle_editable_targets(row, getattr(self, "edit_contract", None))
         selection = tuple(str(item) for item in getattr(self.owner, "f2p_ids", ()) if str(item))
         if isinstance(entry, str) and entry and clause:
             bundle = input_preservation_bundle(
@@ -16779,6 +16778,7 @@ class StateFrameRuntime:
             public_suite=bounded_receipts,
             repair_checks=bounded_receipts,
             edit_scope=self.edit_contract,
+            task_row=getattr(self.owner, "task_row", None),
         )
         audit = packet.get("validity_audit") if isinstance(packet, Mapping) else None
         self.host_repair_packet_audit = copy.deepcopy(dict(audit)) if isinstance(audit, Mapping) else None
@@ -20884,13 +20884,13 @@ class StateFrameRuntime:
                     "sha256:" + hashlib.sha256(source.encode("utf-8")).hexdigest())
             source_present[path] = bool(message_marker and bytes_present and digest_present)
             source_at_revision[path] = bool(source_present[path] and revision_matches)
+        from kernel_edit_affordance import path_editable, whole_set_editable
+        task_row = getattr(getattr(self, "owner", None), "task_row", None)
+        # A whole-set scope is never expanded into a path list: membership goes through path_editable.
+        whole_set = isinstance(scope, Mapping) and whole_set_editable(scope)
         editable_paths = ()
-        if isinstance(scope, Mapping):
+        if isinstance(scope, Mapping) and not whole_set:
             raw_paths = scope.get("editable_paths", ())
-            if scope.get("editable_all") is True:
-                from kernel_edit_affordance import resolve_editable_paths
-                raw_paths = resolve_editable_paths(
-                    scope, getattr(getattr(self, "owner", None), "task_row", None))
             if isinstance(raw_paths, Sequence) and not isinstance(raw_paths, (str, bytes)):
                 editable_paths = tuple(str(item).replace("\\", "/").lstrip("./")
                                        for item in raw_paths)
@@ -20903,14 +20903,21 @@ class StateFrameRuntime:
             if name not in {"edit", "str_replace"}:
                 continue
             tool_descriptions[name] = str(function.get("description", ""))
-        paths_to_check = tuple(dict.fromkeys((*editable_paths, *source_paths)))
         authority_tool = any("single EditAuthority" in description
                              for description in tool_descriptions.values())
-        edit_allowed = {
-            path: (authority_tool and path in editable_paths)
-            or any(path in description for description in tool_descriptions.values())
-            for path in paths_to_check
-        }
+        if whole_set:
+            # Only paths the request actually carries are checked, never the whole product set.
+            edit_allowed = {
+                path: authority_tool and path_editable(scope, path, row=task_row)
+                for path in dict.fromkeys(source_paths)
+            }
+        else:
+            paths_to_check = tuple(dict.fromkeys((*editable_paths, *source_paths)))
+            edit_allowed = {
+                path: (authority_tool and path in editable_paths)
+                or any(path in description for description in tool_descriptions.values())
+                for path in paths_to_check
+            }
         audit = {
             "schema": "stateframe-repair-packet-request-audit/1",
             "request_id": request_id,
