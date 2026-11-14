@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.6.33 (2026-11-14)
 
 - Fixed: grep no longer claims a symbol is absent after a search with no hits, while retaining positive definition locations. Empty results identify the pattern, scope and search mode, including when `|` was matched literally; regex searches keep matching alternatives by default.
 
