@@ -518,7 +518,7 @@
   "kernel_repair_blocks_done.py": "cc6ddfc2f3b7987b526df476ccec14585e76890b912316446a3bf88b3f83465f",
   "kernel_repeated_zero.py": "de16eb796ba9ede3199c084e3191d259c1fbcbe56c5d47eb1a11248bc7fd7465",
   "kernel_replay_green.py": "73e16e8f2a7ea33ce53f09e67b534b44aecadb91d3205ea03ff6540249b819e9",
-  "kernel_repo_catalog.py": "9da02f896ee32b723626e709bde630f08156705ab06c4aee5f70b6479763a6a9",
+  "kernel_repo_catalog.py": "0f52d472c9e565c492a76cd7121fee887a7b93ef46af86c6d4f7acd463fb14ea",
   "kernel_repo_intel.py": "2883f402b18bb2c01775118cb0f33f9b25f930446172b66ea69b89b1bc68c7e2",
   "kernel_repo_signals.py": "56918fd4eb5cb437ec36e156b93a3394821a7b2d4da9f6d6ed81a2e22c4f659a",
   "kernel_repro_first.py": "cdb9e6cfb00d1e6e3b9d988f234de551dae06148de0b2347552d9413a9f1bb9e",

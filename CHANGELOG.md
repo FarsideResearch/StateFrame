@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Structural index: with `STATEFRAME_CATALOG_FULL_COVERAGE=on`, the catalog indexes every eligible source file instead of stopping at the first 512 in path order. What the model sees keeps the same 512-file budget, chosen by relevance (files the task names or prioritises, then their import neighbours, then path order), so files deep in large repos can now reach the model. The switch is off by default, and repos within the budget render the same bytes as before.
+
 ## 0.6.41 (2026-11-14)
 
 - Engine scratch now follows TMPDIR or the run's temp root instead of the system /tmp, so killed runs no longer leave directories behind in /tmp.

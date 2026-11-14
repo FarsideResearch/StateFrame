@@ -45,6 +45,9 @@ MAX_INDEX_FILES = MAX_FILES + MAX_OVERLAY_FILES
 MAX_NEIGHBORS = 32
 MAX_CACHED_BODY_BYTES = 2 * 1024 * 1024
 MAX_SCAN_ENTRIES = 32_768
+# on: index every eligible file; the model-facing view keeps the MAX_FILES budget,
+# ranked by relevance. off: the legacy path-ordered 512-file index.
+FULL_COVERAGE_ENV = "STATEFRAME_CATALOG_FULL_COVERAGE"
 _CACHE_FILENAME = ".stateframe_catalog_structural.json"
 _ID_SAFE_RE = re.compile(r"[^A-Za-z0-9._:/-]+")
 _ASSIGNMENT_RE = re.compile(
@@ -191,6 +194,15 @@ class _ScanResult:
     scan_entries: tuple[tuple[str, str], ...] | None = None
 
 
+def full_coverage_enabled(environ: Mapping[str, str] | None = None) -> bool:
+    """Return whether the structural index covers every eligible file (switch, default off)."""
+    source = os.environ if environ is None else environ
+    value = source.get(FULL_COVERAGE_ENV, "off")
+    if value not in {"on", "off"}:
+        raise StructuralIndexError(f"{FULL_COVERAGE_ENV} must be on or off")
+    return value == "on"
+
+
 def _scan(
     root: Path,
     *,
@@ -198,6 +210,7 @@ def _scan(
     priority_paths: Sequence[str] = (),
     max_files: int = MAX_FILES,
     capture_scan_entries: bool = False,
+    full_coverage: bool = False,
 ) -> _ScanResult:
     limit = max(1, min(int(max_files), MAX_FILES))
     if focus_paths:
@@ -221,7 +234,11 @@ def _scan(
     inventory = _scan_inventory(root)
     found = list(inventory.source_paths)
 
-    if len(found) > limit:
+    if full_coverage:
+        # Coverage is unbounded here; the render budget is applied by the caller's view.
+        selected = tuple(sorted(found))
+        scope = "full" if len(found) <= limit else "full_coverage"
+    elif len(found) > limit:
         canonical = tuple(sorted(found))
         base = canonical[:limit]
         base_set = set(base)
@@ -855,16 +872,23 @@ def build_structural_index(
     source_overrides: Mapping[str, bytes | str] | None = None,
     include_call_graph: bool = True,
     capture_scan_entries: bool = False,
+    rendered: bool = True,
 ) -> StructuralIndex:
-    """Build or refresh a bounded language-neutral index for ``root``."""
+    """Build or refresh a language-neutral index for ``root``.
+
+    With ``FULL_COVERAGE_ENV`` off this is the bounded legacy index. With it on, every
+    eligible file is indexed and the result is the relevance-ranked render view
+    (``render_structural_index``) unless ``rendered=False`` asks for full coverage.
+    """
 
     resolved = Path(root).resolve()
     if not resolved.is_dir() or resolved.name.casefold() in _SKIP_DIRS:
         raise StructuralIndexError("repository root is not a public directory")
     active_namespace = namespace or Namespace("workspace:repo-intel", _namespace_project(resolved.name))
+    full_coverage = full_coverage_enabled()
     scan = _scan(
         resolved, focus_paths=focus_paths, priority_paths=priority_paths, max_files=max_files,
-        capture_scan_entries=capture_scan_entries,
+        capture_scan_entries=capture_scan_entries, full_coverage=full_coverage,
     )
     paths = scan.paths
     overrides = {str(key).replace("\\", "/"): value for key, value in (source_overrides or {}).items()}
@@ -955,7 +979,7 @@ def build_structural_index(
         and indexed_paths == set(paths)
         and scan_entry_set(resolved) == scan.scan_entries
     )
-    return StructuralIndex(
+    index = StructuralIndex(
         root=resolved, namespace=active_namespace, modules=modules, configs=configs, types=types,
         spans=spans, dependencies=dependencies, coverage=coverage, contents=contents, bodies=bodies,
         outlines=outlines,
@@ -970,6 +994,9 @@ def build_structural_index(
         scan_entries=scan.scan_entries,
         scan_stable=scan_stable,
     )
+    if full_coverage and rendered and not focus_paths:
+        return render_structural_index(index, priority_paths=priority_paths, max_files=max_files)
+    return index
 
 
 def merge_structural_index(previous: StructuralIndex, delta: StructuralIndex) -> StructuralIndex:
@@ -1310,10 +1337,102 @@ def combine_structural_indexes(
     )
 
 
+def render_budget(max_files: int = MAX_FILES) -> int:
+    """Files rendered to the model; never above the legacy base budget (MAX_FILES)."""
+    return max(1, min(int(max_files), MAX_FILES))
+
+
+def _module_dotted_name(path: str) -> str:
+    """Dotted import name for a source path, e.g. ``pkg/core.py`` -> ``pkg.core``."""
+    posix = PurePosixPath(path)
+    stem = posix.with_suffix("") if posix.suffix == ".py" else posix
+    parts = list(stem.parts)
+    if parts and parts[-1] == "__init__":
+        parts.pop()
+    return ".".join(parts)
+
+
+def _named_render_paths(index: StructuralIndex, priority_paths: Sequence[str]) -> tuple[str, ...]:
+    """Indexed paths the task or caller named (task paths and overlay/priority files)."""
+    indexed = {module.path for module in index.modules}
+    named: set[str] = set()
+    for item in priority_paths:
+        try:
+            normalized = _relative(index.root, item)
+        except StructuralIndexError:
+            continue
+        if normalized in indexed:
+            named.add(normalized)
+    return tuple(sorted(named))
+
+
+def rank_render_paths(
+    index: StructuralIndex,
+    priority_paths: Sequence[str],
+    budget: int,
+) -> tuple[str, ...]:
+    """Order indexed paths for rendering: named files, import neighbours, then path order.
+
+    Neighbours are one import hop from a named file in either direction. Ties fall back to
+    path order so the selection is deterministic for a given index generation.
+    """
+    indexed = {module.path: module for module in index.modules}
+    named = _named_render_paths(index, priority_paths)
+    named_set = set(named)
+    named_names = {_module_dotted_name(path) for path in named}
+    imported_names: set[str] = set()
+    for path in named:
+        imported_names.update(indexed[path].imports)
+    neighbours = tuple(sorted(
+        path for path, module in indexed.items()
+        if path not in named_set and (
+            _module_dotted_name(path) in imported_names
+            or not named_names.isdisjoint(module.imports)
+        )
+    ))
+    neighbour_set = set(neighbours)
+    rest = tuple(
+        path for path in sorted(indexed)
+        if path not in named_set and path not in neighbour_set
+    )
+    return (*named, *neighbours, *rest)[:budget]
+
+
+def render_structural_index(
+    index: StructuralIndex,
+    *,
+    priority_paths: Sequence[str] = (),
+    max_files: int = MAX_FILES,
+) -> StructuralIndex:
+    """Return the render view of a full-coverage index, bounded by ``render_budget``.
+
+    An index that already fits the budget is returned unchanged, so small repositories keep
+    identical records and stats. Otherwise the view is a ranked path subset whose stats say
+    how many candidate files were left out.
+    """
+    budget = render_budget(max_files)
+    if len(index.modules) <= budget:
+        return index
+    ranked = rank_render_paths(index, priority_paths, budget)
+    rendered = set(ranked)
+    named = _named_render_paths(index, priority_paths)
+    candidate_files = index.stats.candidate_files
+    total = candidate_files if type(candidate_files) is int else len(index.modules)
+    return subset_structural_index(
+        index,
+        ranked,
+        candidate_files=candidate_files,
+        omitted_files=max(0, total - len(ranked)),
+        priority_files_omitted=len(set(named) - rendered),
+        scan_scope="relevance_ranked",
+    )
+
+
 __all__ = [
-    "CACHE_VERSION", "ConfigRecord", "DependencyRecord", "IndexStats", "MAX_INDEX_FILES",
-    "MAX_NEIGHBORS", "MAX_OVERLAY_FILES", "MAX_SCAN_ENTRIES",
+    "CACHE_VERSION", "ConfigRecord", "DependencyRecord", "FULL_COVERAGE_ENV", "IndexStats",
+    "MAX_INDEX_FILES", "MAX_NEIGHBORS", "MAX_OVERLAY_FILES", "MAX_SCAN_ENTRIES",
     "ModuleRecord", "NeighborhoodResult", "SCHEMA", "SpanRead", "SpanRecord", "StructuralIndex",
     "StructuralIndexError", "TypeRecord", "build_structural_index", "combine_structural_indexes",
-    "merge_structural_index", "scan_entry_set", "subset_structural_index",
+    "full_coverage_enabled", "merge_structural_index", "rank_render_paths", "render_budget",
+    "render_structural_index", "scan_entry_set", "subset_structural_index",
 ]
