@@ -489,7 +489,7 @@ def test_host_provision_disables_run_env_on_unknown_executable_pth(tmp_path, cap
     assert json.loads((run / "tool-settings.json").read_text())["run_env"] is False
     assert json.loads((run / "spec.json").read_text())["tool_settings"]["run_env"] is False
     assert "run environment off: executable .pth cannot be safely cloned: unknown.pth; " \
-           "dependency installs will not persist for checks" in capsys.readouterr().out
+           "dependency installs will not persist for checks" in capsys.readouterr().err
 
 
 def test_readonly_shell_does_not_narrow_explicit_custom_network_envelope(setup_tool):
