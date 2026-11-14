@@ -256,6 +256,30 @@ def _restore_transport_sender():
     kernel_bounded_http.request_bytes = original
 
 
+_AUTH_IDENTITY_MODULES = (
+    "kernel_request_auth_identity",
+    "engine.kernel_request_auth_identity",
+    "stateframe.engine.kernel_request_auth_identity",
+)
+
+
+@pytest.fixture(autouse=True)
+def _fresh_auth_identity_cache():
+    """Each test starts with the identity-key cache a fresh process would have.
+
+    The cache is keyed by key path. pytest reuses a deleted tmp_path name (for example with
+    tmp_path_retention_policy=failed in the release gate), so a stale entry would skip key
+    creation for a home that no longer exists. Clear every import alias before each test.
+    """
+    for name in _AUTH_IDENTITY_MODULES:
+        module = sys.modules.get(name)
+        if module is not None:
+            with module._AUTH_BINDING_SECRET_LOCK:
+                module._AUTH_BINDING_SECRET_CACHE.clear()
+                module._AUTH_BINDING_FALLBACK_SECRET = None
+    yield
+
+
 @pytest.fixture
 def clean_test_environment(tmp_path):
     """Real pytest and pip, with no ambient editable installs or startup hooks."""
