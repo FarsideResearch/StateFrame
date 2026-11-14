@@ -1,11 +1,12 @@
 # Changelog
 
-## Unreleased
+## 0.6.7 (2026-11-13)
 
+- Fixed Linux sandbox parity, tokenizer replay, and security tests with a shared-memory pytest basetemp by keeping sandbox-visible fixtures on disk and pinning the scripted provider dialect; probe test budgets now honor `SF_TEST_TIMEOUT_SCALE`.
+- Final tool-surface rebinding now carries owner presentation only when its saved continuation limits and evidence pin still match the rebound contract. Tokenizer replay tests use compact tapes to avoid an unrelated capacity stop; healthy parity still compares exact request bytes after proving the current intake orientation and its task digest are the only additions to the immediate base.
 - Parity tests in branch-only clones now choose the nearest remote ancestor before falling back to a release commit; this avoids comparing pre-orientation release requests with the current base when `origin/main` is absent.
 - Branch-only local clones now use the first parent for immediate-base parity when their single remote ref points at HEAD; this keeps the byte assertion anchored to the same tree selected in the source clone. The tokenizer byte check compares that base directly when it already has the intake block, while retaining proof of the addition for older bases. Local baseline commands have scaled time limits and fail on timeout.
-- Final tool-surface rebinding now carries owner presentation only when its saved continuation limits and evidence pin still match the rebound contract. Tokenizer replay tests use compact tapes to avoid an unrelated capacity stop; healthy parity still compares exact request bytes after proving the current intake orientation and its task digest are the only additions to the immediate base.
-- Fixed Linux sandbox parity, tokenizer replay, and security tests with a shared-memory pytest basetemp by keeping sandbox-visible fixtures on disk and pinning the scripted provider dialect; probe test budgets now honor `SF_TEST_TIMEOUT_SCALE`.
+
 ## 0.6.6 (2026-11-13)
 
 - Token metering now memoizes the countdown-canonical tokenization text of an unchanged request body behind the existing structural-stamp guard and reuses the digest of the last measured text, so re-measuring an unchanged candidate no longer rebuilds and re-hashes it (about 3.5 ms to 0.9 ms per repeat on a 120-message body). Token counts, fit decisions and request bytes are unchanged.
