@@ -1138,6 +1138,34 @@ def retrieve_check_output(
         offset: int = 0,
         limit: int = DEFAULT_PAGE_CHARS,
 ) -> dict[str, object]:
+    """Audit each lookup once, including observe_check_output and memo hits."""
+    from kernel_read_receipts import begin_nested_read_attempt, enabled, end_nested_read_attempt
+    if not enabled():
+        return _retrieve_check_output(runtime, handle, stream=stream, offset=offset, limit=limit)
+    # Nested: a lookup during an enclosing read attempt must not close or erase it.
+    scope, prior = begin_nested_read_attempt(
+        runtime, {"handle": handle, "stream": stream, "offset": offset, "limit": limit})
+    try:
+        page = _retrieve_check_output(runtime, handle, stream=stream, offset=offset, limit=limit)
+    except BaseException as error:
+        scope.finish(error=error)
+        raise
+    else:
+        status = str(page.get("status") or "ERROR")
+        scope.finish("CHECK_OUTPUT" if status == "OK" else status)
+        return page
+    finally:
+        end_nested_read_attempt(runtime, scope, prior)
+
+
+def _retrieve_check_output(
+        runtime: object,
+        handle: object,
+        *,
+        stream: str = "combined",
+        offset: int = 0,
+        limit: int = DEFAULT_PAGE_CHARS,
+) -> dict[str, object]:
     """Return a lossless page of stored output; refuse handles from another revision."""
     handle_text = _text(handle).strip()
     receipts = getattr(runtime, "_check_output_receipts", {})

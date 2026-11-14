@@ -349,3 +349,5 @@ exit code, workspace and environment identity before their recorded output is
 served. Full-network and host calls require `--replay-external`; incomplete calls
 refuse resume. Raw retained output and truncation counters remain in the run
 directory. The foreground shell tool does not launch background shell commands; read-only background jobs use the separate job tools.
+
+`STATEFRAME_WORKING_SET_ALLOCATOR=on` enables read captures and read attempt/result audit events only (default `off`); it does not change source selection or request content. A resumed run keeps its recorded setting.

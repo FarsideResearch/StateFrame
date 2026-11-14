@@ -23,6 +23,9 @@ from kernel_source_delivery import (
     deliver_source, normalize_read_request,
 )
 from kernel_launch_identity_cost import ENVIRONMENT, UNKNOWN, PhaseMeter
+from kernel_read_receipts import (capture_read, capture_failed, enabled as read_captures_enabled,
+                                  uncaptured_path_reason,
+                                  relative_path as _receipt_relative_path)
 
 
 def read_limit(args: object) -> int:
@@ -600,6 +603,15 @@ def execute_read(root: Path, p: Path, raw: str, display: str, start: int, *,
             cached_key, page = cached_page
             cached_metadata = dict(page.get("metadata", {}))
             cached_content = str(page.get("content", ""))
+            if read_captures_enabled():
+                try:
+                    capture_read(
+                        measurement, path=_receipt_relative_path(root, p),
+                        metadata=cached_metadata, payload=cached_content,
+                        original_page=str(page.get("observation", "")), source="page_cache",
+                        arguments=request.arguments, skip_reason=uncaptured_path_reason(root, p))
+                except Exception as error:
+                    capture_failed(measurement, error)
             cached_observation = str(page.get("observation", ""))
             effective = cached_metadata.get("effective_range")
             dedup_receipt: dict[str, object] = {
@@ -760,6 +772,15 @@ def execute_read(root: Path, p: Path, raw: str, display: str, start: int, *,
             reuse_dispatch = None
         shaped: dict[str, object] = {}
         source = deliver_source(read_bytes, display, start, args=request, metadata_out=shaped)
+        if read_captures_enabled() and source.result_class == "OK":
+            try:
+                capture_read(
+                    measurement, path=_receipt_relative_path(root, p),
+                    metadata=source.metadata, payload=source.content, original_page=source.text,
+                    source="file_cache" if file_cache_hit else "disk", arguments=request.arguments,
+                    skip_reason=uncaptured_path_reason(root, p))
+            except Exception as error:
+                capture_failed(measurement, error)
         if source.result_class == "OK":
             try:
                 from kernel_read_reuse_visibility import remember_read_span
@@ -1103,4 +1124,12 @@ def dispatch_live_read(root: Path, p: Path, raw: str, display: str, start: int, 
             bytes_read=bytes_read,
         )
     emit_read_receipt(bolt, root, p, raw, start, result, delivery)
+    scope = getattr(measurement, "_read_attempt_scope", None)
+    if scope is not None:
+        dedup = delivery.get("read_dedup")
+        audit_status = {"PermissionError": "PERMISSION", "TimeoutError": "DEADLINE",
+                        "FileNotFoundError": "MISSING"}.get(delivery.get("error_type"), result)
+        scope.finish(audit_status, dedup=(
+            delivery.get("delivery_status") == "REUSED_PROVEN"
+            or (isinstance(dedup, Mapping) and dedup.get("status") == "UNCHANGED_VISIBLE")))
     return result, observation, source_bytes, delivery

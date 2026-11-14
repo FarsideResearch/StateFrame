@@ -359,6 +359,8 @@ _CAPACITY_SAFE_TAIL = frozenset(
     if classification == "SAFE_TAIL"
 )
 SAFE_TAIL = frozenset({
+    "read_attempt", "read_result",  # audit only; never source/selection authority
+    "read_capture_skipped", "read_capture_failed",  # audit only; delivery is unchanged
     "continuation_writer_resumed", "rich_state_committed", "snapshot_committed",
     "history_decision", "history_exchange_removed", "selection_decision",
     "exposure_composition", "latest_exchange_decision", "request_prepared", "request_submitted",

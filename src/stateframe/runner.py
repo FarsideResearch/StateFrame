@@ -24,7 +24,7 @@ from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from itertools import chain
 from pathlib import Path
-from typing import TYPE_CHECKING, Callable
+from typing import TYPE_CHECKING, Callable, Mapping
 
 from . import (cache_metrics, outer_checks, outcomes, preflight, profiles, routes, storage_gc,
                test_interpreter, workcopy)
@@ -656,6 +656,7 @@ OPT_IN_SWITCHES = {
     "STATEFRAME_KEEP_RUN_ENV": ("on", "off"),  # host-side finished-run retention policy
     "STATEFRAME_MUTATIONS": ("off", "prebuilt", "authored"),
     "STATEFRAME_CACHE_LAYOUT": ("on", "off"),
+    "STATEFRAME_WORKING_SET_ALLOCATOR": ("on", "off"),  # read capture audit only
     "STATEFRAME_EVICTFIX": ("on", "legacy"),
     "STATEFRAME_MICROGRAPH": ("on", "off"),  # experimental; the engine defaults to off
     "STATEFRAME_STABLE_TOOL_HEAD": ("on", "off"),  # append-only tool list per run; on by default
@@ -2994,6 +2995,15 @@ def _compose_resume_route_changes(spec: dict, changes: list[dict[str, object]]) 
         spec["resume"]["route_changes"] = [*prior, *changes]
 
 
+def _validate_read_capture_resume(environment: Mapping[str, str]) -> None:
+    name = "STATEFRAME_WORKING_SET_ALLOCATOR"
+    current = os.environ.get(name, "").strip().lower()
+    recorded = str(environment.get(name, "off")).strip().lower()
+    if current and current != recorded:
+        raise resume_module.ResumeRefused(
+            f"{name} changed (run: {recorded}, now: {current}); unset it to resume")
+
+
 def resume_run(run_dir: Path, *, endpoint: Endpoint | None = None, max_turns: int | None = None,
                 timeout_s: float | None = None, quiet: bool = False, model: str | None = None,
                 keep_checkpoints: bool = False, keep_run_env: bool = False, replay_external: bool = False,
@@ -3120,6 +3130,7 @@ def resume_run(run_dir: Path, *, endpoint: Endpoint | None = None, max_turns: in
     elif replay_external:
         raise resume_module.ResumeRefused("this run has no tool tape; --replay-external cannot apply")
     environment = spec["environment"]
+    _validate_read_capture_resume(environment)
     keys = [k for k in str(environment.get("STATEFRAME_TASK_ENV_KEYS", "")).split(",") if k]
     base = spec["chat_url"].removesuffix(CHAT_SUFFIX)
     wanted = model or spec["model"]

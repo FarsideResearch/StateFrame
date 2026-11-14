@@ -244,6 +244,8 @@ def _finish_boundary_recovery_terminal(
             candidate_export_attempted=True, failure_origin="harness", dispatch=False,
         )
         finish_transcript(messages)
+        from kernel_read_receipts import finish_pending
+        finish_pending(measurement, error=sys.exc_info()[1])
         measurement.finish(outcome, messages=messages)
     return attach(outcome, measurement)
 
@@ -8618,7 +8620,10 @@ def work(d, *, resume=None):
                 _hook_wiring_for_run.rebind_after_checkpoint(root, d, baseline_tests, measurement)
             except Exception as _error:  # noqa: BLE001 - a failed rebind must fall back to replay
                 _kernel_checkpoint.refuse_restored_setup(POC.parent, _error)
+        from kernel_read_receipts import begin_read_attempt, finish_pending as _finish_read_attempt
         for step in step_indices(step + 1, _loop_limit):
+            _finish_read_attempt(measurement)
+            _read_forwarded = False
             if _hook_wiring_for_run is not None and _pending_hook_action is not None:
                 _hook_name, _hook_args, _hook_call_id, _hook_toolcall = _pending_hook_action
                 if _hook_toolcall:
@@ -9203,6 +9208,10 @@ def work(d, *, resume=None):
                         c0 = calls[0]
                         _fn = c0.get("function") or {}
                         _name = _fn.get("name") or ""
+                        if _name == "read":
+                            begin_read_attempt(
+                                measurement, _fn.get("arguments"), call_id=c0.get("id"),
+                                batch_index=(native_batch.index - 1 if native_batch else None))
                         from kernel_measurement import start_turn_timing_step
                         start_turn_timing_step("tool_execution")
                         if (_edit_nturn_request_active
@@ -9520,6 +9529,8 @@ def work(d, *, resume=None):
                                     msgs, tool_call_id, _collection_feedback))
                                 continue
                         if _args.get("path") and not information.check_path(root, str(_args["path"])):
+                            if _name == "read":
+                                _finish_read_attempt(measurement, status="DENIED")
                             msgs.append(_tool_reply_for_call(msgs, tool_call_id, "[information-policy] Path outside workspace denied."))
                             continue
                         # Q6: an identical call already answered by [REPEATED ZERO] is refused.
@@ -9840,6 +9851,7 @@ def work(d, *, resume=None):
                             if _args.get("limit"):
                                 line += " " + str(_args["limit"])
                         elif _name == "read":
+                            _read_forwarded = True
                             line = ("read " + str(_args.get("path") or "") +
                                     ((" " + str(_args["line"])) if _args.get("line")
                                      else "")).strip()
@@ -10383,6 +10395,8 @@ def work(d, *, resume=None):
                         outcome=_harness_outcome, failure_origin="harness",
                         step=step, **_location)
                     finish_native_batch_transcript(msgs)
+                    from kernel_read_receipts import finish_pending
+                    finish_pending(measurement, error=sys.exc_info()[1])
                     measurement.finish(outcome, messages=msgs)
                     return _attach_env_receipt(outcome, measurement)
                 # earlier run: never lose the cause of an ERR:* outcome (smoke 295 ran blind).
@@ -10397,6 +10411,8 @@ def work(d, *, resume=None):
                     pass
                 finish_native_batch_transcript(msgs)
                 _reported_edits, _reported_checks = _reported_progress_counts(locals())
+                from kernel_read_receipts import finish_pending
+                finish_pending(measurement, error=sys.exc_info()[1])
                 measurement.finish({"result": f"ERR:{type(e).__name__}",
                                     "error_detail": str(e)[:600] or (_err_trace.strip().splitlines() or [""])[-1][:600],
                                     "steps": _reported_steps(),
@@ -10406,6 +10422,8 @@ def work(d, *, resume=None):
                     dict(fn=fn, result=f"ERR:{type(e).__name__}", steps=_reported_steps(),
                          edits=_reported_edits, tests=_reported_checks), measurement)
             finally:
+                if not _read_forwarded:
+                    _finish_read_attempt(measurement, error=sys.exc_info()[1])
                 if _capture_token is not None:
                     ACTIVE_REQUEST.reset(_capture_token)
             # FIND THE COMMAND ANYWHERE IN THE REPLY, not just on line 1.
@@ -10631,6 +10649,11 @@ def work(d, *, resume=None):
             # A parsed command breaks the streak — only CONSECUTIVE refusals mean dialect
             # mismatch; occasional prose-only replies are normal model behaviour.
             unparsed_streak = 0
+            if line.startswith("read ") and not toolcall_mode:
+                _read_parts = line[5:].split()
+                begin_read_attempt(measurement, {
+                    "path": _read_parts[0] if _read_parts else "",
+                    "line": _read_parts[1] if len(_read_parts) > 1 else 1})
             if (_hook_wiring_for_run is not None and not toolcall_mode
                     and not line.startswith("done")):
                 _pending_hook_action = (
@@ -10710,6 +10733,9 @@ def work(d, *, resume=None):
             _mash = line.split(" ", 2)
             if len(_mash) >= 2 and _mash[0] == "test" and _mash[1] in ("read", "grep", "edit"):
                 line = line.split(" ", 1)[1].strip()
+                if (line.startswith("read ") and not toolcall_mode
+                        and getattr(measurement, "_read_attempt_scope", None) is None):
+                    begin_read_attempt(measurement, {"path": (line[5:].split() or [""])[0]})
                 if _hook_wiring_for_run is not None and not toolcall_mode:
                     _pending_hook_action = (
                         line.split()[0], {"command": line}, f"text-{step}", False,
@@ -12307,290 +12333,310 @@ def work(d, *, resume=None):
                 obs = render_file_list(root, scope, limit=limit)
                 bolt.receipt("file_list", line, line, "HOST_OBSERVED", detail=f"n={len(obs.splitlines())}")
             elif line.startswith("grep "):
-                pat = line[5:].strip()
-                # STRIP SHELL QUOTING THE AGENT REASONABLY WROTE.
-                #
-                # Unwrap quoted search patterns before literal matching to avoid
-                # incorrectly reporting valid symbols as absent.
-                #
-                # Also drop leading flags: a human-style `grep -n "x" path/` is a perfectly
-                # sensible thing for a coding agent to type, and answering it with silence
-                # teaches it that the symbol is absent.
-                # PARSE `grep [flags] <pattern> [path]` THE WAY A SHELL WOULD.
-                #
-                # Two measured failures, both ours, both looking like the model being wrong:
-                #   grep "def blocking_run_status"          -> searched WITH the quote chars
-                #   grep ensure_born_minimal app/x/y.py     -> used "pattern path" as ONE regex
-                # The second is nastier: a bare `grep X` found the symbol while `grep X path`
-                # returned nothing, which reads exactly like the file not containing it.
-                # Honour the path instead of ignoring it — scoping a search is a correct thing
-                # for an agent to do and it should be rewarded, not silently broken.
-                import shlex
+                from kernel_read_receipts import (begin_nested_read_attempt as _begin_nested_read,
+                                                  end_nested_read_attempt as _end_nested_read)
+                _grep_audit, _grep_audit_prior = _begin_nested_read(
+                    measurement, _args if _name == "grep" else {"query": line[5:]},
+                    call_id=tool_call_id)
+                _grep_audit_status = "REFUSED"
                 try:
-                    argv = shlex.split(pat)                 # handles quoting properly
-                except ValueError:
-                    argv = pat.split()
-                # DROP FLAGS *AND THEIR VALUES*. `-A 20 -B 5` is two flags with numeric
-                # arguments; stripping only the dashed tokens leaves "20" as the first
-                # non-flag word and it becomes the search PATTERN. Measured live: the agent
-                # ran `grep -A 20 -B 5 "gate.*approve" tests/x.py` and got conftest.py hits,
-                # because we searched for "20". A context-flag is a perfectly normal thing for
-                # a coding agent to type.
-                _valued = {"-A", "-B", "-C", "-m", "-e", "--include", "--exclude"}
-                cleaned, skip_next = [], False
-                _end_of_flags = False
-                for a in argv:
-                    if skip_next:
-                        skip_next = False
-                        continue
-                    if _end_of_flags:
-                        cleaned.append(a)
-                        continue
-                    if a == "--" and os.environ.get("STATEFRAME_TOKENLAB_GREP_QUOTE", "off").strip().lower() == "on":
-                        _end_of_flags = True
-                        continue
-                    if a in _valued:
-                        skip_next = True
-                        continue
-                    if a.startswith("-"):
-                        continue
-                    cleaned.append(a)
-                argv = cleaned
-                # Structured native calls must keep pattern/path as their exact
-                # JSON values; reparsing them through the legacy shell dialect
-                # would split a literal containing spaces.
-                if (_name == "grep" and isinstance(_args, Mapping)
-                        and "pattern" in _args):
-                    pat = str(_args.get("pattern") or "")
-                    argv = [pat]
-                    if _args.get("path"):
-                        argv.append(str(_args["path"]))
-                else:
-                    pat = argv[0] if argv else pat
-                scope = str(root)
-                if len(argv) > 1:
+                    pat = line[5:].strip()
+                    # STRIP SHELL QUOTING THE AGENT REASONABLY WROTE.
+                    #
+                    # Unwrap quoted search patterns before literal matching to avoid
+                    # incorrectly reporting valid symbols as absent.
+                    #
+                    # Also drop leading flags: a human-style `grep -n "x" path/` is a perfectly
+                    # sensible thing for a coding agent to type, and answering it with silence
+                    # teaches it that the symbol is absent.
+                    # PARSE `grep [flags] <pattern> [path]` THE WAY A SHELL WOULD.
+                    #
+                    # Two measured failures, both ours, both looking like the model being wrong:
+                    #   grep "def blocking_run_status"          -> searched WITH the quote chars
+                    #   grep ensure_born_minimal app/x/y.py     -> used "pattern path" as ONE regex
+                    # The second is nastier: a bare `grep X` found the symbol while `grep X path`
+                    # returned nothing, which reads exactly like the file not containing it.
+                    # Honour the path instead of ignoring it — scoping a search is a correct thing
+                    # for an agent to do and it should be rewarded, not silently broken.
+                    import shlex
                     try:
-                        scope = str(resolve_tool_path(root, argv[1]))
-                    except AmbiguousToolPath as error:
-                        obs = str(error)
-                        bolt.receipt("grep", line, line, "REJECTED", detail=obs)
-                        measurement.observe(line, obs)
-                        msgs.append(_tool_reply_for_call(msgs, tool_call_id, obs)
-                                    if tool_call_id else {"role": "user", "content": obs})
-                        continue
-                if not information.check_path(root, scope):
-                    msgs.append(_tool_reply_for_call(msgs, tool_call_id, "[information-policy] Path outside workspace denied.")
-                                if tool_call_id else {"role": "user", "content":
-                                "[information-policy] Path outside workspace denied."})
-                    continue
-                _grep_args = _args if isinstance(_args, Mapping) else {}
-                if _hook_gate_route("grep", _grep_args or {"pattern": pat, "path": scope}):
-                    continue
-                _grep_error = None
-                _grep_page = None
-                try:
-                    from kernel_model_policy import resolve_model_policy
-                    from kernel_navigation_pages import search_repository
-                    _grep_page = search_repository(
-                        root, pat, scope,
-                        mode=_grep_args.get("mode"),
-                        file_glob=(_grep_args.get("file_glob") or _grep_args.get("glob") or None),
-                        cursor=_grep_args.get("cursor"),
-                        requested_page_size=_grep_args.get("page_size"),
-                        policy=resolve_model_policy(MODEL),
-                        journal=measurement.journal,
-                    )
-                except (OSError, TypeError, ValueError) as error:
-                    _grep_error = str(error)
-                _grep_metadata = (dict(_grep_page.metadata) if _grep_page is not None else {})
-                _grep_total = int(_grep_metadata.get("total", 0))
-                _grep_shown = int(_grep_metadata.get("shown", 0))
-                _grep_complete = bool(_grep_metadata.get("scan_complete", True))
-                bolt.last_grep_hits = None if _grep_error is not None else _grep_total
-                if _grep_error is None:
-                    bolt.sure_observe({"kind": "grep", "query": pat[:80],
-                                       "hit_count": _grep_total,
-                                       "shown": _grep_shown})
-                # E346: receipts carry the same complete-page metadata the model receives.
-                bolt.receipt(
-                    "grep", pat[:80], pat,
-                    "ERROR" if _grep_error is not None else
-                    "PARTIAL" if not _grep_complete else ("HITS" if _grep_total else "NO_HITS"),
-                    json.dumps(_grep_metadata, sort_keys=True, ensure_ascii=False,
-                               separators=(",", ":"))[:150]
-                    if _grep_error is None else _grep_error,
-                    result_set_digest=_grep_metadata.get("result_set_digest"))
-                if multifile:
-                    _grep_snapshot = _source_snapshot(root, fileset.paths)
-                    _annotate_receipt(
-                        bolt, paths=fileset.paths, scope=(scope,),
-                        before=_grep_snapshot, after=_grep_snapshot,
-                        selectors=tuple(getattr(bolt, "f2p_ids", ())),
-                        failure_tail="")
-                if _grep_error is not None:
-                    obs = f"Search failed: {_grep_error}. Correct the query or scope and retry."
-                elif _grep_page is not None:
-                    _grep_symbol_fact = None
-                    if _grep_total == 0 and interventions:
-                        # Definitions help localize a failed scoped search;
-                        # registry misses cannot establish symbol absence.
+                        argv = shlex.split(pat)                 # handles quoting properly
+                    except ValueError:
+                        argv = pat.split()
+                    # DROP FLAGS *AND THEIR VALUES*. `-A 20 -B 5` is two flags with numeric
+                    # arguments; stripping only the dashed tokens leaves "20" as the first
+                    # non-flag word and it becomes the search PATTERN. Measured live: the agent
+                    # ran `grep -A 20 -B 5 "gate.*approve" tests/x.py` and got conftest.py hits,
+                    # because we searched for "20". A context-flag is a perfectly normal thing for
+                    # a coding agent to type.
+                    _valued = {"-A", "-B", "-C", "-m", "-e", "--include", "--exclude"}
+                    cleaned, skip_next = [], False
+                    _end_of_flags = False
+                    for a in argv:
+                        if skip_next:
+                            skip_next = False
+                            continue
+                        if _end_of_flags:
+                            cleaned.append(a)
+                            continue
+                        if a == "--" and os.environ.get("STATEFRAME_TOKENLAB_GREP_QUOTE", "off").strip().lower() == "on":
+                            _end_of_flags = True
+                            continue
+                        if a in _valued:
+                            skip_next = True
+                            continue
+                        if a.startswith("-"):
+                            continue
+                        cleaned.append(a)
+                    argv = cleaned
+                    # Structured native calls must keep pattern/path as their exact
+                    # JSON values; reparsing them through the legacy shell dialect
+                    # would split a literal containing spaces.
+                    if (_name == "grep" and isinstance(_args, Mapping)
+                            and "pattern" in _args):
+                        pat = str(_args.get("pattern") or "")
+                        argv = [pat]
+                        if _args.get("path"):
+                            argv.append(str(_args["path"]))
+                    else:
+                        pat = argv[0] if argv else pat
+                    scope = str(root)
+                    if len(argv) > 1:
                         try:
-                            token = re.sub(r"^(def|class|async def)\s+", "", pat).strip()
-                            token = re.split(r"[^\w]", token)[0] if token else ""
-                            if token:
-                                reg = _registry_for(root)
-                                _grep_symbol_fact = (token, reg.where(token))
-                        except Exception:                            # noqa: BLE001
-                            pass
-                    from kernel_owner_first import coordinates_enabled
-                    if coordinates_enabled() or _workspace_truth.enabled():
-                        from kernel_navigation_pages import render_grep_result
-                        obs = render_grep_result(
-                            _grep_page,
-                            symbol=_grep_symbol_fact[0] if _grep_symbol_fact else None,
-                            symbol_definitions=_grep_symbol_fact[1] if _grep_symbol_fact else (),
-                            workspace_root=root,
+                            scope = str(resolve_tool_path(root, argv[1]))
+                        except AmbiguousToolPath as error:
+                            obs = str(error)
+                            bolt.receipt("grep", line, line, "REJECTED", detail=obs)
+                            measurement.observe(line, obs)
+                            msgs.append(_tool_reply_for_call(msgs, tool_call_id, obs)
+                                        if tool_call_id else {"role": "user", "content": obs})
+                            continue
+                    if not information.check_path(root, scope):
+                        _grep_audit_status = "DENIED"
+                        msgs.append(_tool_reply_for_call(msgs, tool_call_id, "[information-policy] Path outside workspace denied.")
+                                    if tool_call_id else {"role": "user", "content":
+                                    "[information-policy] Path outside workspace denied."})
+                        continue
+                    _grep_args = _args if isinstance(_args, Mapping) else {}
+                    if _hook_gate_route("grep", _grep_args or {"pattern": pat, "path": scope}):
+                        continue
+                    _grep_audit_status = "ERROR"
+                    _grep_error = None
+                    _grep_page = None
+                    try:
+                        from kernel_model_policy import resolve_model_policy
+                        from kernel_navigation_pages import search_repository
+                        _grep_page = search_repository(
+                            root, pat, scope,
+                            mode=_grep_args.get("mode"),
+                            file_glob=(_grep_args.get("file_glob") or _grep_args.get("glob") or None),
+                            cursor=_grep_args.get("cursor"),
+                            requested_page_size=_grep_args.get("page_size"),
+                            policy=resolve_model_policy(MODEL),
                             journal=measurement.journal,
                         )
-                    else:
-                        obs = _grep_page.text
-                        if _grep_symbol_fact and _grep_symbol_fact[1]:
-                            obs += "\n(no grep matches)\n" + _workspace_truth.render_legacy_symbol_answer(
-                                _grep_symbol_fact[0], _grep_symbol_fact[1], (), 0, 0, 0,
+                    except (OSError, TypeError, ValueError) as error:
+                        _grep_error = str(error)
+                    _grep_metadata = (dict(_grep_page.metadata) if _grep_page is not None else {})
+                    _grep_total = int(_grep_metadata.get("total", 0))
+                    _grep_shown = int(_grep_metadata.get("shown", 0))
+                    _grep_complete = bool(_grep_metadata.get("scan_complete", True))
+                    bolt.last_grep_hits = None if _grep_error is not None else _grep_total
+                    if _grep_error is None:
+                        bolt.sure_observe({"kind": "grep", "query": pat[:80],
+                                           "hit_count": _grep_total,
+                                           "shown": _grep_shown})
+                    # E346: receipts carry the same complete-page metadata the model receives.
+                    bolt.receipt(
+                        "grep", pat[:80], pat,
+                        "ERROR" if _grep_error is not None else
+                        "PARTIAL" if not _grep_complete else ("HITS" if _grep_total else "NO_HITS"),
+                        json.dumps(_grep_metadata, sort_keys=True, ensure_ascii=False,
+                                   separators=(",", ":"))[:150]
+                        if _grep_error is None else _grep_error,
+                        result_set_digest=_grep_metadata.get("result_set_digest"))
+                    if multifile:
+                        _grep_snapshot = _source_snapshot(root, fileset.paths)
+                        _annotate_receipt(
+                            bolt, paths=fileset.paths, scope=(scope,),
+                            before=_grep_snapshot, after=_grep_snapshot,
+                            selectors=tuple(getattr(bolt, "f2p_ids", ())),
+                            failure_tail="")
+                    if _grep_error is not None:
+                        obs = f"Search failed: {_grep_error}. Correct the query or scope and retry."
+                    elif _grep_page is not None:
+                        _grep_symbol_fact = None
+                        if _grep_total == 0 and interventions:
+                            # Definitions help localize a failed scoped search;
+                            # registry misses cannot establish symbol absence.
+                            try:
+                                token = re.sub(r"^(def|class|async def)\s+", "", pat).strip()
+                                token = re.split(r"[^\w]", token)[0] if token else ""
+                                if token:
+                                    reg = _registry_for(root)
+                                    _grep_symbol_fact = (token, reg.where(token))
+                            except Exception:                            # noqa: BLE001
+                                pass
+                        from kernel_owner_first import coordinates_enabled
+                        if coordinates_enabled() or _workspace_truth.enabled():
+                            from kernel_navigation_pages import render_grep_result
+                            obs = render_grep_result(
+                                _grep_page,
+                                symbol=_grep_symbol_fact[0] if _grep_symbol_fact else None,
+                                symbol_definitions=_grep_symbol_fact[1] if _grep_symbol_fact else (),
+                                workspace_root=root,
+                                journal=measurement.journal,
                             )
-                    # Q6: the second identical zero grep at one revision changes the route.
-                    from kernel_repeated_zero import observe as _rz_observe
-                    obs = _rz_observe(
-                        measurement, "grep",
-                        _grep_args if _grep_args else {"pattern": pat, "path": argv[1] if len(argv) > 1 else ""},
-                        obs, zero=(_grep_total == 0 and _grep_complete))
-                else:
-                    obs = "Search failed: no page was produced. Retry the query or scope."
-            elif line.startswith("read "):
-                _native_read = (_name == "read" and isinstance(_args, Mapping)
-                                and "path" in _args)
-                if _native_read:
-                    raw = str(_args.get("path") or "")
-                    _requested_start = _args.get("line", _args.get("start_line", ""))
-                    start = max(0, int(_requested_start) - 1) \
-                        if str(_requested_start).isdigit() else 0
-                    parts = [raw]
-                else:
-                    parts = line[5:].split()
-                    raw = parts[0].strip("`'\"")  # markdown backticks / quotes
-                    start = max(0, int(parts[1]) - 1) if len(parts) > 1 and parts[1].isdigit() else 0
-                # ACCEPT `path:line`, WHICH IS THE FORMAT OUR OWN GREP EMITS.
-                # grep returns "app/foo.py:81: <code>", so an agent naturally copies
-                # "app/foo.py:81" straight into read. Refusing the shape we just handed it is
-                # a self-inflicted trap — measured in the tool audit as one of two remaining
-                # read failures. Use the line number as the start position, which is what the
-                # agent meant.
-                if ":" in raw and (multifile or not pathlib.Path(raw).exists()):
-                    head, _, tail = raw.rpartition(":")
-                    if tail.isdigit() and head:
-                        raw, start = head, max(0, int(tail) - 1)
-                parts = [raw] + parts[1:]
-                if multifile:
-                    try:
-                        p, resolved_path = _multi_path(root, raw)
-                    except ValueError:
-                        p, resolved_path = root / "__invalid_path__", raw
-                else:
-                    resolved_path = raw
-                    try:
-                        p = resolve_tool_path(root, raw)
-                    except AmbiguousToolPath as error:
-                        obs = str(error)
-                        bolt.receipt("read", line, line, "REJECTED", detail=obs)
-                        measurement.observe(line, obs)
-                        msgs.append(_tool_reply_for_call(msgs, tool_call_id, obs)
-                                    if tool_call_id else {"role": "user", "content": obs})
-                        continue
-                if not information.check_path(root, str(p)):
-                    _denied = "[information-policy] Path outside workspace denied."
-                    bolt.receipt("read", f"{raw}@{start + 1}", f"{raw}|{start}",
-                                 "DENIED", detail=_denied[:150],
-                                 target_path=str(p))
-                    try:
-                        measurement.observe(line, _denied)
-                    except (AttributeError, TypeError):
-                        pass
-                    msgs.append(_tool_reply_for_call(msgs, tool_call_id, _denied)
-                                if tool_call_id else {"role": "user", "content":
-                                _denied})
-                    continue
-                if _hook_gate_route("read", {"path": str(p), "line": start + 1}):
-                    continue
-                _read_before = (_source_snapshot(root, fileset.paths)
-                                if multifile else {})
-                # The executor owns file caching, exact-range reuse, and its
-                # revision-bound receipt. Keep one read dispatch path so cached
-                # and fresh reads close the same native continuation effect.
-                from kernel_read_exec import dispatch_live_read
-                from kernel_model_policy import resolve_model_policy
-                (_read_result, obs, _read_bytes,
-                 _read_delivery) = dispatch_live_read(
-                    root, p, raw, parts[0], start, args=_args,
-                    measurement=measurement, step=step, bolt=bolt,
-                    policy=resolve_model_policy(MODEL),
-                    resolved_path=resolved_path, visible_messages=msgs,
-                    page_line_limit=_lean_read_page_line_limit,
-                    page_byte_limit=_lean_read_page_byte_limit)
-                if _read_result == "OK":
-                    try:
-                        _pointer_read_path = p.resolve().relative_to(root.resolve()).as_posix()
-                        _read_path_counts[_pointer_read_path] = (
-                            _read_path_counts.get(_pointer_read_path, 0) + 1)
-                        _pointer_read_delivery = _read_delivery
-                    except (OSError, ValueError):
-                        _pointer_read_path = None
-                        _pointer_read_delivery = None
-                if _read_result == "MISSING":
-                    # E451b: the TARGET file going missing is an emergency, not a
-                    # shrug — jq3 destroyed its own jobq.py and wandered 60+ turns.
-                    if interventions and not multifile and (raw.endswith(d["rel"]) or d["rel"].endswith(raw)):
-                        if _workspace_truth.enabled():
-                            fact = _workspace_truth.exists(
-                                root, d["rel"], journal=getattr(measurement, "journal", None),
-                            )
-                            obs += "\n[kernel] " + _workspace_truth.render_fact(fact)
-                            if fact.status == "missing":
-                                obs += (" If complete authorized content is available, use "
-                                        "`file_create` now; otherwise report the capability "
-                                        "blocker. Do not use `edit` to recreate a missing file.")
-                            elif fact.status == "exists":
-                                obs += " The read returned MISSING; retry the read before editing."
-                            else:
-                                obs += " The read returned MISSING, but current status is unknown; retry the read."
                         else:
-                            obs += _workspace_truth.render_legacy_target_gone_notice(d["rel"])
-                if multifile:
-                    _annotate_receipt(
-                        bolt, paths=fileset.paths, scope=(resolved_path,),
-                        before=_read_before, after=_read_before,
-                        selectors=tuple(getattr(bolt, "f2p_ids", ())),
-                        failure_tail="")
-                # E407: every successful source read feeds the world cache (test lists,
-                # signatures survive trims/compaction — deterministic extraction only).
-                if (getattr(bolt, "world", None) is not None and _read_result == "OK"
-                        and _read_bytes is not None and p.suffix == ".py"):
-                    try:
-                        bolt.world.observe_source(
-                            path=str(p.relative_to(root)), content=_read_bytes.decode("utf-8", errors="ignore"),
-                            revision=max(getattr(bolt, "workspace_revision", 0), bolt.world.current_revision),
-                            evidence_ref=f"read@{step}")
-                    except Exception as error:                       # noqa: BLE001
-                        measurement.journal.emit('world_observation_error', operation='read',
-                                                 error_type=type(error).__name__)
-                if multifile:
-                    _missing_at_read = _missing_declared_paths(
-                        root, fileset, journal=measurement.journal,
-                    )
-                    if interventions and _missing_at_read:
-                        obs += "\n[kernel] " + _target_gone_lines(
-                            _missing_at_read, root=root, journal=measurement.journal,
+                            obs = _grep_page.text
+                            if _grep_symbol_fact and _grep_symbol_fact[1]:
+                                obs += "\n(no grep matches)\n" + _workspace_truth.render_legacy_symbol_answer(
+                                    _grep_symbol_fact[0], _grep_symbol_fact[1], (), 0, 0, 0,
+                                )
+                        # Q6: the second identical zero grep at one revision changes the route.
+                        from kernel_repeated_zero import observe as _rz_observe
+                        obs = _rz_observe(
+                            measurement, "grep",
+                            _grep_args if _grep_args else {"pattern": pat, "path": argv[1] if len(argv) > 1 else ""},
+                            obs, zero=(_grep_total == 0 and _grep_complete))
+                    else:
+                        obs = "Search failed: no page was produced. Retry the query or scope."
+                    _grep_audit_status = ("GREP" if _grep_error is None and _grep_page is not None else "ERROR")
+                finally:
+                    if _grep_audit is not None:
+                        _grep_audit.finish(_grep_audit_status, error=sys.exc_info()[1])
+                        _end_nested_read(measurement, _grep_audit, _grep_audit_prior)
+            elif line.startswith("read "):
+                if getattr(measurement, "_read_attempt_scope", None) is None:
+                    begin_read_attempt(measurement, {"path": (line[5:].split() or [""])[0]})
+                try:
+                    _native_read = (_name == "read" and isinstance(_args, Mapping)
+                                    and "path" in _args)
+                    if _native_read:
+                        raw = str(_args.get("path") or "")
+                        _requested_start = _args.get("line", _args.get("start_line", ""))
+                        start = max(0, int(_requested_start) - 1) \
+                            if str(_requested_start).isdigit() else 0
+                        parts = [raw]
+                    else:
+                        parts = line[5:].split()
+                        raw = parts[0].strip("`'\"")  # markdown backticks / quotes
+                        start = max(0, int(parts[1]) - 1) if len(parts) > 1 and parts[1].isdigit() else 0
+                    # ACCEPT `path:line`, WHICH IS THE FORMAT OUR OWN GREP EMITS.
+                    # grep returns "app/foo.py:81: <code>", so an agent naturally copies
+                    # "app/foo.py:81" straight into read. Refusing the shape we just handed it is
+                    # a self-inflicted trap — measured in the tool audit as one of two remaining
+                    # read failures. Use the line number as the start position, which is what the
+                    # agent meant.
+                    if ":" in raw and (multifile or not pathlib.Path(raw).exists()):
+                        head, _, tail = raw.rpartition(":")
+                        if tail.isdigit() and head:
+                            raw, start = head, max(0, int(tail) - 1)
+                    parts = [raw] + parts[1:]
+                    if multifile:
+                        try:
+                            p, resolved_path = _multi_path(root, raw)
+                        except ValueError:
+                            p, resolved_path = root / "__invalid_path__", raw
+                    else:
+                        resolved_path = raw
+                        try:
+                            p = resolve_tool_path(root, raw)
+                        except AmbiguousToolPath as error:
+                            obs = str(error)
+                            bolt.receipt("read", line, line, "REJECTED", detail=obs)
+                            measurement.observe(line, obs)
+                            msgs.append(_tool_reply_for_call(msgs, tool_call_id, obs)
+                                        if tool_call_id else {"role": "user", "content": obs})
+                            continue
+                    if not information.check_path(root, str(p)):
+                        _finish_read_attempt(measurement, status="DENIED")
+                        _denied = "[information-policy] Path outside workspace denied."
+                        bolt.receipt("read", f"{raw}@{start + 1}", f"{raw}|{start}",
+                                     "DENIED", detail=_denied[:150],
+                                     target_path=str(p))
+                        try:
+                            measurement.observe(line, _denied)
+                        except (AttributeError, TypeError):
+                            pass
+                        msgs.append(_tool_reply_for_call(msgs, tool_call_id, _denied)
+                                    if tool_call_id else {"role": "user", "content":
+                                    _denied})
+                        continue
+                    if _hook_gate_route("read", {"path": str(p), "line": start + 1}):
+                        continue
+                    _read_before = (_source_snapshot(root, fileset.paths)
+                                    if multifile else {})
+                    # The executor owns file caching, exact-range reuse, and its
+                    # revision-bound receipt. Keep one read dispatch path so cached
+                    # and fresh reads close the same native continuation effect.
+                    from kernel_read_exec import dispatch_live_read
+                    from kernel_model_policy import resolve_model_policy
+                    (_read_result, obs, _read_bytes,
+                     _read_delivery) = dispatch_live_read(
+                        root, p, raw, parts[0], start, args=_args,
+                        measurement=measurement, step=step, bolt=bolt,
+                        policy=resolve_model_policy(MODEL),
+                        resolved_path=resolved_path, visible_messages=msgs,
+                        page_line_limit=_lean_read_page_line_limit,
+                        page_byte_limit=_lean_read_page_byte_limit)
+                    if _read_result == "OK":
+                        try:
+                            _pointer_read_path = p.resolve().relative_to(root.resolve()).as_posix()
+                            _read_path_counts[_pointer_read_path] = (
+                                _read_path_counts.get(_pointer_read_path, 0) + 1)
+                            _pointer_read_delivery = _read_delivery
+                        except (OSError, ValueError):
+                            _pointer_read_path = None
+                            _pointer_read_delivery = None
+                    if _read_result == "MISSING":
+                        # E451b: the TARGET file going missing is an emergency, not a
+                        # shrug — jq3 destroyed its own jobq.py and wandered 60+ turns.
+                        if interventions and not multifile and (raw.endswith(d["rel"]) or d["rel"].endswith(raw)):
+                            if _workspace_truth.enabled():
+                                fact = _workspace_truth.exists(
+                                    root, d["rel"], journal=getattr(measurement, "journal", None),
+                                )
+                                obs += "\n[kernel] " + _workspace_truth.render_fact(fact)
+                                if fact.status == "missing":
+                                    obs += (" If complete authorized content is available, use "
+                                            "`file_create` now; otherwise report the capability "
+                                            "blocker. Do not use `edit` to recreate a missing file.")
+                                elif fact.status == "exists":
+                                    obs += " The read returned MISSING; retry the read before editing."
+                                else:
+                                    obs += " The read returned MISSING, but current status is unknown; retry the read."
+                            else:
+                                obs += _workspace_truth.render_legacy_target_gone_notice(d["rel"])
+                    if multifile:
+                        _annotate_receipt(
+                            bolt, paths=fileset.paths, scope=(resolved_path,),
+                            before=_read_before, after=_read_before,
+                            selectors=tuple(getattr(bolt, "f2p_ids", ())),
+                            failure_tail="")
+                    # E407: every successful source read feeds the world cache (test lists,
+                    # signatures survive trims/compaction — deterministic extraction only).
+                    if (getattr(bolt, "world", None) is not None and _read_result == "OK"
+                            and _read_bytes is not None and p.suffix == ".py"):
+                        try:
+                            bolt.world.observe_source(
+                                path=str(p.relative_to(root)), content=_read_bytes.decode("utf-8", errors="ignore"),
+                                revision=max(getattr(bolt, "workspace_revision", 0), bolt.world.current_revision),
+                                evidence_ref=f"read@{step}")
+                        except Exception as error:                       # noqa: BLE001
+                            measurement.journal.emit('world_observation_error', operation='read',
+                                                     error_type=type(error).__name__)
+                    if multifile:
+                        _missing_at_read = _missing_declared_paths(
+                            root, fileset, journal=measurement.journal,
                         )
-                # dispatch_live_read applies repeat-read notes to this tool result.
+                        if interventions and _missing_at_read:
+                            obs += "\n[kernel] " + _target_gone_lines(
+                                _missing_at_read, root=root, journal=measurement.journal,
+                            )
+                    # dispatch_live_read applies repeat-read notes to this tool result.
+                finally:
+                    _finish_read_attempt(measurement, error=sys.exc_info()[1])
             elif line == "str_replace" and tool_batch_args is not None:
                 from kernel_coordinated_change_ledger import (
                     APPLY_EVENT, APPLY_SCHEMA, BatchFailure, BatchResult,
@@ -14163,6 +14209,7 @@ def work(d, *, resume=None):
                     _mutation_runtime, measurement, line, step + 1,
                     continue_turn=(not reached(parse_step_limit(MAX_STEPS), step + 1)
                                    and not done_accepted(measurement)))
+        _finish_read_attempt(measurement)
 
         if _hook_wiring_for_run is not None and _pending_hook_action is not None:
             _hook_name, _hook_args, _hook_call_id, _hook_toolcall = _pending_hook_action
@@ -14199,6 +14246,8 @@ def work(d, *, resume=None):
                        "edits": _reported_edits, "tests": _reported_checks,
                        "behaviour": "unverified"}
             finish_native_batch_transcript(msgs)
+            from kernel_read_receipts import finish_pending
+            finish_pending(measurement, error=sys.exc_info()[1])
             measurement.finish(outcome, messages=msgs)
             return _attach_env_receipt(outcome, measurement)
 
@@ -14627,6 +14676,8 @@ def work(d, *, resume=None):
                           if _hook_wiring_for_run is not None
                           and measurement.system_outcome in {"hook_blocked", "hook_containment"}
                           else None)
+        from kernel_read_receipts import finish_pending
+        finish_pending(measurement, error=sys.exc_info()[1])
         measurement.finish({"result": _hook_terminal or _finish_result,
                             "steps": _reported_steps(),
                             "edits": _finish_progress.edits,
@@ -14724,6 +14775,8 @@ def work(d, *, resume=None):
                     outcome = {"fn": fn, "result": code,
                                "steps": locals().get("step", -1),
                                "error_detail": str(exc)[:600]}
+                    from kernel_read_receipts import finish_pending
+                    finish_pending(measurement, error=sys.exc_info()[1])
                     measurement.finish(outcome, messages=locals().get("msgs"))
                     return _attach_env_receipt(outcome, measurement)
                 raise
@@ -14750,6 +14803,8 @@ def work(d, *, resume=None):
                             outcome = {"fn": fn, "result": code,
                                        "steps": locals().get("step", -1),
                                        "error_detail": str(capture_error)[:600]}
+                            from kernel_read_receipts import finish_pending
+                            finish_pending(measurement, error=sys.exc_info()[1])
                             measurement.finish(outcome, messages=locals().get("msgs"))
                             return _attach_env_receipt(outcome, measurement)
                     capture_failed = True
@@ -14808,6 +14863,8 @@ def work(d, *, resume=None):
                         dispatch=False,
                     )
                 try:
+                    from kernel_read_receipts import finish_pending
+                    finish_pending(measurement, error=sys.exc_info()[1])
                     measurement.finish(outcome, messages=locals().get("msgs"))
                 except Exception as finish_error:
                     measurement.journal.emit(
@@ -14839,6 +14896,8 @@ def work(d, *, resume=None):
                     "worker_exception", error_type=type(exc).__name__,
                     outcome=_harness_outcome, failure_origin="harness",
                     step=locals().get("step", -1), **_location)
+                from kernel_read_receipts import finish_pending
+                finish_pending(measurement, error=sys.exc_info()[1])
                 measurement.finish(outcome, messages=locals().get("msgs"))
             return _attach_env_receipt(outcome, measurement)
         from kernel_pilot import ParentBudgetExhausted
@@ -14889,6 +14948,8 @@ def work(d, *, resume=None):
                                          step=locals().get('step', -1))
                 _messages = locals().get('msgs')
                 finish_native_batch_transcript(_messages)
+                from kernel_read_receipts import finish_pending
+                finish_pending(measurement, error=sys.exc_info()[1])
                 measurement.finish(outcome, messages=_messages)
             return _attach_env_receipt(outcome, measurement)
         outcome = dict(fn=fn, result="ATTEMPT_BUDGET_EXHAUSTED",
@@ -14899,6 +14960,8 @@ def work(d, *, resume=None):
             measurement.system_outcome = "attempt_budget_exhausted"
             _messages = locals().get('msgs')
             finish_native_batch_transcript(_messages)
+            from kernel_read_receipts import finish_pending
+            finish_pending(measurement, error=sys.exc_info()[1])
             measurement.finish(outcome, messages=_messages)
         return _attach_env_receipt(outcome, measurement)
     finally:
@@ -14909,6 +14972,8 @@ def work(d, *, resume=None):
                 if measurement is not None:
                     if 'system_prompt_audited' in locals():
                         _audit_system_prompt()
+                    from kernel_read_receipts import finish_pending
+                    finish_pending(measurement, error=sys.exc_info()[1])
                     measurement.finish({"result": "terminated_without_final_grade"}, messages=_messages)
             finally:
                 if measurement is not None:
