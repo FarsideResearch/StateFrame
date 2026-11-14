@@ -89,6 +89,10 @@ def _fold(ledger: dict[str, object], row: Mapping[str, object], *,
         from kernel_stateframe_framefit5 import FrameFit5Error
 
         raise FrameFit5Error("call coverage folding requires its host index")
+    if "call_ids" not in digest and "coverage_contract" in digest:
+        # The proven host session restores the full frontier below. The incoming
+        # model-facing digest can omit this display field without losing coverage.
+        digest["call_ids"] = []
     digest["call_ids"] = sorted(set(digest["call_ids"]) | ids)
     digest["row_count"] += 1
     counts = digest["kind_counts"]
@@ -225,11 +229,16 @@ def validate_read_ranges(frame: Mapping[str, object],
             raise FrameFit5Error("read receipt lacks its exact same-request source bytes")
     digest = ledger.get("history_digest")
     if digest is not None:
+        # A coverage-contract digest may omit its display frontier (STATEFRAME_HISTORY_DIGEST_IDS=off
+        # or the minimum wire projection); a legacy digest must enumerate its ids.
+        frontier = None
+        if isinstance(digest, Mapping):
+            frontier = digest.get("call_ids", [] if "coverage_contract" in digest else None)
         if (not isinstance(digest, Mapping) or digest.get("kind") != "action_history_digest"
                 or digest.get("source_text") != "not_carried"
-                or not isinstance(digest.get("call_ids"), list)
-                or any(not isinstance(item, str) or not item for item in digest["call_ids"])
-                or digest["call_ids"] != sorted(set(digest["call_ids"]))
+                or not isinstance(frontier, list)
+                or any(not isinstance(item, str) or not item for item in frontier)
+                or frontier != sorted(set(frontier))
                 or type(digest.get("row_count")) is not int or digest["row_count"] < 1
                 or not isinstance(digest.get("kind_counts"), dict)
                 or any(type(count) is not int or count < 1 for count in digest["kind_counts"].values())
@@ -247,10 +256,10 @@ def validate_read_ranges(frame: Mapping[str, object],
                 or not isinstance(digest.get("coverage_run_id"), str)
                 or not digest["coverage_run_id"]
                 or type(digest.get("call_count")) is not int
-                or digest["call_count"] < len(digest["call_ids"])
-                or len(digest["call_ids"]) > FRONTIER_COUNT
-                or len(_bytes(digest["call_ids"])) > FRONTIER_BYTES
-                or any(len(item.encode("utf-8")) > FRONTIER_ID_BYTES for item in digest["call_ids"])
+                or digest["call_count"] < len(frontier)
+                or len(frontier) > FRONTIER_COUNT
+                or len(_bytes(frontier)) > FRONTIER_BYTES
+                or any(len(item.encode("utf-8")) > FRONTIER_ID_BYTES for item in frontier)
                 or not isinstance(digest.get("call_ids_sha256"), str)
                 or len(digest["call_ids_sha256"]) != 64
                 or any(c not in "0123456789abcdef" for c in digest["call_ids_sha256"])):
@@ -572,6 +581,7 @@ def fit_protected_frame(body: dict[str, object], *,
     fragments = JsonFragmentMemo()
 
     def publish() -> int:
+        from kernel_framefit_receipt_history import model_facing_payload
         from kernel_reread_result_truth import reconcile_source_truth
 
         reconcile_source_truth(
@@ -580,7 +590,7 @@ def fit_protected_frame(body: dict[str, object], *,
         )
         # _state_payload has already normalized this envelope. Reuse unchanged
         # JSON fragments rather than deepcopy/serialize the entire frame.
-        states[0]["content"] = STATE_HEADER + "\n" + fragments.dumps(payload)
+        states[0]["content"] = STATE_HEADER + "\n" + fragments.dumps(model_facing_payload(payload))
         return protected_bytes(body, protected_messages)
 
     size = publish()

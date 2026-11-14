@@ -215,7 +215,18 @@ class CoverageIndex:
     def covered_ids(self, digest: Mapping[str, object]) -> set[str]:
         self.sync()
         with self._lock:
-            if _sha(digest) not in self.proofs:
+            proven = _sha(digest) in self.proofs
+            count = digest.get("call_count")
+            if (not proven and "call_ids" not in digest
+                    and digest.get("coverage_contract") == CONTRACT
+                    and type(count) is int and 0 <= count <= len(self.ids)):
+                # Restore only the display field from this exact host prefix.
+                # All other fields must still hash to a durable, complete proof;
+                # a caller-supplied frontier never receives this treatment.
+                frontier = sorted(_frontier([], self.ids[:count]))
+                proven = any(_sha({**digest, "call_ids": ids}) in self.proofs
+                             for ids in (frontier, []))
+            if not proven:
                 _error("call coverage digest has no matching host proof")
             count = digest["call_count"]
             result = set(self.ids[:count])

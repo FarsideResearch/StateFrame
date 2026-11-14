@@ -554,6 +554,7 @@ OPT_IN_SWITCHES = {
     "STATEFRAME_TRANSPORT_MAX_ATTEMPTS": ("1", "2", "3", "4", "5"),
     "STATEFRAME_TRANSPORT_BACKOFF_S": (),  # finite seconds between 0 and 60
     "STATEFRAME_FL_CHECKPOINT_CAPTURE": ("on", "off"),  # opt-in settled-boundary observer capture
+    "STATEFRAME_HISTORY_DIGEST_IDS": ("on", "off"),  # tool-call id frontier in the state-frame history digest; r2hc3 ships off
 }
 # Accepted aliases -> the engine's own value (EVICTFIX "off" is sent as "legacy").
 OPT_IN_ALIASES = {"STATEFRAME_EVICTFIX": {"off": "legacy"}}
