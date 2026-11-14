@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.6.29 (2026-11-14)
+
+- Fixed: when the engine cannot tell whether a test run covered every declared selector, it now withholds the completion hint and logs the error type instead of assuming full coverage.
+
 ## 0.6.28 (2026-11-14)
 
 - Tests: the private-fields wire-identity test covers the kill-attribution fields and its process double matches the current status reads.
