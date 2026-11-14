@@ -79,6 +79,10 @@ def test_recorded_time_left_prefers_the_sidecar_then_legacy_text(tmp_path: Path)
     assert replay_tape.recorded_time_left(current) is None
     (wire / "0001.time-left.json").write_text('{"seconds_left":712.5,"time_allowance_seconds":900.0}')
     assert replay_tape.recorded_time_left(current) == 712.5
+    assert replay_tape.recorded_time_allowance(current) == 900.0
+    (wire / "0001.time-left.json").write_text('{"seconds_left":712.5,"time_allowance_seconds":NaN}')
+    assert replay_tape.recorded_time_left(current) == 712.5
+    assert replay_tape.recorded_time_allowance(current) is None
 
     legacy = wire / "0002.request.json"
     legacy.write_bytes(_legacy("00420.0 (about 0007 minutes left, ~---- turns at your pace)"))
@@ -92,7 +96,7 @@ def test_resumed_time_and_window_read_the_sidecar(tmp_path: Path):
     wire = tmp_path / "wire"
     wire.mkdir()
     rows = []
-    for index, left in ((1, 600.0), (2, 420.0)):
+    for index, left in ((1, 590.0), (2, 420.0)):
         request = wire / f"{index:04d}.request.json"
         request.write_bytes(_legacy("limited (wall allowance 600s)"))
         (wire / f"{index:04d}.time-left.json").write_text(json.dumps(

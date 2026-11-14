@@ -1,8 +1,8 @@
 """A run with --timeout resumes faithfully and keeps its time limit.
 
-The [CONTINUATION LIMITS] line shows the live countdown, so a rebuilt request can never
-byte-match the request it replays. Replay compares with the recorded countdown put back
-(only that field), and the resumed run gets the time it had left once replay ends.
+Model-facing limits contain only the declared allowance, so replayed requests remain byte
+identical. The live seconds left are recorded privately beside each request and resume uses
+that sidecar once replay ends.
 """
 from __future__ import annotations
 
@@ -23,7 +23,7 @@ from _journal import measurement_events
 from _timeouts import scaled
 import kernel_countdown_slot as countdown
 from stateframe.replay_tape import (
-    Replayer, recorded_countdown_seconds, with_recorded_countdown)
+    Replayer, recorded_countdown_seconds, recorded_time_left, with_recorded_countdown)
 from stateframe.scripted_endpoint import Script, ScriptStepUnavailable, serve
 from engine_run import run_monitored, start_monitored
 from fixtures.process_signals import record_identity, signal_run_owned, signal_run_verified
@@ -215,9 +215,14 @@ def test_timeout_run_killed_mid_run_resumes_faithfully(tmp_path, checkpoint):
             watch_paths=(run / "checkpoints",))
         while not script.waiting.wait(0.5):
             assert process.poll() is None, "run ended before its third request"
-        original = [path.read_bytes() for path in sorted((run / "wire").glob("*.request.json"))]
+        original_paths = sorted((run / "wire").glob("*.request.json"))
+        original = [path.read_bytes() for path in original_paths]
         assert len(original) == 3  # two answered, the third in flight
-        assert all(recorded_countdown_seconds(body) is not None for body in original)
+        original_time_left = [recorded_time_left(path) for path in original_paths]
+        assert all(value is not None and 0 < value <= 3600 for value in original_time_left)
+        assert all(b"sandbox_seconds_remaining=limited (wall allowance 3600s);" in body
+                   for body in original)
+        assert all(recorded_countdown_seconds(body) is None for body in original)
         children = subprocess.check_output(["pgrep", "-P", str(process.pid)], text=True).split()
         assert len(children) == 1, children
         child = int(children[0])
@@ -251,18 +256,19 @@ def test_timeout_run_killed_mid_run_resumes_faithfully(tmp_path, checkpoint):
     assert not (run / "checkpoint-refused.json").exists()
     assert not (run / "resume-divergence.json").exists()
     rebuilt = [path.read_bytes() for path in sorted((run / "wire").glob("*.request.json"))]
-    # Every recorded request, the in-flight one included, was rebuilt byte for byte apart from
-    # the live countdown, which replay compared at its recorded value.
+    # Every recorded request, including the in-flight one, is rebuilt byte for byte. Timing is
+    # available in the sidecar and never needs to be inserted into model-facing bytes.
     # Both resume paths number the new attempt's sends from 1, so send N pairs with send N.
     replayed = rebuilt[:len(original)]
     assert len(replayed) == len(original)
     for before, after in zip(original, replayed):
-        assert (after == before or with_recorded_countdown(after, before) == before)
+        assert after == before
     spec = json.loads((run / "spec.json").read_text())
     seconds_left = spec["resume"]["seconds_left"]
     assert 0 < seconds_left <= 3600
     kinds = [event.get("kind") for event in _events(run)]
     assert "checkpoint_unfaithful" not in kinds and "replay_diverged" not in kinds
     # Requests built after replay show the resumed time, never more than what was left.
-    live = [recorded_countdown_seconds(body) for body in rebuilt[len(replayed):]]
+    live_paths = sorted((run / "wire").glob("*.request.json"))[len(replayed):]
+    live = [recorded_time_left(path) for path in live_paths]
     assert live and all(value is not None and value <= seconds_left for value in live)

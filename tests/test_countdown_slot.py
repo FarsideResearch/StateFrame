@@ -99,7 +99,8 @@ def test_canonical_projection_leaves_non_numeric_limits_unchanged() -> None:
 def _limits_and_embedded_stateframes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> tuple[str, str, str, str]:
-    budget = ResponseBudget(limit=10, mode="response", responses_used=1)
+    budget = ResponseBudget(limit=10, mode="response", responses_used=1,
+                            sandbox_time_allowance_seconds=120)
     budget._time_left_clock_start = 0.0
     budget._time_left_decisions_at_start = 0
     seconds_remaining = 60.0
@@ -140,24 +141,19 @@ def test_embedded_stateframe_countdown_canonicalizes_only_the_time_slot(
     )
     first_slot = first_limits.split("sandbox_seconds_remaining=", 1)[1].split(";", 1)[0]
     second_slot = second_limits.split("sandbox_seconds_remaining=", 1)[1].split(";", 1)[0]
-    assert first_slot == "00060.0 (about 0001 minutes left, ~0001 turns at your pace)"
-    assert second_slot == "00120.0 (about 0002 minutes left, ~0003 turns at your pace)"
-    assert first_limits.replace(first_slot, second_slot, 1) == second_limits
-    assert first_frame.replace(first_limits, second_limits, 1) == second_frame
+    assert first_slot == second_slot == "limited (wall allowance 120s)"
+    assert first_limits == second_limits
+    assert first_frame == second_frame
 
-    expected_frame = first_frame.replace(
-        first_limits,
-        first_limits.replace(first_slot, countdown.CANONICAL_TIME_SLOT, 1),
-        1,
-    )
+    expected_frame = first_frame
     first_request = {"messages": [{"role": "user", "content": first_frame}], "tools": []}
     second_request = {"messages": [{"role": "user", "content": second_frame}], "tools": []}
     assert countdown.canonical_time_text(first_frame) == expected_frame
-    assert countdown.CANONICAL_TIME_SLOT in countdown.canonical_time_text(first_frame)
+    assert countdown.CANONICAL_TIME_SLOT not in countdown.canonical_time_text(first_frame)
     canonical_payload = json.loads(expected_frame.split("\n", 1)[1])
     assert (
         canonical_payload["state"]["framefit5"]["owner_protocol"]["continuation_limits"]
-        == first_limits.replace(first_slot, countdown.CANONICAL_TIME_SLOT, 1)
+        == first_limits
     )
     assert countdown.canonical_time_text(first_frame) == countdown.canonical_time_text(second_frame)
     assert countdown.canonical_countdown(first_request) == countdown.canonical_countdown(second_request)
@@ -206,6 +202,16 @@ def test_embedded_countdown_pair_exposes_old_line_start_regex_bug(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _, _, first_frame, second_frame = _limits_and_embedded_stateframes(monkeypatch)
+    first_frame = first_frame.replace(
+        "sandbox_seconds_remaining=limited (wall allowance 120s);",
+        "sandbox_seconds_remaining=00060.0 (about 0001 minutes left, ~0001 turns at your pace);",
+        1,
+    )
+    second_frame = second_frame.replace(
+        "sandbox_seconds_remaining=limited (wall allowance 120s);",
+        "sandbox_seconds_remaining=00120.0 (about 0002 minutes left, ~0003 turns at your pace);",
+        1,
+    )
     old_time_field = re.compile(
         r"(?m)^(\[CONTINUATION LIMITS \| stateframe-continuation-limits/1\][^\n]*?"
         r"sandbox_seconds_remaining=)[0-9][^;\n]*(;)"
@@ -217,7 +223,7 @@ def test_embedded_countdown_pair_exposes_old_line_start_regex_bug(
 
 
 def test_real_stateframe_framefit5_countdown_and_standalone_limits_are_canonicalized() -> None:
-    budget = ResponseBudget(limit=10)
+    budget = ResponseBudget(limit=10, sandbox_time_allowance_seconds=2412)
     budget._sandbox_seconds_remaining = lambda now=None: 2411.8
     limits = budget.render_continuation_limits()
     frame = stateframe_runtime._model_frame_facts({
@@ -232,15 +238,15 @@ def test_real_stateframe_framefit5_countdown_and_standalone_limits_are_canonical
 
     live_slots = re.findall(r"sandbox_seconds_remaining=([^;\n]+);", request_text)
     assert len(live_slots) == 2
-    assert all(slot.startswith("02411.8 ") for slot in live_slots)
+    assert live_slots == ["limited (wall allowance 2412s)"] * 2
     projected = countdown.canonical_countdown(request_text)
     assert isinstance(projected, str)
     projected_slots = re.findall(r"sandbox_seconds_remaining=([^;\n]+);", projected)
-    assert projected_slots == [countdown.CANONICAL_TIME_SLOT] * len(live_slots)
+    assert projected_slots == live_slots
 
 
 def test_hook_panel_prefix_normalizes_only_the_exact_pipe_space_form() -> None:
-    budget = ResponseBudget(limit=10)
+    budget = ResponseBudget(limit=10, sandbox_time_allowance_seconds=2412)
     budget._sandbox_seconds_remaining = lambda now=None: 2411.8
     limits = budget.render_continuation_limits()
     live_slot = limits.split("sandbox_seconds_remaining=", 1)[1].split(";", 1)[0]
@@ -249,11 +255,16 @@ def test_hook_panel_prefix_normalizes_only_the_exact_pipe_space_form() -> None:
     assert isinstance(normalized_panel_line, str)
     assert re.findall(
         r"sandbox_seconds_remaining=([^;\n]+);", normalized_panel_line,
-    ) == [countdown.CANONICAL_TIME_SLOT]
-    assert live_slot not in normalized_panel_line
-    assert normalized_panel_line == "| " + limits.replace(live_slot, countdown.CANONICAL_TIME_SLOT)
+    ) == ["limited (wall allowance 2412s)"]
+    assert live_slot in normalized_panel_line
+    assert normalized_panel_line == "| " + limits
+    legacy_slot = "02411.8 (about 0040 minutes left, ~---- turns at your pace)"
+    legacy_limits = limits.replace(live_slot, legacy_slot, 1)
+    legacy_panel = countdown.canonical_countdown(f"| {legacy_limits}")
+    assert isinstance(legacy_panel, str)
+    assert legacy_panel == "| " + legacy_limits.replace(legacy_slot, countdown.CANONICAL_TIME_SLOT, 1)
     for prefix in ("|| ", "x | "):
-        panel_line = prefix + limits
+        panel_line = prefix + legacy_limits
         assert countdown.canonical_countdown(panel_line) == panel_line
 
 
@@ -261,7 +272,7 @@ def test_embedded_countdown_token_cache_uses_canonical_projection(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     def render(seconds: float) -> tuple[str, str]:
-        budget = ResponseBudget(limit=10)
+        budget = ResponseBudget(limit=10, sandbox_time_allowance_seconds=2412)
         budget._sandbox_seconds_remaining = lambda now=None: seconds
         limits = budget.render_continuation_limits()
         frame = stateframe_runtime._model_frame_facts({
@@ -278,8 +289,9 @@ def test_embedded_countdown_token_cache_uses_canonical_projection(
     second_limits, second_frame = render(2300.0)
     first_slot = first_limits.split("sandbox_seconds_remaining=", 1)[1].split(";", 1)[0]
     second_slot = second_limits.split("sandbox_seconds_remaining=", 1)[1].split(";", 1)[0]
-    assert first_limits.replace(first_slot, second_slot, 1) == second_limits
-    assert first_frame.replace(first_limits, second_limits, 1) == second_frame
+    assert first_slot == second_slot == "limited (wall allowance 2412s)"
+    assert first_limits == second_limits
+    assert first_frame == second_frame
 
     def body(frame: str) -> dict[str, object]:
         return {"messages": [{"role": "user", "content": frame}], "tools": []}
@@ -292,7 +304,7 @@ def test_embedded_countdown_token_cache_uses_canonical_projection(
     assert changed_field_limits != second_limits
     changed_field_frame = second_frame.replace(second_limits, changed_field_limits, 1)
     changed_field_body = body(changed_field_frame)
-    assert first_body != second_body
+    assert first_body == second_body
     assert second_body != changed_field_body
 
     seen: list[str] = []
@@ -320,8 +332,18 @@ def test_embedded_countdown_token_cache_uses_canonical_projection(
         return [1] * len(content)
 
     old_meter = RequestTokenMeter(tokenizer=old_tokenizer)
-    assert old_meter.measure(first_body)[1] == "tokenize"
-    assert old_meter.measure(second_body)[1] == "tokenize"
+    legacy_first = first_frame.replace(
+        "sandbox_seconds_remaining=limited (wall allowance 2412s);",
+        "sandbox_seconds_remaining=02411.8 (about 0040 minutes left, ~---- turns at your pace);",
+        1,
+    )
+    legacy_second = second_frame.replace(
+        "sandbox_seconds_remaining=limited (wall allowance 2412s);",
+        "sandbox_seconds_remaining=02300.0 (about 0038 minutes left, ~---- turns at your pace);",
+        1,
+    )
+    assert old_meter.measure(body(legacy_first))[1] == "tokenize"
+    assert old_meter.measure(body(legacy_second))[1] == "tokenize"
     assert len(old_seen) == 2
     assert old_seen[0] != old_seen[1]
 
@@ -331,8 +353,9 @@ def test_exhausted_limits_keep_the_reserved_time_slot(
     monkeypatch: pytest.MonkeyPatch, ledger_type: type[ResponseBudget],
 ) -> None:
     monkeypatch.setattr(countdown.time, "monotonic", lambda: 1.0)
-    rendered = ledger_type(limit=0, sandbox_deadline_monotonic=0.0).render_continuation_limits()
-    assert f"sandbox_seconds_remaining={countdown.render_time_slot(object(), 0)};" in rendered
+    rendered = ledger_type(limit=0, sandbox_deadline_monotonic=0.0,
+                           sandbox_time_allowance_seconds=60).render_continuation_limits()
+    assert "sandbox_seconds_remaining=limited (wall allowance 60s);" in rendered
     assert "next_action_admission=denied" in rendered
 
 
@@ -342,7 +365,8 @@ def test_slow_clock_does_not_change_source_carrier_census_or_other_wire_bytes(
     path = "pkg/sample.py"
     source = "".join(f"def method_{line:02d}(): return {line}\n" for line in range(1, 64))
     full = f"[Current source: {path}]\n{source}"
-    budget = ResponseBudget(limit=10, mode="response", responses_used=1)
+    budget = ResponseBudget(limit=10, mode="response", responses_used=1,
+                            sandbox_time_allowance_seconds=600)
     budget._time_left_clock_start = 0.0
     budget._time_left_decisions_at_start = 0
     budget._sandbox_seconds_remaining = lambda now=None: 600.0
@@ -398,10 +422,10 @@ def test_slow_clock_does_not_change_source_carrier_census_or_other_wire_bytes(
     cap = counter(countdown.canonical_countdown({"messages": probe.messages, "tools": []}))
     first_limits, first_carrier, first_wire, first = render_and_fit(100.0, cap)
     second_limits, second_carrier, second_wire, second = render_and_fit(1.0, cap)
-    assert first_limits != second_limits
+    assert first_limits == second_limits
     assert [first.status, second.status] == ["fired", "fired"]
     assert first_carrier == second_carrier == full
-    assert countdown.canonical_countdown(json.loads(first_wire)) == countdown.canonical_countdown(json.loads(second_wire))
+    assert first_wire == second_wire
 
 
 def test_token_meter_counts_canonical_slot_without_changing_wire() -> None:
@@ -441,10 +465,10 @@ def test_wire_stability_moves_only_host_limits_and_preserves_source_text(header:
     assert countdown.canonical_countdown(source) == source
     source_body = {"messages": [{"role": "user", "content": source}]}
     assert countdown.canonical_countdown(source_body) is source_body
-    budget = ResponseBudget(limit=10)
+    budget = ResponseBudget(limit=10, sandbox_time_allowance_seconds=60)
     budget._sandbox_seconds_remaining = lambda now=None: 60.0
     limits = budget.render_continuation_limits()
-    assert "00060.0 (about 0001 minutes left" in limits
+    assert "sandbox_seconds_remaining=limited (wall allowance 60s);" in limits
     assert wire_stability._tail_category(limits) == "time"
     assert wire_stability._volatile_segments(limits) == [("limits", limits)]
     projected = wire_stability.project({"messages": [
