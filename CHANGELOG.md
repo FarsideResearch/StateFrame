@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.6.13 (2026-11-13)
 
 - The ideal-path final verification answer now asks for its evidence before the `outcome` choice (outcome is the last property and last required key).
 
