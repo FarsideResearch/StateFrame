@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.6.9 (2026-11-13)
 
 - Resuming a run that did not use stable wire no longer reports an unfaithful resume after a file was moved or deleted. Replay treated every recorded request as a stable-wire fallback, which skipped source-window ordering, so the first request built live after replay listed its source windows in a different order from the one that was in flight.
 
