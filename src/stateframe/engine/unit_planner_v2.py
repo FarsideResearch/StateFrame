@@ -878,7 +878,7 @@ def _bounded_plan_state(bolt, plan: UnitPlanV2) -> dict[str, object]:
             shown = _bounded(shown, len(shown) // 2, "…")
         return shown
 
-    def sample(values: Sequence[str]) -> dict[str, object]:
+    def head_preview(values: Sequence[str]) -> dict[str, object]:
         return {"sample": [label(value) for value in values[:4]], "count": len(values),
                 "digest": _digest(list(values)), "omitted": max(0, len(values) - 4)}
 
@@ -891,7 +891,7 @@ def _bounded_plan_state(bolt, plan: UnitPlanV2) -> dict[str, object]:
         "task_id": label(plan.task_id), "unit_index": pointer,
         "unit_count": len(plan.units), "coalesce_events": plan.coalesce_events,
         "lineage": list(plan.lineage[-4:]), "lineage_count": len(plan.lineage),
-        "passed_units": sample(passed), "recheck_units": sample(rechecks),
+        "passed_units": head_preview(passed), "recheck_units": head_preview(rechecks),
         "escalated_unit": label(escalated) if escalated else None,
         "escalated_unit_digest": _digest(escalated) if escalated else None,
         "authority": "current plan supersedes the initial task PLAN",
@@ -903,8 +903,8 @@ def _bounded_plan_state(bolt, plan: UnitPlanV2) -> dict[str, object]:
         state["units"] = [{
             "unit_id": label(unit.unit_id), "unit_digest": _digest(unit.to_dict()),
             "symbol": label(unit.symbol), "kind": unit.kind,
-            "files": sample(unit.files), "members": sample(unit.members),
-            "gate_tests": sample(unit.gate_tests), "depends_on": sample(unit.depends_on),
+            "files": head_preview(unit.files), "members": head_preview(unit.members),
+            "gate_tests": head_preview(unit.gate_tests), "depends_on": head_preview(unit.depends_on),
             "gate_attempts": unit.gate_attempts,
         }]
     return state

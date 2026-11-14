@@ -759,7 +759,7 @@
   "protected_tree_guard.py": "bd5bec6033b7f4e0bfaaf108e40a4686c36e0d5e5f4a9429aa33975c0af17846",
   "realtask_benchmark.py": "06f9c437a4f0258d4b0e40721bca9cd2ee13e7fac26bc4513b422ca8a5d3b5a9",
   "realtask_worker_receipts.py": "7f358362d2b839957f2541961ce11b6e65bcb26fa60e5f3d28de22144d47421f",
-  "release-manifest.json": "f20217855405aab06c4c9563379aff688c440e49231c0ed3ca2c41fadd7c6315",
+  "release-manifest.json": "04f3ca41627c92d9261981c3fc58eededd8b646426bb3ae218725fd71df0d6d6",
   "sampler_config.py": "1549b3a60e0ebc8fbbad8ed5256f52477cd1bb2491a8da350c64c01e01c81b2d",
   "sf_launch.py": "0e0d792f923a3cbcb68cd22cbb06c7f14dcfc470c8b7c24ed78eacd79990ea5c",
   "sf_mutate_boot.py": "a213bba08b5171f830ba8c1afbcfbcf66b7768ab15961e167a9bcba368d97786",
@@ -769,7 +769,7 @@
   "spec_exec.py": "0a80d5488bc812718b4608e086c12c1b8999604cd075f01217eb9bf172424768",
   "swarm/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
   "swarm/client2.py": "fa141060de5346b46678660fe770c8adcef6b30f579417a52c013d3219d08c70",
-  "switch-registry.json": "3996e44896ec8644f4c7010ef1d63ad4f88d263ad3648bcd62abd4251dcc6f53",
+  "switch-registry.json": "4b78851a8612138492b356e7f1c8521ee056d36bb91e5978aca9181147223477",
   "symbol_registry.py": "28986ae33ad691dd89c201130e1982334d56542c2e162d7fc9ff5b59073ea15f",
   "sys1/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
   "sys1/adapter.py": "633e61b3fcd43dc6a07d628a3c8eb4d4d1e54e53de078cbe9dd74ed677847ab1",
@@ -794,7 +794,7 @@
   "unit_coalesce_contract.py": "562dd9907180dda985d662b91d060018c0b2bb722cf4065f75cf120ffd2d90be",
   "unit_gate_evidence.py": "6eacbd95dd0118e69f6ed0da669491a47620c57e569129accda7db0b40e00fc7",
   "unit_planner.py": "cc5af7ac8d203c4810e2e70a19243a6262b3d9b339ab49ddc122d383490908b8",
-  "unit_planner_v2.py": "ce011772bd9adc74ef5415708ac39eafff471304dc0cdc885bf4e36c06d04cea",
+  "unit_planner_v2.py": "611541ac0c698efb1b492f99e84114274e37625611878981ca2890d3b1485b04",
   "witness_replay.py": "5c624603c177aeae0406754c42eb3f0040d0cc725b73dc4b49432df909186e56",
   "witness_runner.py": "6ff74a8c1a30783a77df3a7e794e5c861b2badfa2c07025bf674096467880f79"
  },
@@ -4731,7 +4731,7 @@
  "release_listed_but_absent_in_source": [],
  "release_manifest": "37f11a29d4ceccbc5ea3aa95d1e60249e41b93974fe1da74e347ccfad28f1374",
  "schema": "stateframe-engine-source/1",
- "shipped_hash": "49b8a2014ef9bf24cd3e110da3c27d00a50b2e0b1a597a1a430796c7b1ef4ac5",
+ "shipped_hash": "c8e21ba4983aa65a7d377f9e9351c2e0e38220b20efe85e7d4462557e08202f4",
  "source_hash": "1a75f27c6197deed9df5acd441902846aced5fd358729dab308577e184a077c4",
  "source_tree": "37f11a29d4ceccbc5ea3aa95d1e60249e41b93974fe1da74e347ccfad28f1374"
 }
