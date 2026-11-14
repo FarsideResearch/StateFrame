@@ -17739,6 +17739,10 @@ class StateFrameRuntime:
                          {key: value for key, value in observation.items() if key != "receipt_id"}
                           for observation in self.observations[-1:]]}
         environment_notice = getattr(self, "_evictfix_environment_notice_pending", None)
+        from unit_planner_v2 import unit_plan_state
+        current_plan = unit_plan_state(self.owner)
+        if current_plan is not None:
+            frame["unit_plan"] = current_plan
         if isinstance(environment_notice, str) and environment_notice:
             frame["environment_check_notice"] = (
                 f"Tests cannot run here: {environment_notice}. "

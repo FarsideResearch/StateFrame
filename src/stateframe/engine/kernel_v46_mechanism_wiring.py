@@ -1392,9 +1392,11 @@ def at_attempt_ceiling(runtime: object, terminal_result: Mapping[str, object]) -
         try:
             from kernel_escalation import build_escalation_packet
             attempt = _attempt_record(runtime, result)
+            coalesced = getattr(runtime, "_unit_coalesce_escalated", None)  # unit_coalesce: merged unit that gave up
             packet = build_escalation_packet(
                 (attempt,), attempt_ceiling=1,
                 task_id=str(getattr(getattr(runtime, "owner", None), "task_id", "task")),
+                dossier=f"unit_coalesce_escalated={coalesced}" if coalesced else None,
                 converged=False,
             )
             if packet is None:

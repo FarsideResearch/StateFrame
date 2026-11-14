@@ -1136,6 +1136,10 @@ def build_typed_state(
             messages, task_index, last_action_index),
         "open_work": open_work,
     }
+    from unit_planner_v2 import unit_plan_state
+    current_plan = unit_plan_state(owner)
+    if current_plan is not None:
+        state["unit_plan"] = current_plan
     from kernel_agent_tools import service as agent_tools_service
     host_tools = agent_tools_service()
     if host_tools is not None and host_tools.jobs.jobs:

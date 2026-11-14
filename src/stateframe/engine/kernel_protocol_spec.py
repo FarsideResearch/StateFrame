@@ -139,6 +139,12 @@ _SWITCH_REFS = (
         "MODE_ENV",
     ),
     SwitchRef(
+        "STATEFRAME_UNIT_COALESCE", "unit_coalesce", "mode",
+        ("off", "on"), "off",
+        "EXPERIMENTAL, default off: merge producer+consumer units after a cross-unit seam failure; pooled budget, escalate on repeat; requires UNIT_PLAN_V2",
+        "MODE_ENV",
+    ),
+    SwitchRef(
         "STATEFRAME_TERMINAL_LATTICE", "kernel_terminal_lattice", "enabled",
         ("off", "on"), "off",
         "monotone accepted, delivery, stop-reason, and artifact-digest terminal labels",

@@ -2038,3 +2038,37 @@ def test_bundled_example_planted_control_anchor_exists():
     """The planted control patches a real line; a moved line must fail loudly, not skip."""
     source = (ROOT / "src/stateframe/engine/kernel_wire_identity.py").read_text(encoding="utf-8")
     assert source.count(_PLANT_ANCHOR) == 1
+
+
+# Existing definitions that deliberately reuse a random API name; each was reviewed.
+RANDOM_NAME_SHADOW_ALLOWLIST = {
+    ("src/stateframe/_child.py", "uuid4"): "Locked wrapper that replaces uuid.uuid4 with the run-seeded generator.",
+    ("src/stateframe/engine/kernel_decision_api.py", "choice"): "Decision property returning the proposed option.",
+    ("src/stateframe/engine/kernel_tokenlab_cache_stable.py", "seed"): "Seeds the stable tool menu with initial schemas.",
+    ("src/stateframe/engine/sys1/labels.py", "token_bytes"): "Returns the label to token-bytes mapping.",
+}
+
+
+def test_request_path_functions_do_not_shadow_random_api_names():
+    # A new helper named like a random API (e.g. `sample`) is scanned as randomness;
+    # it must be renamed, never allowlisted as a reviewed random call.
+    shadowing = sorted(
+        (relative, node.name, node.lineno)
+        for relative in REQUEST_PATH_MODULES
+        for node in ast.walk(ast.parse((ROOT / relative).read_text(encoding="utf-8"), filename=relative))
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and _is_random_call(node.name)
+        and (relative, node.name) not in RANDOM_NAME_SHADOW_ALLOWLIST
+    )
+    assert shadowing == [], f"rename helpers that shadow random API names: {shadowing}"
+
+
+def test_random_name_shadow_allowlist_has_no_stale_rows():
+    defined = {
+        (relative, node.name)
+        for relative in REQUEST_PATH_MODULES
+        for node in ast.walk(ast.parse((ROOT / relative).read_text(encoding="utf-8"), filename=relative))
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+    assert set(RANDOM_NAME_SHADOW_ALLOWLIST) <= defined
+    assert all(reason.strip() for reason in RANDOM_NAME_SHADOW_ALLOWLIST.values())

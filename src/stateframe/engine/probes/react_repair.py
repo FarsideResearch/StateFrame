@@ -31,6 +31,7 @@ from types import SimpleNamespace
 from typing import Callable
 
 from kernel_shell_tool import SHELL_SCHEMA
+from unit_planner_v2 import capture_incomplete_gate_observation
 
 if __package__:
     from .decoy_tools import (
@@ -4985,6 +4986,7 @@ def _host_refusal_observation(runtime, refusal: "_HostExecutionRefused", *, sele
     return text
 
 
+@capture_incomplete_gate_observation
 def _run_tests_impl(root: pathlib.Path, fn: str, explicit: str | None,
                     rel_hint: str | None = None, row=None) -> str:
     """rel_hint is the file under repair — used to tell OUR import failures from the agent's."""
@@ -5168,6 +5170,8 @@ def _run_tests_impl(root: pathlib.Path, fn: str, explicit: str | None,
         _cmd = ([executable, "-m", "pytest", "-x", "-q", "--no-header"]
                 + (["-k", kexpr] if kexpr else []) + ["-p", "no:cacheprovider"]
                 + _nearest_pytest_config_args(root, targets))
+        from unit_planner_v2 import coalesce_pytest_command
+        _cmd = coalesce_pytest_command(_cmd)
         from kernel_step_contract import enabled as contract_enabled
         if isinstance(row, dict) and row.get('_skip_db') and (
                 contract_enabled() or os.environ.get("STATEFRAME_ACTION_SCHEMA", "off") == "on"):
@@ -5179,6 +5183,7 @@ def _run_tests_impl(root: pathlib.Path, fn: str, explicit: str | None,
             changed_write_set, prepare_pytest_command, snapshot_workspace,
         )
         _cmd, env, _test_artifact_policy = prepare_pytest_command(_cmd, root, environment=env)
+        _unit_collection_base = list(_cmd)
         _profiled_command = False
         if _profile:
             try:
@@ -5257,7 +5262,7 @@ def _run_tests_impl(root: pathlib.Path, fn: str, explicit: str | None,
                 )
             return rendered + "\n" + compact_observation(shadow_receipt)
 
-        def _run_check(command):
+        def _run_check(command, *, check_env=None):
             nonlocal _check_output_truncated, _check_memory_limit_mechanism
             nonlocal _check_cgroup_leaf_pattern
             nonlocal _check_memory_limit_killed
@@ -5279,7 +5284,7 @@ def _run_tests_impl(root: pathlib.Path, fn: str, explicit: str | None,
                 result = run_sandboxed(
                     command,
                     root,
-                    env=env,
+                    env=env if check_env is None else check_env,
                     timeout=300,
                     cpu_seconds=check_cpu_backstop_seconds(),
                     output_limit=256 * 1024,
@@ -5326,6 +5331,41 @@ def _run_tests_impl(root: pathlib.Path, fn: str, explicit: str | None,
                 raise _HostExecutionRefused(RuntimeError(denial))
             return result.completed
 
+        def _collect_unit_inventory(command):
+            # Collection may inspect more modules than the requested selector.
+            # Its timeout/refusal is evidence debt, never that selector's result.
+            collection_env = {k: v for k, v in env.items() if k != "PYTEST_ADDOPTS"}
+            try:
+                collected_result, collected_shadow = _effect_test_subprocess(
+                    command, root=root, targets=targets, env=collection_env,
+                    runner=lambda cmd: _run_check(cmd, check_env=collection_env))
+            except (subprocess.TimeoutExpired, _HostExecutionRefused) as collection_error:
+                reason = type(collection_error).__name__
+            else:
+                from unit_gate_evidence import collected_nodes
+                if collected_shadow is None:
+                    nodes = collected_nodes(
+                        collected_result.stdout, collected_result.returncode, _check_output_truncated)
+                    if nodes is not None:
+                        return nodes
+                    reason = f"exit={collected_result.returncode} truncated={_check_output_truncated}"
+                else:
+                    reason = "not_executed"
+            import logging
+            logging.getLogger(__name__).warning("unit_gate_collection_error: %s", reason)
+            owner = getattr(_runtime, "owner", None)
+            if owner is not None:
+                owner._rec("unit_plan", "unit_gate_collection_error", reason)
+            return None
+
+        _unit_collected = None
+        _unit_source_digest = ""
+        from unit_planner_v2 import coalesce_collection
+        _unit_collection = coalesce_collection(root, _unit_collection_base, targets, _runtime)
+        if _unit_collection is not None:
+            _collection_command, _unit_source_digest = _unit_collection
+            charge("tool_work", "unit gate collection subprocess")
+            _unit_collected = _collect_unit_inventory(_collection_command)
         _check_output_truncated = None
         p, _shadow = _effect_test_subprocess(
             _compose_test_command(_cmd, targets), root=root, targets=targets, env=env,
@@ -5336,6 +5376,11 @@ def _run_tests_impl(root: pathlib.Path, fn: str, explicit: str | None,
                          for t in targets)
         if (p.returncode == 4 and _is_oracle
                 and "ImportError while loading conftest" in (p.stdout + p.stderr)):
+            if _unit_collection is not None:
+                # The inventory must use the same conftest fallback as execution.
+                charge("tool_work", "unit gate collection conftest retry")
+                _unit_collected = None
+                _unit_collected = _collect_unit_inventory((*_collection_command, "--noconftest"))
             charge("tool_work", "test subprocess conftest retry")
             _check_output_truncated = None
             p, _shadow = _effect_test_subprocess(
@@ -5344,10 +5389,12 @@ def _run_tests_impl(root: pathlib.Path, fn: str, explicit: str | None,
             if _shadow is not None:
                 return _shadow_observation(_shadow)
     except _HostExecutionRefused as host_refusal:
-        return _host_refusal_observation(
+        _refused_result = _host_refusal_observation(
             _runtime, host_refusal,
             selector=explicit or ", ".join(str(target) for target in targets),
             binding=_test_binding, execution_id=_execution_id)
+        from unit_planner_v2 import coalesce_observation
+        return coalesce_observation(_refused_result, "", None, complete=False)
     except subprocess.TimeoutExpired as timeout_error:
         try:
             timeout_s = float(getattr(timeout_error, "timeout", 300) or 300)
@@ -5399,10 +5446,14 @@ def _run_tests_impl(root: pathlib.Path, fn: str, explicit: str | None,
                     memory_limit_mechanism=_check_memory_limit_mechanism,
                     cgroup_leaf_pattern=_check_cgroup_leaf_pattern,
                 )
-            return timeout_context + "\n" + compact_observation(timeout_receipt)
-        return timeout_context + (
+            from unit_planner_v2 import coalesce_observation
+            return coalesce_observation(timeout_context + "\n" + compact_observation(timeout_receipt),
+                                        _timeout_stream(timeout_error.output), 124, complete=False)
+        from unit_planner_v2 import coalesce_observation
+        return coalesce_observation(timeout_context + (
             " Preserve the partial output, keep completion unresolved, and use an offered "
-            "diagnostic or verification action before attributing a product defect.")
+            "diagnostic or verification action before attributing a product defect."),
+            _timeout_stream(timeout_error.output), 124, complete=False)
     if _runtime is not None:
         from kernel_public_evidence import check_selectors
         _test_observation = check_selectors(root, list(targets), kexpr)
@@ -5575,7 +5626,9 @@ def _run_tests_impl(root: pathlib.Path, fn: str, explicit: str | None,
         from kernel_first_green_disclosure import decorate_test_result
         with _profile_phase("final_result_enrichment"):
             result = decorate_test_result(_runtime, result)
-    return result
+    from unit_planner_v2 import coalesce_observation
+    return coalesce_observation(result, p.stdout, p.returncode, complete=not _check_output_truncated,
+                                collected=_unit_collected, source_digest=_unit_source_digest)
 
 
 def _run_covers_declared_selectors(runtime: object, row: object, targets: Sequence[object]) -> bool:
@@ -5681,39 +5734,45 @@ def _render_scoped_delivery(observation: str, truth_line: str) -> str:
 def run_tests_for_selectors(root: pathlib.Path, fn: str, selectors: Sequence[str],
                             rel_hint: str | None = None, row=None) -> tuple[str, tuple[int, ...]]:
     """Run every logical oracle selector while preserving the legacy run_tests API."""
+    from unit_planner_v2 import coalesce_combined_observation, coalesce_observation
     if isinstance(row, Mapping) and row.get("runner_kind") == "generic":
         from kernel_generic_check import check_result
         observation, code = check_result(root, row)
-        return observation, (code,)
+        return coalesce_observation(observation, "", code, complete=False), (code,)
     observations: list[str] = []
+    gate_observations: list[str] = []
     codes: list[int] = []
     for selector in selectors:
         observation = run_tests(root, fn, selector, rel_hint, row=row)
         code = _selector_exit_code(observation)
         observations.append(f"[{selector}]\n{observation}")
+        gate_observations.append(observation)
         codes.append(code if code is not None else -1)
     if not codes:
-        return "no multi-file selectors supplied", ()
+        return coalesce_observation("no multi-file selectors supplied", "", None, complete=False), ()
     refused = [obs for obs in observations if obs.split("\n", 1)[-1].startswith(HOST_REFUSED_PREFIX)]
     if refused:
         # No aggregate exit: a refused selector never ran, so no verdict exists.
-        return (refused[0].split("\n", 1)[-1].splitlines()[0] + "\n" +
-                "\n\n".join(observations)), tuple(codes)
+        combined = (refused[0].split("\n", 1)[-1].splitlines()[0] + "\n" +
+                    "\n\n".join(observations))
+        return coalesce_combined_observation(combined, gate_observations), tuple(codes)
     predispatch_refused = [obs for obs in observations if obs.split("\n", 1)[-1].startswith(
         "[selector] REFUSED_PREDISPATCH")]
     if predispatch_refused:
         # Keep the typed refusal at the top so the receipt producer does not
         # mistake an unrun selector for an unstructured test result.
-        return (predispatch_refused[0].split("\n", 1)[-1].splitlines()[0] + "\n" +
-                "\n\n".join(observations)), tuple(codes)
+        combined = (predispatch_refused[0].split("\n", 1)[-1].splitlines()[0] + "\n" +
+                    "\n\n".join(observations))
+        return coalesce_combined_observation(combined, gate_observations), tuple(codes)
     if all(code == 0 for code in codes):
         aggregate = 0
     elif any(code == 1 for code in codes):
         aggregate = 1
     else:
         aggregate = next(code for code in codes if code != 0)
-    return (f"pytest exit {aggregate} — multi-selector oracle ({len(codes)} selectors)\n" +
-            "\n\n".join(observations)), tuple(codes)
+    combined = (f"pytest exit {aggregate} — multi-selector oracle ({len(codes)} selectors)\n" +
+                "\n\n".join(observations))
+    return coalesce_combined_observation(combined, gate_observations), tuple(codes)
 
 
 def _fork_a_revalidate_candidate(workspace: pathlib.Path, fn: str,
@@ -7161,7 +7220,7 @@ def work(d, *, resume=None):
         # the handoff rule welded into the brief; single-unit tasks emit nothing (E394).
         if d.get("repo") == "build":
             try:
-                from unit_planner import derive_unit_plan, render_plan_block, joint_handoffs_enabled
+                from unit_planner import derive_unit_plan, joint_handoffs_enabled
                 _uplan = None
                 from unit_planner_v2 import derive_with_index as _plan_v2
                 _uplan = _plan_v2(d, root)       # None unless STATEFRAME_UNIT_PLAN_V2=on + index
@@ -7169,16 +7228,9 @@ def work(d, *, resume=None):
                     bolt.unit_plan_v2_on = True
                 else:
                     _uplan = derive_unit_plan(d, joint_handoffs=joint_handoffs_enabled())
-                bolt.unit_plan = _uplan
-                if len(getattr(_uplan, "units", ())) > 1:
-                    _pblock = bolt.organ_out("unit_plan", render_plan_block(_uplan))
-                    if _pblock:
-                        if len(msgs) > 1 and msgs[1].get("role") == "user":
-                            msgs[1]["content"] = str(msgs[1]["content"]) + "\n\n" + _pblock
-                        else:
-                            msgs.append({"role": "user", "content": _pblock})
-                        bolt._rec("unit_plan", "plan_welded",
-                                  f"units={len(_uplan.units)}")
+                from unit_planner_v2 import install_unit_plan, weld_initial_plan
+                _uplan = install_unit_plan(bolt, _uplan, root)
+                weld_initial_plan(bolt, msgs)
             except Exception as _e:                                  # noqa: BLE001
                 bolt.unit_plan = None
                 print(f"    [stateframe] unit planner OFF: {type(_e).__name__}: {_e}")
@@ -8292,6 +8344,10 @@ def work(d, *, resume=None):
                 break
             if native_batch is not None:
                 native_batch.append_unexecuted_tool_results(msgs)
+            from unit_planner_v2 import consume_coalesce_escalation
+            if consume_coalesce_escalation(bolt):
+                finish_native_batch_transcript(msgs)
+                break
             if _edit_nturn_request_active:
                 _finish_edit_nturn()
             _edit_nturn_request_active = False
@@ -8433,8 +8489,8 @@ def work(d, *, resume=None):
                     if getattr(bolt, "unit_plan", None) is not None and \
                             len(getattr(bolt.unit_plan, "units", ())) > 1:
                         try:
-                            from unit_planner import render_current_unit_line
-                            _up_line = "\n" + render_current_unit_line(bolt.unit_plan, getattr(bolt, "unit_index", 0))
+                            from unit_planner_v2 import render_unit_progress
+                            _up_line = "\n" + render_unit_progress(bolt)
                         except Exception:                            # noqa: BLE001
                             _up_line = ""
                     _wk_digest = ""
@@ -12819,6 +12875,7 @@ def work(d, *, resume=None):
                 else:
                     obs = run_tests(root, fn, rest or None, d["rel"], row=d)
                     _test_codes = None
+                _unit_gate_observation = obs  # retain host-only raw evidence through string decoration
                 plain_observation = obs
                 if os.environ.get("STATEFRAME_EMPIRICAL_FIXES", "off") == "on":
                     from kernel_empirical_fixes import flag_brief_traceback_lines
@@ -12870,8 +12927,9 @@ def work(d, *, resume=None):
                     )
                 if getattr(bolt, "unit_plan_v2_on", False) and bolt.last_test_exit is not None:
                     # unit gate: tests + seam check; the unit pointer advances only on pass
-                    from unit_planner_v2 import gate_and_advance
-                    gate_and_advance(bolt, root, plain_observation)
+                    from unit_planner_v2 import gate_and_advance, refresh_coalesced_plan
+                    gate_and_advance(bolt, root, plain_observation, evidence=_unit_gate_observation)
+                    refresh_coalesced_plan(bolt, msgs)
                 _sig = None
                 if bolt.last_test_exit == 1:
                     try:
@@ -13703,6 +13761,8 @@ def work(d, *, resume=None):
                     delivered_obs = delivered_obs[:-len("\n" + _scope_line)]
                 else:
                     _scope_line = None
+                from unit_planner_v2 import coalesce_notice_observation
+                delivered_obs = coalesce_notice_observation(bolt, delivered_obs)
                 if has_framefit5_state(msgs):
                     from kernel_frame_tool_result_budget import bound_frame_tool_result
                     delivered_obs = bound_frame_tool_result(
@@ -13819,6 +13879,10 @@ def work(d, *, resume=None):
                     outcome=_hook_outcome)
             _pending_hook_action = None
         _finish_edit_nturn()
+        # The last permitted step may have escalated without a next iteration.
+        from unit_planner_v2 import consume_coalesce_escalation
+        if consume_coalesce_escalation(bolt):
+            finish_native_batch_transcript(msgs)
         if (_budget_mode == "response" and _budget.tool_call_cap is not None
                 and _budget.tool_calls_used >= _budget.tool_call_cap
                 and measurement.system_outcome is None

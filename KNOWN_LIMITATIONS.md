@@ -1,5 +1,65 @@
 # Known limitations
 
+## Opt-in unit coalescing: evidence and escalation
+
+`STATEFRAME_UNIT_COALESCE` is **EXPERIMENTAL** and **off by default**. It requires
+`STATEFRAME_UNIT_PLAN_V2=on` and must not be enabled by default until a live A/B
+proves it.
+
+With `STATEFRAME_UNIT_COALESCE=on`, gates read raw pytest stdout through a
+host-only return channel captured before receipt compaction. The model still
+receives the compact receipt. The opt-in host command requests named verbose
+outcomes and retains fail-fast (`-x`), so a failing suite keeps its existing time
+budget and first-failure scope. Multi-selector runs retain evidence from each
+child; timeout, refusal and truncated captures cannot borrow another child's pass.
+A separate sandboxed, effect-taped collection pass expands selectors to whole
+files and removes selection filters. Full node IDs distinguish parameter cases,
+classes and duplicate names across gate test files. Collection is bounded to 400
+test files, 20,000 node IDs and 256 MiB of source identity (16 MiB per file).
+Missing or failed collection cannot certify successful verification.
+Pass freshness also covers unowned Python modules and non-Python workspace inputs,
+within a 20,000-entry source bound. Only version-control/test caches, the running
+host virtualenv and host-identified journal artifacts are excluded. Directory
+names such as `env`, `node_modules` and `.stateframe` alone do not exclude inputs.
+
+Only `PASSED` satisfies a gate. Named `SKIPPED`, `XFAIL`, `XPASS` (including
+non-strict unexpected passes), `DESELECTED`, `FAILED` and `ERROR` are observed
+failures. A gate cannot claim successful verification from an expected failure or
+an unexecuted test. Pytest normally reports deselections only as a count, without
+names: missing gate names produce `unit_gate_unobserved` with a deselection or
+partial-run reason. Incomplete runs never advance the pointer. A confirmed gate
+failure can consume an edited repair even when fail-fast leaves other cases
+unrun; a partial green cannot. Selector results accumulate only for the same
+source and collection identities. Run the missing selectors to complete a gate.
+Failures count only after the indexed source tree changes, with plan installation
+seeding the baseline. Merged units pool remaining attempts with a minimum allowance
+of two edited repairs; testing an unchanged tree after merging consumes none.
+
+Merge and escalation notices use organ-approved messages; they never rewrite
+the initial task or cached PLAN prefix. Quiet/shadow organs record
+`unit_plan_refresh_skipped` when delivery is suppressed. Restored coalesced plans
+retain their lineage and notices; setup does not reinstall a stale ancestor or
+re-weld a plan already present in the resumed transcript. Replay reconstructs the
+same gates from taped raw subprocess results, including their compact receipts.
+During native tool batches, notices travel inside the corresponding test result.
+The current plan, digest, lineage, gate progress and escalation are regenerated
+from restored host state in every typed frame, including a single merged unit.
+Provider changes and fresh failures revoke dependent cached passes.
+Incomplete negative evidence also invalidates accumulated positive node results.
+Pre-fix checkpoint caches must requalify under the revised input identity.
+Large plans project bounded current-unit/progress facts and their digest; the full
+plan remains in host state and checkpoints.
+
+Escalation holds the unit pointer and delivers a code-owned notice when
+the organ permits it. The main loop closes the current native exchange, then
+stops with `UNIT_COALESCE_ESCALATED` before another model request or tool retry.
+The former **escalated but kept retrying** gap is closed even for quiet organs.
+The runtime dossier reaches the attempt-ceiling escalation packet
+only when the profile enables `kernel_v46_mechanism_wiring.enabled("escalation")`;
+the `unit_coalesce_escalate` event remains available independently. This switch
+remains off by default. Advisory helpers fail open on `Exception`, journal/log the
+reason, and preserve completed gate advances; process-control exceptions propagate.
+
 ## Line endings in files the model did not edit (fix in progress)
 
 When a run edits files in place, text files in the edit scope that the model did not change can still be rewritten: Windows (CRLF) line endings, old Mac (CR-only) line endings, mixed line endings and a leading byte-order mark can come back changed. The same changes appear in exported patches, so applying a patch with `git am` carries them too. Files with plain LF line endings and no byte-order mark are not affected.
