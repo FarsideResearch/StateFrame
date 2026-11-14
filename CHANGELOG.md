@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Removed private provenance from source comments and regression test names and values.
 - Removed private provenance from source comments and regression tests, and made the Node memory-limit test find Node on PATH instead of using a personal installation path.
 ## 0.6.31 (2026-11-14)
 
