@@ -6,6 +6,7 @@ from dataclasses import asdict, replace
 import hashlib
 import json
 
+from kernel_reason_log import emit_refusal
 from kernel_request_seal import RequestSealError
 from kernel_working_set_cache import transaction
 
@@ -13,6 +14,8 @@ from kernel_working_set_cache import transaction
 def assert_certified_body(body, prepared) -> None:
     """Reject even equal-length validator rewrites before publishing authority."""
     if json.dumps(body).encode() != prepared.wire:
+        emit_refusal("working_set_live", what="certified working-set body refused",
+                     why="validator changed certified body", journal=False)
         raise RequestSealError("validator changed certified working-set body")
     from kernel_working_set_proof import verify_certificate
     verify_certificate(prepared.wire, prepared.rendered.certificate)
@@ -182,6 +185,8 @@ def prepare_live(capture, runtime, body, *, dialect, reasoning_mode):
     if isinstance(snapshot, SnapshotFailure) or snapshot is None:
         # Persist an orderly, resumable stop before publishing any request.
         _snapshot_failed(runtime, snapshot, request_id=capture.request_id)
+        emit_refusal("working_set_live", what="working-set snapshot refused",
+                     why="snapshot unavailable before publish", journal=False)
         raise RequestSealError("working-set snapshot: " + getattr(snapshot, "reason", "missing"))
     ceiling = getattr(runtime, "frame_ceiling", None)
     from kernel_cache_layout_candidate import final_layout_mode
@@ -248,6 +253,8 @@ def prepare_live(capture, runtime, body, *, dialect, reasoning_mode):
             _blocked(runtime, snapshot, prepared)
         body, closure, sources, receipt = qualify(prepared)
     if not source_delivery_satisfied(receipt):
+        emit_refusal("working_set_live", what="working-set closure proof refused",
+                     why="closure proof failed: " + str(receipt.get("status")), journal=False)
         raise RequestSealError(("cache_layout_refused: " if retried_plain else "") +
                                "certified working-set failed closure proof: " +
                                str(receipt.get("status")) + ":" + ",".join(proof_failures(receipt)))

@@ -124,6 +124,7 @@ REQUEST_PATH_MODULES = (
     "kernel_agent_schemas", "kernel_request_seal", "kernel_request_reprepare",
     "kernel_stateframe_frame_append", "kernel_stateframe_page_log", "kernel_stateframe_tool_stable",
     "kernel_stateframe_runtime", "kernel_measurement", "kernel_context_capacity",
+    "kernel_working_set_live",
 )
 EMITTERS_WITH_JOURNAL = {"emit_reason", "emit_refusal", "emit_timeout"}
 
