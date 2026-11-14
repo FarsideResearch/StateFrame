@@ -1,6 +1,8 @@
 # Changelog
 
-## Unreleased
+## 0.6.28 (2026-11-14)
+
+- Tests: the private-fields wire-identity test covers the kill-attribution fields and its process double matches the current status reads.
 
 ## 0.6.27 (2026-11-14)
 
