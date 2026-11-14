@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 from tools.pinned_tree import pinned_tree
+from _stateframe_home import isolated_stateframe_home
 
 
 def _provider_hashes(tree, work):
@@ -26,6 +27,7 @@ with pytest.MonkeyPatch.context() as patch:
     work.mkdir(parents=True, exist_ok=True)
     destination = work / "hashes.json"
     env = {key: value for key, value in os.environ.items() if not key.startswith("STATEFRAME_")}
+    env["STATEFRAME_HOME"] = isolated_stateframe_home()
     env["PYTHONPATH"] = os.pathsep.join(str(tree / path) for path in
         ("src", "src/stateframe/engine", "tests"))
     result = subprocess.run([sys.executable, "-c", driver, str(work / "run"), str(destination)],
