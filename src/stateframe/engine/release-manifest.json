@@ -730,6 +730,7 @@
   "kernel_working_backwards.py": "8e5589d7a5734e99bf5afe778f332e6c84f458f94cc788107e56e3fec9842185",
   "kernel_working_notebook.py": "bdc1dc14aa70548adc58dc0617c6a8f367c75137bc7001e9252cd13224ade422",
   "kernel_working_notes_restart.py": "7b10dab29975a6da5892e4c9c0a32a550c695a2facaae61cb95eb2ebc6d8129a",
+  "kernel_working_set_allocator.py": "7822ee9dd27e050406320864814778f717d9c8d4c95205f0e11de213bb8f1756",
   "kernel_working_set_state.py": "1a4f9595f1e5c713f4a03620083dfc028c5057b02684bfd0a9cbc7a93f67e96b",
   "kernel_working_set_stop.py": "afbf181f50689a213197d5230b61e0218cca6c98e16c4e7c190eb40de3fbd401",
   "kernel_working_sets.py": "06b4e264eb3186239cce6ade731f173baa431f642eb6eb3196d219af188b66f6",

@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Added the pure working-set allocator core (kernel_working_set_allocator): floor-first FLOOR_INFEASIBLE, greedy lexicographic domain restriction, and the A1b read-admission arithmetic. Not wired into any request path. Fresh slots are FIFO (G1, A1 batch order); carried slots never promote above their previous mode, before or after the prefix break; admit_read_lines gives whole-line admission so a shorter page ends on a valid cursor.
 - Added opt-in read captures and read attempt/result audit events for source pages, shell reads, grep and check output, with typed outcomes and non-fatal capture failures, without changing read selection or request content.
 - Working-set allocator item 2 (opt-in, shadow): journaled read obligation lifecycle rebuilt on continuation restart (post-checkpoint captures, INTERRUPTED trailing reads), plus typed resumable BLOCKED suspension plumbing (runtime_outcome suspended, exit 1); OFF behaviour unchanged.
 
