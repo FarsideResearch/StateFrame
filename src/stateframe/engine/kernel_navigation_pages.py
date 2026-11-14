@@ -247,6 +247,17 @@ def search_repository(root: Path, pattern: str, scope: object = None, *,
         metadata.update({"scan_complete": unreadable_files == 0,
                          "unreadable_files": unreadable_files,
                          "non_text_files": non_text_files})
+    if not rows:
+        # Search evidence is limited to this query and scope. In particular,
+        # literal alternation-looking text says nothing about either symbol.
+        summary = (f"No hits for {normalized_mode} search: pattern={query!r} "
+                   f"scope={metadata['scope']!r}")
+        if file_glob:
+            summary += f" file_glob={file_glob!r}"
+        summary += "."
+        if normalized_mode == "literal" and "|" in query:
+            summary += " The '|' character was matched literally."
+        rendered.append(summary)
     from kernel_owner_first import coordinates_enabled
     if coordinates_enabled():
         metadata["result"] = (
@@ -263,46 +274,50 @@ def search_repository(root: Path, pattern: str, scope: object = None, *,
 def render_grep_result(
         page: NavigationPage, *, symbol: str | None = None,
         symbol_result: str | None = None,
+        symbol_definitions: Sequence[Mapping[str, object]] | None = None,
         workspace_root: str | Path | None = None,
         revision: str | None = None, journal: object = None) -> str:
-    """Render live literal-search and symbol-index evidence with distinct provenance."""
+    """Append positive, located evidence; legacy symbol_result text is not proof."""
     from kernel_owner_first import coordinates_enabled
     if not symbol:
         return page.text
     if _workspace_truth.enabled():
         pattern = page.metadata.get("pattern")
-        if page.metadata.get("mode") == "literal" and pattern == symbol:
+        if (page.metadata.get("mode") == "literal" and pattern == symbol
+                and page.metadata.get("total", 0) > 0):
             fact = _workspace_truth.literal_matches(
                 workspace_root, symbol, scope=str(page.metadata.get("scope") or "."),
                 revision=revision, journal=journal,
             )
-            return (f"{page.text}\n[repository literal search | "
-                    f"query_mode=literal source=live_workspace]\n"
-                    f"{_workspace_truth.render_fact(fact)}")
+            if fact.exists is True and fact.status == "matches" and fact.matches:
+                return (f"{page.text}\n[repository literal search | "
+                        f"query_mode=literal source=live_workspace]\n"
+                        f"{_workspace_truth.render_fact(fact)}")
         fact = _workspace_truth.symbol_defined(
             workspace_root, symbol, revision=revision, journal=journal,
         )
-        answer = _workspace_truth.render_fact(fact)
-        if fact.status == "indexed":
-            status = "EXISTS"
-        elif fact.status == "no_symbol_index_entry":
-            status = "NO_SYMBOL_INDEX_ENTRY"
-        else:
-            status = "UNKNOWN"
-    else:
-        if not coordinates_enabled() or not symbol_result:
+        if not (fact.exists is True and fact.status == "indexed" and fact.definitions):
             return page.text
-        answer = str(symbol_result)
-        if answer.startswith(f"`{symbol}` EXISTS ("):
-            status = "EXISTS"
-        elif answer.startswith(f"`{symbol}`{_workspace_truth.LEGACY_SYMBOL_ABSENCE_PREFIX}"):
-            status = "DOES_NOT_EXIST"
-        elif answer.startswith(f"No symbol index entry for `{symbol}`"):
-            status = "NO_SYMBOL_INDEX_ENTRY"
-        else:
-            status = "UNKNOWN"
+        answer = _workspace_truth.render_fact(fact)
+    else:
+        if not coordinates_enabled():
+            return page.text
+        if symbol_definitions is None:
+            # Older callers supply only rendered text. Verify against the live
+            # index instead of interpreting prose as presence/absence evidence.
+            fact = _workspace_truth.symbol_defined(
+                workspace_root, symbol, revision=revision, journal=journal,
+            )
+            if not (fact.exists is True and fact.status == "indexed" and fact.definitions):
+                return page.text
+            symbol_definitions = fact.definitions
+        if not symbol_definitions:
+            return page.text
+        answer = _workspace_truth.render_legacy_symbol_answer(
+            symbol, symbol_definitions, (), 0, 0, 0,
+        )
     return (f"{page.text}\n[repository symbol lookup | source=symbol_registry "
-            f"query_mode=identifier status={status} symbol=`{symbol}`]\n{answer}")
+            f"query_mode=identifier status=EXISTS symbol=`{symbol}`]\n{answer}")
 
 
 def directory_page(directory: Path, display: str, *, cursor: object = None,

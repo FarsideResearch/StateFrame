@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Fixed: grep no longer claims a symbol is absent after a search with no hits, while retaining positive definition locations. Empty results identify the pattern, scope and search mode, including when `|` was matched literally; regex searches keep matching alternatives by default.
+
 ## 0.6.32 (2026-11-14)
 
 - Tests: the shipped-main allowlist covers the mutation boot and fetch entry points.
