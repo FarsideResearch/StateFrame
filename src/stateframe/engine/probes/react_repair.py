@@ -5646,8 +5646,9 @@ def _run_covers_declared_selectors(runtime: object, row: object, targets: Sequen
         if isinstance(row, Mapping) and row.get("runner_kind") == "generic":
             return True
         return scoped_check_complete(declared, [str(t) for t in targets])
-    except Exception:                                                # noqa: BLE001
-        return True
+    except Exception as error:  # noqa: BLE001 - keep the test result, withhold the completion hint
+        logger.warning("Declared selector coverage unavailable: %s", type(error).__name__)
+        return False
 
 
 def run_tests(root: pathlib.Path, fn: str, explicit: str | None,

@@ -47,6 +47,37 @@ def _bolt(tmp_path: pathlib.Path, declared=DECLARED) -> KernelBolt:
     return bolt
 
 
+@pytest.mark.parametrize("failure_site", ["selector_getter", "coverage_check"])
+def test_coverage_projection_failure_withholds_hint_and_reports_type(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, failure_site: str,
+) -> None:
+    import kernel_public_evidence
+    from probes.react_repair import _run_covers_declared_selectors
+
+    def broken(*_args: object) -> list[str]:
+        raise RuntimeError("private selector details")
+
+    runtime = SimpleNamespace(required_public_selectors=lambda: list(DECLARED))
+    if failure_site == "selector_getter":
+        runtime.required_public_selectors = broken
+    else:
+        monkeypatch.setattr(kernel_public_evidence, "scoped_check_complete", broken)
+
+    with caplog.at_level("WARNING", logger="probes.react_repair"):
+        assert _run_covers_declared_selectors(runtime, {}, DECLARED) is False
+    assert caplog.messages == ["Declared selector coverage unavailable: RuntimeError"]
+    assert "private selector details" not in caplog.text
+
+
+def test_coverage_projection_preserves_complete_partial_and_generic_results() -> None:
+    from probes.react_repair import _run_covers_declared_selectors
+
+    runtime = SimpleNamespace(required_public_selectors=lambda: list(DECLARED))
+    assert _run_covers_declared_selectors(runtime, {}, DECLARED) is True
+    assert _run_covers_declared_selectors(runtime, {}, DECLARED[:1]) is False
+    assert _run_covers_declared_selectors(runtime, {"runner_kind": "generic"}, ()) is True
+
+
 # --- shared definition ------------------------------------------------------------------
 
 def test_every_proper_subset_is_rendered_as_partial_and_never_nudges_done(tmp_path):

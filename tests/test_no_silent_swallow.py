@@ -2,13 +2,16 @@
 from __future__ import annotations
 
 import ast
-from collections import Counter
-from dataclasses import dataclass
+import hashlib
 import json
-from pathlib import Path
 import re
-from typing import Mapping, TypedDict, cast
+from collections import Counter
+from collections.abc import Mapping
+from dataclasses import dataclass
+from pathlib import Path
+from typing import TypedDict, cast
 
+import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 CONFIG = Path(__file__).with_name("silent_swallow_guard.json")
@@ -24,6 +27,7 @@ class GuardEntry(TypedDict):
     file: str
     function: str
     except_clause: str
+    fingerprint: str
     ordinal: int
     reason: str
     risk: str
@@ -40,12 +44,25 @@ class Finding:
     file: str
     function: str
     except_clause: str
+    fingerprint: str
     ordinal: int
     line: int
 
     @property
-    def key(self) -> tuple[str, str, str, int]:
-        return self.file, self.function, self.except_clause, self.ordinal
+    def key(self) -> tuple[str, str, str, str, int]:
+        return self.file, self.function, self.except_clause, self.fingerprint, self.ordinal
+
+
+def _handler_fingerprint(node: ast.ExceptHandler, first_statement: ast.stmt) -> str:
+    # Unparse both parts to ignore comments/positions without depending on
+    # ast.dump's version-specific empty-field formatting. Unrelated handlers,
+    # including the same clause, cannot move this identity. Changed bodies still
+    # require review. Identical copies are counted.
+    identity = [
+        ast.unparse(first_statement).splitlines()[0],
+        ast.unparse(ast.Module(body=node.body, type_ignores=[])),
+    ]
+    return hashlib.sha256(json.dumps(identity).encode("utf-8")).hexdigest()[:24]
 
 
 def _broad_handler(node: ast.ExceptHandler) -> bool:
@@ -92,9 +109,14 @@ def _fail_open(node: ast.ExceptHandler) -> bool:
 def scan_source(source: str, relpath: str) -> list[Finding]:
     """Return fail-open handlers with location-independent baseline identities."""
     tree = ast.parse(source, filename=relpath)
+    first_statements = {
+        handler: node.body[0]
+        for node in ast.walk(tree) if isinstance(node, (ast.Try, ast.TryStar))
+        for handler in node.handlers
+    }
     findings: list[Finding] = []
     scope: list[str] = []
-    ordinals: Counter[str] = Counter()
+    ordinals: Counter[tuple[str, str, str]] = Counter()
 
     class Visitor(ast.NodeVisitor):
         def visit_ClassDef(self, node: ast.ClassDef) -> None:
@@ -111,12 +133,16 @@ def scan_source(source: str, relpath: str) -> list[Finding]:
 
         def visit_ExceptHandler(self, node: ast.ExceptHandler) -> None:
             function = ".".join(scope) or "<module>"
-            ordinals[function] += 1
             if _broad_handler(node) and _fail_open(node):
                 clause = "except:" if node.type is None else f"except {ast.unparse(node.type)}:"
                 if node.name:
                     clause = clause[:-1] + f" as {node.name}:"
-                findings.append(Finding(relpath, function, clause, ordinals[function], node.lineno))
+                fingerprint = _handler_fingerprint(node, first_statements[node])
+                identity = function, clause, fingerprint
+                ordinals[identity] += 1
+                findings.append(Finding(
+                    relpath, function, clause, fingerprint, ordinals[identity], node.lineno,
+                ))
             self.generic_visit(node)
 
     Visitor().visit(tree)
@@ -145,9 +171,10 @@ def guard_sources(
         if relpath not in paths:
             problems.append(f"missing guarded module: {relpath}")
 
-    expected: dict[tuple[str, str, str, int], GuardEntry] = {}
+    expected: dict[tuple[str, str, str, str, int], GuardEntry] = {}
     for entry in config["allowlist"]:
-        key = (entry["file"], entry["function"], entry["except_clause"], entry["ordinal"])
+        key = (entry["file"], entry["function"], entry["except_clause"],
+               entry["fingerprint"], entry["ordinal"])
         if key in expected:
             problems.append(f"duplicate allowlist entry: {key}")
         expected[key] = entry
@@ -156,7 +183,7 @@ def guard_sources(
         if not entry["reason"] or not entry["risk"]:
             problems.append(f"incomplete allowlist entry: {key}")
 
-    found: set[tuple[str, str, str, int]] = set()
+    found: set[tuple[str, str, str, str, int]] = set()
     for relpath, path in sorted(paths.items()):
         source = (overrides or {}).get(relpath, path).read_text(encoding="utf-8")
         for finding in scan_source(source, relpath):
@@ -233,7 +260,7 @@ def raised():
     ]
 
 
-def test_stale_allowlist_and_missing_module_fail(tmp_path: Path) -> None:
+def _sample_guard(tmp_path: Path) -> tuple[Path, GuardConfig]:
     relpath = "src/stateframe/engine/sample.py"
     module = tmp_path / relpath
     module.parent.mkdir(parents=True)
@@ -245,6 +272,7 @@ def test_stale_allowlist_and_missing_module_fail(tmp_path: Path) -> None:
         "file": relpath,
         "function": "sample",
         "except_clause": "except Exception:",
+        "fingerprint": scan_source(module.read_text(encoding="utf-8"), relpath)[0].fingerprint,
         "ordinal": 1,
         "reason": "baseline debt 2026-11-05, see inventory",
         "risk": "med",
@@ -254,12 +282,81 @@ def test_stale_allowlist_and_missing_module_fail(tmp_path: Path) -> None:
         "required_modules": [relpath],
         "allowlist": [entry],
     }
+    return module, config
+
+
+def test_stale_allowlist_and_missing_module_fail(tmp_path: Path) -> None:
+    _, config = _sample_guard(tmp_path)
+    entry = config["allowlist"][0]
     assert guard_sources(tmp_path, config) == []
     stale = {**config, "allowlist": [{**entry, "ordinal": 2}]}
     assert any("stale allowlist entry" in problem and json.dumps(stale["allowlist"][0], sort_keys=True) in problem
                for problem in guard_sources(tmp_path, stale))
     assert any("missing guarded module" in problem
                for problem in guard_sources(tmp_path / "absent", config))
+
+
+@pytest.mark.parametrize(("clause", "body", "new_count"), [
+    ("OSError", "raise", 0),
+    ("Exception", "raise", 0),
+    ("OSError", "pass", 1),
+    ("Exception", "pass", 1),
+    ("Exception", 'return ""', 1),
+])
+def test_unrelated_earlier_handler_preserves_baseline(
+    tmp_path: Path, clause: str, body: str, new_count: int,
+) -> None:
+    module, config = _sample_guard(tmp_path)
+    source = module.read_text(encoding="utf-8")
+    relpath = config["required_modules"][0]
+    baseline = scan_source(source, relpath)[0]
+    inserted = f"    try:\n        unrelated()\n    except {clause}:\n        {body}\n"
+    edited = source.replace("def sample():\n", "def sample():\n" + inserted)
+    assert scan_source(edited, relpath)[-1].key == baseline.key
+    module.write_text(edited, encoding="utf-8")
+    problems = guard_sources(tmp_path, config)
+    assert len(problems) == new_count, problems
+    assert all(problem.startswith("new silent swallow:") for problem in problems)
+
+
+@pytest.mark.parametrize("replacement", ['return None', 'return "changed"'])
+def test_changed_handler_body_requires_review(tmp_path: Path, replacement: str) -> None:
+    module, config = _sample_guard(tmp_path)
+    module.write_text(
+        module.read_text(encoding="utf-8").replace('return ""', replacement),
+        encoding="utf-8",
+    )
+    problems = guard_sources(tmp_path, config)
+    assert len(problems) == 2, problems
+    assert problems[0].startswith("new silent swallow:")
+    assert problems[1] == (
+        "stale allowlist entry: delete this exact row from "
+        "tests/silent_swallow_guard.json: "
+        + json.dumps(config["allowlist"][0], sort_keys=True)
+    )
+
+
+def test_identical_handler_copies_still_require_review(tmp_path: Path) -> None:
+    module, config = _sample_guard(tmp_path)
+    source = module.read_text(encoding="utf-8")
+    handler = source.split("def sample():\n", 1)[1]
+    module.write_text(source + handler, encoding="utf-8")
+    problems = guard_sources(tmp_path, config)
+    assert len(problems) == 1 and problems[0].startswith("new silent swallow:"), problems
+    config["allowlist"].append({**config["allowlist"][0], "ordinal": 2})
+    assert guard_sources(tmp_path, config) == []
+    module.write_text(source, encoding="utf-8")
+    assert guard_sources(tmp_path, config) == [
+        ("stale allowlist entry: delete this exact row from "
+         "tests/silent_swallow_guard.json: "
+         + json.dumps(config["allowlist"][1], sort_keys=True))
+    ]
+
+
+def test_handler_fingerprint_ignores_formatting_and_comments() -> None:
+    original = 'def sample():\n    try:\n        x(1)\n    except Exception:\n        return ""\n'
+    formatted = original.replace("x(1)", "x(  1  )  # comment").replace('return ""', "return ''")
+    assert scan_source(original, "sample.py")[0].key == scan_source(formatted, "sample.py")[0].key
 
 
 def test_removed_baseline_body_reports_exact_row(tmp_path: Path) -> None:
@@ -275,6 +372,6 @@ def test_removed_baseline_body_reports_exact_row(tmp_path: Path) -> None:
     entry = next(row for row in config["allowlist"] if row["file"] == relpath)
     problems = guard_sources(ROOT, config, overrides={relpath: scratch})
     assert problems == [
-        "stale allowlist entry: delete this exact row from "
-        f"tests/silent_swallow_guard.json: {json.dumps(entry, sort_keys=True)}"
+        ("stale allowlist entry: delete this exact row from "
+         f"tests/silent_swallow_guard.json: {json.dumps(entry, sort_keys=True)}")
     ]
