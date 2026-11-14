@@ -299,6 +299,14 @@ def build_qualified_request(capture, runtime, body, *, endpoint, key, deadline=N
     body = compose_stable_guidance(candidate, body)
     maybe_append_greenfact(body["messages"], context, journal=candidate.journal,
                            turn=candidate.step, request_id=candidate.request_id)
+    from kernel_read_receipts import enabled as working_set_enabled
+    shadow_snapshot = None
+    if working_set_enabled():
+        # The observational snapshot owns its copies, never legacy authority.
+        from kernel_working_set_shadow import freeze_shadow
+        shadow_snapshot = freeze_shadow(body, context, request_id=candidate.request_id,
+            dialect=provider_capabilities.dialect,
+            reasoning_mode=reasoning_profile(manifest=capture.journal.manifest).mode)
     before_fit_bytes = len(json.dumps(body).encode())
     body = finalize_frame_candidate(context, candidate, body, frame_counter=token_estimate)
     fitted_body = copy.deepcopy(body)
@@ -416,6 +424,11 @@ def build_qualified_request(capture, runtime, body, *, endpoint, key, deadline=N
             token_ceiling=budget["max_prompt_tokens"],
             measurement_identity=budget["measure_method"],
         )
+    if working_set_enabled():
+        from kernel_working_set_shadow import journal_shadow
+        journal_shadow(shadow_snapshot, wire, journal=candidate.journal,
+            byte_cap=candidate._frame_candidate_inputs["byte_ceiling"],
+            prompt_limit=candidate._frame_candidate_inputs["token_ceiling"])
     candidate._assert_wire_string_hygiene(wire)
     visibility, visibility_receipt = qualify_visibility(
         candidate, context, wire, visibility, candidate.request_source_final_delivery,

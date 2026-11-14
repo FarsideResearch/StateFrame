@@ -350,4 +350,4 @@ served. Full-network and host calls require `--replay-external`; incomplete call
 refuse resume. Raw retained output and truncation counters remain in the run
 directory. The foreground shell tool does not launch background shell commands; read-only background jobs use the separate job tools.
 
-`STATEFRAME_WORKING_SET_ALLOCATOR=on` enables read captures, read attempt/result audit events and read-time admission (default `off`). Fresh pages are shortened on whole-line boundaries when needed to fit the measured request envelope; a page with no admissible line returns `REFUSED_ADMISSION` with a continuation cursor. A resumed run keeps its recorded setting.
+`STATEFRAME_WORKING_SET_ALLOCATOR=on` enables read captures, read attempt/result audit events and read-time admission (default `off`). Fresh pages are shortened on whole-line boundaries when needed to fit the measured request envelope; a page with no admissible line returns `REFUSED_ADMISSION` with a continuation cursor. A frozen allocator candidate is certified and journaled in shadow; request composition still uses the existing fitter. A resumed run keeps its recorded setting.
