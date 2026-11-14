@@ -313,8 +313,9 @@ def _shared_prefix_counts(state: _RequestState, source: SourceDelivery,
 @transaction
 def admit(runtime: object, *, raw: bytes, display: str, start: int,
           request: NormalizedReadRequest, source: SourceDelivery,
-          visible_messages: Sequence[Mapping[str, object]] | None) -> SourceDelivery:
-    """Admit, shorten or refuse an OK page before capture.  Non-OK pages pass through."""
+          visible_messages: Sequence[Mapping[str, object]] | None,
+          allow_shortening: bool = True) -> SourceDelivery:
+    """Admit an OK page before capture; opaque producers may require exact admission."""
     if source.result_class != "OK":
         return source
     state = _state(runtime, visible_messages)
@@ -376,7 +377,7 @@ def admit(runtime: object, *, raw: bytes, display: str, start: int,
     # FULL carrier. Price complete floors at logarithmically many boundaries,
     # retaining the largest feasible prefix. A 120-line page needs at most
     # one full-page evaluation plus seven prefix evaluations.
-    if not state.closed:
+    if not state.closed and allow_shortening:
         low, high = 1, total_lines - 1
         while low <= high:
             count = (low + high) // 2

@@ -135,13 +135,30 @@ def execute_with_read_audit(tool: object, args: dict, call_id: str):
                     capture_skipped(runtime, reason="transformed_or_truncated")
                 else:
                     payload = output.decode("utf-8")
-                    capture_read(runtime, path=relative_path(tool.root, snapshot.path),
-                        metadata={"result_class": "OK",
-                                  "revision": "sha256:" + hashlib.sha256(snapshot.raw).hexdigest(),
-                                  "effective_range": {"start_line": snapshot.first_line,
-                                                      "end_line": snapshot.last_line},
-                                  "byte_start": snapshot.byte_start, "byte_end": snapshot.byte_end},
-                        payload=payload, original_page=reply.observation, source="disk", arguments=args)
+                    from kernel_read_admission import admit
+                    from kernel_source_delivery import SourceDelivery, normalize_read_request
+                    path = relative_path(tool.root, snapshot.path)
+                    metadata = {"result_class": "OK",
+                        "revision": "sha256:" + hashlib.sha256(snapshot.raw).hexdigest(),
+                        "effective_range": {"start_line": snapshot.first_line,
+                                            "end_line": snapshot.last_line},
+                        "start_line": snapshot.first_line, "start_column": 0,
+                        "total_lines": snapshot.raw.count(b"\n") + int(
+                            bool(snapshot.raw) and not snapshot.raw.endswith(b"\n")),
+                        "byte_start": snapshot.byte_start, "byte_end": snapshot.byte_end}
+                    page = SourceDelivery(result_class="OK", text=reply.observation,
+                                          content=payload, metadata=metadata)
+                    request = normalize_read_request({"path": path,
+                        "start_line": snapshot.first_line, "end_line": snapshot.last_line})
+                    admitted = admit(runtime, raw=snapshot.raw, display=path, start=0,
+                        request=request, source=page, visible_messages=None, allow_shortening=False)
+                    if admitted is page:
+                        capture_read(runtime, path=path, metadata=metadata,
+                            payload=payload, original_page=reply.observation, source="disk", arguments=args)
+                    else:
+                        # Shell replies are opaque effects: never replace their
+                        # output with a read page or promise a partial exposure.
+                        capture_skipped(runtime, reason="admission")
             except Exception as error:
                 capture_failed(runtime, error)
         status = "OK" if scope.capture is not None else "SHELL_READ"

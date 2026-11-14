@@ -11,7 +11,7 @@ from kernel_working_set_proof import verify_certificate
 
 
 @pytest.mark.parametrize("copies", [0, 1, 2], ids=["empty", "rewrite", "deduplicate"])
-def test_on_heals_stale_suffix_before_certification_and_seal(tmp_path, monkeypatch, copies):
+def test_on_preserves_opaque_suffix_before_certification_and_seal(tmp_path, monkeypatch, copies):
     import kernel_working_set_live as live
     from test_read_admission_qualification import seal_case
 
@@ -37,9 +37,10 @@ def test_on_heals_stale_suffix_before_certification_and_seal(tmp_path, monkeypat
     certified, = prepared
     assert record.wire == certified.wire == json.dumps(record.body).encode()
     assert verify_certificate(record.wire, capture._working_set_certificate)
-    assert stale not in [row.get("content") for row in record.body["messages"]]
-    assert any("ghost.py: not shown;" in str(row.get("content", ""))
-               for row in record.body["messages"]) == bool(copies)
+    content = stale if copies else "[Source coverage]\nobsolete row"
+    assert sum(row.get("content") == content for row in record.body["messages"]) == max(1, copies)
+    assert not any("ghost.py: not shown;" in str(row.get("content", ""))
+                   for row in record.body["messages"])
     assert not any("giant.py: not shown;" in str(row.get("content", ""))
                    for row in record.body["messages"])
     assert sum(row.get("content") == "Keep this opaque user instruction unchanged: λ"
@@ -96,7 +97,7 @@ def test_production_heal_then_strict_check_is_idempotent():
     ["[Source coverage]\nunrecognized obsolete row"],
     ["[Source coverage]\nghost.py (1 line, unverified): the single line is shown below."] * 2,
 ])
-def test_heal_removals_preserve_fixed_tool_carrier_coordinates(layout, contents):
+def test_opaque_coverage_preserves_fixed_tool_carrier_coordinates(layout, contents):
     from test_final_cache_layout import _body
     from test_working_set_render import source, snapshot
     from kernel_working_set_allocator import FULL
@@ -109,7 +110,7 @@ def test_heal_removals_preserve_fixed_tool_carrier_coordinates(layout, contents)
     body["messages"][2]["content"] = "[StateFrame]\n" + json.dumps(state)
     tool = next(row for row in body["messages"] if row.get("role") == "tool")
     tool["content"] = slot.page
-    # These advisory rows precede the fixed tool carrier; removal shifts it.
+    # Host-looking opaque rows precede the fixed tool carrier and must survive.
     body["messages"][3:3] = [{"role": "user", "content": text} for text in contents]
     original = copy.deepcopy(body)
     frozen = snapshot(slot, body=body, insertion_index=3, layouts=("plain", "final_cache"))
@@ -120,8 +121,11 @@ def test_heal_removals_preserve_fixed_tool_carrier_coordinates(layout, contents)
     assert wire_body["messages"][witness.message_index]["content"] == slot.page
     assert wire_body["messages"][witness.message_index]["role"] == "tool"
     assert body == original
-    assert b"unrecognized obsolete row" not in rendered.wire
-    assert rendered.wire.count(b"ghost.py: not shown;") <= 1
+    from kernel_cache_layout_view import semantic_messages
+    semantic = semantic_messages(wire_body["messages"])
+    for content in contents:
+        assert semantic.count({"role": "user", "content": content}) == contents.count(content)
+    assert rendered.wire.count(b"ghost.py: not shown;") == 0
 
 
 @pytest.mark.parametrize("clipped", [False, True])

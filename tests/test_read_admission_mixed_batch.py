@@ -160,25 +160,52 @@ def test_shell_result_alone_fits_the_cap(tmp_path, monkeypatch):
 
 
 def test_admission_floor_uses_the_live_token_authority(tmp_path, monkeypatch):
-    """S9: the admission floor measures with preparation's meter, not the frozen ratio."""
+    """Both admission verdicts follow the live meter against the offline estimate."""
+    from dataclasses import replace
     import kernel_read_admission as admission
     import kernel_working_set_live as live
+    from kernel_read_exec import execute_read
+    from kernel_read_receipts import begin_read_attempt
+    from kernel_source_delivery import deliver_source, normalize_read_request
 
-    rt, capture, body, plan = _runtime(tmp_path, monkeypatch, lean=True)
-    calls = []
-    real_floor = live.read_admission_floor
+    for live_accepts in (True, False):
+        root = tmp_path / ("accept" if live_accepts else "refuse")
+        root.mkdir()
+        rt, _, body, _ = _runtime(root, monkeypatch, lean=True)
+        calls = []
+        limit = 500 if live_accepts else 33_344
 
-    def spy(snapshot, pages=(), *, require_feasible=False, measure=None):
-        calls.append(measure)
-        return real_floor(snapshot, pages, require_feasible=require_feasible, measure=measure)
+        def meter(wire):
+            calls.append(wire)
+            return (1, 1, "live-test") if live_accepts else (limit + 1, limit + 1, "live-test")
 
-    monkeypatch.setattr(live, "read_admission_floor", spy)
-    sentinel = object()
-    monkeypatch.setattr(live, "read_admission_measure", lambda runtime: sentinel)
-    rt.native_batch = SimpleNamespace(pending=[], origin="probe")
-    state = admission._state(rt, body["messages"])
-    assert state.snapshot is not None
-    assert state.measure is sentinel
+        monkeypatch.setattr(live, "read_admission_measure", lambda runtime: meter)
+        rt.native_batch = SimpleNamespace(pending=[], origin="live-token-probe")
+        state = admission._state(rt, body["messages"])
+        assert state.snapshot is not None
+        state.snapshot = replace(state.snapshot, prompt_limit=limit)
+        raw = ("live-token-source " + "x" * 4000 + "\n").encode()
+        (root / "live.py").write_bytes(raw)
+        args = {"path": "live.py", "max_chars": 10_000}
+        request = normalize_read_request(args)
+        page = deliver_source(raw, "live.py", 0, args=request)
+        slot = live.read_admission_slot(page, path="live.py", arguments=request.arguments, ordinal=1)
+        offline = live.read_admission_floor(state.snapshot, ((slot, "live-read"),),
+                                            require_feasible=True)
+        assert (offline is None) == live_accepts
+        metadata = {}
+        scope = begin_read_attempt(rt, args, call_id="live-read")
+        result = execute_read(root, root / "live.py", "live.py", "live.py", 0,
+            args=args, measurement=rt, step=1, delivery=metadata)
+        scope.finish(result[0])
+        assert calls and any(b"live-token-source" in wire for wire in calls)
+        assert result[0] == ("OK" if live_accepts else "REFUSED_ADMISSION")
+        if live_accepts:
+            assert raw.decode() in result[1]
+            assert state.admitted_count == 1 and len(state.pages) == 1
+        else:
+            assert metadata["next_cursor"] and not state.pages
+            assert not hasattr(rt, "read_capture_ledger")
 
 
 def test_pending_bytes_do_not_survive_a_resume(tmp_path, monkeypatch):
@@ -210,3 +237,18 @@ def test_unbounded_policy_refusal_is_distinct_from_snapshot_failure(tmp_path, mo
         "function": {"name": "shell", "arguments": "{}"}}], origin="unbounded")
     with pytest.raises(live.ReadAdmissionUnbounded):
         live.read_admission_snapshot(rt, body["messages"], byte_cap=CAP)
+
+
+def test_live_token_regression_detects_disconnected_meter(tmp_path, monkeypatch):
+    """The authority regression must fail if admission drops its live meter."""
+    import kernel_working_set_live as live
+
+    real_floor = live.read_admission_floor
+
+    def disconnected(snapshot, pages=(), **kwargs):
+        kwargs.pop("measure", None)
+        return real_floor(snapshot, pages, **kwargs)
+
+    monkeypatch.setattr(live, "read_admission_floor", disconnected)
+    with pytest.raises(AssertionError):
+        test_admission_floor_uses_the_live_token_authority(tmp_path, monkeypatch)

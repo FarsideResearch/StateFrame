@@ -552,7 +552,7 @@ def _render_assignment(snapshot: PreparationSnapshot,
     # Heal against this assignment before byte/token costs and certification.
     # Deleted advisory blocks must not shift fixed-tool witness coordinates.
     unhealed_messages = tuple(body["messages"])
-    reconcile_source_coverage(body["messages"])
+    reconcile_source_coverage(body["messages"], owned_indexes=truth_indexes)
     healed_indexes = {id(message): index for index, message in enumerate(body["messages"])}
     plain = _normalize(body, snapshot)
     if layout == "final_cache":

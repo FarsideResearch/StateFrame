@@ -654,15 +654,19 @@ def _source_coverage_listed_paths(content: str) -> list[str]:
     return paths
 
 
-def reconcile_source_coverage(messages: list[dict[str, object]]) -> None:
+def reconcile_source_coverage(messages: list[dict[str, object]], *,
+                              owned_indexes: Sequence[int] | None = None) -> None:
     """Rebuild the "[Source coverage]" block from the windows the request now carries.
 
     The block is first written while fitting candidate rows. Transforms that run
     afterwards may drop or clip source windows, so the final block is recomputed
     here from the delivered bytes; a path whose window is gone becomes "not shown".
+    Allocator callers must supply host-owned coordinates. None preserves the
+    legacy OFF fitter's reconciliation contract.
     """
     indexes = [index for index, message in enumerate(messages)
-               if isinstance(message, Mapping) and isinstance(message.get("content"), str)
+               if (owned_indexes is None or (index in owned_indexes and message.get("role") == "user"))
+               and isinstance(message, Mapping) and isinstance(message.get("content"), str)
                and message["content"].startswith(SOURCE_COVERAGE_HEADER + "\n")]
     if not indexes:
         return
@@ -682,22 +686,8 @@ def reconcile_source_coverage(messages: list[dict[str, object]]) -> None:
 
 def reconciled_source_coverage_suffix(messages: Sequence[Mapping[str, object]],
                                       suffix: Sequence[Mapping[str, object]]) -> list[dict[str, object]]:
-    """Carry a healed advisory block into the suffix's allocation ownership record.
-
-    The full selected body supplies delivery facts. Reconcile a detached suffix
-    against those facts so source selection cannot leave its old claim as the
-    immutable allocation input; every other suffix row stays unchanged.
-    """
-    def coverage(message: Mapping[str, object]) -> bool:
-        return str(message.get("content") or "").startswith(SOURCE_COVERAGE_HEADER + "\n")
-
-    if not any(coverage(message) for message in suffix):
-        return [copy.deepcopy(dict(message)) for message in suffix]
-    base = [copy.deepcopy(dict(message)) for message in messages if not coverage(message)]
-    start = len(base)
-    base.extend(copy.deepcopy(dict(message)) for message in suffix)
-    reconcile_source_coverage(base)
-    return base[start:]
+    """The newest user suffix is opaque; marker text grants no host ownership."""
+    return [copy.deepcopy(dict(message)) for message in suffix]
 
 
 _COVERAGE_SHOWN_LINE = re.compile(
@@ -727,13 +717,16 @@ def _source_coverage_claimed_ranges(content: str) -> dict[str, list[tuple[int, i
     return claimed
 
 
-def _uncovered_coverage_claims(messages: Sequence[Mapping[str, object]]) -> dict[str, list[tuple[int, int]]]:
+def _uncovered_coverage_claims(messages: Sequence[Mapping[str, object]], *,
+                               owned_indexes: Sequence[int] | None = None) -> dict[str, list[tuple[int, int]]]:
     """Claimed ranges with at least one line absent from the delivered source bytes."""
     from kernel_stateframe_framefit5 import _framefit5_delivered_source_ranges
     from kernel_request_source_window import _model_window_segments, parse_model_source_window
 
     claimed: dict[str, list[tuple[int, int]]] = {}
-    for message in messages:
+    for index, message in enumerate(messages):
+        if owned_indexes is not None and index not in owned_indexes:
+            continue
         content = message.get("content") if isinstance(message, Mapping) else None
         if isinstance(content, str) and content.startswith(SOURCE_COVERAGE_HEADER + "\n"):
             for path, spans in _source_coverage_claimed_ranges(content).items():
@@ -773,7 +766,8 @@ def _uncovered_coverage_claims(messages: Sequence[Mapping[str, object]]) -> dict
 def verify_source_coverage_claims(messages: list[dict[str, object]], *,
                                   strict: bool | None = None,
                                   journal: object = None,
-                                  request_id: object = None) -> bool:
+                                  request_id: object = None,
+                                  owned_indexes: Sequence[int] | None = None) -> bool:
     """Final-wire invariant: every coverage "shown below" claim is delivered in the body.
 
     The claimed line ranges of each "[Source coverage]" line must be a subset of the
@@ -783,7 +777,7 @@ def verify_source_coverage_claims(messages: list[dict[str, object]], *,
     ``context_claim_reconciled`` journal event records it; the run is never blocked.
     Returns True when the claims held without repair.
     """
-    uncovered = _uncovered_coverage_claims(messages)
+    uncovered = _uncovered_coverage_claims(messages, owned_indexes=owned_indexes)
     if not uncovered:
         return True
     if strict is None:
@@ -793,8 +787,8 @@ def verify_source_coverage_claims(messages: list[dict[str, object]], *,
     if strict:
         raise SourceCoverageClaimError(
             f"[Source coverage] claims lines the request does not carry: {detail}")
-    reconcile_source_coverage(messages)
-    healed = not _uncovered_coverage_claims(messages)
+    reconcile_source_coverage(messages, owned_indexes=owned_indexes)
+    healed = not _uncovered_coverage_claims(messages, owned_indexes=owned_indexes)
     emit = getattr(journal, "emit", None)
     if callable(emit):
         emit("context_claim_reconciled", producer="kernel_frame_source_snapshot",

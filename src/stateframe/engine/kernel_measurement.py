@@ -4032,20 +4032,20 @@ class RequestCapture:
                     transport_attempt=attempt + 1,
                     dispatch=False,
                 )
-            if attempt == 0:
-                # A reserved completion response is charged after the first
-                # durable submission, while retries remain one logical call.
-                try:
-                    from kernel_pilot import ACTIVE_RUNTIME
-                except ImportError:
-                    ACTIVE_RUNTIME = None
-                runtime = ACTIVE_RUNTIME.get() if ACTIVE_RUNTIME is not None else None
-                if runtime is None:
-                    runtime = getattr(self, "completion_owner_runtime", None)
-                from kernel_request_kind import is_auxiliary
-                if runtime is not None and not is_auxiliary(self):
-                    from kernel_working_set_state import observe_submission
-                    observe_submission(runtime, self, wire)
+            # Bind every physical attempt; capacity refits may change assignment.
+            # Completion-owner accounting remains once per logical request.
+            try:
+                from kernel_pilot import ACTIVE_RUNTIME
+            except ImportError:
+                ACTIVE_RUNTIME = None
+            runtime = ACTIVE_RUNTIME.get() if ACTIVE_RUNTIME is not None else None
+            if runtime is None:
+                runtime = getattr(self, "completion_owner_runtime", None)
+            from kernel_request_kind import is_auxiliary
+            if runtime is not None and not is_auxiliary(self):
+                from kernel_working_set_state import observe_submission
+                observe_submission(runtime, self, wire, transport_attempt_id=sent["event_id"])
+                if attempt == 0:
                     from kernel_completion_owner import note_request_submitted
                     submitted_tool_names = _submitted_tool_names(body)
                     note_request_submitted(
@@ -4238,6 +4238,11 @@ class RequestCapture:
                                 capacity_retry_limits,
                             )
                         except Exception as refit_error:
+                            from kernel_working_set_stop import WorkingSetSuspended
+                            if isinstance(refit_error, WorkingSetSuspended):
+                                # The durable BLOCKED boundary belongs to the
+                                # worker's resumable suspension handler.
+                                raise
                             from kernel_completion_owner import RequestActionContractError
                             from kernel_wire_truth_facts import WireTruthFactUnavailable
                             if isinstance(refit_error, (RequestActionContractError,
@@ -7323,7 +7328,7 @@ class RequestCapture:
             if delivery_runtime is not None:
                 from kernel_working_set_state import observe_response
                 observe_response(delivery_runtime, self, response_id=received["event_id"],
-                                 disposition="accepted")
+                                 disposition="accepted", transport_attempt_id=sent["event_id"])
                 from kernel_step_contract import commit_environment_notice_delivery
                 commit_environment_notice_delivery(
                     delivery_runtime, getattr(self, "_evictfix_final_wire_messages", ()))

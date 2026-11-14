@@ -206,7 +206,10 @@ class WorkingSetState:
             raise ValueError("invalid working-set pending submission")
         for request_id, row in pending.items():
             if (not isinstance(request_id, str) or not request_id
-                    or set(row) != {"body_sha256", "ordinal", "assignments"}
+                    or set(row) not in ({"body_sha256", "ordinal", "assignments"},
+                                        {"body_sha256", "ordinal", "assignments", "transport_attempt_id"})
+                    or ("transport_attempt_id" in row and (
+                        not isinstance(row["transport_attempt_id"], str) or not row["transport_attempt_id"]))
                     or type(row["ordinal"]) is not int or row["ordinal"] != state.logical_ordinal
                     or not isinstance(row["body_sha256"], str) or len(row["body_sha256"]) != 64
                     or not isinstance(row["assignments"], dict)):
@@ -354,8 +357,13 @@ class WorkingSetState:
 
     def _submission(self, event: Mapping[str, object]) -> None:
         request_id = event["request_id"]
-        if request_id in self.pending:
-            if self.pending[request_id]["body_sha256"] != event["body_sha256"]:
+        previous = self.pending.get(request_id)
+        attempt_id = event.get("transport_attempt_id")
+        if attempt_id is not None and (not isinstance(attempt_id, str) or not attempt_id):
+            raise ValueError("invalid working-set transport attempt")
+        if previous is not None and (attempt_id is None
+                or attempt_id == previous.get("transport_attempt_id")):
+            if previous["body_sha256"] != event["body_sha256"]:
                 raise ValueError("working-set submitted wire changed")
             return
         assignments = {}
@@ -376,15 +384,19 @@ class WorkingSetState:
                         and ranks[mode] > ranks[entry.previous_mode])):
                 raise ValueError("promotion requires a reread or recovery")
             assignments[oid] = {"mode": mode, "capture_ids": list(entry.capture_ids)}
-        self.logical_ordinal += 1
-        # A new primary call closes unmatched failed/discarded predecessors.
+        if previous is None:
+            self.logical_ordinal += 1
+        # A physical retry replaces pending authority without aging obligations.
         self.pending = {request_id: {"body_sha256": event["body_sha256"],
-            "ordinal": self.logical_ordinal, "assignments": assignments}}
+            "ordinal": self.logical_ordinal, "assignments": assignments,
+            **({"transport_attempt_id": attempt_id} if attempt_id is not None else {})}}
 
     def _response(self, event: Mapping[str, object]) -> None:
         request_id = event["request_id"]
         submitted = self.pending.get(request_id)
-        if submitted is None or submitted["body_sha256"] != event["body_sha256"]:
+        if (submitted is None or submitted["body_sha256"] != event["body_sha256"]
+                or (event.get("transport_attempt_id") is not None
+                    and event["transport_attempt_id"] != submitted.get("transport_attempt_id"))):
             return
         disposition = event["disposition"]
         if disposition not in {"accepted", "failed", "discarded"}:
@@ -446,18 +458,22 @@ def record_capture(runtime: object, capture: ReadCapture, *, recovery_pin: bool 
 
 
 def record_submission(runtime: object, *, request_id: str, body_sha256: str,
-                      modes: Mapping[str, Mode]) -> None:
+                      modes: Mapping[str, Mode], transport_attempt_id: str | None = None) -> None:
     emit_event(runtime, "working_set_submission", request_id=request_id,
-               body_sha256=body_sha256, modes=dict(modes))
+               body_sha256=body_sha256, modes=dict(modes),
+               **({"transport_attempt_id": transport_attempt_id} if transport_attempt_id is not None else {}))
 
 
 def record_response(runtime: object, *, request_id: str, response_id: str,
-                    body_sha256: str, disposition: str) -> None:
+                    body_sha256: str, disposition: str,
+                    transport_attempt_id: str | None = None) -> None:
     emit_event(runtime, "working_set_response", request_id=request_id,
-               response_id=response_id, body_sha256=body_sha256, disposition=disposition)
+               response_id=response_id, body_sha256=body_sha256, disposition=disposition,
+               **({"transport_attempt_id": transport_attempt_id} if transport_attempt_id is not None else {}))
 
 
-def observe_submission(runtime: object, capture: object, wire: bytes) -> None:
+def observe_submission(runtime: object, capture: object, wire: bytes, *,
+                       transport_attempt_id: str | None = None) -> None:
     if not enabled():
         return
     if __package__:
@@ -482,20 +498,25 @@ def observe_submission(runtime: object, capture: object, wire: bytes) -> None:
             if set(modes) != active:
                 raise ValueError("certificate does not cover active obligations")
         record_submission(runtime, request_id=capture.request_id,
-                          body_sha256=hashlib.sha256(wire).hexdigest(), modes=modes)
+                          body_sha256=hashlib.sha256(wire).hexdigest(), modes=modes,
+                          transport_attempt_id=transport_attempt_id)
 
 
 def observe_response(runtime: object, capture: object, *, disposition: str,
-                     response_id: str | None = None) -> None:
+                     response_id: str | None = None,
+                     transport_attempt_id: str | None = None) -> None:
     if not enabled():
         return
     state = state_for(runtime)
     submitted = state.pending.get(capture.request_id)
     if response_id is None:
         response_id = getattr(capture, "selected_response_event_id", None)
-    if submitted is not None and response_id:
+    if (submitted is not None and response_id
+            and (transport_attempt_id is None
+                 or transport_attempt_id == submitted.get("transport_attempt_id"))):
         record_response(runtime, request_id=capture.request_id, response_id=response_id,
-                        body_sha256=submitted["body_sha256"], disposition=disposition)
+                        body_sha256=submitted["body_sha256"], disposition=disposition,
+                        transport_attempt_id=transport_attempt_id)
 
 
 def reconstruct(events: Iterable[Mapping[str, object]]) -> WorkingSetState:

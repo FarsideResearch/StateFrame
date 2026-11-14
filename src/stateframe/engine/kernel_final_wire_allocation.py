@@ -429,9 +429,10 @@ def build_qualified_request(capture, runtime, body, *, endpoint, key, deadline=N
     candidate.request_budget_final_wire = budget
     if allocated is not None:
         from kernel_frame_source_snapshot import verify_source_coverage_claims
-        # The allocator healed each rendered assignment before certification.
+        # Freeze removes owned legacy coverage panels; the allocator generates
+        # its own facts. Any remaining marker belongs to an opaque fixed owner.
         # This seam is read-only even in production: never heal certified bytes.
-        verify_source_coverage_claims(body["messages"], strict=True,
+        verify_source_coverage_claims(body["messages"], strict=True, owned_indexes=(),
                                       journal=candidate.journal, request_id=candidate.request_id)
     # Keep classification metadata on the candidate for allocation readers, but
     # prove capacity and bind the seal against the exact provider wire copy.
