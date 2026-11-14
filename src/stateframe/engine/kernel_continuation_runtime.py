@@ -13,7 +13,9 @@ from kernel_continuation_evidence import (
 )
 from kernel_continuation_executive import ContinuationExecutive
 from kernel_continuation_menu_authority import AUTHORED_CHECK_TOOLS, EDIT_TOOLS, state_allow_set
-from kernel_continuation_state import ContinuationError, children_open, unresolved
+from kernel_continuation_state import (
+    MAX_CONTINUATION_TEXT_CHARS, ContinuationError, bounded_objective, children_open, unresolved,
+)
 from kernel_measurement import digest
 from kernel_verdict import (
     NO_HOST_CHECKS, SATISFIED, TrustedTestReceipt, Verdict, evaluate_required_tests,
@@ -410,6 +412,12 @@ class LiveContinuation:
                 if claim_grounding is not None:
                     claim_grounding.planned_ledger = self.engine.planned_artifacts
         self.dispatch: dict | None = None
+        task_row = getattr(getattr(runtime, "owner", None), "task_row", {})
+        task_objective = task_row.get("msg") if isinstance(task_row, Mapping) else None
+        self._root_objective_is_summary = (
+            len(task_objective) > MAX_CONTINUATION_TEXT_CHARS
+            if isinstance(task_objective, str) and task_objective.strip() else None
+        )
         self.effect_id: str | None = None
         # The write call site may expose only a path.  Keep the exact admitted
         # arguments beside the dispatch fence so that path-only admission can
@@ -915,6 +923,8 @@ class LiveContinuation:
             objective = getattr(owner, "task_row", {}).get("msg")
             if not isinstance(objective, str) or not objective.strip():
                 objective = str(messages[1].get("content", "")) if len(messages) > 1 else ""
+            if getattr(self, "_root_objective_is_summary", None) is None:
+                self._root_objective_is_summary = len(objective) > MAX_CONTINUATION_TEXT_CHARS
             required = required_acceptance_selectors(self.runtime)
             pending_decision = "Complete the original objective and verify its public requirements."
             dependencies = binding_versions(current)
@@ -930,7 +940,7 @@ class LiveContinuation:
                 "turns": self.runtime.step_limit, "acceptance": acceptance,
             }, ordinal=1)
             self.engine.apply(
-                "create", new_id=root_id, objective=objective,
+                "create", new_id=root_id, objective=bounded_objective(objective),
                 pending_decision=pending_decision, dependencies=dependencies,
                 turns=self.runtime.step_limit, acceptance=acceptance,
             )
@@ -1486,7 +1496,7 @@ class LiveContinuation:
                 )
             self.engine.apply("detour", intention_id=parent, reason=arguments.get("reason"),
                 wake_token=uuid.uuid4().hex, deadline_us=self.engine.clock_us() + 300_000_000,
-                child={"new_id": child, "objective": objective,
+                child={"new_id": child, "objective": bounded_objective(objective),
                     "pending_decision": pending_decision,
                     "dependencies": dependencies, "turns": turns,
                     "acceptance": acceptance})
@@ -2131,6 +2141,19 @@ class LiveContinuation:
             value["guarded_effects"] = self.guarded_effects.context_dict()
         if coherent_ready:
             value["instructions"] = REFUSAL_LEAD
+        summarized_root = (
+            getattr(self, "_root_objective_is_summary", None) is True
+            and any(item is not None and item.parent_id is None for item in (active, parent))
+        )
+        if summarized_root:
+            for section, item in (("active", active), ("parent", parent)):
+                if item is not None and item.parent_id is None:
+                    value[section]["objective"] = "Use the complete task in the original user request."
+                    value[section]["objective_is_reference"] = True
+            value["instructions"] += (
+                " The bounded root objective is only a continuation-state summary; use the complete "
+                "task in the original user request as the task source."
+            )
         if self._stranded_blocker is not None:
             value["blocker"] = self._stranded_blocker
             value["instructions"] += (

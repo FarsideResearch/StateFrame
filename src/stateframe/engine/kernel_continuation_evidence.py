@@ -6,7 +6,9 @@ from heapq import merge
 import os
 
 from build_tasks.multifile_row import normalize_repo_path
-from kernel_continuation_state import ContinuationError, ContinuationState, text
+from kernel_continuation_state import (
+    MAX_CONTINUATION_RESOURCE_CHARS, ContinuationError, ContinuationState, text,
+)
 from kernel_measurement import digest
 from kernel_verdict import SATISFIED, _selectors, evaluate_required_tests
 
@@ -254,7 +256,11 @@ def binding_versions(binding: object) -> dict[str, str]:
         files = identity.get(group, {})
         if not isinstance(files, dict):
             raise ContinuationError("invalid host file binding")
-        if len(files) > _PER_FILE_VERSION_LIMIT:
+        long_resource_key = any(
+            len(group) + 1 + len(path) > MAX_CONTINUATION_RESOURCE_CHARS
+            for path in files if isinstance(path, str)
+        )
+        if len(files) > _PER_FILE_VERSION_LIMIT or long_resource_key:
             # Real repositories (e.g. a 1,787-file backend) exceed the bounded
             # dependency map.  Collapse the group to one digest: any file change
             # still changes it, so staleness detection is preserved; only the

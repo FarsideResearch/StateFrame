@@ -7,6 +7,7 @@ transitions. Model-authored text is a pending decision, never completion proof.
 from __future__ import annotations
 
 import copy
+import hashlib
 from dataclasses import asdict, dataclass, field
 from typing import Literal
 
@@ -15,6 +16,8 @@ from kernel_stale_edit_policy import allows_stale_repair
 Phase = Literal["eligible", "active", "suspended", "completed", "cancelled", "blocked"]
 EffectStatus = Literal["pending", "applied", "not_applied", "unknown"]
 TERMINAL = frozenset({"completed", "cancelled"})
+MAX_CONTINUATION_TEXT_CHARS = 4096
+MAX_CONTINUATION_RESOURCE_CHARS = 1024
 
 
 class ContinuationError(ValueError):
@@ -86,10 +89,30 @@ class ContinuationState:
         return asdict(self)
 
 
-def text(value: object, name: str, limit: int = 4096) -> str:
+def text(value: object, name: str, limit: int = MAX_CONTINUATION_TEXT_CHARS) -> str:
     if not isinstance(value, str) or not value.strip() or len(value) > limit:
         raise ContinuationError(f"{name} must be a nonempty string of at most {limit} characters")
     return value
+
+
+def bounded_objective(value: object) -> str:
+    """Keep short objectives verbatim and summarize longer source text deterministically."""
+    if not isinstance(value, str) or not value.strip():
+        raise ContinuationError(
+            f"objective must be a nonempty string of at most {MAX_CONTINUATION_TEXT_CHARS} characters")
+    if len(value) <= MAX_CONTINUATION_TEXT_CHARS:
+        return text(value, "objective")
+
+    checksum = hashlib.sha256(value.encode("utf-8")).hexdigest()
+    marker = f"\n\n[Objective truncated; full_length={len(value)}; sha256={checksum}]"
+    prefix_limit = MAX_CONTINUATION_TEXT_CHARS - len(marker)
+    cut = value[:prefix_limit]
+    boundary = next((index for index in range(len(cut) - 1, 0, -1)
+                     if cut[index].isspace()), None)
+    prefix = cut[:boundary].rstrip() if boundary is not None else cut
+    if not prefix:
+        prefix = cut
+    return text(prefix + marker, "objective")
 
 
 def integer(value: object, name: str, minimum: int = 0) -> int:
@@ -101,7 +124,7 @@ def integer(value: object, name: str, minimum: int = 0) -> int:
 def dependencies(value: object) -> dict[str, str]:
     if not isinstance(value, dict) or len(value) > 256:
         raise ContinuationError("dependencies must be a bounded resource/version map")
-    return {text(key, "resource", 1024): text(version, "version", 256)
+    return {text(key, "resource", MAX_CONTINUATION_RESOURCE_CHARS): text(version, "version", 256)
             for key, version in value.items()}
 
 
@@ -139,7 +162,7 @@ def _new(state: ContinuationState, data: dict, now: int, parent: str | None) -> 
     key = text(data.get("new_id"), "new_id", 256)
     if key in state.intentions or sum(i.phase not in TERMINAL for i in state.intentions.values()) >= 128:
         raise ContinuationError("duplicate intention or capacity exhausted")
-    item = Intention(key, parent, text(data.get("objective"), "objective"),
+    item = Intention(key, parent, bounded_objective(data.get("objective")),
                      text(data.get("pending_decision"), "pending_decision"),
                      dependencies(data.get("dependencies", {})), now, now,
                      (None if "turns" in data and data["turns"] is None
