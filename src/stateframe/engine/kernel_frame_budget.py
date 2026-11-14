@@ -656,20 +656,32 @@ def compact_tool_surface(tools: Sequence[Mapping[str, object]], gear: str,
     return result
 
 
-def compact_system_prompt(gear: str) -> str:
+def generic_system_prompt(gear: str) -> str:
+    """The card-free editor guidance for ``gear``; safe to embed inside a larger prompt."""
     phase = PHASE_BY_GEAR[gear].replace("_", "/")
-    generic = ("You are a careful workspace editor. Host StateFrame facts are authoritative: "
-               "never turn prose into a verdict, never claim green without a host PASS, and "
-               "keep open obligations and receipts in view. Current host phase: " + phase + ". "
-               "Use only offered tools. State assumptions and the files/plan you need; "
-               "promotions happen only after host-observed actions.")
+    return ("You are a careful workspace editor. Host StateFrame facts are authoritative: "
+            "never turn prose into a verdict, never claim green without a host PASS, and "
+            "keep open obligations and receipts in view. Current host phase: " + phase + ". "
+            "Use only offered tools. State assumptions and the files/plan you need; "
+            "promotions happen only after host-observed actions.")
+
+
+def compact_system_prompt(gear: str) -> str:
+    """A complete system message for the budget arm: one harness card, then the guidance."""
+    generic = generic_system_prompt(gear)
     from kernel_harness_card import enabled as harness_card_enabled, system_prefix
     return system_prefix(generic) if harness_card_enabled() else generic
 
 
 def prompt_guidance(variant: str = "v3") -> str:
-    """Small system-prompt guidance used only by the budget arm."""
-    base = compact_system_prompt("g0")
+    """Small system-prompt guidance used only by the budget arm.
+
+    This text is spliced into the middle of the operating instructions, so it must not
+    carry the harness card: the card is a system-message prefix owned by frame hygiene
+    (``kernel_harness_card.ensure_system_prefix``), and a copy embedded here was invisible
+    to its ``startswith`` check and shipped twice per request.
+    """
+    base = generic_system_prompt("g0")
     from kernel_intent_carry import f4_enabled as _intent_carry_f4_enabled
     if _intent_carry_f4_enabled():
         # earlier run STATEFRAME_INTENT_CARRY_F4 (tt_output_gap_v2 item 2): the system prompt is built
@@ -927,7 +939,7 @@ def block_reference_table(records: Sequence[Mapping[str, object]]) -> list[dict[
 __all__ = [
     "BOOT_TOKEN_LIMIT", "FIRST_REQUEST_TOKEN_LIMIT", "MODE_ENV", "SCHEMA",
     "PHASE_BY_GEAR", "STEADY_REQUEST_TOKEN_LIMIT", "FrameBudgetController", "account_projection",
-    "block_reference_table", "compact_system_prompt", "compact_tool_surface", "PROBE_DESCRIPTION",
+    "block_reference_table", "compact_system_prompt", "compact_tool_surface", "generic_system_prompt", "PROBE_DESCRIPTION",
     "enabled", "enforce_request_budget", "mode", "phase_projection", "render_projection",
     "prompt_guidance", "truth_projection",
 ]
