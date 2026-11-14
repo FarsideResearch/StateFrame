@@ -1,10 +1,11 @@
 # Changelog
 
-## Unreleased
+## 0.6.32 (2026-11-14)
 
-- The running guide now documents `STATEFRAME_BOUNDARY_CHECKS` and `STATEFRAME_RESULTS_DIR` as profile-only settings and says what each one does.
+- Tests: the shipped-main allowlist covers the mutation boot and fetch entry points.
 - Removed private provenance from source comments and regression test names and values.
-- Removed private provenance from source comments and regression tests, and made the Node memory-limit test find Node on PATH instead of using a personal installation path.
+- The running guide now documents `STATEFRAME_BOUNDARY_CHECKS` and `STATEFRAME_RESULTS_DIR` as profile-only settings and says what each one does.
+
 ## 0.6.31 (2026-11-14)
 
 - Updated the isolated HTTP child import check to recognize its shared redirect and capacity helpers, verify both helpers in an installed wheel, and keep rejecting unavailable dependencies.
