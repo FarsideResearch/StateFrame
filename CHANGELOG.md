@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Fixed: a long-running process now reloads the installation identity key when the key file is rotated, rewritten, or recreated with its home, so checkpoint redaction always covers the key on disk.
 - Checkpoint recovery resolves current credentials from their configured source, records model-router probe provenance, redacts writer diagnostics, and stores append-only indexes in shared signed chunks.
 - Refuse STATEFRAME_HOME inside a run directory or repository, and keep the installation identity key out of checkpoints, exports, and bundles.
 
