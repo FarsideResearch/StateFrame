@@ -128,8 +128,9 @@ def auto_scope(task: str, product: dict[str, str], checks: dict[str, str]) -> li
     """Editable files chosen for an over-limit repository when no --target/--edit was given.
 
     Product files the task names, then product modules the given checks import, then one more
-    import hop from those, at most AUTO_SCOPE_LIMIT in that order. An empty result leaves the
-    caller's refusal in place. Deterministic: the same repository and task give the same scope.
+    import hop from those, at most AUTO_SCOPE_LIMIT in that order. An empty result makes the
+    caller fall back to the whole product set (see resolve_edit_scope). Deterministic: the same
+    repository and task give the same scope.
     """
     chosen: list[str] = []
 
@@ -168,6 +169,34 @@ def auto_scope(task: str, product: dict[str, str], checks: dict[str, str]) -> li
 # frame lists editable paths, and a whole large repo there drowns the state. The rest of the repo
 # is still present in the engine's sandbox as read-only context (see _child.py).
 DECLARE_ALL_LIMIT = 200
+
+# Where a row's editable scope came from, recorded as row["scope_source"] so a run shows it.
+SCOPE_EXPLICIT = "explicit"          # --target and/or --edit given
+SCOPE_INFERRED = "inferred"          # over the limit: auto_scope found files from the task/checks
+SCOPE_FALLBACK_FULL = "fallback_full"  # over the limit: nothing named or inferred, whole product set
+SCOPE_WHOLE_REPO = "whole_repo"      # at or below the limit with no flags: unscoped, as before
+
+
+def resolve_edit_scope(task: str, product: dict[str, str], *, target: str | None,
+                      edits: list[str], steering: dict[str, str]) -> tuple[dict[str, str], bool, str]:
+    """Return (editable product files, scoped_edits, scope_source) for a row.
+
+    ``target``/``edits`` are already validated against ``product``. ``--edit`` always scopes; a
+    ``--target`` alone scopes only over the limit (small repos keep it as a hint, as before). A repo
+    at or below DECLARE_ALL_LIMIT with no flags stays unscoped. Over the limit with no flags,
+    auto_scope chooses the files; when it finds none, the whole product set is the scope and the
+    row is unscoped, the same as a small repo, so the run is never refused before turn 1.
+    """
+    large = len(product) > DECLARE_ALL_LIMIT
+    if edits or (large and target):
+        paths = list(dict.fromkeys(([target] if target else []) + edits))
+        return {path: product[path] for path in paths}, True, SCOPE_EXPLICIT
+    if not large:
+        return product, False, SCOPE_WHOLE_REPO
+    inferred = auto_scope(task, product, steering)
+    if inferred:
+        return {path: product[path] for path in inferred}, True, SCOPE_INFERRED
+    return product, False, SCOPE_FALLBACK_FULL
 
 
 # Opt-in edit scope widening (STATEFRAME_EDIT_SCOPE_WIDEN / --edit-scope widen) admits at most
@@ -263,21 +292,16 @@ def build_row(work: WorkCopy, *, task: str, checks: list[str] | None = None,
     if bad:
         raise TaskRowError("--edit file(s) are not product source files in the repository: "
                            + ", ".join(bad))
-    if edits or len(all_product) > DECLARE_ALL_LIMIT:
-        # Scoped mode: only these files are declared editable; the whole repository is still in
-        # the sandbox as context. Other tests stay in the repository copy, not the row.
-        scope = list(dict.fromkeys(([target] if target else []) + edits))
-        if not scope:
-            # Only explicitly chosen checks steer the scope: discovery lists every test in the repo.
-            steering = set(checks or ()) | set(judging_test_paths(tuple(test_files), test_command, ()))
-            scope = auto_scope(task, all_product, {path: texts[path] for path in sorted(steering)
-                                                   if path in texts})
-        if not scope:
-            raise TaskRowError(f"the repository has {len(all_product)} source files; pass --target "
-                               "(and --edit for any other file the fix may touch)")
-        product = {path: all_product[path] for path in scope}
-    else:
-        product = all_product
+    steering: dict[str, str] = {}
+    if not edits and not target and len(all_product) > DECLARE_ALL_LIMIT:
+        # Only explicitly chosen checks steer the scope: discovery lists every test in the repo.
+        steered = set(checks or ()) | set(judging_test_paths(tuple(test_files), test_command, ()))
+        steering = {path: texts[path] for path in sorted(steered) if path in texts}
+    # Scoped rows declare only the scope's files editable; the whole repository is still in the
+    # sandbox as context. Other tests stay in the repository copy, not the row.
+    product, scoped, scope_source = resolve_edit_scope(
+        task, all_product, target=target, edits=edits, steering=steering)
+    if not scoped:
         # Other tests under tests/ (fixtures, conftest, helpers) stay visible as public test files.
         for path, text in texts.items():
             if path.startswith("tests/") and path not in public_tests:
@@ -309,7 +333,8 @@ def build_row(work: WorkCopy, *, task: str, checks: list[str] | None = None,
         "tier": "USER-REPO",
         "msg": task.strip(),
         "files": {path: {"parent_src": text} for path, text in sorted(product.items())},
-        "scoped_edits": bool(edits or len(all_product) > DECLARE_ALL_LIMIT),
+        "scoped_edits": scoped,
+        "scope_source": scope_source,
         "public_tests": dict(sorted(public_tests.items())),
         "public_check_paths": list(declared_checks),
         "allowed_product_paths": roots,
@@ -374,17 +399,12 @@ def _build_generic_row(work: WorkCopy, *, task: str, checks: list[str] | None,
     if bad:
         raise TaskRowError("--edit file(s) are not product source files in the repository: "
                            + ", ".join(bad))
-    scoped = bool(edits or len(product) > DECLARE_ALL_LIMIT)
-    if scoped:
-        scope = list(dict.fromkeys(([selected_target] if selected_target else []) + edits))
-        if not scope:
-            steering = set(declared) | set(judging_test_paths(tuple(test_files), test_command, ()))
-            scope = auto_scope(task, product, {path: texts[path] for path in sorted(steering)
-                                               if path in texts})
-        if not scope:
-            raise TaskRowError(f"the repository has {len(product)} source files; pass --target "
-                               "(and --edit for any other file the fix may touch)")
-        product = {path: product[path] for path in scope}
+    steering: dict[str, str] = {}
+    if not edits and not selected_target and len(product) > DECLARE_ALL_LIMIT:
+        steered = set(declared) | set(judging_test_paths(tuple(test_files), test_command, ()))
+        steering = {path: texts[path] for path in sorted(steered) if path in texts}
+    product, scoped, scope_source = resolve_edit_scope(
+        task, product, target=selected_target, edits=edits, steering=steering)
     source_files = {path: text for path, text in product.items() if path not in test_files}
     candidates = source_files or product
     entry = selected_target or next(
@@ -411,6 +431,7 @@ def _build_generic_row(work: WorkCopy, *, task: str, checks: list[str] | None,
         "msg": task.strip(),
         "files": {path: {"parent_src": text} for path, text in sorted(product.items())},
         "scoped_edits": scoped,
+        "scope_source": scope_source,
         "public_tests": {},
         "protected_test_paths": sorted(protected),
         "runner_kind": "generic", "test_command": list(test_command),

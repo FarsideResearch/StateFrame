@@ -112,7 +112,8 @@ def _add_task_arguments(command: argparse.ArgumentParser, *, for_run: bool = Fal
                          help="another file the fix may change (repeatable); with --edit or in a "
                               "repo over 200 source files only --target and --edit files are "
                               "editable, the rest of the repo is read-only context; without them a large "
-                              "repo is scoped from the files the task and chosen checks name")
+                              "repo is scoped from the files the task and chosen checks name, and when "
+                              "they name none every product file is editable")
     command.add_argument("--edit-scope", choices=("scoped", "widen"), default=None,
                          help="in a scoped run, 'widen' lets the model edit another existing product "
                               "file instead of being refused (same as STATEFRAME_EDIT_SCOPE_WIDEN=on; "
