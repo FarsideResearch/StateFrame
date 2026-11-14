@@ -62,6 +62,56 @@ def validate_configuration() -> bool:
     return active
 
 
+
+# Receipt label vocabulary, by what actually happened to the call:
+#   APPLIED  executed and succeeded (edit landed, read/lookup answered, tests passed)
+#   RED      executed; the check ran and reported failing tests (a valid outcome)
+#   ERROR    executed but errored before a verdict (bad selector, harness, timeout)
+#   REJECTED refused before dispatch, or an edit the host would not apply
+#   UNKNOWN  no execution receipt
+_RECEIPT_APPLIED = frozenset({
+    "APPLIED", "OK", "ACCEPTED", "PASS", "PASSED", "GREEN", "SUCCESS", "CERTIFIED",
+    "REUSED_VERIFICATION", "NO_OP",
+})
+# Extra success codes of read-only lookups and observations (never edits).
+_RECEIPT_APPLIED_LOOKUP = frozenset({"HOST_OBSERVED", "HITS", "NO_HITS",
+                                     "ALREADY_PRESENT", "ENV_READY"})
+_RECEIPT_RED = frozenset({"RED", "FAIL", "FAILED", "BEHAVIOR_FAIL", "PUBLIC_RED",
+                          "COUNTEREXAMPLE"})
+_RECEIPT_ERROR = frozenset({"ERROR", "SELECTOR_ERROR", "HARNESS_ERROR", "TIMEOUT"})
+_RECEIPT_UNRESOLVED = frozenset({"UNKNOWN", "NO_EXECUTION_RECEIPT"})
+# Check tools run a verdict-producing command; only they can report RED.
+_CHECK_TOOLS = frozenset({"run_tests", "authored_check"})
+
+
+def closed_receipt_status(tool: str, result: object) -> str:
+    """Label a closed call's receipt from its tool kind and typed result class.
+
+    Edit tools never leave REJECTED for a non-success result (a mutation that
+    did not land is a rejection whatever the code says). RED is only for check
+    tools. MALFORMED/ENV_BLOCKED/ENVIRONMENT are refusals, so they stay REJECTED.
+    """
+    from kernel_bounded_locate_code import EDIT_TOOLS as locate_edit_tools
+    from kernel_continuation_menu_authority import EDIT_TOOLS
+    name = str(tool).strip().lower()
+    code = str(result).strip().upper().split(":", 1)[0]
+    if code.startswith("RESULT_"):
+        code = code[len("RESULT_"):]
+    if code in _RECEIPT_UNRESOLVED:
+        return "UNKNOWN"
+    if code in _RECEIPT_APPLIED:
+        return "APPLIED"
+    if name in EDIT_TOOLS or name in locate_edit_tools:
+        return "REJECTED"
+    if code in _RECEIPT_APPLIED_LOOKUP:
+        return "APPLIED"
+    if code in _RECEIPT_RED and name in _CHECK_TOOLS:
+        return "RED"
+    if code in _RECEIPT_ERROR:
+        return "ERROR"
+    return "REJECTED"
+
+
 class NativeToolBatch:
     """Never ask the model again while a returned batch still has pending calls."""
 
@@ -540,21 +590,12 @@ class NativeToolBatch:
         return f"RESULT_{normalized}: {detail}"
 
     def _record_closed_receipt(self, record: dict, result: object) -> None:
-        from kernel_step_contract import successful_lookup_status
         tool = str(self.inflight.get("function", {}).get("name", "")) if isinstance(
             self.inflight, dict) else ""
-        lookup_applied = successful_lookup_status(
-            tool, str(result), str(record.get("observation") or record.get("detail") or result),
-        ) == "APPLIED"
-        unresolved = str(result).upper() in {"UNKNOWN", "NO_EXECUTION_RECEIPT"}
-        successful = lookup_applied or str(result).upper() in {
-            "APPLIED", "OK", "ACCEPTED", "PASS", "PASSED", "GREEN", "SUCCESS",
-            "CERTIFIED", "REUSED_VERIFICATION", "NO_OP",
-        }
+        status = closed_receipt_status(tool, result)
         self._record_receipt(
-            self.inflight,
-            "UNKNOWN" if unresolved else "APPLIED" if successful else "REJECTED",
-            "" if successful else self._failure_reason(record, result),
+            self.inflight, status,
+            "" if status == "APPLIED" else self._failure_reason(record, result),
         )
 
     def _record_receipt(self, call: dict, status: str, reason: str) -> None:
