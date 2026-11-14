@@ -181,7 +181,7 @@ def test_on_real_qualified_hook_sends_certified_wire(tmp_path, monkeypatch):
     assert not any(row.get("kind") == "working_set_blocked" for row in events)
 
 
-@pytest.mark.parametrize("reference", ['56af0dc6d6', '1f6b7e9bc1'])
+@pytest.mark.parametrize("reference", ['56af0dc6d6', 'd7fd3aad93'])
 def test_off_complete_request_bytes_match_1de34aa4(tmp_path, tmp_path_factory, reference):
     from test_working_set_astra_off_parity import test_off_provider_bytes_match_cutover_base
 

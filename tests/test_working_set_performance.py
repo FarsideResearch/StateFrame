@@ -3,6 +3,7 @@ import gzip
 import itertools
 import json
 import os
+import pickle
 import random
 import subprocess
 import sys
@@ -87,8 +88,45 @@ def oracle_value(value):
     raise TypeError(f"unsupported oracle value: {kind}")
 
 
+@pytest.fixture(scope="module")
+def admission_reference(tmp_path_factory):
+    """Keep frozen raw oracles; price promoted reads against the carried parent."""
+    raw = recorded_snapshot()
+    _, display, _, page = recorded_read()
+    revisions = dict(raw.current_revisions)
+    revisions[display] = page.metadata["revision"]
+    protected = replace(raw, protected_paths=tuple(sorted(set(raw.protected_paths) | {display})),
+                        current_revisions=tuple(sorted(revisions.items())))
+    base = pinned_tree("d7fd3aad93", tmp_path_factory)
+    work = tmp_path_factory.mktemp("protected-admission-reference")
+    inputs, outputs = work / "inputs.pickle", work / "outputs.json"
+    inputs.write_bytes(pickle.dumps((raw, protected)))
+    driver = """
+import json, pickle, sys
+from pathlib import Path
+from kernel_working_set_prepare import prepare_candidate
+from test_working_set_performance import oracle_value
+from working_set_benchmark import admission, admit_request
+raw, protected = pickle.loads(Path(sys.argv[1]).read_bytes())
+results = {name: {"prepared": oracle_value(prepare_candidate(snap)),
+                  "admission": oracle_value(admission(snap)),
+                  "read": oracle_value(admit_request(snap))}
+           for name, snap in (("raw", raw), ("protected", protected))}
+Path(sys.argv[2]).write_text(json.dumps(results, sort_keys=True))
+"""
+    environment = {key: value for key, value in os.environ.items()
+                   if not key.startswith("STATEFRAME_")}
+    environment["PYTHONPATH"] = os.pathsep.join(str(base / path) for path in
+        ("src/stateframe/engine", "src", "tests"))
+    result = subprocess.run([sys.executable, "-c", driver, str(inputs), str(outputs)],
+                            cwd=base, env=environment, capture_output=True, text=True,
+                            timeout=600, check=False)
+    assert result.returncode == 0, result.stdout[-4000:] + result.stderr[-4000:]
+    return protected, json.loads(outputs.read_text())
+
+
 @pytest.mark.parametrize("baseline", ["7467debf1", "911db220e"])
-def test_pinned_baseline_exact_results_and_randomized_assignments(baseline):
+def test_pinned_baseline_exact_results_and_randomized_assignments(baseline, admission_reference):
     # Captured once by the old isolated reference_results path, before its removal.
     # JSON is sorted/compact; gzip mtime=0 follows the recorded 98-slot fixture.
     expected = json.loads(gzip.decompress(
@@ -110,9 +148,19 @@ def test_pinned_baseline_exact_results_and_randomized_assignments(baseline):
             assert oracle_value(rendered) == pinned, (baseline, index, ordinal)
         if isinstance(actual, PreparedCandidate):
             assert verify_certificate(actual.wire, actual.rendered.certificate)
-    assert oracle_value(admission(cases[0][0])) == expected["admission"]
-    assert oracle_value(admit_request(cases[0][0])) == expected["read"]
-    print(f"exact differential: {len(cases)} preparations, "
+    protected, parent = admission_reference
+    # Point 8 still reproduces the frozen pre-promotion admission results.
+    assert parent["raw"]["admission"] == expected["admission"]
+    assert parent["raw"]["read"] == expected["read"]
+    # Compare complete preparation/admission with the same promoted inputs,
+    # as the floor fix requires, without depending on retired Git objects.
+    prepared = prepare_candidate(protected)
+    assert oracle_value(prepared) == parent["protected"]["prepared"]
+    if isinstance(prepared, PreparedCandidate):
+        assert verify_certificate(prepared.wire, prepared.rendered.certificate)
+    assert oracle_value(admission(protected)) == parent["protected"]["admission"]
+    assert oracle_value(admit_request(protected)) == parent["protected"]["read"]
+    print(f"exact differential: {len(cases)} frozen preparations plus promoted parent, "
           f"{sum(len(a) for _, a in cases)} assignments, cold and fresh admission floors")
 
 

@@ -610,6 +610,8 @@ _EXPECTED_RESULT_CLASSES = {
        ("job_wait", "job_output", "git", "web_fetch", "skill_load")},
     **{tool: {"OK", "MISSING", "DIRECTORY", "ALREADY_PRESENT", "ERROR", "OUT_OF_RANGE"}
        for tool in ("read", "text")},
+    "read": {"OK", "MISSING", "DIRECTORY", "ALREADY_PRESENT", "ERROR", "OUT_OF_RANGE",
+             "REFUSED_ADMISSION"},
     "grep": {"HITS", "NO_HITS", "ERROR", "OUT_OF_RANGE"},
     "ls": {"OK"},
     "list_files": {"HOST_OBSERVED", "REJECTED"},

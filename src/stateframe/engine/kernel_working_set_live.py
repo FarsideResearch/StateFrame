@@ -43,8 +43,8 @@ class ReadAdmissionUnbounded(RequestSealError):
 class ReadAdmissionUnavailable(RequestSealError):
     """Read admission could not freeze its allocator snapshot; ``reason`` is typed.
 
-    Callers degrade to the conservative envelope estimate with this reason.
-    Closing the batch here would strand every later read behind a cursor.
+    Callers refuse fresh exposure for this batch with this reason. A new
+    request retries the freeze; refusal cursors preserve the requested ranges.
     """
     def __init__(self, reason: str) -> None:
         self.reason = reason
@@ -296,7 +296,7 @@ def read_admission_snapshot(runtime, visible_messages, *, byte_cap):
     qualified = getattr(capture, "qualified_request", None)
     if qualified is not None:
         body = qualified.body
-    if visible_messages and any(str(m.get("content", "")).startswith("[StateFrame]\n")
+    elif visible_messages and any(str(m.get("content", "")).startswith("[StateFrame]\n")
                                 for m in visible_messages):
         body = {**(body or {}), "messages": list(visible_messages)}
     if not isinstance(body, dict) or not any(
@@ -304,7 +304,14 @@ def read_admission_snapshot(runtime, visible_messages, *, byte_cap):
             for row in body.get("messages", ())):
         return None
     body = copy.deepcopy(body)
-    if capture is not None and getattr(capture, "owner_presentation", None) is not None:
+    if qualified is not None:
+        # Qualification already owns the full fixed layout. Re-composition
+        # from owner-visible history can discard mandatory menus/facts and
+        # manufacture fresh allowance. Decode overlays losslessly before
+        # replacing the exchange, while their physical references still bind.
+        from kernel_working_set_snapshot_compat import snapshot_semantic_messages
+        body["messages"] = snapshot_semantic_messages(body["messages"])
+    elif capture is not None and getattr(capture, "owner_presentation", None) is not None:
         from kernel_request_candidate import detached_context, render_candidate
         candidate, context = detached_context(capture, runtime)
         body = render_candidate(candidate, context, body)
@@ -349,17 +356,24 @@ def read_admission_snapshot(runtime, visible_messages, *, byte_cap):
                              reasoning_mode=getattr(authority, "reasoning_mode", "on"))
     if snapshot is None or isinstance(snapshot, SnapshotFailure):
         # A known envelope that cannot be frozen is not permission to expose
-        # unaccounted bytes. The caller degrades to the conservative envelope
-        # estimate under this typed reason instead of closing the batch (S3).
+        # unaccounted bytes. The caller closes this batch under the typed reason
+        # rather than treating the previous envelope as a future wire bound.
         raise ReadAdmissionUnavailable(_snapshot_failure_reason(snapshot).value)
     limits = getattr(capture, "_capacity_retry_limits", None)
     ceiling = getattr(runtime, "frame_ceiling", None)
+    # Multiple pending calls reserve separate assistant/tool shells, including
+    # replies that canonical assembly may later fold out of the newest exchange.
+    # The cache projector accepts only that canonical exchange. Price this
+    # conservative reservation as plain, a layout final preparation also admits,
+    # instead of letting an inapplicable cache projection destroy floor authority.
+    layouts = (("plain", "final_cache") if final_layout_mode() == "on" and len(calls) <= 1
+               else ("plain",))
     return replace(snapshot,
         byte_cap=min(byte_cap, limits.max_request_bytes) if limits is not None else byte_cap,
         prompt_limit=min(snapshot.prompt_limit, limits.max_prompt_tokens) if limits is not None
                      else snapshot.prompt_limit,
         frame_limit=ceiling if type(ceiling) is int and ceiling > 0 else None,
-        layouts=("plain", "final_cache") if final_layout_mode() == "on" else ("plain",))
+        layouts=layouts)
 
 
 @transaction
@@ -379,13 +393,25 @@ def read_admission_floor(snapshot, pages=(), *, require_feasible=False, measure=
 
     body = json.loads(snapshot.fixed_body)
     sources = list(snapshot.sources)
+    protected = set(snapshot.protected_paths)
+    revisions = dict(snapshot.current_revisions)
     for slot, call_id in pages:
         sources.append(slot)
+        protected.add(slot.identity.path)
+        # The proposed page is a positive current-revision observation. Include
+        # its host fact even for paths absent from the previous source plan.
+        revisions[slot.identity.path] = slot.identity.revision
         carrier = next((row for row in body["messages"]
                         if row.get("role") == "tool" and row.get("tool_call_id") == call_id), None)
         if carrier is not None:
             carrier["content"] = slot.page
-    trial = replace(snapshot, fixed_body=json.dumps(body).encode(), sources=tuple(sources))
+    # A successful read can become the next edit site. Preparation then pins
+    # every known range of that path, not just the fresh FULL-only page. Reserve
+    # all proposed paths together so a later read cannot spend that protection
+    # twice or activate older/closure ranges outside the measured floor.
+    trial = replace(snapshot, fixed_body=json.dumps(body).encode(), sources=tuple(sources),
+                    protected_paths=tuple(sorted(protected)),
+                    current_revisions=tuple(sorted(revisions.items())))
     _, floor = _minimum_completion(trial, tuple(propose_slots(trial)))
     verify_certificate(floor.wire, floor.certificate)
     if require_feasible:

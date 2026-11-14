@@ -1,7 +1,6 @@
-"""Snapshot failures degrade typed: admission stays open, preparation suspends.
+"""Snapshot failures refuse fresh debt; preparation suspends with typed evidence.
 
-S3: a snapshot failure at the read boundary must not close the batch for
-good. S4/A6: a SnapshotFailure in prepare_live/freeze_shadow is a durable,
+Refusal lasts only for the current batch. S4/A6: a SnapshotFailure in prepare_live/freeze_shadow is a durable,
 typed non-floor suspension, never RequestSealError, injected through the real
 qualification boundary (build_qualified_request).
 """
@@ -37,22 +36,27 @@ def _failing_freeze(reason):
 
 
 @pytest.mark.parametrize("reason", SNAPSHOT_REASONS)
-def test_snapshot_failure_at_read_boundary_keeps_the_batch_open(monkeypatch, reason):
-    """S3: typed degradation to the conservative envelope, never allowance=0/closed."""
+def test_snapshot_failure_at_read_boundary_refuses_unpriced_debt(monkeypatch, reason):
+    """An estimate cannot authorize FULL-only pages after a failed freeze."""
+    freeze = shadow.freeze_preparation
     monkeypatch.setattr(shadow, "freeze_preparation", _failing_freeze(reason))
     events = []
     journal = SimpleNamespace(emit=lambda kind, **fields: events.append((kind, fields)))
     rt = SimpleNamespace(_frame_budget_request_count=7, native_batch=None, journal=journal)
-    messages = [{"role": "user", "content": "[StateFrame]\n{}"}]
+    messages = [{"role": "system", "content": "rules"},
+                {"role": "user", "content": "Task: read"},
+                {"role": "user", "content": '[StateFrame]\n{"state":{"framefit5":{}}}'},
+                {"role": "user", "content": "[WIRE VOLATILE TAIL]"}]
     state = admission._state(rt, messages)
     assert state.snapshot is None
-    assert state.closed is False
-    assert state.allowance > 0
+    assert state.closed is True
+    assert state.allowance == 0
     assert state.degraded_reason == reason
     assert admission.remaining_allowance(rt, messages) == state.allowance
     degraded = [f for k, f in events if k == admission.EVENT and f["decision"] == "DEGRADED"]
     assert degraded and degraded[0]["reason"] == reason
     # The next request index starts clean: the failure does not stick.
+    monkeypatch.setattr(shadow, "freeze_preparation", freeze)
     rt._frame_budget_request_count = 8
     fresh = admission._state(rt, messages)
     assert fresh is not state and fresh.closed is False and fresh.allowance > 0
@@ -70,7 +74,7 @@ def test_read_admission_snapshot_failure_is_typed(monkeypatch, tmp_path):
 
 
 @pytest.mark.parametrize("reason", SNAPSHOT_REASONS)
-def test_snapshot_failure_still_delivers_and_charges_reads(tmp_path, monkeypatch, reason):
+def test_snapshot_failure_returns_typed_refusals_and_cursors(tmp_path, monkeypatch, reason):
     from test_read_receipts_admission import read
 
     capture, rt, body, plan, journal, tools = seal_fixture(tmp_path, monkeypatch)
@@ -78,16 +82,15 @@ def test_snapshot_failure_still_delivers_and_charges_reads(tmp_path, monkeypatch
     for name in ("a.py", "b.py"):
         (tmp_path / name).write_text("value = 1\n")
         (status, text, _), metadata = read(rt, tmp_path, name)
-        assert status == "OK"
-        assert metadata["effective_range"] is not None
-        assert "value = 1" in text
+        assert status == admission.REFUSED_ADMISSION
+        assert metadata["effective_range"] is None
+        assert metadata["next_cursor"] in text
     state = admission._state(rt, body["messages"])
-    expected = admission.fresh_exposure_allowance(
-        admission.request_byte_cap(), admission.fixed_envelope_estimate(rt, None), ())
-    assert state.allowance == expected
-    assert state.admitted_count == 2 and state.pending_bytes > 0
-    assert admission.remaining_allowance(rt, None) == expected - state.pending_bytes
-    assert state.degraded_reason == reason and not state.closed
+    assert state.allowance == 0
+    assert state.admitted_count == 0 and state.pending_bytes == 0
+    assert state.refused_count == 2
+    assert admission.remaining_allowance(rt, None) == 0
+    assert state.degraded_reason == reason and state.closed
 
 
 def test_snapshot_failure_respects_real_capacity_exhaustion(monkeypatch):
@@ -98,7 +101,7 @@ def test_snapshot_failure_respects_real_capacity_exhaustion(monkeypatch):
     assert state.allowance == 0 and state.closed
 
 
-def test_in_batch_edit_with_stale_visible_source_does_not_strand_reads(tmp_path):
+def test_in_batch_edit_with_stale_visible_source_refuses_until_refrozen(tmp_path):
     """Scout r3: freeze the real stale open-site authority without fault injection."""
     from kernel_request_source_window import source_revision
     from test_read_receipts_admission import read, runtime
@@ -115,14 +118,14 @@ def test_in_batch_edit_with_stale_visible_source_does_not_strand_reads(tmp_path)
     assert before is not None
     path.write_text("new\n")
     state = admission._state(rt, messages)
-    assert not state.closed and state.degraded_reason == "SOURCE_SNAPSHOT_UNSTABLE"
+    assert state.closed and state.degraded_reason == "SOURCE_SNAPSHOT_UNSTABLE"
     with pytest.raises(live.RequestSealError) as caught:
         live.read_admission_snapshot(rt, messages, byte_cap=admission.request_byte_cap())
     assert caught.value.reason == "SOURCE_SNAPSHOT_UNSTABLE"
     (status, text, _), metadata = read(rt, tmp_path, "a.py")
-    assert status == "OK" and "new\n" in text
+    assert status == admission.REFUSED_ADMISSION and metadata["next_cursor"] in text
     assert metadata["revision"] == source_revision("new\n")
-    assert state.pending_bytes > 0
+    assert state.pending_bytes == 0
 
 
 def test_untyped_admission_error_has_a_contract_reason(monkeypatch):
@@ -131,7 +134,7 @@ def test_untyped_admission_error_has_a_contract_reason(monkeypatch):
     monkeypatch.setattr(live, "read_admission_snapshot", fail)
     state = admission._state(SimpleNamespace(), None)
     assert state.degraded_reason == "PREPARATION_CONTRACT_FAILURE"
-    assert state.allowance > 0 and not state.closed
+    assert state.allowance == 0 and state.closed
 
 
 @pytest.mark.parametrize("reason", SNAPSHOT_REASONS)

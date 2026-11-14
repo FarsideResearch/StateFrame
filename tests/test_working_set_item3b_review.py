@@ -210,16 +210,17 @@ def admission_case(lines, *, cap=100_000):
     return rt, raw, request, page
 
 
-@pytest.mark.parametrize("plan_window", [False, True])
-def test_120_line_admission_uses_at_most_eight_floors_and_memoizes(monkeypatch, plan_window):
+@pytest.mark.parametrize("window_lines", [0, 45, 95],
+                         ids=["no-plan", "feasible-plan", "over-cap-plan"])
+def test_120_line_admission_uses_at_most_eight_floors_and_memoizes(monkeypatch, window_lines):
     import kernel_working_set_live as live
     import kernel_read_admission as admission
     rt, raw, request, page = admission_case([f"{i:03} " + "x" * 100 + "\n" for i in range(120)], cap=8000)
     original = live.read_admission_floor
     state = rt._read_admission_state
-    if plan_window:
+    if window_lines:
         from kernel_source_delivery import deliver_source
-        window = deliver_source(raw, "source.py", 0, args=replace(request, max_lines=95))
+        window = deliver_source(raw, "source.py", 0, args=replace(request, max_lines=window_lines))
         slot = live.read_admission_slot(window, path="source.py", arguments=request.arguments, ordinal=1)
         prefix = "[Current source: source.py]\n"
         slot = replace(slot, key="plan", state="CLOSURE", plan_only=True,
@@ -234,7 +235,14 @@ def test_120_line_admission_uses_at_most_eight_floors_and_memoizes(monkeypatch, 
     monkeypatch.setattr(live, "read_admission_floor", floor)
     result = admission.admit(rt, raw=raw, display="source.py", start=0, request=request,
                              source=page, visible_messages=None)
-    assert result.result_class == "OK" and len(result.content.splitlines()) < 120
+    # Promotion makes the whole existing plan range mandatory. The 95-line
+    # range alone exceeds 8 KB, so even a one-line fresh page must be refused.
+    if window_lines == 95:
+        assert result.result_class == admission.REFUSED_ADMISSION
+        assert not result.content
+    else:
+        assert result.result_class == "OK" and len(result.content.splitlines()) < 120
+    assert result.metadata["next_cursor"] in result.text
     assert len(calls) <= 8
     n = len(result.content.splitlines())
     from kernel_source_delivery import deliver_source
@@ -247,6 +255,7 @@ def test_120_line_admission_uses_at_most_eight_floors_and_memoizes(monkeypatch, 
     count = len(calls)
     state.pages.clear()
     state.pending_bytes = 0
+    state.closed = False
     again = admission.admit(rt, raw=raw, display="source.py", start=0, request=request,
                             source=page, visible_messages=None)
     assert again == result and len(calls) == count

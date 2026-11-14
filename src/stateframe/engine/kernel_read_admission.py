@@ -123,8 +123,8 @@ class _RequestState:
     batch_identity: object = None
     snapshot: PreparationSnapshot | None = None
     floor_bytes: int = 0
-    # Typed reason when the allocator snapshot could not be frozen for this
-    # request; admission then runs on the conservative envelope estimate.
+    # Typed reason when the complete floor is unavailable. No fresh exposure
+    # may be promised using an estimate after a failed authoritative freeze.
     degraded_reason: str | None = None
     pages: list[tuple[SourceSlot, str | None]] = field(default_factory=list)
     # Cache exact floor results, including infeasibility, only for this request.
@@ -157,6 +157,7 @@ def _state(runtime: object, visible_messages: Sequence[Mapping[str, object]] | N
             read_admission_snapshot,
         )
         degraded = None
+        failure = None
         measure = None
         unbounded = False
         try:
@@ -170,22 +171,31 @@ def _state(runtime: object, visible_messages: Sequence[Mapping[str, object]] | N
             snapshot, floor_bytes = None, 0
             unbounded = True
         except (RequestSealError, ValueError, TypeError, KeyError, OSError, RuntimeError) as error:
-            # Snapshot failure has no floor authority. Fall back to the existing
-            # conservative envelope; final preparation still needs certification.
+            # A sealed envelope is not a bound on the next complete layout:
+            # source carriers, notices and host facts can all grow. Without a
+            # measured floor, refuse this batch before creating FULL-only debt.
             snapshot, floor_bytes, measure = None, 0, None
             degraded = (error.reason if isinstance(error, ReadAdmissionUnavailable)
                         else "PREPARATION_CONTRACT_FAILURE")
+            trace = error.__traceback__
+            while trace is not None and trace.tb_next is not None:
+                trace = trace.tb_next
+            # Only code coordinates and types: exception text can contain
+            # private source. Keep failures diagnosable without logging it.
+            failure = {"error_type": type(error).__name__,
+                "failure_site": (f"{Path(trace.tb_frame.f_code.co_filename).name}:{trace.tb_lineno}"
+                                 if trace is not None else None)}
         allowance = (max(0, snapshot.byte_cap - floor_bytes) if snapshot is not None else
             fresh_exposure_allowance(request_byte_cap(),
                                      fixed_envelope_estimate(runtime, visible_messages), ()))
-        if unbounded:
+        if unbounded or degraded is not None:
             allowance = 0
         state = _RequestState(request_index=index, allowance=allowance,
                               batch_identity=batch_identity, snapshot=snapshot, floor_bytes=floor_bytes,
                               closed=allowance == 0, degraded_reason=degraded, measure=measure)
         if degraded is not None:
             _journal(runtime, state, decision="DEGRADED", page_bytes=0, admitted_bytes=0,
-                     admitted_lines=None, path="", reason=degraded)
+                     admitted_lines=None, path="", reason=degraded, failure=failure)
         try:
             setattr(runtime, _STATE_ATTR, state)
         except (AttributeError, TypeError):
@@ -208,7 +218,7 @@ def _wire_bytes(text: str) -> int:
 
 def _journal(runtime: object, state: _RequestState, *, decision: str, page_bytes: int,
              admitted_bytes: int, admitted_lines: int | None, path: str,
-             reason: str | None = None) -> None:
+             reason: str | None = None, failure: Mapping[str, str | None] | None = None) -> None:
     journal = getattr(runtime, "journal", None)
     if journal is None:
         return
@@ -219,7 +229,8 @@ def _journal(runtime: object, state: _RequestState, *, decision: str, page_bytes
                 admitted_bytes if decision != REFUSED_ADMISSION else 0),
             page_bytes=page_bytes, admitted_bytes=admitted_bytes, admitted_lines=admitted_lines,
             admitted_count=state.admitted_count, truncated_count=state.truncated_count,
-            refused_count=state.refused_count, **({"reason": reason} if reason is not None else {}))
+            refused_count=state.refused_count, **({"reason": reason} if reason is not None else {}),
+            **(failure or {}))
     except Exception:  # audit only; never fail a delivery
         pass
 

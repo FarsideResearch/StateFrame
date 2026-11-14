@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Read admission preserves the complete qualified envelope and reserves source ranges that a read can promote to the next edit site. Multi-call reservations use the complete plain layout; if the floor cannot be measured, reads return refusals with recovery cursors. This prevents fresh pages from creating delivery debt beyond the next request's byte cap, including mandatory menus, host facts and deferral notices.
+- Continuation settles `REFUSED_ADMISSION` as a read refusal with no source credit, preserving the recovery cursor instead of replacing the reply with an unknown-effect repair.
 - Tests: working-set reference results are frozen as deterministic JSON fixtures so single-branch clones can run parity checks without retired branch objects; a guard requires Git oracle revisions to be ancestors of HEAD. Read metadata stays bound to 0.6.23, with later-source metadata preserved as provenance. The guard also checks working-set pinned-tree calls, parity delegates and reference parameters.
 - Read-loop fixer wave: retire obsolete exposed source without reintroducing stale pages, preserve overflow exposure debt, and certify explicit unavailable-read notices. Reserve retirement retains protected pages and pages lacking a valid omission representation.
 - Read admission reserves bounded pending results, refuses unbounded producers, shares preparation's token authority, and resets at each sealed request. Snapshot failures use typed suspension and conservative read admission; cache proof failures retry plain layout once. Allocator requests price bounded execution/transcript variants and explicitly refuse incompatible stable-wire mode.

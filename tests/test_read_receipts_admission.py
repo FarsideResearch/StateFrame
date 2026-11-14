@@ -61,6 +61,39 @@ def _results(rt):
     return [e for e in rt.journal.events if e["kind"] == "read_result"]
 
 
+def test_admission_refusal_settles_continuation_without_source_credit(tmp_path, on, monkeypatch):
+    """A refused read has a known host outcome and must keep its cursor reply."""
+    from kernel_continuation_state import ContinuationError, unresolved
+    from test_no_dead_fence import _closed_case, _journal_live
+
+    monkeypatch.setattr(admission, "request_byte_cap", lambda: 1000)
+    (tmp_path / "pkg").mkdir()
+    (tmp_path / "pkg/value.py").write_text("value = 1\n")
+    (status, text, _), metadata = read(runtime(tmp_path, fixed=1000), tmp_path, "pkg/value.py")
+    assert status == admission.REFUSED_ADMISSION
+    assert metadata["next_cursor"] in text
+    from kernel_continuation_evidence import result_class_disposition
+    assert result_class_disposition("grep", status) == "unknown"
+    assert result_class_disposition("text", status) == "unknown"
+    from kernel_framefit_receipt_history import read_receipt
+    assert read_receipt({"kind": "action_receipt", "receipt": {
+        "kind": "read", "result_class": status, "target_path": "pkg/value.py",
+        "receipt_id": "refused-read", "workspace_revision": "sha256:source"}}) is None
+    directory = tmp_path / "continuation"
+    directory.mkdir()
+    journal, engine, current, closure, _ = _closed_case(
+        directory, "not_applied_read", read_result=status)
+    try:
+        live = _journal_live(journal, engine, current, ())
+        live.closed(closure)
+        assert engine.state.effects["effect-1"].status == "not_applied"
+        assert not unresolved(engine.state, "root")
+        with pytest.raises(ContinuationError, match="does not prove a current source read"):
+            engine._evidence._read(closure["event_id"], current)
+    finally:
+        journal.close()
+
+
 def test_k1_giant_read_is_paginated_not_blocked(tmp_path, on, monkeypatch):
     monkeypatch.setattr(admission, "request_byte_cap", lambda: 30_000)
     text = big_file(tmp_path, "giant.py")
