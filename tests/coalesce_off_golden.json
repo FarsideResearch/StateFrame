@@ -1,0 +1,112 @@
+{
+  "request": "{\"model\": \"coalesce-parity\", \"messages\": [{\"role\": \"system\", \"content\": \"Repair the current unit.\"}, {\"role\": \"user\", \"content\": \"[PLAN unit-plan/1]\\ntask=t-v2 source=<unknown> digest=sha256:cb661f06ea5f78787ac266882e135ce5cd50e010c5e09c10450d4781717b2f2d\\nhandoff=Unit N+1 starts only after unit N's gate passes: its tests and the cross-file seam check. Mutually dependent symbols form one joint unit.\\n1. Page [unit:Page:g0]\\n   gate: test_page\\n   contract: Implement Page (class) in pkg/models.py; gate = [test_page].\\n2. fetch [unit:fetch:g0]\\n   gate: \\n   contract: Implement fetch (def) in pkg/client.py; gate = [].\\n3. fetch_all [unit:fetch_all:g0]\\n   gate: test_fetch_all\\n   contract: Implement fetch_all (def) in pkg/client.py; gate = [test_fetch_all].\\n4. consume [unit:consume:g0]\\n   gate: test_consume, test_consume_again\\n   contract: Implement consume (def) in pkg/consumer.py; gate = [test_consume, test_consume_again].\\n[/PLAN]\"}, {\"role\": \"user\", \"content\": \"[planner] current unit 2/4: fetch (unit:fetch:g0); gate=\"}], \"max_tokens\": 128, \"temperature\": 0, \"tools\": []}",
+  "plan": {
+    "schema": "unit-plan/2",
+    "task_id": "t-v2",
+    "source_path": "<unknown>",
+    "units": [
+      {
+        "unit_id": "unit:Page:g0",
+        "symbol": "Page",
+        "kind": "class",
+        "gate_tests": [
+          "test_page"
+        ],
+        "depends_on": [],
+        "subcontract": "Implement Page (class) in pkg/models.py; gate = [test_page].",
+        "handoff_rule": "Handoff: do not start fetch until Page's gate tests and seam check pass.",
+        "files": [
+          "pkg/models.py"
+        ],
+        "members": [
+          "Page"
+        ]
+      },
+      {
+        "unit_id": "unit:fetch:g0",
+        "symbol": "fetch",
+        "kind": "def",
+        "gate_tests": [],
+        "depends_on": [
+          "unit:Page:g0"
+        ],
+        "subcontract": "Implement fetch (def) in pkg/client.py; gate = [].",
+        "handoff_rule": "Handoff: do not start fetch_all until fetch's gate tests and seam check pass.",
+        "files": [
+          "pkg/client.py"
+        ],
+        "members": [
+          "fetch"
+        ]
+      },
+      {
+        "unit_id": "unit:fetch_all:g0",
+        "symbol": "fetch_all",
+        "kind": "def",
+        "gate_tests": [
+          "test_fetch_all"
+        ],
+        "depends_on": [
+          "unit:Page:g0",
+          "unit:fetch:g0"
+        ],
+        "subcontract": "Implement fetch_all (def) in pkg/client.py; gate = [test_fetch_all].",
+        "handoff_rule": "Handoff: do not start consume until fetch_all's gate tests and seam check pass.",
+        "files": [
+          "pkg/client.py"
+        ],
+        "members": [
+          "fetch_all"
+        ]
+      },
+      {
+        "unit_id": "unit:consume:g0",
+        "symbol": "consume",
+        "kind": "def",
+        "gate_tests": [
+          "test_consume",
+          "test_consume_again"
+        ],
+        "depends_on": [
+          "unit:fetch_all:g0"
+        ],
+        "subcontract": "Implement consume (def) in pkg/consumer.py; gate = [test_consume, test_consume_again].",
+        "handoff_rule": "Handoff: consume is the final unit; its gate must pass for plan completion.",
+        "files": [
+          "pkg/consumer.py"
+        ],
+        "members": [
+          "consume"
+        ]
+      }
+    ],
+    "handoff_rule": "Unit N+1 starts only after unit N's gate passes: its tests and the cross-file seam check. Mutually dependent symbols form one joint unit.",
+    "index_revision": "3c5bb623ac7d064c",
+    "index_paths": [
+      "pkg/__init__.py",
+      "pkg/client.py",
+      "pkg/consumer.py",
+      "pkg/models.py",
+      "pkg/orphan.py"
+    ],
+    "plan_digest": "sha256:cb661f06ea5f78787ac266882e135ce5cd50e010c5e09c10450d4781717b2f2d"
+  },
+  "events": [
+    [
+      "unit_plan",
+      "unit_gate_pass",
+      "unit:Page:g0 next=1"
+    ],
+    [
+      "unit_plan",
+      "unit_gate_fail",
+      "unit:fetch:g0 tests=[] seams=[('unknown_attribute', 'pkg/client.py', 'has_more')]"
+    ],
+    [
+      "unit_plan",
+      "unit_gate_fail",
+      "unit:fetch:g0 tests=[] seams=[('unknown_attribute', 'pkg/client.py', 'has_more')]"
+    ]
+  ],
+  "pointer": 1
+}

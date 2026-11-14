@@ -56,6 +56,18 @@ its tests plus a seam check. `STATEFRAME_SEAM_RECALL=on` reports seam violations
 found through that index: untyped locals, relative imports, and unverified
 attributes at info level.
 
+## Experimental unit coalescing
+
+`STATEFRAME_UNIT_COALESCE` is **EXPERIMENTAL** and **off by default**. Set
+`STATEFRAME_UNIT_COALESCE=on` together with `STATEFRAME_UNIT_PLAN_V2=on` to merge
+producer and consumer units after a confirmed cross-unit seam failure. Gates
+require fresh, named passing test evidence and a passing seam check. Merged units
+pool remaining repair attempts within bounded merge limits; exhausting a merged
+unit stops further retries and records escalation. Advisory notices depend on the
+unit-plan organ, while escalation recording and stopping also work for quiet organs.
+Do not enable this switch by default until a live A/B proves it. See
+[unit coalescing limitations](../../KNOWN_LIMITATIONS.md#opt-in-unit-coalescing-evidence-and-escalation).
+
 ## Hosted and OpenAI-compatible endpoints
 
 StateFrame chooses the dialect for each selected endpoint, including routed endpoints. It makes bounded `GET /props` and `GET /slots` requests to that endpoint's origin using the request's API key and does not follow redirects. A 200 `/props` response identifies llama.cpp only when it has `default_generation_settings` plus `n_ctx` or `model_path`. A populated `/slots` array with distinct nonnegative integer IDs, positive integer `n_ctx`, and boolean `is_processing` also proves llama.cpp when `/props` is missing or unrecognized. Without either proof or the explicit `STATEFRAME_PROVIDER=llama.cpp` override, StateFrame selects `openai-strict`. The first run line and final summary show each chosen dialect, the reason, and how reasoning controls were handled.

@@ -243,6 +243,8 @@ class _Bolt:
 
 
 def test_pointer_advances_only_on_passing_gate(tmp_path, monkeypatch, recall_on):
+    # Exercise the legacy gate contract; coalescing requires named host evidence.
+    monkeypatch.setenv("STATEFRAME_UNIT_COALESCE", "off")
     monkeypatch.setattr(v2, "_index_class", lambda: RefIndex)
     for rel, text in PKG.items():
         (tmp_path / rel).parent.mkdir(parents=True, exist_ok=True)

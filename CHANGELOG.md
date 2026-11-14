@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Experimental opt-in `STATEFRAME_UNIT_COALESCE=on` (requires `STATEFRAME_UNIT_PLAN_V2=on`): merge failed producer/consumer seams with bounded pooled repair attempts, retain fresh named gate evidence and passed-unit progress, and stop retries after merged-unit escalation. Off by default pending live A/B validation.
+
 ## 0.6.24 (2026-11-14)
 
 - Planner v2 and seam recall can now be turned on: STATEFRAME_UNIT_PLAN_V2 and STATEFRAME_SEAM_RECALL accept on/off.
