@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Subframes: with the working-set allocator on, subframe workers run on the legacy frame allocation (the recorded worker environment pins `STATEFRAME_WORKING_SET_ALLOCATOR=off`), because the allocator has no unit tool surface or visibility yet. The allocator's read-loop protections therefore do not apply inside subframe workers yet; a fix is planned for a 0.7.x patch release. See KNOWN_LIMITATIONS.md. `STATEFRAME_PARALLEL_SUGGEST` also rides the legacy allocation and has no effect on a parent that runs the allocator.
 - Subframes: with the working-set allocator on, subframe workers run on the legacy frame allocation (the recorded worker environment pins `STATEFRAME_WORKING_SET_ALLOCATOR=off`), because the allocator has no unit tool surface or visibility yet. The allocator's read-loop protections therefore do not apply inside subframe workers yet; see KNOWN_LIMITATIONS.md. `STATEFRAME_PARALLEL_SUGGEST` also rides the legacy allocation and has no effect on a parent that runs the allocator.
 ## 0.6.46 (2026-11-15)
 
