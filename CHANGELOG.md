@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.7.4 (2026-11-15)
 
 - Parallel subframes: the `parallel` tool schema now requires `goal` (the short form the description advertises), and a subframe without one is refused with a matching `goal` hint. Before, models that followed the schema were refused with a contradictory `outcome` hint and never split. The KNOWN_LIMITATIONS entry about the mismatch is removed.
 
