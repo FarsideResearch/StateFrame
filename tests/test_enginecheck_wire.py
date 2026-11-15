@@ -2,11 +2,12 @@
 from __future__ import annotations
 
 import json
+import urllib.error
 from pathlib import Path
 from typing import Mapping, Sequence
 
 import pytest
-from enginecheck import HarnessError, Need, Scenario, Trace, run
+from enginecheck import HarnessError, Need, Scenario, Trace, VacuousScenario, run
 from enginecheck import wire as wire_module
 from enginecheck.wire import (
     OfflineTokenizer,
@@ -26,7 +27,7 @@ from enginecheck.wire import (
 )
 from stateframe.engine import kernel_cache_layout as LAYOUT
 
-IM = 99  # token id of <|im_start|> in the offline fake tokenizer below
+IM = 0x110000  # above any ord() of fake content, so <|im_start|> can never collide with text
 
 
 class FakeTokenizer:
@@ -48,8 +49,12 @@ class FakeTokenizer:
         return IM
 
 
-def _trace(tmp_path: Path, bodies: list[dict[str, object]], raws: list[bytes] | None = None) -> Trace:
+def _trace(tmp_path: Path, bodies: list[dict[str, object]], raws: list[bytes] | None = None,
+           responded: set[int] | None = None, errored: set[int] | None = None) -> Trace:
+    """A trace whose wire siblings exist; every send responds unless `responded` names the answered turns."""
     requests = raws if raws is not None else [json.dumps(body, sort_keys=True).encode() for body in bodies]
+    answered = set(range(1, len(requests) + 1)) if responded is None else responded
+    _write_wire_siblings(tmp_path, count=len(requests), responded=answered, errored=errored or set())
     return Trace(requests=requests, request_json=bodies, events=[], exit_code=0, switches={},
                  run_dir=tmp_path, repo=tmp_path)
 
@@ -215,13 +220,19 @@ SHIPPED_ENGINE_FAILURES: tuple[str, ...] = (
 )
 def test_real_scripted_run_keeps_stable_prefix(tmp_path: Path) -> None:
     _relay_reachable()
-    trace = run(_read_three_scenario(), tmp_path)
+    try:
+        trace = run(_read_three_scenario(), tmp_path)
+    except VacuousScenario as error:
+        # A vacuous run is a harness problem, not the pinned engine break: it must not satisfy the xfail.
+        raise RuntimeError(f"real scenario was vacuous, not an engine verdict: {error}") from error
     report = analyze(trace)
     if not report.failures:
         return  # engine fixed: strict xfail reports XPASS, prompting removal of the marker
-    if report.failures != SHIPPED_ENGINE_FAILURES:
-        raise RuntimeError(f"unexpected real-run failures (not the pinned engine break): {report.failures}")
-    assert_prefix_stable(trace)  # raises AssertionError listing the pinned engine failures
+    message = "; ".join(report.failures)
+    pinned = "; ".join(SHIPPED_ENGINE_FAILURES)
+    if message != pinned:
+        raise RuntimeError(f"unexpected real-run failures (not the pinned engine break): {message}")
+    raise AssertionError(f"pinned shipped-profile engine break: {message}")
 
 
 # --- 3. Negative controls: the gate must reject a broken analyzer, and accept the real one ---
@@ -312,3 +323,65 @@ def test_shipped_switches_exclude_launcher_policy_and_keep_engine_switches() -> 
     assert "STATEFRAME_PROTECT_TESTS" not in switches
     assert switches["STATEFRAME_F4"] == "on"
     assert switches["STATEFRAME_FRAMEFIT"] == "on"
+
+
+# --- Repair round: no-sample siblings, malformed tool menus, relay HTTP faults, vacuous real runs ---
+
+def _write_wire_siblings(run_dir: Path, count: int, responded: set[int], errored: set[int] = frozenset()) -> None:
+    """Engine wire siblings: a request file per send, a response only for responded sends, an error record if any."""
+    wire = run_dir / "wire"
+    wire.mkdir(parents=True, exist_ok=True)
+    for turn in range(1, count + 1):
+        (wire / f"{turn:04d}.request.json").write_bytes(b"{}")
+        if turn in responded:
+            (wire / f"{turn:04d}.response.json").write_bytes(b"{}")
+        if turn in errored:
+            (wire / f"{turn:04d}.error.txt").write_text("send failed", encoding="utf-8")
+
+
+def test_send_without_response_is_no_sample_and_never_the_baseline(tmp_path: Path) -> None:
+    # Turn 2 has no response file, so it is no sample. Turn 3 must be judged against turn 1 and pass.
+    # Before the repair the sibling files were ignored: no_sample was empty and turn 2 was compared (failure).
+    report = analyze(_trace(tmp_path, _read_turns(2), responded={1, 3}),
+                     tokenizer=FakeTokenizer())  # type: ignore[arg-type]
+    assert report.no_sample == (2,)
+    assert report.failures == ("no_sample:2",)
+
+
+def test_send_with_error_record_is_no_sample(tmp_path: Path) -> None:
+    report = analyze(_trace(tmp_path, _read_turns(2), responded={1, 3}, errored={2}),
+                     tokenizer=FakeTokenizer())  # type: ignore[arg-type]
+    assert report.no_sample == (2,)
+
+
+def test_tool_menu_with_non_mapping_entry_is_malformed(tmp_path: Path) -> None:
+    # Before the repair the junk entry was filtered out, so the menu looked unchanged and passed.
+    before = _tools(["read"])
+    after = [*_tools(["read"]), "junk"]  # type: ignore[list-item]
+    assert _menu_failure(before, after) == "prefix_turn_2_tool_menu_malformed_offset_5"
+
+
+def test_relay_http_error_is_not_retried_as_unreachable(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Before the repair HTTPError was caught as URLError: three attempts, then tokenizer_relay_unreachable.
+    calls: list[int] = []
+
+    def fake_urlopen(request: object, timeout: float) -> object:
+        calls.append(1)
+        raise urllib.error.HTTPError("http://127.0.0.1:18592/tokenize", 500, "relay fault", {}, None)
+
+    monkeypatch.setattr(wire_module.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(wire_module.time, "sleep", lambda seconds: None)
+    with pytest.raises(HarnessError, match="tokenizer_relay_http_error"):
+        OfflineTokenizer().tokenize("x")
+    assert len(calls) == 1
+
+
+def test_real_run_vacuous_scenario_cannot_satisfy_the_xfail(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Before the repair the VacuousScenario (an AssertionError) escaped and would have satisfied the strict xfail.
+    def vacuous(scenario: Scenario, tmp: Path) -> Trace:
+        raise VacuousScenario("the engine sent no requests")
+
+    monkeypatch.setitem(globals(), "run", vacuous)
+    monkeypatch.setitem(globals(), "_relay_reachable", lambda: None)
+    with pytest.raises(RuntimeError, match="vacuous"):
+        test_real_scripted_run_keeps_stable_prefix(tmp_path)

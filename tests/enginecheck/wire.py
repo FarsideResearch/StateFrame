@@ -12,6 +12,7 @@ import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
+from pathlib import Path
 from types import ModuleType
 from typing import Mapping, Sequence
 
@@ -125,6 +126,9 @@ def _post_json(path: str, body: Mapping[str, object], *, endpoint: str) -> dict[
         try:
             with urllib.request.urlopen(request, timeout=RELAY_TIMEOUT_SECONDS) as response:
                 raw = response.read()
+        except urllib.error.HTTPError as error:
+            # The relay answered: retrying would hide a real fault behind "unreachable".
+            raise HarnessError("tokenizer_relay_http_error") from error
         except (urllib.error.URLError, TimeoutError, OSError) as error:
             if attempt + 1 == RELAY_RETRIES:
                 raise HarnessError("tokenizer_relay_unreachable") from error
@@ -321,8 +325,13 @@ def _is_retained_source(message: object, module: ModuleType) -> bool:
     return isinstance(message, Mapping) and _message_band(module, message) == "retained_source"
 
 
-def _tool_list(tools: object) -> list[Mapping[str, object]]:
-    return [tool for tool in tools if isinstance(tool, Mapping)] if isinstance(tools, list) else []
+def _tool_list(tools: object) -> list[Mapping[str, object]] | None:
+    """The tool entries of one request, or None when the menu is not a list of mappings (malformed)."""
+    if tools is None:
+        return []
+    if not isinstance(tools, list) or not all(isinstance(tool, Mapping) for tool in tools):
+        return None
+    return list(tools)
 
 
 def _tool_menu_failure(previous: Wire, current: Wire, module: ModuleType) -> str | None:
@@ -336,6 +345,8 @@ def _tool_menu_failure(previous: Wire, current: Wire, module: ModuleType) -> str
         return None
     before = _tool_list(before_raw)
     after = _tool_list(after_raw)
+    if before is None or after is None:
+        return "tool_menu_malformed"
     before_names = [module._tool_name(tool) for tool in before]
     after_names = [module._tool_name(tool) for tool in after]
     prefix_intact = [_canonical(tool) for tool in after[:len(before)]] == [_canonical(tool) for tool in before]
@@ -439,12 +450,33 @@ def tokenize_wire(wire: Wire, tokenizer: OfflineTokenizer, module: ModuleType) -
                 retained_source_prefix_ends=retained_ends)
 
 
+def _no_sample_reasons(run_dir: Path, count: int) -> list[str | None]:
+    """Per send, from the engine's wire siblings: an error record or a missing response makes it no sample."""
+    wire_dir = run_dir / "wire"
+    paths = sorted(wire_dir.glob("[0-9][0-9][0-9][0-9].request.json")) if wire_dir.is_dir() else []
+    if len(paths) != count:
+        raise HarnessError(f"wire_request_count_mismatch: {len(paths)} request files for {count} requests")
+    reasons: list[str | None] = []
+    for path in paths:
+        stem = path.name[:4]
+        if (wire_dir / f"{stem}.error.txt").is_file():
+            reasons.append("send_error")
+        elif not (wire_dir / f"{stem}.response.json").is_file():
+            reasons.append("no_response")
+        else:
+            reasons.append(None)
+    return reasons
+
+
 def analyze(trace: Trace, tokenizer: OfflineTokenizer | None = None) -> WireReport:
     """Tokenize each sent request through the relay and report stable-prefix pairs, cached tokens and failures."""
     client = tokenizer if tokenizer is not None else OfflineTokenizer()
-    wires = [Wire(turn=index + 1, raw=raw, body=body)
-             for index, (raw, body) in enumerate(zip(trace.requests, trace.request_json))]
-    tokenized = [tokenize_wire(wire, client, layout) for wire in wires]
+    reasons = _no_sample_reasons(trace.run_dir, len(trace.requests))
+    wires = [Wire(turn=index + 1, raw=raw, body=body, no_sample_reason=reason)
+             for index, (raw, body, reason) in enumerate(zip(trace.requests, trace.request_json, reasons))]
+    # No-sample sends are never tokenized: they cannot be reuse, and they never become the baseline.
+    tokenized = [wire if wire.no_sample_reason is not None else tokenize_wire(wire, client, layout)
+                 for wire in wires]
     return analyze_wires(tokenized, im_start_token=client.marker(), layout=layout)
 
 
