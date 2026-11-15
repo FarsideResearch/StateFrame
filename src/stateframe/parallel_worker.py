@@ -609,6 +609,13 @@ def prepare_worker(spec: UnitSpec, spec_path: Path, run_dir: Path, start_snapsho
         raise WorkerPreparationError("parent profile environment must contain string keys and values")
     environment["STATEFRAME_TOOL_SETTINGS_FILE"] = str(settings_path.resolve())
     environment["STATEFRAME_REPO_CACHE_DIR"] = str((run_dir / "worker" / "repo-intel-cache").resolve())
+    # The working-set allocator replaces the legacy frame allocation that the subframe tool
+    # surface, unit visibility and unit grep paths run on, and it has no unit policy yet.
+    # A subframe therefore runs on the legacy allocation even when the parent has the
+    # allocator on; the recorded spec carries the pin so resume sees the same value.
+    allocator_pinned = environment.get("STATEFRAME_WORKING_SET_ALLOCATOR") == "on"
+    if allocator_pinned:
+        environment["STATEFRAME_WORKING_SET_ALLOCATOR"] = "off"
     # Route scope is only meaningful (and only accepted by the switch preflight) when the run uses model routes.
     routed = parent_spec.get("routes") is not None
     if routed:
@@ -623,6 +630,8 @@ def prepare_worker(spec: UnitSpec, spec_path: Path, run_dir: Path, start_snapsho
         "STATEFRAME_TOOL_SETTINGS_FILE": "runner:unit-tool-settings",
         "STATEFRAME_REPO_CACHE_DIR": "runner:unit-repo-cache",
     })
+    if allocator_pinned:
+        environment_sources["STATEFRAME_WORKING_SET_ALLOCATOR"] = "runner:unit-allocator-pin"
     if routed:
         environment_sources.update({
             "STATEFRAME_ROUTE_SCOPE": "runner:unit-route",

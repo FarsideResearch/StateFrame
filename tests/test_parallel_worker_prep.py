@@ -653,6 +653,22 @@ def test_directory_effect_comparison_ignores_only_shell_duration(tmp_path):
         _assert_directory_effect_values_match(base, tmp_path, "endpoint", changed, tmp_path, "endpoint")
 
 
+@pytest.mark.parametrize("parent_value,expected", [("on", "off"), ("off", "off"), (None, None)])
+def test_prepare_worker_pins_working_set_allocator_off_for_subframes(
+        tmp_path, parent_value, expected):
+    snapshot, run_dir, spec_path, spec, parent_spec, _parent_run = _unit_fixture(tmp_path)
+    if parent_value is not None:
+        parent_spec["environment"]["STATEFRAME_WORKING_SET_ALLOCATOR"] = parent_value
+
+    prepare_worker(spec, spec_path, run_dir, snapshot, parent_spec=parent_spec)
+
+    prepared = json.loads((run_dir / "spec.json").read_text())
+    assert prepared["environment"].get("STATEFRAME_WORKING_SET_ALLOCATOR") == expected
+    pinned = parent_value == "on"
+    assert ("STATEFRAME_WORKING_SET_ALLOCATOR" in prepared["environment_sources"]) is (
+        pinned or "STATEFRAME_WORKING_SET_ALLOCATOR" in parent_spec.get("environment_sources", {}))
+
+
 def test_prepare_worker_builds_an_ordinary_isolated_run_from_verified_snapshot(tmp_path):
     snapshot, run_dir, spec_path, spec, parent_spec, parent_run = _unit_fixture(tmp_path)
     parent_spec["run_env"] = {"root": str(parent_run / "env"), "kind": "venv", "env": {}}

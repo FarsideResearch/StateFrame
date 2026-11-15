@@ -15,6 +15,9 @@ def _prepared_parent(tmp_path: Path, monkeypatch, *, mode: str):
     from kernel_stateframe_runtime import StateFrameRuntime
     from probes.react_repair import _tools_for_probe_modes
 
+    # This synthetic parent harness predates the shipped working-set allocator; like the
+    # other pre-allocator wire harnesses it pins the allocator off.
+    monkeypatch.setenv("STATEFRAME_WORKING_SET_ALLOCATOR", "off")
     source = tmp_path / "shop/pricing.py"
     source.parent.mkdir()
     source.write_text("def price(value):\n    return value\n")
