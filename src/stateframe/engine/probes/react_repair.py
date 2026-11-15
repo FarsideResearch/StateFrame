@@ -3152,7 +3152,7 @@ def _tools_for_probe_modes(*, probe_gate_on: bool,
 
 def _execute_parent_parallel(measurement, bolt, root, created_this_run,
                              baseline_tests, sandbox_deadline, tool_call_id,
-                             args, artifact_root):
+                             args, artifact_root, *, schema_errors=()):
     from kernel_parallel import context as parallel_context, execute_parallel
 
     context = parallel_context(
@@ -3163,7 +3163,8 @@ def _execute_parent_parallel(measurement, bolt, root, created_this_run,
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}", call_name):
         call_name = "call_" + hashlib.sha256(call_name.encode()).hexdigest()[:40]
     result = execute_parallel(
-        context, args, host=None, store_root=artifact_root / "parallel" / call_name)
+        context, args, host=None, store_root=artifact_root / "parallel" / call_name,
+        schema_errors=tuple(schema_errors))
     return call_name, result
 
 
@@ -9062,12 +9063,12 @@ def work(d, *, resume=None):
             queue_advisory(measurement, trigger)
             return True
 
-        def _dispatch_parent_parallel(tool_call_id, arguments):
+        def _dispatch_parent_parallel(tool_call_id, arguments, *, schema_errors=()):
             nonlocal tool_surface, _parallel_parent_terminal
             call_name, result = _execute_parent_parallel(
                 measurement, bolt, root, created_this_run,
                 baseline_tests, _sandbox_deadline, tool_call_id,
-                arguments, POC.parent)
+                arguments, POC.parent, schema_errors=schema_errors)
             observation = result.observation
             bolt.receipt("parallel", "parallel", call_name,
                          "APPLIED" if result.txn_order else "REFUSED", observation)
@@ -9079,6 +9080,16 @@ def work(d, *, resume=None):
                     _parallel_parent_terminal = True
                     measurement._parallel_parent_terminal = True
             return observation
+
+        def _parallel_schema_refusal(tool_call_id, arguments, errors):
+            """Seal a schema-rejected parallel call as a typed refusal receipt, so the fold never meets a bare reject."""
+            from kernel_parallel import available as parallel_available, writable_workspace
+            if not parallel_available() or not writable_workspace():
+                observation = "REFUSED RESOURCES_UNAVAILABLE: subframe execution is disabled for this run"
+                bolt.receipt("parallel", "parallel", "disabled", "REFUSED", observation)
+                measurement.observe("parallel", observation)
+                return observation
+            return _dispatch_parent_parallel(tool_call_id, arguments, schema_errors=errors)
 
         def _hook_gate(name, arguments, call_id):
             if _hook_wiring_for_run is None:
@@ -9484,12 +9495,8 @@ def work(d, *, resume=None):
                     elif (_forced_error is None
                           and (action_schema_mode or contract_enabled() or native_tool_batches)
                           and _forced_schema_errors):
-                        _forced_observation = _render_contract_rejection(
-                            "parallel", _forced_schema_errors,
-                            binding_current=measurement.dispatch_binding_current())
-                        bolt.receipt("parallel", "parallel", "parallel", "REJECTED",
-                                     _forced_observation)
-                        measurement.observe("parallel", _forced_observation)
+                        _forced_observation = _parallel_schema_refusal(
+                            _forced_call_id, _forced_args, _forced_schema_errors)
                     else:
                         _forced_observation = _dispatch_parent_parallel(
                             _forced_call_id, _forced_args)
@@ -10208,6 +10215,13 @@ def work(d, *, resume=None):
                         _binding_current = measurement.dispatch_binding_current()
                         if (action_schema_mode or contract_enabled() or native_tool_batches) and (
                                 _schema_errors or not _binding_current):
+                            if _name == "parallel":
+                                # Every parallel exchange leaves a receipt, including schema rejects.
+                                msgs.append(_tool_reply_for_call(msgs, tool_call_id,
+                                    _parallel_schema_refusal(
+                                        tool_call_id, _args,
+                                        _schema_errors or ("workspace changed since the proposal's state",))))
+                                continue
                             _reject_text = _render_contract_rejection(
                                 _name, _schema_errors,
                                 binding_current=_binding_current)

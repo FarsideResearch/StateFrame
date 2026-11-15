@@ -813,8 +813,8 @@ def _opaque_actions(
                         # The inherited parent exchange is not an action owned by this worker.
                         continue
                     from kernel_parallel import (
-                        ParallelError, action_receipt_source, action_receipt_summary,
-                        render_parallel_disposition,
+                        ParallelError, ParallelReceiptMissing, action_receipt_source,
+                        action_receipt_summary, render_parallel_disposition,
                     )
                     try:
                         parallel_result, expanded_plan = action_receipt_source(call_id)
@@ -827,6 +827,19 @@ def _opaque_actions(
                             continue
                         summary, omitted = action_receipt_summary(parallel_result, expanded_plan)
                         summary = public_wire_text(summary, journal)
+                    except ParallelReceiptMissing:
+                        # Backstop only: a missing receipt is a refused exchange, not corruption.
+                        # Present-but-invalid receipts still fail closed in the branch below.
+                        _journal_parallel_receipt_missing(journal, call_id)
+                        from kernel_parallel import PARALLEL_ACTION_SUMMARY_BYTES
+                        summary = result_text.encode("utf-8")[:PARALLEL_ACTION_SUMMARY_BYTES].decode(
+                            "utf-8", errors="ignore")
+                        rows.append(_validated_bounded_action_receipt(_bounded_action_receipt(
+                            call_id, tool_name, arguments, argument_bytes, result_text,
+                            turn_index=turn_index, journal=journal, result_summary=summary,
+                            omitted_committed=0, outcome="REJECTED",
+                        )))
+                        continue
                     except ParallelError as error:
                         raise FrameFit5Error(f"typed subframe action receipt is unavailable: {error}") from error
                     receipt = _bounded_action_receipt(
@@ -875,6 +888,14 @@ def _valid_bounded_receipt_path(path: object) -> bool:
         return _safe_relative_path(path) == path
     except (FrameFit5Error, UnicodeError):
         return False
+
+
+def _journal_parallel_receipt_missing(journal: object, call_id: str) -> None:
+    """Record that a parallel exchange lacked its receipt; the fold continues with a refusal."""
+    emit = getattr(journal, "emit", None)
+    if callable(emit):
+        emit("parallel_receipt_missing", producer="kernel_stateframe_framefit5",
+             call_id=call_id[:160], tool="parallel", dispatch=False)
 
 
 def _validated_bounded_action_receipt(value: object) -> dict[str, object]:
@@ -2769,10 +2790,15 @@ def _verify_next_site_bytes(site: Mapping[str, object], workspace_root: str | Pa
     current_bytes = site.get("current_bytes")
     source_ref = site.get("source_ref")
     revision = site.get("revision")
+    # Delivery truth clears current_bytes (value None) on a site this request did
+    # not show. That is a location pointer the model re-reads, not a dropped field.
+    not_shown = (site.get("read_this_request") is False and "current_bytes" in site
+                 and current_bytes is None and not isinstance(source_ref, Mapping))
     missing_fields = []
     if not isinstance(line_range, Mapping):
         missing_fields.append("lines")
-    if not isinstance(current_bytes, str) and not isinstance(source_ref, Mapping):
+    if (not not_shown and not isinstance(current_bytes, str)
+            and not isinstance(source_ref, Mapping)):
         missing_fields.append("current_bytes")
     if not isinstance(revision, str):
         missing_fields.append("revision")
@@ -2806,7 +2832,7 @@ def _verify_next_site_bytes(site: Mapping[str, object], workspace_root: str | Pa
         }
         if current_bytes is not None or dict(source_ref) != expected_ref:
             raise FrameFit5Error("typed next-site source reference is invalid")
-    elif excerpt.decode("utf-8") != current_bytes:
+    elif not not_shown and excerpt.decode("utf-8") != current_bytes:
         raise _CandidateSourceChanged("typed next-site bytes changed before dispatch")
     if line is not None:
         if line < start or line > end:

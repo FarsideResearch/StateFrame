@@ -19,7 +19,7 @@ import stat
 import sys
 import tempfile
 import time
-from typing import Callable, Mapping, Protocol
+from typing import Callable, Mapping, Protocol, Sequence
 
 if __package__:
     from .kernel_parallel_admission import DirectorySnapshot, _definitions, _safe_path, admit, rescan_proposal, scan_coupling
@@ -66,6 +66,35 @@ class ParallelInputError(ParallelError):
         self.detail = detail
         self.hint = hint
         super().__init__(f"subframe {unit_id} {field}: {detail}; fix: {hint}")
+
+
+class ParallelReceiptMissing(ParallelError):
+    """A parallel exchange has no durable receipt; the fold records a typed refusal instead of crashing."""
+
+
+_REQUIRED_PROPERTY = re.compile(r"'([A-Za-z_][A-Za-z0-9_]{0,63})' is a required property")
+
+
+def schema_input_error(args: Mapping, errors: Sequence[str]) -> ParallelInputError:
+    """Translate a tool-schema rejection into the typed refusal the model can act on."""
+    subframes = args.get("subframes") if isinstance(args, Mapping) else None
+    units = subframes if isinstance(subframes, list) else []
+    for error in errors:
+        match = _REQUIRED_PROPERTY.search(str(error))
+        if match is None:
+            continue
+        field = match.group(1)
+        unit_id = "all"
+        for index, unit in enumerate(units):
+            if isinstance(unit, Mapping) and field not in unit:
+                identity = unit.get("id")
+                unit_id = identity if isinstance(identity, str) and identity.strip() else str(index)
+                break
+        return ParallelInputError(unit_id, field, "is required by the parallel schema",
+                                  f'add "{field}": ... and resend the whole parallel call')
+    detail = "; ".join(str(error) for error in errors[:3]) or "does not match the parallel schema"
+    return ParallelInputError("all", "subframes", detail[:300],
+                              "fix the subframe fields to match the parallel schema and resend the whole call")
 
 
 class RecoveryRequired(BaseException):
@@ -1207,7 +1236,7 @@ def action_receipt_source(call_id: str) -> tuple[ParallelResult, ParallelRequest
         else:
             raise ParallelError("subframe expanded plan schema is unsupported")
     except FileNotFoundError as error:
-        raise ParallelError("subframe result or expanded plan is missing") from error
+        raise ParallelReceiptMissing("subframe result or expanded plan is missing") from error
     except OSError as error:
         if error.errno in {errno.ELOOP, errno.ENOTDIR}:
             raise ParallelError("subframe receipt path has an unsafe ancestor") from error
@@ -2633,8 +2662,13 @@ def _recorded_input_refusal(context: ParallelContext, args: Mapping, record,
 
 
 def execute_parallel(context: ParallelContext, args: Mapping, *, host: HostClientProtocol,
-                     store_root: Path) -> ParallelResult:
-    """Admit, run, validate and publish one parent-owned subframe call."""
+                     store_root: Path, schema_errors: Sequence[str] = ()) -> ParallelResult:
+    """Admit, run, validate and publish one parent-owned subframe call.
+
+    schema_errors carries a rejection from the advertised tool schema. It is
+    sealed as the same typed refusal receipt as any other input refusal, so
+    every parallel exchange leaves a durable receipt for the frame fold.
+    """
     if _service is None:
         raise ParallelError("subframe service is not installed")
     run, parent_spec = _service
@@ -2689,6 +2723,9 @@ def execute_parallel(context: ParallelContext, args: Mapping, *, host: HostClien
                 error = ParallelInputError(unit_id, "outcome", "conflicts with goal",
                                            "make outcome equal goal or omit outcome")
                 return _input_refusal(context, args, error, call_id, raw_call_id, call_root)
+    if schema_errors:
+        return _input_refusal(context, args, schema_input_error(args, schema_errors),
+                              call_id, raw_call_id, call_root)
     try:
         completed_args, plan_actions = _complete_arguments(args, pre_snapshot, context.limits)
         request = _request(completed_args, call_id, context.mode, requirements=context.requirements)
