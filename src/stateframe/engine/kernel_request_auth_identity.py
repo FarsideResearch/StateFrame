@@ -7,10 +7,12 @@ import os
 from pathlib import Path
 import secrets
 import stat
+import sys
 import threading
 
 
-_AUTH_BINDING_SECRET_CACHE: dict[str, bytes] = {}
+# key path -> (key file fingerprint at load, or None for the fallback salt, secret).
+_AUTH_BINDING_SECRET_CACHE: dict[str, tuple[tuple[int, ...] | None, bytes]] = {}
 _AUTH_BINDING_FALLBACK_SECRET: bytes | None = None
 _AUTH_BINDING_SECRET_LOCK = threading.RLock()
 
@@ -121,28 +123,113 @@ def _fallback_secret() -> bytes:
         return _AUTH_BINDING_FALLBACK_SECRET
 
 
-def _installation_secret() -> bytes:
-    try:
-        # Reuse StateFrame's home resolution, including STATEFRAME_HOME and
-        # the standard ~/.stateframe default.
-        from stateframe.storage_gc import stateframe_home
+def _register_checkpoint_secret(secret: bytes) -> None:
+    # Import only the matching guard, then cover aliases that are already loaded.
+    if __package__:
+        from . import kernel_checkpoint as native_checkpoint
+    else:
+        import kernel_checkpoint as native_checkpoint
+    native_checkpoint.register_secret(secret)
+    for name in ("kernel_checkpoint", "engine.kernel_checkpoint", "stateframe.engine.kernel_checkpoint"):
+        checkpoint = sys.modules.get(name)
+        if checkpoint is not None and checkpoint is not native_checkpoint:
+            checkpoint.register_secret(secret)
 
-        key_path = stateframe_home() / "identity.key"
+
+def _installation_home(configured_home: str | Path | None = None) -> Path:
+    if __package__:
+        from .kernel_safe_paths import safe_expanduser, safe_home
+    else:
+        from kernel_safe_paths import safe_expanduser, safe_home
+
+    selected = configured_home if configured_home is not None else os.environ.get("STATEFRAME_HOME")
+    if selected:
+        home = safe_expanduser(Path(selected))
+    else:
+        user_home = safe_home()
+        if user_home is None:
+            raise ValueError("cannot find the StateFrame home: set HOME or STATEFRAME_HOME")
+        home = safe_expanduser(user_home / ".stateframe")
+    return home if home.is_absolute() else Path.cwd() / home
+
+
+def _installation_secret(configured_home: str | Path | None = None) -> bytes:
+    try:
+        key_path = _installation_home(configured_home) / "identity.key"
         cache_key = os.fspath(key_path)
     except Exception:
         return _fallback_secret()
 
     with _AUTH_BINDING_SECRET_LOCK:
         cached = _AUTH_BINDING_SECRET_CACHE.get(cache_key)
-        if cached is not None:
-            return cached
+        # A path is not an identity: a long-lived process can see the key at the same path
+        # replaced, rotated or deleted (home recreated between runs). Reuse the cached secret
+        # only while the file is the one it was loaded from; otherwise reload, so the secret
+        # registered for checkpoint redaction is always the key actually on disk.
+        if cached is not None and cached[0] == _key_fingerprint(key_path):
+            _register_checkpoint_secret(cached[1])
+            return cached[1]
         secret = _read_secret(key_path)
         if secret is None:
             secret = _create_secret(key_path)
+        fingerprint = _key_fingerprint(key_path) if secret is not None else None
+        if fingerprint is not None and _read_secret(key_path) != secret:
+            fingerprint = None  # replaced while loading: never matches a valid file, so reload
         if secret is None:
             secret = _fallback_secret()
-        _AUTH_BINDING_SECRET_CACHE[cache_key] = secret
+        _AUTH_BINDING_SECRET_CACHE[cache_key] = (fingerprint, secret)
+        _register_checkpoint_secret(secret)
         return secret
+
+
+def _key_fingerprint(path: Path) -> tuple[int, ...] | None:
+    """Identity of the key file as loaded; None when there is no valid file to identify."""
+    try:
+        info = os.lstat(path)
+    except OSError:
+        return None
+    if not _valid_secret_file(info, uid=os.getuid()):
+        return None
+    return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+
+
+def protected_home_identity(
+        configured_home: str | Path | None = None, *, initialize: bool = False,
+) -> dict[str, int | str]:
+    """Return the filesystem identity of the protected home and its identity key.
+
+    Initialization is runner-start-only. Snapshot and export checks never recreate a
+    missing home or key, because a disappearance means the protected identity changed.
+    """
+    home = Path(os.path.realpath(os.fspath(_installation_home(configured_home))))
+    key_path = home / "identity.key"
+    if initialize:
+        _installation_secret(home)
+    try:
+        home_info = os.stat(home, follow_symlinks=False)
+        key_info = os.lstat(key_path)
+        secret = _read_secret(key_path)
+        home_after = os.stat(home, follow_symlinks=False)
+        key_after = os.lstat(key_path)
+    except OSError as error:
+        raise ValueError("protected home identity is unavailable") from error
+    if secret is None:
+        raise ValueError("protected identity key is unavailable")
+    if (not stat.S_ISDIR(home_info.st_mode) or not stat.S_ISREG(key_info.st_mode)
+            or (home_info.st_dev, home_info.st_ino) != (home_after.st_dev, home_after.st_ino)
+            or not stat.S_ISDIR(home_after.st_mode)
+            or any(getattr(key_info, name) != getattr(key_after, name) for name in (
+                "st_dev", "st_ino", "st_mode", "st_uid", "st_size", "st_mtime_ns", "st_ctime_ns"))):
+        raise ValueError("protected home or key changed during identity capture")
+    _register_checkpoint_secret(secret)
+    return {
+        "realpath": os.fspath(home),
+        "home_st_dev": int(home_info.st_dev),
+        "home_st_ino": int(home_info.st_ino),
+        "key_st_dev": int(key_info.st_dev),
+        "key_st_ino": int(key_info.st_ino),
+        "key_st_ctime_ns": int(key_info.st_ctime_ns),
+    }
 
 
 def auth_binding_for_key(key: str | None) -> str | None:

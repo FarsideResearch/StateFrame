@@ -48,6 +48,16 @@ RANDOM_CALL_ALLOWLIST = {
             1, "Creates the private checkpoint signing key, not a request or receipt identity."
         ),
     },
+    "src/stateframe/commit_export.py": {
+        "uuid.uuid4": (
+            1, "Names a private run-directory backup of the previous commits export; never sent to the model."
+        ),
+    },
+    "src/stateframe/engine/kernel_checkpoint.py": {
+        "os.urandom": (
+            1, "Uniquifies a checkpoint index chunk file name; never sent to the model."
+        ),
+    },
     "src/stateframe/engine/kernel_bolt.py": {
         "uuid.uuid4": (
             1, "Creates a host run label; applied-edit wire rows use the stable journal projection."

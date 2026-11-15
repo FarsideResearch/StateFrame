@@ -3209,9 +3209,190 @@ def _mark_http_contract(exc: BaseException) -> None:
         exc.failure_origin = "harness"
 
 
-def _failed_request_destination(capture) -> tuple[str, str]:
-    """Use the physical send's destination, falling back for uncaptured calls."""
-    return getattr(capture, "_provider_probe_destination", (API, KEY))
+_PROBE_DESTINATION_SCHEMA = "stateframe-probe-destination/1"
+_PRIMARY_API_KEY_ENV_SETTING = "STATEFRAME_PRIMARY_API_KEY_ENV"
+_ENV_VAR_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
+
+
+def _valid_credential_env_name(value: object) -> bool:
+    return isinstance(value, str) and _ENV_VAR_NAME.fullmatch(value) is not None
+
+
+def _route_probe_provenance(route) -> dict[str, object] | None:
+    """Project a frame route into credential-free checkpoint provenance."""
+    from kernel_frame_routes import Route as FrameRoute
+
+    is_route = isinstance(route, FrameRoute)
+    if not is_route and not _frame_routes.ROUTES_ACTIVE:
+        return None
+    settings = getattr(route, "settings", None)
+    endpoint = getattr(route, "endpoint", None)
+    if not isinstance(settings, Mapping) or not isinstance(endpoint, str) or not endpoint:
+        return None
+    credential_env = settings.get("api_key_env")
+    return {
+        "schema": _PROBE_DESTINATION_SCHEMA,
+        "source": "frame_route",
+        "route_name": getattr(route, "role", None),
+        "endpoint": endpoint,
+        "credential_source": (
+            "env" if isinstance(credential_env, str) and credential_env
+            else "unavailable"),
+        "credential_env": (
+            credential_env if isinstance(credential_env, str) and credential_env
+            else None),
+    }
+
+
+def _router_probe_provenance(capture) -> dict[str, object] | None:
+    """Return router provenance only when the send path recorded it before checkpointing."""
+    provenance = getattr(capture, "_provider_probe_provenance", None)
+    if not isinstance(provenance, Mapping) or provenance.get("source") != "model_router":
+        return None
+    return dict(provenance)
+
+
+def _probe_destination_provenance(capture) -> dict[str, object] | None:
+    """Read checkpointed provenance without rebuilding it from current process settings."""
+    provenance = getattr(capture, "_provider_probe_provenance", None)
+    if not isinstance(provenance, Mapping):
+        return None
+    if provenance.get("source") == "model_router":
+        return _router_probe_provenance(capture)
+    return dict(provenance)
+
+
+def _record_probe_destination_skip(capture, reason: str) -> None:
+    """Retain a safe refusal reason and best-effort record it in the run journal."""
+    setattr(capture, "_provider_probe_unavailable_reason", reason)
+    emit = getattr(getattr(capture, "journal", None), "emit", None)
+    if callable(emit):
+        try:
+            emit("provider_probe_skipped", producer="react_repair",
+                 request_id=getattr(capture, "request_id", None),
+                 reason=reason, dispatch=False)
+        except Exception:  # noqa: BLE001 - a probe refusal must not hide the transport failure
+            logger.warning("provider probe skip event could not be recorded")
+
+
+def _failed_request_destination(capture) -> tuple[str, str] | None:
+    """Use the physical destination, or safely rebind its live credential source."""
+    destination = getattr(capture, "_provider_probe_destination", None)
+    if (isinstance(destination, tuple) and len(destination) == 2
+            and isinstance(destination[0], str) and destination[0]
+            and isinstance(destination[1], str)):
+        return destination
+    if destination is not None:
+        _record_probe_destination_skip(capture, "invalid_transient_probe_destination")
+        return None
+
+    provenance = _probe_destination_provenance(capture)
+    if provenance is None:
+        raw_provenance = getattr(capture, "_provider_probe_provenance", None)
+        reason = "probe_provenance_missing" if raw_provenance is None else "invalid_probe_provenance"
+        _record_probe_destination_skip(capture, reason)
+        return None
+    if provenance.get("schema") != _PROBE_DESTINATION_SCHEMA:
+        _record_probe_destination_skip(capture, "invalid_probe_provenance")
+        return None
+    source = provenance.get("source")
+    endpoint = provenance.get("endpoint")
+    credential_source = provenance.get("credential_source")
+    credential_env = provenance.get("credential_env")
+    if not isinstance(endpoint, str) or not endpoint:
+        _record_probe_destination_skip(capture, "destination_unresolved")
+        return None
+
+    if source == "model_router":
+        from kernel_stateframe_model_router import EndpointConfig
+
+        decision = getattr(capture, "model_router_decision", None)
+        selected = getattr(decision, "endpoint", None)
+        if (getattr(capture, "model_router_applied", False) is not True
+                or not isinstance(selected, EndpointConfig)
+                or selected.name != provenance.get("provider_id")
+                or getattr(capture, "model_router_effective_endpoint", None) != endpoint):
+            _record_probe_destination_skip(capture, "router_destination_unresolved")
+            return None
+        if credential_source == "env":
+            if not _valid_credential_env_name(credential_env):
+                _record_probe_destination_skip(capture, "invalid_credential_env_name")
+                return None
+            if selected.api_key_env != credential_env:
+                _record_probe_destination_skip(capture, "router_credential_source_unresolved")
+                return None
+        elif credential_source == "primary":
+            if (selected.api_key_env
+                    or not (selected.inherit_api_key or selected.url is None or endpoint == API)):
+                _record_probe_destination_skip(capture, "router_credential_source_unresolved")
+                return None
+            if not isinstance(credential_env, str) or not credential_env:
+                _record_probe_destination_skip(capture, "router_primary_credential_env_missing")
+                return None
+            if not _valid_credential_env_name(credential_env):
+                _record_probe_destination_skip(capture, "invalid_credential_env_name")
+                return None
+            primary_env = os.environ.get(_PRIMARY_API_KEY_ENV_SETTING)
+            if not primary_env:
+                _record_probe_destination_skip(capture, "primary_run_credential_env_unavailable")
+                return None
+            if not _valid_credential_env_name(primary_env):
+                _record_probe_destination_skip(capture, "invalid_run_credential_env_name")
+                return None
+            if credential_env != primary_env:
+                _record_probe_destination_skip(
+                    capture, "router_primary_credential_env_mismatch")
+                return None
+        elif credential_source == "empty":
+            if not selected.allow_empty_key:
+                _record_probe_destination_skip(capture, "router_credential_source_unresolved")
+                return None
+            return endpoint, ""
+        else:
+            _record_probe_destination_skip(capture, "router_credential_source_unresolved")
+            return None
+    elif source == "frame_route":
+        route = getattr(capture, "frame_route", None)
+        route_provenance = _route_probe_provenance(route)
+        if not _valid_credential_env_name(credential_env):
+            _record_probe_destination_skip(capture, "invalid_credential_env_name")
+            return None
+        if (route_provenance is None
+                or route_provenance.get("endpoint") != endpoint
+                or route_provenance.get("route_name") != provenance.get("route_name")
+                or route_provenance.get("credential_env") != credential_env
+                or credential_source != "env"):
+            _record_probe_destination_skip(capture, "frame_route_destination_unresolved")
+            return None
+    elif source == "primary":
+        if not isinstance(credential_env, str) or not credential_env:
+            _record_probe_destination_skip(capture, "primary_credential_env_missing")
+            return None
+        if not _valid_credential_env_name(credential_env):
+            _record_probe_destination_skip(capture, "invalid_credential_env_name")
+            return None
+        if credential_source != "env":
+            _record_probe_destination_skip(capture, "primary_credential_source_unresolved")
+            return None
+        primary_env = os.environ.get(_PRIMARY_API_KEY_ENV_SETTING)
+        if not primary_env:
+            _record_probe_destination_skip(capture, "primary_run_credential_env_unavailable")
+            return None
+        if not _valid_credential_env_name(primary_env):
+            _record_probe_destination_skip(capture, "invalid_run_credential_env_name")
+            return None
+        if credential_env != primary_env:
+            _record_probe_destination_skip(capture, "primary_credential_env_mismatch")
+            return None
+    else:
+        _record_probe_destination_skip(capture, "unsupported_probe_source")
+        return None
+
+    key = os.environ.get(credential_env, "") if isinstance(credential_env, str) else ""
+    if not key:
+        _record_probe_destination_skip(capture, "missing_live_credential")
+        return None
+    return endpoint, key
 
 
 def _await_endpoint(endpoint: str, key: str, max_wait: int = 300) -> bool:
@@ -3227,6 +3408,13 @@ def _await_endpoint(endpoint: str, key: str, max_wait: int = 300) -> bool:
         if remaining > 0:
             time.sleep(min(10, remaining))
     return False
+
+
+def _await_failed_request_destination(capture) -> bool:
+    destination = _failed_request_destination(capture)
+    if destination is None:
+        return False
+    return _await_endpoint(*destination)
 
 
 def _transport_future_timeout(capture, wall_timeout: float,
@@ -3623,7 +3811,7 @@ def ask_tools(messages, mt=4000, temp=None, tools=None, known_refs=None):
             if _is_connection_failure(_te):
                 emit_reason("degrade", "react_repair:endpoint_failure", "react_repair",
                             "endpoint connection failed; awaiting recovery", type(_te).__name__)
-                if _await_endpoint(*_failed_request_destination(capture)):
+                if _await_failed_request_destination(capture):
                     continue                     # recovered: retry, attempt not wasted
             if attempt == POLICY.transport_attempts - 1:
                 raise

@@ -26,7 +26,8 @@ from itertools import chain
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable
 
-from . import cache_metrics, outer_checks, outcomes, preflight, profiles, routes, test_interpreter, workcopy
+from . import (cache_metrics, outer_checks, outcomes, preflight, profiles, routes, storage_gc,
+               test_interpreter, workcopy)
 from .test_runners import (DECLARED_TEST_SOURCE, declared_test_evidence, discover_check,
                             lock_initial_failing_tests, parse_command, validate_patterns)
 from .test_changes import inspect_test_changes
@@ -62,6 +63,8 @@ PASS_ENV = ("PATH", "HOME", "LANG", "LC_ALL", "LC_CTYPE", "TMPDIR", "USER", "LOG
 USER_ENV = ("LLAMA_CPP_TOKENIZE_URL",)
 # The engine child's test interpreter (absolute path); the engine's test_python() helper reads exactly this key.
 TEST_PYTHON_ENV = "STATEFRAME_TEST_PYTHON"
+RUNNER_HOME_IDENTITY_ENV = "STATEFRAME_RUNNER_HOME_IDENTITY"
+_STARTUP_HOME_IDENTITY_UNSET = object()
 # Engine checkpoint switches the runner copies into the run's environment (kernel_checkpoint).
 CHECKPOINT_ENV = {"STATEFRAME_CHECKPOINT": "save", "STATEFRAME_CHECKPOINT_EVERY": "1",
                   "STATEFRAME_CHECKPOINT_KEEP": "2",
@@ -289,6 +292,9 @@ class RunOptions:
     edit_paths: list[str] = field(default_factory=list)
     target: str | None = None
     run_dir: Path | None = None
+    _resolved_run_dir: Path | None = field(default=None, init=False, repr=False)
+    _stateframe_home_identity: dict[str, int | str] | None = field(default=None, init=False,
+                                                                     repr=False)
     in_place: bool = False
     profile: str = profiles.DEFAULT
     python: str = sys.executable  # the ENGINE's interpreter
@@ -374,6 +380,120 @@ def default_run_dir(repo: Path) -> Path:
     state_root = (home if home is not None else
                   Path(tempfile.gettempdir()) / f"stateframe-{getattr(os, 'getuid', lambda: 'unknown')()}")
     return state_root / ".stateframe" / "runs" / f"{repo.resolve().name}-{stamp}"
+
+
+def _resolved_run_dir(options: RunOptions) -> Path:
+    if options._resolved_run_dir is None:
+        candidate = options.run_dir or default_run_dir(options.repo)
+        options._resolved_run_dir = Path(os.path.realpath(candidate))
+    return options._resolved_run_dir
+
+
+def _path_within(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+        return True
+    except ValueError:
+        return False
+
+
+def _resolved_stateframe_home(run_dir: Path, configured_home: str | None = None) -> Path | None:
+    selected = configured_home or os.environ.get("STATEFRAME_HOME")
+    relative_root = run_dir if configured_home else Path.cwd()
+    try:
+        if selected:
+            state_home = storage_gc.safe_expanduser(Path(selected))
+            if not state_home.is_absolute():
+                state_home = relative_root / state_home
+        else:
+            state_home = storage_gc.stateframe_home()
+        return Path(os.path.realpath(state_home))
+    except (OSError, RuntimeError, ValueError) as error:
+        if selected:
+            raise RunError(
+                "STATEFRAME_HOME_BOUNDARY: STATEFRAME_HOME could not be resolved"
+            ) from error
+        return None
+
+
+def _validate_stateframe_home_paths(run_dir: Path, repo: Path,
+                                    *, configured_homes: tuple[str, ...] = (),
+                                    recorded_home: str | None = None) -> None:
+    homes = [_resolved_stateframe_home(run_dir)]
+    homes.extend(_resolved_stateframe_home(run_dir, value) for value in configured_homes if value)
+    if recorded_home:
+        homes.append(_resolved_stateframe_home(run_dir, recorded_home))
+
+    resolved_run = Path(os.path.realpath(run_dir))
+    resolved_repo = Path(os.path.realpath(repo))
+    for resolved_home in homes:
+        if (resolved_home is not None
+                and (_path_within(resolved_home, resolved_run)
+                     or _path_within(resolved_home, resolved_repo))):
+            raise RunError(
+                "STATEFRAME_HOME_BOUNDARY: STATEFRAME_HOME must resolve outside the run directory "
+                "and repository"
+            )
+
+
+def _validate_stateframe_home_boundary(options: RunOptions) -> None:
+    profile_environment = profiles.load(options.profile)
+    configured_homes = tuple(
+        value for value in (profile_environment.get("STATEFRAME_HOME"),
+                            options.extra_env.get("STATEFRAME_HOME"))
+        if isinstance(value, str) and value
+    )
+    _validate_stateframe_home_paths(
+        _resolved_run_dir(options), options.repo, configured_homes=configured_homes,
+    )
+
+
+def _stateframe_home_at_start(options: RunOptions) -> Path:
+    run_dir = _resolved_run_dir(options)
+    ambient = os.environ.get("STATEFRAME_HOME")
+    if ambient:
+        home = _resolved_stateframe_home(run_dir)
+    else:
+        profile_environment = profiles.load(options.profile)
+        configured = (options.extra_env["STATEFRAME_HOME"]
+                      if "STATEFRAME_HOME" in options.extra_env
+                      else profile_environment.get("STATEFRAME_HOME"))
+        home = _resolved_stateframe_home(
+            run_dir, configured if isinstance(configured, str) else None,
+        )
+    if home is None:
+        raise RunError("STATEFRAME_HOME_IDENTITY_UNAVAILABLE")
+    return home
+
+
+def _capture_stateframe_home_identity(options: RunOptions) -> dict[str, int | str]:
+    from .engine import kernel_request_auth_identity
+
+    home = _stateframe_home_at_start(options)
+    try:
+        identity = kernel_request_auth_identity.protected_home_identity(home, initialize=True)
+    except (OSError, ValueError, RuntimeError) as error:
+        raise RunError("STATEFRAME_HOME_IDENTITY_UNAVAILABLE") from error
+    options._stateframe_home_identity = identity
+    return identity
+
+
+def _verify_stateframe_home_identity(options: RunOptions, home: Path | None = None) -> None:
+    from .engine import kernel_request_auth_identity
+
+    expected = options._stateframe_home_identity
+    if expected is None:
+        raise RunError("STATEFRAME_HOME_IDENTITY_CHANGED")
+    current_home = home or _stateframe_home_at_start(options)
+    try:
+        current = kernel_request_auth_identity.protected_home_identity(current_home)
+        if current != expected:
+            raise ValueError("home identity changed")
+        _validate_stateframe_home_paths(
+            _resolved_run_dir(options), options.repo, recorded_home=str(current_home),
+        )
+    except (OSError, ValueError, RuntimeError, RunError) as error:
+        raise RunError("STATEFRAME_HOME_IDENTITY_CHANGED") from error
 
 
 def run_test_cmd(command: str, cwd: Path, timeout_s: float = 900,
@@ -1068,6 +1188,9 @@ def _finish_prompt_refusal(options: RunOptions, run_dir: Path, spec: dict,
 
 
 def prepare(options: RunOptions, printer=print) -> tuple[Path, workcopy.WorkCopy, dict]:
+    _validate_stateframe_home_boundary(options)
+    if options._stateframe_home_identity is None:
+        _capture_stateframe_home_identity(options)
     explicit_test_protection = options.protect_tests is not None
     try:
         options.runner_kind, test_argv = parse_command(options.test_cmd, options.runner_kind)
@@ -1201,7 +1324,7 @@ def prepare(options: RunOptions, printer=print) -> tuple[Path, workcopy.WorkCopy
         )
     except (hook_host.HookTrustError, hook_host.HookConfigError) as error:
         raise RunError(str(error)) from error
-    run = (options.run_dir or default_run_dir(options.repo)).resolve()
+    run = _resolved_run_dir(options)
     if run.exists():
         raise RunError(f"run directory already exists: {run}")
     # Checked BEFORE anything is created: a run never writes into the user's repository.
@@ -1278,6 +1401,21 @@ def prepare(options: RunOptions, printer=print) -> tuple[Path, workcopy.WorkCopy
         environment["STATEFRAME_MUTATIONS"] = mutation_options["level"]
     else:
         environment.pop("STATEFRAME_MUTATIONS", None)
+    configured_home = os.environ.get("STATEFRAME_HOME") or environment.get("STATEFRAME_HOME")
+    if os.environ.get("STATEFRAME_HOME"):
+        stateframe_home = _resolved_stateframe_home(run)
+    else:
+        stateframe_home = _resolved_stateframe_home(
+            run, configured_home if isinstance(configured_home, str) else None,
+        )
+    _verify_stateframe_home_identity(options, stateframe_home)
+    environment[RUNNER_HOME_IDENTITY_ENV] = json.dumps(
+        options._stateframe_home_identity, sort_keys=True, separators=(",", ":"))
+    if stateframe_home is None:
+        environment.pop("STATEFRAME_HOME", None)
+    else:
+        # The child uses the same resolved home as the host for identity and snapshot boundaries.
+        environment["STATEFRAME_HOME"] = str(stateframe_home)
     # Host authority wins over every caller-supplied environment overlay.
     environment["STATEFRAME_TOOL_SETTINGS_FILE"] = str(settings_file)
     environment["STATEFRAME_SKILL_SETTINGS_FILE"] = str(skills_file)
@@ -1305,8 +1443,11 @@ def prepare(options: RunOptions, printer=print) -> tuple[Path, workcopy.WorkCopy
             raise RunError("--pytest-plugins only accepts 'installed'")
         environment["STATEFRAME_TASK_PYTEST_PLUGINS"] = "installed"
     environment_sources = {k: "profile:" + options.profile for k in environment}
+    if stateframe_home is not None:
+        environment_sources["STATEFRAME_HOME"] = "runner:resolved-stateframe-home"
     environment_sources["STATEFRAME_TOOL_SETTINGS_FILE"] = "runner:host-tool-settings"
     environment_sources["STATEFRAME_SKILL_SETTINGS_FILE"] = "runner:host-skill-settings"
+    environment_sources[RUNNER_HOME_IDENTITY_ENV] = "runner:startup-home-identity"
     for name in opt_in:
         environment_sources[name] = ("ambient:" + name if os.environ.get(name, "").strip()
                                      else "runner:default-" + OPT_IN_RUNNER_DEFAULTS[name])
@@ -1433,6 +1574,8 @@ def _child_env(options: RunOptions) -> dict[str, str]:
         env["REACT_SLOT_ID"] = str(selected_slot)
     env["PYTHONDONTWRITEBYTECODE"] = "1"
     env["PYTHONUNBUFFERED"] = "1"
+    env[RUNNER_HOME_IDENTITY_ENV] = json.dumps(
+        options._stateframe_home_identity, sort_keys=True, separators=(",", ":"))
     return env
 
 
@@ -2260,7 +2403,9 @@ def clean_finished_run_env(run_dir: Path, *, keep: bool = False) -> int | None:
 
 
 def finish_run_storage(run_dir: Path, *, keep_checkpoints: bool = False,
-                       keep_run_env: bool = False, printer=print) -> dict[str, int | None]:
+                       keep_run_env: bool = False, printer=print,
+                       startup_home_identity: object = _STARTUP_HOME_IDENTITY_UNSET
+                       ) -> dict[str, int | None]:
     """Apply finish-time storage actions without allowing cleanup errors to change the result."""
     removed: dict[str, int | None] = {"checkpoints": None, "env": None}
     try:
@@ -2285,7 +2430,11 @@ def finish_run_storage(run_dir: Path, *, keep_checkpoints: bool = False,
     for label, seal in (("measurement storage", storage_gc.seal_measurements),
                         ("preflight requests", storage_gc.seal_requests)):
         try:
-            seal(run_dir, printer=printer)
+            if (label == "preflight requests"
+                    and startup_home_identity is not _STARTUP_HOME_IDENTITY_UNSET):
+                seal(run_dir, printer=printer, startup_home_identity=startup_home_identity)
+            else:
+                seal(run_dir, printer=printer)
         except Exception as error:
             printer(f"warning: {label} was not sealed: {type(error).__name__}: {error}")
     return removed
@@ -2736,6 +2885,9 @@ def _step_limit_line(options: RunOptions) -> str:
 
 
 def run(options: RunOptions, printer=print) -> dict[str, object]:
+    _resolved_run_dir(options)
+    _validate_stateframe_home_boundary(options)
+    _capture_stateframe_home_identity(options)
     if sys.platform != "linux":
         if options.mutations is not None:
             level = options.mutations
@@ -2869,6 +3021,30 @@ def resume_run(run_dir: Path, *, endpoint: Endpoint | None = None, max_turns: in
             powerups.verify_records(spec["powerups"])
         except powerups.PowerupError as error:
             raise resume_module.ResumeRefused(str(error)) from error
+    recorded_environment = spec.get("environment")
+    recorded_home = (recorded_environment.get("STATEFRAME_HOME")
+                     if isinstance(recorded_environment, dict) else None)
+    _validate_stateframe_home_paths(
+        run_dir, Path(spec["repo"]),
+        recorded_home=recorded_home if isinstance(recorded_home, str) else None,
+    )
+    from .engine import kernel_checkpoint, kernel_request_auth_identity
+    home_for_identity = recorded_home if isinstance(recorded_home, str) else None
+    try:
+        recorded_identity = kernel_checkpoint.recorded_home_identity(spec)
+        if isinstance(recorded_identity, dict):
+            current_identity = kernel_request_auth_identity.protected_home_identity(
+                home_for_identity)
+            if current_identity != recorded_identity:
+                raise ValueError("protected home identity changed")
+        else:
+            current_identity = kernel_request_auth_identity.protected_home_identity(
+                home_for_identity, initialize=True)
+            spec.setdefault("environment", {})[RUNNER_HOME_IDENTITY_ENV] = json.dumps(
+                current_identity, sort_keys=True, separators=(",", ":"))
+            _write_hook_spec(run_dir, spec)
+    except (OSError, ValueError, RuntimeError) as error:
+        raise resume_module.ResumeRefused("STATEFRAME_HOME_IDENTITY_CHANGED") from error
     try:
         verify_records(spec.get("skills", []), spec.get("skills_digest", skills_digest([])),
                        spec.get("skills_measurements"))
@@ -2963,6 +3139,7 @@ def resume_run(run_dir: Path, *, endpoint: Endpoint | None = None, max_turns: in
          pytest_plugins=environment.get("STATEFRAME_TASK_PYTEST_PLUGINS"),
          keep_checkpoints=keep_checkpoints, keep_run_env=keep_run_env,
          allow_source_tree=bool(spec.get("allow_source_tree", False)))
+    options._stateframe_home_identity = current_identity
     options.route_cli = route_cli or []
     options.routes_file = routes_file
     if "tool_settings" in spec:
@@ -3325,6 +3502,43 @@ def _resume_record(run_dir: Path, resume: dict, summary: dict) -> dict[str, obje
             "divergence": divergence, "model_swap": resume.get("model_swap")}
 
 
+def _export_final_diff(work: workcopy.WorkCopy, run_dir: Path,
+                       expected_identity: object) -> str | None:
+    """Publish final.diff only after scanning its source bytes and formatted representation."""
+    from .engine import kernel_checkpoint
+
+    diff_target = run_dir / "final.diff"
+    temporary_diff = None
+    try:
+        kernel_checkpoint.verify_stateframe_home_identity(
+            run_dir, expected_identity=expected_identity)
+        captured_secret_generation = kernel_checkpoint._SECRET_GENERATION
+        diff = workcopy.unified_diff(
+            work, scan_bytes=kernel_checkpoint._check_registered_secrets)
+        with tempfile.NamedTemporaryFile(mode="wb", prefix=".final-diff-", dir=run_dir,
+                                         delete=False) as stream:
+            temporary_diff = Path(stream.name)
+            stream.write(diff.encode("utf-8", errors="surrogateescape"))
+            stream.flush()
+            os.fsync(stream.fileno())
+        kernel_checkpoint.verify_stateframe_home_identity(
+            run_dir, expected_identity=expected_identity)
+        kernel_checkpoint.check_registered_secret_file(temporary_diff)
+        kernel_checkpoint.verify_stateframe_home_identity(
+            run_dir, expected_identity=expected_identity)
+        if kernel_checkpoint._SECRET_GENERATION != captured_secret_generation:
+            raise kernel_checkpoint.CheckpointError("STATEFRAME_HOME_IDENTITY_CHANGED")
+        os.replace(temporary_diff, diff_target)
+        _fsync_directory(diff_target.parent)
+        temporary_diff = None
+    except kernel_checkpoint.CheckpointError as error:
+        return kernel_checkpoint._failure_reason(error)
+    finally:
+        if temporary_diff is not None:
+            temporary_diff.unlink(missing_ok=True)
+    return None
+
+
 def _execute(options: RunOptions, started: float, printer, run_dir: Path, work: workcopy.WorkCopy,
              spec: dict) -> dict[str, object]:
     def atomic_bytes(path: Path, data: bytes) -> None:
@@ -3446,13 +3660,16 @@ def _execute(options: RunOptions, started: float, printer, run_dir: Path, work: 
                 candidate_error = "candidate changed while host checks ran; checks are stale"
         except KeyboardInterrupt:
             cancelled = True
-    diff = workcopy.unified_diff(work)
-    atomic_bytes(run_dir / "final.diff", diff.encode("utf-8"))
+    changed_files = workcopy.changed_files(work)
+    diff_export_error = _export_final_diff(work, run_dir, options._stateframe_home_identity)
+    if diff_export_error:
+        printer(f"final.diff export refused: {diff_export_error}")
     commits = None
     if (run_dir / "commits.jsonl").is_file():
         from .commit_export import CommitExportError, export_commits
         try:
-            commits = export_commits(run_dir)
+            commits = export_commits(
+                run_dir, startup_home_identity=options._stateframe_home_identity)
         except (CommitExportError, OSError, ValueError, subprocess.TimeoutExpired) as error:
             commits = {"error": str(error)}
     summary = summarize(run_dir, started)
@@ -3475,10 +3692,11 @@ def _execute(options: RunOptions, started: float, printer, run_dir: Path, work: 
         "candidate_captured": candidate is not None,
         "candidate_sha256": digest,
         "candidate_artifact_digest": artifact_digest,
+        **({"final_diff_error": diff_export_error} if diff_export_error else {}),
         "candidate_error": candidate_error,
         "candidate_paths_dropped": dropped_paths,
         "candidate_files_written": written,
-        "files_changed": sorted(workcopy.changed_files(work)),
+        "files_changed": sorted(changed_files),
         "tests_before": {k: before[k] for k in ("command", "exit_code", "passed")},
         "tests_after": {k: after[k] for k in ("command", "exit_code", "passed", "candidate_sha256")
                         if k in after},
@@ -3511,7 +3729,7 @@ def _execute(options: RunOptions, started: float, printer, run_dir: Path, work: 
             options.test_cmd, options.check_cmd, options.check_source, options.runner_kind)))
     summary["exit_code"] = outcomes.exit_code(summary)
     summary["succeeded"] = succeeded(summary)
-    if options.in_place and diff:
+    if options.in_place and changed_files:
         if summary["succeeded"]:
             try:
                 summary["applied_in_place"] = workcopy.apply_in_place(work)
@@ -3594,7 +3812,8 @@ def _execute(options: RunOptions, started: float, printer, run_dir: Path, work: 
                 f"{hook_summary['vetoes']} vetoes, {hook_summary['errors']} errors")
     _write_json_atomic(run_dir / "summary.json", summary)
     removed = finish_run_storage(run_dir, keep_checkpoints=options.keep_checkpoints,
-                                 keep_run_env=options.keep_run_env, printer=printer)
+                                 keep_run_env=options.keep_run_env, printer=printer,
+                                 startup_home_identity=options._stateframe_home_identity)
     if removed["checkpoints"] is not None:
         printer(f"Removed checkpoints ({removed['checkpoints'] / 1e6:,.0f} MB); run finished. "
                 "Use --keep-checkpoints to keep them.")

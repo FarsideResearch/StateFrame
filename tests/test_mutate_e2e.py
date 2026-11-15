@@ -639,10 +639,13 @@ def test_scripted_run_sqlite_input_survives_sigkill_resume_and_cleans_mutation_r
     run = tmp_path / "run"
     home = tmp_path / "home"
     home.mkdir()
-    runtime_parent = home / ".stateframe" / "rt" / "mutations"
+    # The runner pins an ambient STATEFRAME_HOME into the child, so point it at this home.
+    state_home = home / ".stateframe"
+    runtime_parent = state_home / "rt" / "mutations"
     before = snapshot_leftovers(runtime_parent)
     environment = {**os.environ, "PYTHONPATH": str(Path(__file__).resolve().parents[1] / "src"),
-                   "STATEFRAME_MUTATIONS": "authored", "HOME": str(home)}
+                   "STATEFRAME_MUTATIONS": "authored", "HOME": str(home),
+                   "STATEFRAME_HOME": str(state_home)}
     endpoint = f"http://127.0.0.1:{server.server_port}/v1"
     command = [sys.executable, "-m", "stateframe", "run", "--repo", str(repo),
                "--task", "Read app.db with sqlite_peek, then report.odd with a slow authored reader.",

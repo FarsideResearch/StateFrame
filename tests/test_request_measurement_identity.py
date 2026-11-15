@@ -212,6 +212,25 @@ def test_identity_key_mode_is_exact_under_zero_umask(tmp_path, monkeypatch):
     assert stat.S_IMODE((state_home / "identity.key").stat().st_mode) == 0o600
 
 
+def test_identity_key_bytes_are_registered_with_checkpoint_guard(tmp_path, monkeypatch):
+    _set_isolated_home(monkeypatch, tmp_path)
+    secret = kernel_request_auth_identity._installation_secret()
+    raw_key = secret
+    hex_key = secret.hex().encode("ascii")
+    key_fingerprint = hashlib.sha256(secret).hexdigest()[:12]
+
+    if raw_key not in kernel_checkpoint._SECRETS:
+        pytest.fail(
+            f"identity key bytes were not registered (length={len(secret)}, "
+            f"sha256={key_fingerprint})"
+        )
+    if hex_key not in kernel_checkpoint._SECRETS:
+        pytest.fail(
+            f"identity key hex was not registered (length={len(secret)}, "
+            f"sha256={key_fingerprint})"
+        )
+
+
 def test_different_installs_journal_different_identity_for_same_key(
         tmp_path, monkeypatch):
     first_home = _set_isolated_home(monkeypatch, tmp_path, "first")

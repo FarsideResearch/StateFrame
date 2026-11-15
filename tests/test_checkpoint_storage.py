@@ -6,12 +6,18 @@ import os
 import hashlib
 import sys
 import contextvars
+import types
 from pathlib import Path
 
 import pytest
 
 from _journal import journal_bytes, write_journal_bytes
 from stateframe.engine import kernel_checkpoint as checkpoint
+
+
+@pytest.fixture(autouse=True)
+def _legacy_direct_engine_checkpoint(monkeypatch):
+    monkeypatch.setenv("STATEFRAME_CHECKPOINT_LEGACY_DIRECT_ENGINE", "1")
 
 
 def _complete(path: Path, seq: int) -> None:
@@ -104,7 +110,7 @@ def test_async_writer_publishes_completed_directory(tmp_path):
 
 
 @pytest.mark.skipif(os.name != "posix", reason="inode sharing requires POSIX")
-def test_snapshot_links_only_seed_linked_readonly_files(tmp_path):
+def test_snapshot_copies_seed_linked_readonly_files_independently(tmp_path):
     seed = tmp_path / "seed"
     run = tmp_path / "run"
     out = tmp_path / "snapshot"
@@ -117,9 +123,14 @@ def test_snapshot_links_only_seed_linked_readonly_files(tmp_path):
     private = run / "pyvenv.cfg"
     private.write_text("home = run\n")
     counts = checkpoint._copy_tree(run, out, None, set(), seed=seed)
-    assert (out / shared.relative_to(seed)).stat().st_ino == shared.stat().st_ino
+    copied_shared = out / shared.relative_to(seed)
+    assert copied_shared.stat().st_ino != shared.stat().st_ino
     assert (out / "pyvenv.cfg").stat().st_ino != private.stat().st_ino
-    assert counts["linked"] == 1
+    assert counts["linked"] == 0
+    assert counts["copied"] + counts["cloned"] == 2
+    copied_shared.chmod(0o600)
+    copied_shared.write_text("checkpoint can change independently\n")
+    assert shared.read_text() == "shared\n"
 
 
 def test_seeded_env_second_snapshot_adds_no_file_bytes(tmp_path):
@@ -332,10 +343,11 @@ def test_pool_gc_keeps_reference_from_unpublished_manifest(tmp_path):
     assert (store / "pending").is_file()
 
 
-def test_linux_pool_snapshot_links_write_once_files(tmp_path):
+def test_linux_pool_snapshot_copies_write_once_files_independently(tmp_path):
     source = tmp_path / "run/wire"
     source.mkdir(parents=True)
-    (source / "0001.request.json").write_text('{"model":"test"}')
+    live = source / "0001.request.json"
+    live.write_text('{"model":"test"}')
     target = tmp_path / "snapshot/wire"
     target.parent.mkdir()
     pool = tmp_path / "checkpoints/blob-pool"
@@ -344,9 +356,91 @@ def test_linux_pool_snapshot_links_write_once_files(tmp_path):
     checkpoint._snapshot_tree(source, target, "wire", pool, manifests, created)
     pooled = pool / "wire/0001.request.json"
     assert pooled.is_file()
-    assert (source / "0001.request.json").stat().st_ino == pooled.stat().st_ino
+    assert live.stat().st_ino != pooled.stat().st_ino
     assert target.is_dir() and not list(target.iterdir())
     assert len(manifests["wire"][0]) == 2
+    live.write_text('{"model":"changed after publish"}')
+    assert pooled.read_text() == '{"model":"test"}'
+
+
+def test_pool_restore_copies_live_files_independently(tmp_path):
+    root = tmp_path / "checkpoints"
+    saved = root / "0001-1"
+    (saved / "run" / "wire").mkdir(parents=True)
+    store = root / checkpoint.POOL_DIR / "wire" / "0001.request.json"
+    store.parent.mkdir(parents=True)
+    store.write_bytes(b'{"model":"saved"}')
+    (saved / checkpoint.MANIFEST_FILE).write_text(
+        json.dumps({"wire": [[store.name, store.stat().st_size]]}))
+    run = tmp_path / "restored-run"
+    run.mkdir()
+
+    checkpoint._restore_files(saved, run, {"entries": ["wire"], "file_chunks": {}})
+
+    restored = run / "wire" / store.name
+    assert restored.stat().st_ino != store.stat().st_ino
+    restored.write_bytes(b"live mutation")
+    assert store.read_bytes() == b'{"model":"saved"}'
+
+
+def test_pool_snapshot_scan_cache_survives_saves_and_invalidates_on_change(tmp_path, monkeypatch):
+    run = tmp_path / "run"
+    source = run / "wire/0001.request.json"
+    source.parent.mkdir(parents=True)
+    source.write_bytes(b'{"model":"test"}')
+
+    code = test_pool_snapshot_scan_cache_survives_saves_and_invalidates_on_change.__code__
+    frame = types.SimpleNamespace(f_code=code, f_locals={"value": "checkpoint fixture"})
+    monkeypatch.setattr(checkpoint, "_STATE", {
+        "setup": {"code": code, "line": 0, "funcs": frozenset()},
+    })
+    monkeypatch.setattr(checkpoint, "_SIGNING_KEY", [b"checkpoint-test-key-0123456789abcdef"])
+    monkeypatch.setattr(checkpoint, "_SECRETS", [])
+    monkeypatch.setattr(checkpoint, "_SECRET_GENERATION", 0)
+    monkeypatch.setattr(checkpoint, "_PARTICIPANTS", {})
+    monkeypatch.setattr(checkpoint, "_POOL_KNOWN", {})
+    monkeypatch.setattr(checkpoint, "_VERIFIED_POOL_IDENTITIES", set())
+    monkeypatch.setattr(checkpoint, "_is_state_module", lambda *_args: False)
+    monkeypatch.setattr(checkpoint, "_context_items", lambda: [])
+
+    active_path = None
+    scanned_bytes = 0
+    original_file_check = checkpoint._check_snapshot_file
+    original_secret_check = checkpoint._check_registered_secrets
+
+    def observe_file_check(path, *, digest_hint=None, cache_verified=True, force_scan=False):
+        nonlocal active_path
+        previous_path = active_path
+        active_path = Path(path)
+        try:
+            return original_file_check(
+                path, digest_hint=digest_hint, cache_verified=cache_verified, force_scan=force_scan)
+        finally:
+            active_path = previous_path
+
+    def observe_secret_check(data, tail=b"", **kwargs):
+        nonlocal scanned_bytes
+        if active_path == source or (active_path is not None and ".capture-" in active_path.name):
+            scanned_bytes += len(data)
+        return original_secret_check(data, tail, **kwargs)
+
+    monkeypatch.setattr(checkpoint, "_check_snapshot_file", observe_file_check)
+    monkeypatch.setattr(checkpoint, "_check_registered_secrets", observe_secret_check)
+
+    first = checkpoint.save(frame, 1, run, background=False)
+    first_scan_bytes = scanned_bytes
+    assert first_scan_bytes == source.stat().st_size
+
+    checkpoint.save(frame, 2, run, background=False)
+    assert scanned_bytes == first_scan_bytes, "unchanged pooled file was rescanned on the second save"
+
+    before = source.stat()
+    source.write_bytes(b'{"model":"other"}')
+    os.utime(source, ns=(before.st_atime_ns, before.st_mtime_ns + 10_000_000))
+    with pytest.raises(checkpoint.CheckpointError, match="pooled file changed"):
+        checkpoint.save(frame, 3, run, background=False)
+    assert scanned_bytes > first_scan_bytes, "changed pooled file bypassed the verified-file cache"
+    assert (first / "run" / "wire").is_dir()
 
 
 def test_pool_checksum_detects_same_size_tampering(tmp_path, monkeypatch):

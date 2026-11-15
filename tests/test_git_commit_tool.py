@@ -13,6 +13,11 @@ from stateframe.commit_export import export_commits
 needs_git = pytest.mark.skipif(shutil.which("git") is None, reason="git is not installed")
 
 
+@pytest.fixture(autouse=True)
+def _legacy_direct_engine_checkpoint(monkeypatch):
+    monkeypatch.setenv("STATEFRAME_CHECKPOINT_LEGACY_DIRECT_ENGINE", "1")
+
+
 @pytest.fixture
 def run(tmp_path):
     workspace = tmp_path / "run" / "workspace"
@@ -175,3 +180,78 @@ def test_export_without_commits_writes_nothing(run):
     commits.branch(commits.CommitLog(run_dir), "b1", "only-branch")
     assert export_commits(run_dir) is None
     assert not (run_dir / "commits").exists()
+
+
+@needs_git
+@pytest.mark.parametrize("source", ["binary-addition", "binary-deletion", "symlink-target", "quoted-path", "encoded-message"])
+def test_export_refuses_secret_before_git_patch_encoding(run, monkeypatch, source):
+    from stateframe.commit_export import CommitExportError
+    from stateframe.engine import kernel_checkpoint
+
+    run_dir, workspace = run
+    secret = ("é" * 16).encode() if source in {"quoted-path", "encoded-message"} else (
+        b"binary-export-identity-key-2026!!!")
+    monkeypatch.setattr(kernel_checkpoint, "_SECRETS", [secret])
+    if source == "symlink-target":
+        (workspace / "asset").symlink_to(secret.decode())
+        ContentStore(run_dir).put(secret)
+    elif source == "quoted-path":
+        (workspace / secret.decode()).write_bytes(b"safe content")
+    elif source != "encoded-message":
+        (workspace / "asset.bin").write_bytes(b"\0" + secret + b"\0")
+    if source == "binary-deletion":
+        shutil.copy2(workspace / "asset.bin", run_dir / "parent" / "asset.bin")
+        (workspace / "asset.bin").unlink()
+    message = secret.decode() if source == "encoded-message" else "Export fixture"
+    assert _commit(run_dir, workspace, "secret-export", message).startswith("commit ")
+
+    with pytest.raises(CommitExportError, match="checkpoint refused: registered secret in state"):
+        export_commits(run_dir)
+    assert not (run_dir / "commits").exists()
+    assert not list(run_dir.glob(".commits-export-*"))
+
+
+@needs_git
+def test_export_refuses_a_secret_discovered_after_the_patch_scan(run, monkeypatch):
+    from stateframe.commit_export import CommitExportError
+    from stateframe.engine import kernel_checkpoint as checkpoint
+
+    run_dir, workspace = run
+    monkeypatch.setattr(checkpoint, "_SECRETS", [])
+    monkeypatch.setattr(checkpoint, "_SECRET_GENERATION", 0)
+    (workspace / "app.py").write_text("VALUE = 2\n")
+    _commit(run_dir, workspace, "late-secret", "Export fixture")
+    original = checkpoint.check_registered_secret_file
+
+    def scan_then_register(path):
+        result = original(path)
+        checkpoint.register_secret(b"late-export-identity-key-fixture!!")
+        return result
+
+    monkeypatch.setattr(checkpoint, "check_registered_secret_file", scan_then_register)
+    with pytest.raises(CommitExportError, match="STATEFRAME_HOME_IDENTITY_CHANGED"):
+        export_commits(run_dir)
+    assert not (run_dir / "commits").exists()
+
+
+@needs_git
+def test_guarded_export_keeps_binary_patches_applicable(run, tmp_path):
+    run_dir, workspace = run
+    payload = b"\x00\xffbinary\r\npayload\x00"
+    (workspace / "asset.bin").write_bytes(payload)
+    _commit(run_dir, workspace, "binary", "Add binary asset")
+
+    summary = export_commits(run_dir)
+    assert summary["count"] == 1
+    patches = sorted((run_dir / "commits" / "main").glob("*.patch"))
+    assert len(patches) == 1
+    assert b"GIT binary patch" in patches[0].read_bytes()
+    target = tmp_path / "binary-export-target"
+    shutil.copytree(run_dir / "parent", target)
+    env = {"GIT_CONFIG_NOSYSTEM": "1", "HOME": str(tmp_path), "PATH": "/usr/bin:/bin"}
+    git = ["git", "-c", "user.name=t", "-c", "user.email=t@t", "-C", str(target)]
+    for args in (["init", "-q", "-b", "main"], ["add", "-A"], ["commit", "-q", "-m", "base"]):
+        subprocess.run(git + args, check=True, env=env, capture_output=True)
+    subprocess.run(git + ["am", "-q", *map(str, patches)], check=True, env=env, capture_output=True)
+    assert (target / "asset.bin").read_bytes() == payload
+    assert (target / "app.py").read_bytes() == (run_dir / "parent" / "app.py").read_bytes()

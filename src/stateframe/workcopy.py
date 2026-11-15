@@ -17,6 +17,7 @@ import stat
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Callable
 
 # Never copied: VCS metadata, environments, caches, build output.
 IGNORE_DIRS = {".git", ".hg", ".svn", "__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache",
@@ -141,29 +142,59 @@ def changed_files(work: WorkCopy) -> dict[str, str]:
     return dict(sorted(changes.items()))
 
 
-def unified_diff(work: WorkCopy) -> str:
-    """Diff of the copy against the original repository's bytes at run start."""
+def unified_diff(work: WorkCopy, *, scan_bytes: Callable[[bytes], object] | None = None) -> str:
+    """Diff exact changed bytes, scanning paths and both inputs before formatting when requested."""
     chunks = []
     for rel, kind in changed_files(work).items():
-        before = _read_original(work, rel) if kind != "added" else ""
-        after = (work.copy / rel).read_text(encoding="utf-8", errors="replace") if kind != "deleted" else ""
-        chunks.extend(difflib.unified_diff(
+        if scan_bytes is not None:
+            scan_bytes(os.fsencode(rel))
+        before_bytes = _read_original_bytes(work, rel) if kind != "added" else b""
+        after_bytes = (work.copy / rel).read_bytes() if kind != "deleted" else b""
+        if scan_bytes is not None:
+            scan_bytes(before_bytes)
+            scan_bytes(after_bytes)
+        before = _diff_text(before_bytes)
+        after = _diff_text(after_bytes)
+        if before is None or after is None:
+            chunks.append(
+                f"binary/line-ending change: {rel} "
+                "(text diff omitted; byte-level change recorded).\n"
+            )
+            continue
+        file_diff = list(difflib.unified_diff(
             before.splitlines(keepends=True), after.splitlines(keepends=True),
             fromfile=f"a/{rel}" if kind != "added" else "/dev/null",
             tofile=f"b/{rel}" if kind != "deleted" else "/dev/null"))
-        if chunks and not chunks[-1].endswith("\n"):
-            chunks[-1] += "\n\\ No newline at end of file\n"
+        for index, line in enumerate(file_diff):
+            if line.startswith((" ", "+", "-")) and not line.endswith(("\n", "\r")):
+                file_diff[index] = line + "\n\\ No newline at end of file\n"
+        if not file_diff:
+            chunks.append(
+                f"binary/line-ending change: {rel} "
+                "(text diff omitted; byte-level change recorded).\n"
+            )
+            continue
+        chunks.extend(file_diff)
     return "".join(chunks)
 
 
-def _read_original(work: WorkCopy, rel: str) -> str:
-    """Baseline text, from the immutable start snapshot when there is one (else the original,
-    which must still hash to its baseline)."""
+def _diff_text(data: bytes) -> str | None:
+    """Return displayable UTF-8 text, preserving physical line endings."""
+    if b"\x00" in data:
+        return None
+    try:
+        return data.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+
+
+def _read_original_bytes(work: WorkCopy, rel: str) -> bytes:
+    """Baseline bytes from the immutable start snapshot, or the unchanged original."""
     path = (work.snapshot if work.snapshot is not None else work.original) / rel
     data = path.read_bytes() if path.is_file() else b""
     if _sha(data) != work.baseline.get(rel):
         raise WorkCopyError(f"original {rel} changed during the run; diff would be wrong")
-    return data.decode("utf-8", errors="replace")
+    return data
 
 
 def apply_files(work: WorkCopy, files: dict[str, bytes | None], *, declared: set[str]) -> list[str]:

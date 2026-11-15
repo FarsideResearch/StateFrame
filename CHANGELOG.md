@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.6.38 (2026-11-14)
+
+- Fixed: a long-running process now reloads the installation identity key when the key file is rotated, rewritten, or recreated with its home, so checkpoint redaction always covers the key on disk.
+- Checkpoint recovery resolves current credentials from their configured source, records model-router probe provenance, redacts writer diagnostics, and stores append-only indexes in shared signed chunks.
+- Refuse STATEFRAME_HOME inside a run directory or repository, and keep the installation identity key out of checkpoints, exports, and bundles.
+- Tests: the stable-wire checkpoint fixture opts into the legacy direct-engine checkpoint path explicitly.
+
 ## 0.6.37 (2026-11-14)
 
 - The shipped `r2hc3` profile now omits the tool-call ids (`history_digest.call_ids`) from the state-frame history digest sent to the model; `STATEFRAME_HISTORY_DIGEST_IDS=on` restores them. The ids stay in the host ledger and journal proofs, and a paired temperature-0 replay of 30 recorded steps showed model behaviour unchanged without them.

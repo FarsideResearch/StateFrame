@@ -389,8 +389,11 @@ def test_killed_second_save_restores_previous_complete_journal(
             if mode == "journal":
                 chunk = Path(fault["temporary"])
                 assert chunk.is_file() and chunk.stat().st_size > 0
-                assert chunk.parent == root / "journal-cache"
+                # Unverified chunks stay private until the snapshot's identity recheck.
+                assert chunk.parent == pending[0] / "artifacts" / "journal-cache"
                 assert chunk.name.startswith(".file-") and chunk.name.endswith(".tmp")
+                assert not (root / "journal-cache" / chunk.name).exists()
+                assert not (root / "journal-cache" / chunk.name[1:-4]).exists()
             else:
                 clone = Path(fault["cloned"])
                 assert fault["files"] >= 2 and clone.is_file()
@@ -590,7 +593,11 @@ def test_writer_enospc_does_not_block_next_request(tmp_path: Path) -> None:
     while not any(row.get("event") == "checkpoint_failed" for row in _events(run_dir)) \
             and time.monotonic() < deadline:
         time.sleep(0.05)
-    assert any(row.get("event") == "checkpoint_failed" and "Errno 28" in row.get("error", "")
+    # Approved frozen-acceptance exception: ENOSPC diagnostics use a fixed code so exception
+    # controlled text cannot escape; the run must continue and retain wire parity.
+    assert any(row.get("event") == "checkpoint_failed"
+               and row.get("failure_reason") == "checkpoint write failed: ENOSPC"
+               and row.get("error") == "checkpoint write failed: ENOSPC"
                for row in _events(run_dir))
     assert _wire(run_dir) == _wire(control.run_dir)
 
