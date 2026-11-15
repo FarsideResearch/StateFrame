@@ -176,7 +176,10 @@ def editable_read_paths(runtime: object) -> set[str]:
     """Use edit authority, not readable closure dependencies, for read priority."""
     contract = getattr(runtime, "edit_contract", None)
     authority = contract.get("edit_authority") if isinstance(contract, Mapping) else None
-    paths = authority.get("editable_paths") if isinstance(authority, Mapping) else None
+    from kernel_edit_affordance import resolve_editable_paths
+    owner = getattr(runtime, "owner", None)
+    paths = (resolve_editable_paths(authority, getattr(owner, "task_row", None))
+             if isinstance(authority, Mapping) else None)
     if not isinstance(paths, Sequence) or isinstance(paths, (str, bytes, bytearray)):
         return set()
     from kernel_request_source_window import _safe_framefit_path

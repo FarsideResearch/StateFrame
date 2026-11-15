@@ -113,7 +113,8 @@ def install() -> None:
             if isinstance(edit_scope, Mapping) and edit_scope:
                 result.setdefault("state", {})["edit_authority"] = {
                     key: edit_scope[key]
-                    for key in ("mode", "editable_paths", "shortcuts", "tool_matrix")
+                    for key in ("mode", "editable_paths", "editable_all", "editable_count",
+                                "editable_sample", "shortcuts", "tool_matrix")
                     if key in edit_scope
                 }
         return result

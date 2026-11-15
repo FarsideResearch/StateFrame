@@ -2677,8 +2677,12 @@ def repair_packet(payload: Mapping[str, object] | None, *,
                   episode: Mapping[str, object] | None = None,
                   public_suite: Sequence[object] = (),
                   repair_checks: Sequence[object] = (),
-                  edit_scope: Mapping[str, object] | None = None) -> dict[str, object] | None:
-    """Build the ordered one-gap repair packet used after a host refusal."""
+                  edit_scope: Mapping[str, object] | None = None,
+                  task_row: Mapping[str, object] | None = None) -> dict[str, object] | None:
+    """Build the ordered one-gap repair packet used after a host refusal.
+
+    ``task_row`` supplies the declared product set when ``edit_scope`` is a whole-set marker.
+    """
     if not isinstance(payload, Mapping) or not payload.get("focus_obligation"):
         return None
     assessment = _assessment_for_packet(payload, assessments)
@@ -2773,9 +2777,14 @@ def repair_packet(payload: Mapping[str, object] | None, *,
                     shortcut.pop("label", None)
     if scope is not None:
         from kernel_bound_edit import bind_target, enabled as bound_edit_enabled
+        from kernel_edit_affordance import path_editable, whole_set_editable
         editable_paths = set(_strings(scope.get("editable_paths", ())))
+        whole_set = whole_set_editable(scope)
         for row in files:
-            row["editable"] = str(row.get("path", "")) in editable_paths
+            path = str(row.get("path", ""))
+            # A whole-product-set scope carries no list: every product file in the row is editable.
+            row["editable"] = (path_editable(scope, path, row=task_row) if whole_set
+                               else path in editable_paths)
         if bound_edit_enabled():
             bound_targets: dict[str, object] = {}
             for row in files:

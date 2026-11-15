@@ -1358,6 +1358,9 @@ def prepare(options: RunOptions, printer=print) -> tuple[Path, workcopy.WorkCopy
         chosen = sorted(row["files"])
         printer(f"edit scope: {len(chosen)} file(s) chosen from the task and its checks "
                 f"(pass --target/--edit to choose): {', '.join(chosen)}")
+    elif row.get("scope_source") == "fallback_full":
+        printer(f"edit scope: nothing in the task or checks points at a file, so all "
+                f"{len(row['files'])} product files are editable (pass --target/--edit to narrow)")
     if explicit_test_protection:
         row["test_wrong_wire"] = True
     if options.runner_kind == "generic":

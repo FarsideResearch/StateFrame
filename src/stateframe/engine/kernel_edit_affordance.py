@@ -6,6 +6,90 @@ import os
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 
+# A declared product set above this many files is carried as a "whole product set editable"
+# marker plus a count and a small sample, never as a path list: a 6,800-file repo would put about
+# 270 KB per copy into a 48K frame.  Mirrors stateframe.task_row.DECLARE_ALL_LIMIT (a test pins
+# the two together).  At or below the limit every contract is byte-identical to the listed form.
+COMPACT_EDIT_SCOPE_LIMIT = 200
+EDIT_SCOPE_SAMPLE_SIZE = 8
+# Task-row key that opt-in edit scope widening appends admitted files to.  Mirrors
+# probes.react_repair.EDIT_SCOPE_WIDENED_KEY (a test pins the two spellings together).
+WIDENED_PATHS_KEY = '_edit_scope_widened'
+
+
+def is_compact(count: int) -> bool:
+    return count > COMPACT_EDIT_SCOPE_LIMIT
+
+
+def whole_set_editable(holder: object) -> bool:
+    """True when a scope or authority carries the whole-product-set marker, not a path list."""
+    return isinstance(holder, Mapping) and holder.get('editable_all') is True
+
+
+def _compact_fields(paths: Sequence[str]) -> dict:
+    """The bounded stand-in for an editable path list (count, marker and a tiny sample)."""
+    return {
+        'editable_paths': [],
+        'editable_all': True,
+        'editable_scope': 'whole_product_set',
+        'editable_count': len(paths),
+        'editable_sample': list(paths[:EDIT_SCOPE_SAMPLE_SIZE]),
+    }
+
+
+def _widened_paths(row: object) -> list[str]:
+    """Files admitted by opt-in edit scope widening, carried on the task row."""
+    if not isinstance(row, Mapping):
+        return []
+    raw = row.get(WIDENED_PATHS_KEY, ())
+    if isinstance(raw, (str, bytes, bytearray)) or not isinstance(raw, Sequence):
+        return []
+    return [str(path).replace('\\', '/').lstrip('./') for path in raw if str(path).strip()]
+
+
+def resolve_editable_paths(holder: object, row: object = None) -> list[str]:
+    """Editable paths of a scope/authority; for a whole-set marker, the task row's product set.
+
+    The row's ``files`` keys are the engine's declared product set, so membership and iteration
+    stay exact without the contract (and therefore the frame) carrying the list.  Files widened
+    into scope during the run (``WIDENED_PATHS_KEY``) are unioned in, so they stay editable.
+    """
+    if not isinstance(holder, Mapping):
+        return []
+    if not whole_set_editable(holder):
+        raw = holder.get('editable_paths', ())
+        if isinstance(raw, Sequence) and not isinstance(raw, (str, bytes, bytearray)):
+            return [str(path) for path in raw]
+        return []
+    files = row.get('files') if isinstance(row, Mapping) else None
+    product = _product_paths(list(files)) if isinstance(files, Mapping) else []
+    return sorted({*product, *_widened_paths(row)})
+
+
+def path_editable(holder: object, path: str, product_paths: Sequence[str] | frozenset[str] | None = None,
+                  row: object = None) -> bool:
+    """Is ``path`` editable under ``holder``?  Whole-set scopes use product-set membership."""
+    if not isinstance(holder, Mapping):
+        return False
+    if whole_set_editable(holder):
+        if product_paths is not None:
+            return path in product_paths
+        files = row.get('files') if isinstance(row, Mapping) else None
+        return (isinstance(files, Mapping) and path in files) or path in _widened_paths(row)
+    raw = holder.get('editable_paths', ())
+    return isinstance(raw, Sequence) and not isinstance(raw, (str, bytes, bytearray)) and path in raw
+
+
+def bundle_editable_targets(row: object, contract: object) -> list[str]:
+    """Editable targets for the input-preservation bundle: the row's own list, else the scope's.
+
+    A whole-set scope carries no list, so the targets come from the row's product set instead.
+    """
+    listed = row.get('editable_paths') if isinstance(row, Mapping) else None
+    if listed:
+        return list(listed) if isinstance(listed, Sequence) and not isinstance(listed, str) else []
+    return resolve_editable_paths(contract, row)
+
 
 def _product_paths(paths: object) -> list[str]:
     """Normalize the declared product surface without treating test files as targets."""
@@ -47,6 +131,9 @@ def measure_product_sizes(root: Path, paths: Sequence[str]) -> dict[str, dict[st
 
 def _whole_file_eligibility(
         declared: Sequence[str], sizes: Mapping[str, Mapping[str, int | None]] | None) -> dict:
+    if is_compact(len(declared)):
+        # Too many files to measure or list: never whole-file, and no per-file table in the frame.
+        return {'files': {}, 'files_count': len(declared), 'eligible': False, 'measured': False}
     files = {}
     for path in sorted(declared):
         measured = sizes.get(path, {}) if isinstance(sizes, Mapping) else {}
@@ -99,8 +186,9 @@ def _with_edit_authority(scope: dict, editable_paths: Sequence[str],
         'explicit_text_fallback': 'str_replace',
     }
     scope['edit_normalization'] = copy.deepcopy(normalization)
+    listed = list(dict.fromkeys(str(path) for path in editable_paths if str(path)))
     scope['edit_authority'] = {
-        'editable_paths': list(dict.fromkeys(str(path) for path in editable_paths if str(path))),
+        **(_compact_fields(listed) if is_compact(len(listed)) else {'editable_paths': listed}),
         'shortcuts': copy.deepcopy(list(shortcuts)),
         'normalization': copy.deepcopy(normalization),
     }
@@ -184,7 +272,9 @@ def contract(*, multi_file: bool, entry_path: str | None,
             'Existing acceptance tests remain protected.'}
     scope.update(_typed_editability(declared, declared, []))
     return _with_edit_authority(scope, declared, ({
-        'tool': 'edit', 'mode': 'top_level_function_or_class', 'paths': declared,
+        'tool': 'edit', 'mode': 'top_level_function_or_class',
+        **({'paths': [], 'paths_scope': 'whole_product_set'} if is_compact(len(declared))
+           else {'paths': declared}),
         'label': 'edit replaces the complete file operation only when the authority '
                  'selects whole-file mode; otherwise it replaces a top-level function or class',
     },))
@@ -195,6 +285,22 @@ def _typed_editability(declared: Sequence[str], edit_paths: Sequence[str],
     paths = list(dict.fromkeys(str(path) for path in declared if str(path)))
     edit_paths = list(dict.fromkeys(str(path) for path in edit_paths if str(path)))
     whole_file_paths = list(dict.fromkeys(str(path) for path in whole_file_paths if str(path)))
+    if is_compact(len(paths)):
+        return {
+            **_compact_fields(paths),
+            'edit_fn_shortcut': None,
+            'tool_matrix': {
+                'edit': {'operation': 'replace_entry_function_or_top_level',
+                         'paths': [], 'paths_scope': 'whole_product_set',
+                         'whole_file_paths': []},
+                'str_replace': {'operation': 'replace_exact_text',
+                                'paths': [], 'paths_scope': 'whole_product_set'},
+                'typed_plan': {
+                    'operations': ['replace'],
+                    'composition': 'exact old-text match against current source',
+                },
+            },
+        }
     return {
         # These fields are intentionally explicit.  A model should not have to
         # infer a whitelist from a task's entry-function label.
@@ -273,11 +379,15 @@ def tool_surface(tools: list[dict], scope: dict | None, *, authority: bool = Fal
                     'the current source of that definition is the authoritative base.')
             tool['function']['parameters']['properties']['function_source'][
                 'description'] = source_description
-        elif name == 'str_replace' and scope.get('editable_paths'):
+        elif name == 'str_replace' and (scope.get('editable_paths') or whole_set_editable(scope)):
             if wire_authority is not None:
                 tool['function']['description'] = (
                     'Exact text replacement in a path listed by the single EditAuthority. '
                     'The old text must match the current file exactly once.')
+            elif whole_set_editable(scope):
+                tool['function']['description'] = (
+                    f"Exact text replacement in any of the {scope.get('editable_count')} product "
+                    'files in the repository. The old text must match the current file exactly once.')
             else:
                 paths = ', '.join(scope['editable_paths'])
                 tool['function']['description'] = (
@@ -287,7 +397,7 @@ def tool_surface(tools: list[dict], scope: dict | None, *, authority: bool = Fal
             if isinstance(properties, dict) and 'path' in properties:
                 properties['path']['description'] = (
                     'Declared product file path; the single EditAuthority lists eligible paths.')
-        elif name == 'file_create' and scope.get('editable_paths'):
+        elif name == 'file_create' and (scope.get('editable_paths') or whole_set_editable(scope)):
             tool['function']['description'] = (
                 'Create a new product file when the task permits it. Existing product files '
                 'are edited with edit or str_replace.')
@@ -356,6 +466,8 @@ def apply_frame(frame: dict, scope: dict | None, path: str, *, authority: bool =
         frame.setdefault('action_prerequisites', {})
         frame['action_prerequisites'].pop('edit', None)
         authority_value = scope.get('edit_authority', {
+            **({k: scope[k] for k in ('editable_all', 'editable_scope', 'editable_count',
+                                      'editable_sample') if k in scope}),
             'editable_paths': list(scope.get('editable_paths', ())),
             'shortcuts': [],
         })

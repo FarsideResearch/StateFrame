@@ -349,6 +349,10 @@ def _editable_product_paths(runtime: object) -> tuple[str, ...]:
         if not isinstance(holder, Mapping) or "editable_paths" not in holder:
             continue
         raw_paths = holder.get("editable_paths")
+        if holder.get("editable_all") is True:
+            # Whole-product-set contract: the list is the task row's product set, not the frame's.
+            from kernel_edit_affordance import resolve_editable_paths
+            raw_paths = resolve_editable_paths(holder, getattr(owner, "task_row", None))
         if isinstance(raw_paths, str):
             candidates = (raw_paths,)
         elif isinstance(raw_paths, Sequence) and not isinstance(raw_paths, (bytes, bytearray)):

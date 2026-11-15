@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.6.44 (2026-11-14)
+
+- Fixed: in a repository with more than 200 source files, a task that names no file and whose checks point at no file no longer stops before turn 1 asking for `--target` or `--edit`. The whole product set becomes the editable scope, unscoped like a small repository, and the row records how its scope was chosen in `scope_source` (`explicit`, `inferred`, `fallback_full` or `whole_repo`). In that case the edit contract carries a whole-product-set marker and a file count instead of the path list, so the frame stays small however large the repository is, any product file stays editable, source snapshots only re-read files that changed, and `public_tests` keeps at most 25 extra test files plus a `public_tests_omitted` count.
+
 ## 0.6.43 (2026-11-14)
 
 - Fixed: the opt-in catalog full-coverage and cross-file index switches can now be set from the shell; they were documented but not forwarded to the engine.

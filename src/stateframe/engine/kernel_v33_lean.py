@@ -243,6 +243,8 @@ def _compact_stateframe(content: str) -> str:
         compact["edit_authority"] = {
             "mode": authority.get("mode"),
             "editable_paths": copy.deepcopy(authority.get("editable_paths", ())),
+            **({"editable_all": True, "editable_count": authority.get("editable_count")}
+               if authority.get("editable_all") is True else {}),
             "tools": sorted(str(key) for key in (authority.get("tool_matrix", {}) or {})
                              if str(key)),
         }
