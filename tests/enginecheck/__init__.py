@@ -56,6 +56,8 @@ class Scenario:
     switches: dict[str, str] = field(default_factory=dict)
     max_turns: int = 6
     needs: list[Need] = field(default_factory=list)
+    # Extra engine CLI arguments appended after the harness arguments, e.g. ("--parallel", "auto").
+    cli_args: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -151,6 +153,7 @@ def run(scenario: Scenario, tmp_path: Path) -> Trace:
         "--endpoint", f"http://127.0.0.1:{endpoint.server_port}/v1",
         "--model", "scripted", "--run-dir", str(run_dir), "--quiet", "--json",
         "--max-turns", str(scenario.max_turns), "--test-python", sys.executable,
+        *scenario.cli_args,
     ]
     try:
         environment = _engine_environment(scenario.switches)

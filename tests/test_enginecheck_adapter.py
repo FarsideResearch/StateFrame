@@ -133,3 +133,19 @@ def test_wire_files_sort_numerically_past_four_digits(tmp_path: Path) -> None:
     names = [path.name for path in enginecheck._request_paths(tmp_path)]
 
     assert names == ["0001.request.json", "9999.request.json", "10000.request.json"]
+
+
+def test_cli_args_are_appended_to_the_engine_argv(monkeypatch, tmp_path: Path) -> None:
+    engine_argvs: list[list[str]] = []
+    real_run_monitored = enginecheck.run_monitored
+
+    def recording_run_monitored(command, **kwargs):
+        engine_argvs.append(list(command))
+        return real_run_monitored(command, **kwargs)
+
+    monkeypatch.setattr(enginecheck, "run_monitored", recording_run_monitored)
+    run(_scenario(cli_args=("--parallel", "off")), tmp_path)
+
+    argv = engine_argvs[0]
+    assert argv[-2:] == ["--parallel", "off"]
+    assert argv.index("--parallel") > argv.index("--test-python")
