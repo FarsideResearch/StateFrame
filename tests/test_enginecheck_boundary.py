@@ -47,7 +47,7 @@ _ENGINE_FINDINGS: dict[str, tuple[str, str]] = {
 
 def _boundary_params() -> list[object]:
     return [
-        pytest.param(name, marks=pytest.mark.xfail(strict=True, raises=HarnessError, reason=_ENGINE_FINDINGS[name][1]))
+        pytest.param(name, marks=pytest.mark.xfail(strict=True, raises=HarnessError, reason="ENGINE-BOUNDARY-REDS: " + _ENGINE_FINDINGS[name][1]))
         if name in _ENGINE_FINDINGS else name
         for name in sorted(BOUNDARY_CONTENTS)
     ]

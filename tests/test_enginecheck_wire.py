@@ -216,7 +216,7 @@ SHIPPED_ENGINE_FAILURES: tuple[str, ...] = (
 @pytest.mark.xfail(
     strict=True,
     raises=AssertionError,
-    reason="shipped-profile engine cache break: " + "; ".join(SHIPPED_ENGINE_FAILURES),
+    reason="CACHE-CHECKSBAND: shipped-profile engine cache break: " + "; ".join(SHIPPED_ENGINE_FAILURES),
 )
 def test_real_scripted_run_keeps_stable_prefix(tmp_path: Path) -> None:
     _relay_reachable()

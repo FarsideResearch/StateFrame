@@ -217,7 +217,7 @@ _VERDICT_LINE = re.compile(r"^(00|10|01|11|full): ")
 
 
 @pytest.mark.xfail(strict=True, raises=AssertionError, reason=(
-    "exit 2: engine could not seal request 1: working_set_allocator_incompatible: STATEFRAME_WORKING_SET_ALLOCATOR=on "
+    "CACHE-ALLOC-CONFLICT: exit 2: engine could not seal request 1: working_set_allocator_incompatible: STATEFRAME_WORKING_SET_ALLOCATOR=on "
     "cannot preserve the stable-wire prefix (HARNESS_CONTRACT)"))
 def test_allocator_and_stable_wire_compose_under_shipped_profile(real_report: ComposeReport) -> None:
     try:
