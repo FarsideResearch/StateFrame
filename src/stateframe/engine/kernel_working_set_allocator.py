@@ -4,7 +4,7 @@ The allocator decides, for every pre-serialized slot of a request, which renderi
 goes on the wire. It is a pure function over immutable inputs: no runtime, no clock, no
 environment, no engine imports. The same inputs always give the same answer.
 
-Algorithm (Astra G1):
+Algorithm:
 1. Floor first. ``M = fixed + sum(min-cost mode per slot)``. If ``M > cap`` the request is
    infeasible before any search, and ``Blocked(reason="FLOOR_INFEASIBLE")`` carries the
    floor broken down by priority tier and by slot kind.
