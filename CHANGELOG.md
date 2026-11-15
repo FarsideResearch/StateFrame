@@ -1,5 +1,7 @@
 # Changelog
 
+## Unreleased
+
 ## 0.6.45 (2026-11-15)
 
 - The live-token admission regression now admits and refuses actual source pages with a callable meter that contradicts the offline estimate; a mutation guard proves disconnecting that meter fails the regression.
