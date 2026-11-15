@@ -272,8 +272,13 @@ def _is_exception_name(expect: str) -> bool:
 
 def _kill_group(proc: subprocess.Popen[str]) -> None:
     """Kill the child's whole process group and reap it, so a hung test cannot outlive the timeout."""
+    # Imported here: exported known-bad trees carry enginecheck/ but not fixtures/, and only a timeout needs it.
+    from fixtures.process_signals import signal_run_owned
+
     with contextlib.suppress(ProcessLookupError):
-        os.killpg(proc.pid, signal.SIGKILL)
+        # A pytest child, not an engine run: no checkpoint to wait for. It leads its own session, so kill its group.
+        signal_run_owned(Path("."), proc, signal.SIGKILL, deadline=0.0, what="timed-out pytest child",
+                         require_checkpoint_saved=False, group=True)
     proc.communicate()
 
 

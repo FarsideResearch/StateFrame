@@ -36,7 +36,7 @@ from typing import Mapping, Sequence
 
 # A direct run starts with tests/enginecheck/ on sys.path, not tests/. Put tests/ (for enginecheck) and src/ next to it.
 _TESTS_DIR = Path(__file__).resolve().parents[1]
-for _path in (_TESTS_DIR, _TESTS_DIR.parent / "src"):
+for _path in (_TESTS_DIR, _TESTS_DIR.parent / "src", _TESTS_DIR.parent / "src" / "stateframe" / "engine"):
     if str(_path) not in sys.path:
         sys.path.insert(0, str(_path))
 

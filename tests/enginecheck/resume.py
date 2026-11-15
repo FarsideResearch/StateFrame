@@ -30,6 +30,7 @@ from enginecheck import (
     run,
 )
 from engine_run import run_monitored
+from fixtures.process_signals import signal_run_owned
 from stateframe.scripted_endpoint import Script, ScriptStepUnavailable, serve
 
 _ENGINE_TIMEOUT_SECONDS = 600
@@ -233,7 +234,9 @@ def assert_resume_equivalent(scenario: Scenario, tmp_path: Path, *, stop_after: 
         if not held.held.wait(_PENDING_WAIT_SECONDS):
             raise HarnessError(f"engine never sent turn {stop_after + 1}")
         _await_pending(run_dir, stop_after + 1)
-        engine.send_signal(signal.SIGTERM)
+        # Checkpoint barrier: interrupt only after the run's checkpoint writer has saved.
+        signal_run_owned(run_dir, engine, signal.SIGTERM, deadline=time.monotonic() + _PENDING_WAIT_SECONDS,
+                         what=f"interrupt after turn {stop_after}")
     finally:
         held.release.set()
         endpoint.shutdown()
@@ -241,7 +244,9 @@ def assert_resume_equivalent(scenario: Scenario, tmp_path: Path, *, stop_after: 
     try:
         out, err = engine.communicate(timeout=_ENGINE_TIMEOUT_SECONDS)
     except subprocess.TimeoutExpired as error:
-        engine.kill()
+        signal_run_owned(run_dir, engine, signal.SIGKILL, deadline=time.monotonic(), what="stuck interrupt",
+                         require_checkpoint_saved=False)
+        engine.communicate()
         raise HarnessError("interrupted engine did not stop after SIGTERM") from error
     if len(_request_paths(run_dir)) < stop_after + 1:
         raise _post_run_failure(f"interrupted run recorded fewer than {stop_after + 1} requests", run_dir,

@@ -11,6 +11,7 @@ Signals go only to processes this test spawned. The holder is matched by pid and
 """
 from __future__ import annotations
 
+import contextlib
 import importlib
 import inspect
 import os
@@ -68,7 +69,12 @@ def _fd_targets(pid: int) -> set[str]:
 
 
 def _kill_own_child(process: subprocess.Popen[Any]) -> None:
-    process.kill()
+    from fixtures.process_signals import signal_run_owned  # lazy: a known-bad export has no fixtures/
+
+    with contextlib.suppress(ProcessLookupError):  # an owner in exit mode is already gone
+        # Plain helper processes, not engine runs: no checkpoint barrier applies.
+        signal_run_owned(Path("."), process, signal.SIGKILL, deadline=0.0, what="seed helper",
+                         require_checkpoint_saved=False)
     process.wait(timeout=THREAD_JOIN_SECONDS)
     if process.stdout is not None:
         process.stdout.close()
@@ -83,6 +89,7 @@ def _scenario(owner_mode: str) -> dict[str, Any]:
     job_process: subprocess.Popen[Any] | None = None
     holder: int | None = None
     holder_start: int | None = None
+    holder_identity = None
     thread: threading.Thread | None = None
     handed_owner_pipe = False
     errors: list[BaseException] = []
@@ -90,9 +97,12 @@ def _scenario(owner_mode: str) -> dict[str, Any]:
         srv, cli = socket.socketpair()
         owner_r, owner_w = os.pipe()
         try:
+            launched_after = time.time()
             owner = subprocess.Popen(
                 [sys.executable, "-I", "-c", OWNER_SCRIPT, str(cli.fileno()), str(owner_w), owner_mode],
                 pass_fds=(cli.fileno(), owner_w), stdout=subprocess.PIPE, close_fds=True,
+                # Own session: the signal fixtures refuse to touch the test runner's process group.
+                start_new_session=True,
             )
             cli.close()
             os.close(owner_w)  # harness copy must go, or the owner-pipe EOF can never reach the supervisor
@@ -104,6 +114,8 @@ def _scenario(owner_mode: str) -> dict[str, Any]:
             if holder_stat is None:
                 raise RuntimeError("holder vanished before the scenario started")
             holder_start = holder_stat[1]
+            from fixtures.process_signals import record_identity, signal_run_verified  # lazy, as above
+            holder_identity = record_identity(holder, launched_after=launched_after, command_fragment="os.fork()")
             # Isolation: the holder keeps the control socket but never the owner-pipe write end.
             pipe_name = os.readlink(f"/proc/self/fd/{owner_r}")
             holder_fds = _fd_targets(holder)
@@ -165,10 +177,12 @@ def _scenario(owner_mode: str) -> dict[str, Any]:
             }
         finally:
             # Signal only what this test spawned. The holder is ours by pid, checked by start time first.
-            if holder is not None and holder_start is not None:
+            if holder is not None and holder_start is not None and holder_identity is not None:
                 current = _stat(holder)
                 if current is not None and current[1] == holder_start and current[0] != "Z":
-                    os.kill(holder, signal.SIGKILL)
+                    with contextlib.suppress(ProcessLookupError):
+                        signal_run_verified(Path("."), holder, holder_identity, signal.SIGKILL, deadline=0.0,
+                                            what="seed holder", require_checkpoint_saved=False)
             if owner is not None:
                 _kill_own_child(owner)
             if job_process is not None:
