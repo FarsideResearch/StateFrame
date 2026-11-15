@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.6.39 (2026-11-14)
 
 - Fixed: continuation objectives now keep long task specifications in bounded state, preserve the complete task in the request, and use bounded digests for oversized dependency keys.
 
