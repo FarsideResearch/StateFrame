@@ -107,8 +107,11 @@ def _emit(handler: str = PROBE, error: BaseException | None = None, **kwargs: ob
 
 # ---- registry ------------------------------------------------------------------------------------
 
-def test_product_handlers_is_empty():
-    assert HANDLERS == {}
+def test_product_handlers_name_their_contract_tests():
+    # Product rows are live sites: each names the tests that pin its contract (test-only entries never ship).
+    for handler_id, spec in HANDLERS.items():
+        assert not handler_id.startswith("synthetic."), handler_id
+        assert spec.contract_tests, handler_id
 
 
 def test_test_registration_is_visible_only_inside_the_context(fresh):

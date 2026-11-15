@@ -11206,18 +11206,28 @@ def work(d, *, resume=None):
                         error_detail=str(e)[:600], traceback=_err_trace, dispatch=False)
                 except Exception:                                  # noqa: BLE001
                     pass
+                # Post-run boundary, not a request path. The reason row lands in problems.jsonl.
+                # record_fault never raises, and its result does not change the outcome returned below.
+                _err_message = str(e)[:600] or (_err_trace.strip().splitlines() or [""])[-1][:600]
+                from kernel_fault_disposition import record_fault
+                record_fault("react_repair.run_exception", e, disposition="boundary",
+                             observed_at="react_repair.run",
+                             journal=getattr(measurement, "journal", None))
                 finish_native_batch_transcript(msgs)
                 _reported_edits, _reported_checks = _reported_progress_counts(locals())
                 from kernel_read_receipts import finish_pending
                 finish_pending(measurement, error=sys.exc_info()[1])
                 measurement.finish({"result": f"ERR:{type(e).__name__}",
-                                    "error_detail": str(e)[:600] or (_err_trace.strip().splitlines() or [""])[-1][:600],
+                                    "error_detail": _err_message,
                                     "steps": _reported_steps(),
                                     "edits": _reported_edits,
                                     "tests": _reported_checks}, messages=msgs)
+                # error_type/error_message ride the engine-result envelope so the runner's terminal copy and
+                # outcomes.engine_error_reason can name the failure (ERR:* alone carried no cause).
                 return _attach_env_receipt(
                     dict(fn=fn, result=f"ERR:{type(e).__name__}", steps=_reported_steps(),
-                         edits=_reported_edits, tests=_reported_checks), measurement)
+                         edits=_reported_edits, tests=_reported_checks,
+                         error_type=type(e).__name__, error_message=_err_message), measurement)
             finally:
                 if not _read_forwarded:
                     _finish_read_attempt(measurement, error=sys.exc_info()[1])

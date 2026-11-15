@@ -254,10 +254,32 @@ def project(summary: dict[str, object], *, cancelled: bool = False,
     return projected
 
 
-def engine_error_reason(summary: dict[str, object]) -> str | None:
-    """One readable line for a seal/finalization failure, from the engine's own terminal receipt."""
+def resume_hint_applies(summary: dict[str, object]) -> bool:
+    """True when a stopped run should be offered `stateframe resume`.
+
+    A seal/finalization failure would only repeat on resume, so it gets no hint; an ERR:* crash keeps it.
+    """
+    if summary.get("runtime_outcome") not in ("cancelled", "engine_error", "missing_result", "budget_stop",
+                                              "recovery_required"):
+        return False
     terminal = summary.get("engine_terminal") or {}
-    if terminal.get("result") not in SEAL_FAILURES:
+    return not (summary.get("engine_error_reason") and terminal.get("result") in SEAL_FAILURES)
+
+
+def engine_error_reason(summary: dict[str, object]) -> str | None:
+    """One readable line for an engine failure, from the engine's own terminal receipt.
+
+    ERR:* outcomes name the exception class and message. Seal/finalization failures keep their own wording.
+    """
+    terminal = summary.get("engine_terminal") or {}
+    result = terminal.get("result")
+    if isinstance(result, str) and result.startswith("ERR:"):
+        message = str(terminal.get("error_message") or "").strip()
+        if not message:
+            return f"engine error: {result}"
+        error_type = str(terminal.get("error_type") or result[len("ERR:"):])
+        return f"engine error: {error_type}: {message}"
+    if result not in SEAL_FAILURES:
         return None
     detail = str(terminal.get("error_message") or terminal.get("error") or terminal.get("error_type") or "no detail")
     requests = summary.get("requests")

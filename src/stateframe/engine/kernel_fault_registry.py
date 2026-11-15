@@ -71,9 +71,20 @@ def _require_tuple_of_text(value: object, name: str, handler_id: str) -> None:
             raise ValueError(f"{handler_id}: {name} entries must be non-empty text")
 
 
-# Product registry. Empty until step-3 batch 1 converts live guard sites (each adds its row, inject
-# hook and record_fault call). Tests use register_for_tests, never this dict.
-HANDLERS: dict[str, HandlerSpec] = {}
+# Product registry. Each live guard site adds its row (plus inject hook and record_fault call).
+# Tests use register_for_tests, never this dict.
+HANDLERS: dict[str, HandlerSpec] = {
+    # Catch-all for an engine run that ends ERR:* (probes/react_repair.py work). Every exception here is unexpected.
+    "react_repair.run_exception": HandlerSpec(
+        handler_id="react_repair.run_exception", module="probes.react_repair", function="work",
+        op="react_repair.run", taxonomy="D", tier="T0", requiredness="required", expected=(),
+        dispositions=("boundary",), fallback_id=None, owner="crew-08",
+        contract_tests=(
+            "tests/test_engine_error_reason.py::test_catch_all_returns_class_and_message_and_records_reason_row",
+        ),
+        policy_version=1,
+    ),
+}
 
 _TEST_HANDLERS: dict[str, HandlerSpec] = {}
 
