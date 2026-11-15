@@ -109,8 +109,8 @@ def test_missing_outcome_and_requirements_has_literal_repair_hint(tmp_path):
     first.pop("requirements", None)
     with pytest.raises(ParallelInputError) as refusal:
         _parse(args, _repo(tmp_path), expand=True)
-    assert refusal.value.field == "outcome"
-    assert refusal.value.hint == 'add "outcome": "<one sentence>"'
+    assert refusal.value.field == "goal"
+    assert refusal.value.hint == 'add "goal": "<one sentence>"'
 
     first.update(json.loads("{" + refusal.value.hint.removeprefix("add ") + "}"))
     request, _, _ = _parse(args, _repo(tmp_path), expand=True)
@@ -346,7 +346,7 @@ def test_pending_fourth_wire_call_replays_historical_refusal_before_result_seal(
 # whether the repaired request is accepted.
 _NEAR_MISSES = (
     ("id", None, "a"), ("id", 3, "a"),
-    ("outcome", None, "Change a"), ("outcome", "", "Change a"),
+    ("outcome", "", "Change a"),  # missing outcome with no goal is covered by the goal repair test below
     ("owns", None, ["a.py"]), ("owns", "a.py", ["a.py"]),
     ("creates", None, []), ("creates", "new.py", []),
     ("reads", "a.py", []), ("requirements", "condition", []),

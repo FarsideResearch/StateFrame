@@ -142,7 +142,7 @@ _UNIT = {"type": "object", "properties": {
                       "type": "array", "items": {"type": "string"}}}, "required": ["tests"]},
               ]},
     "model_class": {"type": "string"}},
-    "required": ["id", "owns"]}
+    "required": ["id", "goal", "owns"]}
 PARALLEL_TOOL = {"type": "function", "function": {
     "name": "parallel",
     "description": "For each subframe send {id, goal, owns}; optional consumes (symbol or path) "
@@ -829,12 +829,15 @@ def _request(args: Mapping, call_id: str, mode: str, *,
         if extra:
             field = sorted(extra)[0]
             raise ParallelInputError(unit_id, field, "unknown field", "remove the field")
-        for field in ("id", "outcome"):
-            if not isinstance(item.get(field), str) or not item[field].strip():
-                hint = (f'add "id": "subframe_{index}"' if field == "id" and field not in item
-                        else 'add "outcome": "<one sentence>"'
-                        if field == "outcome" and field not in item else f"provide {field} as text")
-                raise ParallelInputError(unit_id, field, "expected nonempty text", hint)
+        if not isinstance(item.get("id"), str) or not item["id"].strip():
+            hint = f'add "id": "subframe_{index}"' if "id" not in item else "provide id as text"
+            raise ParallelInputError(unit_id, "id", "expected nonempty text", hint)
+        # goal is expanded into outcome before this check, so a missing outcome here means neither was sent.
+        if "goal" not in item and "outcome" not in item:
+            raise ParallelInputError(unit_id, "goal", "expected nonempty text",
+                                     'add "goal": "<one sentence>"')
+        if not isinstance(item.get("outcome"), str) or not item["outcome"].strip():
+            raise ParallelInputError(unit_id, "outcome", "expected nonempty text", "provide outcome as text")
         owns = strings(item.get("owns"), unit_id, "owns")
         creates = strings(item.get("creates"), unit_id, "creates")
         reads = strings(item.get("reads", []), unit_id, "reads")
