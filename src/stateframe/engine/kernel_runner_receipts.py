@@ -7,11 +7,9 @@ executed with ``shell=False`` through the existing effect boundary.
 from __future__ import annotations
 
 import hashlib
-import os
 import re
-import subprocess
 import xml.etree.ElementTree as ElementTree
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, TypeAlias
@@ -27,7 +25,6 @@ ReceiptStatus: TypeAlias = Literal[
 SkipState: TypeAlias = Literal["NOT_SKIPPED", "NO_TESTS", "SKIPPED"]
 ApplicabilityState: TypeAlias = Literal["current", "stale", "unknown", "mixed_inputs"]
 BindingMode: TypeAlias = Literal["historical_execution", "live_at_acceptance"]
-CommandRunner: TypeAlias = Callable[..., subprocess.CompletedProcess[str]]
 MAX_OUTPUT_TAIL = 4_000
 
 
@@ -135,13 +132,6 @@ class RunnerReceipt:
             ),
             "applicability": self.applicability,
         }
-
-
-@dataclass(frozen=True, slots=True)
-class CheckExecution:
-    receipt: RunnerReceipt
-    output: str
-    observation: str
 
 
 def _receipt(
@@ -322,136 +312,6 @@ def adapt_output(stdout: str, stderr: str, exit_code: int,
     return adapt_plain(stdout, stderr, exit_code, descriptor)
 
 
-def _product_revision(root: Path) -> str | None:
-    try:
-        from kernel_product_manifest import product_revision
-        return product_revision(root)
-    except (ImportError, OSError, ValueError):
-        return None
-
-
-def _run_subprocess(
-    root: Path, descriptor: CheckDescriptor, *, run: CommandRunner | None,
-    timeout: float | None, environment: Mapping[str, str],
-) -> tuple[RunnerReceipt | None, str]:
-    cwd_path = (root / descriptor.cwd).resolve()
-    try:
-        cwd_path.relative_to(root.resolve())
-    except ValueError:
-        receipt = _receipt(descriptor, status="INFRA_ERROR", exit_code=None,
-                           output="descriptor cwd escapes product root")
-        return receipt, receipt.output_tail
-    execute = run or subprocess.run
-    try:
-        completed = execute(
-            list(descriptor.argv), cwd=str(cwd_path), capture_output=True, text=True,
-            timeout=timeout if timeout is not None else descriptor.timeout,
-            env=dict(environment), shell=False,
-        )
-    except subprocess.TimeoutExpired as error:
-        output = str(error.stdout or "") + str(error.stderr or "")
-        receipt = _receipt(descriptor, status="TIMEOUT", exit_code=None, output=output,
-                           timed_out=True)
-        return receipt, receipt.output_tail
-    except (FileNotFoundError, OSError) as error:
-        receipt = _receipt(descriptor, status="INFRA_ERROR", exit_code=None,
-                           output=f"runner unavailable: {type(error).__name__}")
-        return receipt, receipt.output_tail
-    except Exception as error:  # noqa: BLE001 - host runner boundary is fail-closed
-        receipt = _receipt(descriptor, status="INFRA_ERROR", exit_code=None,
-                           output=f"runner invocation failed: {type(error).__name__}")
-        return receipt, receipt.output_tail
-    output = (completed.stdout or "") + (("\n" + completed.stderr) if completed.stderr else "")
-    return adapt_output(completed.stdout or "", completed.stderr or "", completed.returncode,
-                        descriptor), output
-
-
-def execute_check(root: Path, descriptor: CheckDescriptor, *, owner: object | None = None,
-                  run: CommandRunner | None = None, timeout: float | None = None,
-                  environment_input_vector: EnvironmentInputVector | None = None,
-                  applicability: ApplicabilityState | None = None) -> CheckExecution:
-    """Execute one host descriptor through the existing effect sandbox."""
-    environment = dict(os.environ)
-    environment.update(dict(descriptor.env))
-    output_holder: dict[str, str] = {}
-    revision = _product_revision(root)
-    if applicability is not None:
-        captured_applicability = applicability
-    elif not descriptor.environment_predicates:
-        captured_applicability = "current"
-    elif environment_input_vector is None:
-        captured_applicability = "unknown"
-    elif environment_input_vector.input_coverage != "complete":
-        captured_applicability = "mixed_inputs"
-    else:
-        # A vector is an input capture, not proof that its inputs still match
-        # the current ledger.  The binding owner must explicitly authorize
-        # current applicability after evaluating all predicates.
-        captured_applicability = "unknown"
-
-    def dispatch() -> RunnerReceipt:
-        receipt, output = _run_subprocess(root, descriptor, run=run, timeout=timeout,
-                                          environment=environment)
-        assert receipt is not None
-        output_holder["value"] = output
-        return receipt
-
-    try:
-        from kernel_effect_application import apply_effect
-        application = apply_effect(
-            operation="run_check",
-            snapshot={"check_id": descriptor.check_id, "kind": descriptor.kind,
-                      "argv": descriptor.argv, "cwd": descriptor.cwd},
-            dispatch=dispatch,
-            owner=owner,
-            shadow_value=_receipt(descriptor, status="SKIPPED", exit_code=None,
-                                  output="effect boundary shadow mode",
-                                  skip_state="SKIPPED", product_revision=revision,
-                                  environment_input_vector=environment_input_vector,
-                                  applicability=captured_applicability),
-        )
-        if not application.executed:
-            receipt = application.value
-            assert isinstance(receipt, RunnerReceipt)
-            return CheckExecution(receipt=receipt, output=receipt.output_tail,
-                                  observation=application.rendered or receipt.status)
-        receipt = application.value
-    except (ImportError, RuntimeError, ValueError) as error:
-        # A boundary failure is a typed inability, never permission to retry
-        # the effect outside its authorization path.
-        receipt = _receipt(
-            descriptor, status="INFRA_ERROR", exit_code=None,
-            output="effect boundary unavailable: " + type(error).__name__,
-            product_revision=revision,
-            environment_input_vector=environment_input_vector,
-            applicability=("unknown" if descriptor.environment_predicates else captured_applicability),
-        )
-    assert isinstance(receipt, RunnerReceipt)
-    changes: dict[str, object] = {}
-    if receipt.product_revision != revision:
-        changes["product_revision"] = revision
-    if receipt.environment_input_vector != environment_input_vector:
-        changes["environment_input_vector"] = environment_input_vector
-    if receipt.applicability != captured_applicability:
-        changes["applicability"] = captured_applicability
-    if changes:
-        receipt = dataclass_replace(receipt, **changes)
-    output = output_holder.get("value", receipt.output_tail)
-    return CheckExecution(receipt=receipt, output=output,
-                          observation=render_observation(receipt))
-
-
-def dataclass_replace(receipt: RunnerReceipt, **changes: object) -> RunnerReceipt:
-    """Typed local wrapper avoiding a broad ``dataclasses.replace`` return."""
-    from dataclasses import replace
-    return replace(receipt, **changes)
-
-
-def render_observation(receipt: RunnerReceipt) -> str:
-    return (f"{receipt.runner} {receipt.kind} {receipt.status} "
-            f"exit={receipt.exit_code} output={receipt.output_reference}")
-
-
 class CheckRegistry:
     """Host-owned descriptor registry."""
 
@@ -520,22 +380,6 @@ def register_task_checks(row: Mapping[str, object]) -> tuple[str, ...]:
     return tuple(dict.fromkeys(registered))
 
 
-def run_registered_check(root: Path, check_id: str, *, owner: object | None = None,
-                         run: CommandRunner | None = None,
-                         environment_input_vector: EnvironmentInputVector | None = None,
-                         applicability: ApplicabilityState | None = None) -> CheckExecution:
-    descriptor = HOST_CHECKS.get(check_id)
-    if descriptor is None:
-        unknown = CheckDescriptor(check_id=check_id, runner="unknown", argv=("unknown",),
-                                  kind="PROCESS")
-        receipt = _receipt(unknown, status="INFRA_ERROR", exit_code=None,
-                          output="unknown host-owned check descriptor")
-        return CheckExecution(receipt, receipt.output_tail, render_observation(receipt))
-    return execute_check(root, descriptor, owner=owner, run=run,
-                         environment_input_vector=environment_input_vector,
-                         applicability=applicability)
-
-
 def description_for_descriptor(descriptor: CheckDescriptor) -> str:
     return (f"{descriptor.kind} check {descriptor.check_id!r} uses host runner "
             f"{descriptor.runner!r} with {descriptor.adapter} results")
@@ -565,9 +409,9 @@ def capability_facts() -> dict[str, object]:
 
 
 __all__ = [
-    "CheckDescriptor", "CheckExecution", "CheckKind", "CheckRegistry", "HOST_CHECKS",
+    "CheckDescriptor", "CheckKind", "CheckRegistry", "HOST_CHECKS",
     "RunnerReceipt", "adapt_junit", "adapt_output", "adapt_plain", "adapt_pytest", "adapt_tap",
-    "capability_facts", "description_for_descriptor", "execute_check", "register_check",
+    "capability_facts", "description_for_descriptor", "register_check",
     "register_task_checks",
-    "pytest_descriptor", "render_observation", "run_registered_check",
+    "pytest_descriptor",
 ]

@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.7.3 (2026-11-15)
+
+- Removed an unused host check runner that could start processes outside the sandbox; a guard test now blocks new unsandboxed process calls in the engine.
+
 ## 0.7.2 (2026-11-15)
 
 - Tests: neutral wording in test docstrings and module names; recorded-wire tests read STATEFRAME_RECORDED_WIRE and skip when it is unset.
