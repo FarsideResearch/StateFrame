@@ -1,18 +1,13 @@
 # Changelog
 
-## Unreleased
+## 0.6.45 (2026-11-15)
 
 - The live-token admission regression now admits and refuses actual source pages with a callable meter that contradicts the offline estimate; a mutation guard proves disconnecting that meter fails the regression.
-
 - Allocator coverage repair uses explicit host-owned coordinates; user suffixes and tool, assistant and system content retain their exact bytes even when they start with a source-coverage marker.
-
 - Exact shell-read captures pass read admission before creating exposure debt. Oversized replies keep their opaque output and a skipped-capture audit instead of stranding the next request.
   Shell capture metadata counts newline-delimited source lines without splitting the snapshot into a list; regression cases cover trailing newlines, CRLF and embedded carriage returns.
-
 - Allocator suspension during an HTTP capacity refit reaches the worker as resumable BLOCKED instead of being replaced by a transport failure.
-
 - Capacity retries journal each certified physical wire and adopt its matching assignment without advancing the logical working-set clock twice.
-
 - Read admission preserves the complete qualified envelope and reserves source ranges that a read can promote to the next edit site. Multi-call reservations use the complete plain layout; if the floor cannot be measured, reads return refusals with recovery cursors. This prevents fresh pages from creating delivery debt beyond the next request's byte cap, including mandatory menus, host facts and deferral notices.
 - Continuation settles `REFUSED_ADMISSION` as a read refusal with no source credit, preserving the recovery cursor instead of replacing the reply with an unknown-effect repair.
 - Tests: working-set reference results are frozen as deterministic JSON fixtures so single-branch clones can run parity checks without retired branch objects; a guard requires Git oracle revisions to be ancestors of HEAD. Read metadata stays bound to 0.6.23, with later-source metadata preserved as provenance. The guard also checks working-set pinned-tree calls, parity delegates and reference parameters.
