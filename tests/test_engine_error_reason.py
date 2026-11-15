@@ -1,6 +1,6 @@
 """ERR:* engine outcomes name the exception class and message, and the catch-all records a reason row.
 
-Incident (crew-09 L4, 0.7.3): the run ended ERR:FrameFit5Error. engine-result.json carried only the result
+Incident (subframes benchmark L4, 0.7.3): the run ended ERR:FrameFit5Error. engine-result.json carried only the result
 name, summary.json had no engine_error_reason, and problems.jsonl had no row.
 """
 from __future__ import annotations
