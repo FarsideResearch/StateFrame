@@ -39,6 +39,8 @@ PROFILE_ONLY = {
 }
 # Placeholders in the extension guide and prefixes of per-role variables, not settings.
 EXAMPLES = {"STATEFRAME_MY_SWITCH"}
+# Test-fixture variables named in the CHANGELOG: read only by the test suite, never by the product.
+TEST_FIXTURE_ONLY = {"STATEFRAME_RECORDED_WIRE"}
 PREFIXES = {"STATEFRAME_ROUTE_"}
 NAME = re.compile(r"STATEFRAME_[A-Z0-9_]+")
 
@@ -66,7 +68,7 @@ def unsupported(documented: dict[str, list[str]], allowlist, product: set[str]) 
     """Documented names a user could export to no effect, with the reason."""
     problems = []
     for name, sentences in sorted(documented.items()):
-        if name in EXAMPLES or name in PREFIXES or name in allowlist:
+        if name in EXAMPLES or name in PREFIXES or name in allowlist or name in TEST_FIXTURE_ONLY:
             continue
         if name in PROFILE_ONLY:
             if not any("profile" in sentence.lower() for sentence in sentences):
@@ -80,6 +82,16 @@ def unsupported(documented: dict[str, list[str]], allowlist, product: set[str]) 
 
 def test_every_documented_switch_takes_effect():
     assert unsupported(_documented(), runner.OPT_IN_SWITCHES, _product_reads()) == []
+
+
+def test_test_fixture_variables_are_never_product_switches():
+    product = _product_reads()
+    engine = runner.engine_switches()
+    for name in TEST_FIXTURE_ONLY:
+        assert name not in runner.OPT_IN_SWITCHES
+        assert name not in product
+        assert name not in engine
+        assert any(name in path.read_text(encoding="utf-8") for path in (ROOT / "tests").glob("test_*.py"))
 
 
 def test_planted_violation_is_caught():
