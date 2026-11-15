@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Tests: journal reads in the working-set and final-wire fixtures go through the shared measurement reader; silent-swallow allowlist re-fingerprinted; route-only next-site negative controls (wrong revision, range past end, line outside range).
 - Tests: adds the `tests/enginecheck` harness library (scripted-session adapter, proof integrity, boundary inputs, wire prefix stability, feature composition, race-seed registry and CLI, resume equivalence). Known engine defects it finds are pinned as strict xfails.
 ## 0.7.7 (2026-11-15)
 
