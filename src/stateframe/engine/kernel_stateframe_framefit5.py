@@ -2769,10 +2769,15 @@ def _verify_next_site_bytes(site: Mapping[str, object], workspace_root: str | Pa
     current_bytes = site.get("current_bytes")
     source_ref = site.get("source_ref")
     revision = site.get("revision")
+    # Delivery truth clears current_bytes (value None) on a site this request did
+    # not show. That is a location pointer the model re-reads, not a dropped field.
+    not_shown = (site.get("read_this_request") is False and "current_bytes" in site
+                 and current_bytes is None and not isinstance(source_ref, Mapping))
     missing_fields = []
     if not isinstance(line_range, Mapping):
         missing_fields.append("lines")
-    if not isinstance(current_bytes, str) and not isinstance(source_ref, Mapping):
+    if (not not_shown and not isinstance(current_bytes, str)
+            and not isinstance(source_ref, Mapping)):
         missing_fields.append("current_bytes")
     if not isinstance(revision, str):
         missing_fields.append("revision")
@@ -2806,7 +2811,7 @@ def _verify_next_site_bytes(site: Mapping[str, object], workspace_root: str | Pa
         }
         if current_bytes is not None or dict(source_ref) != expected_ref:
             raise FrameFit5Error("typed next-site source reference is invalid")
-    elif excerpt.decode("utf-8") != current_bytes:
+    elif not not_shown and excerpt.decode("utf-8") != current_bytes:
         raise _CandidateSourceChanged("typed next-site bytes changed before dispatch")
     if line is not None:
         if line < start or line > end:
