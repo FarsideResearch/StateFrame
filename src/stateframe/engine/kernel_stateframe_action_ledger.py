@@ -323,11 +323,12 @@ def _read_site_window(
         or total < end
         or chars is None
         or clip is None
-        or clip.group(1).casefold() not in {"none", "max_lines"}
+        or clip.group(1).casefold() not in {"none", "max_lines", "max_chars"}
         or "decoded_with_replacement=true" in metadata.casefold()
         or (truncated is not None and clip.group(1).casefold() == "none"
             and truncated.group(1).casefold() != "false")
-        or (clip.group(1).casefold() == "max_lines"
+        # Clipped pages carry the EFFECTIVE range in lines=; the typed truncation must say so.
+        or (clip.group(1).casefold() in {"max_lines", "max_chars"}
             and (truncated is None or truncated.group(1).casefold() != "true"))
     ):
         return None
@@ -1215,7 +1216,12 @@ def _fallback_edit_open_site_locator(
     if len(old_text.encode("utf-8")) + len(new_text.encode("utf-8")) > MAX_OPEN_EDIT_SITE_BYTES:
         return None
     prior_read = current_reads.get(path)
-    read_fact, read_text = prior_read if prior_read is not None else ({}, "")
+    # No prior read in this request: there is no anchored site. Returning None
+    # makes the caller fail closed with its typed missing-site reason instead of
+    # anchoring at line 1 with an empty revision.
+    if prior_read is None:
+        return None
+    read_fact, read_text = prior_read
     read_lines = read_fact.get("lines")
     start = int(read_lines.get("start", 1)) if isinstance(read_lines, Mapping) else 1
     count = max(1, len(new_text.splitlines()))

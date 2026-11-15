@@ -33,6 +33,7 @@ PROVIDER_REQUEST_NOT_DISPATCHED_REASON_CODES = frozenset({
     "prepared_overflow",
     "response_budget_unavailable",
     "tool_call_loop_breaker",
+    "needs_source_capacity",
     "unit_context_too_large",
 })
 LEAN_REQUEST_CONTRACT_KIND = "lean_stable_surface"

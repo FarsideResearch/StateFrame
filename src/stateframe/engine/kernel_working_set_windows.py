@@ -38,6 +38,38 @@ def render_frozen_span(metadata, descriptor, payload):
     return page, len(prefix.encode())
 
 
+def _unit_active() -> bool:
+    """Only subframe children page oversized plan units; other allocator runs are unchanged."""
+    import sys
+    module = sys.modules.get("kernel_unit_policy")
+    return module is not None and module.active() is not None
+
+
+def _plan_spans(lines, first, last, path, revision, anchors):
+    """Split a plan unit into read-page-sized spans, each with its own recovery route.
+
+    A whole-file plan unit longer than one read page has no single recovery route, so
+    it can never be DEFERRED and stays mandatory FULL. Splitting it into page-sized
+    spans gives each span a route; subframe paging then retires them. Units that fit
+    one page are returned unchanged, with their anchors.
+    """
+    if not _unit_active():
+        return ((first, last, anchors),)
+    from kernel_working_set_recovery import MAX_READ_CHARS, MAX_READ_LINES, read_page_header_reserve
+    budget = MAX_READ_CHARS - read_page_header_reserve(path, revision)
+    spans, start, chars = [], first, 0
+    for number in range(first, last + 1):
+        size = len(lines[number - 1])
+        if number > start and (number - start >= MAX_READ_LINES or chars + size > budget):
+            spans.append((start, number - 1, []))
+            start, chars = number, 0
+        chars += size
+    if not spans:
+        return ((first, last, anchors),)
+    spans.append((start, last, []))
+    return tuple(spans)
+
+
 def frozen_plan_windows(runtime, existing, current_revisions):
     """Offer every exact plan unit, including units absent from legacy panels.
 
@@ -83,32 +115,33 @@ def frozen_plan_windows(runtime, existing, current_revisions):
         lines = source.splitlines(keepends=True)
         if last > len(lines):
             raise SnapshotConstructionError("SOURCE_SNAPSHOT_UNSTABLE")
-        payload = "".join(lines[first - 1:last])
-        identity_key = path, revision, first, last, payload
-        revisions[path] = revision
-        if identity_key in seen:
-            continue
-        seen.add(identity_key)
-        descriptor = {"start_line": first, "end_line": last,
-                      "anchors": list(unit.get("anchors", ()))}
-        page = project_source_window(_render_ranges(lines, (descriptor,), path=path,
-            revision=revision, total_lines=len(lines)), owner="source_closure")
-        if not isinstance(page, str):
-            raise SnapshotConstructionError("SOURCE_SNAPSHOT_UNSTABLE")
-        payload_start = page.index(f"--- source lines {first}-{last} ---\n")
-        payload_start += len(f"--- source lines {first}-{last} ---\n")
-        checksum = hashlib.sha256(payload.encode()).hexdigest()
-        identity = ReceiptIdentity(path, revision, first, last, None, None, checksum,
-            DecodedSpan(0, len(lines[last - 1]), "model-source-window/1"))
-        evidence = line_digests_with_numbers(payload, first)
-        key = "closure:" + hashlib.sha256(json.dumps(identity_key).encode()).hexdigest()
-        ordinal += 1
-        role = str(unit.get("role") or "")
-        state = "PLAN" if role in {"plan", "plan_window", "planned_edit"} else "CLOSURE"
-        proposed.append(SourceSlot(key, (key,), identity, payload, page, *evidence,
-            json.dumps({"path": path, "start_line": first, "end_line": last}).encode(),
-            ordinal, 0, state, kind="tests" if path.startswith("tests/") else "context",
-            payload_start=len(page[:payload_start].encode()), plan_only=True))
+        for first, last, anchors in _plan_spans(lines, first, last, path, revision, list(unit.get("anchors", ()))):
+            payload = "".join(lines[first - 1:last])
+            identity_key = path, revision, first, last, payload
+            revisions[path] = revision
+            if identity_key in seen:
+                continue
+            seen.add(identity_key)
+            descriptor = {"start_line": first, "end_line": last,
+                          "anchors": list(unit.get("anchors", ()))}
+            page = project_source_window(_render_ranges(lines, (descriptor,), path=path,
+                revision=revision, total_lines=len(lines)), owner="source_closure")
+            if not isinstance(page, str):
+                raise SnapshotConstructionError("SOURCE_SNAPSHOT_UNSTABLE")
+            payload_start = page.index(f"--- source lines {first}-{last} ---\n")
+            payload_start += len(f"--- source lines {first}-{last} ---\n")
+            checksum = hashlib.sha256(payload.encode()).hexdigest()
+            identity = ReceiptIdentity(path, revision, first, last, None, None, checksum,
+                DecodedSpan(0, len(lines[last - 1]), "model-source-window/1"))
+            evidence = line_digests_with_numbers(payload, first)
+            key = "closure:" + hashlib.sha256(json.dumps(identity_key).encode()).hexdigest()
+            ordinal += 1
+            role = str(unit.get("role") or "")
+            state = "PLAN" if role in {"plan", "plan_window", "planned_edit"} else "CLOSURE"
+            proposed.append(SourceSlot(key, (key,), identity, payload, page, *evidence,
+                json.dumps({"path": path, "start_line": first, "end_line": last}).encode(),
+                ordinal, 0, state, kind="tests" if path.startswith("tests/") else "context",
+                payload_start=len(page[:payload_start].encode()), plan_only=True))
     return tuple(proposed), revisions
 
 

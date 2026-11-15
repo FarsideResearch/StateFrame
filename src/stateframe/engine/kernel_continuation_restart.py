@@ -1024,6 +1024,12 @@ DOCUMENTED_REJECT.update({
     "subframe_auto_finished": (
         "An auto-finished subframe sealed its own terminal and has no restore reconciliation contract."
     ),
+    "edit_admission_refused": (
+        "A refused subframe edit is audit evidence only; the refusal observation is already in the replayed transcript."
+    ),
+    "source_view_incomplete": (
+        "A refused incomplete source view is audit evidence for a request that was never dispatched."
+    ),
     "subframe_final_sources": (
         "Subframe final sources pin the unit result files and cannot be rebuilt from a checkpoint."
     ),

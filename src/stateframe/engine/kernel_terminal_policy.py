@@ -26,6 +26,7 @@ FATAL_OUTCOMES = frozenset({
     "harness_transport", "harden8_contract_error", "harden8_evidence_pin_error",
     "harden8_owner_finalization_error", "harden8_route_error", "invalidate_attempt",
     "quarantine_harness", "run_incomplete", "continuation_blocked", "unit_context_too_large",
+    "needs_source_capacity",
 })
 _SUBFRAME_BLOCK_REASONS = frozenset({
     "NEEDS_UNOWNED_FILE", "INTERFACE_WRONG", "CONTRACT_IMPOSSIBLE", "CHECK_WRONG", "OTHER",

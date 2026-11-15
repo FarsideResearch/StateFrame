@@ -175,6 +175,11 @@ def carry_scoped_continuation_limits(messages: list[dict[str, object]]) -> bool:
     return False
 
 
+def _allocator_owns_final_delivery() -> bool:
+    from kernel_read_receipts import enabled as working_set_enabled
+    return working_set_enabled()
+
+
 def scope_typed_state_for_unit(
         state: Mapping[str, object], unit_spec: object, *, root: Path | None = None,
         delivered_windows: Sequence[Mapping[str, object]] | None = None,
@@ -226,7 +231,9 @@ def scope_typed_state_for_unit(
            for site in source_sites):
         raise FrameFit5Error("subframe state scope has a malformed edit site")
     unit_sites = _unit_rows(source_sites, owned_paths)
-    if delivered_windows is not None:
+    if delivered_windows is not None and not _allocator_owns_final_delivery():
+        # Refs are decided here against pre-final windows. With the working-set
+        # allocator on, final delivery is unknown at scope time, so bytes stay inline.
         unit_sites = [site_ref_or_inline(site, delivered_windows) for site in unit_sites]
     requirements = raw_spec.get("requirement_clauses", [])
     if not isinstance(requirements, (list, tuple)):
@@ -2194,6 +2201,53 @@ def compose_frame_only(
     return result
 
 
+def _require_owned_source_rendered(
+        messages: Sequence[Mapping[str, object]],
+        source_plan: Mapping[str, object],
+        sources: Mapping[str, str] | None,
+) -> None:
+    """Fail closed when allocator-ON unallocated assembly drops retained owned source.
+
+    Every path behind a retained bounded-delivery unit must render as a verified
+    current source block. Deferred paths are withheld on purpose behind a notice
+    and are exempt.
+    """
+    bounded = source_plan.get("bounded_delivery")
+    if not isinstance(bounded, Mapping):
+        return
+    from kernel_request_source_window import verify_current_source_message
+    retained_raw = bounded.get("retained_handles", ())
+    if not isinstance(retained_raw, Sequence) or isinstance(retained_raw, (str, bytes, bytearray)):
+        raise FrameFit5Error("owned source delivery has malformed retained handles")
+    retained = {str(handle).strip() for handle in retained_raw if str(handle).strip()}
+    if not retained:
+        return
+    deferred_raw = source_plan.get("deferred_paths", ())
+    deferred: set[str] = set()
+    if isinstance(deferred_raw, Sequence) and not isinstance(deferred_raw, (str, bytes, bytearray)):
+        deferred = {str(path).replace("\\", "/") for path in deferred_raw}
+    units_raw = source_plan.get("units", ())
+    if not isinstance(units_raw, Sequence) or isinstance(units_raw, (str, bytes, bytearray)):
+        raise FrameFit5Error("owned source delivery has malformed units")
+    required: list[str] = []
+    for unit in units_raw:
+        if not isinstance(unit, Mapping):
+            continue
+        handle = str(unit.get("unit_handle") or unit.get("unit_id") or unit.get("handle") or "").strip()
+        path = str(unit.get("path", "")).replace("\\", "/").strip()
+        if handle in retained and path and path not in deferred and path not in required:
+            required.append(path)
+    for path in required:
+        source = sources.get(path) if isinstance(sources, Mapping) else None
+        if not isinstance(source, str):
+            raise FrameFit5Error(f"owned source for {path} has no snapshot to deliver")
+        if not any(
+                verify_current_source_message(message.get("content"), path=path, source=source)
+                for message in messages if isinstance(message, Mapping)
+        ):
+            raise FrameFit5Error(f"owned source for {path} was not rendered into the request")
+
+
 def assemble_framefit5_request(
         prepared: Sequence[Mapping[str, object]],
         source_messages: Sequence[Mapping[str, object]],
@@ -2213,21 +2267,25 @@ def assemble_framefit5_request(
     """Build one complete FrameFit5 provider surface for prep and every recovery path."""
     from kernel_read_receipts import enabled as allocator_enabled
     allocator_on = allocator_enabled()
+    # Legacy source branches run whenever no FrameRequestAllocation pins the
+    # layout. With the allocator ON and no allocation they must still deliver
+    # owned source, otherwise the request silently carries zero source (UNITVIS-073).
+    unallocated = frame_request_allocation is None
     prepared_for_composition: Sequence[Mapping[str, object]] = prepared
-    if frame_request_allocation is None:
+    if unallocated:
         _task, original_newest, _task_index, _action_index = _task_and_latest_turn(source_messages)
     else:
         # Allocated assembly must consume its captured ownership, including
         # callers that intentionally supply no mutable transcript at all.
         original_newest = frame_request_allocation.source_layout["newest_user_suffix"]
-    if not allocator_on and frame_request_allocation is None and isinstance(source_plan, Mapping):
+    if unallocated and isinstance(source_plan, Mapping):
         from kernel_frame_source_snapshot import retire_f4_deferred_carriers
 
         prepared_for_composition = retire_f4_deferred_carriers(
             prepared, source_messages, source_plan, sources,
         )
     required_deferred_paths: list[object] = []
-    if not allocator_on and isinstance(source_plan, Mapping):
+    if (not allocator_on or unallocated) and isinstance(source_plan, Mapping):
         deferred_paths = source_plan.get("deferred_paths", ())
         if (isinstance(deferred_paths, Sequence)
                 and not isinstance(deferred_paths, (str, bytes, bytearray))
@@ -2268,7 +2326,7 @@ def assemble_framefit5_request(
         volatile_micrograph=getattr(runtime, "micrograph_wire", None) is not None,
     )
     projected_count = 0
-    if not allocator_on and frame_request_allocation is None and isinstance(source_plan, Mapping):
+    if unallocated and isinstance(source_plan, Mapping):
         from kernel_request_source_window import project_model_source_messages
 
         projected_count = project_model_source_messages(
@@ -2279,6 +2337,8 @@ def assemble_framefit5_request(
             sources=sources,
             preserve_source_messages=original_newest,
         )
+        if allocator_on:
+            _require_owned_source_rendered(result, source_plan, sources)
     if runtime is not None and isinstance(owner_contract, Mapping):
         result = attach_owner_protocol(
             result,
@@ -2297,13 +2357,13 @@ def assemble_framefit5_request(
                 "FrameFit5 assembly could not preserve the existing volatile tail"
             )
         result[volatile_indexes[0]]["content"] = preserved_tail_content
-    if not allocator_on and frame_request_allocation is None:
+    if unallocated:
         from kernel_stateframe_capacity import refresh_read_ranges
 
         refresh_read_ranges(result, getattr(runtime, "_framefit_action_context", None))
     # Allocated layouts already pin source notices as ordered facts. Rebuilding
     # them from mutable runtime evidence here would move captured carriers.
-    source_notice_requested = not allocator_on and frame_request_allocation is None and (
+    source_notice_requested = unallocated and (
         bool(required_deferred_paths)
         or any(
             _is_framefit5_source_notice(message)
@@ -2968,6 +3028,43 @@ def _framefit5_delivered_source_ranges(
     return delivered
 
 
+def _request_carries_whole_source(
+        messages: Sequence[Mapping[str, object]], path: str,
+        ranges: Mapping[tuple[str, str], Sequence[tuple[int, int]]],
+) -> bool:
+    """True when the request carries lines 1..N of ``path`` at the map's revision (FU-070-ALLOC).
+
+    The last ``[Current source map]`` entry is authoritative: it names the revision and
+    claims 1..N. Delivered ranges must match that revision exactly and cover 1..N with no
+    gap. Revision-less blocks never count: without bytes their freshness is unprovable, so
+    the notice stays and errs toward listing. The check is byte-free because the advisory
+    deferral notice only needs to be true; the edit gate byte-verifies every carried page.
+    """
+    from kernel_source_view import parse_source_map
+
+    entry = None
+    for message in messages:
+        parsed = parse_source_map(message.get("content"))
+        if parsed is not None and path in parsed:
+            entry = parsed[path]
+    if entry is None:
+        return False
+    revision, claimed = entry
+    if len(claimed) != 1 or claimed[0][0] != 1:
+        return False
+    total = claimed[0][1]
+    covered: list[tuple[int, int]] = []
+    for (carried_path, carried_revision), spans in ranges.items():
+        if carried_path == path and carried_revision == revision:
+            covered.extend(spans)
+    cursor = 1  # next line not yet covered
+    for start, end in sorted(covered):
+        if start > cursor:
+            break
+        cursor = max(cursor, end + 1)
+    return cursor > total
+
+
 def _reconcile_framefit5_source_notices(
         messages: list[dict[str, object]], framefit5: Mapping[str, object],
         *, required_deferred_paths: Sequence[object] = (),
@@ -3093,10 +3190,16 @@ def _reconcile_framefit5_source_notices(
         elif owed and fact.get("body_delivery") == "bookmarked":
             read_lines[-1] += "; " + str(fact.get("delivery_notice"))
 
+    # Allocator-on (STATEFRAME_WORKING_SET_ALLOCATOR, the same switch the edit gate reads): a path
+    # whose full source the request already carries is not "not attached". Allocator-off keeps
+    # the legacy list byte for byte.
+    from kernel_read_receipts import enabled as allocator_enabled
+    allocator_on = allocator_enabled()
     other_paths = [
         path for path in deferred_paths
-        if path in required_paths
-        or (path not in attached_paths and path not in current_read_paths)
+        if (path in required_paths
+            or (path not in attached_paths and path not in current_read_paths))
+        and not (allocator_on and _request_carries_whole_source(messages, path, ranges))
     ]
     lines = ["[Host fact]"]
     if range_lines:

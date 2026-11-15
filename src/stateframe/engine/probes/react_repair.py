@@ -6407,6 +6407,62 @@ def _write_unit_refused_request(run_dir: pathlib.Path, messages: object,
         temporary.unlink()
 
 
+def _transport_wire_body(runtime: object, body: Mapping[str, object]) -> dict[str, object]:
+    """The provider body as transport serializes it.
+
+    Mirrors the last mutable request seam in kernel_measurement: private ``_`` message
+    keys are dropped (``_without_private_message_keys``), then the explicit reasoning
+    profile is applied (``enforce_provider_body``). ``llama.cpp`` is the allocator
+    snapshot's default dialect (kernel_working_set_snapshot), so the floor is priced on it.
+    """
+    from kernel_launch_identity_cost import enforce_provider_body, reasoning_profile
+    from kernel_measurement import _without_private_message_keys
+
+    manifest = getattr(getattr(runtime, "journal", None), "manifest", None)
+    return enforce_provider_body(_without_private_message_keys(body),
+                                 profile=reasoning_profile(manifest=manifest),
+                                 dialect="llama.cpp")
+
+
+def _sent_request_messages(prepared: object) -> list[Mapping[str, object]]:
+    """Messages of the request the provider actually received (FU-070-ALLOC).
+
+    ``prepared.messages`` is the pre-render list: no allocator source window and no
+    ``[Current source map]``. The qualified wire is what transport sent. Returns [] when
+    no qualified wire exists, so the edit gate fails closed rather than judging a list
+    the model never saw.
+    """
+    qualified = getattr(getattr(prepared, "capture", None), "qualified_request", None)
+    if qualified is None:
+        return []
+    body = qualified.body
+    messages = body.get("messages") if isinstance(body, Mapping) else None
+    if not isinstance(messages, list):
+        return []
+    return [item for item in messages if isinstance(item, Mapping)]
+
+
+def _never_legacy_complete(content: object) -> bool:
+    """Single-block shortcut is disabled for edit admission.
+
+    ``verify_current_source_message`` proves any one byte-verified page, so a shortcut on
+    it admitted an edit from a 1-of-3 page view. ``source_view`` already demands full
+    coverage (one full block or a map plus every verified span), so it is the only proof.
+    """
+    del content
+    return False
+
+
+def _admit_sent_edit(prepared: object, *, path: str, source: bytes) -> tuple[bool, str, str]:
+    """Admit a child edit only against the sent wire (FU-070-ALLOC)."""
+    from kernel_edit_admission import admit_unit_edit
+
+    return admit_unit_edit(
+        _sent_request_messages(prepared), path=path, source=source,
+        request_id=prepared.capture.request_id,
+        legacy_complete=_never_legacy_complete)
+
+
 def _enforce_unit_first_request(runtime: object, prepared: object, tools: object,
                                 unit: object, root: pathlib.Path,
                                 run_dir: pathlib.Path) -> None:
@@ -6441,12 +6497,67 @@ def _enforce_unit_first_request(runtime: object, prepared: object, tools: object
     missing = []
     required = tuple(dict.fromkeys((*unit.spec.contract.owns,
                                     *unit.spec.contract.check.source_paths)))
+    from kernel_source_view import (
+        deferred_read_obligation_valid, file_floor_bytes, file_floor_messages, source_view,
+    )
+    from kernel_read_receipts import enabled as allocator_enabled
+    from kernel_request_budget import HARD_MAX_REQUEST_BYTES
+
+    # The byte floor is an allocator contract: with the allocator off this check never
+    # runs, so the legacy request bytes and refusals stay exactly as they were.
+    allocator_on = allocator_enabled()
+    # The allocator's serialized-bytes cap, composed exactly as the live
+    # working-set path does (kernel_working_set_live).
+    retry_limits = getattr(prepared.capture, "_capacity_retry_limits", None)
+    byte_cap = (min(HARD_MAX_REQUEST_BYTES, retry_limits.max_request_bytes)
+                if retry_limits is not None else HARD_MAX_REQUEST_BYTES)
+    fixed_rows = [item for item in prepared.messages if isinstance(item, Mapping) and (
+        item.get("role") == "system" or str(item.get("content", "")).startswith(("Task:", "[StateFrame]")))]
+    capacity: list[tuple[str, str, int, int]] = []
+    owned_paths = set(unit.spec.contract.owns)
     for path in required:
-        source = (root / path).read_text(encoding="utf-8")
-        if not any(verify_current_source_message(
+        raw = (root / path).read_bytes()
+        source = raw.decode("utf-8")
+        if any(verify_current_source_message(
                 item.get("content"), path=path, source=source)
                 for item in prepared.messages if isinstance(item, Mapping)):
+            continue
+        # Allocator-on children defer or page their source: a byte-verified source
+        # view (map + pages) or a current-revision deferral obligation also counts.
+        if not (source_view(prepared.messages, path=path, source=raw).complete
+                or deferred_read_obligation_valid(
+                    prepared.messages, path=path, source=raw, runtime=runtime,
+                    capture=prepared.capture)):
             missing.append(path)
+            continue
+        if path in owned_paths:
+            # FILE floor: every page plus the map line. Above the band it can never fit.
+            try:
+                floor: int | None = measure_subframe_cap(
+                    {"messages": file_floor_messages(path, source)}, meter, cap=cap).tokens
+            except TimeoutError:
+                # An unmeasurable token floor never refuses on tokens, but it must not
+                # skip the byte floor below; the request fit check still runs afterwards.
+                floor = None
+            if floor is not None and floor > cap:
+                capacity.append((path, f"floor {floor} tokens exceeds band {cap}", 0, 0))
+                continue
+            if allocator_on:
+                floor_bytes = file_floor_bytes(
+                    path, source, fixed_messages=fixed_rows, tools=tools,
+                    wire=lambda body: _transport_wire_body(runtime, body))
+                if floor_bytes > byte_cap:
+                    capacity.append((path, "floor {} serialized bytes exceeds cap {}".format(
+                        floor_bytes, byte_cap), floor_bytes, byte_cap))
+    if capacity:
+        path, reason, _floor_bytes, _byte_cap = capacity[0]
+        runtime.system_outcome = "needs_source_capacity"
+        runtime.unit_context_detail = f"needs_source_capacity: {path} {reason}"[:300]
+        _write_unit_refused_request(run_dir, prepared.messages, tools)
+        _record_prepared_provider_not_dispatched(
+            runtime, prepared, provider_request=True,
+            reason_code="needs_source_capacity")
+        raise _UnitContextTooLarge(runtime.unit_context_detail)
     if unit.first_request_fits(tokens, owned_source_complete=not missing):
         return
     runtime.system_outcome = "unit_context_too_large"
@@ -9236,7 +9347,7 @@ def work(d, *, resume=None):
                 break
             if measurement.system_outcome in {
                     'invalidate_attempt', 'quarantine_harness', 'unit_blocked',
-                    'unit_context_too_large'}:
+                    'unit_context_too_large', 'needs_source_capacity'}:
                 measurement.journal.emit('supervision_stop', reason=measurement.system_outcome, step=step)
                 break
             if measurement.system_outcome == "STOPPED_INCOMPLETE":
@@ -10072,6 +10183,25 @@ def work(d, *, resume=None):
                                     measurement.journal.emit(
                                         "unit_mutation_refused", op=_op,
                                         path=_requested_path, reason=_unit_refusal.reason)
+                                # FU-070: allocator-ON edits need a complete, byte-verified view of
+                                # the request whose response produced this call (_prepared is the
+                                # last request sent in _provider_request_once).
+                                _edit_norm = _unit_module._path(_requested_path)
+                                _edit_file = root / _requested_path
+                                if (_unit_refusal is None and _op == "edit" and _edit_norm
+                                        and _edit_norm in _unit.spec.contract.owns
+                                        and _edit_file.is_file() and not _edit_file.is_symlink()
+                                        and os.environ.get("STATEFRAME_WORKING_SET_ALLOCATOR") == "on"):
+                                    _edit_raw = _edit_file.read_bytes()
+                                    _edit_ok, _edit_why, _edit_detail = _admit_sent_edit(
+                                        _prepared, path=_edit_norm, source=_edit_raw)
+                                    if not _edit_ok:
+                                        measurement.journal.emit(
+                                            "edit_admission_refused", path=_edit_norm,
+                                            reason=_edit_why or "incomplete_view",
+                                            request=_prepared.capture.request_id)
+                                        _unit_refusal = _unit_module._refusal(
+                                            "SOURCE_NOT_VERIFIED", _edit_detail, _edit_norm)
                             if _unit_refusal is not None:
                                 measurement._unit_open_refusal = True
                                 if _unit_refusal.reason != "HIDDEN_PATH":
@@ -15055,7 +15185,8 @@ def work(d, *, resume=None):
             finish_native_batch_transcript(msgs)
         unit_context_detail = getattr(measurement, "unit_context_detail", None)
         if unit_context_detail is not None:
-            measurement.system_outcome = "unit_context_too_large"
+            if measurement.system_outcome != "needs_source_capacity":
+                measurement.system_outcome = "unit_context_too_large"
             _reported_edits, _reported_checks = _reported_progress_counts(locals())
             outcome = {"fn": fn, "result": "SUBFRAME_CONTEXT_TOO_LARGE",
                        "reason_code": "SUBFRAME_CONTEXT_TOO_LARGE",
@@ -15587,10 +15718,12 @@ def work(d, *, resume=None):
                               if measurement.system_outcome == "unit_blocked" else
                               {"reason_code": "SUBFRAME_CONTEXT_TOO_LARGE",
                                "detail": measurement.unit_context_detail}
-                              if measurement.system_outcome == "unit_context_too_large" else {})
+                              if measurement.system_outcome in {
+                                  "unit_context_too_large", "needs_source_capacity"} else {})
             _terminal_result = {
                 "unit_blocked": "SUBFRAME_BLOCKED",
                 "unit_context_too_large": "SUBFRAME_CONTEXT_TOO_LARGE",
+                "needs_source_capacity": "SUBFRAME_CONTEXT_TOO_LARGE",
             }.get(measurement.system_outcome, measurement.system_outcome.upper())
             _unit_check_receipt = getattr(measurement, "_unit_check_receipt", None)
             if _unit_check_receipt is not None:

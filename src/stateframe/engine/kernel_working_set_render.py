@@ -10,6 +10,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 import hashlib
 import json
+import sys
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -208,6 +209,36 @@ def _recoverable(snapshot: PreparationSnapshot, slot: SourceSlot) -> bool:
     return True
 
 
+def _unit_active() -> bool:
+    """Only subframe children retire covered pages; every other allocator run keeps them FULL."""
+    import sys
+    module = sys.modules.get("kernel_unit_policy")
+    return module is not None and module.active() is not None
+
+
+def _covered_by_standing_window(snapshot: PreparationSnapshot, slot: SourceSlot) -> bool:
+    """True when another non-due slot of the same path and revision spans this slot's lines.
+
+    The coverer must be strictly wider (or equal and admitted earlier) so two
+    identical slots can never both retire.
+    """
+    ident = slot.identity
+    if type(ident.first_line) is not int or type(ident.last_line) is not int:
+        return False
+    for other in snapshot.sources:
+        if other is slot or other.state == "DUE":
+            continue
+        o = other.identity
+        if (o.path != ident.path or o.revision != ident.revision
+                or type(o.first_line) is not int or type(o.last_line) is not int
+                or o.first_line > ident.first_line or o.last_line < ident.last_line):
+            continue
+        same = o.first_line == ident.first_line and o.last_line == ident.last_line
+        if not same or other.admission_ordinal < slot.admission_ordinal:
+            return True
+    return False
+
+
 @source_frozen
 def _slot_modes(snapshot: PreparationSnapshot, slot: SourceSlot) -> tuple[core.Mode, ...]:
     if slot.state == "DUE" or slot.recovery_pin:
@@ -229,6 +260,17 @@ def _slot_modes(snapshot: PreparationSnapshot, slot: SourceSlot) -> tuple[core.M
             or slot.previous_mode in {"D", "O"}):
         return (core.DEFERRED,)
     if slot.identity.path in snapshot.protected_paths:
+        if _unit_active() and _covered_by_standing_window(snapshot, slot):
+            # A page wholly inside a protected window that stays FULL adds no
+            # coverage; letting it retire keeps the window plus fresh pages feasible.
+            return (core.FULL, core.DEFERRED)
+        if _unit_active() and snapshot.due_ordinal >= 2 and _recoverable(snapshot, slot):
+            # Subframe owned files page from ordinal 2: once the owed window is carried,
+            # delivered and plan-closure pages of the owned file may retire and be
+            # re-read. DUE debt and recovery pins returned FULL above. A span without a
+            # callable route stays FULL, since DEFERRED would certify an unrecoverable
+            # omission. Edit admission still requires complete verified coverage.
+            return (core.FULL, core.DEFERRED)
         return (core.FULL,)
     if _recovery_unavailable_reason(snapshot) is not None:
         # Missing read permission does not manufacture fresh delivery debt.
@@ -429,6 +471,36 @@ def _fixed_body(snapshot: PreparationSnapshot):
     return json.loads(snapshot.fixed_body)
 
 
+def _current_source_map(current, locations) -> str | None:
+    """``[Current source map]`` for current-revision FULL windows carried in generated messages.
+
+    Only spans whose generated page verifiably carries the exact payload are listed,
+    so native read pages and fixed carriers never appear. Sorted and merged: the
+    block is a pure function of the assignment (request determinism).
+    """
+    if __package__:
+        from .kernel_source_view import page_carries_span, render_source_map
+    else:
+        from kernel_source_view import page_carries_span, render_source_map
+    # Only subframe workers (an active unit policy) gate their first request on the
+    # map; every other allocator request keeps its exact pinned bytes.
+    unit_module = sys.modules.get("kernel_unit_policy")
+    if unit_module is None or unit_module.active() is None:
+        return None
+    entries: dict[str, tuple[str, list[tuple[int, int]]]] = {}
+    for slot in current:
+        identity = slot.identity
+        owner = locations[slot.key][0]
+        page = slot.standalone_page if slot.standalone_page is not None else slot.page
+        if owner != "generated" or not page_carries_span(
+                page, path=identity.path, revision=identity.revision,
+                first=identity.first_line, last=identity.last_line, payload=slot.payload):
+            continue
+        entries.setdefault(identity.path, (identity.revision, []))[1].append(
+            (identity.first_line, identity.last_line))
+    return render_source_map(entries)
+
+
 def _render_assignment(snapshot: PreparationSnapshot,
                        assignment: Mapping[str, core.Mode] | core.Assignment,
                        layout: str = "plain", *, wire_only: bool = False):
@@ -501,6 +573,12 @@ def _render_assignment(snapshot: PreparationSnapshot,
             f"revision {s.identity.revision}" for s in current)
         categories[len(generated)] = "host_facts"
         generated.append({"role": "user", "content": facts})
+    source_map = _current_source_map(current, locations)
+    if source_map is not None:
+        # Index of the spans this request's own windows carry; the verifier
+        # (kernel_source_view) proves each one against current source bytes.
+        categories[len(generated)] = "host_facts"
+        generated.append({"role": "user", "content": source_map})
     deferred_paths = set(snapshot.deferred_paths)
     deferred_paths.update(s.identity.path for s in ordered if modes[s.key] != core.FULL)
     # Mirror the live closure proof: every plan unit the FULL carriers do not
