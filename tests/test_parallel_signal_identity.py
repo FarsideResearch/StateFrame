@@ -83,7 +83,8 @@ def test_missing_leader_refuses_live_group_and_accepts_empty_group(tmp_path, mon
     calls = _identity(monkeypatch, lambda pid: None)
     monkeypatch.setattr(host, "_live_group_members", lambda group: [5555])
 
-    with pytest.raises(host.ParallelHostError, match="orphaned members \\[5555\\]"):
+    with pytest.raises(host.ProcessInspectionDeferred,
+                       match="^process disappeared during family inspection; retry pending$"):
         host._signal_recorded_group(run_dir, 4444, 4444, "darwin:100:1", signal.SIGTERM, record)
     assert calls == []
 
