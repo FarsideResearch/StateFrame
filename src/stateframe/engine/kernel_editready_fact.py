@@ -21,6 +21,15 @@ _PROTECTED_PANEL_PREFIXES = (
     "[Done-path]",
 )
 _TEST_PARTS = frozenset({"test", "tests", "__tests__"})
+# Host-owned authority lines are bound into the admitted request contract
+# (the continuation limits digest is checked by the request seal), so the
+# EDITREADY fact must never take the slot of a panel that carries one.
+_HOST_AUTHORITY_MARKERS = (
+    "[CONTINUATION LIMITS |", "[Unified stop authority]", "[COMPLETION OWNER]",
+    "[WIRE_TRUTH_FACT ", "[EVIDENCEPIN]", "[DONE AUTHORITY]", "[MENU AUTHORITY]",
+    "[Read lockout]", "[WIRE_READ_CONTRACT]", "[OPEN UNKNOWNS]",
+    "[NATIVE BATCH RECEIPTS]", "[LITERAL SITE INVENTORY |",
+)
 
 
 def mode(environ: Mapping[str, str] | None = None) -> str:
@@ -221,6 +230,10 @@ def _safe_panel(message: Mapping[str, object]) -> bool:
         return False
     stripped = content.lstrip()
     if stripped.startswith(_PROTECTED_PANEL_PREFIXES):
+        return False
+    if stripped.startswith("[StateFrame]") or any(
+        marker in content for marker in _HOST_AUTHORITY_MARKERS
+    ):
         return False
     lowered = stripped.casefold()
     if lowered.startswith(("[done", "[greenfact", "[request diet:", "[deferred required source paths]")):
