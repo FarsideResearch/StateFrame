@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.6.43 (2026-11-14)
 
 - Fixed: the opt-in catalog full-coverage and cross-file index switches can now be set from the shell; they were documented but not forwarded to the engine.
 
