@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Engine errors name their cause: a crash (`ERR:*`, or a child `ENGINE_ERROR`/`MUTATION_CONTAINMENT`) now carries its exception class and message into the terminal receipt, the summary's `engine_error_reason` and `problems.jsonl`. Before, the cause reached only `engine.log`. Crashes keep the `stateframe resume` hint; replay and seal refusals still do not get it.
 - Tests: journal reads in the working-set and final-wire fixtures go through the shared measurement reader; silent-swallow allowlist re-fingerprinted; route-only next-site negative controls (wrong revision, range past end, line outside range).
 - Tests: adds the `tests/enginecheck` harness library (scripted-session adapter, proof integrity, boundary inputs, wire prefix stability, feature composition, race-seed registry and CLI, resume equivalence). Known engine defects it finds are pinned as strict xfails.
 ## 0.7.7 (2026-11-15)
