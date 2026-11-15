@@ -167,8 +167,6 @@ requests share the model server's capacity, and each subframe adds setup and ver
   the parent can commit it.
 - Enabling `--parallel` offers the tool rather than forcing its use. A run can legitimately use zero subframes.
   Check subframe request counts in the run summary instead of treating the flag as evidence that work ran in parallel.
-- Subframes: in 0.7.0 and 0.7.1 the `parallel` tool's schema and description disagree on required fields, so some
-  models' split requests are refused and the run finishes serially. A fix is coming in the next 0.7.x patch.
 - When coupling between subframes is unknown, an otherwise valid composition with no final check recipe reports
   `NOT_RUN` for the final check and `UNVERIFIED` for integration. Supply a task-level `--test-cmd` to check the combined
   changes. Passing subframe checks alone does not prove the whole task passes.

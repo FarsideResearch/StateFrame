@@ -2,7 +2,8 @@
 
 ## Unreleased
 
-- Parallel subframes: the `parallel` tool schema now requires `goal` (the short form the description advertises), and a subframe without one is refused with a matching `goal` hint. Before, models that followed the schema were refused with a contradictory `outcome` hint and never split.
+- Parallel subframes: the `parallel` tool schema now requires `goal` (the short form the description advertises), and a subframe without one is refused with a matching `goal` hint. Before, models that followed the schema were refused with a contradictory `outcome` hint and never split. The KNOWN_LIMITATIONS entry about the mismatch is removed.
+
 ## 0.7.3 (2026-11-15)
 
 - Removed an unused host check runner that could start processes outside the sandbox; a guard test now blocks new unsandboxed process calls in the engine.
