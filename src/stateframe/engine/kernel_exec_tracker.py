@@ -372,7 +372,8 @@ class ProcessTable:
         try:
             # Raw descriptor read: a full-table scan calls this per process, and the pathlib
             # text path costs about four times as much. Bytes also tolerate any comm name.
-            descriptor = os.open(f"/proc/{pid}/stat", os.O_RDONLY)
+            # The proc root comes from Path("/proc") so a test can point it at a fixture tree.
+            descriptor = os.open(os.fspath(Path("/proc") / str(pid) / "stat"), os.O_RDONLY)
             try:
                 raw = os.read(descriptor, 8192)
             finally:

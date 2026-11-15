@@ -32,6 +32,10 @@ REVIEWED_SIGNALS = {
         "The helper is this parent's unreaped Popen child.",
     ("stateframe/parallel_worker.py", "os.kill(process.pid, signal.SIGKILL)"):
         "The failed launch is a direct child held unreaped; Popen.kill would poll and release its PID.",
+    ("stateframe/parallel_host.py", "os.killpg(pgid, 0)"):
+        "Signal 0 sends nothing: a passive existence probe used only as a pre-filter after a "
+        "complete tick scan found no group; saved births are still checked by "
+        "_recorded_group_live before any transition.",
 }
 
 REVIEWED_INDIRECT = {

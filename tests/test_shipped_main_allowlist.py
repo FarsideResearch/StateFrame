@@ -31,6 +31,7 @@ ALLOWLIST = {
     "stateframe/engine/kernel_bolt.py": "kernel self-test",
     "stateframe/engine/kernel_bounded_http.py": "HTTP and probe child process",
     "stateframe/engine/kernel_exec_supervisor.py": "execution supervisor child process",
+    "stateframe/engine/kernel_fanout_continuation.py": "fanout continuation diagnostic command",
     "stateframe/engine/kernel_hook_driver.py": "sandbox hook child process",
     "stateframe/engine/kernel_liveness.py": "liveness diagnostic",
     "stateframe/engine/kernel_release_switch_registry.py": "release registry maintenance command",
@@ -43,6 +44,7 @@ ALLOWLIST = {
     "stateframe/engine/sf_mutate_fetch.py": "bounded mutation HTTP broker child process",
     "stateframe/engine/sidekick.py": "sidekick self-test",
     "stateframe/engine/symbol_registry.py": "symbol registry command",
+    "stateframe/parallel_journal.py": "parallel journal helper process",
     "stateframe/outer_checks.py": "outer check helper process",
     "stateframe/scripted_endpoint.py": "offline example endpoint command",
 }
@@ -72,6 +74,9 @@ PROCESS_LAUNCH_SITES = {
     "stateframe/engine/sf_mutate_fetch.py": (
         "stateframe/engine/sf_mutate_boot.py",
         "sf_mutate_fetch.py", "runpy.run_path"),
+    "stateframe/parallel_journal.py": (
+        "stateframe/parallel_journal.py",
+        "--", "subprocess.Popen"),
     "stateframe/outer_checks.py": (
         "stateframe/outer_checks.py",
         "--helper", "subprocess.Popen"),

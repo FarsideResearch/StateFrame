@@ -979,6 +979,69 @@ DOCUMENTED_REJECT.update({
     "context_too_small": (
         "A typed context-floor stop finishes the run before dispatch; a checkpoint tail cannot resume past it."
     ),
+    "parallel_admission": (
+        "Parallel admission decides which subframe units run and cannot be replayed from a checkpoint."
+    ),
+    "parallel_batch_discarded": (
+        "A discarded parallel batch changes which unit results the parent may apply."
+    ),
+    "parallel_degraded": (
+        "Parallel degradation changes the live execution mode and must be re-evaluated from restored state."
+    ),
+    "parallel_final": (
+        "The parallel final record seals subframe results that restore does not reconstruct."
+    ),
+    "parallel_forced_manifest_rejected": (
+        "A rejected forced manifest changes unit planning and is not replayed on restore."
+    ),
+    "parallel_plan_completed": (
+        "A completed parallel plan changes which subframe units remain and has no restore reconciliation contract."
+    ),
+    "parallel_suggestion_decision": (
+        "A parallel suggestion decision changes the unit plan and cannot be replayed from a checkpoint."
+    ),
+    "parallel_txn": (
+        "Parallel transactions record subframe state changes that only the parallel host reconciles."
+    ),
+    "parallel_unit_started": (
+        "A started subframe unit is a live child whose state only the parallel host reconciles."
+    ),
+    "parallel_unit_terminal": (
+        "A subframe unit terminal changes parent state and is reconciled by the parallel host, not tail restore."
+    ),
+    "public_test_path_skipped": (
+        "A skipped public test path changes unit check coverage and is not replayed on restore."
+    ),
+    "subframe_auto_finish_armed": (
+        "Auto-finish arming changes subframe completion authority and is not replayed on restore."
+    ),
+    "subframe_auto_finish_declined": (
+        "A declined auto-finish changes subframe completion authority and is not replayed on restore."
+    ),
+    "subframe_auto_finished": (
+        "An auto-finished subframe sealed its own terminal and has no restore reconciliation contract."
+    ),
+    "subframe_final_sources": (
+        "Subframe final sources pin the unit result files and cannot be rebuilt from a checkpoint."
+    ),
+    "unit_blocked": (
+        "A blocked subframe unit changes the terminal outcome and requires reconciliation by the parallel host."
+    ),
+    "unit_check": (
+        "A unit check result changes subframe evidence and has no restore reconciliation contract."
+    ),
+    "unit_frame_tokens": (
+        "Unit frame token accounting changes subframe budgets and is not replayed on restore."
+    ),
+    "unit_hidden_path": (
+        "A hidden unit path refusal changes subframe observations and is not replayed on restore."
+    ),
+    "unit_mutation_refused": (
+        "A refused unit mutation changes subframe observations and is not replayed on restore."
+    ),
+    "unit_tool_refused": (
+        "A refused unit tool call changes subframe observations and is not replayed on restore."
+    ),
 })
 
 
