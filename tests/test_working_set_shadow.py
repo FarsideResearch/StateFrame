@@ -105,7 +105,7 @@ def test_recorded_wire_0020_fresh_page_full_and_within_cap(tmp_path, monkeypatch
     monkeypatch.setenv("STATEFRAME_WORKING_SET_ALLOCATOR", "on")
     path = Path(os.environ.get("STATEFRAME_RECORDED_WIRE") or "/nonexistent/recorded-wire.json")
     if not path.exists():
-        pytest.skip("recorded r38g wire absent")
+        pytest.skip("recorded wire absent")
     from kernel_read_receipts import capture_read
     from test_read_receipts import runtime
     import re

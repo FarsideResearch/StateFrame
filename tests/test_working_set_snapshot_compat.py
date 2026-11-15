@@ -14,7 +14,7 @@ from kernel_working_set_snapshot_compat import snapshot_semantic_messages
 def test_recorded_overlay_reconstructs_source_references_without_mutating_wire():
     path = Path(os.environ.get("STATEFRAME_RECORDED_WIRE") or "/nonexistent/recorded-wire.json")
     if not path.is_file():
-        pytest.skip("recorded r38g wire absent")
+        pytest.skip("recorded wire absent")
     body = json.loads(path.read_bytes())
     before = copy.deepcopy(body)
     messages = snapshot_semantic_messages(body["messages"])
