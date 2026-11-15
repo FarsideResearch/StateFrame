@@ -697,21 +697,26 @@ def _resumed_time(tape: list[dict[str, object]], pending: dict[str, object] | No
                   wire_dir: Path) -> dict[str, float]:
     """The run's --timeout as the recorded requests showed it, so a resume keeps it.
 
-    ``seconds_left`` is the countdown of the newest recorded request (the one in flight when the
-    run stopped, else the last replayed one); ``time_allowance_seconds`` is the first one, about
-    the whole allowance. Empty when the run had no time limit.
+    ``seconds_left`` is the private remaining-time value of the newest recorded request (the one
+    in flight when the run stopped, else the last replayed one); ``time_allowance_seconds`` is
+    the declared allowance from its sidecar. Older tapes fall back to their first visible
+    countdown. Empty when the run had no time limit.
     """
     requests = [Path(str(item["request"])) for item in tape if item.get("request")]
     if pending is not None and pending.get("request"):
         requests.append(Path(str(pending["request"])))
     seconds = [value for value in (replay_tape.recorded_time_left(path)
                                    for path in requests if path.is_file()) if value is not None]
+    allowances = [value for value in (replay_tape.recorded_time_allowance(path)
+                                      for path in requests if path.is_file())
+                  if value is not None]
     if not seconds:
         window = replay_tape.recorded_countdown_window(wire_dir)
         seconds = list(window) if window is not None else []
     if not seconds:
         return {}
-    return {"seconds_left": seconds[-1], "time_allowance_seconds": seconds[0]}
+    allowance = allowances[0] if allowances else seconds[0]
+    return {"seconds_left": seconds[-1], "time_allowance_seconds": allowance}
 
 
 def archive_attempt(state: dict[str, object], engine_dir: Path, *, use_checkpoint: bool = True,

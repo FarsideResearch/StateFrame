@@ -29,12 +29,14 @@ from tools.sandbox_temp import sandbox_visible_temp_dir, timeout_scale
 
 TOKENIZE_TIMEOUT_SECONDS = 0.05
 TOKENIZE_DELAY_SECONDS = 0.08
-# Matches the fixed-width slot from kernel_countdown_slot.py and older rounded-minute slots.
+# Matches the current stable allowance and legacy live countdowns. The baseline comparison
+# masks only this intentionally changed limits value; every other request byte remains pinned.
 _CLEAN_METER_COUNTDOWN = re.compile(
-    rb"sandbox_seconds_remaining=\d+\.\d \(about (?:\d+|999\+) minutes left"
-    rb"(?:, ~(?:\d+|999\+|----) turns at your pace)?\)"
+    rb"sandbox_seconds_remaining=(?:limited \(wall allowance (?:undeclared|\d+s)\)|unbounded|"
+    rb"\d+\.\d \(about (?:\d+|999\+) minutes left"
+    rb"(?:, ~(?:\d+|999\+|----) turns at your pace)?\))"
 )
-_CLEAN_METER_COUNTDOWN_MASK = b"sandbox_seconds_remaining=<masked>"
+_CLEAN_METER_COUNTDOWN_MASK = b"sandbox_seconds_remaining=<time allowance>"
 
 # Compact request specimen with the current StateFrame field and a near-match decoy.
 _COUNTDOWN_MASK_CONTROL_BODY = (
@@ -60,8 +62,8 @@ def _model_value_start(wire_body: bytes) -> int:
     return match.end()
 
 
-# The countdown may be echoed elsewhere in the wire body. Count the canonical active-frame field
-# once per request, while the digest helper masks every formatted copy.
+# The limits value may be echoed elsewhere in the wire body. Count the active-frame field once
+# per request, while the digest helper masks every current or legacy copy.
 def _active_frame_countdowns(wire_body: bytes) -> list[bytes]:
     payload = json.loads(wire_body)
     if not isinstance(payload, dict):
@@ -699,18 +701,22 @@ def _capture_clean_meter_request_bodies(
 
 
 def _clean_meter_fingerprints(request_bodies):
-    countdown_copy_counts = tuple(
+    time_field_copy_counts = tuple(
         len(_CLEAN_METER_COUNTDOWN.findall(wire_body)) for wire_body in request_bodies
     )
     masked_hashes = []
     for index, wire_body in enumerate(request_bodies, start=1):
         countdowns = _active_frame_countdowns(wire_body)
         assert len(countdowns) == 1, (
-            f"request {index} active-frame countdown matches={countdowns!r}; "
-            f"whole-request countdown-copy counts={countdown_copy_counts!r}"
+            f"request {index} active-frame time values={countdowns!r}; "
+            f"whole-request time-field copy counts={time_field_copy_counts!r}"
+        )
+        value = countdowns[0].split(b"=", 1)[1]
+        assert value.startswith(b"limited (wall allowance "), (
+            f"request {index} exposed a live countdown: {countdowns[0]!r}"
         )
         masked_hashes.append(_masked_wire_sha256(wire_body))
-    return tuple(masked_hashes), countdown_copy_counts
+    return tuple(masked_hashes), time_field_copy_counts
 
 
 def _remove_proven_intake_addition(current_wire: bytes, baseline_wire: bytes) -> bytes:
@@ -820,10 +826,10 @@ def test_healthy_measurement_preserves_baseline_request_bytes(baseline_checkout)
         request_bodies = _capture_clean_meter_request_bodies(scratch_root)
     baseline_masked_hashes, baseline_copy_counts = _clean_meter_fingerprints(baseline_bodies)
     computed_masked_hashes, countdown_copy_counts = _clean_meter_fingerprints(request_bodies)
-    # Every one of the six current requests has exactly one active-frame
-    # countdown; only requests 1-2 have an immediate-base byte oracle.
+    # Every current request has one stable active-frame allowance; the old release's
+    # live countdown is normalized only for the intentional field change.
     assert countdown_copy_counts[:2] == baseline_copy_counts[:2], (
-        f"whole-request countdown-copy counts for requests 1-2: current={countdown_copy_counts!r}; "
+        f"whole-request time-field copy counts for requests 1-2: current={countdown_copy_counts!r}; "
         f"baseline={baseline_copy_counts!r}"
     )
     # Planted control: one extra standalone limits line in request 0001 must change its count.

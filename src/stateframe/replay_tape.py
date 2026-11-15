@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import re
 from pathlib import Path
 
@@ -125,21 +126,41 @@ def with_recorded_countdown(request: bytes, recorded: bytes) -> bytes | None:
 TIME_LEFT_SUFFIX = ".time-left.json"
 
 
+def _time_left_record(request_path: Path) -> dict[str, object] | None:
+    name = request_path.name
+    if not name.endswith(".request.json"):
+        return None
+    sidecar = request_path.with_name(name[: -len(".request.json")] + TIME_LEFT_SUFFIX)
+    try:
+        value = json.loads(sidecar.read_bytes())
+    except (OSError, ValueError, RecursionError):
+        return None
+    return value if isinstance(value, dict) else None
+
+
 def recorded_time_left(request_path: Path) -> float | None:
     """Seconds the run had left at this send: the sidecar, else the legacy countdown text."""
-    name = request_path.name
-    if name.endswith(".request.json"):
-        sidecar = request_path.with_name(name[: -len(".request.json")] + TIME_LEFT_SUFFIX)
-        try:
-            value = json.loads(sidecar.read_bytes()).get("seconds_left")
-        except (OSError, ValueError, AttributeError):
-            value = None
-        if isinstance(value, (int, float)) and not isinstance(value, bool):
-            return float(value)
+    record = _time_left_record(request_path)
+    value = record.get("seconds_left") if record is not None else None
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        seconds = float(value)
+        if math.isfinite(seconds) and seconds >= 0:
+            return seconds
     try:
         return recorded_countdown_seconds(request_path.read_bytes())
     except OSError:
         return None
+
+
+def recorded_time_allowance(request_path: Path) -> float | None:
+    """Declared run allowance from the private sidecar, if this is a current-format request."""
+    record = _time_left_record(request_path)
+    value = record.get("time_allowance_seconds") if record is not None else None
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        seconds = float(value)
+        if math.isfinite(seconds) and seconds > 0:
+            return seconds
+    return None
 
 
 def recorded_countdown_seconds(request: bytes) -> float | None:
@@ -165,8 +186,9 @@ def recorded_countdown_window(wire_dir: Path) -> tuple[float, float] | None:
             continue
         value = recorded_time_left(request)
         if value is not None:
-            seconds.append(value)
-    return (seconds[0], seconds[-1]) if seconds else None
+            allowance = recorded_time_allowance(request)
+            seconds.append((allowance if allowance is not None else value, value))
+    return (seconds[0][0], seconds[-1][1]) if seconds else None
 
 
 def _leading_model(request: bytes) -> tuple[str, int] | None:
