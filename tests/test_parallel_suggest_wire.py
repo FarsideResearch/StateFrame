@@ -37,6 +37,9 @@ def test_parallel_suggest_on_first_wire(tmp_path: Path) -> None:
         "PYTHONPATH": str(Path(__file__).resolve().parents[1] / "src"),
         "PYTHONHASHSEED": "0", "HOME": str(home),
         "STATEFRAME_HOME": isolated_stateframe_home(),
+        # The suggestion is applied by the legacy frame allocation; the working-set
+        # allocator (shipped on) does not consume it yet.
+        "STATEFRAME_WORKING_SET_ALLOCATOR": "off",
         "STATEFRAME_PARALLEL_SUGGEST": "on",
         "STATEFRAME_PARALLEL_SUGGEST_BACKEND": "hosted",
     })
