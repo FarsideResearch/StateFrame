@@ -1,5 +1,7 @@
 # Changelog
 
+## Unreleased
+
 ## 0.7.7 (2026-11-15)
 
 - Fixed: final request validation accepts the delivery-truth "not shown" next-site notice, so a run no longer stops with FrameFit5Error "typed next-site receipt is incomplete: current_bytes".
