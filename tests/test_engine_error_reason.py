@@ -220,3 +220,17 @@ def test_replay_guidance_from_engine_log_is_kept_over_terminal_message():
         "result": "ENGINE_ERROR", "error": "ReplayUnfaithful", "error_type": "ReplayUnfaithful",
         "error_message": "terminal detail"}}
     assert outcomes.engine_error_reason(summary) == REPLAY_REASON
+
+
+def test_resume_hint_kept_for_child_engine_error_with_message():
+    from stateframe import outcomes
+    crash = {"runtime_outcome": "engine_error",
+             "engine_terminal": {"result": "ENGINE_ERROR", "error": "FrameFit5Error",
+                                 "error_type": "FrameFit5Error", "error_message": "receipt incomplete"}}
+    crash["engine_error_reason"] = outcomes.engine_error_reason(crash)
+    assert crash["engine_error_reason"]
+    assert outcomes.resume_hint_applies(crash)
+    replay = {"runtime_outcome": "engine_error", "engine_error_reason": "replay diverged at request 3",
+              "engine_terminal": {"result": "ENGINE_ERROR", "error": "ReplayUnfaithful",
+                                  "error_type": "ReplayUnfaithful", "error_message": "diverged"}}
+    assert not outcomes.resume_hint_applies(replay)

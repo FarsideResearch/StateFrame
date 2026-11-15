@@ -16,6 +16,8 @@ INCOMPLETE = {"RUN_INCOMPLETE", "STOPPED_INCOMPLETE", "TEST_REPORTED_WRONG"}
 SEAL_FAILURES = {"HARNESS_CONTRACT", "FINALIZATION_ERROR"}
 # Non-seal engine failures whose child terminal may carry error_type/error_message (see _child.py).
 ENGINE_FAILURES_WITH_MESSAGE = {"ENGINE_ERROR", "MUTATION_CONTAINMENT"}
+# Refusals that would only repeat on resume (runner copies their guidance from engine.log).
+REPEATING_ENGINE_ERRORS = {"ReplayUnfaithful", "CheckpointUnfaithful"}
 
 
 RECOVERED_FROM_JOURNAL = "recovered_from_journal"
@@ -267,6 +269,11 @@ def resume_hint_applies(summary: dict[str, object]) -> bool:
     terminal = summary.get("engine_terminal") or {}
     result = terminal.get("result")
     if isinstance(result, str) and result.startswith("ERR:"):
+        return True
+    # A crash whose reason is only its own exception text may succeed on resume; replay/checkpoint
+    # refusals (their reason is copied from engine.log) would repeat, so they keep the old rule below.
+    if (result in ENGINE_FAILURES_WITH_MESSAGE and terminal.get("error_message")
+            and terminal.get("error") not in REPEATING_ENGINE_ERRORS):
         return True
     # Everything else keeps the pre-existing rule. A reason on a stopped run (seal failure, or a
     # ReplayUnfaithful/CheckpointUnfaithful copied from engine.log) means the resume would repeat it.
