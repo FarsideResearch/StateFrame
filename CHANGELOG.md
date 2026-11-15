@@ -1,6 +1,8 @@
 # Changelog
 
-## Unreleased
+## 0.7.5 (2026-11-15)
+
+- Tests: the documented-switch check treats STATEFRAME_RECORDED_WIRE as a test-fixture variable and pins that the product never reads it.
 
 ## 0.7.4 (2026-11-15)
 
