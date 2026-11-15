@@ -1,8 +1,9 @@
 # Changelog
 
-## Unreleased
+## 0.7.6 (2026-11-15)
 
 - Fixed: the EDITREADY fact no longer overwrites a host-authority panel. With `STATEFRAME_EDITREADY=on`, it could replace the standalone `[CONTINUATION LIMITS | ...]` message, which tripped the request seal (`RequestSealError: owner presentation limits differ from admitted contract`) and ended the run as ENGINE_ERROR, on both the default and the parallel path. Panels carrying a host-authority line, and the `[StateFrame]` panel, are now never replaced; the fact is appended instead. Tests: `tests/test_editready_authority_panels.py`.
+- Fixed: a run with the working-set allocator on but no working-set certificate no longer stops with "frame-only request projection failed" when a file it had read is shown in full; the stale "re-read it" claim is reconciled on every uncertified request.
 
 ## 0.7.5 (2026-11-15)
 
