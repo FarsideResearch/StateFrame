@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Parallel: a schema-rejected `parallel` call (e.g. a unit missing `goal`) now writes a typed INVALID_ARGUMENTS refusal receipt and the model gets an actionable `add "goal"` reply; the frame fold journals `parallel_receipt_missing` for a missing receipt instead of crashing with ENGINE_ERROR.
 ## 0.7.6 (2026-11-15)
 
 - Fixed: the EDITREADY fact no longer overwrites a host-authority panel. With `STATEFRAME_EDITREADY=on`, it could replace the standalone `[CONTINUATION LIMITS | ...]` message, which tripped the request seal (`RequestSealError: owner presentation limits differ from admitted contract`) and ended the run as ENGINE_ERROR, on both the default and the parallel path. Panels carrying a host-authority line, and the `[StateFrame]` panel, are now never replaced; the fact is appended instead. Tests: `tests/test_editready_authority_panels.py`.

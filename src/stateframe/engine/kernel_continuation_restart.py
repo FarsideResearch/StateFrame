@@ -997,6 +997,9 @@ DOCUMENTED_REJECT.update({
     "parallel_plan_completed": (
         "A completed parallel plan changes which subframe units remain and has no restore reconciliation contract."
     ),
+    "parallel_receipt_missing": (
+        "A parallel exchange without its durable receipt is refused in the action fold; restore has no receipt to replay."
+    ),
     "parallel_suggestion_decision": (
         "A parallel suggestion decision changes the unit plan and cannot be replayed from a checkpoint."
     ),

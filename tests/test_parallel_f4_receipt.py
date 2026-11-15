@@ -169,9 +169,20 @@ def test_refused_terse_plan_preserves_resend_fragment(tmp_path, monkeypatch):
     assert row["outcome"] == "REJECTED"
 
 
-def test_missing_durable_parallel_result_fails_closed(tmp_path, monkeypatch):
+def test_missing_durable_parallel_result_becomes_typed_refusal(tmp_path, monkeypatch):
+    # A missing receipt is a refused exchange, journaled, not a crash; see test_parallel_schema_refusal_receipt.
     _, turns = _case(tmp_path, (("alpha", "COMMITTED"),))
     (tmp_path / "parallel" / "call_0" / "result.json").unlink()
+    monkeypatch.setattr(kernel_parallel, "_service", (tmp_path, {"parallel_mode": "2"}))
+    rows, ids = _opaque_actions(turns)
+    assert ids == {"call_0"}
+    assert len(rows) == 1
+    assert rows[0]["outcome"] == "REJECTED"
+
+
+def test_corrupt_durable_parallel_result_fails_closed(tmp_path, monkeypatch):
+    _, turns = _case(tmp_path, (("alpha", "COMMITTED"),))
+    (tmp_path / "parallel" / "call_0" / "result.json").write_text("{not json")
     monkeypatch.setattr(kernel_parallel, "_service", (tmp_path, {"parallel_mode": "2"}))
     with pytest.raises(FrameFit5Error, match="subframe result"):
         _opaque_actions(turns)
