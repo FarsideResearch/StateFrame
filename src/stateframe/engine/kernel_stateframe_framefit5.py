@@ -3304,7 +3304,8 @@ def validate_product_request(
         validate_allocation_authority(frame_request_allocation, runtime, messages, tools)
         refresh_headcarry = False
     from kernel_cache_layout_view import is_cache_layout, semantic_messages
-    if is_cache_layout(messages):
+    cache_layout_view = is_cache_layout(messages)
+    if cache_layout_view:
         messages = semantic_messages(messages)
         refresh_headcarry = False
     if not is_frame_only(messages):
@@ -3365,21 +3366,26 @@ def validate_product_request(
     from kernel_stateframe_capacity import validate_read_ranges, validate_coverage
 
     from kernel_read_receipts import enabled as allocator_enabled
-    if (not allocator_enabled() and isinstance(framefit5.get("headcarry"), Mapping)
-            and isinstance(state_message, dict)):
-        # verified heads are read-delivery carriers. Allocation paths re-render the
-        # optional heads after the last delivery reconcile, so derive delivery claims from the
-        # carriers in THIS final frame before validating it (the validator still runs below).
+    certificate = getattr(getattr(runtime, "_active_capture", None), "_working_set_certificate", None)
+    # Only a working-set certificate proves these bytes; the allocator switch alone does not.
+    certified = (allocator_enabled() and certificate is not None
+                 and (frame_selection is not None or frame_request_allocation is not None))
+    if (not certified and isinstance(state_message, dict)
+            and (isinstance(framefit5.get("headcarry"), Mapping) or not cache_layout_view)):
+        # Any transform after the last delivery reconcile can add or remove a read carrier
+        # (headcarry re-renders, trims, evictions), not only headcarry. Derive delivery claims
+        # from the carriers in THIS final frame before validating it (the validator still runs below).
+        # A cache-layout view is a copy: rewriting it would leave the physical wire stale, so
+        # without headcarry it is not reconciled here and a stale claim still fails closed.
         from kernel_reread_result_truth import reconcile_frame
 
-        before_facts = copy.deepcopy(framefit5.get("read_facts"))
+        # reconcile_frame also rewrites prior_user_context labels, so compare the whole frame.
+        before_frame = copy.deepcopy(framefit5)
         reconcile_frame(framefit5, messages)
-        if framefit5.get("read_facts") != before_facts:
+        if framefit5 != before_frame:
             _payload["state"] = state
             state_message["content"] = _serialize_state_message(_payload)
-    certificate = getattr(getattr(runtime, "_active_capture", None), "_working_set_certificate", None)
-    if (allocator_enabled() and certificate is not None
-            and (frame_selection is not None or frame_request_allocation is not None)):
+    if certified:
         from kernel_working_set_proof import verify_messages
         verify_messages(messages, certificate)
     else:
