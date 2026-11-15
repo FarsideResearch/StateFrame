@@ -20,6 +20,7 @@ or with its mutant active. A seed is ok only when both hold.
 """
 from __future__ import annotations
 
+import argparse
 import ast
 import io
 import json
@@ -31,9 +32,15 @@ import tarfile
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Mapping
+from typing import Mapping, Sequence
 
-from enginecheck.proof import red_proof, run_nodes
+# A direct run starts with tests/enginecheck/ on sys.path, not tests/. Put tests/ (for enginecheck) and src/ next to it.
+_TESTS_DIR = Path(__file__).resolve().parents[1]
+for _path in (_TESTS_DIR, _TESTS_DIR.parent / "src"):
+    if str(_path) not in sys.path:
+        sys.path.insert(0, str(_path))
+
+from enginecheck.proof import red_proof, run_nodes  # noqa: E402
 
 _SEED_DIR = "tests/race_seeds"
 _HARNESS_PATHS = ("tests/enginecheck", "tests/race_seeds")
@@ -224,3 +231,76 @@ def _extract(archive: bytes, dest: Path, required: tuple[str, ...]) -> None:
             tar.extractall(dest, filter="data")
         else:
             tar.extractall(dest)
+
+
+def _seed_row(seed: Seed) -> dict[str, str | None]:
+    return {
+        "seed_id": seed.seed_id,
+        "node_id": seed.node_id,
+        "known_bad": seed.known_bad,
+        "mutant": seed.mutant,
+        "expect": seed.expect,
+    }
+
+
+def _select(seeds: list[Seed], requested: list[str] | None) -> list[Seed]:
+    """Return the requested seeds sorted by id, or every seed. Unknown ids raise SeedRegistryError."""
+    if requested is None:
+        return seeds
+    by_id = {seed.seed_id: seed for seed in seeds}
+    unknown = sorted(set(requested) - set(by_id))
+    if unknown:
+        raise SeedRegistryError(f"unknown seed id(s) {unknown}; registered: {sorted(by_id)}")
+    return [by_id[seed_id] for seed_id in sorted(set(requested))]
+
+
+def _cmd_list(seeds: list[Seed]) -> int:
+    print(json.dumps([_seed_row(seed) for seed in seeds], indent=2))
+    return 0
+
+
+def _cmd_prove(seeds: list[Seed], repo: Path, requested: list[str] | None) -> int:
+    selected = _select(seeds, requested)
+    if not selected:
+        raise SeedRegistryError("no race seeds registered under tests/race_seeds; nothing to prove")
+    failed: list[str] = []
+    with tempfile.TemporaryDirectory(prefix="enginecheck-seeds-prove-") as tmp:
+        for seed in selected:
+            proof = prove_seed(seed, repo, Path(tmp) / seed.seed_id)
+            print(f"{proof.seed_id} {'OK' if proof.ok else 'NOT_OK'} {proof.detail}")
+            if not proof.ok:
+                failed.append(proof.seed_id)
+    if failed:
+        print(f"SEEDS NOT_OK failed={failed!r}")
+        return 1
+    print(f"SEEDS OK n={len(selected)}")
+    return 0
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(
+        prog="seeds.py", description="List or prove enginecheck race_seed regression seeds."
+    )
+    commands = parser.add_subparsers(dest="command", required=True)
+    list_cmd = commands.add_parser("list", help="print registered seeds as a JSON array sorted by seed_id")
+    list_cmd.add_argument("--repo", required=True, type=Path, help="repo root holding tests/race_seeds")
+    prove_cmd = commands.add_parser("prove", help="prove seeds (GREEN on tree, RED through expect)")
+    prove_cmd.add_argument("--repo", required=True, type=Path, help="repo root holding tests/race_seeds")
+    prove_cmd.add_argument(
+        "--seed", nargs="+", action="extend", metavar="NN", help="seed ids to prove (default: all)"
+    )
+    args = parser.parse_args(argv)
+
+    repo = args.repo.resolve()
+    try:
+        seeds = collect_seeds(repo)
+        if args.command == "list":
+            return _cmd_list(seeds)
+        return _cmd_prove(seeds, repo, args.seed)
+    except SeedRegistryError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -4,8 +4,10 @@ Fake history: commit BAD has compute() returning 1 and no fakemod_extra; commit 
 """
 from __future__ import annotations
 
+import json
 import shutil
 import subprocess
+import sys
 import textwrap
 from dataclasses import replace
 from pathlib import Path
@@ -213,3 +215,79 @@ def test_duplicate_seed_id_is_an_error(tmp_path):
     _install_race_conftest(repo)
     with pytest.raises(SeedRegistryError, match="duplicate seed id '07'"):
         collect_seeds(repo)
+
+
+SEEDS_CLI = ROOT / "tests/enginecheck/seeds.py"
+
+
+def _cli(*args: str, cwd: Path) -> subprocess.CompletedProcess[str]:
+    """Run the seeds CLI as a plain script from `cwd`, so the file-relative sys.path bootstrap is exercised."""
+    return subprocess.run(
+        [sys.executable, str(SEEDS_CLI), *args], cwd=cwd, capture_output=True, text=True, timeout=900, check=False,
+    )
+
+
+def test_cli_list_prints_sorted_seed_json_for_fake_repo(fake_repo, tmp_path):
+    repo, bad = fake_repo
+    proc = _cli("list", "--repo", str(repo), cwd=tmp_path)
+    assert proc.returncode == 0, proc.stderr
+    rows = json.loads(proc.stdout)
+    assert [row["seed_id"] for row in rows] == ["01", "02", "03", "04"]
+    assert all(set(row) == {"seed_id", "node_id", "known_bad", "mutant", "expect"} for row in rows)
+    assert rows[0]["known_bad"] == bad and rows[0]["mutant"] is None and rows[0]["expect"] == "AssertionError"
+    assert rows[0]["node_id"].endswith("test_fake_seeds.py::test_known_bad_compute")
+    assert rows[1]["mutant"] == "flip" and rows[1]["known_bad"] is None
+
+
+def test_cli_list_exits_2_with_registry_error_on_stderr(tmp_path):
+    repo = tmp_path / "repo"
+    _write(repo, "tests/race_seeds/test_ok.py", VALID_SEED)
+    _write(repo, "tests/test_stray.py", VALID_SEED.replace('"10"', '"11"').replace("def test_ok", "def test_stray"))
+    _install_race_conftest(repo)
+    proc = _cli("list", "--repo", str(repo), cwd=tmp_path)
+    assert proc.returncode == 2
+    assert proc.stdout == ""
+    assert "outside tests/race_seeds" in proc.stderr
+
+
+def test_cli_prove_ok_seed_exits_0(fake_repo, tmp_path):
+    repo, _bad = fake_repo
+    proc = _cli("prove", "--repo", str(repo), "--seed", "01", cwd=tmp_path)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    lines = proc.stdout.splitlines()
+    assert len(lines) == 2 and lines[0].startswith("01 OK")
+    assert lines[-1] == "SEEDS OK n=1"
+
+
+def test_cli_prove_failing_seed_exits_1(fake_repo, tmp_path):
+    repo, _bad = fake_repo
+    proc = _cli("prove", "--repo", str(repo), "--seed", "04", cwd=tmp_path)
+    assert proc.returncode == 1
+    lines = proc.stdout.splitlines()
+    assert lines[0].startswith("04 NOT_OK")
+    assert lines[-1] == "SEEDS NOT_OK failed=['04']"
+
+
+def test_cli_prove_defaults_to_all_seeds_and_lists_every_failure(fake_repo, tmp_path):
+    repo, _bad = fake_repo
+    proc = _cli("prove", "--repo", str(repo), cwd=tmp_path)
+    assert proc.returncode == 1
+    lines = proc.stdout.splitlines()
+    assert [line.split(" ", 1)[0] for line in lines[:-1]] == ["01", "02", "03", "04"]
+    assert lines[-1] == "SEEDS NOT_OK failed=['03', '04']"
+
+
+def test_cli_prove_unknown_seed_exits_2(fake_repo, tmp_path):
+    repo, _bad = fake_repo
+    proc = _cli("prove", "--repo", str(repo), "--seed", "99", cwd=tmp_path)
+    assert proc.returncode == 2
+    assert "unknown seed" in proc.stderr and "99" in proc.stderr
+
+
+def test_cli_prove_registry_error_exits_2(tmp_path):
+    repo = tmp_path / "repo"
+    _write(repo, "tests/race_seeds/test_bad.py", "import pytest\n\n\n@pytest.mark.race_seed(\"01\")\ndef test_bad():\n    pass\n")
+    _install_race_conftest(repo)
+    proc = _cli("prove", "--repo", str(repo), cwd=tmp_path)
+    assert proc.returncode == 2
+    assert "invalid race_seed marker" in proc.stderr
