@@ -2036,8 +2036,8 @@ def test_tick_survives_a_concurrent_marker_writer(tmp_path):
     assert worker.started_epoch == 102.25
 
 
-def test_submission_fixture_matches_4a475493_artifact(tmp_path):
-    fixture = Path(__file__).parent / "fixtures/parallel/host_submission_4a475493.json"
+def test_submission_fixture_matches_b520a637_artifact(tmp_path):
+    fixture = Path(__file__).parent / "fixtures/parallel/host_submission_b520a637.json"
     expected = json.loads(fixture.read_bytes())
     _record_submission(tmp_path, expected["writes"])
     submission = json.loads((tmp_path / "engine-result.json").read_bytes())["result"]["submission"]

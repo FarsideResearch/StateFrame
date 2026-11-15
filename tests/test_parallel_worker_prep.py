@@ -421,7 +421,7 @@ def test_release_parity_checks_wire_before_summary():
 
     source = inspect.getsource(test_default_parallel_off_wire_and_public_artifacts_match_merged_main)
     assert source.index("_assert_wire_parity(") < source.index('old_summary_a =')
-    assert 'base = "4a475493"' in source
+    assert 'base = "b520a637"' in source
 
 
 @pytest.mark.host_sandbox
@@ -441,7 +441,7 @@ def test_parallel_off_exact_main_wire_fixture_and_on_companion(tmp_path, mode):
     assert len(captured) >= 3
     evidence = json.loads((tmp_path / "capture/evidence.json").read_bytes())
     assert evidence["checks"][0] == "FAIL" and evidence["checks"][-1] == "PASS"
-    fixture = root / "tests/fixtures/parallel/off_wire_main_4a475493"
+    fixture = root / "tests/fixtures/parallel/off_wire_main_b520a637"
     for send, stage in enumerate(("initial", "failed-check", "applied-edit"), 1):
         name = f"{send:04}.request.json"
         raw = captured[name]
@@ -1498,7 +1498,7 @@ def test_latest_stable_release_commit_fails_without_reachable_tag(tmp_path):
 @pytest.mark.host_sandbox
 def test_default_parallel_off_wire_and_public_artifacts_match_merged_main(tmp_path):
     root = Path(__file__).resolve().parents[1]
-    base = "4a475493"
+    base = "b520a637"
     old = tmp_path / "main-base"
     old.mkdir()
     archive = tmp_path / "main-base.tar"

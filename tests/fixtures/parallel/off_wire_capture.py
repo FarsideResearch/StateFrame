@@ -1,9 +1,9 @@
 """Capture raw requests on main or the candidate, with deterministic external inputs.
 
-Regenerate from an unmodified 4a475493 tree, from this checkout's root:
+Regenerate from an unmodified b520a637 tree, from this checkout's root:
     PYTHONHASHSEED=0 PYTHONNOUSERSITE=1 .venv/bin/python \
         tests/fixtures/parallel/off_wire_capture.py MAIN_TREE OUTPUT_DIR omitted
-Copy OUTPUT_DIR/run/wire/000{1,2,3}.request.json verbatim to off_wire_main_4a475493/.
+Copy OUTPUT_DIR/run/wire/000{1,2,3}.request.json verbatim to off_wire_main_b520a637/.
 Only provider tokenization/replies and check-process results are simulated. Request
 construction, failed-check recording, edits, CLI option parsing and child wiring are real.
 """
