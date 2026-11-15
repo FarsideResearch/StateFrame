@@ -1,6 +1,6 @@
 {
  "dropped_lab_only": 1,
- "file_count": 830,
+ "file_count": 832,
  "files": {
   "architecture/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
   "architecture/domain_ids.py": "b0aefd60ec4b876a45ff77f2badfdf12a4902af02cbb6506398b46da368106fd",
@@ -259,6 +259,8 @@
   "kernel_fanout_continuation.py": "7660b0ea9ace00e992e83bd4013f985cbf82b893cd61f2df16cf4018aac087fc",
   "kernel_fanout_continuation_cli.py": "1488de947c408ed78767a70376b223a6cd3fbec8d3ed4503b6916c5e9b8d16fa",
   "kernel_fanout_pin.py": "09d74eddd27ebf70e26031711e9af7605531f35a0c35b836ec835a6e77417c37",
+  "kernel_fault_disposition.py": "e30023f9f7c6bc53f94e3574d8f0eac4e81bf9f2acd066e6bff42df8154dc5e4",
+  "kernel_fault_registry.py": "007474aa8cef5329364ca6cb907bc1e152466f883425a1e76c35a7e1a067d70c",
   "kernel_figure_it_out.py": "8304ea5f42bf241e747175778f34edb3eafacc28f2944a801b0f9361e2dd7e00",
   "kernel_file_ops.py": "ef3de8fa2ba9c1f08be1515364f3eb1b9fadc4d319e2540ef8b8bec73f746818",
   "kernel_final_product_manifest.py": "c75e47dbdcae6005e797273443962a4a0e9b4aa0f39d683b75af8c6d524b6bff",
@@ -794,7 +796,7 @@
   "protected_tree_guard.py": "bd5bec6033b7f4e0bfaaf108e40a4686c36e0d5e5f4a9429aa33975c0af17846",
   "realtask_benchmark.py": "06f9c437a4f0258d4b0e40721bca9cd2ee13e7fac26bc4513b422ca8a5d3b5a9",
   "realtask_worker_receipts.py": "7f358362d2b839957f2541961ce11b6e65bcb26fa60e5f3d28de22144d47421f",
-  "release-manifest.json": "cd24a957611dd908eebd411540480f1d1ee4017251bc0b262f10c8476138b8b8",
+  "release-manifest.json": "e2b4a563fcef0b419a8ed1d06e6042ed17937551a952b42c01d4b15403e15e1a",
   "sampler_config.py": "1549b3a60e0ebc8fbbad8ed5256f52477cd1bb2491a8da350c64c01e01c81b2d",
   "sf_launch.py": "0e0d792f923a3cbcb68cd22cbb06c7f14dcfc470c8b7c24ed78eacd79990ea5c",
   "sf_mutate_boot.py": "a213bba08b5171f830ba8c1afbcfbcf66b7768ab15961e167a9bcba368d97786",
@@ -804,7 +806,7 @@
   "spec_exec.py": "0a80d5488bc812718b4608e086c12c1b8999604cd075f01217eb9bf172424768",
   "swarm/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
   "swarm/client2.py": "fa141060de5346b46678660fe770c8adcef6b30f579417a52c013d3219d08c70",
-  "switch-registry.json": "6ae4bdd9878deed63f16dd924da92f695ba3f76f488adc8e3ad7d4643e80e30b",
+  "switch-registry.json": "e252020fb00a5d64ab3e47ae6421e30d819b4657f5238264fb504ff750b840e6",
   "symbol_registry.py": "28986ae33ad691dd89c201130e1982334d56542c2e162d7fc9ff5b59073ea15f",
   "sys1/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
   "sys1/adapter.py": "633e61b3fcd43dc6a07d628a3c8eb4d4d1e54e53de078cbe9dd74ed677847ab1",
@@ -4766,7 +4768,7 @@
  "release_listed_but_absent_in_source": [],
  "release_manifest": "37f11a29d4ceccbc5ea3aa95d1e60249e41b93974fe1da74e347ccfad28f1374",
  "schema": "stateframe-engine-source/1",
- "shipped_hash": "89b0256a9e5a449dd3a43fe5da3daf3223f580df1e08cb79b02dbaa5b8fa3588",
+ "shipped_hash": "97e208bb94de04b6d16a0860666027a8d6b511c47ccdfd5db53f8e988637ccda",
  "source_hash": "1a75f27c6197deed9df5acd441902846aced5fd358729dab308577e184a077c4",
  "source_tree": "37f11a29d4ceccbc5ea3aa95d1e60249e41b93974fe1da74e347ccfad28f1374"
 }
