@@ -568,7 +568,7 @@ import importlib.util, json, pathlib, traceback
 p = json.load(__import__('sys').stdin)
 path = pathlib.Path(p['path'])
 result = []
-spec = importlib.util.spec_from_file_location('_astra22_candidate', path)
+spec = importlib.util.spec_from_file_location('_jq_audit_candidate', path)
 module = importlib.util.module_from_spec(spec)
 try:
     spec.loader.exec_module(module)
@@ -662,7 +662,7 @@ print(json.dumps({'checks': result}, sort_keys=True, default=str))
 def bounded_contract_audit(source: str, *, path: str = "candidate.py",
                            brief: str = "") -> dict[str, object]:
     """Run the frozen public-brief checks in a disposable subprocess."""
-    with tempfile.TemporaryDirectory(prefix="astra22-audit-") as root:
+    with tempfile.TemporaryDirectory(prefix="jq-audit-") as root:
         target = pathlib.Path(root) / pathlib.Path(path).name
         target.write_text(source, encoding="utf-8")
         try:
