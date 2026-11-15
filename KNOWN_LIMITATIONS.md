@@ -169,6 +169,10 @@ requests share the model server's capacity, and each subframe adds setup and ver
 - When coupling between subframes is unknown, an otherwise valid composition with no final check recipe reports
   `NOT_RUN` for the final check and `UNVERIFIED` for integration. Supply a task-level `--test-cmd` to check the combined
   changes. Passing subframe checks alone does not prove the whole task passes.
+- Subframe workers run with the working-set allocator off, even when the parent runs it on. Workers use the legacy
+  frame allocation and legacy source rendering, so the allocator's read-loop protections do not apply inside a
+  subframe yet. `STATEFRAME_PARALLEL_SUGGEST` also rides the legacy allocation and has no effect on a parent that
+  runs the allocator.
 
 ## Lifecycle hooks
 
