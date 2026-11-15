@@ -10,13 +10,14 @@ from __future__ import annotations
 
 import hashlib
 import json
-import lzma
 import re
 import struct
 import zlib
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
+
+from _journal import measurement_events, measurement_journal_paths
 
 _READ_PAGE = re.compile(r"^\[read page\] path=(\S+) revision=(sha256:[0-9a-f]+) lines=(\d+)-(\d+)/(\d+)[^\n]*\n")
 _NOTICE = re.compile(r"^(\d+ more(?: lines)?;|\[read\] )")
@@ -40,16 +41,14 @@ class MissingRead:
 
 class _Journal:
     def __init__(self, run_dir: Path) -> None:
-        journals = sorted((run_dir / "worker" / "measurement-runs").glob("*/events.jsonl*"))
+        journals = measurement_journal_paths(run_dir)
         if len(journals) != 1:
             raise AssertionError(f"expected one measurement journal under {run_dir}, found {len(journals)}")
         self.path = journals[0]
         self.blobs = self.path.parent / "blobs"
         index = self.blobs / "pack-0001.idx"
         self.index = json.loads(index.read_text())["records"] if index.is_file() else {}
-        opener = lzma.open if self.path.suffix == ".xz" else open
-        with opener(self.path, "rt", encoding="utf-8") as handle:
-            self.events = [json.loads(line) for line in handle if line.strip()]
+        self.events = measurement_events(run_dir)
         self._cache: dict[str, object] = {}
 
     def _blob(self, digest: str) -> object:

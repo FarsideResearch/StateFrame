@@ -2290,6 +2290,15 @@
       "risk": "unclassified"
     },
     {
+      "file": "src/stateframe/engine/kernel_request_auth_identity.py",
+      "function": "_key_fingerprint",
+      "except_clause": "except OSError:",
+      "fingerprint": "8f0116f2447ef1fc948a70c8",
+      "ordinal": 1,
+      "reason": "missing or unreadable key file means no identity; documented None return",
+      "risk": "low"
+    },
+    {
       "file": "src/stateframe/engine/kernel_request_budget.py",
       "function": "_ordered_reserved_messages",
       "except_clause": "except (ImportError, TypeError, ValueError):",
@@ -2338,7 +2347,7 @@
       "file": "src/stateframe/engine/kernel_request_budget.py",
       "function": "_apply_budget_with_diet.dispatchable",
       "except_clause": "except (AttributeError, OSError, RuntimeError, TypeError, ValueError):",
-      "fingerprint": "c08363a1b1dc69ebd3d81a90",
+      "fingerprint": "d98780a480bd6096ca92be1d",
       "ordinal": 1,
       "reason": "baseline debt 2026-11-05, see inventory",
       "risk": "unclassified"
@@ -2387,6 +2396,15 @@
       "ordinal": 1,
       "reason": "baseline debt 2026-11-05, see inventory",
       "risk": "unclassified"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_request_diet.py",
+      "function": "RequestTokenMeter.measure_subframe_cap",
+      "except_clause": "except Exception:",
+      "fingerprint": "e8dfe3a241164e701b2404fc",
+      "ordinal": 1,
+      "reason": "tokenizer failure falls back to the next measurement path; broad catch is debt (FU-BR-SWALLOW-DIET)",
+      "risk": "medium"
     },
     {
       "file": "src/stateframe/engine/kernel_request_diet.py",
@@ -3173,6 +3191,15 @@
     },
     {
       "file": "src/stateframe/engine/kernel_stateframe_runtime.py",
+      "function": "StateFrameRuntime.__init__",
+      "except_clause": "except (OSError, ValueError):",
+      "fingerprint": "c39d3d3ee2869b91e2dcc1a0",
+      "ordinal": 1,
+      "reason": "skip contract paths that fail to resolve or escape the root; the next candidate is tried",
+      "risk": "low"
+    },
+    {
+      "file": "src/stateframe/engine/kernel_stateframe_runtime.py",
       "function": "StateFrameRuntime._bind_target",
       "except_clause": "except (OSError, ValueError):",
       "fingerprint": "aa206c0264ae8aa9f21561be",
@@ -3616,7 +3643,7 @@
       "file": "src/stateframe/engine/kernel_stateframe_runtime.py",
       "function": "StateFrameRuntime._pass_gates_menu.dispatchable",
       "except_clause": "except (AttributeError, OSError, RuntimeError, TypeError, ValueError):",
-      "fingerprint": "e3586f6b17e8ea5c02dcaaa3",
+      "fingerprint": "b814678b37d01e373d30bf6d",
       "ordinal": 1,
       "reason": "baseline debt 2026-11-05, see inventory",
       "risk": "unclassified"
