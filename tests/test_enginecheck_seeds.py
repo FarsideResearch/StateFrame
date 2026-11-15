@@ -51,6 +51,9 @@ SEED_FILE = textwrap.dedent(
 )
 
 
+VALID_SEED = 'import pytest\n\n\n@pytest.mark.race_seed("10", known_bad="abc1234", expect="AssertionError")\ndef test_ok():\n    pass\n'
+
+
 def _git(repo: Path, *args: str) -> str:
     return subprocess.run(
         ["git", *_IDENT, "-C", str(repo), *args], check=True, capture_output=True, text=True
@@ -125,13 +128,62 @@ def test_vacuous_seed_that_is_also_green_on_bad_tree_is_not_ok(fake_repo, tmp_pa
     assert proof.green and not proof.red_intended and not proof.ok
 
 
-def test_unknown_known_bad_sha_fails_the_proof_without_raising(fake_repo, tmp_path):
+def test_parent_mutant_env_does_not_leak_into_green_run(fake_repo, tmp_path, monkeypatch):
+    """A mutant leaked from the parent env must not turn the GREEN run of an unmutated seed into a failure."""
     repo, _bad = fake_repo
-    seed = _seed(repo, "01")
-    missing = replace(seed, known_bad="0123456789abcdef0123456789abcdef01234567")
-    proof = prove_seed(missing, repo, tmp_path / "work")
-    assert not proof.ok and not proof.red_intended
-    assert "export failed" in proof.detail
+    monkeypatch.setenv("ENGINECHECK_RACE_MUTANT", "flip")
+    proof = prove_seed(_seed(repo, "02"), repo, tmp_path / "work")
+    assert proof.green and proof.ok, proof.detail
+
+
+def test_unknown_known_bad_sha_raises_with_git_stderr(fake_repo, tmp_path):
+    repo, _bad = fake_repo
+    missing = replace(_seed(repo, "01"), known_bad="0123456789abcdef0123456789abcdef01234567")
+    work = tmp_path / "work"
+    work.mkdir()
+    with pytest.raises(SeedRegistryError, match="git archive .* failed.*fatal"):
+        prove_seed(missing, repo, work)
+    assert list(work.iterdir()) == []
+
+
+def test_known_bad_export_dir_is_removed_after_proof(fake_repo, tmp_path):
+    repo, _bad = fake_repo
+    work = tmp_path / "work"
+    work.mkdir()
+    proof = prove_seed(_seed(repo, "01"), repo, work)
+    assert proof.ok, proof.detail
+    assert list(work.iterdir()) == []
+
+
+def test_known_bad_overlay_comes_from_committed_harness_not_working_tree(fake_repo, tmp_path):
+    """Dirty the working-tree seed so it passes on the bad tree; the proof must still judge the committed seed."""
+    repo, _bad = fake_repo
+    seed_path = repo / "tests/race_seeds/test_fake_seeds.py"
+    original = seed_path.read_text(encoding="utf-8")
+    dirty = original.replace("    assert fakemod.compute() == 2\n", "    pass\n", 1)
+    assert dirty != original
+    seed_path.write_text(dirty, encoding="utf-8")
+    proof = prove_seed(_seed(repo, "01"), repo, tmp_path / "work")
+    assert proof.ok, proof.detail
+    assert "assert 1 == 2" in proof.detail
+
+
+def test_stray_race_seed_marker_outside_seed_dir_fails_collection(tmp_path):
+    repo = tmp_path / "repo"
+    _write(repo, "tests/race_seeds/test_ok.py", VALID_SEED)
+    _write(repo, "tests/test_stray.py", VALID_SEED.replace('"10"', '"11"').replace("def test_ok", "def test_stray"))
+    _install_race_conftest(repo)
+    with pytest.raises(SeedRegistryError, match="outside tests/race_seeds.*test_stray.py"):
+        collect_seeds(repo)
+
+
+def test_unregistered_marker_in_seed_dir_fails_strict_collection(tmp_path):
+    repo = tmp_path / "repo"
+    _write(repo, "tests/race_seeds/test_ok.py", VALID_SEED)
+    _write(repo, "tests/race_seeds/test_bogus.py", "import pytest\n\n\n@pytest.mark.bogus_unregistered\ndef test_b():\n    pass\n")
+    _install_race_conftest(repo)
+    with pytest.raises(SeedRegistryError, match="bogus_unregistered"):
+        collect_seeds(repo)
 
 
 _BAD_MARKERS = {

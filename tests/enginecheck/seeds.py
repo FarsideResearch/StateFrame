@@ -5,15 +5,22 @@ Seeds are regression tests under tests/race_seeds/ that must prove they catch a 
 
 Seed-author contract:
 - Exactly one of known_bad (hex commit sha that still has the race) or mutant (a name for an injected race).
-- expect is the intended failure: an exception class name (AssertionError) or a substring of the failure message.
+- expect is the intended failure. An exception class name (AssertionError) must equal the failure type exactly. Any
+  other text is matched as a substring of the failure message. Prefer an exception name for known_bad seeds: a symbol
+  missing from the bad tree raises AttributeError or TypeError, and matching on that text is fragile.
 - Mutant seeds read os.environ["ENGINECHECK_RACE_MUTANT"] and activate their own mutant only when it equals their name.
-- Known-bad seeds run against `git archive <sha>` with the seed file, tests/race_seeds/ and tests/enginecheck/ copied in.
+  The GREEN run and known_bad runs always get that variable set to "" so a parent env cannot leak a mutant in.
+- Known-bad seeds run on `git archive <sha>` of the bad tree. The bad tree keeps its own tests/conftest.py on purpose:
+  that is the code the seed targets. The seed harness (tests/race_seeds/, tests/enginecheck/ and the seed file) is
+  overlaid from committed HEAD, never from the working tree, so uncommitted edits cannot change the verdict.
+- Seeds must live under tests/race_seeds/. A race_seed marker anywhere else under tests/ fails collection.
 
 prove_seed: GREEN means the seed passes on the current tree. RED means it fails through `expect` on the known-bad tree
 or with its mutant active. A seed is ok only when both hold.
 """
 from __future__ import annotations
 
+import ast
 import io
 import json
 import os
@@ -29,8 +36,7 @@ from typing import Mapping
 from enginecheck.proof import red_proof, run_nodes
 
 _SEED_DIR = "tests/race_seeds"
-_SEED_DIRS = ("tests/enginecheck",)
-_SEED_FILES = ("tests/race_seeds/__init__.py", "tests/race_seeds/conftest.py")
+_HARNESS_PATHS = ("tests/enginecheck", "tests/race_seeds")
 _MUTANT_ENV = "ENGINECHECK_RACE_MUTANT"
 _DUMP_ENV = "ENGINECHECK_SEED_DUMP"
 _COLLECT_TIMEOUT_SECONDS = 600
@@ -40,7 +46,7 @@ _DETAIL_CHARS = 300
 
 
 class SeedRegistryError(RuntimeError):
-    """Collection or registry failure: a broken marker, a duplicate seed id or a collection error."""
+    """Collection or registry failure: a broken marker, a duplicate seed id, a stray marker or a git/export error."""
 
 
 @dataclass(frozen=True)
@@ -65,12 +71,12 @@ class SeedProof:
 
 
 def collect_seeds(repo: Path) -> list[Seed]:
-    """Collect every race_seed under tests/race_seeds. The conftest validates markers and dumps them as JSON."""
+    """Collect every race_seed under tests/race_seeds with strict markers. The conftest validates and dumps them."""
     with tempfile.TemporaryDirectory(prefix="enginecheck-seeds-") as tmp:
         dump = Path(tmp) / "seeds.json"
         command = [
             sys.executable, "-m", "pytest", "-p", "no:cacheprovider", f"--rootdir={repo.resolve()}",
-            "--collect-only", "-q", _SEED_DIR,
+            "--strict-markers", "--collect-only", "-q", _SEED_DIR,
         ]
         env = {key: value for key, value in os.environ.items() if key != "PYTEST_CURRENT_TEST"}
         env[_DUMP_ENV] = str(dump)
@@ -84,11 +90,31 @@ def collect_seeds(repo: Path) -> list[Seed]:
         if proc.returncode != 0:
             tail = (proc.stdout + proc.stderr)[-_TAIL_CHARS:].strip()
             raise SeedRegistryError(f"seed collection failed (exit {proc.returncode}): {tail}")
+        strays = _stray_markers(repo)
+        if strays:
+            raise SeedRegistryError(f"race_seed marker outside tests/race_seeds in: {', '.join(strays)}")
         try:
             raw = json.loads(dump.read_text(encoding="utf-8"))
         except (OSError, ValueError) as exc:
             raise SeedRegistryError("seed collection wrote no valid dump") from exc
     return _build_registry(raw)
+
+
+def _stray_markers(repo: Path) -> list[str]:
+    """Files under tests/ outside tests/race_seeds that use a `.race_seed` attribute. AST-based, so strings do not match."""
+    seed_root = (repo / _SEED_DIR).resolve()
+    strays: list[str] = []
+    for path in sorted((repo / "tests").rglob("*.py")):
+        if path.resolve().is_relative_to(seed_root):
+            continue
+        rel = path.relative_to(repo).as_posix()
+        try:
+            tree = ast.parse(path.read_text(encoding="utf-8"), filename=rel)
+        except (SyntaxError, UnicodeDecodeError) as exc:
+            raise SeedRegistryError(f"cannot scan {rel} for race_seed markers: {exc}") from exc
+        if any(isinstance(node, ast.Attribute) and node.attr == "race_seed" for node in ast.walk(tree)):
+            strays.append(rel)
+    return strays
 
 
 def _build_registry(raw: object) -> list[Seed]:
@@ -132,19 +158,22 @@ def _optional_text(entry: Mapping[str, object], key: str) -> str | None:
 
 
 def prove_seed(seed: Seed, repo: Path, tmp: Path) -> SeedProof:
-    """Prove one seed: GREEN on the current tree, RED through `expect` on the known-bad tree or with its mutant."""
-    green_report = run_nodes([seed.node_id], cwd=repo)
+    """Prove one seed: GREEN on the current tree, RED through `expect` on the known-bad tree or with its mutant.
+
+    Raises SeedRegistryError when the known-bad tree or the committed harness cannot be exported. Export dirs are
+    created under `tmp` and removed on every exit path.
+    """
+    green_report = run_nodes([seed.node_id], cwd=repo, env={_MUTANT_ENV: ""})
     green = green_report.ok
     green_detail = "green" if green else f"green-fail: {green_report.summary()}"
 
     if seed.mutant is not None:
         red = red_proof(seed.node_id, cwd=repo, expect=seed.expect, env={_MUTANT_ENV: seed.mutant})
     else:
-        try:
-            export_dir = _export_known_bad(seed, repo, tmp)
-        except SeedRegistryError as exc:
-            return SeedProof(seed.seed_id, green, False, f"{green_detail}; known_bad export failed: {exc}")
-        red = red_proof(seed.node_id, cwd=export_dir, expect=seed.expect)
+        tmp.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix=f"enginecheck-known-bad-{seed.seed_id}-", dir=tmp) as export_root:
+            export_dir = _export_known_bad(seed, repo, Path(export_root))
+            red = red_proof(seed.node_id, cwd=export_dir, expect=seed.expect, env={_MUTANT_ENV: ""})
 
     detail = (
         f"{green_detail}; red status={red.status} intended={red.intended} "
@@ -153,42 +182,45 @@ def prove_seed(seed: Seed, repo: Path, tmp: Path) -> SeedProof:
     return SeedProof(seed.seed_id, green, red.intended, detail)
 
 
-def _export_known_bad(seed: Seed, repo: Path, tmp: Path) -> Path:
-    """Extract `git archive <known_bad>` into a fresh dir under tmp, then overlay the seed harness from the current tree."""
+def _export_known_bad(seed: Seed, repo: Path, export_root: Path) -> Path:
+    """Build the known-bad tree: `git archive <known_bad>`, then the committed seed harness from HEAD over it."""
     if seed.known_bad is None:
         raise SeedRegistryError("seed has no known_bad sha")
-    try:
-        archive = subprocess.run(
-            ["git", "-C", str(repo), "archive", "--format=tar", seed.known_bad],
-            capture_output=True, check=True, timeout=_GIT_TIMEOUT_SECONDS,
-        ).stdout
-    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError) as exc:
-        raise SeedRegistryError(f"git archive {seed.known_bad} failed: {exc}") from exc
+    dest = export_root / "tree"
+    dest.mkdir()
+    _extract(_git_archive(repo, seed.known_bad, ()), dest, required=())
 
-    dest = tmp / f"known-bad-{seed.seed_id}"
+    seed_file = seed.node_id.split("::", 1)[0]
+    harness = (*_HARNESS_PATHS, seed_file)
+    for rel in harness:
+        stale = dest / rel
+        if stale.is_dir():
+            shutil.rmtree(stale)
+        elif stale.exists():
+            stale.unlink()
+    _extract(_git_archive(repo, "HEAD", harness), dest, required=harness)
+    return dest
+
+
+def _git_archive(repo: Path, rev: str, paths: tuple[str, ...]) -> bytes:
+    command = ["git", "-C", str(repo), "archive", "--format=tar", rev, *paths]
     try:
-        dest.mkdir(parents=True, exist_ok=False)
-    except FileExistsError as exc:
-        raise SeedRegistryError(f"export dir {dest} already exists") from exc
+        proc = subprocess.run(command, capture_output=True, check=True, timeout=_GIT_TIMEOUT_SECONDS)
+    except subprocess.CalledProcessError as exc:
+        stderr = exc.stderr.decode("utf-8", "replace").strip()
+        raise SeedRegistryError(f"git archive {rev} failed: {stderr or exc}") from exc
+    except (subprocess.TimeoutExpired, OSError) as exc:
+        raise SeedRegistryError(f"git archive {rev} failed: {exc}") from exc
+    return proc.stdout
+
+
+def _extract(archive: bytes, dest: Path, required: tuple[str, ...]) -> None:
     with tarfile.open(fileobj=io.BytesIO(archive)) as tar:
+        names = {name.rstrip("/") for name in tar.getnames()}
+        for rel in required:
+            if not any(name == rel or name.startswith(rel + "/") for name in names):
+                raise SeedRegistryError(f"harness path missing in committed HEAD: {rel}")
         if hasattr(tarfile, "data_filter"):
             tar.extractall(dest, filter="data")
         else:
             tar.extractall(dest)
-
-    seed_file = seed.node_id.split("::", 1)[0]
-    for rel in (seed_file, *_SEED_FILES):
-        source = repo / rel
-        if not source.is_file():
-            raise SeedRegistryError(f"harness file missing in tree: {rel}")
-        target = dest / rel
-        target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(source, target)
-    for rel in _SEED_DIRS:
-        if not (repo / rel).is_dir():
-            raise SeedRegistryError(f"harness dir missing in tree: {rel}")
-        shutil.copytree(
-            repo / rel, dest / rel, dirs_exist_ok=True,
-            ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
-        )
-    return dest
