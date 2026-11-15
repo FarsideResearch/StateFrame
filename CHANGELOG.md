@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.6.41 (2026-11-14)
+
+- Engine scratch now follows TMPDIR or the run's temp root instead of the system /tmp, so killed runs no longer leave directories behind in /tmp.
+
 ## 0.6.40 (2026-11-14)
 
 - Fixed: resuming a timed run preserves its declared allowance, keeping replayed requests byte-identical while remaining time stays private to the run record.
