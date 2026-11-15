@@ -2,6 +2,7 @@
 
 ## 0.7.1 (2026-11-15)
 
+- Docs: the README opens the subframes section with subframes as a fork-join replacement for sub-agents, and the mutations section with what mutations did in our tests; the subframes guide describes the fork-join model. KNOWN_LIMITATIONS.md is audited against 0.7.0: stale "fix in progress" and "fix planned" notes for line endings and stable wire are removed, the coalesce escalation outcome name, the resume-after-upgrade rule and the mutation platform note are corrected, a retired error name is dropped, the 0.6.44 large-repo fallback scope, the `--timeout` finalize reserve and the `CONTEXT_TOO_SMALL` result are added, and a new entry notes the `parallel` tool schema mismatch in 0.7.0 and 0.7.1.
 - Context-size probes now read `/slots` and `/props` bodies up to 16 MiB, and a larger body is reported as a typed refusal instead of silently ignored.
 - The corpus provider index now reads up to 5000 files by default, up from 600, so larger corpora are no longer cut short for import evidence. `STATEFRAME_PROVIDER_INDEX_MAX_FILES` sets the cap in a custom profile, clamped to 200000; a capped index still reports `truncated` and `files_scanned`.
 ### localize: full query text and configurable inventory limits

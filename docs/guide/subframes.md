@@ -3,7 +3,9 @@
 Subframes let the parent split independent file work into separate, bounded engine runs. They are parallel processing
 inside one StateFrame task, not independently steered agents: there are no child chat histories, model-written briefs,
 reports, or messages between subframes. The parent owns the only authoritative state, workspace, and journal. A
-subframe's proposal becomes parent state only after the host verifies it and publishes a transaction.
+subframe's proposal becomes parent state only after the host verifies it and publishes a transaction. The model is fork-join: each subframe's workspace is a snapshot forked from the parent at dispatch, and its
+result is joined back only through that verified transaction. Subframes never see another subframe's work in progress,
+only the committed interface projections of producers they depend on.
 
 ## When to use them
 
