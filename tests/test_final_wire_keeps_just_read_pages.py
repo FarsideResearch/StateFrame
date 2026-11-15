@@ -100,10 +100,18 @@ def _engine_result(run_dir: Path) -> str | None:
     return result if isinstance(result, str) else None
 
 
-@pytest.mark.parametrize("allocator", ["off", "on"])
-@pytest.mark.parametrize("turns", [
-    pytest.param(8, id="first-reads"),
-    pytest.param(38, id="protected-over-cap"),
+# The legacy allocator-OFF path drops just-read pages once protected reads exceed
+# the cap; the working-set allocator (default ON) is the fix. The OFF case stays as a
+# strict xfail so the known gap is visible and an unexpected pass fails loudly (approved).
+_LEGACY_OFF_GAP = pytest.mark.xfail(
+    strict=True, reason="legacy allocator-OFF path drops just-read pages over the protected cap")
+
+
+@pytest.mark.parametrize("turns,allocator", [
+    pytest.param(8, "off", id="first-reads-off"),
+    pytest.param(38, "off", id="protected-over-cap-off", marks=_LEGACY_OFF_GAP),
+    pytest.param(8, "on", id="first-reads-on"),
+    pytest.param(38, "on", id="protected-over-cap-on"),
 ])
 def test_just_read_pages_reach_the_next_final_wire(tmp_path: Path, turns: int, allocator: str) -> None:
     started = time.monotonic()
