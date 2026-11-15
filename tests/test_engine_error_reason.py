@@ -115,6 +115,33 @@ def test_catch_all_returns_class_and_message_and_records_reason_row(tmp_path, mo
     assert fields["disposition"] == "boundary"
     assert fields["expectation"] == "unexpected"
     assert INCIDENT_MESSAGE in matching[0]["why"]
+    # Fault record schema: the catch-all row names its site, class, message, work item and a stable id.
+    assert fields["site_id"] == HANDLER_ID
+    assert fields["kind"] == "D"
+    assert fields["exception_class"] == "FrameFit5Error"
+    assert fields["exception_message"] == INCIDENT_MESSAGE
+    assert fields["required_work_id"] == "engine_run"
+    assert len(fields["fault_id"]) == 16
+    assert fields["cause_chain"] == "[]"
+    assert fields["primary_fault_id"] == fields["fault_id"]
+
+
+def test_catch_all_fault_id_is_stable_for_the_same_incident(tmp_path):
+    # Same inputs in a fresh reason-log state give the same id (no clock, uuid or random input).
+    import kernel_fault_disposition as disposition
+
+    error = FrameFit5Error(INCIDENT_MESSAGE)
+    ids = []
+    for index in range(2):
+        run_root = tmp_path / str(index)
+        run_root.mkdir()
+        with pytest.MonkeyPatch.context() as patch:
+            with isolated_reason_log(patch, run_root) as harness:
+                assert disposition.record_fault(HANDLER_ID, error, disposition="boundary",
+                                                observed_at="react_repair.run", journal=False) is True
+                row = json.loads(Path(harness.problems).read_text().splitlines()[0])
+                ids.append(row["fields"]["fault_id"])
+    assert ids[0] == ids[1]
 
 
 REPLAY_REASON = "replay diverged at send 4: prompt bytes differ"

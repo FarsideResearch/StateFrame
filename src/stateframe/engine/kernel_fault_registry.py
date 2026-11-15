@@ -32,6 +32,9 @@ class HandlerSpec:
     owner: str
     contract_tests: tuple[str, ...]
     policy_version: int
+    # Work item the fault blocks (e.g. "engine_run"), carried on every fault row so a triage view can
+    # tie a fault to the unit of work it stopped. None when the handler guards no tracked work item.
+    required_work_id: str | None = None
 
     def __post_init__(self) -> None:
         for name in ("handler_id", "module", "function", "op", "owner"):
@@ -56,6 +59,8 @@ class HandlerSpec:
         if isinstance(self.policy_version, bool) or not isinstance(self.policy_version, int) \
                 or self.policy_version < 1:
             raise ValueError(f"{self.handler_id}: policy_version must be an int >= 1")
+        if self.required_work_id is not None:
+            _require_text(self.required_work_id, "required_work_id")
 
 
 def _require_text(value: object, name: str) -> None:
@@ -82,7 +87,7 @@ HANDLERS: dict[str, HandlerSpec] = {
         contract_tests=(
             "tests/test_engine_error_reason.py::test_catch_all_returns_class_and_message_and_records_reason_row",
         ),
-        policy_version=1,
+        policy_version=1, required_work_id="engine_run",
     ),
 }
 

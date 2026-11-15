@@ -322,11 +322,17 @@ def test_event_fields_reach_reason_row_and_journal(fresh):
         "observed_at": OBSERVED, "expectation": "expected", "disposition": "boundary",
         "fallback_id": None, "policy_version": 1, "disposition_mismatch": False,
         "fault_code_rejected": False,
+        "fault_id": disposition_mod._fault_id(PROBE, "boundary", "ValueError", OBSERVED, 0),
+        "kind": "D", "exception_class": "ValueError", "exception_message": "boom", "site_id": PROBE,
+        "required_work_id": None, "cause_chain": "[]",
+        "primary_fault_id": disposition_mod._fault_id(PROBE, "boundary", "ValueError", OBSERVED, 0),
     }
     assert _only_row(problems)["fields"] == expected_fields
     assert [kind for kind, _ in journal.events] == ["reason_logged"]
     journal_fields = journal.events[0][1]
-    assert {k: v for k, v in journal_fields.items() if k in expected_fields} == expected_fields
+    # The journal event reserves "kind" for the event type, so the fault taxonomy letter travels as receipt_kind.
+    journal_expected = {("receipt_kind" if k == "kind" else k): v for k, v in expected_fields.items()}
+    assert {k: v for k, v in journal_fields.items() if k in journal_expected} == journal_expected
 
 
 def test_journal_false_writes_problems_row_but_no_journal_event(fresh):
@@ -438,3 +444,172 @@ def test_concurrent_self_error_does_not_flip_a_successful_record(fresh):
 def test_observed_at_is_required_keyword(fresh):
     with pytest.raises(TypeError):
         record_fault(PROBE, ValueError("x"), disposition="boundary")  # type: ignore[call-arg]
+
+
+# ---- fault record schema (fault_id, kind, exception, site, work id, cause chain) ------------------
+
+def _reset_reason_log(tmp_path: Path, name: str) -> Path:
+    rl.reset_for_tests()
+    problems = tmp_path / name
+    rl.configure(level="WARN", journal=_Journal(), problems_path=problems, stream=io.StringIO())
+    return problems
+
+
+def _fields(problems: Path) -> dict:
+    return _only_row(problems)["fields"]
+
+
+def test_fault_id_is_sixteen_lowercase_hex_chars(fresh):
+    _, problems = fresh
+    _emit(error=ValueError("boom"))
+    fault_id = _fields(problems)["fault_id"]
+    assert len(fault_id) == 16 and all(c in "0123456789abcdef" for c in fault_id)
+
+
+def test_fault_id_is_a_pure_function_of_its_inputs():
+    base = ("h", "boundary", "ValueError", OBSERVED, 0)
+    same = disposition_mod._fault_id(*base)
+    assert same == disposition_mod._fault_id(*base)
+    for index, replacement in enumerate(("h2", "fallback", "KeyError", "2026-11-16T00:00:00Z", 1)):
+        changed = list(base)
+        changed[index] = replacement
+        assert disposition_mod._fault_id(*changed) != same, index
+
+
+def test_fault_id_is_identical_across_two_fresh_reason_log_states(fresh, tmp_path):
+    _, first_problems = fresh
+    _emit(error=ProbeError("first"))
+    first_id = _fields(first_problems)["fault_id"]
+    second_problems = _reset_reason_log(tmp_path, "second.jsonl")
+    _emit(error=ProbeError("first"))
+    assert _fields(second_problems)["fault_id"] == first_id
+
+
+def test_repeated_fault_in_one_run_consumes_an_occurrence_index(fresh):
+    _, problems = fresh
+    key = f"{PROBE}:boundary:ValueError"
+    assert disposition_mod._prior_occurrences("invariant", key) == 0
+    _emit(error=ValueError("boom"))
+    assert disposition_mod._prior_occurrences("invariant", key) == 1
+    _emit(error=ValueError("boom"))
+    assert len(_rows(problems)) == 1  # repeat only counts; the next occurrence id is distinct
+    assert disposition_mod._fault_id(PROBE, "boundary", "ValueError", OBSERVED, 1) != _fields(problems)["fault_id"]
+
+
+def test_kind_is_registry_taxonomy_letter(fresh):
+    _, problems = fresh
+    _emit(error=ValueError("boom"))
+    assert _fields(problems)["kind"] == "D"
+
+
+def test_unregistered_handler_has_unregistered_kind_and_no_work_id(fresh):
+    _, problems = fresh
+    assert _emit("not.registered.handler", ValueError("boom")) is True
+    fields = _fields(problems)
+    assert fields["kind"] == "unregistered"
+    assert fields["site_id"] == "not.registered.handler"
+    assert fields["required_work_id"] is None
+    assert fields["expectation"] == "unregistered"
+
+
+def test_site_id_is_handler_id_and_exception_class_is_type_name(fresh):
+    _, problems = fresh
+    _emit(error=ProbeError("boom"))
+    fields = _fields(problems)
+    assert fields["site_id"] == fields["handler_id"] == PROBE
+    assert fields["exception_class"] == "ProbeError"
+    assert fields["cause_code"] == "ProbeError:E42"  # cause_code stays as before; class is separate
+
+
+def test_exception_message_is_whitespace_normalized_and_capped(fresh):
+    _, problems = fresh
+    _emit(error=ValueError("alpha\n\n  beta\t" + "x" * 400))
+    message = _fields(problems)["exception_message"]
+    assert len(message) == disposition_mod.MAX_MESSAGE_CHARS
+    assert message.startswith("alpha beta xxx") and message.endswith("...")
+    assert "\n" not in message and "\t" not in message
+
+
+def test_empty_exception_message_uses_placeholder(fresh):
+    _, problems = fresh
+    _emit(error=ValueError(""))
+    assert _fields(problems)["exception_message"] == disposition_mod.EMPTY_DETAIL
+
+
+def test_message_at_exactly_the_cap_is_not_truncated():
+    text = "y" * disposition_mod.MAX_MESSAGE_CHARS
+    assert disposition_mod._bounded(text) == text
+
+
+def test_chained_exception_records_cause_chain_and_primary_id(fresh):
+    _, problems = fresh
+    try:
+        try:
+            raise KeyError("inner")
+        except KeyError as inner:
+            raise RuntimeError("outer") from inner
+    except RuntimeError as outer:
+        _emit(error=outer)
+    fields = _fields(problems)
+    assert json.loads(fields["cause_chain"]) == ["KeyError"]
+    assert fields["primary_fault_id"] == disposition_mod._fault_id(PROBE, "boundary", "KeyError", OBSERVED, 0)
+    assert fields["primary_fault_id"] != fields["fault_id"]
+
+
+def test_implicit_context_is_followed_unless_suppressed(fresh):
+    _, problems = fresh
+    try:
+        try:
+            raise OSError("disk")
+        except OSError:
+            raise ValueError("wrapped")
+    except ValueError as implicit:
+        _emit(error=implicit)
+    assert json.loads(_fields(problems)["cause_chain"]) == ["OSError"]
+
+
+def test_suppressed_context_yields_empty_chain(fresh):
+    _, problems = fresh
+    try:
+        try:
+            raise OSError("disk")
+        except OSError:
+            raise ValueError("hidden") from None
+    except ValueError as hidden:
+        _emit(error=hidden)
+    fields = _fields(problems)
+    assert fields["cause_chain"] == "[]"
+    assert fields["primary_fault_id"] == fields["fault_id"]
+
+
+def test_cause_chain_is_capped_at_max_chain():
+    error: BaseException = ValueError("leaf")
+    for depth in range(disposition_mod.MAX_CHAIN + 3):
+        outer = RuntimeError(f"level {depth}")
+        outer.__cause__ = error
+        error = outer
+    chain = disposition_mod._cause_chain(error)
+    assert len(chain) == disposition_mod.MAX_CHAIN
+    assert chain[0] == "RuntimeError"  # outermost cause first
+
+
+def test_cause_chain_terminates_on_a_cycle():
+    first, second = ValueError("a"), KeyError("b")
+    first.__cause__ = second
+    second.__cause__ = first
+    assert disposition_mod._cause_chain(first) == ["KeyError"]
+
+
+def test_no_chain_primary_id_equals_fault_id(fresh):
+    _, problems = fresh
+    _emit(error=ValueError("plain"))
+    fields = _fields(problems)
+    assert fields["cause_chain"] == "[]"
+    assert fields["primary_fault_id"] == fields["fault_id"]
+
+
+def test_registry_required_work_id_defaults_to_none_and_rejects_blank():
+    assert PROBE_SPEC.required_work_id is None
+    with pytest.raises(ValueError, match="required_work_id"):
+        HandlerSpec(**{**_VALID, "required_work_id": "   "})
+    assert HANDLERS["react_repair.run_exception"].required_work_id == "engine_run"
