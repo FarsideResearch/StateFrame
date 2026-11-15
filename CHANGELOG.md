@@ -2,7 +2,11 @@
 
 ## Unreleased
 
+<<<<<<< HEAD
 - Fixed (FU-070-ALLOC, replan pins): with the working-set allocator on, `refresh_read_ranges` applies the shared delivery rule (`drop_delivered_range_pins`) before reproving receipts. A pin whose bytes this request delivers now converts to `range_delivery=same_request` on the wire frame, matching the allocation validator's projection. Without it, every replacement request failed `unit-scoped serialized ledger differs from host projection` and exhausted the source-revision replan. Allocator-off is unchanged. Tests: `tests/test_ledger_pin_delivery.py`, `tests/test_fu070_alloc_checkpoint1.py` (xfail marker removed).
+=======
+- Fixed (FU-070-ALLOC, UNITVIS-073 scope): the unallocated legacy source branches (retired F4 carriers, deferred-source notice, model source projection, read-range refresh, source-notice request) run with the working-set allocator on only inside a subframe worker. Allocator-on parent requests keep their pre-UNITVIS-073 bytes, which restores the default parallel-off wire parity. Gate: `_legacy_source_path` in `kernel_stateframe_framefit5.py`. Tests: `tests/test_unitvis_legacy_source_gate.py`.
+>>>>>>> 8a323d79 (FU-070-ALLOC: scope UNITVIS-073 legacy source branches to subframe workers)
 - Fixed (FU-070-ALLOC, ledger pins): the allocation validator applies the fit's pin rules to the host-projected action ledger before comparing it with the fitted frame: an exact range pin for a superseded revision is dropped, and a pin whose bytes the request already delivers becomes `range_delivery=same_request`. Authority fields are not relaxed. Tests: `tests/test_ledger_pin_delivery.py`.
 - Fixed (FU-070-ALLOC, siteref): with the working-set allocator on, the subframe scope producer always inlines the next-site bytes and never emits a `source_ref`, because final delivery is unknown at scope time. The final validator rejected refs decided against pre-final windows (`typed next-site reference lacks matching source delivery`). Allocator-off requests are unchanged. Tests: `tests/test_parallel_site_refs.py`.
 - Fixed (FU-070-ALLOC, postedit3 D3): `_fallback_edit_open_site_locator` returns no site when the request has no prior read of the edited path, instead of anchoring at line 1 with an empty `last_read_revision`. Callers fail closed with `MISSING_EXACT_CURRENT_SITE`. Tests: `tests/test_fu070_postedit3.py`.
