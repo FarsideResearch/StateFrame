@@ -22,14 +22,14 @@ import uuid
 
 if __package__:
     from .kernel_exec_capability import ExecCapability
-    from .kernel_exec_tracker import (ProcessTable, capture_launch_identity, kill_launch_unit,
+    from .kernel_exec_tracker import (Descendants, ProcessTable, capture_launch_identity, kill_launch_unit,
                                       process_cmdline_digest, recorded_launch_identity)
     from .kernel_reason_log import emit_timeout
     from .kernel_test_isolation import sandbox_executable
     from .sf_launch import _current_cgroup
 else:
     from kernel_exec_capability import ExecCapability
-    from kernel_exec_tracker import (ProcessTable, capture_launch_identity, kill_launch_unit,
+    from kernel_exec_tracker import (Descendants, ProcessTable, capture_launch_identity, kill_launch_unit,
                                      process_cmdline_digest, recorded_launch_identity)
     from kernel_reason_log import emit_timeout
     from kernel_test_isolation import sandbox_executable
@@ -73,6 +73,21 @@ def _owner_pipe() -> tuple[int, int]:
 class ExecSessionError(RuntimeError):
     """The execution boundary could not be established or maintained."""
 
+    supervisor_lost = False
+    probe_retry_forbidden = False
+    probe_containment_verified = False
+
+
+@dataclass(frozen=True)
+class ProbeFailure:
+    attempt: int
+    classification: str
+    error: str
+
+    def as_dict(self) -> dict[str, object]:
+        return {"attempt": self.attempt, "classification": self.classification,
+                "error": self.error, "status": "INVALID"}
+
 
 @dataclass(frozen=True)
 class CleanupReport:
@@ -93,6 +108,7 @@ class ExecResult:
     cleanup: CleanupReport
     memory_limit_mechanism: str | None = None
     cgroup_leaf_pattern: str | None = None
+    probe_failures: tuple[ProbeFailure, ...] = ()
 
 
 def _cleanup(value: dict) -> CleanupReport:
@@ -384,6 +400,7 @@ class ExecSession:
         self._initial_capability: ExecCapability | None = None
         self._network_envelope: str | None = None
         self._read_envelope: tuple[Path, ...] = ()
+        self._probe_family: Descendants | None = None
 
     def configure(self, capability: ExecCapability) -> None:
         """Pin the run namespace envelope before any purpose launches a command."""
@@ -398,9 +415,16 @@ class ExecSession:
         return _supervisor_diagnostics(
             self._process, self._directory / "supervisor.log", self._process_role)
 
-    def _supervisor_error(self, message: str) -> ExecSessionError:
-        return ExecSessionError(
+    @property
+    def containment_verified(self) -> bool:
+        """Positive close-time proof, never inferred from a dead launcher alone."""
+        return getattr(self, "_containment_verified", False)
+
+    def _supervisor_error(self, message: str, *, lost: bool = False) -> ExecSessionError:
+        error = ExecSessionError(
             f"{message}\nstartup supervisor diagnostics:\n{self.startup_diagnostics()}")
+        error.supervisor_lost = lost
+        return error
 
     def _start(self, cap: ExecCapability) -> None:
         if self._closed:
@@ -481,6 +505,13 @@ class ExecSession:
                                              pass_fds=(owner_read_fd,))
             self._process_role = "launcher (bwrap)" if bwrap_executable is not None else "supervisor"
             capture_launch_identity(self._process, session_leader=True)
+            if getattr(cap, "purpose", None) == "probe":
+                # Diagnostics may reap a killed launcher before close(). Retain its
+                # stamped family now; never reconstruct authority from a dead PID.
+                table = ProcessTable()
+                table.require_complete = True
+                self._probe_family = Descendants(
+                    self._process.pid, table, recorded_launch_identity(self._process))
         except BaseException as error:  # noqa: BLE001 - release every owner fd on launch failure
             parent.close()
             self._log.close()
@@ -507,6 +538,12 @@ class ExecSession:
         with self._lock:
             if self._closed or self._control is None:
                 raise ExecSessionError("execution session is not open")
+            family = getattr(self, "_probe_family", None)
+            if family is not None:
+                try:
+                    family.update(family.table.refresh_members(family.members))
+                except (OSError, RuntimeError, ValueError) as error:
+                    raise ExecSessionError("cannot observe probe launch unit: " + str(error)) from error
             self._next_rid += 1
             payload = json.dumps({**request, "rid": self._next_rid}, separators=(",", ":")).encode() + b"\n"
             if len(payload) > 1 << 20:
@@ -529,7 +566,8 @@ class ExecSession:
                                 "or raise STATEFRAME_EXEC_RPC_SECONDS") from error
                         if not part:
                             raise self._supervisor_error(
-                                f"execution supervisor exited; inspect {self._directory / 'supervisor.log'}")
+                                f"execution supervisor exited; inspect {self._directory / 'supervisor.log'}",
+                                lost=True)
                         self._receive.extend(part)
                         if len(self._receive) > 6 << 20:
                             raise ExecSessionError("execution supervisor response exceeds bound")
@@ -545,7 +583,8 @@ class ExecSession:
                     return value
             except OSError as error:
                 raise self._supervisor_error(
-                    f"execution supervisor communication failed: {error}") from error
+                    f"execution supervisor communication failed: {error}",
+                    lost=error.errno in {errno.EPIPE, errno.ECONNRESET, errno.ECONNABORTED}) from error
 
     def _spawn(self, argv, cap, *, cwd=None, stdin=None, mounts=None,
                armable_wall_s=None) -> JobHandle:
@@ -591,9 +630,14 @@ class ExecSession:
         lost = 0
         saw_output = False
         saw_timeout = False
+        saw_terminal_failure = False
         try:
             while True:
                 status = handle._status(True)
+                saw_terminal_failure = bool(
+                    saw_terminal_failure or status.get("probe_retry_forbidden", False)
+                    or status.get("exit_code") not in (None, 0)
+                    or status.get("output_total_bytes", 0) > cap.limits.output_bytes)
                 if status["timed_out"] and not saw_timeout:
                     saw_timeout = True
                     if on_timeout is not None:
@@ -618,8 +662,16 @@ class ExecSession:
                                       status.get("memory_limit_mechanism"),
                                       getattr(handle, "cgroup_leaf_pattern", None))
                 time.sleep(0.01)
-        except BaseException:
-            handle.stop(0.1)
+        except BaseException as error:
+            if isinstance(error, ExecSessionError):
+                # A lost channel cannot erase limits already observed for this job.
+                error.probe_retry_forbidden = bool(error.probe_retry_forbidden or saw_timeout
+                                                   or saw_terminal_failure or lost
+                                                   or total_received > cap.limits.output_bytes)
+            try:
+                handle.stop(0.1)
+            except BaseException as cleanup_error:
+                raise error from cleanup_error
             raise
 
     def stop_all(self, grace_seconds: float = 2.0) -> CleanupReport:
@@ -703,6 +755,7 @@ class ExecSession:
                             getattr(self._process, "pid", "?"), samples, ticks, len(members))
                 if verified and exited:
                     self._close_process_reaped = True
+                    self._containment_verified = True
                 else:
                     # A refused or lost control reply cannot attest to descendants, and a
                     # supervisor that did not exit is unresponsive: verify the whole launch
@@ -710,11 +763,14 @@ class ExecSession:
                     self._close_force_kill = True
                     survivors = kill_launch_unit(
                         self._process, deadline_seconds=5,
+                        **({"family": self._probe_family}
+                           if getattr(self, "_probe_family", None) is not None else {}),
                         launch_identity=recorded_launch_identity(self._process),
                         reason=("session_close_unattested" if exited
                                 else "session_close_deadline"))
                     self._close_unit_killed = True
                     self._close_process_reaped = not survivors
+                    self._containment_verified = survivors == ()
                     if not survivors:
                         self._close_stop_done = True
                     if survivors or not exited:
@@ -741,6 +797,10 @@ class ExecSession:
                         self._process._stateframe_launch_identity = replace(identity, pidfd=None)
         if self._log is not None and not self._log.closed:
             attempt(self._log.close)
+        family = getattr(self, "_probe_family", None)
+        if self.containment_verified and family is not None:
+            if family.private_pid_namespace_pin is not None:
+                attempt(family.private_pid_namespace_pin.close)
         if errors:
             if stop_error is not None:
                 # Lead with the failure that made cleanup unverified, as callers did

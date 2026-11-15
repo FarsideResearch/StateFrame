@@ -1,0 +1,58 @@
+{
+  "subframes": [
+    {
+      "check": {
+        "tests": [
+          "tests/test_pricing.py"
+        ]
+      },
+      "id": "fix_pricing",
+      "model_class": "str_replace",
+      "owns": [
+        "shop/pricing.py"
+      ],
+      "reads": [
+        "tests/test_pricing.py"
+      ],
+      "requirements": [
+        "A 10% promotion with a $20 minimum applies when cart totals exactly $20; minimum threshold is inclusive."
+      ]
+    },
+    {
+      "check": {
+        "tests": [
+          "tests/test_shipping.py"
+        ]
+      },
+      "id": "fix_shipping",
+      "model_class": "str_replace",
+      "owns": [
+        "shop/shipping.py"
+      ],
+      "reads": [
+        "tests/test_shipping.py"
+      ],
+      "requirements": [
+        "A 12x12x10 inch carton weighing 2 pounds bills at 9 pounds (dimensional weight = volume/166)."
+      ]
+    },
+    {
+      "check": {
+        "tests": [
+          "tests/test_invoicing.py"
+        ]
+      },
+      "id": "fix_invoicing",
+      "model_class": "str_replace",
+      "owns": [
+        "shop/invoicing.py"
+      ],
+      "reads": [
+        "tests/test_invoicing.py"
+      ],
+      "requirements": [
+        "An invoice for a taxable 10-cent item at 5% tax should show 1 cent (round half up)."
+      ]
+    }
+  ]
+}

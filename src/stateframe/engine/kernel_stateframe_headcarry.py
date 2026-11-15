@@ -8,6 +8,7 @@ import json
 import os
 import re
 import stat
+import sys
 from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path, PurePosixPath
@@ -522,6 +523,11 @@ def render_headcarry(
                                      producer="kernel_stateframe_headcarry")
 
     primary, roles = _requested_paths(open_sites, applied_edits, owed_reads)
+    unit_module = sys.modules.get("kernel_unit_policy")
+    unit_policy = unit_module.active() if unit_module is not None else None
+    if unit_policy is not None:
+        primary = [path for path in primary if unit_policy.visible(path)]
+        roles = {path: role for path, role in roles.items() if unit_policy.visible(path)}
     owed_revisions, owed_weights = _owed_read_requirements(owed_reads)
     unavailable = 0
     imports: Counter[str] = Counter()
@@ -540,6 +546,8 @@ def render_headcarry(
         if isinstance(targets, UnavailableEvidence):
             return targets
         for dependency, count in targets.items():
+            if unit_policy is not None and not unit_policy.visible(dependency):
+                continue
             imports[dependency] += count
             first_reference.setdefault(dependency, reference_order)
             reference_order += 1

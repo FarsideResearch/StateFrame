@@ -13,3 +13,8 @@
 **Mechanisms over instructions.** When behavior matters, the engine enforces it in code (tool menus, guards, budgets) rather than asking the model in prose. Prose can be ignored; a guard cannot.
 
 **Local first and safe by default.** Loopback endpoints only unless you opt in, work on a copy, sandboxed commands without network, and changes to your repository only when you ask.
+
+**Parallel processing keeps one authority.** The parent projects a bounded frame for each subframe and accepts only a
+sealed proposal that passes scope and contract checks. A durable transaction publishes its files and receipt into
+the parent state before any dependent subframe starts. These are bounded child runs, not independently steered agents; see
+[Subframes](subframes.md).

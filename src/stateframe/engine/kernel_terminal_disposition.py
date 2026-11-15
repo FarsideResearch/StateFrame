@@ -164,6 +164,10 @@ def _stop_reason(result: Mapping[str, object], terminal: str, *, accepted: bool)
         return aliases[value]
     if accepted:
         return "DONE"
+    if terminal == "INCOMPLETE":
+        # A plain incomplete terminal is not a finalization error. Labelling it one let the
+        # lattice's failure rank override the real INCOMPLETE result once failures outranked it.
+        return "RUN_INCOMPLETE"
     if terminal in _ENVIRONMENT_RESULTS:
         return "RESOURCE_EXHAUSTION"
     return "FINALIZATION_ERROR"

@@ -46,6 +46,10 @@ The run's history lives in the run directory on disk, not in process memory, and
 
 The tool tape records intent before execution and completion afterward for shell, job, Git, web and custom calls. Native file operations follow the existing edit replay path. Read-only observations are served from the tape. Reproducible taped local effects are repeated and compared with their recorded exit, workspace and environment state. Outside effects require `--replay-external`; an incomplete taped operation or mismatch refuses resume, including during checkpoint fallback. Running background jobs are not relaunched.
 
+The parent-only `parallel` tool follows the same state rule: projected subframe proposals become authoritative only
+when their validated transaction is published into the parent workspace. Resume can finish a durable transaction
+or replay a completed one without provider calls. See [Subframes](subframes.md).
+
 ## Determinism
 
 Wire-visible IDs are derived from the persisted run seed, step, identifying content and an ordinal for duplicate content at that step. Journal sequence, event IDs, random UUIDs and wall-clock values do not mint provider-visible IDs, so repeated runs with the same run seed send identical request bytes and preserve prompt-cache reuse. Volatile test and tool output (durations, memory addresses in tracebacks, run-directory paths) is normalized before the model sees it, with the raw output kept in the run journal. The model's own output is not deterministic. See KNOWN_LIMITATIONS.md.

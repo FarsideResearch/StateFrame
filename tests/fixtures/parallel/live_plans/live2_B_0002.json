@@ -1,0 +1,137 @@
+{
+  "subframes": [
+    {
+      "id": "fix_tax",
+      "outcome": "Fix calculate_tax to treat rate as percentage (divide by 100). Test: calculate_tax(100, 10) == 10.00",
+      "owns": [
+        "pricing/tax.py"
+      ],
+      "creates": [],
+      "exports": [
+        {
+          "id": "calculate_tax",
+          "path": "pricing/tax.py",
+          "symbol": "calculate_tax",
+          "signature": {
+            "kind": "function",
+            "params": [
+              {
+                "name": "subtotal",
+                "kind": "pos",
+                "has_default": false,
+                "annotation": null
+              },
+              {
+                "name": "rate",
+                "kind": "pos",
+                "has_default": false,
+                "annotation": null
+              }
+            ],
+            "returns": null,
+            "decorators": []
+          }
+        }
+      ],
+      "reads": [
+        "tests/test_tax.py"
+      ],
+      "requirements": [
+        "calculate_tax(100.00, 10) == 10.00"
+      ],
+      "check": {
+        "tests": [
+          "tests/test_tax.py"
+        ]
+      }
+    },
+    {
+      "id": "fix_discount",
+      "outcome": "Fix apply_discount to return final price (price - discount amount). Tests: apply_discount(80, 25) == 60.00, apply_discount(80, 100) == 0.00",
+      "owns": [
+        "pricing/discount.py"
+      ],
+      "creates": [],
+      "exports": [],
+      "reads": [
+        "tests/test_discount.py"
+      ],
+      "requirements": [
+        "apply_discount(80.00, 25) == 60.00",
+        "apply_discount(80.00, 100) == 0.00"
+      ],
+      "check": {
+        "tests": [
+          "tests/test_discount.py"
+        ]
+      }
+    },
+    {
+      "id": "fix_quantity",
+      "outcome": "Fix line_total to multiply unit_price by quantity. Test: line_total(3.25, 4) == 13.00",
+      "owns": [
+        "pricing/quantity.py"
+      ],
+      "creates": [],
+      "exports": [],
+      "reads": [
+        "tests/test_quantity.py"
+      ],
+      "requirements": [
+        "line_total(3.25, 4) == 13.00"
+      ],
+      "check": {
+        "tests": [
+          "tests/test_quantity.py"
+        ]
+      }
+    },
+    {
+      "id": "fix_rounding",
+      "outcome": "Fix round_cents to round to 2 decimal places. Test: round_cents(10.129) == 10.13",
+      "owns": [
+        "pricing/rounding.py"
+      ],
+      "creates": [],
+      "exports": [],
+      "reads": [
+        "tests/test_rounding.py"
+      ],
+      "requirements": [
+        "round_cents(10.129) == 10.13"
+      ],
+      "check": {
+        "tests": [
+          "tests/test_rounding.py"
+        ]
+      }
+    },
+    {
+      "id": "fix_checkout",
+      "outcome": "Fix total_with_tax to add tax from calculate_tax to subtotal. Test: total_with_tax(100, 10) == 110.00",
+      "owns": [
+        "pricing/checkout.py"
+      ],
+      "creates": [],
+      "exports": [],
+      "consumes": [
+        {
+          "export_id": "calculate_tax",
+          "path": "pricing/tax.py",
+          "symbol": "calculate_tax"
+        }
+      ],
+      "reads": [
+        "tests/test_checkout.py"
+      ],
+      "requirements": [
+        "total_with_tax(100.00, 10) == 110.00"
+      ],
+      "check": {
+        "tests": [
+          "tests/test_checkout.py"
+        ]
+      }
+    }
+  ]
+}

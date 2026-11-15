@@ -1,6 +1,7 @@
 """Repository tests import the checkout's product package and engine modules."""
 import sys
 import importlib.metadata
+import json
 import os
 import shutil
 import subprocess
@@ -278,6 +279,20 @@ def _fresh_auth_identity_cache():
                 module._AUTH_BINDING_SECRET_CACHE.clear()
                 module._AUTH_BINDING_FALLBACK_SECRET = None
     yield
+
+
+@pytest.fixture
+def shipped_runtime_profile(monkeypatch):
+    """Install shipped engine switches, excluding the launcher-only test policy."""
+    profile = json.loads((ROOT / "src/stateframe/profiles/r2hc3.json").read_text())
+    switches = profile["switches"]
+    assert switches["STATEFRAME_F4"] == "on"
+    assert switches["STATEFRAME_FRAMEFIT"] == "on"
+    assert "STATEFRAME_PROTECT_TESTS" in switches
+    for key, value in switches.items():
+        if key != "STATEFRAME_PROTECT_TESTS":
+            monkeypatch.setenv(key, value)
+    return switches
 
 
 @pytest.fixture

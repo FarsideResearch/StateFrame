@@ -1,8 +1,7 @@
 """Engine child process: runs one StateFrame task from a prepared run directory.
 
-Started by ``stateframe run`` as ``<python> -B _child.py <run-dir>``. It imports nothing
-from the ``stateframe`` package (so it can run under the user's own project interpreter),
-only stdlib-only sibling helpers and the vendored engine directory named in the spec.
+Started by ``stateframe run`` as ``<python> -B _child.py <run-dir>``. It uses
+stdlib-only package helpers and the vendored engine directory named in the spec.
 
 What it adds around the engine, mirroring the lab release runner's ``checked_ask``:
 * the declared environment (product profile + run settings) is installed before any
@@ -22,23 +21,38 @@ import stat
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import traceback
 import urllib.request
+from contextlib import suppress
 from pathlib import Path
 
 if __package__:
     from .cache_metrics import normalize
     from .engine import kernel_reason_log as _reason_log
     from .engine.kernel_safe_paths import safe_home
-    from .replay_tape import CheckpointUnfaithful, ReplayUnfaithful, Replayer, mask_volatile
+    from .replay_tape import (
+        CheckpointUnfaithful,
+        Replayer,
+        ReplayUnfaithful,
+        mask_volatile,
+    )
     from .skills import SkillError, skills_digest, verify_records
     from .state_dirs import private_directory
 else:  # Executed by path under the selected project interpreter.
+    # The interpreter may also have another StateFrame installation. Package
+    # imports used by subframes must belong to this child and its adjacent engine.
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
     from cache_metrics import normalize
     from engine import kernel_reason_log as _reason_log
     from engine.kernel_safe_paths import safe_home
-    from replay_tape import CheckpointUnfaithful, ReplayUnfaithful, Replayer, mask_volatile
+    from replay_tape import (
+        CheckpointUnfaithful,
+        Replayer,
+        ReplayUnfaithful,
+        mask_volatile,
+    )
     from skills import SkillError, skills_digest, verify_records
     from state_dirs import private_directory
 
@@ -74,6 +88,26 @@ def recorded_stable_wire_decision(recorded: bytes | None) -> str | None:
     if is_stable_wire_projection(messages, recorded=True):
         return "applied"
     return "plain" if stable_wire_mode() == "on" else None
+
+
+def _failed_send_record(send: int, wire: bytes, layout: dict[str, object],
+                        stable_record: dict[str, object],
+                        transport_attempts: list[dict[str, object]], error: BaseException,
+                        endpoint_identity: dict[str, str] | None) -> dict[str, object]:
+    """Build the durable sends.jsonl row for an unsuccessful physical send."""
+    record: dict[str, object] = {
+        "send": send,
+        "request_bytes": len(wire),
+        "request_sha256": hashlib.sha256(wire).hexdigest(),
+        **layout,
+        **stable_record,
+        "transport_attempts": transport_attempts,
+        "error": type(error).__name__,
+    }
+    if endpoint_identity is not None:
+        record["endpoint_identity"] = dict(endpoint_identity)
+    return record
+
 
 def _start_resumed_deadline() -> None:
     """Once replay is over, give the run the time it had left, counted from now (once)."""
@@ -198,6 +232,48 @@ def _selected_resume_checkpoint(resume: dict | None) -> dict | None:
     return checkpoint
 
 
+def configure_subframe_slot(run: Path, leased_slot: int, *, pinned: bool,
+                            replayer: Replayer | None) -> int | None:
+    """Preserve a recorded pin on replay; use the current endpoint policy for live sends."""
+    historical_slot = run / "parallel-slot.json"
+    if historical_slot.exists() or historical_slot.is_symlink():
+        if historical_slot.is_symlink() or not historical_slot.is_file():
+            raise RuntimeError("subframe historical slot artifact is unsafe")
+        try:
+            with historical_slot.open("rb") as source:
+                recorded = source.read(257)
+            if len(recorded) > 256:
+                raise RuntimeError("subframe historical slot artifact exceeds 256 bytes")
+            slot_record = json.loads(recorded)
+        except (OSError, UnicodeError, ValueError) as error:
+            raise RuntimeError("subframe historical slot artifact is unreadable or invalid") from error
+        if not isinstance(slot_record, dict) or set(slot_record) not in ({"slot"}, {"slot", "pinned"}):
+            raise RuntimeError("subframe historical slot artifact has invalid fields")
+        old_slot = slot_record.get("slot")
+        if type(old_slot) is not int or old_slot < 0:
+            raise RuntimeError("subframe historical slot artifact is invalid")
+        historical_pinned = slot_record.get("pinned", True)
+        if type(historical_pinned) is not bool:
+            raise RuntimeError("subframe historical slot pin status is invalid")
+    else:
+        if replayer is not None:
+            raise RuntimeError("subframe historical slot artifact is missing for replay")
+        old_slot = leased_slot
+        historical_pinned = pinned
+        with historical_slot.open("x", encoding="utf-8") as output:
+            output.write(json.dumps({"slot": old_slot, "pinned": historical_pinned}))
+            output.flush()
+            os.fsync(output.fileno())
+    live_slot = leased_slot if pinned else None
+    replaying = replayer is not None and (replayer.active or replayer.pending is not None)
+    active_slot = (old_slot if historical_pinned else None) if replaying else live_slot
+    if active_slot is None:
+        os.environ.pop("REACT_SLOT_ID", None)
+    else:
+        os.environ["REACT_SLOT_ID"] = str(active_slot)
+    return live_slot
+
+
 def _install_direct_opener() -> None:
     if __package__:
         from .engine.kernel_redirect_policy import (
@@ -269,8 +345,13 @@ def _actions(response: object) -> list[str]:
     return out[:16] + (["actions truncated"] if truncated else [])
 
 
+class SubframeBudgetExhausted(BaseException):
+    """A subframe has no reserved physical sends left."""
+
+
 def install_wire_recorder(run: Path, chat_url: str, replayer: Replayer | None = None,
-                          routed_endpoints: set[str] | None = None, hook_wiring=None) -> None:
+                          routed_endpoints: set[str] | None = None, hook_wiring=None,
+                          *, send_ledger=None, send_cap: int | None = None) -> None:
     """Record every physical chat send: exact identity bytes, response bytes, usage.
 
     On ``stateframe resume`` a send the interrupted attempt already completed is answered from its
@@ -338,6 +419,21 @@ def install_wire_recorder(run: Path, chat_url: str, replayer: Replayer | None = 
     original = kernel_bounded_http.request_bytes
     counter = {"n": 0}
     HOST_STATE["wire"] = counter
+    wire_lock = threading.Lock()
+
+    def route_identity(wire: bytes, endpoint: str) -> dict[str, str]:
+        try:
+            from .endpoint import normalize_base_url
+        except ImportError:
+            from stateframe.endpoint import normalize_base_url
+        try:
+            body = json.loads(wire)
+        except (ValueError, UnicodeDecodeError) as error:
+            raise ValueError("subframe model request is not valid JSON") from error
+        model = body.get("model") if isinstance(body, dict) else None
+        if not isinstance(model, str) or not model:
+            raise ValueError("subframe model request lacks a model identity")
+        return {"url": normalize_base_url(endpoint), "model": model}
 
     def final_layout_record(_wire: bytes) -> dict[str, str]:
         from kernel_measurement import ACTIVE_REQUEST
@@ -366,7 +462,7 @@ def install_wire_recorder(run: Path, chat_url: str, replayer: Replayer | None = 
 
     def recorded(wire: bytes, endpoint: str, key: str, **kwargs):
         route = kwargs.pop("route_meta", None)
-        if routed_endpoints is None and endpoint != chat_url:
+        if send_ledger is None and routed_endpoints is None and endpoint != chat_url:
             return original(wire, endpoint, key, **kwargs)
         if routed_endpoints is not None:
             if endpoint not in routed_endpoints or not isinstance(route, dict):
@@ -379,120 +475,174 @@ def install_wire_recorder(run: Path, chat_url: str, replayer: Replayer | None = 
                 raise ValueError("routed send has no valid model field") from error
             if wire_model != route.get("model"):
                 raise ValueError("routed send model differs from route authority")
-        if replayer is not None and replayer.strict and replayer.diverged is not None:
-            raise CheckpointUnfaithful(
-                "This recording can't be replayed by this version. Start a fresh run. "
-                "an earlier rebuilt request differed; nothing more is sent")
-        if replayer is not None and replayer.route_mismatch:
-            raise CheckpointUnfaithful(
-                "This recording can't be replayed by this version. Start a fresh run. "
-                "an earlier routed replay differed; nothing more is sent")
-        counter["n"] += 1
-        index = counter["n"]
-        stem = wire_dir / f"{index:04d}"
-        from kernel_measurement import ACTIVE_REQUEST
-        from kernel_stable_wire_record import validate_reserves_record
+        with wire_lock:
+            if replayer is not None and replayer.strict and replayer.diverged is not None:
+                raise CheckpointUnfaithful("This recording can't be replayed by this version. Start a fresh run. "
+                    "an earlier rebuilt request differed; nothing more is sent")
+            if replayer is not None and replayer.route_mismatch:
+                raise CheckpointUnfaithful("This recording can't be replayed by this version. Start a fresh run. "
+                    "an earlier routed replay differed; nothing more is sent")
+            counter["n"] += 1
+            index = counter["n"]
+            stem = wire_dir / f"{index:04d}"
+            from kernel_measurement import ACTIVE_REQUEST
+            from kernel_stable_wire_record import validate_reserves_record
 
-        reserves = validate_reserves_record(
-            getattr(ACTIVE_REQUEST.get(), "_stable_wire_reserves_record", None))
-        stable_record = {"stable_wire_reserves": reserves} if reserves is not None else {}
-        if reserves is not None:
-            # fsync before publishing the request, so a pending send has its trim authority.
-            atomic_bytes(stem.with_suffix(".stable-wire.json"), json.dumps(
-                reserves, sort_keys=True, separators=(",", ":")).encode())
-        if routed_endpoints is not None:
-            atomic_bytes(stem.with_suffix(".route.json"), json.dumps(
-                route, sort_keys=True, separators=(",", ":")).encode())
-            atomic_bytes(stem.with_suffix(".request.json"), wire)
-        else:
-            atomic_bytes(stem.with_suffix(".request.json"), wire)
-        # The live countdown is not on the wire; a resume reads it from this private sidecar.
-        from kernel_read_fixes import sandbox_time_left
-        time_left = sandbox_time_left()
-        if time_left is not None:
-            atomic_bytes(stem.with_suffix(".time-left.json"), json.dumps(
-                time_left, sort_keys=True, separators=(",", ":")).encode())
-        started = time.monotonic()
-        replayed = None
-        # An in-flight request to verify keeps the replayer in the path even with no tail left to answer.
-        if replayer is not None and (replayer.active or replayer.pending is not None):
-            replayed = replayer.answer(wire, route=route)
-            if routed_endpoints is not None and replayer.pending_verified is not None:
-                atomic_bytes(run / "resume-pending-verified.json", json.dumps(
-                    replayer.pending_verified, sort_keys=True, separators=(",", ":")).encode())
-            if replayed is None and replayer.diverged is not None:
-                atomic_bytes(run / "resume-divergence.json", json.dumps(
-                    {**replayer.diverged, "send": index, "checkpoint": replayer.strict}, indent=1).encode())
-                if routed_endpoints is not None and replayer.route_mismatch:
-                    raise CheckpointUnfaithful(
-                        "This recording can't be replayed by this version. Start a fresh run. "
-                        f"send {index}: {replayer.diverged['reason']}")
-                if replayer.strict:
-                    emit("checkpoint_unfaithful", send=index, **{k: v for k, v in replayer.diverged.items()
-                                                                 if k != "first_difference"})
-                    atomic_bytes(run / "checkpoint-refused.json", json.dumps(
-                        {"error": "CheckpointUnfaithful", "send": index,
-                         "reason": replayer.diverged["reason"]}, indent=1).encode())
-                    raise CheckpointUnfaithful(
-                        "This recording can't be replayed by this version. Start a fresh run. "
-                        f"send {index}: {replayer.diverged['reason']}")
-                if replayer.pending_mismatch:
-                    # No answer exists for this send. Retire replay authority before
-                    # handing the rebuilt request to the live transport.
-                    fields = {k: v for k, v in replayer.diverged.items()
-                              if k != "first_difference"}
-                    from kernel_measurement import ACTIVE_REQUEST
-                    capture = ACTIVE_REQUEST.get()
-                    journal = getattr(capture, "journal", None)
-                    if journal is not None:
-                        journal.emit("replay_pending_discarded", send=index, **fields)
-                    emit("replay_pending_discarded", send=index, **fields)
-                    from kernel_tool_tape import end_replay
-                    end_replay()
+            reserves = validate_reserves_record(
+                getattr(ACTIVE_REQUEST.get(), "_stable_wire_reserves_record", None))
+            stable_record = {"stable_wire_reserves": reserves} if reserves is not None else {}
+            if reserves is not None:
+                # fsync before publishing the request, so a pending send has its trim authority.
+                atomic_bytes(stem.with_suffix(".stable-wire.json"), json.dumps(
+                    reserves, sort_keys=True, separators=(",", ":")).encode())
+            identity = route_identity(wire, endpoint) if send_ledger is not None else None
+            if identity is not None:
+                identity_path = wire_dir / f"{index:04d}.endpoint.json"
+                encoded_identity = json.dumps(identity, sort_keys=True, separators=(",", ":")).encode()
+                try:
+                    with identity_path.open("xb") as output:
+                        output.write(encoded_identity)
+                        output.flush()
+                        os.fsync(output.fileno())
+                except FileExistsError:
+                    if identity_path.is_symlink() or identity_path.read_bytes() != encoded_identity:
+                        raise ValueError("subframe wire endpoint identity changed for an existing send") from None
+            request_path = stem.with_suffix(".request.json")
+            if routed_endpoints is not None:
+                atomic_bytes(stem.with_suffix(".route.json"), json.dumps(
+                    route, sort_keys=True, separators=(",", ":")).encode())
+            if identity is not None and request_path.exists():
+                if request_path.is_symlink() or request_path.read_bytes() != wire:
+                    raise ValueError("subframe wire request changed for an existing send")
+            elif routed_endpoints is not None:
+                atomic_bytes(request_path, wire)
+            else:
+                atomic_bytes(request_path, wire)
+            # The live countdown is not on the wire; a resume reads it from this private sidecar.
+            from kernel_read_fixes import sandbox_time_left
+            time_left = sandbox_time_left()
+            if time_left is not None:
+                atomic_bytes(stem.with_suffix(".time-left.json"), json.dumps(
+                    time_left, sort_keys=True, separators=(",", ":")).encode())
+            started = time.monotonic()
+            replayed = None
+            # The abandoned single-worker retry path can overlap sends; keep replay state serial too.
+            if replayer is not None and (replayer.active or replayer.pending is not None):
+                replayed = replayer.answer(wire, route=route, endpoint_identity=identity)
+                if routed_endpoints is not None and replayer.pending_verified is not None:
+                    atomic_bytes(run / "resume-pending-verified.json", json.dumps(
+                        replayer.pending_verified, sort_keys=True, separators=(",", ":")).encode())
+                if replayed is None and replayer.diverged is not None:
+                    atomic_bytes(run / "resume-divergence.json", json.dumps(
+                        {**replayer.diverged, "send": index, "checkpoint": replayer.strict}, indent=1).encode())
+                    if routed_endpoints is not None and replayer.route_mismatch:
+                        raise CheckpointUnfaithful("This recording can't be replayed by this version. Start a fresh run. "
+                            f"send {index}: {replayer.diverged['reason']}")
+                    if identity is not None:
+                        from kernel_tool_tape import ToolReplayRefused
+                        raise ToolReplayRefused(f"send {index}: {replayer.diverged['reason']}")
+                    if replayer.strict:
+                        emit("checkpoint_unfaithful", send=index, **{k: v for k, v in replayer.diverged.items()
+                                                                     if k != "first_difference"})
+                        atomic_bytes(run / "checkpoint-refused.json", json.dumps(
+                            {"error": "CheckpointUnfaithful", "send": index,
+                             "reason": replayer.diverged["reason"]}, indent=1).encode())
+                        raise CheckpointUnfaithful("This recording can't be replayed by this version. Start a fresh run. "
+                            f"send {index}: {replayer.diverged['reason']}")
+                    if replayer.pending_mismatch:
+                        # No answer exists for this send. Retire replay authority before
+                        # handing the rebuilt request to the live transport.
+                        fields = {k: v for k, v in replayer.diverged.items()
+                                  if k != "first_difference"}
+                        from kernel_measurement import ACTIVE_REQUEST
+                        capture = ACTIVE_REQUEST.get()
+                        journal = getattr(capture, "journal", None)
+                        if journal is not None:
+                            journal.emit("replay_pending_discarded", send=index, **fields)
+                        emit("replay_pending_discarded", send=index, **fields)
+                        from kernel_tool_tape import end_replay
+                        end_replay()
+                        _start_resumed_deadline()
+                    else:
+                        raise ReplayUnfaithful("This recording can't be replayed by this version. Start a fresh run. "
+                            f"send {index}: {replayer.diverged['reason']}")
+                elif replayed is not None and not replayer.active:
+                    emit("replay_done", send=index, replayed=replayer.cursor)
+                    # The next request is the first one built live: it shows the resumed time left.
                     _start_resumed_deadline()
-                else:
-                    raise ReplayUnfaithful(
-                        "This recording can't be replayed by this version. Start a fresh run. "
-                        f"send {index}: {replayer.diverged['reason']}")
-            elif replayed is not None and not replayer.active:
-                emit("replay_done", send=index, replayed=replayer.cursor)
-                # The next request is the first one built live: it shows the resumed time left.
+                if replayer.strict and replayer.diverged is None and not replayer.active \
+                        and replayer.pending is None \
+                        and not getattr(replayer, "verified_emitted", False):
+                    replayer.verified_emitted = True
+                    emit("checkpoint_verified", send=index, replayed=replayer.cursor)
+            elif replayer is not None:
+                from kernel_tool_tape import end_replay
+                end_replay()
                 _start_resumed_deadline()
-            if replayer.strict and replayer.diverged is None and not replayer.active \
-                    and replayer.pending is None \
-                    and not getattr(replayer, "verified_emitted", False):
-                replayer.verified_emitted = True
-                emit("checkpoint_verified", send=index, replayed=replayer.cursor)
-        elif replayer is not None:
-            from kernel_tool_tape import end_replay
-            end_replay()
-            _start_resumed_deadline()
-        if (replayer is not None and replayed is None and replayer.diverged is None
-                and not replayer.active and replayer.pending is None):
-            from kernel_tool_tape import end_replay
-            end_replay()
-            _start_resumed_deadline()
+            if (replayer is not None and replayed is None and replayer.diverged is None
+                    and not replayer.active and replayer.pending is None):
+                from kernel_tool_tape import end_replay
+                end_replay()
+                _start_resumed_deadline()
+            replay_position = replayer.cursor if replayer is not None else None
+            replay_total = len(replayer.tape) if replayer is not None else None
+        authorized_ids: list[str] = []
+        def before_attempt(attempt_index: int) -> None:
+            if send_cap is None:
+                raise SubframeBudgetExhausted("BUDGET_EXHAUSTED: subframe physical send allowance is exhausted")
+            send_id = (f"{os.environ.get('SF_SUBFRAME_INCARNATION', '0')}:{os.getpid()}:"
+                       f"{index}:{attempt_index}:"
+                       f"{hashlib.sha256(wire).hexdigest()[:20]}")
+            if not send_ledger.authorize_with_cap(send_id, send_cap):
+                raise SubframeBudgetExhausted("BUDGET_EXHAUSTED: subframe physical send allowance is exhausted")
+            authorized_ids.append(send_id)
+
+        def settle_attempts(attempts: list[dict[str, object]], usage: dict[str, object]) -> None:
+            for position, send_id in enumerate(authorized_ids[:len(attempts)]):
+                send_ledger.settle(send_id, usage if position == len(attempts) - 1 else {})
+
+        def settle_after_error(send: int, attempts: list[dict[str, object]]) -> None:
+            if send_ledger is None:
+                return
+            try:
+                settle_attempts(attempts, {})
+            except BaseException as settlement_error:  # noqa: BLE001 - preserve the active send error
+                error_name = type(settlement_error).__name__
+                # Best-effort reporting must not replace the transport or budget exception.
+                with suppress(BaseException), wire_lock:
+                    atomic_bytes(wire_dir / f"{send:04d}.settle-error.txt",
+                                 (error_name + "\n").encode("utf-8"))
+                with suppress(BaseException):
+                    emit("send_settlement_error", send=send, error=error_name)
+
         transport_attempts: list[dict[str, object]] = []
         try:
             response = (replayed if replayed is not None else original(
                 wire, endpoint, key, record_attempts=transport_attempts.extend,
+                **({"before_attempt": before_attempt} if send_ledger is not None else {}),
                 **({**kwargs, "route_meta": route} if routed_endpoints is not None else kwargs)))
         except Exception as error:
+            settle_after_error(index, transport_attempts)
             detail = getattr(error, "error_detail", None)
             detail = detail if isinstance(detail, str) and detail else None
-            atomic_bytes(
-                wire_dir / f"{index:04d}.error.txt",
-                (type(error).__name__ + (f": {detail}" if detail else "") + "\n").encode("utf-8"))
+            error_path = wire_dir / f"{index:04d}.error.txt"
+            error_text = type(error).__name__ + (f": {detail}" if detail else "") + "\n"
             if transport_attempts:
-                with (run / "sends.jsonl").open("a") as stream:
-                    stream.write(json.dumps({"send": index, "request_bytes": len(wire),
-                                             "request_sha256": hashlib.sha256(wire).hexdigest(),
-                                             **final_layout_record(wire),
-                                             **stable_record,
-                                             "transport_attempts": transport_attempts,
-                                             "error": type(error).__name__}) + "\n")
+                with wire_lock, (run / "sends.jsonl").open("a") as stream:
+                    atomic_bytes(error_path, error_text.encode("utf-8"))
+                    stream.write(json.dumps(_failed_send_record(
+                        index, wire, final_layout_record(wire), stable_record,
+                        transport_attempts, error, identity)) + "\n")
+            else:
+                with wire_lock:
+                    atomic_bytes(error_path, error_text.encode("utf-8"))
             emit("send_error", send=index, error=type(error).__name__,
                  **({"detail": detail} if detail else {}))
+            raise
+        except SubframeBudgetExhausted:
+            settle_after_error(index, transport_attempts)
+            with wire_lock:
+                atomic_bytes(wire_dir / f"{index:04d}.error.txt", b"SubframeBudgetExhausted\n")
             raise
         if hook_wiring is not None:
             from kernel_measurement import ACTIVE_REQUEST
@@ -500,12 +650,15 @@ def install_wire_recorder(run: Path, chat_url: str, replayer: Replayer | None = 
             request_id = getattr(capture, "request_id", None)
             hook_wiring.sent(wire, str(request_id) if request_id is not None else f"send:{index}")
         elapsed = time.monotonic() - started
-        atomic_bytes(stem.with_suffix(".response.json"), response)
+        with wire_lock:
+            atomic_bytes(stem.with_suffix(".response.json"), response)
         try:
             parsed = json.loads(response)
         except (ValueError, RecursionError):
             parsed = None
         usage = _usage(parsed)
+        if send_ledger is not None and replayed is None:
+            settle_attempts(transport_attempts, usage)
         try:
             body = json.loads(wire)
         except (ValueError, RecursionError):
@@ -517,11 +670,13 @@ def install_wire_recorder(run: Path, chat_url: str, replayer: Replayer | None = 
                   **final_layout_record(wire),
                   **stable_record,
                   "seconds": round(elapsed, 3), **usage, "actions": _actions(parsed)}
+        if identity is not None:
+            record["endpoint_identity"] = identity
         if replayed is not None:
-            record.update(replayed=True, replay_position=replayer.cursor, replay_total=len(replayer.tape))
+            record.update(replayed=True, replay_position=replay_position, replay_total=replay_total)
         if transport_attempts:
             record["transport_attempts"] = transport_attempts
-        with (run / "sends.jsonl").open("a") as stream:
+        with wire_lock, (run / "sends.jsonl").open("a") as stream:
             stream.write(json.dumps(record) + "\n")
         emit("send", **record)
         return response
@@ -556,7 +711,10 @@ def install_token_count_warning() -> None:
     RequestTokenMeter.measure = measured
 
 
-def install_checked_ask(rr, spec: dict, run: Path, hook_wiring=None) -> None:
+def install_checked_ask(rr, spec: dict, run: Path, hook_wiring=None, *,
+                        live_slot: int | None = None,
+                        replayer: Replayer | None = None,
+                        managed_slot: bool = False) -> None:
     """The release runner's provider callback contract, minus the lab release fences."""
     original_ask = rr.ask_tools
     requests_dir = run / "requests"
@@ -639,6 +797,11 @@ def install_checked_ask(rr, spec: dict, run: Path, hook_wiring=None) -> None:
             messages, presentation = preflight_presentation_or_degrade(
                 messages, engine_spec, runtime, tools=tools, **extra)
             record_preflight(messages, tools, presentation)
+        if replayer is None or (not replayer.active and replayer.pending is None):
+            if live_slot is not None:
+                os.environ["REACT_SLOT_ID"] = str(live_slot)
+            elif managed_slot:
+                os.environ.pop("REACT_SLOT_ID", None)
         return original_ask(messages, **kwargs)
 
     import inspect
@@ -668,7 +831,43 @@ def install_checked_ask(rr, spec: dict, run: Path, hook_wiring=None) -> None:
 CAPTURE_SKIP_PARTS = {"__pycache__", ".pytest_cache", ".test-tmp"}
 
 
-def install_repo_context(rr, parent: Path) -> None:
+def _copy_shared_context_file(source: Path, destination: Path, *, mode: int) -> None:
+    """Clone immutable snapshot bytes to a private inode, reflinking blocks when supported."""
+    import shutil
+
+    if sys.platform == "linux":
+        created = False
+        try:
+            import fcntl
+
+            source_fd = os.open(source, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+            try:
+                source_stat = os.fstat(source_fd)
+                destination_fd = os.open(
+                    destination, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+                created = True
+                try:
+                    fcntl.ioctl(destination_fd, 0x40049409, source_fd)
+                    os.fchmod(destination_fd, mode)
+                    os.utime(destination, ns=(source_stat.st_atime_ns, source_stat.st_mtime_ns))
+                    return
+                finally:
+                    os.close(destination_fd)
+            finally:
+                os.close(source_fd)
+        except FileExistsError as error:
+            raise RuntimeError("shared subframe context destination appeared during cloning") from error
+        except OSError:
+            if created:
+                destination.unlink(missing_ok=True)
+    shutil.copy2(source, destination)
+    destination.chmod(mode)
+
+
+def install_repo_context(rr, parent: Path, *, shared_snapshot: Path | None = None,
+                         snapshot_manifest_digest: str | None = None,
+                         source_manifest_digest: str | None = None,
+                         excluded_paths: tuple[str, ...] = ()) -> None:
     """Put the whole repository into the engine's sandbox, not only the declared files.
 
     The engine's multi-file branch builds a fresh root from the declared files and public tests.
@@ -678,27 +877,113 @@ def install_repo_context(rr, parent: Path) -> None:
     """
     import shutil
 
+    shared_manifest = None
+    if shared_snapshot is not None:
+        if not isinstance(snapshot_manifest_digest, str) or not isinstance(source_manifest_digest, str):
+            raise RuntimeError("shared subframe context lacks authenticated manifest identities")
+        try:
+            try:
+                from .parallel_worker import read_snapshot_manifest
+            except ImportError:
+                from stateframe.parallel_worker import read_snapshot_manifest
+            shared_manifest = read_snapshot_manifest(
+                shared_snapshot, snapshot_manifest_digest, verify_contents=False,
+                verify_inventory=False)
+        except (OSError, ImportError, RuntimeError, ValueError) as error:
+            raise RuntimeError(f"shared subframe context snapshot is invalid: {error}") from error
+        if shared_manifest.source_digest != source_manifest_digest:
+            raise RuntimeError("shared subframe context source digest differs from the unit start")
+        for relative in shared_manifest.directories:
+            directory = Path(shared_snapshot) / relative
+            if (directory.is_symlink() or not directory.is_dir()
+                    or stat.S_IMODE(directory.stat().st_mode) != 0o555):
+                raise RuntimeError(f"shared subframe context directory is unsafe: {relative}")
+        if any(not isinstance(path, str) or not path or path.startswith("/") or "\\" in path
+               or any(part in {"", ".", ".."} for part in path.split("/"))
+               for path in excluded_paths):
+            raise RuntimeError("shared subframe context exclusions contain an unsafe path")
+    excluded = frozenset(excluded_paths)
+
     original = rr._materialize_public_tests
     done: dict[str, Path] = {}
     HOST_STATE["repo_context"] = done
 
     def materialize(root, fileset, row):
-        root = Path(root).resolve()
+        raw_root = Path(root)
+        if shared_manifest is not None and raw_root.is_symlink():
+            raise RuntimeError("shared subframe context sandbox root is a symlink")
+        root = raw_root.resolve()
         if done and done["root"] != root:
             raise RuntimeError("engine switched sandbox roots mid-run")
         if not done:
-            for source in sorted(parent.rglob("*")):
-                rel = source.relative_to(parent)
-                if source.is_symlink() or not source.is_file() or CAPTURE_SKIP_PARTS & set(rel.parts):
-                    continue
-                destination = root / rel
-                if destination.exists():
-                    continue
-                destination.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(source, destination)
-                # The engine rewrites public tests in its own sandbox copy; a read-only source file (A10
-                # fixtures ship protected tests as 0444) must not make that copy unwritable. Sandbox only.
-                destination.chmod(destination.stat().st_mode | stat.S_IWUSR)
+            if shared_manifest is not None:
+                shared_root = Path(shared_snapshot)
+                for relative, original_mode in shared_manifest.files.items():
+                    rel = Path(relative)
+                    if relative in excluded or CAPTURE_SKIP_PARTS & set(rel.parts):
+                        continue
+                    source = shared_root / rel
+                    destination = root / rel
+                    try:
+                        source_mode = source.lstat().st_mode
+                    except OSError as error:
+                        raise RuntimeError(
+                            f"shared subframe context file is missing: {relative}") from error
+                    if not stat.S_ISREG(source_mode) or stat.S_IMODE(source_mode) != 0o444:
+                        raise RuntimeError(f"shared subframe context file is unsafe: {relative}")
+                    destination_parent = root
+                    for part in rel.parts[:-1]:
+                        destination_parent = destination_parent / part
+                        if destination_parent.is_symlink():
+                            raise RuntimeError(
+                                "shared subframe context destination contains a symlink")
+                        if destination_parent.exists():
+                            if not destination_parent.is_dir():
+                                raise RuntimeError(
+                                    "shared subframe context destination parent is not a directory")
+                        else:
+                            destination_parent.mkdir()
+                    if destination.is_symlink():
+                        raise RuntimeError(
+                            "shared subframe context destination is a symlink")
+                    if destination.exists():
+                        continue
+                    try:
+                        destination.parent.resolve().relative_to(root)
+                    except ValueError as error:
+                        raise RuntimeError(
+                            "shared subframe context destination escaped its sandbox") from error
+                    ancestor = destination.parent
+                    while ancestor != root:
+                        if ancestor.is_symlink():
+                            raise RuntimeError(
+                                "shared subframe context destination contains a symlink")
+                        ancestor = ancestor.parent
+                    if original_mode & 0o111:
+                        # Executable helpers retain their source mode in the private sandbox.
+                        shutil.copy2(source, destination)
+                        destination.chmod(original_mode | stat.S_IWUSR)
+                        continue
+                    # Clone immutable snapshot bytes without exposing a mutable hardlink.
+                    # Match the old private-context mode derived from the read-only snapshot.
+                    _copy_shared_context_file(
+                        source, destination,
+                        mode=stat.S_IMODE(source_mode) | stat.S_IWUSR)
+                done["shared_snapshot"] = shared_root
+                done["shared_snapshot_digest"] = shared_manifest.digest
+            else:
+                for source in sorted(parent.rglob("*")):
+                    rel = source.relative_to(parent)
+                    if source.is_symlink() or not source.is_file() or CAPTURE_SKIP_PARTS & set(rel.parts):
+                        continue
+                    destination = root / rel
+                    if destination.exists():
+                        continue
+                    destination.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(source, destination)
+                    # The engine rewrites public tests in its own sandbox copy; a read-only source file (A10
+                    # fixtures ship protected tests as 0444) must not make that copy unwritable. Sandbox only.
+                    destination.chmod(destination.stat().st_mode | stat.S_IWUSR)
             done["root"] = root
         return original(root, fileset, row)
 
@@ -1177,6 +1462,55 @@ def main(argv: list[str]) -> int:
         except kernel_checkpoint.CheckpointError:
             emit("engine_error", error="CheckpointError", detail="STATEFRAME_HOME_IDENTITY_CHANGED")
             return 1
+    unit_spec = None
+    send_ledger = None
+    slot_lease = None
+    live_slot = None
+    send_cap = None
+    if "unit_spec" in spec:
+        from kernel_parallel_records import UnitSpec
+        from kernel_unit_policy import UnitPolicy, install as install_unit_policy
+        from kernel_check_permits import install as install_check_permits
+        try:
+            from .parallel_resources import (SendLedger, SlotHandoffDurabilityError, SlotPoolError,
+                                             idle_slots, lease_slot, parse_slot_pool, slot_candidates)
+        except ImportError:
+            from stateframe.parallel_resources import (SendLedger, SlotHandoffDurabilityError, SlotPoolError,
+                                                       idle_slots, lease_slot, parse_slot_pool, slot_candidates)
+        unit_spec = UnitSpec.from_json(spec["unit_spec"])
+        if Path(str(spec.get("parallel_engine_python", ""))).resolve() != Path(sys.executable).resolve():
+            raise RuntimeError("subframe interpreter differs from the recorded parent engine interpreter")
+        permit_root = Path(str(spec["parallel_permit_root"]))
+        install_check_permits(permit_root, unit_spec.limits.check_permits)
+        install_unit_policy(UnitPolicy(unit_spec))
+        send_ledger = SendLedger(Path(str(spec["parallel_send_ledger"])))
+        send_cap = unit_spec.limits.unit_max_requests
+        endpoint = str(spec["parallel_parent_endpoint"])
+        available = idle_slots(endpoint)
+        try:
+            pool = parse_slot_pool(spec.get("parallel_slots"), source="--parallel-slots in worker spec")
+        except SlotPoolError as error:
+            raise RuntimeError(f"invalid subframe slot pool: {error}") from error
+        prompt_cache_slot = spec.get("prompt_cache_slot")
+        parent_slot = (prompt_cache_slot.get("slot") if isinstance(prompt_cache_slot, dict)
+                       else None)
+        candidates = slot_candidates(pool, available, parent_slot,
+                                     fallback_capacity=unit_spec.limits.max_concurrency)
+        slot_lease = lease_slot(endpoint, candidates)
+        if slot_lease is None:
+            raise RuntimeError("RESOURCES_UNAVAILABLE: no subframe model slot lease is available")
+        live_slot = configure_subframe_slot(run, slot_lease.slot,
+                                            # A configured pool coordinates local concurrency even
+                                            # when the provider has no proven native slot API. Only
+                                            # /slots discovery authorizes provider slot fields.
+                                            pinned=available is not None,
+                                            replayer=replayer)
+    elif spec.get("parallel_mode", "off") != "off":
+        from kernel_check_permits import install as install_check_permits
+        limits = spec.get("parallel_limits")
+        if not isinstance(limits, dict) or type(limits.get("check_permits")) is not int:
+            raise RuntimeError("parent subframe limits are missing or invalid")
+        install_check_permits(run / "parallel" / "check-permits", limits["check_permits"])
     routed_endpoints = None
     if spec.get("routes") is not None:
         import kernel_frame_routes
@@ -1239,6 +1573,12 @@ def main(argv: list[str]) -> int:
             hook_wiring = HookWiring(run, hooks, spec, replay=replay_mode_active)
             HOST_STATE["hooks"] = hook_wiring.state
         configure_replay(run, active=bool(replayer and replayer.tape))
+        if unit_spec is None and spec.get("parallel_mode", "off") != "off":
+            from kernel_parallel import install as install_parallel
+            install_parallel(run, spec)
+            if spec.get("environment", {}).get("STATEFRAME_PARALLEL_SUGGEST") == "on":
+                from kernel_parallel_suggest import install_host_context
+                install_host_context(spec)
     except (ToolSettingsError, CustomToolError, ToolTapeError, SkillError, OSError, KeyError, ValueError) as error:
         _reason_log.emit_reason("invariant", "engine_setup_failed", "engine_child",
                                 "engine refused to start: tool or skill setup failed",
@@ -1293,13 +1633,31 @@ def main(argv: list[str]) -> int:
         rr.MODEL = spec["model"]
         rr.KEY = key
         rr.REPOS["build"] = Path(spec["parent_snapshot"])
-        install_repo_context(rr, Path(spec["parent_snapshot"]))
+        if unit_spec is None:
+            install_repo_context(rr, Path(spec["parent_snapshot"]))
+        else:
+            shared_snapshot = run.parents[1] / "snapshots" / f"g{unit_spec.start_generation}"
+            public_tests = spec["public_row"].get("public_tests", {})
+            public_test_paths = tuple(public_tests) if isinstance(public_tests, dict) else ()
+            excluded_paths = tuple(sorted(set(unit_spec.contract.owns)
+                                          | set(unit_spec.contract.creates)
+                                          | set(unit_spec.contract.check.source_paths)
+                                          | set(public_test_paths)))
+            install_repo_context(
+                rr, Path(spec["parent_snapshot"]), shared_snapshot=shared_snapshot,
+                snapshot_manifest_digest=str(spec["parallel_snapshot_manifest_digest"]),
+                source_manifest_digest=unit_spec.start_manifest_digest,
+                excluded_paths=excluded_paths,
+            )
         install_compact_capture(Path(spec["parent_snapshot"]))
-        install_wire_recorder(run, spec["chat_url"], replayer, routed_endpoints, hook_wiring)
+        install_wire_recorder(run, spec["chat_url"], replayer, routed_endpoints, hook_wiring,
+                              send_ledger=send_ledger, send_cap=send_cap)
         previous_checks = Path(resume["previous_attempt"]) / "checks" if resume is not None else None
         install_check_recorder(run, replayer, previous_checks)
         install_token_count_warning()
-        install_checked_ask(rr, spec, run, hook_wiring)
+        install_checked_ask(rr, spec, run, hook_wiring,
+                            live_slot=live_slot, replayer=replayer,
+                            managed_slot=unit_spec is not None)
         install_test_log(rr)
         register_host_state(required=checkpoint is not None, secret=key)
         if routed_endpoints is not None:
@@ -1334,12 +1692,24 @@ def main(argv: list[str]) -> int:
                                 "engine stopped with an error",
                                 f"{type(error).__name__}: {' '.join(str(error).split())[:300]}", level="ERROR")
         emit("engine_error", error=type(error).__name__, detail=" ".join(str(error).split())[:300])
+        recovery_type = None
+        if unit_spec is None and spec.get("parallel_mode", "off") != "off":
+            from kernel_parallel import RecoveryRequired as recovery_type
+        recovery_required = recovery_type is not None and isinstance(error, recovery_type)
         if hook_wiring is not None:
             from kernel_hook_exec import HookContainmentError
-            kind = "HOOK_CONTAINMENT" if isinstance(error, HookContainmentError) else "ENGINE_ERROR"
+            hook_containment = isinstance(error, HookContainmentError)
         else:
-            kind = "ENGINE_ERROR"
+            hook_containment = False
+        kind = ("RECOVERY_REQUIRED" if recovery_required else
+                "BUDGET_EXHAUSTED" if isinstance(error, SubframeBudgetExhausted) else
+                "HOOK_CONTAINMENT" if hook_containment else "ENGINE_ERROR")
+        emit("recovery_required" if recovery_required else "engine_error",
+             error=type(error).__name__, detail=" ".join(str(error).split())[:300])
         result = {"result": kind, "error": type(error).__name__}
+        if recovery_required:
+            result["reason_code"] = "RECOVERY_REQUIRED"
+            result["error_message"] = " ".join(str(error).split())[:300]
         status = 1
     finally:
         if mutation_runtime is not None:
@@ -1370,6 +1740,21 @@ def main(argv: list[str]) -> int:
                                         "shell sessions did not stop cleanly", str(error)[:300], level="ERROR")
                 emit("engine_error", error="ShellCleanupFailed", detail=str(error)[:300])
                 result, status = {"result": "ENGINE_ERROR", "error": "ShellCleanupFailed"}, 1
+            if slot_lease is not None:
+                containment_verified = bool(getattr(session, "containment_verified", False))
+                if hasattr(session, "_process") and session._process is None:
+                    containment_verified = True
+                try:
+                    if containment_verified:
+                        slot_lease.close()
+                    else:
+                        slot_lease.handoff_to_host()
+                except SlotHandoffDurabilityError as error:
+                    emit("engine_error", error=type(error).__name__, detail=str(error)[:300])
+                    result, status = {"result": "ENGINE_ERROR", "error": type(error).__name__}, 1
+                except (RuntimeError, OSError) as error:
+                    emit("engine_error", error="SlotLeaseCleanupFailed", detail=str(error)[:300])
+                    result, status = {"result": "ENGINE_ERROR", "error": "SlotLeaseCleanupFailed"}, 1
             signal.signal(signal.SIGTERM, previous_term)
     elapsed = time.monotonic() - started
     atomic_bytes(run / "engine-result.json", json.dumps(

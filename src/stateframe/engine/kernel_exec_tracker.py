@@ -12,6 +12,7 @@ import ctypes
 import errno
 import hashlib
 import logging
+import math
 import os
 from pathlib import Path
 import signal
@@ -59,6 +60,34 @@ class ContainmentUnverified(RuntimeError):
 def _log_containment_unverified(cause_key: str, why: str) -> None:
     """Containment could not be proven: an invariant break (ERROR). Logging only."""
     emit_reason("invariant", cause_key, "exec_tracker", "process containment unverified", why, level="ERROR")
+
+
+PARALLEL_TIMING_DEFAULTS = {
+    "STATEFRAME_PARALLEL_INSPECT_SECONDS": 15.0,
+    "STATEFRAME_PARALLEL_CLEANUP_SECONDS": 30.0,
+    "STATEFRAME_PARALLEL_WATCHDOG_GRACE_SECONDS": 60.0,
+    "STATEFRAME_PARALLEL_HOST_RESPONSE_SECONDS": 300.0,
+    "STATEFRAME_PARALLEL_PREPARE_SECONDS": 120.0,
+}
+
+
+def load_tolerant_seconds(name: str) -> float:
+    """Read a positive timeout and allow scheduling slack on an overloaded host."""
+    default = PARALLEL_TIMING_DEFAULTS[name]
+    try:
+        seconds = float(os.environ.get(name, str(default)))
+    except ValueError:
+        seconds = default
+    if not math.isfinite(seconds) or seconds <= 0:
+        seconds = default
+    try:
+        load = os.getloadavg()[0]
+    except (AttributeError, OSError):
+        load = 0.0
+    ratio = load / max(1, os.cpu_count() or 1) if math.isfinite(load) else 1.0
+    # POSIX poll converts seconds to signed 32-bit milliseconds. Keep even
+    # finite user overrides below that limit after load scaling.
+    return min(seconds * min(8.0, max(1.0, ratio)), (2**31 - 1) / 1000 - 1.0)
 
 
 def capture_launch_identity(process, table: ProcessTable | None = None, *,
@@ -341,12 +370,23 @@ class ProcessTable:
             return ProcessIdentity(pid, info.ppid, info.pgid, sid,
                                    (info.start_sec, info.start_usec), info.status == 5)
         try:
-            raw = (Path("/proc") / str(pid) / "stat").read_text()
+            # Raw descriptor read: a full-table scan calls this per process, and the pathlib
+            # text path costs about four times as much. Bytes also tolerate any comm name.
+            # The proc root comes from Path("/proc") so a test can point it at a fixture tree.
+            descriptor = os.open(os.fspath(Path("/proc") / str(pid) / "stat"), os.O_RDONLY)
+            try:
+                raw = os.read(descriptor, 8192)
+            finally:
+                os.close(descriptor)
         except (FileNotFoundError, ProcessLookupError):
             return None
-        fields = raw[raw.rfind(")") + 2:].split()
+        fields = raw[raw.rfind(b")") + 2:].split()
+        if len(fields) < 20:
+            if getattr(self, "require_complete", False):
+                raise RuntimeError("incomplete process stat during authoritative scan")
+            return None
         return ProcessIdentity(pid, int(fields[1]), int(fields[2]), int(fields[3]),
-                               (int(fields[19]), 0), fields[0] in {"Z", "X", "x"})
+                               (int(fields[19]), 0), fields[0] in {b"Z", b"X", b"x"})
 
     def cpu_ticks(self, row: ProcessIdentity) -> int | None:
         """User plus system clock ticks of a live Linux process; None when gone or unknown."""
@@ -556,7 +596,8 @@ class ProcessTable:
                 raise RuntimeError("process table changed beyond enumeration capacity")
             candidates = list(pids[:actual])
         else:
-            candidates = [int(p.name) for p in Path("/proc").iterdir() if p.name.isdecimal()]
+            # os.listdir: a Path object per /proc entry is a measurable share of a full scan.
+            candidates = [int(name) for name in os.listdir("/proc") if name.isdecimal()]
         result = {}
         for pid in candidates:
             if pid <= 0:
@@ -564,10 +605,14 @@ class ProcessTable:
             try:
                 row = self.identity(pid)
             except PermissionError:
+                if getattr(self, "require_complete", False):
+                    raise
                 # Other users' processes are not children of this supervisor.
                 continue
             if row is not None:
                 result[pid] = row
+        if getattr(self, "require_complete", False) and (not result or os.getpid() not in result):
+            raise RuntimeError("authoritative process snapshot omits its observer")
         return result
 
 
@@ -627,6 +672,7 @@ class Descendants:
         namespace_inode = getattr(table, "pid_namespace_inode", None)
         self.launch_namespace_inode = namespace_inode(leader) if namespace_inode else None
         self.private_pid_namespace_inode: int | None = None
+        self._namespace_inodes: dict[tuple[int, tuple[int, int]], int] = {}
         # Holds the private namespace open so its inode cannot name another sandbox later.
         self.private_pid_namespace_pin: PinnedNamespace | None = None
         # A leader PID cannot be reused until the leader is reaped, so a group or session named
@@ -677,8 +723,21 @@ class Descendants:
                     break
         if self.private_pid_namespace_inode is not None and namespace_inode is not None:
             launched = self.launch_leader_start or getattr(self.members.get(self.leader), "start", None)
+            cache = self._namespace_inodes
+            if len(cache) > 4 * len(rows) + 64:
+                self._namespace_inodes = cache = {key: value for key, value in cache.items()
+                                                  if rows.get(key[0]) is not None
+                                                  and rows[key[0]].start == key[1]}
             for pid, row in rows.items():
-                if namespace_inode(pid) != self.private_pid_namespace_inode:
+                # A process never changes PID namespace, so (pid, start) names its inode for
+                # good; re-reading /proc/<pid>/ns/pid for every process on every update made
+                # each supervisor observation cost one syscall per process on the host.
+                inode = cache.get((pid, row.start))
+                if inode is None:
+                    inode = namespace_inode(pid)
+                    if inode is not None:
+                        cache[(pid, row.start)] = inode
+                if inode != self.private_pid_namespace_inode:
                     continue
                 if launched is not None and row.start < launched and pid not in self.members:
                     # Older than our launch: it cannot live in our namespace. Never adopt it.

@@ -357,3 +357,16 @@ def test_terminal_authority_guard_catches_planted_completion_receipt_reuse(monke
     monkeypatch.setattr(completion_owner, "seal_terminal_disposition", planted_stale_reuse)
     _assert_planted_failure(monkeypatch, capsys)
     assert control_observed == [True]
+
+
+def test_plain_incomplete_terminal_is_not_labelled_a_finalization_error():
+    # Failures outrank incomplete outcomes in the lattice, so a plain INCOMPLETE terminal
+    # mislabelled FINALIZATION_ERROR would override its own real result on join.
+    runtime = SimpleNamespace(stateframe_completion_owner_mode="on",
+                              stateframe_terminal_lattice_mode="on")
+    terminal = completion_owner.terminal_result(
+        runtime, {"result": "DONE", "accepted": True, "certified": True, "observation": "ok"})
+    assert terminal["result"] == "INCOMPLETE"
+    assert terminal["accepted"] is False
+    assert terminal_disposition._stop_reason({}, "INCOMPLETE", accepted=False) == "RUN_INCOMPLETE"
+    assert terminal_disposition._stop_reason({}, "UNMAPPED", accepted=False) == "FINALIZATION_ERROR"

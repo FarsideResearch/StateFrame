@@ -1,0 +1,98 @@
+{
+  "parent": [
+    {
+      "tool": "parallel",
+      "arguments": {
+    "subframes": [
+          {
+            "id": "discount",
+            "outcome": "Return the price after applying the requested percentage discount.",
+            "owns": ["pricing/discount.py"],
+            "creates": [],
+            "exports": [],
+            "consumes": [],
+            "reads": [],
+            "requirements": [],
+            "check": {"tests": ["tests/test_discount.py"]}
+          },
+          {
+            "id": "quantity",
+            "outcome": "Include quantity in the line total.",
+            "owns": ["pricing/quantity.py"],
+            "creates": [],
+            "exports": [],
+            "consumes": [],
+            "reads": [],
+            "requirements": [],
+            "check": {"tests": ["tests/test_quantity.py"]}
+          },
+          {
+            "id": "rounding",
+            "outcome": "Round monetary values to two decimal places.",
+            "owns": ["pricing/rounding.py"],
+            "creates": [],
+            "exports": [],
+            "consumes": [],
+            "reads": [],
+            "requirements": [],
+            "check": {"tests": ["tests/test_rounding.py"]}
+          },
+          {
+            "id": "tax",
+            "outcome": "Treat the tax rate as a percentage and return the tax amount.",
+            "owns": ["pricing/tax.py"],
+            "creates": [],
+            "exports": [{
+              "id": "tax.calculate_tax",
+              "path": "pricing/tax.py",
+              "symbol": "calculate_tax",
+              "signature": {
+                "kind": "function",
+                "params": [
+                  {"name": "subtotal", "kind": "pos", "has_default": false, "annotation": null},
+                  {"name": "rate", "kind": "pos", "has_default": false, "annotation": null}
+                ],
+                "returns": null,
+                "decorators": []
+              }
+            }],
+            "consumes": [],
+            "reads": [],
+            "requirements": [],
+            "check": {"tests": ["tests/test_tax.py"]}
+          },
+          {
+            "id": "checkout",
+            "outcome": "Add the tax calculated by the declared pricing interface.",
+            "owns": ["pricing/checkout.py"],
+            "creates": [],
+            "exports": [],
+            "consumes": [{"export_id": "tax.calculate_tax"}],
+            "reads": [],
+            "requirements": [],
+            "check": {"tests": ["tests/test_checkout.py"]}
+          }
+        ]
+      }
+    },
+    {"tool": "read", "arguments": {"path": "pricing/tax.py"}},
+    {"tool": "done", "arguments": {"summary": "The pricing fixes and declared checkout wiring are complete."}}
+  ],
+  "subframes": {
+    "discount": [
+      {"tool": "str_replace", "arguments": {"path": "pricing/discount.py", "old_str": "return round(price * percent / 100, 2)", "new_str": "return round(price * (100 - percent) / 100, 2)"}}
+    ],
+    "quantity": [
+      {"tool": "str_replace", "arguments": {"path": "pricing/quantity.py", "old_str": "return round(unit_price, 2)", "new_str": "return round(unit_price * quantity, 2)"}}
+    ],
+    "rounding": [
+      {"tool": "str_replace", "arguments": {"path": "pricing/rounding.py", "old_str": "return round(amount)", "new_str": "return round(amount, 2)"}}
+    ],
+    "tax": [
+      {"tool": "str_replace", "arguments": {"path": "pricing/tax.py", "old_str": "return round(subtotal * rate, 2)", "new_str": "return round(subtotal * rate / 100, 2)"}}
+    ],
+    "checkout": [
+      {"tool": "str_replace", "arguments": {"path": "pricing/checkout.py", "old_str": "return subtotal", "new_str": "return subtotal + calculate_tax(subtotal, rate)"}}
+    ]
+  }
+}

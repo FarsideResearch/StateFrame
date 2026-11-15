@@ -98,6 +98,45 @@ def test_gzip_415_resends_same_identity_once(monkeypatch, transport_server):
 
 
 @pytest.mark.host_sandbox
+@pytest.mark.parametrize("routed", [False, True])
+@pytest.mark.parametrize("allowed_attempts", [0, 1, 2])
+def test_direct_transport_authorizes_each_gzip_attempt(
+        monkeypatch, transport_server, routed, allowed_attempts):
+    """Direct proxy policy and per-send authority must compose in the HTTP child."""
+    monkeypatch.setenv("STATEFRAME_HTTP_GZIP", "on")
+    for name in ("http_proxy", "HTTP_PROXY", "https_proxy", "HTTPS_PROXY",
+                 "all_proxy", "ALL_PROXY"):
+        monkeypatch.setenv(name, "http://127.0.0.1:1")
+    for name in ("no_proxy", "NO_PROXY"):
+        monkeypatch.setenv(name, "")
+    endpoint, seen, _ = transport_server
+    authorized = []
+    attempts = []
+    refusal = PermissionError("physical send allowance exhausted")
+
+    def authorize(attempt):
+        authorized.append(attempt)
+        if attempt > allowed_attempts:
+            raise refusal
+
+    def send():
+        return kernel_bounded_http.request_bytes(
+            WIRE, endpoint, "", deadline=time.monotonic() + 10, socket_timeout=5,
+            route_meta={} if routed else None, before_attempt=authorize,
+            record_attempts=attempts.extend)
+
+    if allowed_attempts < 2:
+        with pytest.raises(PermissionError) as failure:
+            send()
+        assert failure.value is refusal
+    else:
+        assert send() == b'{"ok":true}'
+    assert authorized == list(range(1, min(allowed_attempts + 1, 2) + 1))
+    assert [entry[0] for entry in seen] == ["gzip", None][:allowed_attempts]
+    assert [attempt["http_status"] for attempt in attempts] == [415, 200][:allowed_attempts]
+
+
+@pytest.mark.host_sandbox
 def test_gzip_415_identity_queue_wait_uses_resend_first_byte(monkeypatch):
     monkeypatch.setenv("STATEFRAME_HTTP_GZIP", "on")
     monkeypatch.setenv("STATEFRAME_PROVIDER_LIVENESS_S", "0.6")

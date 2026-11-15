@@ -45,6 +45,13 @@
 - `--instructions[=FILE]`: project instructions, off by default. With no value, the repository's `AGENTS.md`, else `CLAUDE.md`; with a value, that file. `--no-instructions` states the default explicitly. See [Project instructions](#project-instructions).
 - On `resume`, `--replay-external` explicitly repeats recorded external operations before continuing.
 
+## Parallel subframes
+
+Subframes are off by default. Add `--parallel auto` to let the engine size concurrency, or `--parallel N` to allow
+up to N active subframes. This offers the `parallel` tool to the model; the model decides whether to use it, so
+zero subframes is a valid outcome. `--parallel 1` uses the same validation with at most one active subframe.
+`--parallel-max N` caps automatic and explicit concurrency; `--parallel-slots 2,5` restricts slot leases.
+See [Subframes](subframes.md) for when to use them, every flag and default, validation, result locations, and recovery.
 Hook files named with `--hooks` are explicitly trusted by that command. Project hook files need a separate digest trust step, and edits to the file or its pinned scripts require trust again. The [hooks guide](hooks.md) describes the event contract and the sandbox boundary.
 
 ## Experimental unit planning and seam recall
@@ -211,6 +218,8 @@ Watch for:
 A profile is a JSON file (`"schema": "stateframe-product-profile/1"`) whose `switches` map sets the engine's `STATEFRAME_*` switches for a run. The default is the one profile shipped in `src/stateframe/profiles/`. `--profile NAME_OR_PATH` uses another. Many switches ship disabled; turning one on is a profile edit. Engine settings come only from the profile: the engine child drops inherited `STATEFRAME_*` variables, `--test-env` refuses them, and the engine refuses any switch it has no reader for. Host-issued shell, network, sandbox, web and custom-tool authority comes from CLI flags, not profile switches. The shipped product profile uses the composed loop; lean mode is not supported by that profile. The plain loop refuses Git, web and custom-tool settings before execution and supports foreground shell only.
 
 `STATEFRAME_ROUTEBUDGET_MODE` is `on` in the shipped profile. It includes the live probe budget, failed and denied routes, and offered tools in the model's recovery view, and removes an exhausted probe from the tool menu. Set it to `off` in a custom profile to disable that projection. The profile switch was renamed from `STATEFRAME_ROUTE_BUDGET`; the old name is still accepted but deprecated in profiles and the environment, with a one-line stderr warning. If both names are set, the new name wins and the warning says the old name was ignored. The `STATEFRAME_ROUTE_` namespace is reserved for per-role model settings, with an exception for this deprecated alias; the rename leaves recovery-view bytes and route selection unchanged.
+
+`STATEFRAME_BOUNDARY_CHECKS` and `STATEFRAME_HOST_CLOSURE` are optional engine switches configured in a custom profile, not by exporting them in the shell. Set either to `on` or `off` in that profile to control boundary checks or host closure checks. The engine’s `STATEFRAME_RESULTS_DIR` override is also configured in a profile; ordinary runs write logs and receipts under their run directory.
 
 ### Multi-file source and repeated reads
 

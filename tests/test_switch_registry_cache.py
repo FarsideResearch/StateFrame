@@ -86,12 +86,35 @@ def _parsed_environment_prefixes(package: Path) -> dict[str, set[str]]:
     (child env isolation, privileged settings), it interprets the remaining name.
     Read literals and named constants from code, never a copied prefix list.
     """
+    # This one removal formats an already-rejected setting for an error. It
+    # does not consume valid settings or reserve a namespace. Review both its
+    # exact expression/count here and its prefix-literal count below.
+    error_label_strips = {
+        ("engine/kernel_parallel_records.py", "ParallelLimits.from_settings",
+         "switch.removeprefix('STATEFRAME_PARALLEL_')"): 1,
+    }
     prefixes: dict[str, set[str]] = {}
     for path in package.rglob("*.py"):
         source = path.read_text(encoding="utf-8")
         if "STATEFRAME_" not in source or "removeprefix" not in source:
             continue
         tree = ast.parse(source, filename=str(path))
+        owner = path.relative_to(package).as_posix()
+        parents = {child: node for node in ast.walk(tree) for child in ast.iter_child_nodes(node)}
+
+        def scope_name(node):
+            scopes = []
+            parent = parents.get(node)
+            while parent is not None:
+                if isinstance(parent, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                    scopes.append(parent.name)
+                parent = parents.get(parent)
+            return ".".join(reversed(scopes)) or "<module>"
+
+        strips = [node for node in ast.walk(tree)
+                  if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                  and node.func.attr == "removeprefix" and node.args]
+        strip_counts = Counter((owner, scope_name(node), ast.unparse(node)) for node in strips)
         constants = {}
         for node in ast.walk(tree):
             if isinstance(node, ast.Assign) and isinstance(node.value, ast.Constant):
@@ -106,7 +129,10 @@ def _parsed_environment_prefixes(package: Path) -> dict[str, set[str]]:
             prefix = (argument.value if isinstance(argument, ast.Constant)
                       else constants.get(argument.id) if isinstance(argument, ast.Name) else None)
             if isinstance(prefix, str) and prefix.startswith("STATEFRAME_"):
-                prefixes.setdefault(prefix, set()).add(path.relative_to(package).as_posix())
+                site = (owner, scope_name(node), ast.unparse(node))
+                if site in error_label_strips and strip_counts[site] == error_label_strips[site]:
+                    continue
+                prefixes.setdefault(prefix, set()).add(owner)
     return prefixes
 
 
@@ -120,6 +146,13 @@ def _assert_namespace_discovery_is_complete(package: Path, parsed: dict[str, set
     is the configuration root, not a subnamespace.
     """
     reviewed_filters_and_builders = {
+        # These sites filter the opt-in parallel settings, never parse role keys.
+        # One startswith filter and one rejected-name error-label removal.
+        ("engine/kernel_parallel_records.py", "ParallelLimits.from_settings", "STATEFRAME_PARALLEL_"): 2,
+        ("runner.py", "resolve_opt_in_switches", "STATEFRAME_PARALLEL_"): 1,
+        ("runner.py", "prepare", "STATEFRAME_PARALLEL_"): 2,
+        ("runner.py", "<module>", "STATEFRAME_PARALLEL_"): 1,
+        ("runner.py", "_provider_environment", "STATEFRAME_PARALLEL_"): 1,
         ("runner.py", "_compare_resume_routes", "STATEFRAME_ROUTE_"): 1,
         ("runner.py", "ignored_shell_settings", "STATEFRAME_ROUTE_"): 1,
         ("_child.py", "install_environment", "STATEFRAME_TASK_"): 1,
@@ -299,3 +332,31 @@ def test_a_stale_or_damaged_registry_falls_back_to_the_scan(tmp_path, damage):
     assert switches == frozenset(expected)
     assert "STATEFRAME_FORGED" not in switches
     assert digest == registry.build_registry_document(root)["digest"]
+
+
+@pytest.mark.parametrize("scope,count", [("unreviewed", 1), ("resolve_opt_in_switches", 2)])
+def test_parallel_filter_review_rejects_new_scope_or_extra_occurrence(tmp_path, scope, count):
+    literals = ", ".join(repr("STATEFRAME_PARALLEL_") for _ in range(count))
+    (tmp_path / "runner.py").write_text(f"def {scope}():\n    return ({literals},)\n")
+    with pytest.raises(AssertionError, match="unreviewed environment namespaces"):
+        _assert_namespace_discovery_is_complete(tmp_path, {})
+
+
+@pytest.mark.parametrize("extra_scope", [False, True])
+def test_parallel_error_label_review_does_not_hide_parser_use(tmp_path, extra_scope):
+    engine = tmp_path / "engine"
+    engine.mkdir()
+    path = engine / "kernel_parallel_records.py"
+    source = ("class ParallelLimits:\n"
+              "    def from_settings(self, switch):\n"
+              "        label = switch.removeprefix('STATEFRAME_PARALLEL_')\n"
+              "        raise ValueError(label)\n")
+    path.write_text(source)
+    assert _parsed_environment_prefixes(tmp_path) == {}
+    addition = ("\ndef parse_setting(switch):\n"
+                "    return switch.removeprefix('STATEFRAME_PARALLEL_')\n"
+                if extra_scope else
+                "        tail = switch.removeprefix('STATEFRAME_PARALLEL_')\n")
+    path.write_text(source + addition)
+    assert _parsed_environment_prefixes(tmp_path) == {
+        "STATEFRAME_PARALLEL_": {"engine/kernel_parallel_records.py"}}

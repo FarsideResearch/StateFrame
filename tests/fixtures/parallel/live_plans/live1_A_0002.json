@@ -1,0 +1,122 @@
+{
+  "subframes": [
+    {
+      "id": "fix_tax",
+      "outcome": "Fix calculate_tax to divide rate by 100 for percentage",
+      "owns": [
+        "pricing/tax.py"
+      ],
+      "creates": [],
+      "exports": [
+        {
+          "id": "tax_export",
+          "path": "pricing/tax.py",
+          "symbol": "calculate_tax"
+        }
+      ],
+      "consumes": [],
+      "reads": [
+        "tests/test_tax.py"
+      ],
+      "requirements": [
+        "tax rate is a percentage"
+      ],
+      "check": {
+        "tests": [
+          "tests/test_tax.py"
+        ]
+      }
+    },
+    {
+      "id": "fix_discount",
+      "outcome": "Fix apply_discount to subtract percent from price",
+      "owns": [
+        "pricing/discount.py"
+      ],
+      "creates": [],
+      "exports": [],
+      "consumes": [],
+      "reads": [
+        "tests/test_discount.py"
+      ],
+      "requirements": [
+        "25% discount on 80 costs 60",
+        "100% discount returns zero"
+      ],
+      "check": {
+        "tests": [
+          "tests/test_discount.py"
+        ]
+      }
+    },
+    {
+      "id": "fix_quantity",
+      "outcome": "Fix line_total to multiply unit_price by quantity",
+      "owns": [
+        "pricing/quantity.py"
+      ],
+      "creates": [],
+      "exports": [],
+      "consumes": [],
+      "reads": [
+        "tests/test_quantity.py"
+      ],
+      "requirements": [
+        "line total must multiply by quantity"
+      ],
+      "check": {
+        "tests": [
+          "tests/test_quantity.py"
+        ]
+      }
+    },
+    {
+      "id": "fix_rounding",
+      "outcome": "Fix round_cents to keep 2 decimal places",
+      "owns": [
+        "pricing/rounding.py"
+      ],
+      "creates": [],
+      "exports": [],
+      "consumes": [],
+      "reads": [
+        "tests/test_rounding.py"
+      ],
+      "requirements": [
+        "rounding must keep cents"
+      ],
+      "check": {
+        "tests": [
+          "tests/test_rounding.py"
+        ]
+      }
+    },
+    {
+      "id": "fix_checkout",
+      "outcome": "Fix total_with_tax to add tax from calculate_tax",
+      "owns": [
+        "pricing/checkout.py"
+      ],
+      "creates": [],
+      "exports": [],
+      "consumes": [
+        {
+          "export_id": "tax_export",
+          "path": "pricing/tax.py",
+          "symbol": "calculate_tax"
+        }
+      ],
+      "reads": [
+        "tests/test_checkout.py"
+      ],
+      "requirements": [
+        "checkout must add tax to subtotal"
+      ],
+      "check": {
+        "tests": [
+          "tests/test_checkout.py"
+        ]
+      }
+    }
+  ]
+}

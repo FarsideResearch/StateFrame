@@ -41,6 +41,24 @@ ALLOWLIST = {
         "signaler; cleanup() owns the reason and journals environment_process_* events",
     "src/stateframe/runner.py:_stop_group":
         "post-exit cleanup helper; the wall-deadline caller (on_timeout) logs the kill with its reason",
+    "src/stateframe/parallel_host.py:_signal_one":
+        "pidfd signaler for a birth-verified subframe worker; the supervisor that chose the signal journals the unit terminal with its cause",
+    "src/stateframe/parallel_host.py:_launch_failed":
+        "subframe launch rollback; raises ContainmentUnverified into the supervisor, which journals the typed parallel_unit_terminal with the error",
+    "src/stateframe/parallel_journal.py:_release":
+        "releases a lost journal helper process through its own handle; the caller journals why the helper was lost",
+    "src/stateframe/parallel_worker.py:_sweep_group":
+        "bounded cleanup sweep; ContainmentUnverified propagates to the host, which journals the typed unit terminal with its cause",
+    "src/stateframe/parallel_worker.py:_live_unit":
+        "inspection refusal raised as ContainmentUnverified; the host journals the unit terminal with this cause",
+    "src/stateframe/parallel_worker.py:_live_group":
+        "inspection refusal raised as ContainmentUnverified; the host journals the unit terminal with this cause",
+    "src/stateframe/parallel_worker.py:_live_family":
+        "inspection refusal raised as ContainmentUnverified; the host journals the unit terminal with this cause",
+    "src/stateframe/parallel_worker.py:_signal_group":
+        "worker group signaler on a verified launch identity; sweep/cancel callers own the cause and the host journals the unit terminal",
+    "src/stateframe/parallel_worker.py:reap":
+        "family-exit proof refusals raised as ContainmentUnverified/WorkerPreparationError; the host journals the unit terminal with this cause",
 }
 
 

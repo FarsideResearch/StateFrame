@@ -9,7 +9,6 @@ child still in the launcher's process group (bwrap mid-setup) and a child that a
 called setsid (left the group). A planted launcher-only kill must fail the same check.
 """
 import ast
-import os
 import signal
 import subprocess
 import sys
@@ -20,6 +19,7 @@ from pathlib import Path
 from _timeouts import scaled
 import pytest
 
+from fixtures.process_signals import record_identity, signal_owned, signal_verified
 import kernel_exec_tracker as tracker
 import kernel_execution_policy as policy
 import kernel_probe as probe
@@ -49,19 +49,24 @@ def _alive(pid):
 
 
 def _launch(kind):
+    launched_after = time.time()
     process = subprocess.Popen([sys.executable, "-c", LAUNCHER, kind], stdout=subprocess.PIPE,
                                start_new_session=True)
     assert tracker.capture_launch_identity(process) is not None
     child = int(process.stdout.readline())
-    return process, child
+    identity = record_identity(child, launched_after=launched_after, command_fragment="python")
+    return process, child, identity
 
 
-def _cleanup(process, child):
-    for pid in (child, process.pid):
+def _cleanup(process, child, identity):
+    row = tracker.ProcessTable().identity(child)
+    if row is not None and not row.zombie:
         try:
-            os.kill(pid, signal.SIGKILL)
+            signal_verified(child, identity, signal.SIGKILL)
         except ProcessLookupError:
             pass
+    if process.poll() is None:
+        signal_owned(process, signal.SIGKILL)
     process.wait()
     process.stdout.close()
 
@@ -81,10 +86,11 @@ CLEANUPS = {
 }
 
 
+@pytest.mark.host_sandbox
 @pytest.mark.parametrize("kind", ["same_group", "setsid"])
 @pytest.mark.parametrize("name", sorted(CLEANUPS))
 def test_cleanup_leaves_no_family_member(name, kind):
-    process, child = _launch(kind)
+    process, child, identity = _launch(kind)
     try:
         result = CLEANUPS[name](process)
         deadline = time.monotonic() + scaled(2)
@@ -99,24 +105,26 @@ def test_cleanup_leaves_no_family_member(name, kind):
         if name == "kill_launch_unit":
             assert result == ()
     finally:
-        _cleanup(process, child)
+        _cleanup(process, child, identity)
 
 
+@pytest.mark.host_sandbox
 @pytest.mark.parametrize("kind", ["same_group", "setsid"])
 def test_planted_launcher_only_kill_is_caught(kind):
-    process, child = _launch(kind)
+    process, child, identity = _launch(kind)
     try:
         _launcher_only(process)
         time.sleep(.2)
         assert _alive(child), "control: a launcher-only kill must leave the child running"
     finally:
-        _cleanup(process, child)
+        _cleanup(process, child, identity)
 
 
+@pytest.mark.host_sandbox
 def test_monitor_family_survivor_is_killed_after_launcher_is_gone():
     # The MCP shape: the monitor recorded the child while the launcher lived; the launcher
     # is already dead and reaped when cleanup runs.
-    process, child = _launch("setsid")
+    process, child, identity = _launch("setsid")
     try:
         family = tracker.Descendants(process.pid, tracker.ProcessTable())
         family.update(family.table.snapshot())
@@ -130,11 +138,12 @@ def test_monitor_family_survivor_is_killed_after_launcher_is_gone():
         assert survivors == ()
         assert not _alive(child)
     finally:
-        _cleanup(process, child)
+        _cleanup(process, child, identity)
 
 
+@pytest.mark.host_sandbox
 def test_unkillable_survivor_is_reported(monkeypatch):
-    process, child = _launch("setsid")
+    process, child, identity = _launch("setsid")
     try:
         monkeypatch.setattr(tracker.Descendants, "signal", lambda self, rows, sig: set())
         survivors = tracker.kill_launch_unit(
@@ -145,7 +154,7 @@ def test_unkillable_survivor_is_reported(monkeypatch):
         assert child in survivors
     finally:
         monkeypatch.undo()
-        _cleanup(process, child)
+        _cleanup(process, child, identity)
 
 
 def test_kill_launch_unit_never_signals_a_reused_group_leader(monkeypatch):

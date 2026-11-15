@@ -477,11 +477,41 @@ def service() -> ShellTool | None:
     return _active
 
 
-def publish_effects(reply: ShellReply, runtime, bolt, created: set[str], *, name="shell") -> Path | None:
-    """Publish an opaque observation and retire proof for every admitted mutation."""
+def publish_host_effects(runtime, bolt, created: set[str], *, changed, created_paths,
+                         deleted=(), name="parallel") -> Path | None:
+    """Publish committed host mutations through the same receipt and proof path as shell."""
     from kernel_post_edit_refresh import rebind_after_file_operation
     from kernel_green_lock import note_applied_product_edit
 
+    paths = tuple(changed)
+    created_paths = frozenset(created_paths)
+    deleted = frozenset(deleted)
+    target = runtime.target
+    for relative in paths:
+        path = Path(bolt.root) / relative
+        if relative in deleted:
+            created.discard(str(path))
+            target = rebind_after_file_operation(runtime, relative, None)
+        elif relative in created_paths:
+            created.add(str(path))
+        note_applied_product_edit(path)
+    if paths:
+        bolt.product_edits += 1
+    if paths:
+        bolt.last_test_exit = None
+        bolt._last_green_revision = None
+    if name:
+        observation = f"subframe commit applied: {', '.join(paths)}" if paths else "subframe commit made no file changes"
+        bolt.receipt("shell_effect" if paths else name, name, observation,
+                     "APPLIED" if paths else "NO_OP", observation,
+                     changed_paths=paths,
+                     effects=tuple({"path": path, "change": "delete" if path in deleted else
+                                    "create" if path in created_paths else "modify"} for path in paths))
+    return target
+
+
+def publish_effects(reply: ShellReply, runtime, bolt, created: set[str], *, name="shell") -> Path | None:
+    """Publish an opaque observation and retire proof for every admitted mutation."""
     paths = tuple(effect.path for effect in reply.applied)
     if reply.memory_limit_mechanism:
         runtime.journal.emit(
@@ -496,18 +526,13 @@ def publish_effects(reply: ShellReply, runtime, bolt, created: set[str], *, name
             } if reply.memory_limit_killed else {}),
             dispatch=False,
         )
-    target = runtime.target
-    for effect in reply.applied:
-        path = Path(bolt.root) / effect.path
-        if effect.after is None:
-            created.discard(str(path))
-            target = rebind_after_file_operation(runtime, effect.path, None)
-        elif effect.after.kind == "file" and effect.before is None:
-            created.add(str(path))
-        note_applied_product_edit(path)
-    if paths:
-        bolt.product_edits += 1
-    if paths or reply.environment_changed:
+    target = publish_host_effects(runtime, bolt, created, changed=paths,
+                                  created_paths=tuple(effect.path for effect in reply.applied
+                                                      if effect.after is not None and effect.after.kind == "file"
+                                                      and effect.before is None),
+                                  deleted=tuple(effect.path for effect in reply.applied if effect.after is None),
+                                  name="")
+    if reply.environment_changed:
         bolt.last_test_exit = None
         bolt._last_green_revision = None
     if reply.environment_changed:

@@ -31,7 +31,12 @@ class ExampleCommand:
 def commands(source: Path) -> tuple[ExampleCommand, ...]:
     """Parse real run commands; reject every unmapped bundled example command."""
     found: list[ExampleCommand] = []
-    for document in (source / "QUICKSTART.md", source / "README.md"):
+    documents = [source / "QUICKSTART.md", source / "README.md"]
+    examples = source / "examples"
+    if examples.is_dir():
+        documents.extend(sorted(examples.glob("*/README.md")))
+    for document in documents:
+        document_name = document.relative_to(source).as_posix()
         blocks = re.findall(r"(?ms)^```(?:bash|sh)\n(.*?)^```", document.read_text())
         for block in blocks:
             for line in block.replace("\\\n", " ").splitlines():
@@ -40,18 +45,18 @@ def commands(source: Path) -> tuple[ExampleCommand, ...]:
                     continue
                 argv = shlex.split(line)
                 if "--repo" not in argv:
-                    raise AssertionError(f"{document.name}: run command has no --repo: {line}")
+                    raise AssertionError(f"{document_name}: run command has no --repo: {line}")
                 repo = argv[argv.index("--repo") + 1]
                 if not repo.startswith("examples/"):
-                    if document.name == "README.md" and repo == "~/code/shop":
+                    if document == source / "README.md" and repo == "~/code/shop":
                         continue  # the documented sketch for a reader's own repository
-                    raise AssertionError(f"{document.name}: unmapped run command: {line}")
+                    raise AssertionError(f"{document_name}: unmapped run command: {line}")
                 name = repo.removeprefix("examples/")
                 if not (source / "examples" / name).is_dir() or not (
                     source / "examples" / f"{name}.script.json"
                 ).is_file():
-                    raise AssertionError(f"{document.name}: no bundled script for {line}")
-                found.append(ExampleCommand(f"{document.name}: {line}", tuple(argv[1:]), name))
+                    raise AssertionError(f"{document_name}: no bundled script for {line}")
+                found.append(ExampleCommand(f"{document_name}: {line}", tuple(argv[1:]), name))
     scripted = {path.name.removesuffix(".script.json")
                 for path in (source / "examples").glob("*.script.json")}
     for name in sorted(scripted - {item.example for item in found}):
@@ -71,6 +76,15 @@ def commands(source: Path) -> tuple[ExampleCommand, ...]:
 
 def outcome(requests: int, result: str) -> bool:
     return requests >= 1 and result == "SUBMITTED"
+
+
+def installed_run_arguments(case: ExampleCommand, source: Path, run_dir: Path,
+                            endpoint: str, test_python: Path) -> list[str]:
+    argv = list(case.arguments)
+    argv[argv.index("--repo") + 1] = str(source / "examples" / case.example)
+    test_interpreter = ["--test-python", str(test_python)] if case.example == "parallel_fixes" else []
+    return [*argv, *test_interpreter, "--endpoint", endpoint, "--model", "scripted",
+            "--run-dir", str(run_dir)]
 
 
 def sweep(source: Path, work: Path, *, cases: tuple[ExampleCommand, ...] | None = None
@@ -116,42 +130,60 @@ def sweep(source: Path, work: Path, *, cases: tuple[ExampleCommand, ...] | None 
     results = []
     for index, case in enumerate(cases):
         script = source / "examples" / f"{case.example}.script.json"
-        server = subprocess.Popen(
-            [str(python), "-m", "stateframe.scripted_endpoint", "--script", str(script),
-             "--port", "0"], cwd=source, env=environment, stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE, text=True,
-        )
-        try:
-            ready, _, _ = select.select([server.stdout], [], [], scaled(20))
-            if not ready:
-                raise AssertionError(f"endpoint did not start for {case.label}")
-            endpoint = server.stdout.readline().strip()
-            if not endpoint.startswith("http://127.0.0.1:"):
-                raise AssertionError(f"invalid endpoint for {case.label}: {endpoint}")
-            run_dir = work / f"run-{index}"
-            argv = list(case.arguments)
-            argv[argv.index("--repo") + 1] = str(source / "examples" / case.example)
-            process = run_monitored(
-                [str(executable), *argv, "--endpoint", endpoint, "--model", "scripted",
-                 "--run-dir", str(run_dir)], cwd=source, env=environment,
-                capture_output=True, text=True, expected_seconds=scaled(300),
-                run_dir=run_dir, step=case.label,
+        run_dir = work / f"run-{index}"
+
+        def run_case(endpoint: str) -> subprocess.CompletedProcess[str]:
+            return run_monitored(
+                [str(executable), *installed_run_arguments(case, source, run_dir, endpoint, python)],
+                cwd=source, env=environment, capture_output=True, text=True,
+                expected_seconds=scaled(300), run_dir=run_dir, step=case.label,
             )
-            summary_path = run_dir / "summary.json"
-            summary = json.loads(summary_path.read_text()) if summary_path.is_file() else {}
-            requests = int(summary.get("provider_sends", 0))
-            result = str(summary.get("engine_result", "MISSING"))
-            results.append((case.label, requests, result))
-            if process.returncode and outcome(requests, result):
-                tail = (process.stderr or process.stdout or "").strip()[-600:]
-                results[-1] = (case.label, requests, f"EXIT_{process.returncode}: {tail}")
-        finally:
-            server.terminate()
+
+        if case.example == "parallel_fixes":
+            fixture_root = str(Path(__file__).resolve().parents[1])
+            if fixture_root not in sys.path:
+                sys.path.insert(0, fixture_root)
+            from fixtures.barrier_endpoint import BarrierEndpoint
+
+            scenario = json.loads(script.read_text())
+            with BarrierEndpoint(scenario["parent"], scenario["subframes"]) as server:
+                process = run_case(server.url)
+                try:
+                    server.assert_consumed()
+                except AssertionError as error:
+                    detail = (process.stderr or process.stdout or "").strip()[-1200:]
+                    raise AssertionError(
+                        f"{error}; installed run exit={process.returncode}; output={detail}") from error
+        else:
+            server = subprocess.Popen(
+                [str(python), "-m", "stateframe.scripted_endpoint", "--script", str(script),
+                 "--port", "0"], cwd=source, env=environment, stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE, text=True,
+            )
             try:
-                server.wait(timeout=scaled(5))
-            except subprocess.TimeoutExpired:
-                server.kill()
-                server.wait()
+                ready, _, _ = select.select([server.stdout], [], [], scaled(20))
+                if not ready:
+                    raise AssertionError(f"endpoint did not start for {case.label}")
+                endpoint = server.stdout.readline().strip()
+                if not endpoint.startswith("http://127.0.0.1:"):
+                    raise AssertionError(f"invalid endpoint for {case.label}: {endpoint}")
+                process = run_case(endpoint)
+            finally:
+                server.terminate()
+                try:
+                    server.wait(timeout=scaled(5))
+                except subprocess.TimeoutExpired:
+                    server.kill()
+                    server.wait()
+
+        summary_path = run_dir / "summary.json"
+        summary = json.loads(summary_path.read_text()) if summary_path.is_file() else {}
+        requests = int(summary.get("provider_sends", 0))
+        result = str(summary.get("engine_result", "MISSING"))
+        results.append((case.label, requests, result))
+        if process.returncode and outcome(requests, result):
+            tail = (process.stderr or process.stdout or "").strip()[-600:]
+            results[-1] = (case.label, requests, f"EXIT_{process.returncode}: {tail}")
     return results
 
 

@@ -94,6 +94,20 @@ def test_model_name_swap_changes_only_top_level_field(tmp_path, strict):
     assert pending_player.pending is None
 
 
+def test_model_name_swap_does_not_hide_a_changed_task(tmp_path):
+    recorded = b'{"model": "old", "task": "' + b"a" * 32 + b'"}'
+    changed = recorded.replace(b'"old"', b'"new"', 1).replace(b"a" * 32, b"b" * 32)
+    request = tmp_path / "0001.request.json"
+    request.write_bytes(recorded)
+    player = replay_tape.Replayer(
+        [{"send": 1, "request": str(request), "request_digest": replay_tape.normalized_digest(recorded)}],
+        {"served": "new", "recorded": ["old"]})
+
+    assert player.answer(changed) is None
+    assert player.diverged is not None
+    assert player.model_swapped == 0
+
+
 def test_carry_forward_checks_archived_bytes_across_digest_change(tmp_path):
     current = tmp_path / "current.json"
     previous = tmp_path / "previous.json"
@@ -441,6 +455,42 @@ def test_restore_keeps_complete_tool_tape_for_later_resume(tmp_path):
     assert tape.read_text() == 'checkpoint intent\nrecorded tail\n'
     assert (run / "sends.jsonl").read_text() == "checkpoint prefix\n"
     assert "tool-tape.jsonl" in kernel_checkpoint.SKIP_RUN_ENTRIES
+
+
+def test_restore_keeps_live_parallel_authority(tmp_path):
+    run = tmp_path / "run"
+    checkpoint = run / "checkpoints" / "saved"
+    (checkpoint / "run").mkdir(parents=True)
+    parallel = run / "parallel"
+    parallel.mkdir()
+    result = parallel / "result.json"
+    result.write_text("latest durable decision\n")
+    identity = parallel.stat().st_ino
+    (run / "sends.jsonl").write_text("new attempt\n")
+    (checkpoint / "run" / "sends.jsonl").write_text("checkpoint prefix\n")
+
+    kernel_checkpoint._restore_files(checkpoint, run, {"entries": ["sends.jsonl"]})
+
+    assert parallel.is_dir(), "restore moved the live supervisor's directory"
+    assert parallel.stat().st_ino == identity
+    assert result.read_text() == "latest durable decision\n"
+    assert (run / "sends.jsonl").read_text() == "checkpoint prefix\n"
+    assert "parallel" in kernel_checkpoint.SKIP_RUN_ENTRIES
+
+
+def test_restore_refuses_saved_parallel_before_moving_setup_files(tmp_path):
+    run = tmp_path / "run"
+    checkpoint = run / "checkpoints" / "saved"
+    (checkpoint / "run" / "parallel").mkdir(parents=True)
+    (run / "parallel").mkdir()
+    settings = run / "skill-settings.json"
+    settings.write_text("current settings\n")
+
+    with pytest.raises(kernel_checkpoint.CheckpointError, match="live run entry 'parallel'"):
+        kernel_checkpoint._restore_files(checkpoint, run, {"entries": ["parallel"]})
+
+    assert settings.read_text() == "current settings\n"
+    assert not list((run / "checkpoints").glob("setup-discard.*"))
 
 
 @dataclass(frozen=True)

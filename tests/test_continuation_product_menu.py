@@ -12,7 +12,9 @@ from test_agent_tools import host as host
 @pytest.mark.parametrize("stale", [False, True])
 @pytest.mark.parametrize("repair", ["0", "1"])
 def test_live_intention_menu_product_tools(host, monkeypatch, stale, repair):
+    import kernel_parallel
     import kernel_shell_tool
+    monkeypatch.setattr(kernel_parallel, "_service", None)
     hub, _, _ = host
     monkeypatch.setattr(kernel_shell_tool, "_active", hub.shell)
     monkeypatch.setenv("KERNEL_STALE_EDIT_REPAIR", repair)
@@ -25,8 +27,9 @@ def test_live_intention_menu_product_tools(host, monkeypatch, stale, repair):
     live.engine = SimpleNamespace(state=state)
     runtime.continuation = live
     allowed = per_step_allow_set(runtime)
+    assert "parallel" not in allowed
     if not stale or repair == "1":
-        assert EDIT_TOOLS <= allowed
+        assert EDIT_TOOLS - {"parallel"} <= allowed
     else:
         assert not EDIT_TOOLS & allowed
     assert "web_fetch" in allowed

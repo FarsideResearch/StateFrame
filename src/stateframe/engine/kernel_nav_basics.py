@@ -100,10 +100,14 @@ def list_workspace_files(
     """
     max_depth = _bounded_int(depth, DEFAULT_DEPTH, MAX_DEPTH, name="depth")
     max_entries = _bounded_int(limit, DEFAULT_LIMIT, MAX_LIMIT, name="limit")
+    import sys
+    unit_module = sys.modules.get("kernel_unit_policy")
+    unit_policy = unit_module.active() if unit_module is not None else None
     root = Path(root).resolve()
     start = resolve_scope(root, scope)
     if start.is_file():
-        rows = (_entry(start, root, 0),)
+        rows = ((_entry(start, root, 0),) if unit_policy is None
+                or unit_policy.visible(_relative(root, start)) else ())
         metadata = {
             "schema": SCHEMA, "scope": _relative(root, start), "depth": max_depth,
             "limit": max_entries, "shown": min(len(rows), max_entries),
@@ -128,6 +132,13 @@ def list_workspace_files(
                 continue
             if not (child.is_dir() or child.is_file()):
                 continue
+            if unit_policy is not None:
+                relative = _relative(root, child)
+                if child.is_file() and not unit_policy.visible(relative):
+                    continue
+                if child.is_dir() and not any(
+                        path.startswith(relative + "/") for path in unit_policy.spec.visible_paths):
+                    continue
             rows.append(_entry(child, root, child_depth))
             if child.is_dir() and child_depth < max_depth:
                 next_directories.append((child, child_depth))
@@ -187,7 +198,12 @@ def closest_paths(root: Path, requested: object, *, limit: int = MAX_SUGGESTIONS
     if not query_name:
         return ()
     scored: list[tuple[float, str]] = []
+    import sys
+    unit_module = sys.modules.get("kernel_unit_policy")
+    unit_policy = unit_module.active() if unit_module is not None else None
     for candidate in _candidate_paths(root):
+        if unit_policy is not None and not unit_policy.visible(candidate):
+            continue
         name = Path(candidate).name.casefold()
         path_text = candidate.casefold()
         if name == query_name:

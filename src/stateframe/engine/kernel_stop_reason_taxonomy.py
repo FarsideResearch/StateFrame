@@ -111,6 +111,11 @@ _SAFE_FIELDS = frozenset({
     "event_id",
 })
 _NESTED_FIELDS = frozenset({"authority", "completion", "decision", "done_facts", "record"})
+_SUBFRAME_BLOCKED_LABELS = frozenset({"UNIT_BLOCKED", "SUBFRAME_BLOCKED"})
+_GENERIC_INCOMPLETE_LABELS = frozenset({
+    "INCOMPLETE", "RUN_INCOMPLETE", "NOT_COMPLETED", "TIMEOUT", "TIMED_OUT",
+    "TIMEOUT_EXHAUSTED", "STOPPED", "NEEDS_WORK",
+})
 
 
 def mode(value: object = None) -> str:
@@ -148,8 +153,10 @@ def _normalise(value: object) -> str:
             if value is not None else "")
 
 
-def _reason_from_value(value: object) -> str | None:
+def _reason_from_value(value: object, *, allow_subframe_block: bool = False) -> str | None:
     key = _normalise(value)
+    if key in {"UNIT_BLOCKED", "SUBFRAME_BLOCKED"}:
+        return BLOCKED if allow_subframe_block else None
     aliases = {
         "DONE": DONE_ACCEPTED,
         "DONE_ACCEPTED": DONE_ACCEPTED,
@@ -209,16 +216,26 @@ def _reason_from_value(value: object) -> str | None:
         "DEADLINE_EXCEEDED": DEADLINE_EXCEEDED,
         "FAIL": RUN_FAILED,
         "FAILED": RUN_FAILED,
+        "FAILURE": RUN_FAILED,
+        "ERROR": RUN_FAILED,
         "RUN_FAILED": RUN_FAILED,
+        "RED": RUN_FAILED,
         "AUTHORITY_FAILURE": AUTHORITY_FAILURE,
         "HARDEN8_AUTHORITY_FAILURE": AUTHORITY_FAILURE,
         "HARDEN8_CONTRACT_ERROR": AUTHORITY_FAILURE,
         "HARDEN8_EVIDENCE_PIN_ERROR": AUTHORITY_FAILURE,
         "HARDEN8_OWNER_FINALIZATION_ERROR": AUTHORITY_FAILURE,
+        "HARDEN8_ROUTE_ERROR": AUTHORITY_FAILURE,
+        "FINALIZATION_ERROR": AUTHORITY_FAILURE,
         "HOOK_BLOCKED": HOOK_BLOCKED,
         "HOOK_CONTAINMENT": HOOK_CONTAINMENT,
         "REQUEST_ACTION_CONTRACT_ERROR": AUTHORITY_FAILURE,
+        "RUN_INCOMPLETE": RUN_INCOMPLETE,
         "INCOMPLETE": RUN_INCOMPLETE,
+        "NOT_COMPLETED": RUN_INCOMPLETE,
+        "TIMEOUT": RUN_INCOMPLETE,
+        "TIMED_OUT": RUN_INCOMPLETE,
+        "TIMEOUT_EXHAUSTED": RUN_INCOMPLETE,
         "NEEDS_WORK": RUN_INCOMPLETE,
         "UNKNOWN": UNKNOWN,
     }
@@ -515,7 +532,8 @@ def _open_id_diagnostic(
 
 def _classify_reason(result: Mapping[str, object], system_outcome: object,
                      events: Sequence[Mapping[str, object]], *, accepted: bool = False,
-                     acceptance_source: str | None = None) -> tuple[str, list[str]]:
+                     acceptance_source: str | None = None,
+                     allow_subframe_block: bool = False) -> tuple[str, list[str]]:
     evidence: list[str] = []
     if acceptance_source == "done_seal":
         # A stored model seal is terminal authority; prior refused done attempts
@@ -525,8 +543,28 @@ def _classify_reason(result: Mapping[str, object], system_outcome: object,
     if system_outcome is not None:
         explicit_values.append(system_outcome)
     explicit_values.extend(_status_values(result))
+    if (allow_subframe_block and any(
+            _normalise(value) in _SUBFRAME_BLOCKED_LABELS for value in explicit_values)):
+        # A verified subframe block may replace generic incompleteness, but a
+        # specific failure or other terminal authority in the joined result wins.
+        for value in explicit_values:
+            key = _normalise(value)
+            if key in _SUBFRAME_BLOCKED_LABELS | _GENERIC_INCOMPLETE_LABELS:
+                continue
+            reason = _reason_from_value(value)
+            if reason is not None and reason != DONE_ACCEPTED:
+                return reason, evidence
+        for event in reversed(events):
+            reason = _event_reason(event)
+            if reason is None or reason in {DONE_ACCEPTED, RUN_INCOMPLETE}:
+                continue
+            kind = event.get("kind")
+            if isinstance(kind, str) and kind not in evidence:
+                evidence.append(kind)
+            return reason, evidence
+        return BLOCKED, evidence
     for value in explicit_values:
-        reason = _reason_from_value(value)
+        reason = _reason_from_value(value, allow_subframe_block=allow_subframe_block)
         if reason is None:
             continue
         if reason == DONE_ACCEPTED:
@@ -555,8 +593,13 @@ def classify_run_end(result: Mapping[str, object] | None, *,
                      runtime: object = None,
                      last_n: object = None) -> dict[str, object]:
     """Classify one terminal result without changing it or its journal."""
-    from kernel_terminal_lattice import join_terminal
+    from kernel_terminal_lattice import (
+        join_terminal,
+        stop_reason_rank,
+        subframe_block_authorized,
+    )
 
+    allow_subframe_block = subframe_block_authorized(runtime)
     terminal = join_terminal(
         runtime, dict(result) if isinstance(result, Mapping) else {},
         writer="kernel_stop_reason_taxonomy.classify_run_end",
@@ -567,7 +610,8 @@ def classify_run_end(result: Mapping[str, object] | None, *,
     green_source = _trusted_green_source(terminal, observed, runtime)
     stop_reason, evidence = _classify_reason(
         terminal, system_outcome, observed, accepted=acceptance_source is not None,
-        acceptance_source=acceptance_source)
+        acceptance_source=acceptance_source,
+        allow_subframe_block=allow_subframe_block)
     green = _green_at_stop(terminal, observed, runtime)
     accepted = acceptance_source is not None
     open_ids, open_ids_status = _open_id_diagnostic(terminal, runtime)
@@ -601,9 +645,24 @@ def classify_run_end(result: Mapping[str, object] | None, *,
         "decision_window": window,
         "last_decisions": _decision_tail(observed, window),
     }
-    return join_terminal(
+    joined = join_terminal(
         runtime, classified, writer="kernel_stop_reason_taxonomy.classify_run_end",
     )
+    if allow_subframe_block and stop_reason == BLOCKED:
+        # Keep this observer's generic stop class even when the runtime retains
+        # the more specific authorized SUBFRAME_BLOCKED terminal, but never
+        # replace a stronger reason selected by the terminal lattice.
+        subframe_rank = stop_reason_rank(
+            "SUBFRAME_BLOCKED", allow_subframe_block=True,
+        )
+        joined_ranks = [
+            stop_reason_rank(value, allow_subframe_block=True)
+            for value in (joined.get("stop_reason"), joined.get("stop_cause"))
+        ]
+        if max(joined_ranks, default=0) <= subframe_rank:
+            joined["stop_reason"] = BLOCKED
+            joined["stop_cause"] = BLOCKED
+    return joined
 
 
 def _journal_events(path: object) -> list[dict[str, object]]:

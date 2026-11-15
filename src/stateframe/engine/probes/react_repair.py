@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import ast
 import copy
-from contextlib import nullcontext
 import hashlib
 import json
 import logging
@@ -25,7 +24,9 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import warnings
 from collections.abc import Collection, Mapping, Sequence
+from contextlib import nullcontext, suppress
 from dataclasses import dataclass, field
 from types import SimpleNamespace
 from typing import Callable
@@ -136,6 +137,7 @@ sys.path.insert(0, str(POC))
 sys.path.insert(0, str(POC / "probes"))
 import kernel_py39_compat  # noqa: E402,F401
 from build_test_path import resolve_build_test_path  # noqa: E402
+from kernel_safe_paths import safe_expanduser  # noqa: E402
 from kernel_tool_paths import (  # noqa: E402
     AmbiguousToolPath, receipt_target_path, resolve_tool_path, unique_tool_match,
 )
@@ -959,6 +961,66 @@ def _bound_edit_refusal(root: pathlib.Path, path: pathlib.Path,
     return validate_target(target_ref, path=relative, revision=revision, source=source)
 
 
+def _auto_finish_checked_subframe(measurement, policy, root, original_sources,
+                                  messages, native_batch) -> bool:
+    """Close the completed edit before checking subframe submission authority."""
+    from kernel_done_is_submit_authority import (
+        _pending_mutations, enabled as done_submit_enabled, request_submission,
+    )
+    from kernel_unit_policy import ready_to_auto_finish
+
+    if not done_submit_enabled(measurement):
+        measurement.journal.emit(
+            "subframe_auto_finish_declined", reason="submission_unavailable",
+            dispatch=False)
+        return False
+    pending_calls = bool(native_batch is not None and native_batch.pending)
+    if not pending_calls:
+        # prepare() normally delivers the check and closes this action before
+        # the next provider send. Do both here so submission sees the same
+        # settled effect without another send.
+        measurement._deliver_auto_verify(messages)
+        measurement.close_step(messages)
+    receipt = getattr(measurement, "_unit_auto_finish_receipt", None)
+    if not ready_to_auto_finish(
+            policy, root, receipt, original_sources,
+            pending_calls=pending_calls,
+            pending_mutations=bool(_pending_mutations(measurement)),
+            open_refusal=bool(getattr(measurement, "_unit_open_refusal", False)),
+            decline=lambda reason: measurement.journal.emit(
+                "subframe_auto_finish_declined", reason=reason, dispatch=False)):
+        return False
+    request_submission(measurement, source="host")
+    measurement.journal.emit(
+        "subframe_auto_finished", reason_code="auto_finished_on_green_check",
+        check_receipt=receipt.to_json())
+    return True
+
+
+def _classify_unsubmitted_loop(measurement, step_cap: int | None) -> None:
+    """Classify an exhausted completion loop before candidate capture."""
+    if (not getattr(measurement, "disposition_v2", False)
+            or measurement.system_outcome is not None):
+        return
+    # A host-armed subframe has the same pending capture authority as model done.
+    # Capture failure sets its own error later; loop exhaustion is not its result.
+    if done_accepted(measurement):
+        return
+    if getattr(measurement, "_unit_policy", None) is not None:
+        from kernel_done_is_submit_authority import submission_pending
+        if submission_pending(measurement):
+            return
+    from kernel_terminal_policy import enabled as hard_budget_only_enabled
+    measurement.system_outcome = (
+        "run_incomplete" if step_cap is None else
+        "step_budget_exhausted" if hard_budget_only_enabled(measurement)
+        else "incomplete")
+    measurement.journal.emit(
+        "v2_terminal", terminal="INCOMPLETE",
+        reason=("action loop ended without accepted done" if step_cap is None
+                else "step limit without accepted done"))
+
+
 def _capture_done_candidate_after_exception(
         measurement: object, context: object) -> object:
     """Capture the latest scoped source snapshot if an exception follows done."""
@@ -1106,13 +1168,12 @@ def _missing_declared_paths(root: pathlib.Path, fileset: FileSet, *,
 
 
 def _product_roots(row: Mapping[str, object]) -> tuple[str, ...]:
-    """Return the public product roots used for dynamic candidate registration."""
-    raw = row.get("allowed_product_paths")
-    if isinstance(raw, Sequence) and not isinstance(raw, (str, bytes)):
-        roots = tuple(str(path).strip().strip("/") for path in raw if str(path).strip())
-        if roots:
-            return roots
-    return ("app",)
+    """Include declared creates when registering product files for capture."""
+    roots: list[str] = []
+    for raw in (row.get("allowed_product_paths"), row.get("new_file_roots")):
+        if isinstance(raw, Sequence) and not isinstance(raw, (str, bytes)):
+            roots.extend(str(path).strip().strip("/") for path in raw if str(path).strip())
+    return tuple(dict.fromkeys(roots)) or ("app",)
 
 
 def _is_product_path(relative: str, row: Mapping[str, object]) -> bool:
@@ -1428,6 +1489,23 @@ def _record_final_product_no_candidate(
     return True
 
 
+def _journal_skipped_public_test_path(path: object, reason: str) -> None:
+    path_label = path if isinstance(path, str) else f"<{type(path).__name__}>"
+    fields = {"path": path_label[:256], "reason": reason,
+              "producer": "react_repair", "dispatch": False}
+    with suppress(Exception):
+        from kernel_pilot import ACTIVE_RUNTIME
+        runtime = ACTIVE_RUNTIME.get()
+        journal = getattr(runtime, "journal", None)
+        journal_emit = getattr(journal, "emit", None)
+        if callable(journal_emit):
+            journal_emit("public_test_path_skipped", **fields)
+            return
+    with suppress(Warning):
+        warnings.warn(f"skipped invalid public test path {fields['path']!r} ({reason})",
+                      RuntimeWarning, stacklevel=2)
+
+
 def _materialize_public_tests(root: pathlib.Path, fileset: FileSet,
                               row: Mapping[str, object]) -> tuple[str, ...]:
     """Write declared public tests independently of the product source map."""
@@ -1437,10 +1515,38 @@ def _materialize_public_tests(root: pathlib.Path, fileset: FileSet,
     if not sources:
         return ()
     written = []
-    for path, source in sorted(sources.items()):
-        destination, normalized = _multi_path(root, path)
-        if not is_harness_path(pathlib.Path(normalized)):
-            raise ValueError(f"public test must identify a declared test file: {path}")
+    unit_module = sys.modules.get("kernel_unit_policy")
+    unit = unit_module.active() if unit_module is not None else None
+    if unit is None:
+        # Ordinary runs retain the main materialization and fail-closed contract.
+        for path, source in sorted(sources.items()):
+            destination, normalized = _multi_path(root, path)
+            if not is_harness_path(pathlib.Path(normalized)):
+                raise ValueError(f"public test must identify a declared test file: {path}")
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            destination.write_text(source, encoding="utf-8")
+            written.append(normalized)
+        return tuple(written)
+    seen: set[str] = set()
+    for path, source in sorted(sources.items(), key=lambda item: str(item[0])):
+        if not isinstance(path, str):
+            _journal_skipped_public_test_path(path, "path_not_text")
+            continue
+        try:
+            destination, normalized = _multi_path(root, path)
+        except (OSError, TypeError, ValueError):
+            _journal_skipped_public_test_path(path, "invalid_repo_path")
+            continue
+        if normalized in seen:
+            _journal_skipped_public_test_path(path, "duplicate_normalized_path")
+            continue
+        if not is_harness_path(pathlib.PurePosixPath(normalized)):
+            _journal_skipped_public_test_path(path, "not_a_test_harness_path")
+            continue
+        if not isinstance(source, str):
+            _journal_skipped_public_test_path(path, "source_not_text")
+            continue
+        seen.add(normalized)
         destination.parent.mkdir(parents=True, exist_ok=True)
         destination.write_text(source, encoding="utf-8")
         written.append(normalized)
@@ -2939,6 +3045,29 @@ def _tools_for_probe_modes(*, probe_gate_on: bool,
                   or (shell is not None and shell.settings.shell != "off")]
     from kernel_agent_tools import project_menu
     base_tools = project_menu(base_tools)
+    _unit_module = sys.modules.get("kernel_unit_policy")
+    _unit = _unit_module.active() if _unit_module is not None else None
+    if _unit is not None:
+        base_tools = [tool for tool in base_tools
+                      if tool["function"]["name"] in _unit.allowed_tools]
+        base_tools.append(_unit_module.UNIT_BLOCKED_TOOL)
+        return base_tools
+    _parallel_module = None
+    for module_name in ("kernel_parallel", "stateframe.engine.kernel_parallel"):
+        candidate = sys.modules.get(module_name)
+        if candidate is not None and candidate.available() and candidate.writable_workspace():
+            _parallel_module = candidate
+            break
+    if _parallel_module is not None:
+        base_tools = [
+            {**tool, "function": {**tool["function"], "description":
+                "Retrieve a revision-bound check receipt with next_offset, or an "
+                "authenticated subframe receipt page with next_handle. Follow next_handle "
+                "to read all subframe pages."}}
+            if tool["function"]["name"] == "read_check_receipt" else tool
+            for tool in base_tools
+        ]
+        base_tools.append(_parallel_module.PARALLEL_TOOL)
     boundary_aliases = os.environ.get("STATEFRAME_BOUNDARY_CHECKS", "off").lower() == "on"
     probe_modes = ["python"]
     if not observation_probe_on:
@@ -3019,6 +3148,135 @@ def _tools_for_probe_modes(*, probe_gate_on: bool,
     from kernel_completion_owner import canonicalize_tool_surface
     return canonicalize_tool_surface(
         _owner_coordinate_read_surface(selected), probe_modes=probe_modes)
+
+
+def _execute_parent_parallel(measurement, bolt, root, created_this_run,
+                             baseline_tests, sandbox_deadline, tool_call_id,
+                             args, artifact_root):
+    from kernel_parallel import context as parallel_context, execute_parallel
+
+    context = parallel_context(
+        measurement, bolt, root, created_this_run,
+        protected=lambda path: protected_test_path(root / path, baseline_tests),
+        deadline=sandbox_deadline)
+    call_name = tool_call_id
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}", call_name):
+        call_name = "call_" + hashlib.sha256(call_name.encode()).hexdigest()[:40]
+    result = execute_parallel(
+        context, args, host=None, store_root=artifact_root / "parallel" / call_name)
+    return call_name, result
+
+
+PARALLEL_PARENT_GUIDANCE = (
+    "Independent parts (separate files + separate tests): dispatch them together with `parallel` before reading their sources."
+)
+_PARALLEL_FORCE_MANIFEST_ENV = "STATEFRAME_PARALLEL_FORCE_MANIFEST"
+_PARALLEL_FORCE_MANIFEST_MAX_BYTES = 64 * 1024
+
+
+def _forced_parallel_manifest_for_parent() -> str | None:
+    """The benchmark hook is unavailable in a process running under UnitPolicy."""
+    unit_module = sys.modules.get("kernel_unit_policy")
+    active = getattr(unit_module, "active", None) if unit_module is not None else None
+    if callable(active) and active() is not None:
+        return None
+    return os.environ.get(_PARALLEL_FORCE_MANIFEST_ENV)
+
+
+def _parallel_parent_system_instruction(system: str, tools: object) -> str:
+    """Add the parent dispatch rule only when this run offers parallel."""
+    if not isinstance(tools, (list, tuple)):
+        return system
+    offered = any(isinstance(tool, Mapping)
+                 and isinstance(tool.get("function"), Mapping)
+                 and tool["function"].get("name") == "parallel"
+                 for tool in tools)
+    return system + ("\n" + PARALLEL_PARENT_GUIDANCE if offered else "")
+
+
+def _parallel_result_is_terminal(result: object) -> bool:
+    admission = getattr(result, "admission", None)
+    outcomes = getattr(result, "outcomes", ())
+    if (getattr(admission, "status", None) != "ADMITTED"
+            or getattr(result, "final_check", None) != "PASS"
+            or getattr(result, "integration", None) != "VERIFIED"
+            or not isinstance(outcomes, (list, tuple)) or not outcomes):
+        return False
+    return all(getattr(outcome, "status", None) == "COMMITTED" for outcome in outcomes)
+
+
+def _parallel_parent_tool_surface(tools: list[dict], result: object | None,
+                                  *, enabled: bool = True) -> list[dict]:
+    """Retain parallel while a refusal or incomplete run can still be retried."""
+    if not enabled or not _parallel_result_is_terminal(result):
+        return tools
+    return [tool for tool in tools
+            if not (isinstance(tool, Mapping)
+                    and isinstance(tool.get("function"), Mapping)
+                    and tool["function"].get("name") == "parallel")]
+
+
+def _parallel_drop_terminal_enabled() -> bool:
+    value = os.environ.get("STATEFRAME_PARALLEL_DROP_TOOL_AFTER_TERMINAL", "on").strip().lower()
+    if value not in {"on", "off"}:
+        raise ValueError("STATEFRAME_PARALLEL_DROP_TOOL_AFTER_TERMINAL must be on or off")
+    return value == "on"
+
+
+def _read_forced_parallel_manifest(path: str) -> tuple[dict, str, str | None]:
+    """Read a bounded regular manifest without following symlinks or accepting loose JSON."""
+    target = safe_expanduser(path)
+    flags = (os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+             | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_CLOEXEC", 0))
+    try:
+        descriptor = os.open(target, flags)
+    except OSError as error:
+        return {}, "{}", "manifest_read_failed_" + str(error.errno or "unknown")
+    try:
+        info = os.fstat(descriptor)
+        if not stat.S_ISREG(info.st_mode):
+            return {}, "{}", "manifest_not_regular"
+        if info.st_size > _PARALLEL_FORCE_MANIFEST_MAX_BYTES:
+            return {}, "{}", "manifest_too_large"
+        chunks = []
+        remaining = _PARALLEL_FORCE_MANIFEST_MAX_BYTES + 1
+        while remaining:
+            chunk = os.read(descriptor, min(remaining, 8192))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        raw = b"".join(chunks)
+    except OSError as error:
+        return {}, "{}", "manifest_read_failed_" + str(error.errno or "unknown")
+    finally:
+        os.close(descriptor)
+    if len(raw) > _PARALLEL_FORCE_MANIFEST_MAX_BYTES:
+        return {}, "{}", "manifest_too_large"
+    try:
+        source = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return {}, "{}", "manifest_not_utf8"
+
+    def object_without_duplicates(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError("duplicate object key")
+            result[key] = value
+        return result
+
+    def reject_constant(_value):
+        raise ValueError("non-standard JSON constant")
+
+    try:
+        parsed = json.loads(source, object_pairs_hook=object_without_duplicates,
+                            parse_constant=reject_constant)
+    except (json.JSONDecodeError, ValueError):
+        return {}, "{}", "manifest_invalid_json"
+    if not isinstance(parsed, dict):
+        return {}, "{}", "manifest_root_not_object"
+    return parsed, source, None
 
 _DSML_PIPE = "｜"  # full-width vertical line
 _DSML_INVOKE_RE = re.compile(
@@ -5281,7 +5539,9 @@ def _host_refusal_observation(runtime, refusal: "_HostExecutionRefused", *, sele
 def _run_tests_impl(root: pathlib.Path, fn: str, explicit: str | None,
                     rel_hint: str | None = None, row=None) -> str:
     """rel_hint is the file under repair — used to tell OUR import failures from the agent's."""
-    if isinstance(row, Mapping) and row.get("runner_kind") == "generic":
+    _unit_module = sys.modules.get("kernel_unit_policy")
+    _unit = _unit_module.active() if _unit_module is not None else None
+    if _unit is None and isinstance(row, Mapping) and row.get("runner_kind") == "generic":
         from kernel_generic_check import check_result
         return check_result(root, row)[0]
     _profile = None
@@ -5500,7 +5760,11 @@ def _run_tests_impl(root: pathlib.Path, fn: str, explicit: str | None,
             _profile.bind_runtime(_runtime)
             _profile.mark("execution_identity_prepared")
         _binding_span = _profile.start_span("pre_test_binding") if _profile else None
-        _test_binding = _runtime.binding() if _runtime else {}
+        _test_binding = (_runtime.binding(command=_unit.check_binding_command())
+                         if _runtime is not None and _unit is not None
+                         else _runtime.binding() if _runtime else {})
+        if _runtime is not None and _unit is not None:
+            _test_binding = _fresh_unit_check_binding(_runtime, _unit, root, _test_binding)
         if _profile:
             _profile.end_span(_binding_span)
         _execution_id = None
@@ -5534,6 +5798,12 @@ def _run_tests_impl(root: pathlib.Path, fn: str, explicit: str | None,
         def _shadow_observation(shadow_text):
             rendered = str(shadow_text)
             if _runtime is None:
+                return rendered
+            if _unit is not None:
+                from kernel_public_evidence import check_selectors
+                _runtime._unit_pending_test_observations.append((
+                    check_selectors(root, list(targets), kexpr), _test_binding,
+                    _cmd, env, _execution_id))
                 return rendered
             from kernel_check_receipts import compact_observation
             from kernel_check_truth_adapter import record_native_observation
@@ -5569,21 +5839,38 @@ def _run_tests_impl(root: pathlib.Path, fn: str, explicit: str | None,
                 run_sandboxed,
             )
             from kernel_pilot import ParentBudgetExhausted
+            _check_token = None
+            if _unit is not None:
+                from kernel_unit_policy import new_check_token
+                _check_token = new_check_token()
             try:
                 # RLIMIT_CPU is only a runaway backstop here, never a budget: the old 30 s
                 # policy default SIGKILLed a 37 s public check mid-run (rc 137).
-                result = run_sandboxed(
-                    command,
-                    root,
-                    env=env if check_env is None else check_env,
-                    timeout=300,
-                    cpu_seconds=check_cpu_backstop_seconds(),
-                    output_limit=256 * 1024,
-                    **({"observe_pytest": True} if _profiled_command else {}),
-                )
+                try:
+                    result = run_sandboxed(
+                        command,
+                        root,
+                        env=env if check_env is None else check_env,
+                        timeout=300,
+                        cpu_seconds=check_cpu_backstop_seconds(),
+                        output_limit=256 * 1024,
+                        **({"internal_env": {"STATEFRAME_CHECK_TOKEN": _check_token}}
+                           if _check_token is not None else {}),
+                        **({"observe_pytest": True} if _profiled_command else {}),
+                    )
+                except BaseException:
+                    if _check_token is not None:
+                        from kernel_unit_policy import _reap_check_token
+                        _reap_check_token(_check_token)
+                    raise
+                if _unit is not None:
+                    from kernel_unit_policy import reap_check_group
+                    reap_check_group(result.pid, token=_check_token)
             except ParentBudgetExhausted:
                 raise
             except RuntimeError as refusal:  # ExecutionPolicyError, stage6 canary, ...
+                if _unit is not None and isinstance(refusal, _unit_module.UnitCheckCleanupError):
+                    raise
                 raise _HostExecutionRefused(refusal) from refusal
             _check_memory_limit_mechanism = policy_memory_limit_mechanism(result)
             _check_cgroup_leaf_pattern = getattr(result, "cgroup_leaf_pattern", None)
@@ -5694,7 +5981,7 @@ def _run_tests_impl(root: pathlib.Path, fn: str, explicit: str | None,
         timeout_label = f"{timeout_s:g}"
         if _runtime is not None and callable(getattr(_runtime, "note_long_run_signal", None)):
             _runtime.note_long_run_signal("check_timeout", timeout_s=timeout_s)
-        if _runtime is not None:
+        if _runtime is not None and _unit is None:
             from kernel_public_evidence import check_selectors
             _timeout_observation = check_selectors(root, list(targets), kexpr)
             with _profile_phase("post_snapshot_integrity"):
@@ -5716,7 +6003,12 @@ def _run_tests_impl(root: pathlib.Path, fn: str, explicit: str | None,
             f"pytest exit 1 — TIMED OUT after {timeout_label}s. The configured check "
             "did not establish a result within its time budget; code, harness, and "
             "environment are not distinguished by this observation.")
-        if _runtime is not None:
+        if _runtime is not None and _unit is not None:
+            from kernel_public_evidence import check_selectors
+            _runtime._unit_pending_test_observations.append((
+                check_selectors(root, list(targets), kexpr), _test_binding,
+                _cmd, env, _execution_id))
+        if _runtime is not None and _unit is None:
             from kernel_check_receipts import compact_observation
             from kernel_check_truth_adapter import record_native_observation
             with _profile_phase("first_receipt"):
@@ -5724,8 +6016,10 @@ def _run_tests_impl(root: pathlib.Path, fn: str, explicit: str | None,
                     _runtime,
                     selector=explicit or ", ".join(str(target) for target in targets),
                     status="TIMEOUT",
-                    stdout=_timeout_stream(timeout_error.output),
-                    stderr=_timeout_stream(timeout_error.stderr),
+                    stdout=(_unit.project_check_output(_timeout_stream(timeout_error.output), "pytest")
+                            if _unit is not None else _timeout_stream(timeout_error.output)),
+                    stderr=(_unit.project_check_output(_timeout_stream(timeout_error.stderr), "pytest")
+                            if _unit is not None else _timeout_stream(timeout_error.stderr)),
                     assertion_context=timeout_context,
                     execution_id=str(_execution_id or ""),
                     exit_code=124,
@@ -5737,6 +6031,10 @@ def _run_tests_impl(root: pathlib.Path, fn: str, explicit: str | None,
                     memory_limit_mechanism=_check_memory_limit_mechanism,
                     cgroup_leaf_pattern=_check_cgroup_leaf_pattern,
                 )
+            if _unit is not None:
+                return (timeout_context + "\n"
+                        + _timeout_stream(timeout_error.output) + "\n"
+                        + _timeout_stream(timeout_error.stderr))
             from unit_planner_v2 import coalesce_observation
             return coalesce_observation(timeout_context + "\n" + compact_observation(timeout_receipt),
                                         _timeout_stream(timeout_error.output), 124, complete=False)
@@ -5750,16 +6048,20 @@ def _run_tests_impl(root: pathlib.Path, fn: str, explicit: str | None,
         _test_observation = check_selectors(root, list(targets), kexpr)
         with _profile_phase("post_snapshot_integrity"):
             _test_write_set = changed_write_set(_test_write_snapshot, snapshot_workspace(root))
-        with _profile_phase("readiness_binding_enrichment"):
-            _runtime.test_observation(
-                _test_observation, p.returncode, _test_binding,
-                observation=p.stdout + "\n" + p.stderr,
-                run_write_set=_test_write_set, command=_cmd, test_environment=env,
-                memory_limit_mechanism=_check_memory_limit_mechanism,
-                cgroup_leaf_pattern=_check_cgroup_leaf_pattern,
-                memory_limit_killed=_check_memory_limit_killed,
-                termination_evidence=dict(_check_termination),
-            )
+        if _unit is not None:
+            _runtime._unit_pending_test_observations.append(
+                (_test_observation, _test_binding, _cmd, env, _execution_id))
+        else:
+            with _profile_phase("readiness_binding_enrichment"):
+                _runtime.test_observation(
+                    _test_observation, p.returncode, _test_binding,
+                    observation=p.stdout + "\n" + p.stderr,
+                    run_write_set=_test_write_set, command=_cmd, test_environment=env,
+                    memory_limit_mechanism=_check_memory_limit_mechanism,
+                    cgroup_leaf_pattern=_check_cgroup_leaf_pattern,
+                    memory_limit_killed=_check_memory_limit_killed,
+                    termination_evidence=dict(_check_termination),
+                )
         _repro_gate = getattr(_runtime, "repro_first_gate", None)
         _repro_context = getattr(_runtime, "_repro_first_observation_context", None)
         if (__import__("kernel_repro_first").repro_first_gate_mode() == "on"
@@ -5770,7 +6072,10 @@ def _run_tests_impl(root: pathlib.Path, fn: str, explicit: str | None,
             _probe_id = str(_repro_context.get("probe_id") or rel_hint or fn or "pytest")
             observe_pytest(
                 _repro_gate,
-                "pytest exit %d\n%s\n%s" % (p.returncode, p.stdout, p.stderr),
+                ("pytest exit %d\n%s" % (
+                    p.returncode, _unit.project_check_output(p.stdout + "\n" + p.stderr, "pytest"))
+                 if _unit is not None else
+                 "pytest exit %d\n%s\n%s" % (p.returncode, p.stdout, p.stderr)),
                 command=str(_repro_context.get("command") or ("pytest:" + _probe_id)),
                 probe_id=_probe_id,
                 root=root,
@@ -5869,6 +6174,10 @@ def _run_tests_impl(root: pathlib.Path, fn: str, explicit: str | None,
     # then chased a phantom bug at the wrong line. A NameError/ImportError without its
     # `File "...", line N` frame is not evidence, it is a rumour.
     body = _pytest_failure_excerpt(tail)
+    if _unit is not None:
+        # The unit receipt is built after the disposable clone is scanned. Raw
+        # pytest text stays in its evidence file, outside model-facing receipts.
+        return "pytest exit %d\n%s\n%s" % (p.returncode, p.stdout, p.stderr)
     receipt = None
     if _runtime is not None:
         from kernel_check_receipts import compact_observation
@@ -5942,9 +6251,95 @@ def _run_covers_declared_selectors(runtime: object, row: object, targets: Sequen
         return False
 
 
+def _fresh_unit_check_binding(runtime, unit, root: pathlib.Path, binding: Mapping) -> Mapping:
+    """Bind a subframe check to the files it actually runs on.
+
+    The green-lock repair rail checks an edit inside the edit action, before the host
+    advances the workspace view's mutation epoch, so the cached view can still describe the
+    pre-edit files.  A check receipt bound to the wrong revision would claim the previous
+    candidate's verdict for the new one.  When the cached binding disagrees with the files on
+    disk, advance the epoch and rebind.
+    """
+    if (not callable(getattr(runtime, "note_mutation", None))
+            or not callable(getattr(runtime, "_invalidate_binding_cache", None))):
+        return binding  # minimal runtimes (unit fakes) have no workspace view to refresh
+    from kernel_live_projection import workspace_binding
+    live = workspace_binding(pathlib.Path(root), str(binding.get("environment_revision", "")))
+    if (live["product_revision"] == binding.get("product_revision")
+            and live["test_harness_revision"] == binding.get("test_harness_revision")):
+        return binding
+    runtime.note_mutation((), "check_binding_refresh")
+    runtime._invalidate_binding_cache()
+    return runtime.binding(command=unit.check_binding_command())
+
+
 def run_tests(root: pathlib.Path, fn: str, explicit: str | None,
               rel_hint: str | None = None, row=None) -> str:
     """Keep test profiling advisory and attach one scope to each host invocation."""
+    _unit_module = sys.modules.get("kernel_unit_policy")
+    _unit = _unit_module.active() if _unit_module is not None else None
+    if _unit is not None:
+        from kernel_pilot import ACTIVE_RUNTIME
+        _runtime = ACTIVE_RUNTIME.get()
+        if _runtime is None:
+            raise RuntimeError("unit check requires an active runtime")
+        _journal = getattr(_runtime, "journal", None)
+        _journal_path = getattr(_journal, "path", None)
+        if _journal_path is None:
+            raise RuntimeError("unit check requires a durable journal path")
+        _runtime._unit_pending_test_observations = []
+        _previous_receipt = getattr(_runtime, "_unit_check_receipt", None)
+        _check_step = getattr(getattr(_runtime, "owner", None), "current_step", None)
+        # The repair controller and the host auto-verify rail both check an edit within one
+        # step.  A FAIL on identical inputs is repeated, not re-run, in that step only, so
+        # a later explicit retry still executes the check.
+        _receipt = (
+            _unit_module.current_receipt(_unit, root, _previous_receipt)
+            if (getattr(_previous_receipt, "status", None) == "FAIL"
+                and _check_step is not None
+                and getattr(_runtime, "_unit_check_step", None) == _check_step) else None)
+        if _receipt is None:
+            _receipt = _unit_module.run_frozen_check(
+                _unit, root,
+                execute=(lambda clone, selector: _run_tests_impl(
+                    clone, fn, selector, rel_hint, row=row))
+                if _unit.spec.contract.check.command_kind == "pytest"
+                else _unit_module.run_check_command,
+                evidence_dir=pathlib.Path(_journal_path).parent / "unit-check-evidence",
+                previous_receipt=_previous_receipt,
+            )
+        _runtime._unit_check_receipt = _receipt
+        _runtime._unit_check_step = _check_step
+        if _receipt is not _previous_receipt:
+            # One journal event per executed check; a repeated receipt ran nothing.
+            _journal.emit("unit_check", recipe_digest=_receipt.recipe_digest,
+                          status=_receipt.status, invalid_reason=_receipt.invalid_reason,
+                          wrote_paths=list(_receipt.wrote_paths), reused=False)
+        _pending = _runtime._unit_pending_test_observations
+        if callable(getattr(_runtime, "test_observation", None)):
+            if _pending:
+                _selectors = [selector for item in _pending for selector in item[0]]
+                _binding, _command, _environment, _execution_id = _pending[0][1:]
+            else:
+                _selectors = list(_unit.spec.contract.check.selectors)
+                _binding = _runtime.binding()
+                _command, _environment, _execution_id = (), None, None
+            _runtime.test_observation(
+                _selectors, 0 if _receipt.status == "PASS" else 1, _binding,
+                observation=_receipt.projected_observation,
+                run_write_set=_receipt.wrote_paths,
+                command=_command, test_environment=_environment,
+                execution_id=_execution_id,
+                typed_observation={"status": _receipt.status,
+                                   "outcome": _receipt.status},
+            )
+        del _runtime._unit_pending_test_observations
+        if _receipt.status == "INVALID":
+            return ("pytest exit 4 — INVALID " + str(_receipt.invalid_reason)
+                    + "\n" + _receipt.projected_observation)
+        if _receipt.status == "NOT_RUN":
+            return "pytest exit 4 — NOT_RUN"
+        return _receipt.projected_observation
     if os.environ.get("STATEFRAME_TEST_RUN_SPANS", "off").strip().lower() not in {"shadow", "on"}:
         return _run_tests_impl(root, fn, explicit, rel_hint, row=row)
     from kernel_test_run_spans import profile_scope
@@ -5970,6 +6365,103 @@ def provider_dispatch_allowed(prepared: object) -> bool:
     faults, HYBRID_CONTEXT_OVERFLOW) is terminal and is never sent."""
     overflow = getattr(prepared, "overflow", None)
     return not overflow or overflow.get("kind") == "RENDER_OVERFLOW"
+
+
+class _UnitContextTooLarge(RuntimeError):
+    """The final prepared subframe request cannot be sent within its ceiling."""
+
+
+def _write_unit_refused_request(run_dir: pathlib.Path, messages: object,
+                                tools: object) -> None:
+    """Keep the exact unsent provider body for a subframe capacity refusal."""
+    import tempfile
+
+    destination = run_dir / "unit-refused-request.json"
+    payload = json.dumps({"messages": list(messages), "tools": tools},
+                         ensure_ascii=False, sort_keys=True,
+                         separators=(",", ":")).encode("utf-8") + b"\n"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    if destination.is_symlink() or (destination.exists() and not destination.is_file()):
+        raise RuntimeError("subframe refused request evidence path is not a regular file")
+    if destination.exists():
+        if destination.read_bytes() != payload:
+            raise RuntimeError("subframe refused request evidence differs from existing record")
+        return
+    with tempfile.NamedTemporaryFile(dir=run_dir, prefix=".unit-refused-request-",
+                                     delete=False) as staged:
+        temporary = pathlib.Path(staged.name)
+        staged.write(payload)
+        staged.flush()
+        os.fsync(staged.fileno())
+    try:
+        os.link(temporary, destination)
+        directory = os.open(run_dir, os.O_RDONLY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+    except FileExistsError:
+        if destination.is_symlink() or not destination.is_file():
+            raise RuntimeError("subframe refused request evidence path is not a regular file")
+        if destination.read_bytes() != payload:
+            raise RuntimeError("subframe refused request evidence differs from existing record")
+    finally:
+        temporary.unlink()
+
+
+def _enforce_unit_first_request(runtime: object, prepared: object, tools: object,
+                                unit: object, root: pathlib.Path,
+                                run_dir: pathlib.Path) -> None:
+    """Refuse an incomplete or oversized first subframe request before transport."""
+    from kernel_parallel_meter import SubframeCapMeasurement, measure_subframe_cap
+    from kernel_request_budget import _request_token_meter
+    from kernel_request_diet import _wire_bytes
+    from kernel_request_source_window import verify_current_source_message
+
+    body = {"messages": list(prepared.messages), "tools": tools}
+    cap = unit.spec.limits.unit_request_tokens
+    meter = _request_token_meter(runtime, prepared.capture)
+    try:
+        measured = measure_subframe_cap(body, meter, cap=cap)
+    except TimeoutError:
+        pinned = getattr(unit.spec, "subframe_cap_calibration", None)
+        calibration_id = (pinned.get("calibration_id")
+                          if isinstance(pinned, Mapping) else None)
+        measured = SubframeCapMeasurement(
+            tokens=cap + 1,
+            meter_kind="measurement_timeout",
+            confidence="unknown",
+            calibration_id=calibration_id if isinstance(calibration_id, str) else "unknown",
+            effective_tokens_per_byte=None,
+            request_bytes=_wire_bytes(body),
+            residual_tokens=0,
+        )
+    tokens = measured.tokens
+    runtime.journal.emit("unit_frame_tokens", request=prepared.capture.request_id,
+                         tokens=tokens, counter=measured.meter_kind,
+                         **measured.audit_fields(cap))
+    missing = []
+    required = tuple(dict.fromkeys((*unit.spec.contract.owns,
+                                    *unit.spec.contract.check.source_paths)))
+    for path in required:
+        source = (root / path).read_text(encoding="utf-8")
+        if not any(verify_current_source_message(
+                item.get("content"), path=path, source=source)
+                for item in prepared.messages if isinstance(item, Mapping)):
+            missing.append(path)
+    if unit.first_request_fits(tokens, owned_source_complete=not missing):
+        return
+    runtime.system_outcome = "unit_context_too_large"
+    detail = (f"first request requires {tokens} tokens "
+              f"(ceiling {unit.spec.limits.unit_request_tokens})")
+    if missing:
+        detail += "; missing full source: " + ", ".join(missing)
+    runtime.unit_context_detail = detail[:300]
+    _write_unit_refused_request(run_dir, prepared.messages, tools)
+    _record_prepared_provider_not_dispatched(
+        runtime, prepared, provider_request=True,
+        reason_code="unit_context_too_large")
+    raise _UnitContextTooLarge(runtime.unit_context_detail)
 
 
 def _record_prepared_provider_not_dispatched(
@@ -6027,6 +6519,11 @@ def run_tests_for_selectors(root: pathlib.Path, fn: str, selectors: Sequence[str
                             rel_hint: str | None = None, row=None) -> tuple[str, tuple[int, ...]]:
     """Run every logical oracle selector while preserving the legacy run_tests API."""
     from unit_planner_v2 import coalesce_combined_observation, coalesce_observation
+    _unit_module = sys.modules.get("kernel_unit_policy")
+    if _unit_module is not None and _unit_module.active() is not None:
+        observation = run_tests(root, fn, None, rel_hint, row=row)
+        code = _selector_exit_code(observation)
+        return observation, (code if code is not None else -1,)
     if isinstance(row, Mapping) and row.get("runner_kind") == "generic":
         from kernel_generic_check import check_result
         observation, code = check_result(root, row)
@@ -6303,6 +6800,17 @@ def _terminal_block_skips_final_grading(measurement: object) -> bool:
     return getattr(measurement, "system_outcome", None) == "continuation_blocked"
 
 
+def _initial_task_content(brief: str, orientation: str, intake_orientation: str) -> str:
+    """Render the initial user message under the active request contract."""
+    from kernel_stateframe_f4_fit import framefit_enabled
+
+    label = "Task" if framefit_enabled() else "Bug report"
+    content = f"{label}: {brief}\n\n{orientation}"
+    if intake_orientation:
+        content += f"\n\n{intake_orientation}"
+    return content + "\nBegin."
+
+
 def work(d, *, resume=None):
     # Workers and scripted tapes may assign MAX_STEPS after import.
     step_cap = parse_step_limit(MAX_STEPS)
@@ -6380,6 +6888,13 @@ def work(d, *, resume=None):
         from kernel_candidate_restart_reconcile import enabled as candidate_reconcile_enabled
         candidate_reconcile_enabled()
     d = information.worker_row(d)
+    _unit_module = sys.modules.get("kernel_unit_policy")
+    _unit = _unit_module.active() if _unit_module is not None else None
+    if _unit is not None and not _unit.spec.contract.owns:
+        # The general public-row projection drops non-file entry forms. Restore
+        # this authenticated absence solely from the installed unit contract.
+        d["entry"] = {"create_path": _unit.spec.contract.creates[0],
+                      "absent_paths": list(_unit.spec.contract.creates)}
     _real04_target_metadata = ""
     if os.environ.get("KERNEL_REAL04_TARGET_METADATA", "off").strip().lower() != "off":
         from kernel_real04_bugs import preserve_target_metadata, target_metadata_block
@@ -6853,6 +7368,7 @@ def work(d, *, resume=None):
             if native_tool_batches:
                 from kernel_native_tools import instructions as native_instructions
                 _base_system = native_instructions(_base_system)
+        _base_system = _parallel_parent_system_instruction(_base_system, tool_surface)
         from kernel_step_contract import INSTRUCTIONS, enabled as contract_enabled
         if action_schema_mode:
             _base_system += (
@@ -6950,10 +7466,8 @@ def work(d, *, resume=None):
             _intake_orientation = ""
             _record_intake_orientation_failure(_error, _intake_step, _wiring_journal)
         msgs = [{"role": "system", "content": _system},
-                {"role": "user", "content":
-                    f"Bug report: {brief}\n\n{_orientation}\n\n"
-                    f"{_intake_orientation}\nBegin." if _intake_orientation else
-                    f"Bug report: {brief}\n\n{_orientation}\nBegin."}]
+                {"role": "user", "content": _initial_task_content(
+                    brief, _orientation, _intake_orientation)}]
         if operational_prompt and target is not None:
             target_relative = target.relative_to(root).as_posix()
             if _edit_contract is not None:
@@ -8548,6 +9062,24 @@ def work(d, *, resume=None):
             queue_advisory(measurement, trigger)
             return True
 
+        def _dispatch_parent_parallel(tool_call_id, arguments):
+            nonlocal tool_surface, _parallel_parent_terminal
+            call_name, result = _execute_parent_parallel(
+                measurement, bolt, root, created_this_run,
+                baseline_tests, _sandbox_deadline, tool_call_id,
+                arguments, POC.parent)
+            observation = result.observation
+            bolt.receipt("parallel", "parallel", call_name,
+                         "APPLIED" if result.txn_order else "REFUSED", observation)
+            measurement.observe("parallel", observation)
+            if _parallel_drop_terminal_enabled():
+                reduced_surface = _parallel_parent_tool_surface(tool_surface, result)
+                if len(reduced_surface) != len(tool_surface):
+                    tool_surface = reduced_surface
+                    _parallel_parent_terminal = True
+                    measurement._parallel_parent_terminal = True
+            return observation
+
         def _hook_gate(name, arguments, call_id):
             if _hook_wiring_for_run is None:
                 return False
@@ -8618,10 +9150,14 @@ def work(d, *, resume=None):
             return _hook_gate(name, route_arguments, call_id)
 
         _pending_hook_action = None
+        _forced_parallel_dispatched = False
+        _parallel_parent_terminal = False
 
         # True save/load resume (kernel_checkpoint): restore before the loop, snapshot at each boundary.
         import kernel_checkpoint as _kernel_checkpoint
         _checkpoint_restored = _kernel_checkpoint.restore_point(sys._getframe(), POC)
+        if _parallel_parent_terminal:
+            measurement._parallel_parent_terminal = True
         if _checkpoint_restored and _hook_wiring_for_run is not None:
             try:
                 _hook_wiring_for_run.rebind_after_checkpoint(root, d, baseline_tests, measurement)
@@ -8660,6 +9196,22 @@ def work(d, *, resume=None):
             if consume_coalesce_escalation(bolt):
                 finish_native_batch_transcript(msgs)
                 break
+            _unit_policy = getattr(measurement, "_unit_policy", None)
+            _auto_receipt = getattr(measurement, "_unit_auto_finish_receipt", None)
+            _latest_unit_receipt = getattr(measurement, "_unit_check_receipt", None)
+            if (_unit_policy is not None
+                    and getattr(_latest_unit_receipt, "status", None) == "PASS"):
+                _decline = ("system_outcome_open" if measurement.system_outcome is not None
+                            else "receipt_not_armed" if _auto_receipt is None else None)
+                if _decline is not None:
+                    measurement.journal.emit(
+                        "subframe_auto_finish_declined", reason=_decline, dispatch=False)
+            if (_unit_policy is not None and _auto_receipt is not None
+                    and measurement.system_outcome is None):
+                if _auto_finish_checked_subframe(
+                        measurement, _unit_policy, root, fileset.parent,
+                        msgs, native_batch):
+                    break
             if _edit_nturn_request_active:
                 _finish_edit_nturn()
             _edit_nturn_request_active = False
@@ -8674,7 +9226,9 @@ def work(d, *, resume=None):
                     native_batch.discard_pending("tool_call_cap")
                 measurement.system_outcome = "tool_call_cap"
                 break
-            if measurement.system_outcome in {'invalidate_attempt', 'quarantine_harness'}:
+            if measurement.system_outcome in {
+                    'invalidate_attempt', 'quarantine_harness', 'unit_blocked',
+                    'unit_context_too_large'}:
                 measurement.journal.emit('supervision_stop', reason=measurement.system_outcome, step=step)
                 break
             if measurement.system_outcome == "STOPPED_INCOMPLETE":
@@ -8860,6 +9414,98 @@ def work(d, *, resume=None):
                     if (native_batch is not None and _request_tools is not None
                             and os.environ.get("STATEFRAME_EMPIRICAL_FIXES", "off") == "on"):
                         _request_tools = native_batch.menu_for_pending(_request_tools)
+            _forced_manifest_path = _forced_parallel_manifest_for_parent()
+            if (_forced_manifest_path and not _forced_parallel_dispatched
+                    and toolcall_mode and _request_tools is not None):
+                _forced_parallel_dispatched = True
+                _forced_args, _forced_wire_args, _forced_error = (
+                    _read_forced_parallel_manifest(_forced_manifest_path))
+                _forced_identity = (_forced_wire_args if _forced_error is None else
+                                    _forced_manifest_path + "\0" + _forced_error)
+                _forced_call_id = "forced_parallel_" + hashlib.sha256(
+                    _forced_identity.encode("utf-8")).hexdigest()[:16]
+                _forced_tool_call = {
+                    "id": _forced_call_id,
+                    "type": "function",
+                    "function": {"name": "parallel", "arguments": _forced_wire_args},
+                }
+                _forced_call_message = {
+                    "role": "assistant", "content": None,
+                    "tool_calls": [_forced_tool_call],
+                }
+                msgs.append(_forced_call_message)
+                _uncapped_messages.append(copy.deepcopy(_forced_call_message))
+                if _hook_wiring_for_run is not None:
+                    _pending_hook_action = ("parallel", _forced_args, _forced_call_id, True)
+                measurement.current_tool_call_id = _forced_call_id
+                _forced_grounding_feedback = measurement.start_action(
+                    "parallel", _forced_args, charge_dispatch=not contract_enabled())
+                measurement.current_tool_call_id = _forced_call_id
+                tool_calls_seen += 1
+                _forced_observation = None
+                if not _budget.register_tool_call(step=step, tool="parallel"):
+                    measurement.system_outcome = "tool_call_cap"
+                    _forced_observation = "REFUSED TOOL_CALL_CAP: tool-call limit reached"
+                else:
+                    # This synthetic first action is benchmark input, so validate it
+                    # against the run's declared tool surface. State-aware menu gates
+                    # can temporarily hide parallel before the first provider request;
+                    # the shared parallel executor still performs normal admission.
+                    _forced_dispatch_tools = tool_surface
+                    _forced_schema_errors = _contract_errors(
+                        _forced_dispatch_tools, "parallel", _forced_args)
+                    if not _forced_schema_errors:
+                        from kernel_completion_owner import (
+                            RequestActionContractError, dispatch_tool_call,
+                        )
+                        try:
+                            dispatch_tool_call(
+                                _forced_dispatch_tools, "parallel", _forced_args)
+                        except RequestActionContractError as _dispatch_error:
+                            _forced_schema_errors = (str(_dispatch_error),)
+                    if _forced_schema_errors:
+                        schema_violation_details.append({
+                            "tool": "parallel", "turn": step,
+                            "errors": list(_forced_schema_errors)[:6],
+                        })
+                    if _forced_error is not None:
+                        measurement.journal.emit(
+                            "parallel_forced_manifest_rejected",
+                            producer="kernel_parallel", reason_code=_forced_error,
+                            dispatch=False,
+                        )
+                    if _hook_gate("parallel", _forced_args, _forced_call_id):
+                        _forced_observation = None
+                    elif _forced_grounding_feedback is not None:
+                        _forced_observation = _forced_grounding_feedback
+                        bolt.receipt("parallel", "parallel", "parallel", "REJECTED",
+                                     _forced_observation)
+                        measurement.observe("parallel", _forced_observation)
+                    elif (_forced_error is None
+                          and (action_schema_mode or contract_enabled() or native_tool_batches)
+                          and _forced_schema_errors):
+                        _forced_observation = _render_contract_rejection(
+                            "parallel", _forced_schema_errors,
+                            binding_current=measurement.dispatch_binding_current())
+                        bolt.receipt("parallel", "parallel", "parallel", "REJECTED",
+                                     _forced_observation)
+                        measurement.observe("parallel", _forced_observation)
+                    else:
+                        _forced_observation = _dispatch_parent_parallel(
+                            _forced_call_id, _forced_args)
+                if _forced_observation is not None:
+                    msgs.append(_tool_reply_for_call(msgs, _forced_call_id,
+                                                     _forced_observation))
+                    _uncapped_messages.append(copy.deepcopy(msgs[-1]))
+                else:
+                    # A pre-dispatch hook already appended its refusal reply.
+                    _uncapped_messages = copy.deepcopy(msgs)
+                if getattr(measurement, "_parallel_parent_terminal", False):
+                    _request_tools = (measurement.tool_menu(
+                        tool_surface, _uncapped_messages) if toolcall_mode else None)
+                    if (native_batch is not None and _request_tools is not None
+                            and os.environ.get("STATEFRAME_EMPIRICAL_FIXES", "off") == "on"):
+                        _request_tools = native_batch.menu_for_pending(_request_tools)
             if getattr(measurement, "long_horizon_depth_tracker", None) is not None:
                 measurement.long_horizon_depth_tracker.observe(msgs)
             if measurement.restart_enabled:
@@ -8873,7 +9519,9 @@ def work(d, *, resume=None):
                     "tool_calls_seen": tool_calls_seen, "decoy_call_names": decoy_call_names,
                     "schema_violation_details": schema_violation_details,
                     "unknown_tool_names": unknown_tool_names, "first_edit_step": first_edit_step,
-                    "wrong_tool_before_first_edit": wrong_tool_before_first_edit}
+                    "wrong_tool_before_first_edit": wrong_tool_before_first_edit,
+                    "_forced_parallel_dispatched": _forced_parallel_dispatched,
+                    "_parallel_parent_terminal": _parallel_parent_terminal}
                 if _host_truth_progress_enabled:
                     _checkpoint_progress = _progress_facts()
                     _checkpoint_state.update({
@@ -8943,6 +9591,19 @@ def work(d, *, resume=None):
                     _request_tools = _prepared_tool_contract(_prepared, _request_tools)
             else:
                 _request_tools = _prepared_tool_contract(_prepared, _request_tools)
+            _unit_module = sys.modules.get("kernel_unit_policy")
+            _unit = _unit_module.active() if _unit_module is not None else None
+            _unit_prechecked_capture = None
+            if _unit is not None and _provider_request and not getattr(
+                    measurement, "_unit_first_request_sent", False):
+                _audit_system_prompt(_prepared.messages)
+                try:
+                    _enforce_unit_first_request(
+                        measurement, _prepared, _request_tools, _unit, root,
+                        pathlib.Path(POC).parent)
+                except _UnitContextTooLarge:
+                    break
+                _unit_prechecked_capture = _prepared.capture
             if (isinstance(request_contract, Mapping)
                     and request_contract.get("host_stop")):
                 measurement.journal.emit(
@@ -9031,6 +9692,12 @@ def work(d, *, resume=None):
                 reroute_action = None
                 while True:
                     try:
+                        if _unit is not None and _provider_request and not getattr(
+                                measurement, "_unit_first_request_sent", False) and (
+                                _prepared.capture is not _unit_prechecked_capture):
+                            _enforce_unit_first_request(
+                                measurement, _prepared, _request_tools, _unit, root,
+                                pathlib.Path(POC).parent)
                         if toolcall_mode:
                             if native_batch is not None:
                                 route = (getattr(_prepared.capture, "frame_route", None)
@@ -9046,14 +9713,19 @@ def work(d, *, resume=None):
                                                                    custom_writes=custom_writes)
                                         if target is not None:
                                             raise RouteEscalation(target, batch)
-                                return native_batch.next(
+                                response = native_batch.next(
                                     ask_tools, list(_prepared.messages), temp=run_temp,
                                     tools=_request_tools, known_refs=_action_known_refs,
                                     **({"before_commit": before_commit} if before_commit is not None else {}))
-                            return ask_tools(
-                                list(_prepared.messages), temp=run_temp,
-                                tools=_request_tools, known_refs=_action_known_refs)
-                        return ask(list(_prepared.messages), temp=run_temp)
+                            else:
+                                response = ask_tools(
+                                    list(_prepared.messages), temp=run_temp,
+                                    tools=_request_tools, known_refs=_action_known_refs)
+                        else:
+                            response = ask(list(_prepared.messages), temp=run_temp)
+                        if _unit is not None and _provider_request:
+                            measurement._unit_first_request_sent = True
+                        return response
                     except Exception as error:                       # noqa: BLE001
                         from capability_capacity_preflight import CapacityRefusal
                         if (not isinstance(error, CapacityRefusal)
@@ -9370,6 +10042,68 @@ def work(d, *, resume=None):
                                     msgs.append(_tool_reply_for_call(msgs, tool_call_id, _obs))
                                     measurement.observe(_name, _obs)
                                     continue
+                        _unit_module = sys.modules.get("kernel_unit_policy")
+                        _unit = _unit_module.active() if _unit_module is not None else None
+                        if _unit is not None:
+                            _unit_refusal = _unit.authorize_tool(_name)
+                            if _unit_refusal is None and _name in {"read", "grep"}:
+                                _requested_path = str(_args.get("path") or "")
+                                if (_requested_path and not
+                                        (_unit.visible_scope(_requested_path) if
+                                         (root / _requested_path).is_dir() else
+                                         _unit.visible(_requested_path))):
+                                    _unit_refusal = _unit_module._refusal(
+                                        "HIDDEN_PATH", f"path {_requested_path} is withheld", _requested_path)
+                                    measurement.journal.emit(
+                                        "unit_hidden_path", producer=_name, path=_requested_path)
+                            if _unit_refusal is None and _name == "run_tests":
+                                _unit_refusal = _unit.authorize_check_target(_args)
+                            if _unit_refusal is None and _name in _unit.mutating_tools:
+                                _requested_path = str(_args.get("path") or "")
+                                _created_by_unit = str(root / _requested_path) in created_this_run
+                                _op = "create" if _name == "file_create" else "edit"
+                                _unit_refusal = _unit.authorize_mutation(
+                                    _op, _requested_path, created_by_unit=_created_by_unit)
+                                if _unit_refusal is not None:
+                                    measurement.journal.emit(
+                                        "unit_mutation_refused", op=_op,
+                                        path=_requested_path, reason=_unit_refusal.reason)
+                            if _unit_refusal is not None:
+                                measurement._unit_open_refusal = True
+                                if _unit_refusal.reason != "HIDDEN_PATH":
+                                    measurement.journal.emit(
+                                        "unit_tool_refused", tool=_name,
+                                        reason=_unit_refusal.reason)
+                                _unit_observation = (f"REFUSED {_unit_refusal.reason}: "
+                                                     f"{_unit_refusal.detail}")
+                                bolt.receipt("tool", _name, _name, "REFUSED", _unit_observation)
+                                measurement.observe(_name, _unit_observation)
+                                msgs.append(_tool_reply_for_call(msgs, tool_call_id, _unit_observation))
+                                continue
+                            if _name == "subframe_blocked":
+                                _reason = _args.get("reason_code")
+                                _detail = _args.get("detail", "")
+                                _allowed_reasons = _unit_module.UNIT_BLOCKED_TOOL["function"]["parameters"]["properties"]["reason_code"]["enum"]
+                                if (_schema_errors or _reason not in _allowed_reasons
+                                        or not isinstance(_detail, str) or len(_detail) > 300):
+                                    measurement._unit_open_refusal = True
+                                    measurement.journal.emit(
+                                        "unit_tool_refused", tool="subframe_blocked",
+                                        reason="BAD_ARGUMENT")
+                                    _unit_observation = "REFUSED BAD_ARGUMENT: invalid subframe_blocked reason or detail"
+                                    measurement.observe("subframe_blocked", _unit_observation)
+                                    msgs.append(_tool_reply_for_call(msgs, tool_call_id,
+                                                                      _unit_observation))
+                                    continue
+                                measurement.unit_blocked_reason = _reason
+                                measurement.unit_blocked_detail = _detail
+                                measurement.journal.emit("unit_blocked", reason_code=_reason)
+                                from kernel_terminal_policy import authorize_subframe_block
+                                authorize_subframe_block(measurement, _reason, _detail)
+                                measurement.system_outcome = "unit_blocked"
+                                msgs.append(_tool_reply_for_call(msgs, tool_call_id,
+                                                                   f"SUBFRAME_BLOCKED {_reason}"))
+                                break
                         if _agent_tools is not None and _name == "git" and not _agent_tools.offered("git"):
                             _obs = "REFUSED NOT_A_GIT_REPO: source is not a Git repository or Git is disabled"
                             bolt.receipt("git", "git", "unavailable", "REFUSED", _obs)
@@ -9782,6 +10516,21 @@ def work(d, *, resume=None):
                         if _working_note is not None:
                             measurement.stage_working_note(
                                 _working_note, tool=_name, arguments=_args)
+                        if _name == "parallel":
+                            if _hook_gate(_name, _args, tool_call_id):
+                                continue
+                            from kernel_parallel import (available as parallel_available,
+                                                         writable_workspace)
+                            if not parallel_available() or not writable_workspace():
+                                _parallel_observation = "REFUSED RESOURCES_UNAVAILABLE: subframe execution is disabled for this run"
+                                bolt.receipt("parallel", "parallel", "disabled", "REFUSED", _parallel_observation)
+                                measurement.observe(_name, _parallel_observation)
+                                msgs.append(_tool_reply_for_call(msgs, tool_call_id, _parallel_observation))
+                                continue
+                            _parallel_observation = _dispatch_parent_parallel(
+                                tool_call_id, _args)
+                            msgs.append(_tool_reply_for_call(msgs, tool_call_id, _parallel_observation))
+                            continue
                         if (_name == "work"
                                 and getattr(measurement, "work_record", None) is not None
                                 and _hook_gate(_name, _args, tool_call_id)):
@@ -10242,6 +10991,20 @@ def work(d, *, resume=None):
                         elif _name == "read_check_receipt":
                             if _hook_gate_route("read_check_receipt", _args):
                                 continue
+                            _parallel_receipts = sys.modules.get("kernel_parallel")
+                            if (_parallel_receipts is not None
+                                    and _parallel_receipts.receipt_handle_available(_args.get("handle"))):
+                                try:
+                                    _receipt_text = _parallel_receipts.read_subframe_receipt(_args["handle"])
+                                    _receipt_status = "HOST_OBSERVED"
+                                except _parallel_receipts.ParallelError as _receipt_error:
+                                    _receipt_text = f"REJECTED: {_receipt_error}"
+                                    _receipt_status = "REJECTED"
+                                bolt.receipt("read", "read subframe receipt", _args["handle"],
+                                             _receipt_status, _receipt_text[:240])
+                                measurement.observe(_name, _receipt_text)
+                                msgs.append(_tool_reply_for_call(msgs, tool_call_id, _receipt_text))
+                                continue
                             from kernel_check_receipts import observe_check_output
                             _receipt_text = observe_check_output(
                                 measurement, bolt,
@@ -10362,6 +11125,8 @@ def work(d, *, resume=None):
                 # Orderly typed stop: durable working_set_blocked already journaled.
                 # The outer worker handler finishes it as BLOCKED, never ERR:<type>.
                 raise
+            except _UnitContextTooLarge:
+                break
             except Exception as e:                              # noqa: BLE001
                 if os.environ.get("STATEFRAME_MUTATIONS", "off") in {"prebuilt", "authored"}:
                     from kernel_mutate_projection import MutationSendRefused
@@ -12442,17 +13207,28 @@ def work(d, *, resume=None):
                     _grep_error = None
                     _grep_page = None
                     try:
-                        from kernel_model_policy import resolve_model_policy
-                        from kernel_navigation_pages import search_repository
-                        _grep_page = search_repository(
-                            root, pat, scope,
-                            mode=_grep_args.get("mode"),
-                            file_glob=(_grep_args.get("file_glob") or _grep_args.get("glob") or None),
-                            cursor=_grep_args.get("cursor"),
-                            requested_page_size=_grep_args.get("page_size"),
-                            policy=resolve_model_policy(MODEL),
-                            journal=measurement.journal,
-                        )
+                        _unit = getattr(measurement, "_unit_policy", None)
+                        if _unit is not None:
+                            _scope_rel = pathlib.Path(scope).relative_to(root).as_posix()
+                            _grep_page = _unit.search_visible(
+                                root, pat, scope="" if _scope_rel == "." else _scope_rel,
+                                mode=str(_grep_args.get("mode") or "regex"),
+                                file_glob=str(_grep_args.get("file_glob") or _grep_args.get("glob") or ""),
+                                cursor=str(_grep_args.get("cursor") or ""),
+                                page_size=int(_grep_args.get("page_size") or 60),
+                            )
+                        else:
+                            from kernel_model_policy import resolve_model_policy
+                            from kernel_navigation_pages import search_repository
+                            _grep_page = search_repository(
+                                root, pat, scope,
+                                mode=_grep_args.get("mode"),
+                                file_glob=(_grep_args.get("file_glob") or _grep_args.get("glob") or None),
+                                cursor=_grep_args.get("cursor"),
+                                requested_page_size=_grep_args.get("page_size"),
+                                policy=resolve_model_policy(MODEL),
+                                journal=measurement.journal,
+                            )
                     except (OSError, TypeError, ValueError) as error:
                         _grep_error = str(error)
                     _grep_metadata = (dict(_grep_page.metadata) if _grep_page is not None else {})
@@ -12484,9 +13260,12 @@ def work(d, *, resume=None):
                         obs = f"Search failed: {_grep_error}. Correct the query or scope and retry."
                     elif _grep_page is not None:
                         _grep_symbol_fact = None
-                        if _grep_total == 0 and interventions:
-                            # Definitions help localize a failed scoped search;
-                            # registry misses cannot establish symbol absence.
+                        if (_grep_total == 0 and interventions
+                                and getattr(measurement, "_unit_policy", None) is None):
+                            # Definitions help localize a failed scoped search; registry
+                            # misses cannot establish symbol absence. The symbol registry
+                            # stays a Python-only aid and never defines repository search
+                            # completeness or suppresses pages in a subframe.
                             try:
                                 token = re.sub(r"^(def|class|async def)\s+", "", pat).strip()
                                 token = re.split(r"[^\w]", token)[0] if token else ""
@@ -12496,7 +13275,8 @@ def work(d, *, resume=None):
                             except Exception:                            # noqa: BLE001
                                 pass
                         from kernel_owner_first import coordinates_enabled
-                        if coordinates_enabled() or _workspace_truth.enabled():
+                        if ((coordinates_enabled() or _workspace_truth.enabled())
+                                and getattr(measurement, "_unit_policy", None) is None):
                             from kernel_navigation_pages import render_grep_result
                             obs = render_grep_result(
                                 _grep_page,
@@ -14170,7 +14950,9 @@ def work(d, *, resume=None):
                 and tool_batch_args is None
                 and "applied." in obs.split("\n")[0]
             )
-            if _product_edit_applied:
+            # Host progress already counted a subframe's applied receipt.
+            if (_product_edit_applied
+                    and (_unit is None or not _host_truth_progress_enabled)):
                 bolt.product_edits += 1
             _batch_result_for_noread = locals().get("_batch_result")
             _active_capture = getattr(measurement, "_active_capture", None)
@@ -14250,6 +15032,18 @@ def work(d, *, resume=None):
         from unit_planner_v2 import consume_coalesce_escalation
         if consume_coalesce_escalation(bolt):
             finish_native_batch_transcript(msgs)
+        unit_context_detail = getattr(measurement, "unit_context_detail", None)
+        if unit_context_detail is not None:
+            measurement.system_outcome = "unit_context_too_large"
+            _reported_edits, _reported_checks = _reported_progress_counts(locals())
+            outcome = {"fn": fn, "result": "SUBFRAME_CONTEXT_TOO_LARGE",
+                       "reason_code": "SUBFRAME_CONTEXT_TOO_LARGE",
+                       "detail": unit_context_detail, "steps": _reported_steps(),
+                       "edits": _reported_edits, "tests": _reported_checks,
+                       "behaviour": "unverified"}
+            finish_native_batch_transcript(msgs)
+            measurement.finish(outcome, messages=msgs)
+            return _attach_env_receipt(outcome, measurement)
         if (_budget_mode == "response" and _budget.tool_call_cap is not None
                 and _budget.tool_calls_used >= _budget.tool_call_cap
                 and measurement.system_outcome is None
@@ -14303,19 +15097,9 @@ def work(d, *, resume=None):
         # completion_accepted, but this check read only the legacy v2_disposition flag, so an accepted done
         # was relabelled "step limit without accepted done" / step_budget_exhausted and the terminal
         # downgraded it to NOT_COMPLETED. Either acceptance authority counts as an accepted done.
-        if (getattr(measurement, "disposition_v2", False)
-                and not done_accepted(measurement)
-                and measurement.system_outcome is None):
-            # Exhausting the action loop without an accepted v2 done is the
-            # existing runner's non-submission shape, made explicit.
-            from kernel_terminal_policy import enabled as hard_budget_only_enabled
-            measurement.system_outcome = (
-                "run_incomplete" if step_cap is None else
-                "step_budget_exhausted" if hard_budget_only_enabled(measurement)
-                else "incomplete")
-            measurement.journal.emit("v2_terminal", terminal="INCOMPLETE",
-                                     reason=("action loop ended without accepted done" if step_cap is None
-                                             else "step limit without accepted done"))
+        # Exhausting the action loop without an accepted v2 done is the
+        # existing runner's non-submission shape, made explicit.
+        _classify_unsubmitted_loop(measurement, step_cap)
         measurement.flush_public_state(msgs, _reported_steps())
         if (action_schema_mode or contract_enabled()
                 or measurement.continuation is not None):
@@ -14407,6 +15191,19 @@ def work(d, *, resume=None):
                       f"{type(_e).__name__}: {_e}", flush=True)
             nf, ng = norm(final), norm(gold)
             ok = nf is not None and nf == ng
+
+        if source_map_path is not None and getattr(measurement, "_unit_policy", None) is not None:
+            from kernel_done_is_submit_authority import parallel_final_source_fields
+
+            _journal_sources = _seal_sources_preserving_binary(root, {
+                str(path): source for path, source in final_sources.items()
+                if isinstance(path, str) and (isinstance(source, str) or source is None)
+            })
+            measurement.journal.emit(
+                "subframe_final_sources",
+                **parallel_final_source_fields(_journal_sources, source_map_path=source_map_path),
+                dispatch=False,
+            )
 
         from kernel_done_is_submit_authority import submission_pending
         if submission_pending(measurement):
@@ -14764,11 +15561,24 @@ def work(d, *, resume=None):
                      behaviour="test_reported_wrong", **_done_facts_fields,
                      **_done_submit_fields, **_multi_result), measurement)
         if measurement.system_outcome:
+            _unit_terminal = ({"reason_code": measurement.unit_blocked_reason,
+                               "detail": measurement.unit_blocked_detail}
+                              if measurement.system_outcome == "unit_blocked" else
+                              {"reason_code": "SUBFRAME_CONTEXT_TOO_LARGE",
+                               "detail": measurement.unit_context_detail}
+                              if measurement.system_outcome == "unit_context_too_large" else {})
+            _terminal_result = {
+                "unit_blocked": "SUBFRAME_BLOCKED",
+                "unit_context_too_large": "SUBFRAME_CONTEXT_TOO_LARGE",
+            }.get(measurement.system_outcome, measurement.system_outcome.upper())
+            _unit_check_receipt = getattr(measurement, "_unit_check_receipt", None)
+            if _unit_check_receipt is not None:
+                _unit_terminal["check_receipt"] = _unit_check_receipt.to_json()
             return _attach_env_receipt(
-                dict(fn=fn, result=measurement.system_outcome.upper(), steps=_reported_steps(),
+                dict(fn=fn, result=_terminal_result, steps=_reported_steps(),
                      edits=_finish_progress.edits, tests=_finish_progress.checks,
                      behaviour=behaviour, **_done_facts_fields,
-                      **_done_submit_fields, **_multi_result), measurement)
+                      **_done_submit_fields, **_multi_result, **_unit_terminal), measurement)
         if (_done_terminal is None and harness_suspect and not ok
                 and behaviour != "PASS_behavioural"):
             return _attach_env_receipt(
@@ -14778,9 +15588,12 @@ def work(d, *, resume=None):
                      **_done_submit_fields, **_multi_result), measurement)
         return _attach_env_receipt(
             dict(fn=fn, result=_finish_result, steps=_reported_steps(),
-                 edits=_finish_progress.edits, tests=_finish_progress.checks,
-                 behaviour=behaviour, **_done_facts_fields,
-                 **_done_submit_fields, **_multi_result), measurement)
+                  edits=_finish_progress.edits, tests=_finish_progress.checks,
+                  behaviour=behaviour, **_done_facts_fields,
+                  **_done_submit_fields, **_multi_result,
+                  **({"check_receipt": measurement._unit_check_receipt.to_json()}
+                     if getattr(measurement, "_unit_check_receipt", None) is not None else {})),
+            measurement)
     except WorkingSetSuspended as exc:
         # BLOCKED is a resumable boundary terminal (allocator §7): the suspension
         # record travels on the outcome so summary.json keeps resumable/suspension.

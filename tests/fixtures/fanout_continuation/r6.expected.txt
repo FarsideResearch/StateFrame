@@ -1,0 +1,16 @@
+[FANOUT CONTINUATION]
+unit=invoicing; owns=shop/invoicing.py; check=tests/test_invoicing.py; status=COMMITTED; check_result=PASS; child_sends=1; changed_paths=shop/invoicing.py; contract=True
+unit=pricing; owns=shop/pricing.py; check=tests/test_pricing.py; status=COMMITTED; check_result=PASS; child_sends=1; changed_paths=shop/pricing.py; contract=True
+unit=shipping; owns=shop/shipping.py; check=tests/test_shipping.py; status=REFUSED; check_result=NOT_RUN; child_sends=0; changed_paths=none; contract=None
+refusal=SUBFRAME_CONTEXT_TOO_LARGE: first_frame_tokens=35136; cap=33344
+final_check=FAIL; final_integration=FAILED
+remaining=[shipping]
+failure=tests/test_shipping.py::test_bulky_light_carton_uses_carrier_dimensional_divisor; location=tests/test_shipping.py:14; expected=9; observed=11
+failure_assertion=assert quote.billable_pounds == 9
+source_revision=sha256:ddf601ae6a6314af1a377ea2f2e0220a5ce4d1e7abfcea69a640b08b09c3e8c6; excerpt:
+DIMENSIONAL_DIVISOR = Decimal("139")
+def billable_weight(parcel: Parcel) -> int:
+    """Carrier bills the higher of actual and dimensional weight."""
+    dimensional = parcel.volume_cubic_in / DIMENSIONAL_DIVISOR
+    return max(pounds_rounded_up(parcel.weight_lb), pounds_rounded_up(dimensional))
+next_action: repair only shipping; invoicing/pricing committed+PASS, don't reopen; run tests/test_shipping.py then the full check

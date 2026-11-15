@@ -40,7 +40,7 @@ from typing import Final
 
 from kernel_non_product_paths import is_non_product
 from kernel_test_python import selected_test_python
-from kernel_safe_probe import ProbeCleanupError
+from kernel_safe_probe import ProbeCleanupError, probe_evidence, retry_probe, run_probe_session
 from kernel_tree_digest import path_entry, tree_digest as canonical_tree_digest
 
 
@@ -67,7 +67,7 @@ def mode(environ: Mapping[str, str] | None = None) -> str:
 
 @dataclass(frozen=True)
 class ShipTreeSmokeResult:
-    status: str                      # PASS | FAIL | ENVIRONMENT | UNKNOWN (nothing to check)
+    status: str                      # PASS | FAIL | ENGINE_ERROR | ENVIRONMENT | UNKNOWN
     checked: tuple[str, ...]
     failures: tuple[tuple[str, str], ...]   # (path, error)
     tree_digest: str = ""
@@ -79,13 +79,14 @@ class ShipTreeSmokeResult:
     declared_scope: tuple[str, ...] = ()
     resolver_identity: str = ""
     digest_format: str = ""
+    probe_evidence: dict[str, object] | None = None
 
     @property
     def blocking(self) -> bool:
-        return self.status == "FAIL"
+        return self.status in {"FAIL", "ENGINE_ERROR"}
 
     def as_dict(self) -> dict[str, object]:
-        return {"payload_schema": SCHEMA, "status": self.status,
+        result = {"payload_schema": SCHEMA, "status": self.status,
                 "checked": list(self.checked),
                 "failures": [{"path": path, "error": error} for path, error in self.failures],
                 "environment": [{"path": path, "error": error}
@@ -98,6 +99,9 @@ class ShipTreeSmokeResult:
                 "environment_identity": self.environment_identity,
                 "declared_scope": list(self.declared_scope),
                 "resolver_identity": self.resolver_identity}
+        if self.probe_evidence is not None:
+            result["probe_evidence"] = self.probe_evidence
+        return result
 
 
 _CHILD = r'''
@@ -154,13 +158,17 @@ print("\nSTATEFRAME_SMOKE_RESULT=" + json.dumps(rows, sort_keys=True))
 
 
 def _execute_smoke(root: Path, checked: Sequence[str], roots: Sequence[str], timeout: float):
+    return retry_probe(lambda: _execute_smoke_once(root, checked, roots, timeout))
+
+
+def _execute_smoke_once(root: Path, checked: Sequence[str], roots: Sequence[str], timeout: float):
     """Imports are arbitrary repository code, never host-side introspection.
 
     Keep both the candidate and selected environment read-only. Only disposable
     scratch is writable; the session owns descendants and denies networking.
     """
     from kernel_exec_capability import shell_capability
-    from kernel_exec_session import ExecSession, ExecSessionError
+    from kernel_exec_session import ExecSession
     from kernel_test_isolation import _interpreter_roots
 
     selected = Path(selected_test_python())
@@ -176,16 +184,11 @@ def _execute_smoke(root: Path, checked: Sequence[str], roots: Sequence[str], tim
         cap = replace(cap, purpose="probe", limits=replace(cap.limits, wall_seconds=timeout))
         (scratch / "session").mkdir()
         session = ExecSession(scratch / "session")
-        try:
-            result = session.run(
+        return run_probe_session(
+            session, lambda: session.run(
                 [str(selected), "-I", "-B", "-c", _CHILD, str(root),
-                 json.dumps(list(checked)), json.dumps(list(roots))], cap)
-        finally:
-            try:
-                session.close()
-            except (ExecSessionError, OSError) as error:
-                raise ImportSmokeCleanupError(str(error)) from error
-        return result
+                 json.dumps(list(checked)), json.dumps(list(roots))], cap),
+            cleanup_error=ImportSmokeCleanupError)
 
 
 def python_paths(root: Path, values: Sequence[object]) -> tuple[str, ...]:
@@ -386,7 +389,8 @@ def apply_baseline(result: "ShipTreeSmokeResult",
     local-import shadow findings stay FAIL (N14), and a NEW failure (different
     path or message, e.g. an import an edit broke) stays FAIL.
     """
-    if baseline is None or result.status == "UNKNOWN" or baseline.digest_format != TREE_DIGEST_FORMAT:
+    if (baseline is None or result.status in {"UNKNOWN", "ENGINE_ERROR"}
+            or baseline.digest_format != TREE_DIGEST_FORMAT):
         return result
     if (baseline.dependency_identity != result.dependency_identity
             or baseline.environment_identity != result.environment_identity
@@ -406,10 +410,8 @@ def apply_baseline(result: "ShipTreeSmokeResult",
         else:
             failures.append((path, error))
     status = "FAIL" if failures else ("ENVIRONMENT" if environment else "PASS")
-    return ShipTreeSmokeResult(status, result.checked, tuple(failures), result.tree_digest,
-                               tuple(environment), result.roots,
-                               result.dependency_identity, result.environment_identity,
-                               result.declared_scope, result.resolver_identity, TREE_DIGEST_FORMAT)
+    return replace(result, status=status, failures=tuple(failures), environment=tuple(environment),
+                   digest_format=TREE_DIGEST_FORMAT)
 
 
 def tree_digest(root: Path, paths: Sequence[str], *, dependency_identity: object = "",
@@ -519,9 +521,12 @@ def run_smoke(root: Path, paths: Sequence[str], *, timeout_s: float = 20.0,
     failures: list[tuple[str, str]] = []
     host_failures: list[tuple[str, str]] = []
     runner_failed = False
+    evidence = None
+    engine_error = False
     from kernel_exec_session import ExecSessionError
     try:
         completed = _execute_smoke(root, checked, import_roots, max(0.1, float(timeout_s)))
+        evidence = probe_evidence(completed)
         if not completed.cleanup.ok:
             raise ImportSmokeCleanupError("import smoke cleanup failed: " + completed.cleanup.detail)
         if completed.timed_out or completed.exit_code != 0:
@@ -531,6 +536,8 @@ def run_smoke(root: Path, paths: Sequence[str], *, timeout_s: float = 20.0,
         payload = completed.output.rsplit(b"\nSTATEFRAME_SMOKE_RESULT=", 1)
         rows = json.loads(payload[1] if len(payload) == 2 else b"")
     except (OSError, ValueError, ExecSessionError) as error:
+        evidence = probe_evidence(error) or evidence
+        engine_error = getattr(error, "outcome", "") == "ENGINE_ERROR"
         rows = []
         runner_failed = True
         host_failures = [(path, f"fresh interpreter failed: {type(error).__name__}: {error}")
@@ -561,17 +568,25 @@ def run_smoke(root: Path, paths: Sequence[str], *, timeout_s: float = 20.0,
         )
     else:
         failures.extend(static_findings)
-    status = "FAIL" if failures else ("ENVIRONMENT" if host_failures else "PASS")
+    status = ("ENGINE_ERROR" if engine_error else
+              "FAIL" if failures else ("ENVIRONMENT" if host_failures else "PASS"))
     raw = ShipTreeSmokeResult(status, checked, tuple(failures), digest,
                               tuple(host_failures), import_roots,
                               dependency_key, environment_key, scope, resolver_key,
-                              TREE_DIGEST_FORMAT)
+                              TREE_DIGEST_FORMAT, probe_evidence=evidence)
     return apply_baseline(raw, baseline)
 
 
 def render_smoke(result: ShipTreeSmokeResult) -> str:
+    recovery = ""
+    if result.probe_evidence is not None:
+        recovery = "\n" + json.dumps(result.probe_evidence, sort_keys=True)
+    if result.status == "ENGINE_ERROR":
+        return (f"{BLOCK_HEADER} ENGINE_ERROR: fresh interpreter unavailable."
+                + recovery)
     if result.status == "PASS":
-        return f"{BLOCK_HEADER} PASS: {len(result.checked)} touched module(s) import in a fresh interpreter."
+        return (f"{BLOCK_HEADER} PASS: {len(result.checked)} touched module(s) import in a fresh interpreter."
+                + recovery)
     if result.status == "UNKNOWN":
         return f"{BLOCK_HEADER} nothing to check yet (no touched Python module)."
     if result.status == "ENVIRONMENT":
@@ -584,7 +599,7 @@ def render_smoke(result: ShipTreeSmokeResult) -> str:
         lines.append("done is not blocked by a baseline-identical environment failure; no edit is "
                      "requested for it. Only NEW import failures introduced by an edit are "
                      "reported as FAIL.")
-        return "\n".join(lines)
+        return "\n".join(lines) + recovery
     lines = [f"{BLOCK_HEADER} FAIL — completion is blocked until these import cleanly:"]
     lines.extend(f"- {path}: {error}" for path, error in result.failures[:6])
     if os.environ.get(DETAIL_ENV, "off").strip().lower() == "on":
@@ -598,7 +613,7 @@ def render_smoke(result: ShipTreeSmokeResult) -> str:
     if result.environment:
         lines.append(f"({len(result.environment)} other failure(s) are identical at the untouched "
                      "parent revision: environment, not a task obligation.)")
-    return "\n".join(lines)
+    return "\n".join(lines) + recovery
 
 
 _MISSING_IMPORT = re.compile(

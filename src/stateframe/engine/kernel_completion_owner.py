@@ -33,6 +33,7 @@ PROVIDER_REQUEST_NOT_DISPATCHED_REASON_CODES = frozenset({
     "prepared_overflow",
     "response_budget_unavailable",
     "tool_call_loop_breaker",
+    "unit_context_too_large",
 })
 LEAN_REQUEST_CONTRACT_KIND = "lean_stable_surface"
 OWNER_BLOCK_SCHEMA = "stateframe-owner-block/1"
@@ -5547,6 +5548,15 @@ def _framefit5_owner_protocol(messages: object) -> Mapping[str, object] | None:
         protocol = framefit5.get("owner_protocol") if isinstance(framefit5, Mapping) else None
         if (isinstance(protocol, Mapping)
                 and protocol.get("schema") == "stateframe-framefit5-owner/1"):
+            if (not protocol.get("continuation_limits")
+                    and isinstance(framefit5.get("subframe_scope"), Mapping)):
+                # Final cache layout moves the host's serialized limit into its
+                # authority overlay. Recover that exact child-only value for the
+                # unchanged budget digest check below.
+                line = next((value.strip() for value in _contract_host_text(messages).splitlines()
+                             if value.startswith("[CONTINUATION LIMITS |")), None)
+                if line is not None:
+                    return {**protocol, "continuation_limits": line}
             return protocol
     return None
 

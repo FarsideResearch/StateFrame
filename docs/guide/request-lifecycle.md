@@ -20,3 +20,8 @@ Diagram: [ARCHITECTURE.md](../../ARCHITECTURE.md#request-lifecycle).
 9. **Inspect.** `stateframe inspect <run-dir>` reads `wire/NNNN.request.json`, so what you see is what the model saw.
 
 The tool schemas, bounded observations and job section all use the request's prompt budget. Shell, job and custom-command output delivery shrinks to the measured remaining room; the full taped observation stays in the run directory within collector limits. The shipped product profile uses the composed loop. The plain loop refuses Git, web, custom commands and background jobs before execution; lean mode is unsupported by the product profile. [Agent tools](tools.md) lists arguments, policies and replay classes.
+
+When the parent calls `parallel`, that one tool step projects and launches bounded subframe engine runs. Their requests
+are recorded in their own run directories. The parent validates and publishes each proposal through a durable
+transaction before returning to its next request. See [Subframes](subframes.md) for the full contract and recovery
+path.

@@ -2618,6 +2618,77 @@ def bound_runtime_sources(
     target = getattr(runtime, "target", None)
     root = getattr(getattr(runtime, "owner", None), "root", None)
     path = _path_from_runtime(runtime)
+    unit_policy = getattr(runtime, "_unit_policy", None)
+    if unit_policy is not None:
+        if root is None:
+            raise ValueError("subframe source allocation requires a workspace root")
+        owned = tuple(unit_policy.spec.contract.owns)
+        check_paths = tuple(path for path in unit_policy.spec.contract.check.source_paths
+                            if path not in owned)
+        required = owned + check_paths
+        sources: dict[str, str] = {}
+        for relative in required:
+            source_path = Path(root) / relative
+            if source_path.is_symlink() or not source_path.is_file():
+                raise ValueError(f"subframe required source is unavailable: {relative}")
+            source = source_path.read_text(encoding="utf-8")
+            sources[relative] = source
+            if not any(verify_current_source_message(
+                    item.get("content"), path=relative, source=source)
+                    for item in messages if isinstance(item, Mapping)):
+                messages.append({"role": "user", "content":
+                                 f"[Current source: {relative}]\n{source}"})
+        revisions = {relative: source_revision(source)
+                     for relative, source in sources.items()}
+        units = [{"path": relative, "start_line": 1,
+                  "end_line": max(1, len(source.splitlines())),
+                  "revision": revisions[relative],
+                  "role": ("subframe_owned_source" if relative in owned else "subframe_check_source"),
+                  "reason": ("subframe_contract" if relative in owned else "subframe_frozen_check"),
+                  "priority": 1,
+                  "handle": (f"subframe:owned:{relative}" if relative in owned
+                             else f"subframe:check:{relative}"),
+                  "unit_handle": (f"subframe:owned:{relative}" if relative in owned
+                                  else f"subframe:check:{relative}")}
+                 for relative, source in sources.items()]
+        from kernel_aha10_honest_loop import bounded_source_delivery
+        delivery = bounded_source_delivery(
+            [{**unit, "text": sources[unit["path"]]} for unit in units],
+            max_chars=max(1, sum(len(source.encode("utf-8")) for source in sources.values())),
+            required_unit_handles=[unit["unit_handle"] for unit in units],
+            required_paths=required,
+        )
+        if delivery["omitted_units"]:
+            raise ValueError("subframe source allocation omitted a required file")
+        closure_plan = {
+            "schema": "stateframe-request-evidence-closure/1",
+            "ticket_sha256": unit_policy.spec.contract.digest(),
+            "paths": list(required), "source_contents": sources,
+            "revisions": revisions, "dependency_revisions": {},
+            "units": units,
+            "bounded_delivery": {
+                "schema": delivery["schema"],
+                "complete_units": delivery["complete_units"],
+                "status": delivery["status"],
+                "continuation": delivery["continuation"],
+                "continuation_action": delivery["continuation_action"],
+                "source_paths": delivery["source_paths"],
+                "coverage": delivery["coverage"],
+                "retained_handles": [unit["unit_handle"] for unit in units],
+                "omitted_handles": [],
+            },
+            "lexical_sites": [], "omissions": [], "skipped_files": [],
+            "workspace_authorization": {
+                "scope": str(getattr(runtime, "workspace_scope", root)),
+                "generation": str(getattr(runtime, "workspace_revision",
+                                          getattr(runtime, "product_revision", "0"))),
+            },
+        }
+        setattr(runtime, "_request_source_closure", closure_plan)
+        return {"changed": bool(required), "windowed": len(required),
+                "paths": required, "deferred_paths": (),
+                "unit_full_source_revisions": revisions,
+                "closure": closure_plan}
     if isinstance(path, UnavailableEvidence):
         return path
     raw_deferred_paths = getattr(runtime, "_request_deferred_source_paths", ())

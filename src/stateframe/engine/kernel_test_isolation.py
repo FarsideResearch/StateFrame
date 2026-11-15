@@ -229,7 +229,8 @@ def isolated_command(command: list[str], root: Path, env: dict[str, str], *,
                      generic_check: bool = False,
                      nproc_budget: int | None = None,
                      selected_python: str | None = None,
-                     read_grants_out: list[SandboxReadGrants] | None = None) -> tuple[list[str], dict[str, str]]:
+                     read_grants_out: list[SandboxReadGrants] | None = None,
+                     private_pid_check: bool = False) -> tuple[list[str], dict[str, str]]:
     executable = backend()
     root = root.resolve()
     scratch = root / ".test-tmp"
@@ -340,6 +341,10 @@ def isolated_command(command: list[str], root: Path, env: dict[str, str], *,
     # No host home, repository, private result tree, sockets or audit directory is mounted.
     arguments = [executable, "--die-with-parent", "--unshare-all", "--new-session",
                  "--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp"]
+    if private_pid_check:
+        # The check command is namespace init. When it exits, Linux kills every
+        # descendant, including children that called setsid or detached.
+        arguments.append("--as-pid-1")
     # The HOST (never the model) may declare that checks need the container's own
     # private network, e.g. a stage6 worker whose tests reach a per-run Postgres on an
     # unpublished Docker bridge. Only then share the net namespace and expose the two

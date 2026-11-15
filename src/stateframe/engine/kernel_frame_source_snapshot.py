@@ -278,6 +278,9 @@ def recent_editable_read_windows(runtime: object, frame: Mapping[str, object]) -
     from kernel_stateframe_framefit5 import _workspace_root
 
     editable = editable_read_paths(runtime)
+    unit_policy = getattr(runtime, "_unit_policy", None)
+    if unit_policy is not None:
+        editable = {path for path in editable if unit_policy.visible(path)}
     if not editable:
         owner = getattr(runtime, "owner", None)
         task = getattr(owner, "task_row", None)
@@ -296,6 +299,8 @@ def recent_editable_read_windows(runtime: object, frame: Mapping[str, object]) -
         if not isinstance(row, Mapping):
             continue
         path, revision = row.get("path"), row.get("revision")
+        if unit_policy is not None and isinstance(path, str) and not unit_policy.visible(path):
+            continue
         if (not isinstance(path, str) or not frame_source_path_allowed(path) or path not in editable
                 or not isinstance(revision, str)):
             continue
@@ -458,12 +463,15 @@ def public_check_source_windows(runtime: object, state: Mapping[str, object]) ->
     if not isinstance(selectors, (list, tuple)):
         return []
     root = _workspace_root(runtime)
+    unit_policy = getattr(runtime, "_unit_policy", None)
     result = []
     seen: set[str] = set()
     for selector in selectors:
         if not isinstance(selector, str):
             continue
         path, _, name = selector.partition("::")
+        if unit_policy is not None and not unit_policy.visible(path):
+            continue
         if (_safe_framefit_path(path) != path or not frame_source_path_allowed(path)
                 or path in seen):
             continue
@@ -1214,11 +1222,13 @@ def frame_source_snapshot(
     from kernel_stateframe_framefit5 import _workspace_root
     from kernel_stateframe_headcarry import _read_optional_source
 
+    unit_policy = getattr(runtime, "_unit_policy", None)
     sources = {
         str(path): row["content"]
         for path, row in getattr(runtime, "_empirical_frame_sources", {}).items()
         if isinstance(row, Mapping) and isinstance(row.get("content"), str)
         and public_path(path) == str(path) and frame_source_path_allowed(str(path))
+        and (unit_policy is None or unit_policy.visible(str(path)))
     }
     if not isinstance(plan, Mapping):
         return sources
@@ -1233,6 +1243,8 @@ def frame_source_snapshot(
         if (not isinstance(path, str) or _safe_framefit_path(path) != path
                 or public_path(path) != path or not frame_source_path_allowed(path)):
             raise FrameAllocationReplanNeeded("source proof has an unsafe selected path")
+        if unit_policy is not None and not unit_policy.visible(path):
+            raise FrameAllocationReplanNeeded("source proof selected a withheld path")
         if path in checked:
             continue
         revision = revisions.get(path)
@@ -1275,6 +1287,8 @@ def frame_source_snapshot(
         if (_safe_framefit_path(path) != path or public_path(path) != path
                 or not frame_source_path_allowed(path)):
             raise FrameAllocationReplanNeeded("source proof has an unsafe selected path")
+        if unit_policy is not None and not unit_policy.visible(path):
+            raise FrameAllocationReplanNeeded("source proof selected a withheld path")
         # Same stale-cache contract as the selected loop: a non-empty cached body
         # for a now-empty path is never silently overwritten.
         cached = sources.get(path)

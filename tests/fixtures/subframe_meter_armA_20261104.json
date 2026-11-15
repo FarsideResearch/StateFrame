@@ -1,0 +1,17 @@
+[
+  {"run":"r10_p2_a1","unit":"invoicing_fix","body_bytes":51024,"prompt_tokens":13332},
+  {"run":"r10_p2_a1","unit":"pricing_fix","body_bytes":35003,"prompt_tokens":8998},
+  {"run":"r10_p2_a1","unit":"shipping_fix","body_bytes":50943,"prompt_tokens":13518},
+  {"run":"r2_p2_a1","unit":"invoicing_fix","body_bytes":35098,"prompt_tokens":9072},
+  {"run":"r2_p2_a1","unit":"pricing_fix","body_bytes":34241,"prompt_tokens":8791},
+  {"run":"r3_p2_a1","unit":"invoicing_fix","body_bytes":35218,"prompt_tokens":9096},
+  {"run":"r3_p2_a1","unit":"pricing_fix","body_bytes":34665,"prompt_tokens":8941},
+  {"run":"r6_p2_a1","unit":"invoicing","body_bytes":34835,"prompt_tokens":8945},
+  {"run":"r6_p2_a1","unit":"pricing","body_bytes":34263,"prompt_tokens":8797},
+  {"run":"r7_p2_a1","unit":"invoicing_fix","body_bytes":34067,"prompt_tokens":8694},
+  {"run":"r7_p2_a1","unit":"pricing_fix","body_bytes":48020,"prompt_tokens":12759},
+  {"run":"r7_p2_a1","unit":"shipping_fix","body_bytes":48730,"prompt_tokens":12782},
+  {"run":"r8_p2_a1","unit":"invoicing","body_bytes":34833,"prompt_tokens":9003},
+  {"run":"r8_p2_a1","unit":"pricing","body_bytes":34017,"prompt_tokens":8750},
+  {"run":"r8_p2_a1","unit":"shipping","body_bytes":50160,"prompt_tokens":13255}
+]

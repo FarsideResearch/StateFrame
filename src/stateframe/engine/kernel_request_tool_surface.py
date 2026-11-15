@@ -59,6 +59,18 @@ def _tool_names(tools: Sequence[object]) -> list[str]:
     return names
 
 
+def _parallel_terminal_drop_enabled(runtime: object) -> bool:
+    return (getattr(runtime, "_parallel_parent_terminal", False) is True
+            and os.environ.get(
+                "STATEFRAME_PARALLEL_DROP_TOOL_AFTER_TERMINAL", "on").strip().lower() == "on")
+
+
+def _without_parallel(tools: Sequence[Mapping[str, object]]) -> list[dict]:
+    return [copy.deepcopy(dict(tool)) for tool in tools
+            if not (isinstance(tool.get("function"), Mapping)
+                    and tool["function"].get("name") == "parallel")]
+
+
 def request_tool_floor_enabled(runtime: object | None = None) -> bool:
     """Return the strict, default-off request-final tool-floor switch."""
     configured = (
@@ -106,11 +118,13 @@ def _request_tool_floor_schemas(
 
     base_by_name = _schema_index(base_tools)
     current_by_name = _schema_index(incoming_tools)
+    unit_policy = getattr(runtime, "_unit_policy", None)
     # skill_load is offered only for runs with selected skills. The floor must
     # not require or restore a schema that the run never made dispatchable.
-    floor_names = [name for name in _REQUEST_TOOL_FLOOR
-                   if name != "skill_load" or name in base_by_name or name in current_by_name]
-    if "list_files" in base_by_name:
+    floor_names = (list(sorted(unit_policy.allowed_tools)) if unit_policy is not None
+                   else [name for name in _REQUEST_TOOL_FLOOR
+                         if name != "skill_load" or name in base_by_name or name in current_by_name])
+    if unit_policy is None and "list_files" in base_by_name:
         floor_names.append("list_files")
     from kernel_code_bookmarks import enabled as bookmarks_enabled
     if bookmarks_enabled() and getattr(runtime, "_read_lockout_notice", None):
@@ -465,13 +479,17 @@ def author_final_tool_surface(
 
         done_enabled = done_submit_enabled(runtime)
         floor_enabled = request_tool_floor_enabled(runtime)
-        if not done_enabled and not floor_enabled and not bind_current_surface:
+        unit_policy = getattr(runtime, "_unit_policy", None)
+        if not done_enabled and not floor_enabled and not bind_current_surface and unit_policy is None:
             return None
         raw_tools = tools_override if tools_override is not None else body.get("tools")
         if (not isinstance(raw_tools, list)
                 or any(not isinstance(tool, Mapping) for tool in raw_tools)):
             return None
         incoming_tools = [copy.deepcopy(dict(tool)) for tool in raw_tools]
+        if unit_policy is not None:
+            incoming_tools = [tool for tool in incoming_tools
+                              if tool.get("function", {}).get("name") in unit_policy.allowed_tools]
         runtime_before = _snapshot(runtime, _RUNTIME_FIELDS)
         capture_before = _snapshot(capture, _CAPTURE_FIELDS)
         candidate_exists = bool(done_candidate_exists(runtime)) if done_enabled else False
@@ -657,6 +675,19 @@ def author_final_tool_surface(
                 final_tools = authoring_tools(final_tools, runtime)
                 if "mutate" not in _tool_names(final_tools):
                     raise _SurfaceUnavailable("mutation_authoring_tool_missing")
+        if unit_policy is not None:
+            final_tools = [tool for tool in final_tools
+                           if tool.get("function", {}).get("name") in unit_policy.allowed_tools]
+            if not any(tool.get("function", {}).get("name") == "subframe_blocked"
+                       for tool in final_tools):
+                blocked = next((tool for tool in getattr(runtime, "_unit_tool_schemas", ())
+                                if tool.get("function", {}).get("name") == "subframe_blocked"), None)
+                if blocked is None:
+                    raise _SurfaceUnavailable("subframe_blocked_schema_missing")
+                final_tools.append(copy.deepcopy(blocked))
+        parallel_terminal = _parallel_terminal_drop_enabled(runtime)
+        if parallel_terminal:
+            final_tools = _without_parallel(final_tools)
         names = _tool_names(final_tools)
         if (not names or any(not name for name in names)
                 or len(names) != len(set(names))):
@@ -673,7 +704,17 @@ def author_final_tool_surface(
                 run_offerable_tools,
             )
             offerable_tools = run_offerable_tools(runtime)
+            if unit_policy is not None:
+                offerable_tools = [tool for tool in offerable_tools
+                                   if tool.get("function", {}).get("name")
+                                   in unit_policy.allowed_tools]
             listed_tools = stable_listed_tools(runtime, final_tools, offerable_tools)
+            if unit_policy is not None:
+                listed_tools = [tool for tool in listed_tools
+                                if tool.get("function", {}).get("name")
+                                in unit_policy.allowed_tools]
+            if parallel_terminal:
+                listed_tools = _without_parallel(listed_tools)
             dispatch_tools = callable_subset(listed_tools, names)
             if set(_tool_names(dispatch_tools)) != set(names):
                 raise _SurfaceUnavailable("stable_tool_head_unbound")
@@ -811,6 +852,8 @@ def author_final_tool_surface(
         else:
             body.pop("tools", None)
         _record_failure(capture, runtime, request_key, str(error))
+        if getattr(runtime, "_unit_policy", None) is not None:
+            raise RuntimeError(f"subframe tool surface unavailable: {error}") from error
         return None
     except Exception as error:  # N1: author failure must not become a send-time exception.
         _restore(runtime, runtime_before if "runtime_before" in locals() else {})
@@ -825,4 +868,6 @@ def author_final_tool_surface(
         from kernel_frame_optional_allocation import FrameAllocationReplanNeeded
         if isinstance(error, FrameAllocationReplanNeeded):
             raise
+        if getattr(runtime, "_unit_policy", None) is not None:
+            raise RuntimeError("subframe tool surface authoring failed") from error
         return None

@@ -30,6 +30,8 @@ from typing import TypeVar
 
 MAX_RESPONSE_BYTES = 16 * 1024 * 1024
 MAX_ERROR_BYTES = 8 * 1024
+# The child reads at most 64 KiB of JSON; re-encoding can escape each byte sixfold.
+_MAX_PROBE_RESPONSE_BYTES = 6 * 65536 + 128
 RELAY_ERROR_LABELS = frozenset({
     "upstream_reset", "upstream_timeout", "upstream_refused", "upstream_error",
     "downstream_disconnect", "relay_wall_cap", "relay_ttft_timeout",
@@ -349,6 +351,48 @@ def _provider_probe_json_response(origin: tuple[str, str, int | None], path: str
         _close_probe_connection(connection)
 
 
+def _probe_output(process: subprocess.Popen[bytes], packet: bytes, timeout: float) -> bytes | None:
+    """Keep complete proof at expiry without waiting for another byte or child exit."""
+    try:
+        output, _ = process.communicate(packet, timeout=timeout)
+        if process.returncode != 0:
+            return None
+    except subprocess.TimeoutExpired as error:
+        collected = error.output
+        output = collected if isinstance(collected, bytes) else b""
+        stream = process.stdout
+        if stream is not None and not stream.closed:
+            descriptor = stream.fileno()
+            os.set_blocking(descriptor, False)
+            # communicate checks its clock before consuming readiness. After descheduling,
+            # the complete reply may still be in the pipe rather than TimeoutExpired.output.
+            while len(output) <= _MAX_PROBE_RESPONSE_BYTES:
+                if not select.select([descriptor], [], [], 0.0)[0]:
+                    break
+                try:
+                    chunk = os.read(descriptor, min(65536, _MAX_PROBE_RESPONSE_BYTES + 1 - len(output)))
+                except BlockingIOError:
+                    break
+                if not chunk:
+                    break
+                output += chunk
+    return output if output and len(output) <= _MAX_PROBE_RESPONSE_BYTES else None
+
+
+def _close_probe(process: subprocess.Popen[bytes]) -> None:
+    """Ready-byte recovery can observe exit without communicate closing its pipes."""
+    try:
+        _terminate_child(process)
+    finally:
+        for name in ("stdin", "stdout", "stderr"):
+            stream = getattr(process, name, None)
+            if stream is not None:
+                try:
+                    stream.close()
+                except OSError:
+                    pass
+
+
 def bounded_json_probe(endpoint: str, key: str, path: str, *,
                        timeout: float = 2.0,
                        deadline: float | None = None) -> tuple[int, object] | None:
@@ -373,15 +417,15 @@ def bounded_json_probe(endpoint: str, key: str, path: str, *,
         remaining = stop_at - time.monotonic()
         if remaining <= 0:
             return None
-        output, _ = process.communicate(packet, timeout=remaining)
-        if process.returncode == 0 and output:
+        output = _probe_output(process, packet, remaining)
+        if output:
             result = json.loads(output)
             if isinstance(result, list) and len(result) == 2 and type(result[0]) is int:
                 return result[0], result[1]
-    except (subprocess.TimeoutExpired, ValueError):
+    except (OSError, subprocess.TimeoutExpired, ValueError):
         pass
     finally:
-        _terminate_child(process)
+        _close_probe(process)
     return None
 
 
@@ -488,16 +532,16 @@ def _bounded_probe(endpoint: str, key: str, stop_at: float, *,
         remaining = stop_at - time.monotonic()
         if remaining <= 0:
             return None
-        output, _ = process.communicate(packet, timeout=remaining)
-        if process.returncode == 0:
+        output = _probe_output(process, packet, remaining)
+        if output:
             result = json.loads(output)
             if (isinstance(result, list) and len(result) == 2
                     and type(result[0]) is int and type(result[1]) is bool):
                 return result[0], result[1]
-    except (subprocess.TimeoutExpired, ValueError):
+    except (OSError, subprocess.TimeoutExpired, ValueError):
         pass
     finally:
-        _terminate_child(process)
+        _close_probe(process)
     return None
 
 
@@ -762,13 +806,14 @@ class _RoutedRedirects(urllib.request.HTTPRedirectHandler):
 
 
 def request_bytes(wire: bytes, endpoint: str, key: str, *,
-                   deadline: float, socket_timeout: float,
-                   run_deadline: float | None = None,
-                   liveness_timeout: float | None = None,
+                  deadline: float, socket_timeout: float,
+                  run_deadline: float | None = None,
+                  liveness_timeout: float | None = None,
                   route_meta: dict[str, object] | None = None,
                   route_allow_remote: bool = False,
-                   record_attempts: Callable[[list[dict[str, object]]], None] | None = None,
-                   record_queue_wait: Callable[[float, int, str], None] | None = None) -> bytes:
+                  record_attempts: Callable[[list[dict[str, object]]], None] | None = None,
+                  record_queue_wait: Callable[[float, int, str], None] | None = None,
+                  before_attempt: Callable[[int], None] | None = None) -> bytes:
     """Bound the full HTTP operation and abort it after provider liveness is lost."""
     if not math.isfinite(deadline) or not math.isfinite(socket_timeout) or socket_timeout <= 0:
         raise ValueError("invalid HTTP deadline or socket timeout")
@@ -791,17 +836,54 @@ def request_bytes(wire: bytes, endpoint: str, key: str, *,
                             time.monotonic() + queue_wait_max_seconds())
     if hard_deadline <= time.monotonic():
         raise TimeoutError("HTTP run deadline expired before submission")
-    packet = json.dumps({"wire": wire.decode("utf-8"), "endpoint": endpoint, "key": key,
-                         "deadline": hard_deadline,
-                         "request_deadline": deadline,
-                         "socket_timeout": min(socket_timeout, remaining),
-                         "send_stall_seconds": send_stall_seconds(),
-                         "report_body_sent": True,
-                         "gzip": request_gzip_enabled(),
-                         **({"route_allow_remote": route_allow_remote} if route_meta is not None else {})}).encode()
-    process = subprocess.Popen(
-        [sys.executable, "-I", "-B", str(Path(__file__).resolve()), "--http-child"],
-        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    packet_data = {"wire": wire.decode("utf-8"), "endpoint": endpoint, "key": key,
+                   "deadline": hard_deadline, "request_deadline": deadline,
+                   "socket_timeout": min(socket_timeout, remaining),
+                   "send_stall_seconds": send_stall_seconds(), "report_body_sent": True,
+                   "gzip": request_gzip_enabled(),
+                   **({"route_allow_remote": route_allow_remote} if route_meta is not None else {})}
+    authority_parent, authority_child = socket.socketpair() if before_attempt is not None else (None, None)
+    if authority_child is not None:
+        packet_data["authority_fd"] = authority_child.fileno()
+    try:
+        packet = json.dumps(packet_data).encode()
+        process = subprocess.Popen(
+            [sys.executable, "-I", "-B", str(Path(__file__).resolve()), "--http-child"],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            pass_fds=(authority_child.fileno(),) if authority_child is not None else ())
+    except BaseException:
+        if authority_parent is not None:
+            authority_parent.close()
+            authority_child.close()
+        raise
+    if authority_child is not None:
+        authority_child.close()
+    callback_errors: list[BaseException] = []
+    authority_thread = None
+    if authority_parent is not None:
+        def authorize_attempts() -> None:
+            attempt = 0
+            try:
+                while authority_parent.recv(1):
+                    attempt += 1
+                    try:
+                        before_attempt(attempt)
+                    except BaseException as error:
+                        callback_errors.append(error)
+                        authority_parent.sendall(b"N")
+                        return
+                    authority_parent.sendall(b"Y")
+            except OSError as error:
+                if process.poll() is None:
+                    callback_errors.append(error)
+
+        authority_thread = threading.Thread(target=authorize_attempts, daemon=True)
+        try:
+            authority_thread.start()
+        except BaseException:
+            _terminate_child(process)
+            authority_parent.close()
+            raise
     probe_state: dict[str, int | float | None] = {
         "status": None, "body_attempt": 0, "completed_at": None}
     diagnostic = b""
@@ -817,6 +899,8 @@ def request_bytes(wire: bytes, endpoint: str, key: str, *,
                 attempts = None
             if isinstance(attempts, list):
                 record_attempts(attempts)
+        if callback_errors:
+            raise callback_errors[0]
         if process.returncode != 0:
             raise _child_transport_error(diagnostic, key, endpoint)
         return output
@@ -834,6 +918,9 @@ def request_bytes(wire: bytes, endpoint: str, key: str, *,
                     record_queue_wait(waited, probe_state["status"], _safe_origin(endpoint))
         finally:
             _terminate_child(process)
+            if authority_parent is not None:
+                authority_parent.close()
+                authority_thread.join(timeout=1)
 
 
 REQUEST_GZIP_ENV = "STATEFRAME_HTTP_GZIP"
@@ -1261,11 +1348,16 @@ def _child() -> None:
     else:
         handlers = (_AbortiveHTTPHandler(tracker), _AbortiveHTTPSHandler(tracker))
     opener = build_credential_scoped_opener(proxy_mode="direct", handlers=handlers)
+    authority = socket.socket(fileno=packet["authority_fd"]) if "authority_fd" in packet else None
     response_complete = False
     attempts: list[dict[str, object]] = []
 
     def send(data: bytes, headers: dict[str, str]) -> bytes:
         import hashlib
+        if authority is not None:
+            authority.sendall(b"?")
+            if authority.recv(1) != b"Y":
+                raise PermissionError("HTTP attempt was refused before submission")
         request_headers = {"Content-Type": "application/json", **headers}
         request_headers["Authorization"] = "Bearer " + packet["key"]
         request = urllib.request.Request(packet["endpoint"], data=data,
@@ -1318,7 +1410,7 @@ def _child() -> None:
             send, body, encoding, identity, identity_headers, on_refused)
         response_complete = True
     except Exception as error:
-        if len(attempts) > 1:
+        if (attempts and "authority_fd" in packet) or len(attempts) > 1:
             error.transport_attempts = attempts
         error.first_response_at = tracker.first_response_at
         reason = error.reason if isinstance(error, urllib.error.URLError) else error
@@ -1337,9 +1429,11 @@ def _child() -> None:
     finally:
         if not response_complete:
             tracker.abort_all()
-    if len(attempts) > 1 or tracker.first_response_at is not None:
+        if authority is not None:
+            authority.close()
+    if (attempts and "authority_fd" in packet) or len(attempts) > 1 or tracker.first_response_at is not None:
         sys.stderr.write(json.dumps({
-            **({"transport_attempts": attempts} if len(attempts) > 1 else {}),
+            **({"transport_attempts": attempts} if (attempts and "authority_fd" in packet) or len(attempts) > 1 else {}),
             "first_response_at": tracker.first_response_at}))
     sys.stdout.buffer.write(data)
 
@@ -1358,6 +1452,7 @@ def _probe_child() -> None:
                 origin, path, packet["key"], remaining, packet["read_ok"])
         if result is not None:
             sys.stdout.write(json.dumps(result))
+            sys.stdout.flush()
             return
 
 

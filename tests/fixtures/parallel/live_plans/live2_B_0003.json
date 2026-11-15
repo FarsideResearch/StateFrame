@@ -1,0 +1,84 @@
+{
+  "subframes": [
+    {
+      "id": "fix_tax",
+      "outcome": "Fix calculate_tax to divide rate by 100",
+      "owns": [
+        "pricing/tax.py"
+      ],
+      "creates": [],
+      "exports": [
+        {
+          "id": "calculate_tax",
+          "path": "pricing/tax.py",
+          "symbol": "calculate_tax",
+          "signature": {
+            "kind": "function",
+            "params": [
+              {
+                "name": "subtotal",
+                "kind": "pos",
+                "has_default": false,
+                "annotation": null
+              },
+              {
+                "name": "rate",
+                "kind": "pos",
+                "has_default": false,
+                "annotation": null
+              }
+            ],
+            "returns": null,
+            "decorators": []
+          }
+        }
+      ],
+      "reads": [],
+      "requirements": [
+        "calculate_tax(100.00, 10) == 10.00"
+      ],
+      "check": {
+        "tests": [
+          "tests/test_tax.py"
+        ]
+      }
+    },
+    {
+      "id": "fix_discount",
+      "outcome": "Fix apply_discount to return price - discount",
+      "owns": [
+        "pricing/discount.py"
+      ],
+      "creates": [],
+      "exports": [],
+      "reads": [],
+      "requirements": [
+        "apply_discount(80.00, 25) == 60.00",
+        "apply_discount(80.00, 100) == 0.00"
+      ],
+      "check": {
+        "tests": [
+          "tests/test_discount.py"
+        ]
+      }
+    },
+    {
+      "id": "fix_quantity",
+      "outcome": "Fix line_total to multiply unit_price * quantity",
+      "owns": [
+        "pricing/quantity.py"
+      ],
+      "creates": [],
+      "exports": [],
+      "reads": [],
+      "requirements": [
+        "line_total(3.25, 4) == 13.00"
+      ],
+      "check": {
+        "tests": [
+          "tests/test_quantity.py"
+        ]
+      }
+    }
+  ]
+}

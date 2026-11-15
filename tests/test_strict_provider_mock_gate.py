@@ -1,12 +1,19 @@
 """A DeepInfra-shaped provider must admit a multi-send source-window run."""
 from __future__ import annotations
 
+import gzip
+import io
+import json
+import os
+import subprocess
+import venv
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 from _journal import measurement_events
+from engine_run import run_monitored
 from kernel_completion_owner import (
     RequestActionContractError, assert_request_action_contract,
     establish_request_action_contract,
@@ -14,7 +21,52 @@ from kernel_completion_owner import (
 from kernel_measurement import RequestCapture
 from kernel_read_fixes import ContinuationLimits
 from kernel_request_reprepare import SourceRevisionReplanRefused, source_replan_preparation
+from fixtures.barrier_endpoint import BarrierEndpoint
 from tests.test_request_seal_wire_form import _run_scripted, assert_sealed_wire
+from stateframe.scripted_endpoint import _strict_openai_error
+
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+class _StrictParallelEndpoint(BarrierEndpoint):
+    """OpenAI-shaped mock that rejects llama-only fields and returns 404 probes."""
+
+    def __init__(self, parent_steps: list[dict[str, object]],
+                 subframe_steps: dict[str, list[dict[str, object]]]) -> None:
+        super().__init__(parent_steps, subframe_steps)
+        self.probe_statuses: list[tuple[str, int]] = []
+        self.strict_errors: list[str] = []
+
+    def _handler(self):
+        base = super()._handler()
+        endpoint = self
+
+        class Handler(base):
+            def do_GET(self) -> None:  # noqa: N802
+                path = self.path.rstrip("/")
+                if path in {"/props", "/slots"}:
+                    with endpoint._condition:
+                        endpoint.probe_statuses.append((path, 404))
+                    self._send(404, {"error": {"message": "not found"}})
+                    return
+                super().do_GET()
+
+            def do_POST(self) -> None:  # noqa: N802
+                if self.path.rstrip("/") == "/v1/chat/completions":
+                    raw = self.rfile.read(int(self.headers.get("Content-Length") or 0))
+                    decoded = (gzip.decompress(raw)
+                               if self.headers.get("Content-Encoding") == "gzip" else raw)
+                    error = _strict_openai_error(json.loads(decoded))
+                    if error:
+                        with endpoint._condition:
+                            endpoint.strict_errors.append(error)
+                        self._send(400, {"error": {"message": error}})
+                        return
+                    self.rfile = io.BytesIO(raw)
+                super().do_POST()
+
+        return Handler
 
 
 @pytest.mark.host_sandbox
@@ -34,6 +86,103 @@ def test_strict_provider_six_sends_seal_provider_bytes(tmp_path: Path) -> None:
     script.assert_consumed()
     assert not script.strict_openai_errors
     assert_sealed_wire(run, minimum=6)
+
+
+@pytest.mark.host_sandbox
+def test_strict_provider_forced_subframes_send_multiple_child_requests(tmp_path: Path) -> None:
+    plan: dict[str, object] = {"subframes": [
+        {"id": "left", "outcome": "Update the left adapter.", "owns": ["left.py"],
+         "creates": [], "reads": [], "exports": [], "consumes": [], "requirements": [],
+         "check": {"tests": ["tests/test_left.py"]}},
+        {"id": "right", "outcome": "Update the right adapter.", "owns": ["right.py"],
+         "creates": [], "reads": [], "exports": [], "consumes": [], "requirements": [],
+         "check": {"tests": ["tests/test_right.py"]}},
+    ]}
+    def step(tool: str, arguments: dict[str, object]) -> dict[str, object]:
+        return {"tool": tool, "arguments": arguments}
+
+    # The forced manifest dispatches parallel internally; the provider resumes at done.
+    parent_steps = [step("done", {
+        "summary": "Both adapters are updated.",
+    })]
+    subframe_steps = {
+        "left": [
+            step("read", {"path": "left.py"}),
+            step("str_replace", {"path": "left.py", "old_str": "VALUE = 1",
+                                  "new_str": "VALUE = 3"}),
+        ],
+        "right": [
+            step("read", {"path": "right.py"}),
+            step("str_replace", {"path": "right.py", "old_str": "VALUE = 1",
+                                  "new_str": "VALUE = 4"}),
+        ],
+    }
+    endpoint = _StrictParallelEndpoint(parent_steps, subframe_steps)
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "left.py").write_text("VALUE = 1\n", encoding="utf-8")
+    (repo / "right.py").write_text("VALUE = 1\n", encoding="utf-8")
+    test_root = repo / "tests"
+    test_root.mkdir()
+    (test_root / "test_left.py").write_text(
+        "from left import VALUE\n\n\ndef test_left_value():\n    assert VALUE == 3\n",
+        encoding="utf-8",
+    )
+    (test_root / "test_right.py").write_text(
+        "from right import VALUE\n\n\ndef test_right_value():\n    assert VALUE == 4\n",
+        encoding="utf-8",
+    )
+    manifest = tmp_path / "forced-plan.json"
+    manifest.write_text(json.dumps(plan, separators=(",", ":")), encoding="utf-8")
+    run = tmp_path / "run"
+    engine_environment = tmp_path / "engine-environment"
+    venv.EnvBuilder(system_site_packages=True).create(engine_environment)
+    engine_python = engine_environment / "bin" / "python"
+    installation = subprocess.run(
+        [str(engine_python), "-I", "-m", "pip", "install",
+         "--disable-pip-version-check", "--no-index", "--no-build-isolation", "--no-deps",
+         "--no-input", "--force-reinstall", str(ROOT)],
+        capture_output=True, text=True, timeout=180, check=False,
+    )
+    assert installation.returncode == 0, installation.stdout + installation.stderr
+    environment = {name: value for name, value in os.environ.items()
+                   if not name.startswith(("STATEFRAME_", "REACT_"))}
+    environment.update({
+        "PYTHONDONTWRITEBYTECODE": "1", "PYTHONHASHSEED": "0",
+        "STATEFRAME_HOME": str(tmp_path / "state-home"),
+        "STATEFRAME_PARALLEL_FORCE_MANIFEST": str(manifest),
+    })
+    with endpoint:
+        command = [
+            str(engine_python), "-m", "stateframe", "run", "--repo", str(repo),
+            "--task", "Update left.py and right.py in separate subframes.",
+            "--endpoint", endpoint.url, "--model", "scripted", "--run-dir", str(run),
+            "--max-turns", "32", "--parallel", "2", "--shell", "off",
+            "--python", str(engine_python), "--test-python", str(engine_python), "--quiet",
+        ]
+        process = run_monitored(
+            command, cwd=ROOT, env=environment, capture_output=True, text=True,
+            expected_seconds=600, run_dir=run, check=False,
+        )
+    output = process.stdout + process.stderr
+    traceback = run / "child-traceback.txt"
+    if traceback.is_file():
+        output += traceback.read_text(encoding="utf-8")
+    assert "provider dialect: openai-strict" in output
+    assert not endpoint.strict_errors
+    probe_paths = {path for path, status in endpoint.probe_statuses if status == 404}
+    assert {"/props", "/slots"}.issubset(probe_paths)
+    child_requests = {
+        unit_id: [row for row in endpoint.requests if row.get("marker") == unit_id]
+        for unit_id in ("left", "right")
+    }
+    assert all(len(requests) >= 2 for requests in child_requests.values()), output
+    assert all(len(list((run / "parallel").glob(
+        f"*/units/{unit_id}/wire/*.request.json"))) >= 2 for unit_id in child_requests), output
+    assert all(_strict_openai_error(row["request"]) is None
+               for row in endpoint.requests), output
+    assert process.returncode == 0, output + f"\nMock errors: {endpoint.errors!r}"
+    endpoint.assert_consumed()
 
 
 @pytest.mark.host_sandbox

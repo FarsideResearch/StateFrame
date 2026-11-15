@@ -2907,6 +2907,8 @@ def _read_requested_source(
 
 
 class StateFrameRuntime:
+    _unit_policy = None
+
     def __setattr__(self, name: str, value: object) -> None:
         """Keep heuristic stop outcomes advisory while hard budgets remain authoritative."""
         if name == "system_outcome" and value is not None:
@@ -2933,6 +2935,11 @@ class StateFrameRuntime:
                 }
                 queue_advisory(self, triggers.get(outcome, "generic_terminal"))
                 return
+            if (str(value).strip().lower() == "unit_blocked"
+                    and getattr(self, "_unit_policy", None) is not None):
+                from kernel_terminal_policy import consume_subframe_block
+                if not consume_subframe_block(self):
+                    return
         object.__setattr__(self, name, value)
 
     @profiled_function_span("runtime_initialization")
@@ -3771,6 +3778,33 @@ class StateFrameRuntime:
             tools = working_sets_tool_surface(tools)
         from kernel_decisive_factor import tool_surface as decisive_factor_tool_surface
         tools = decisive_factor_tool_surface(tools)
+        _unit_module = sys.modules.get("kernel_unit_policy")
+        self._unit_policy = _unit_module.active() if _unit_module is not None else None
+        if self._unit_policy is not None:
+            if self.target is None:
+                # Subframes have no parent target path. Bind the continuation
+                # workspace to a path already authorized by the frozen unit
+                # contract, including a declared file that will be created.
+                root = Path(owner.root).resolve()
+                contract = self._unit_policy.spec.contract
+                for relative in (*contract.owns, *contract.creates):
+                    try:
+                        candidate = (root / relative).resolve()
+                        candidate.relative_to(root)
+                    except (OSError, ValueError):
+                        continue
+                    self.target = candidate
+                    try:
+                        self._turtle_baseline_source = (
+                            candidate.read_text(encoding="utf-8") if candidate.is_file() else "")
+                    except (OSError, UnicodeError):
+                        self._turtle_baseline_source = ""
+                    break
+            if self._unit_policy.spec.contract.check.selectors:
+                self.auto_verify_mode = "on"
+            tools = [tool for tool in tools
+                     if tool.get("function", {}).get("name") in self._unit_policy.allowed_tools]
+            self._unit_tool_schemas = tuple(copy.deepcopy(tools))
         self.active_tool_restriction = None
         self.public_review = None
         self.live_projection = None
@@ -5437,7 +5471,7 @@ class StateFrameRuntime:
                                               for existing in self.pending_multi_definition_edits):
                             self.pending_multi_definition_edits.append(row)
         self.work_record = None
-        if self.stateframe_work_record_mode == "on":
+        if self.stateframe_work_record_mode == "on" and self._unit_policy is None:
             latest_work_state = None
             records = getattr(self.journal, "records", None)
             if resume is not None and callable(records):
@@ -5871,6 +5905,12 @@ class StateFrameRuntime:
                          "authorization_scope", getattr(self, "context_scope", "UNKNOWN_SCOPE")),
                      "tenant_identity": self.journal.manifest.get(
                          "tenant_identity", self.journal.manifest.get("tenant_id", "UNKNOWN_TENANT"))}
+        # The frozen recipe belongs to the unit, not to a check having run: bind it before the
+        # first check too, so a step's before/after bindings agree when its check is refused.
+        if (self._unit_policy is not None
+                and (not effective_command
+                     or effective_command == self._unit_policy.check_binding_command())):
+            value["check_recipe_digest"] = self._unit_policy.spec.contract.check.digest()
         if cache_enabled:
             self._binding_cache = {
                 "epoch": self._binding_epoch,
@@ -8479,6 +8519,9 @@ class StateFrameRuntime:
             "receipt_id": receipt_id,
             "step": step,
             **canonical,
+            **(sys.modules["kernel_unit_policy"].host_final_check_fields(
+                getattr(self, "_unit_check_receipt", None))
+               if getattr(self, "_unit_policy", None) is not None else {}),
             **StateFrameRuntime._micrograph_failed_paths(self, canonical_rows),
             # LedgerIndex consumes action-shaped test receipts to reobserve the
             # selected test paths at the binding checked by this subprocess.
@@ -8520,11 +8563,13 @@ class StateFrameRuntime:
         artifact_policy = discover_test_artifact_policy(
             Path(self.owner.root), command=command, environment=test_environment)
         filtered_binding = filter_binding(binding, artifact_policy)
-        self._test_command = command
+        binding_command = (self._unit_policy.check_binding_command()
+                           if self._unit_policy is not None else command)
+        self._test_command = binding_command
         self._test_run_write_set = tuple(str(item) for item in run_write_set)
         integrity_report = self._audit_test_integrity()
         after_binding = self.binding(
-            command=command, run_write_set=self._test_run_write_set)
+            command=binding_command, run_write_set=self._test_run_write_set)
         filtered_after_binding = filter_binding(after_binding, artifact_policy)
         stability = binding_stability(
             filtered_binding, filtered_after_binding,
@@ -9059,16 +9104,21 @@ class StateFrameRuntime:
                 or not self._is_product_edit(edit_receipt)
                 or not callable(self.auto_verify_runner)):
             return
+        if self._unit_policy is not None:
+            self._unit_auto_finish_receipt = None
         selectors = (tuple(expected_selectors) if expected_selectors is not None else
                      tuple(str(item) for item in getattr(self.owner, "f2p_ids", ())
                            if str(item).strip()))
+        if self._unit_policy is not None:
+            selectors = self._unit_policy.spec.contract.check.selectors
         if not selectors:
             self.journal.emit("auto_verify_skipped", reason="no_configured_public_selector",
                               edit_receipt_id=edit_receipt.get("receipt_id"),
                               dispatch=False)
             return
         self._auto_verify_running = True
-        before = self.binding()
+        before = (self.binding(command=self._unit_policy.check_binding_command())
+                  if self._unit_policy is not None else self.binding())
         self.journal.emit("auto_verify_started", producer="stateframe_auto_verify",
                           selectors=list(selectors), edit_receipt_id=edit_receipt.get("receipt_id"),
                           binding=before, request_id=getattr(self, "current_request_id", None))
@@ -9214,6 +9264,16 @@ class StateFrameRuntime:
                 run_write_set=run_write_set, command=test_command,
                 test_environment=test_environment,
                 canonical_check_receipts=canonical_check_receipts)
+            if (self._unit_policy is not None and exit_code == 0
+                    and getattr(getattr(self, "_unit_check_receipt", None), "status", None) == "PASS"):
+                if self.test_receipts and self.test_receipts[-1].get("binding_stable") is True:
+                    self._unit_auto_finish_receipt = self._unit_check_receipt
+                    self.journal.emit("subframe_auto_finish_armed",
+                                      recipe_digest=self._unit_check_receipt.recipe_digest,
+                                      dispatch=False)
+                else:
+                    self.journal.emit("subframe_auto_finish_declined", reason="binding_unstable",
+                                      dispatch=False)
             if (exit_code == 0 and self.continuation is not None
                     and getattr(self, "stateframe_green_revalidate_mode", "off") == "on"
                     and self.test_receipts):
@@ -9427,6 +9487,9 @@ class StateFrameRuntime:
         )
 
     def _schedule_auto_verify(self, receipt: Mapping[str, object]) -> None:
+        if (self._unit_policy is not None
+                and not self._unit_policy.spec.contract.check.selectors):
+            return
         if (getattr(self, "stateframe_green_lock_repair_mode", "off") == "on"
                 and bool(getattr(getattr(self, "green_lock", None), "green", False))):
             # The repair controller owns the post-GREEN verification boundary and
@@ -12215,6 +12278,27 @@ class StateFrameRuntime:
         return selected
 
     def _base_tool_menu(self, tools: list[dict], messages: Sequence[dict]) -> list[dict]:
+        if self._unit_policy is not None:
+            selected = [tool for tool in tools
+                        if tool.get("function", {}).get("name") in self._unit_policy.allowed_tools]
+            if getattr(self, "stateframe_completion_owner_mode", "off") == "on":
+                from kernel_completion_owner import register_tools
+                selected = register_tools(self, selected)
+            selected = self._pass_gates_menu(self._idealpath_project_menu(selected))
+            selected = [tool for tool in selected
+                        if tool.get("function", {}).get("name") in self._unit_policy.allowed_tools]
+            if not any(tool.get("function", {}).get("name") == "subframe_blocked"
+                       for tool in selected):
+                blocked = next((tool for tool in tools
+                                if tool.get("function", {}).get("name") == "subframe_blocked"), None)
+                if blocked is None:
+                    raise RuntimeError("subframe_blocked schema is missing from subframe tool surface")
+                selected.append(blocked)
+            names = [tool["function"]["name"] for tool in selected]
+            self.completion_menu = tuple(names)
+            self._question_done_available = "done" in names
+            self.active_tool_restriction = None
+            return selected
         from kernel_lean import enabled as lean_enabled, plain_tool_surface
         if lean_enabled():
             selected = plain_tool_surface(tools)
@@ -15176,13 +15260,16 @@ class StateFrameRuntime:
             from kernel_post_edit_refresh import refresh_after_applied_edit
             refresh_after_applied_edit(self, receipt, current, tuple(changed_paths))
             self._auto_verify_pending_edit_id = receipt.get("receipt_id")
-            self._run_host_repair_checks(receipt)
-            self._schedule_frozen_authored_checks(receipt)
+            if self._unit_policy is None:
+                self._run_host_repair_checks(receipt)
+                self._schedule_frozen_authored_checks(receipt)
             self._schedule_auto_verify(receipt)
-            if getattr(self, "stateframe_behavior_witness_mode", "off") == "on":
+            if (self._unit_policy is None
+                    and getattr(self, "stateframe_behavior_witness_mode", "off") == "on"):
                 from kernel_behavior_witness import rerun_failed_witnesses
                 rerun_failed_witnesses(self, getattr(self, "observation_probe_runner", None))
-            if getattr(self, "stateframe_get_sure_mode", "off") == "on":
+            if (self._unit_policy is None
+                    and getattr(self, "stateframe_get_sure_mode", "off") == "on"):
                 from kernel_stateframe_get_sure import after_applied_edit, run_relevant_checks
                 after_applied_edit(self, receipt)
                 run_relevant_checks(self, receipt)
@@ -17692,6 +17779,12 @@ class StateFrameRuntime:
         self._pass_gates_last_vector = vector.as_dict()
         def dispatchable(name: str, arguments: Mapping[str, object]) -> bool:
             try:
+                if (self._unit_policy is not None and name == "run_tests"
+                        and any(key in arguments for key in
+                                ("unknown_id", "check_id", "check_identity"))
+                        and not self._unit_policy.matches_check_resolver(
+                            arguments, self.test_receipts)):
+                    return False
                 from kernel_completion_owner import dispatch_tool_call
                 dispatch_tool_call(selected, name, arguments)
                 return True
@@ -23451,12 +23544,19 @@ class StateFrameRuntime:
         estimate = token_estimate({"messages": prepared, "tools": tools})
         framefit_on = getattr(self, "stateframe_framefit_mode", "off") == "on"
         task_row = getattr(self.owner, "task_row", None)
-        # The budget draft can still carry the repair protocol when a generic
-        # check turns green. The final FrameFit5 assembly installs this owner
-        # decision; its wire assertion below remains strict.
-        generic_framefit_preassembly = (
+        # FrameFit5 installs the owner terminal line at final assembly. Generic
+        # checks and no-check tasks can reach the submit route before that line
+        # is serialized; the final provider-bound assertion remains strict.
+        from kernel_completion_owner import _no_host_checks
+        framefit5_preassembly = (
             framefit_on and isinstance(task_row, Mapping)
-            and task_row.get("runner_kind") == "generic"
+            and (
+                task_row.get("runner_kind") == "generic"
+                or (
+                    getattr(self, "stateframe_completion_owner_mode", "off") == "on"
+                    and _no_host_checks(self)
+                )
+            )
         )
         if (f4_on and (getattr(self, "stateframe_f4_fit_mode", "off") == "on"
                        or framefit_on)
@@ -24652,6 +24752,23 @@ class StateFrameRuntime:
                 framefit5_shape_trace, "after_read_once", prepared,
             )
             estimate = token_estimate({"messages": prepared, "tools": tools})
+            # Late budget/source projections can rebuild the StateFrame after
+            # the earlier owner handoff was attached. Re-attach the exact
+            # owner line at the final prepared-message boundary before the
+            # immutable request contract checks it.
+            if isinstance(final_presentation_contract, Mapping):
+                from kernel_completion_owner import _framefit5_terminal_line_present
+                terminal_line = str(final_presentation_contract.get("terminal_line") or "").strip()
+                terminal_block_id = str(
+                    final_presentation_contract.get("terminal_block_id") or "").strip()
+                if (terminal_line and terminal_block_id
+                        and not _framefit5_terminal_line_present(prepared, terminal_line)):
+                    prepared = [*prepared, {
+                        "role": "user",
+                        "content": terminal_line,
+                        "_stateframe_owner_block": terminal_block_id,
+                    }]
+                    estimate = token_estimate({"messages": prepared, "tools": tools})
             # Freeze the owner contract only after every late presentation
             # mutation, including grounded-intake notices and lean hygiene.
             # The drift assertion remains strict; its snapshot now describes
@@ -24684,7 +24801,7 @@ class StateFrameRuntime:
                 request_action_contract = establish_request_action_contract(
                     self, prepared, tools, request_id=capture.request_id,
                     provider_request=provider_request,
-                    framefit5_preassembly=generic_framefit_preassembly,
+                    framefit5_preassembly=framefit5_preassembly,
                 )
             except Exception as error:  # noqa: BLE001 - owner finalization holds the request
                 from kernel_harden8 import record_failure
@@ -24709,7 +24826,7 @@ class StateFrameRuntime:
                 request_action_contract = assert_request_action_contract(
                     self, prepared, tools, request_id=capture.request_id,
                     boundary="prepared",
-                    framefit5_preassembly=generic_framefit_preassembly,
+                    framefit5_preassembly=framefit5_preassembly,
                     allow_host_stop=bool(
                         isinstance(request_action_contract, Mapping)
                         and request_action_contract.get("host_stop")),
@@ -25002,7 +25119,7 @@ class StateFrameRuntime:
                     surface = author_final_tool_surface(
                         capture, self, menu_body, request_id=capture.request_id,
                         bind_current_surface=True,
-                        framefit5_preassembly=generic_framefit_preassembly,
+                        framefit5_preassembly=framefit5_preassembly,
                         final_fit_pending=True,
                     )
                     if not isinstance(surface, Mapping):

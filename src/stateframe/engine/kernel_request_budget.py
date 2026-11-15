@@ -13,6 +13,7 @@ import hashlib
 import json
 import os
 import re
+import sys
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from types import SimpleNamespace
@@ -1157,6 +1158,14 @@ def _request_token_meter(
         if isinstance(candidate, RequestTokenMeter):
             meter = candidate
             break
+    if meter is None and runtime is not None and getattr(runtime, "_unit_policy", None) is not None:
+        if __package__:
+            from .kernel_parallel_meter import _meter_for_unit_request
+        else:
+            from kernel_parallel_meter import _meter_for_unit_request
+        restored = _meter_for_unit_request(runtime, capture, None)
+        if isinstance(restored, RequestTokenMeter):
+            meter = restored
     if meter is None:
         meter = RequestTokenMeter(
             tokenizer=tokenizer,
@@ -1176,8 +1185,27 @@ def _request_token_meter(
         # Route changes invalidate cache/calibration at the next measurement,
         # but cannot reset failure state within the logical request.
         meter.endpoint = resolved_endpoint
+    unit_policy = getattr(runtime, "_unit_policy", None) if runtime is not None else None
+    # Only installed parent/worker authority can opt out of historical feedback.
+    # Rebind cached and checkpoint-restored meters before subscribing to usage.
+    parallel_enabled = unit_policy is not None or any(
+        module is not None and module.active() is not None
+        for module in (sys.modules.get("kernel_unit_policy"),
+                       sys.modules.get("stateframe.engine.kernel_unit_policy"))
+    ) or any(
+        module is not None and module.available()
+        for module in (sys.modules.get("kernel_parallel"),
+                       sys.modules.get("stateframe.engine.kernel_parallel"))
+    )
+    meter.usage_feedback_enabled = not (
+        parallel_enabled
+        and os.environ.get("STATEFRAME_PARALLEL_USAGE_FEEDBACK", "observe").strip().lower() == "off"
+    )
     meter.bind_tokenizer_auth(*request_tokenizer_credentials(capture))
     meter.provider_identity = tokenizer_contract(runtime, capture)
+    if unit_policy is not None:
+        meter.subframe_cap_calibration = getattr(
+            getattr(unit_policy, "spec", None), "subframe_cap_calibration", None)
     generation = getattr(capture, "request_id", None) or request_id
     logical = (getattr(capture, "_tokenize_logical_request_id", None)
                or getattr(capture, "_replacement_lineage", None) or generation)
@@ -2982,6 +3010,13 @@ def _apply_budget_with_diet(
 
                 def dispatchable(name: str, arguments: Mapping[str, object]) -> bool:
                     try:
+                        unit_policy = getattr(runtime, "_unit_policy", None)
+                        if (unit_policy is not None and name == "run_tests"
+                                and any(key in arguments for key in
+                                        ("unknown_id", "check_id", "check_identity"))
+                                and not unit_policy.matches_check_resolver(
+                                    arguments, getattr(runtime, "test_receipts", ()))):
+                            return False
                         dispatch_tool_call(final_tools, name, arguments)
                         return True
                     except (AttributeError, OSError, RuntimeError, TypeError, ValueError):

@@ -44,7 +44,7 @@ from .state_dirs import private_directory
 from .request_records import RequestRecordsError, list_request_records
 from .storage_gc import _fsync_directory, _write_json_atomic
 
-from .engine.kernel_safe_paths import safe_home
+from .engine.kernel_safe_paths import safe_expanduser, safe_home
 
 if TYPE_CHECKING:
     from .engine.kernel_hooks import HookSet
@@ -297,6 +297,9 @@ class RunOptions:
                                                                      repr=False)
     in_place: bool = False
     profile: str = profiles.DEFAULT
+    parallel_mode: str = "off"
+    parallel_slots: str | None = None
+    parallel_cli: dict[str, int] = field(default_factory=dict)
     python: str = sys.executable  # the ENGINE's interpreter
     # The interpreter for the repository's tests (test_interpreter.choose). python_explicit marks a
     # user-passed --python, which keeps its old meaning of engine AND tests.
@@ -670,6 +673,30 @@ OPT_IN_SWITCHES = {
     "STATEFRAME_STABLE_WIRE_HEADROOM": (),  # retained, not-current source window tokens per epoch
     "STATEFRAME_STABLE_WIRE_RETAIN_PREFIX": ("on", "off"),  # relayouts may keep not-current windows in the prefix
     "STATEFRAME_ZERO_PROGRESS_NUDGE_STEP": (),  # positive int step for the one no-edit/no-check nudge; default 35
+    "STATEFRAME_PARALLEL_MAX_SUBFRAMES": ("6",),
+    "STATEFRAME_PARALLEL_MIN_SUBFRAMES": ("2",),
+    "STATEFRAME_PARALLEL_MAX_PATHS_PER_SUBFRAME": ("6",),
+    "STATEFRAME_PARALLEL_MAX_PATHS_TOTAL": ("24",),
+    "STATEFRAME_PARALLEL_SUBFRAME_REQUEST_TOKENS": ("26675",),
+    "STATEFRAME_PARALLEL_MAX_OWNED_SOURCE_BYTES": ("24576",),
+    "STATEFRAME_PARALLEL_SUBFRAME_MAX_REQUESTS": ("12",),
+    "STATEFRAME_PARALLEL_PARENT_RESERVE_REQUESTS": ("4",),
+    "STATEFRAME_PARALLEL_CHECK_PERMITS": ("1",),
+    "STATEFRAME_PARALLEL_MAX_CONCURRENCY": ("4",),
+    "STATEFRAME_PARALLEL_FANOUT_CONTINUATION": ("on", "off"),
+    "STATEFRAME_PARALLEL_SUGGEST": ("on", "off"),
+    "STATEFRAME_PARALLEL_SUGGEST_BACKEND": ("auto", "hosted", "local", "unknown"),
+    "STATEFRAME_PARALLEL_SUGGEST_MIN_UNITS": ("2",),
+    "STATEFRAME_PARALLEL_SUGGEST_INPUT_SHARE_PCT": ("50",),
+    "STATEFRAME_PARALLEL_SUGGEST_EDIT_FRACTION_PCT": ("25",),
+    "STATEFRAME_PARALLEL_SUGGEST_TOKENS_PER_EDIT_LINE": ("12",),
+    "STATEFRAME_PARALLEL_SLOTS": ("0",),
+    "STATEFRAME_PARALLEL_BYTE_TOKEN_CALIBRATION": (
+        "auto", "generic", "deepinfra/deepseek-ai/deepseek-v4-flash-0731@v1"),
+    "STATEFRAME_PARALLEL_BYTE_TOKEN_HEADROOM_PCT": (),
+    "STATEFRAME_PARALLEL_USAGE_FEEDBACK": ("observe", "off"),
+    "STATEFRAME_PARALLEL_DROP_TOOL_AFTER_TERMINAL": ("on", "off"),
+    "STATEFRAME_PARALLEL_FORCE_MANIFEST": (),  # internal benchmark-only; stability may change
     "STATEFRAME_QUEUE_WAIT_MAX_S": (),  # finite positive seconds; a profile may set it too
     "STATEFRAME_SEND_STALL_S": (),  # 10-600 seconds without request-body progress
     "STATEFRAME_TRANSPORT_MAX_ATTEMPTS": ("1", "2", "3", "4", "5"),
@@ -681,19 +708,58 @@ OPT_IN_SWITCHES = {
     "STATEFRAME_CROSSFILE_EXISTENCE_CHECK": ("on", "off"),  # opt-in report of edits leaving repo symbol references dangling; off by default
     "STATEFRAME_CROSSFILE_SIGNATURE_CHECK": ("on", "off"),  # opt-in report of callers broken by a changed signature; off by default
 }
+PARALLEL_CONTROL_SWITCHES = frozenset({
+    "STATEFRAME_PARALLEL_DROP_TOOL_AFTER_TERMINAL",
+    "STATEFRAME_PARALLEL_FORCE_MANIFEST",
+    "STATEFRAME_PARALLEL_SUGGEST",
+    "STATEFRAME_PARALLEL_SUGGEST_BACKEND",
+    "STATEFRAME_PARALLEL_SUGGEST_MIN_UNITS",
+    "STATEFRAME_PARALLEL_SUGGEST_INPUT_SHARE_PCT",
+    "STATEFRAME_PARALLEL_SUGGEST_EDIT_FRACTION_PCT",
+    "STATEFRAME_PARALLEL_SUGGEST_TOKENS_PER_EDIT_LINE",
+})
+PARALLEL_LIMIT_SHELL_SWITCHES = frozenset(name for name in OPT_IN_SWITCHES
+                                          if name.startswith("STATEFRAME_PARALLEL_")
+                                          and name not in {
+                                              "STATEFRAME_PARALLEL_SLOTS",
+                                              "STATEFRAME_PARALLEL_BYTE_TOKEN_CALIBRATION",
+                                              "STATEFRAME_PARALLEL_BYTE_TOKEN_HEADROOM_PCT",
+                                              "STATEFRAME_PARALLEL_USAGE_FEEDBACK",
+                                              "STATEFRAME_PARALLEL_FANOUT_CONTINUATION",
+                                              "STATEFRAME_PARALLEL_SUGGEST",
+                                              "STATEFRAME_PARALLEL_SUGGEST_BACKEND",
+                                              "STATEFRAME_PARALLEL_SUGGEST_MIN_UNITS",
+                                              "STATEFRAME_PARALLEL_SUGGEST_INPUT_SHARE_PCT",
+                                              "STATEFRAME_PARALLEL_SUGGEST_EDIT_FRACTION_PCT",
+                                              "STATEFRAME_PARALLEL_SUGGEST_TOKENS_PER_EDIT_LINE",
+                                              "STATEFRAME_PARALLEL_DROP_TOOL_AFTER_TERMINAL",
+                                              "STATEFRAME_PARALLEL_FORCE_MANIFEST",
+                                          })
+INTERNAL_BENCHMARK_SWITCHES = {
+    "STATEFRAME_PARALLEL_FORCE_MANIFEST": {
+        "classification": "internal/benchmark-only",
+        "stability": "may change",
+    },
+}
 # Accepted aliases -> the engine's own value (EVICTFIX "off" is sent as "legacy").
 OPT_IN_ALIASES = {"STATEFRAME_EVICTFIX": {"off": "legacy"}}
 # These settings are read by the host before the engine child starts; they must not enter the engine spec.
-HOST_ONLY_SWITCHES = frozenset({"STATEFRAME_ENV_SEED", "STATEFRAME_KEEP_RUN_ENV"})
+# Parallel limits are serialized into the typed parallel_limits record and removed from the child environment.
+HOST_ONLY_SWITCHES = (frozenset({"STATEFRAME_ENV_SEED", "STATEFRAME_KEEP_RUN_ENV",
+                                 "STATEFRAME_PARALLEL_SLOTS"})
+                      | PARALLEL_LIMIT_SHELL_SWITCHES)
 # Legacy unless the user opts in, on every engine that reads the switch (read eviction fix: slower on long runs
 # in this release, and no measured edit gain). Applied by the runner so the default never depends on the engine's own.
 OPT_IN_RUNNER_DEFAULTS = {"STATEFRAME_EVICTFIX": "legacy"}
 
 
-def resolve_opt_in_switches(engine_dir: Path = ENGINE_DIR) -> dict[str, str]:
+def resolve_opt_in_switches(engine_dir: Path = ENGINE_DIR, *,
+                            parallel_enabled: bool = True) -> dict[str, str]:
     """The shell switches set by the user, validated and forwarded in the engine spec."""
     chosen = {}
     for name in OPT_IN_SWITCHES:
+        if not parallel_enabled and name.startswith("STATEFRAME_PARALLEL_"):
+            continue
         raw = os.environ.get(name, "").strip()
         if not raw:
             default = OPT_IN_RUNNER_DEFAULTS.get(name)
@@ -722,6 +788,13 @@ def resolve_opt_in_switches(engine_dir: Path = ENGINE_DIR) -> dict[str, str]:
                 raise RunError(f"{name} is set, but this engine does not support it; unset it to run")
             chosen[name] = str(value)
             continue
+        if name == "STATEFRAME_PARALLEL_FORCE_MANIFEST":
+            if len(raw) > 4096:
+                raise RunError(f"{name} must be a path no longer than 4096 characters")
+            if name not in engine_switches(engine_dir):
+                raise RunError(f"{name} is set, but this engine does not support it; unset it to run")
+            chosen[name] = str(safe_expanduser(raw).absolute())
+            continue
         if name in {"STATEFRAME_QUEUE_WAIT_MAX_S", "STATEFRAME_SEND_STALL_S",
                     "STATEFRAME_TRANSPORT_BACKOFF_S"}:
             try:
@@ -741,12 +814,46 @@ def resolve_opt_in_switches(engine_dir: Path = ENGINE_DIR) -> dict[str, str]:
             chosen[name] = raw
             continue
         value = raw.lower()
+        if name == "STATEFRAME_PARALLEL_BYTE_TOKEN_HEADROOM_PCT":
+            if (not value.isascii() or not value.isdecimal()
+                    or not 0 <= int(value) <= 50):
+                raise RunError(f"{name}={raw!r} must be a whole percent from 0 through 50")
+            if name not in engine_switches(engine_dir):
+                raise RunError(f"{name} is set, but this engine does not support it; unset it to run")
+            chosen[name] = str(int(value))
+            continue
+        if name in {"STATEFRAME_PARALLEL_SUGGEST_MIN_UNITS",
+                    "STATEFRAME_PARALLEL_SUGGEST_INPUT_SHARE_PCT",
+                    "STATEFRAME_PARALLEL_SUGGEST_EDIT_FRACTION_PCT",
+                    "STATEFRAME_PARALLEL_SUGGEST_TOKENS_PER_EDIT_LINE"}:
+            minimum = 2 if name.endswith("MIN_UNITS") else 1
+            maximum = 100 if name.endswith("_PCT") else 10000
+            if (not value.isascii() or not value.isdecimal()
+                    or not minimum <= int(value) <= maximum):
+                raise RunError(f"{name}={raw!r} must be an integer from {minimum} to {maximum}")
+            if name not in engine_switches(engine_dir):
+                raise RunError(f"{name} is set, but this engine does not support it; unset it to run")
+            chosen[name] = str(int(value))
+            continue
         if name == "STATEFRAME_KEEP_RUN_ENV" and value in {"1", "true", "yes"}:
             value = "on"
         elif name == "STATEFRAME_KEEP_RUN_ENV" and value in {"0", "false", "no"}:
             value = "off"
         value = OPT_IN_ALIASES.get(name, {}).get(value, value)
         allowed = OPT_IN_SWITCHES[name]
+        if name in PARALLEL_LIMIT_SHELL_SWITCHES:
+            if not value.isascii() or not value.isdecimal() or int(value) <= 0:
+                raise RunError(f"{name}={raw!r} must be a positive integer")
+            chosen[name] = value
+            continue
+        if name == "STATEFRAME_PARALLEL_SLOTS":
+            from .parallel_resources import SlotPoolError, parse_slot_pool
+            try:
+                parse_slot_pool(raw, source=name)
+            except SlotPoolError as error:
+                raise RunError(str(error)) from error
+            chosen[name] = raw
+            continue
         if value not in allowed:
             raise RunError(f"{name}={raw!r} must be {' or '.join(allowed)}; unset it to keep the default")
         if name in HOST_ONLY_SWITCHES:
@@ -814,6 +921,30 @@ def mutation_builtin_names(spec: dict) -> frozenset[str]:
             and options.get("level") in {"prebuilt", "authored"} else frozenset())
 
 
+PARALLEL_TIMING_SETTINGS = (
+    "STATEFRAME_PARALLEL_INSPECT_SECONDS", "STATEFRAME_PARALLEL_CLEANUP_SECONDS",
+    "STATEFRAME_PARALLEL_WATCHDOG_GRACE_SECONDS", "STATEFRAME_PARALLEL_HOST_RESPONSE_SECONDS",
+    "STATEFRAME_PARALLEL_PREPARE_SECONDS",
+)
+
+
+def resolve_parallel_timing_env(*, parallel_enabled: bool) -> dict[str, str]:
+    """Record explicit timing allowances only for an enabled subframe run."""
+    chosen: dict[str, str] = {}
+    for name in PARALLEL_TIMING_SETTINGS if parallel_enabled else ():
+        raw = os.environ.get(name)
+        if raw is None:
+            continue
+        try:
+            seconds = float(raw)
+        except ValueError:
+            seconds = 0.0
+        if not math.isfinite(seconds) or seconds <= 0:
+            raise RunError(f"{name} must be a positive finite number of seconds")
+        chosen[name] = raw.strip()
+    return chosen
+
+
 def resolve_exec_rpc_env() -> dict[str, str]:
     """Pass an explicitly configured supervisor timeout to the isolated engine child."""
     name = "STATEFRAME_EXEC_RPC_SECONDS"
@@ -836,6 +967,7 @@ SHELL_SETTINGS = frozenset({
     "STATEFRAME_ENDPOINT", "STATEFRAME_MODEL", "STATEFRAME_ALLOW_REMOTE_ENDPOINT", "STATEFRAME_KEEP_CHECKPOINTS",
     "STATEFRAME_CONTEXT_TOKENS", "STATEFRAME_PROMPT_BUDGET", "STATEFRAME_ROUTES",
     "STATEFRAME_EXEC_RPC_SECONDS", "STATEFRAME_STARTUP_PROBE_SECONDS",
+    *PARALLEL_TIMING_SETTINGS,
     *CHECKPOINT_ENV, *OPT_IN_SWITCHES,
 })
 
@@ -1208,8 +1340,45 @@ def prepare(options: RunOptions, printer=print) -> tuple[Path, workcopy.WorkCopy
         raise RunError(str(error)) from error
     _validate_timeout(options.timeout_s)
     _remaining(options)
+    mode = options.parallel_mode
+    if (not isinstance(mode, str) or mode not in {"off", "auto"}
+            and (not mode.isascii() or not mode.isdecimal() or int(mode) <= 0)):
+        raise RunError("--parallel must be off, auto, or a positive integer")
     environment = profiles.load(options.profile)
     _apply_operator_reasoning_effort(environment)
+    opt_in = resolve_opt_in_switches(parallel_enabled=mode != "off")
+    parallel_slots = None
+    parallel_limits = None
+    unit_cap_explicit = False
+    if mode != "off":
+        environment.update({name: value for name, value in opt_in.items()
+                            if name.startswith("STATEFRAME_PARALLEL_")})
+        profile_slots = environment.pop("STATEFRAME_PARALLEL_SLOTS", None)
+        slot_value = options.parallel_slots if options.parallel_slots is not None else profile_slots
+        slot_source = ("--parallel-slots" if options.parallel_slots is not None else
+                       "STATEFRAME_PARALLEL_SLOTS (override with --parallel-slots)")
+        from .engine.kernel_parallel_records import (PARALLEL_LIMIT_OPTIONS, ParallelConfigError,
+                                                      ParallelLimits)
+        if slot_value is not None:
+            from .parallel_resources import SlotPoolError, parse_slot_pool
+            try:
+                parallel_slots = parse_slot_pool(slot_value, source=slot_source)
+            except SlotPoolError as error:
+                raise RunError(str(error)) from error
+        try:
+            limit_environment = {name: value for name, value in environment.items()
+                                 if name not in PARALLEL_CONTROL_SWITCHES}
+            parallel_limits = ParallelLimits.from_settings(limit_environment, options.parallel_cli,
+                                                           prompt_budget=options._prompt_budget)
+        except ParallelConfigError as error:
+            raise RunError(str(error)) from error
+        unit_cap_explicit = (options.parallel_cli.get("unit_max_requests") is not None
+                             or "STATEFRAME_PARALLEL_SUBFRAME_MAX_REQUESTS" in environment)
+    if parallel_slots is not None and mode not in {"off", "auto"} and int(mode) > len(parallel_slots):
+        raise RunError(f"--parallel {mode} exceeds the --parallel-slots pool size {len(parallel_slots)}")
+    if mode not in {"off", "auto"} and int(mode) > parallel_limits.max_concurrency:
+        raise RunError(f"--parallel {mode} exceeds --parallel-max={parallel_limits.max_concurrency}; "
+                       "raise --parallel-max or STATEFRAME_PARALLEL_MAX_CONCURRENCY")
     if options._routes is not None:
         routed_keys = {settings.get("api_key_env") for settings in options._routes.roles.values()}
         stored_names = set(environment) | set(options.extra_env) | set(options.test_env) | set(options._context_env)
@@ -1402,7 +1571,7 @@ def prepare(options: RunOptions, printer=print) -> tuple[Path, workcopy.WorkCopy
     _write_json_atomic(skills_file, skills_record, mode=0o600)
     environment.update(options._context_env)
     environment.update(resolve_exec_rpc_env())
-    opt_in = resolve_opt_in_switches()
+    environment.update(resolve_parallel_timing_env(parallel_enabled=mode != "off"))
     environment.update(opt_in)
     environment.update(options.extra_env)
     if mutation_options is not None:
@@ -1424,6 +1593,15 @@ def prepare(options: RunOptions, printer=print) -> tuple[Path, workcopy.WorkCopy
     else:
         # The child uses the same resolved home as the host for identity and snapshot boundaries.
         environment["STATEFRAME_HOME"] = str(stateframe_home)
+    # This host-only pool is serialized separately and is not an engine STATEFRAME switch.
+    environment.pop("STATEFRAME_PARALLEL_SLOTS", None)
+    if mode == "off":
+        for name in tuple(environment):
+            if name.startswith("STATEFRAME_PARALLEL_"):
+                environment.pop(name)
+    else:
+        for option in PARALLEL_LIMIT_OPTIONS.values():
+            environment.pop(option["switch"], None)
     # Host authority wins over every caller-supplied environment overlay.
     environment["STATEFRAME_TOOL_SETTINGS_FILE"] = str(settings_file)
     environment["STATEFRAME_SKILL_SETTINGS_FILE"] = str(skills_file)
@@ -1457,6 +1635,8 @@ def prepare(options: RunOptions, printer=print) -> tuple[Path, workcopy.WorkCopy
     environment_sources["STATEFRAME_SKILL_SETTINGS_FILE"] = "runner:host-skill-settings"
     environment_sources[RUNNER_HOME_IDENTITY_ENV] = "runner:startup-home-identity"
     for name in opt_in:
+        if name not in environment:
+            continue
         environment_sources[name] = ("ambient:" + name if os.environ.get(name, "").strip()
                                      else "runner:default-" + OPT_IN_RUNNER_DEFAULTS[name])
     if options._cache_slot_degraded:
@@ -1471,6 +1651,8 @@ def prepare(options: RunOptions, printer=print) -> tuple[Path, workcopy.WorkCopy
         "engine_dir": str(ENGINE_DIR),
         "engine_source": profiles.engine_source_summary(),
         "profile": options.profile,
+        **({"parallel_mode": options.parallel_mode, "parallel_limits": parallel_limits.to_json()}
+           if options.parallel_mode != "off" else {}),
         "capabilities": options._capabilities,
         **({"provider_capabilities": provider_records} if provider_records else {}),
         "chat_url": options.endpoint.chat_url,
@@ -1510,6 +1692,10 @@ def prepare(options: RunOptions, printer=print) -> tuple[Path, workcopy.WorkCopy
         "in_place": options.in_place,
         **({"mutations": mutation_options} if mutation_options is not None else {}),
     }
+    if options.parallel_mode != "off":
+        spec["parallel_subframe_max_requests_explicit"] = unit_cap_explicit
+    if options.parallel_mode != "off" and parallel_slots is not None:
+        spec["parallel_slots"] = list(parallel_slots)
     if powerup_selection.active or powerup_selection.skipped:
         spec["powerups"] = powerup_selection.record()
     if options._routes is not None:
@@ -1585,6 +1771,44 @@ def _child_env(options: RunOptions) -> dict[str, str]:
     env[RUNNER_HOME_IDENTITY_ENV] = json.dumps(
         options._stateframe_home_identity, sort_keys=True, separators=(",", ":"))
     return env
+
+
+def auto_parallel_concurrency(spec: dict[str, object], max_concurrency: int) -> int:
+    """Resolve auto against distinct configured model endpoints at the launch boundary."""
+    if type(max_concurrency) is not int or max_concurrency < 1:
+        raise ValueError("max_concurrency must be a positive integer")
+    from .parallel_resources import SlotPoolError, idle_slots, parse_slot_pool
+
+    try:
+        pool = parse_slot_pool(spec.get("parallel_slots"), source="--parallel-slots in run spec")
+    except SlotPoolError as error:
+        raise RunError(str(error)) from error
+
+    main = spec.get("chat_url")
+    if not isinstance(main, str) or not main:
+        raise RunError("subframe auto mode needs a configured model endpoint")
+    endpoints = [main.removesuffix(CHAT_SUFFIX)]
+    routes = spec.get("routes")
+    if isinstance(routes, dict):
+        configured = routes.get("roles") if isinstance(routes.get("roles"), dict) else routes
+        for route in configured.values():
+            if isinstance(route, dict):
+                candidate = route.get("endpoint") or route.get("chat_url")
+                if isinstance(candidate, str) and candidate.startswith(("http://", "https://")):
+                    endpoints.append(candidate.removesuffix(CHAT_SUFFIX))
+    total = 0
+    for endpoint in dict.fromkeys(endpoints):
+        idle = idle_slots(endpoint)
+        if idle is None and pool is None:
+            return max_concurrency
+        if pool is None:
+            total += len(idle)
+        elif idle is None:
+            total += len(pool)
+        else:
+            idle_set = set(idle)
+            total += sum(slot in idle_set for slot in pool)
+    return min(total, max_concurrency)
 
 
 def _slot_id(entry: dict) -> int | None:
@@ -1955,8 +2179,12 @@ def _provider_environment(options: RunOptions) -> dict[str, str]:
     """Resolve the same operator/profile environment used by the engine."""
     result = dict(os.environ)
     result.update(profiles.load(options.profile))
-    result.update(resolve_opt_in_switches())
+    result.update(resolve_opt_in_switches(
+        parallel_enabled=options.parallel_mode != "off"))
     result.update(options.extra_env)
+    if options.parallel_mode == "off":
+        result = {name: value for name, value in result.items()
+                  if not name.startswith("STATEFRAME_PARALLEL_")}
     return result
 
 
@@ -2083,6 +2311,8 @@ def _render_event(event: dict) -> str | None:
             if engine_text in detail:
                 return f"stopped: {plain}"
         return f"engine error: {event.get('error')}: {detail}"
+    if kind == "recovery_required":
+        return f"recovery required: {event.get('detail')}"
     if kind == "engine_end":
         return f"engine finished: {event.get('result')} in {event.get('seconds')}s"
     return None
@@ -2264,6 +2494,7 @@ def drive(run: Path, options: RunOptions, printer=print) -> int:
         # A silent, hung engine must still be stopped, so the limit is a timer, not a line check.
         watchdog = (threading.Timer(max(0, kill_at - time.monotonic()), on_timeout)
                     if math.isfinite(kill_at) else None)  # no limit set: no watchdog kill
+        parallel_supervisor = None
         try:
             if watchdog is not None:
                 watchdog.daemon = True
@@ -2279,7 +2510,17 @@ def drive(run: Path, options: RunOptions, printer=print) -> int:
             while True:
                 from .shell_host import answer_pending
                 answer_pending(run, options.shell_confirm)
+                if options.parallel_mode != "off":
+                    parallel_root = run / "parallel"
+                    if parallel_supervisor is None and parallel_root.is_dir():
+                        from .parallel_host import ParallelSupervisor
+                        parallel_supervisor = ParallelSupervisor(run)
+                    if parallel_supervisor is not None:
+                        parallel_supervisor.tick()
                 if drain_until is None and (child_exited_unreaped(process) or timed_out.is_set()):
+                    if parallel_supervisor is not None:
+                        parallel_supervisor.cancel_all("parent engine child exited")
+                        parallel_supervisor.reap()
                     drain_until = time.monotonic() + OUTPUT_DRAIN_SECONDS
                 if drain_until is not None and timed_out.is_set() and time.monotonic() >= drain_until:
                     break
@@ -2325,6 +2566,9 @@ def drive(run: Path, options: RunOptions, printer=print) -> int:
             if watchdog is not None:
                 watchdog.cancel()
             _stop_group(process)
+            if parallel_supervisor is not None:
+                parallel_supervisor.cancel_all("parent engine child exited")
+                parallel_supervisor.reap()
             process.stdout.close()
 
 
@@ -2560,6 +2804,32 @@ def final_candidate(run: Path) -> dict[str, bytes | None] | None:
             **{name: None for name in deletes}}
 
 
+def final_candidate_with_file_digests(
+        run: Path) -> tuple[dict[str, bytes | None] | None, dict[str, str] | None]:
+    """Export candidate bytes with only the authenticated digest map from its DoneSeal."""
+    files = final_candidate(run)
+    if files is None:
+        return None, None
+    from .engine.kernel_done_is_submit_authority import (
+        DoneCaptureError, authenticated_file_digests,
+    )
+
+    try:
+        sealed_digests = authenticated_file_digests(outcomes.terminal_receipt(run))
+    except DoneCaptureError as error:
+        raise RunError(f"sealed candidate file digests are invalid: {error}") from error
+    if sealed_digests is None:
+        return files, None
+    written = {path: data for path, data in files.items() if data is not None}
+    if set(sealed_digests) != set(written):
+        raise RunError("sealed candidate file digest paths differ from its writes")
+    for path, data in written.items():
+        digest = hashlib.sha256(data).hexdigest()
+        if sealed_digests[path] != digest:
+            raise RunError(f"sealed candidate file digest differs from its bytes: {path}")
+    return files, sealed_digests
+
+
 def _read_send_metrics(run: Path, sends: list[dict]) -> list[dict[str, int | None]]:
     """Normalize each captured response, with a compatibility path for older runs."""
     wire_dir = run / "wire"
@@ -2604,6 +2874,143 @@ def _cache_share_line(summary: dict[str, object]) -> str:
     return f"cached share: {share:.1%} ({cached}/{total}, normalized)" + suffix
 
 
+def _parallel_summary(run: Path) -> dict[str, object]:
+    """Project strict parallel results into compact run-level usage and timing totals."""
+    root = run / "parallel"
+    subframes: list[dict[str, object]] = []
+    calls: list[dict[str, object]] = []
+    errors: list[dict[str, str]] = []
+    degraded: list[dict[str, object]] = []
+    totals = {"requests": 0, "physical_sends": 0, "prompt_tokens": 0, "completion_tokens": 0,
+              "initial_frame_tokens": 0, "subframes": 0, "subframes_with_initial_frame_tokens": 0,
+              "subframes_with_wall": 0}
+    parallel_walls: list[float] = []
+    unit_walls: list[float] = []
+    if root.is_symlink():
+        return {"calls": calls, "subframes": subframes, "totals": totals, "degraded": degraded, "measured": None,
+                "errors": [{"path": str(root), "error": "parallel artifact root is a symlink"}]}
+    if not root.exists():
+        return {"calls": calls, "subframes": subframes, "totals": totals, "degraded": degraded, "measured": None,
+                "errors": errors}
+    if not root.is_dir():
+        return {"calls": calls, "subframes": subframes, "totals": totals, "degraded": degraded, "measured": None,
+                "errors": [{"path": str(root), "error": "parallel artifact root is not a directory"}]}
+
+    from .engine.kernel_parallel_records import ParallelRecordError, ParallelResult
+
+    def strict_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
+        value: dict[str, object] = {}
+        for key, item in pairs:
+            if key in value:
+                raise ValueError(f"duplicate JSON key {key!r}")
+            value[key] = item
+        return value
+
+    try:
+        call_roots = sorted(root.iterdir(), key=lambda item: item.name)
+    except OSError as error:
+        return {"calls": calls, "subframes": subframes, "totals": totals, "degraded": degraded, "measured": None,
+                "errors": [{"path": str(root), "error": f"cannot list parallel artifacts: {error}"}]}
+    for call_root in call_roots:
+        if call_root.is_symlink():
+            errors.append({"path": str(call_root), "error": "parallel call artifact is a symlink"})
+            continue
+        if not call_root.is_dir():
+            continue
+        result_path = call_root / "result.json"
+        if result_path.is_symlink():
+            errors.append({"path": str(result_path), "error": "result.json is a symlink"})
+            continue
+        if not result_path.exists():
+            continue
+        if not result_path.is_file():
+            errors.append({"path": str(result_path), "error": "result.json is not a regular file"})
+            continue
+        try:
+            raw = json.loads(result_path.read_text(encoding="utf-8"), object_pairs_hook=strict_object)
+            result = ParallelResult.from_json(raw)
+        except (OSError, UnicodeError, ValueError, ParallelRecordError) as error:
+            errors.append({"path": str(result_path), "error": f"{type(error).__name__}: {error}"})
+            continue
+        refusal = result.admission.refusal
+        if refusal is not None and refusal.reason in {
+                "UNIT_CONTEXT_TOO_LARGE", "RESOURCES_UNAVAILABLE"}:
+            display_reason = ("SUBFRAME_CONTEXT_TOO_LARGE" if refusal.reason ==
+                              "UNIT_CONTEXT_TOO_LARGE" else refusal.reason)
+            degraded.append({"call_id": result.call_id, "reason": display_reason,
+                             "detail": refusal.detail, "launched_subframes": 0})
+        elif result.outcomes and all(
+                outcome.status == "REFUSED" and outcome.reason in {
+                    "SUBFRAME_CONTEXT_TOO_LARGE", "RESOURCES_UNAVAILABLE"}
+                for outcome in result.outcomes):
+            degraded.append({
+                "call_id": result.call_id,
+                "reason": ",".join(sorted({str(item.reason) for item in result.outcomes})),
+                "detail": "; ".join(f"{item.unit_id}: {item.detail or item.reason}"
+                                    for item in result.outcomes),
+                "launched_subframes": len(result.outcomes),
+            })
+        call_wall = result.measured.parallel_wall_seconds
+        if call_wall < 0:
+            errors.append({"path": str(result_path), "error": "parallel result wall time is negative"})
+            call_wall = None
+        call_subframes: list[dict[str, object]] = []
+        for outcome in result.outcomes:
+            usage = outcome.usage.to_json()
+            wall = outcome.wall_seconds
+            if wall < 0:
+                errors.append({"path": str(result_path), "error":
+                               f"subframe {outcome.unit_id} wall time is negative"})
+                wall = None
+            subframe = {"call_id": result.call_id, "subframe_id": outcome.unit_id, "status": outcome.status,
+                    "reason": outcome.reason, "usage": usage,
+                    "requests": usage["requests"], "physical_sends": usage["physical_sends"],
+                    "prompt_tokens": usage["prompt_tokens"], "completion_tokens": usage["completion_tokens"],
+                    "initial_frame_tokens": usage["initial_frame_tokens"], "wall_seconds": wall}
+            call_subframes.append(subframe)
+            subframes.append(subframe)
+            totals["subframes"] += 1
+            for key in ("requests", "physical_sends", "prompt_tokens", "completion_tokens"):
+                totals[key] += usage[key]
+            if usage["initial_frame_tokens"] is not None:
+                totals["initial_frame_tokens"] += usage["initial_frame_tokens"]
+                totals["subframes_with_initial_frame_tokens"] += 1
+            if wall is not None:
+                totals["subframes_with_wall"] += 1
+                unit_walls.append(wall)
+        call_measured = result.measured.to_json()
+        call_measured["peak_active_subframes"] = call_measured.pop("peak_active_workers")
+        calls.append({"call_id": result.call_id, "final_check": result.final_check,
+                      "integration": result.integration, "subframes": call_subframes,
+                      "measured": call_measured})
+        if call_wall is not None:
+            parallel_walls.append(call_wall)
+    parallel_wall = round(sum(parallel_walls), 3)
+    serial_wall = round(sum(unit_walls), 3)
+    tick_latency = None
+    metrics_path = root / "host-metrics.json"
+    if metrics_path.is_file() and not metrics_path.is_symlink():
+        try:
+            host_metrics = json.loads(metrics_path.read_text(encoding="utf-8"),
+                                      object_pairs_hook=strict_object)
+            if (not isinstance(host_metrics, dict)
+                    or host_metrics.get("schema") != "stateframe-parallel-host-metrics/1"
+                    or type(host_metrics.get("max_tick_latency_seconds")) not in (int, float)
+                    or host_metrics["max_tick_latency_seconds"] < 0):
+                raise ValueError("host tick metrics are invalid")
+            tick_latency = host_metrics["max_tick_latency_seconds"]
+        except (OSError, UnicodeError, ValueError) as error:
+            errors.append({"path": str(metrics_path), "error": f"host tick metrics: {error}"})
+    return {"calls": calls, "subframes": subframes, "totals": totals, "degraded": degraded,
+            "measured": {"parallel_wall_seconds": parallel_wall,
+                         "estimated_serial_seconds": serial_wall,
+                         "speedup": round(serial_wall / parallel_wall, 3) if parallel_wall else None,
+                         "peak_active_subframes": max((item["measured"]["peak_active_subframes"]
+                                                       for item in calls), default=0),
+                         "max_tick_latency_seconds": tick_latency,
+                         "queue_wait_seconds": round(sum(item["measured"]["queue_wait_seconds"]
+                                                         for item in calls), 3)},
+            "errors": errors}
 def _effective_route_prices(route_spec: dict, role: str, route: dict) -> dict:
     prices = dict(route_spec["roles"].get(role, {}))
     if route.get("scope") == "unit":
@@ -2783,6 +3190,8 @@ def summarize(run: Path, started: float) -> dict[str, object]:
         "prompt_cache_slot": slot_info,
         "wall_seconds": round(time.monotonic() - started, 1),
     }
+    if (run / "parallel").exists():
+        summary["parallel"] = _parallel_summary(run)
     summary["cached_share_display"] = _cache_share_line(summary)
     if isinstance(spec.get("routes"), dict) and isinstance(spec["routes"].get("roles"), dict):
         summary["route_costs"] = _route_costs(run, spec["routes"], sends, metrics)
@@ -3154,6 +3563,7 @@ def resume_run(run_dir: Path, *, endpoint: Endpoint | None = None, max_turns: in
         protected_test_globs=list(spec.get("protected_test_globs") or ()),
         protect_tests=spec.get("protect_tests", "all"),
         in_place=bool(spec.get("in_place")), profile=str(spec.get("profile") or profiles.DEFAULT),
+        parallel_mode=str(spec.get("parallel_mode", "off")),
         python=str((spec.get("capabilities") or {}).get("python") or sys.executable),
         timeout_s=timeout_s, quiet=quiet, test_env={k: environment[k] for k in keys if k in environment},
          pytest_plugins=environment.get("STATEFRAME_TASK_PYTEST_PLUGINS"),
@@ -3214,9 +3624,24 @@ def resume_run(run_dir: Path, *, endpoint: Endpoint | None = None, max_turns: in
             route_changes = _compare_resume_routes(spec.get("routes"), options._routes, options.route_cli,
                                                    old_default=old_default, new_default=new_default)
             lock = resume_module.hold_run_lock(run_dir)  # noqa: F841 - held until this resume returns
+            recovery_value = state.get("parallel_recovery")
+            if recovery_value is not None:
+                if recovery_value.get("schema") == "stateframe-parallel-input-refusal/1":
+                    spec["parallel_recovery"] = recovery_value
+                else:
+                    from .engine.kernel_parallel_records import RecoveryDescriptor
+                    from .parallel_host import ParallelHostError, fence_and_reap
+                    try:
+                        recovery = RecoveryDescriptor.from_json(recovery_value)
+                        fence_and_reap(run_dir, recovery)
+                    except (ParallelHostError, ValueError, OSError) as error:
+                        raise resume_module.ResumeRefused(
+                            f"could not fence prior subframes: {error}") from error
+                    spec["parallel_recovery"] = recovery.to_json()
             if "tool_settings" in spec:
                 _write_json_atomic(run_dir / "tool-settings.json", settings.as_dict(), mode=0o600)
                 spec["tool_settings"] = settings.as_dict()
+            if "tool_settings" in spec or recovery_value is not None:
                 _write_run_spec_atomic(run_dir, spec)
             # A checkpoint holds the engine's loop limit, endpoint and model name as they were; a resume
             # that changes any of them rebuilds the run by replay instead.
@@ -3469,6 +3894,9 @@ def _run(options: RunOptions, started: float, printer=print) -> dict[str, object
         print(warning, file=sys.stderr)
     options._test_python = _select_test_python(options, printer)
     run_dir, work, spec = prepare(options, printer=printer)
+    if options.parallel_mode != "off":
+        printer(f"subframes: {options.parallel_mode} (maximum concurrent "
+                f"{spec['parallel_limits']['max_concurrency']})")
     from .shell_host import provision
     provision(options, run_dir, spec)
     printer(f"run directory: {run_dir}")
@@ -3842,7 +4270,8 @@ def _execute(options: RunOptions, started: float, printer, run_dir: Path, work: 
     if removed["env"] is not None:
         printer(f"Removed run env ({removed['env'] / 1e6:,.0f} MB); run finished. "
                 "Use --keep-run-env to keep it.")
-    if (summary["runtime_outcome"] in ("cancelled", "engine_error", "missing_result", "budget_stop")
+    if (summary["runtime_outcome"] in ("cancelled", "engine_error", "missing_result", "budget_stop",
+                                      "recovery_required")
             and not summary.get("engine_error_reason")):  # a seal failure would only repeat on resume
         limit = " --max-turns <more>" if summary["runtime_outcome"] == "budget_stop" else ""
         printer(f"stopped before finishing; continue it with: stateframe resume {run_dir}{limit}")

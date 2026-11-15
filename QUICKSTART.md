@@ -40,6 +40,22 @@ stateframe run --repo examples/discount_bug \
 
 `authored` also lets a run submit helper units for sandboxed validation. Network and write access need separate `--mutation-network` and `--mutation-write` grants. See the [mutation units guide](docs/guide/mutations.md) for the available controls and limits.
 
+## Try subframes (optional)
+
+The [pricing example](examples/parallel_fixes/README.md) has separate files and focused checks for several repairs:
+
+```bash
+stateframe run --repo examples/parallel_fixes \
+  --task "Repair the pricing calculations and include tax in checkout." \
+  --parallel 2
+```
+
+Subframes default to off. `--parallel 2` offers the `parallel` tool and permits up to two concurrent subframes;
+the model decides whether to use it, so zero subframes is a valid result. In the run directory's `summary.json`,
+the `parallel` section reports `totals.subframes` and `totals.requests` when present. A positive request count
+confirms subframe model requests were made. See the [subframes guide](docs/guide/subframes.md) for limits and records.
+Subframes do not promise a general speedup.
+
 ## llama.cpp server on another machine: co-locate the tokenizer
 
 The engine counts tokens many times per turn, by default on the model server. If that server is remote,

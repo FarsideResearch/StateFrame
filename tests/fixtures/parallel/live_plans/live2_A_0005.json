@@ -1,0 +1,174 @@
+{
+  "subframes": [
+    {
+      "id": "fix_discount",
+      "outcome": "apply_discount returns price minus discount amount: 80 - 20 = 60",
+      "owns": [
+        "pricing/discount.py"
+      ],
+      "creates": [],
+      "exports": [
+        {
+          "id": "discount_export",
+          "path": "pricing/discount.py",
+          "symbol": "apply_discount",
+          "signature": {
+            "kind": "function",
+            "params": [
+              {
+                "name": "price",
+                "kind": "pos",
+                "has_default": false,
+                "annotation": null
+              },
+              {
+                "name": "percent",
+                "kind": "pos",
+                "has_default": false,
+                "annotation": null
+              }
+            ],
+            "returns": "float",
+            "decorators": []
+          }
+        }
+      ],
+      "consumes": [],
+      "reads": [
+        "tests/test_discount.py"
+      ],
+      "check": {
+        "tests": [
+          "tests/test_discount.py"
+        ]
+      }
+    },
+    {
+      "id": "fix_quantity",
+      "outcome": "line_total multiplies unit_price by quantity: 3.25 * 4 = 13.0",
+      "owns": [
+        "pricing/quantity.py"
+      ],
+      "creates": [],
+      "exports": [
+        {
+          "id": "quantity_export",
+          "path": "pricing/quantity.py",
+          "symbol": "line_total",
+          "signature": {
+            "kind": "function",
+            "params": [
+              {
+                "name": "unit_price",
+                "kind": "pos",
+                "has_default": false,
+                "annotation": null
+              },
+              {
+                "name": "quantity",
+                "kind": "pos",
+                "has_default": false,
+                "annotation": null
+              }
+            ],
+            "returns": "float",
+            "decorators": []
+          }
+        }
+      ],
+      "consumes": [],
+      "reads": [
+        "tests/test_quantity.py"
+      ],
+      "check": {
+        "tests": [
+          "tests/test_quantity.py"
+        ]
+      }
+    },
+    {
+      "id": "fix_rounding",
+      "outcome": "round_cents keeps 2 decimal places: 10.129 -> 10.13",
+      "owns": [
+        "pricing/rounding.py"
+      ],
+      "creates": [],
+      "exports": [
+        {
+          "id": "rounding_export",
+          "path": "pricing/rounding.py",
+          "symbol": "round_cents",
+          "signature": {
+            "kind": "function",
+            "params": [
+              {
+                "name": "amount",
+                "kind": "pos",
+                "has_default": false,
+                "annotation": null
+              }
+            ],
+            "returns": "float",
+            "decorators": []
+          }
+        }
+      ],
+      "consumes": [],
+      "reads": [
+        "tests/test_rounding.py"
+      ],
+      "check": {
+        "tests": [
+          "tests/test_rounding.py"
+        ]
+      }
+    },
+    {
+      "id": "fix_checkout",
+      "outcome": "total_with_tax adds tax from calculate_tax: 100 + 10 = 110",
+      "owns": [
+        "pricing/checkout.py"
+      ],
+      "creates": [],
+      "exports": [
+        {
+          "id": "checkout_export",
+          "path": "pricing/checkout.py",
+          "symbol": "total_with_tax",
+          "signature": {
+            "kind": "function",
+            "params": [
+              {
+                "name": "subtotal",
+                "kind": "pos",
+                "has_default": false,
+                "annotation": null
+              },
+              {
+                "name": "rate",
+                "kind": "pos",
+                "has_default": false,
+                "annotation": null
+              }
+            ],
+            "returns": "float",
+            "decorators": []
+          }
+        }
+      ],
+      "consumes": [
+        {
+          "export_id": "tax_export"
+        }
+      ],
+      "reads": [
+        "tests/test_checkout.py"
+      ],
+      "check": {
+        "tests": [
+          "tests/test_checkout.py"
+        ]
+      }
+    }
+  ]
+}

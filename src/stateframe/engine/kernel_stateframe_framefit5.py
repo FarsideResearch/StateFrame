@@ -5,6 +5,7 @@ import copy
 import hashlib
 import json
 import os
+import sys
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path, PurePosixPath
 
@@ -66,9 +67,316 @@ def _json_value(value: object) -> object:
     return json.loads(_json_text(value))
 
 
+def _active_unit_spec() -> object | None:
+    module = sys.modules.get("kernel_unit_policy")
+    active = getattr(module, "active", None) if module is not None else None
+    policy = active() if callable(active) else None
+    return getattr(policy, "spec", None) if policy is not None else None
+
+
+def _unit_rows(value: object, paths: set[str]) -> list[dict[str, object]]:
+    if not isinstance(value, list):
+        return []
+    rows = []
+    for row in value:
+        if not isinstance(row, Mapping):
+            continue
+        path = row.get("path")
+        if isinstance(path, str) and path in paths:
+            rows.append(copy.deepcopy(dict(row)))
+    return rows
+
+
+def site_ref_or_inline(
+        site: Mapping[str, object], delivered_windows: Sequence[Mapping[str, object]],
+) -> dict[str, object]:
+    """Reference only source bytes proven present in this request's window bodies."""
+    inline = copy.deepcopy(dict(site))
+    path, revision, bounds = site.get("path"), site.get("revision"), site.get("lines")
+    content, digest = site.get("current_bytes"), site.get("content_sha256")
+    if (not isinstance(path, str) or not isinstance(revision, str)
+            or not isinstance(bounds, Mapping) or not isinstance(content, str)
+            or not isinstance(digest, str) or _sha256(content.encode("utf-8")) != digest):
+        return inline
+    start, end = bounds.get("start"), bounds.get("end")
+    if (type(start) is not int or type(end) is not int or start < 1 or end < start):
+        return inline
+    from kernel_request_source_window import (
+        _model_window_segments, _window_segments,
+        parse_model_source_window, parse_window,
+    )
+
+    delivered: dict[int, str] = {}
+    for message in delivered_windows:
+        body = message.get("content")
+        if not isinstance(body, str):
+            continue
+        metadata = parse_model_source_window(body)
+        segmenter = _model_window_segments
+        if metadata is None:
+            metadata = parse_window(body)
+            segmenter = _window_segments
+        if (metadata is None or metadata.get("path") != path
+                or metadata.get("revision") != revision):
+            continue
+        for row, text in segmenter(body, metadata):
+            first, last = row.get("start_line"), row.get("end_line")
+            if (type(first) is not int or type(last) is not int
+                    or first < 1 or last < first):
+                continue
+            if row.get("trailing_newline") is False and text.endswith("\n"):
+                text = text[:-1]
+            lines = text.splitlines(keepends=True)
+            if len(lines) != last - first + 1:
+                continue
+            for number, line_text in enumerate(lines, first):
+                if number in delivered and delivered[number] != line_text:
+                    return inline
+                delivered[number] = line_text
+    if any(number not in delivered for number in range(start, end + 1)):
+        return inline
+    actual = "".join(delivered[number] for number in range(start, end + 1))
+    if _sha256(actual.encode("utf-8")) != digest:
+        return inline
+    inline.pop("current_bytes", None)
+    inline["source_ref"] = {
+        "path": path, "lines": {"start": start, "end": end},
+        "content_sha256": digest,
+    }
+    return inline
+
+
+def carry_scoped_continuation_limits(messages: list[dict[str, object]]) -> bool:
+    """Keep the host's serialized budget line in a child's typed owner protocol."""
+    from kernel_completion_owner import _contract_host_text
+
+    line = next((value.strip() for value in _contract_host_text(messages).splitlines()
+                 if value.startswith("[CONTINUATION LIMITS |")), None)
+    if line is None:
+        return False
+    for message in messages:
+        if not str(message.get("content") or "").startswith(STATE_HEADER + "\n"):
+            continue
+        payload, state = _state_payload(message)
+        frame = state.get("framefit5")
+        if not isinstance(frame, dict) or not isinstance(frame.get("subframe_scope"), Mapping):
+            return False
+        raw_protocol = frame.get("owner_protocol")
+        protocol = dict(raw_protocol) if isinstance(raw_protocol, Mapping) else {
+            "schema": "stateframe-framefit5-owner/1"}
+        if protocol.get("continuation_limits") == line:
+            return False
+        protocol["continuation_limits"] = line
+        frame["owner_protocol"] = protocol
+        state["framefit5"] = frame
+        payload["state"] = state
+        message["content"] = _serialize_state_message(payload)
+        return True
+    return False
+
+
+def scope_typed_state_for_unit(
+        state: Mapping[str, object], unit_spec: object, *, root: Path | None = None,
+        delivered_windows: Sequence[Mapping[str, object]] | None = None,
+        continuation_limits: str = "",
+) -> dict[str, object]:
+    """Keep a worker frame to its contract and receipts; source stays in request messages."""
+    serialize = getattr(unit_spec, "to_json", None)
+    if not callable(serialize):
+        raise FrameFit5Error("subframe state scope has no serializable unit specification")
+    raw_spec = serialize()
+    if not isinstance(raw_spec, Mapping):
+        raise FrameFit5Error("subframe state scope has an invalid unit specification")
+    raw_contract = raw_spec.get("contract")
+    if not isinstance(raw_contract, Mapping):
+        raise FrameFit5Error("subframe state scope has no unit contract")
+    raw_check = raw_contract.get("check")
+    if not isinstance(raw_check, Mapping):
+        raise FrameFit5Error("subframe state scope has no unit check")
+
+    def strings(value: object, label: str) -> list[str]:
+        if not isinstance(value, (list, tuple)) or any(not isinstance(item, str) for item in value):
+            raise FrameFit5Error(f"subframe state scope has invalid {label}")
+        return list(value)
+
+    owns = strings(raw_contract.get("owns"), "owned paths")
+    creates = strings(raw_contract.get("creates"), "created paths")
+    reads = strings(raw_contract.get("reads"), "read paths")
+    hidden_paths = set(strings(raw_spec.get("hidden_paths", []), "hidden paths"))
+    requirement_ids = strings(raw_contract.get("requirement_ids"), "requirement ids")
+    selectors = strings(raw_check.get("selectors"), "check selectors")
+    check_sources = strings(raw_check.get("source_paths"), "check source paths")
+    if (set(owns) | set(creates) | set(check_sources)) & hidden_paths:
+        raise FrameFit5Error("subframe state scope contract refers to a hidden path")
+    reads = [path for path in reads if path not in hidden_paths]
+    owned_paths = set(owns) | set(creates)
+    visible_paths = owned_paths | set(reads) | set(check_sources)
+    from kernel_open_site_capacity import LOCATION_MODE, expand_location_inventory
+
+    if state.get("site_inventory_encoding") == LOCATION_MODE:
+        if root is None:
+            raise FrameFit5Error("subframe location inventory has no workspace authority")
+        source_sites = expand_location_inventory(state, root)
+    else:
+        source_sites = state.get("open_sites")
+        if not isinstance(source_sites, list):
+            next_site = state.get("next_site")
+            source_sites = [next_site] if isinstance(next_site, Mapping) else []
+    if any(not isinstance(site, Mapping) or not isinstance(site.get("path"), str)
+           for site in source_sites):
+        raise FrameFit5Error("subframe state scope has a malformed edit site")
+    unit_sites = _unit_rows(source_sites, owned_paths)
+    if delivered_windows is not None:
+        unit_sites = [site_ref_or_inline(site, delivered_windows) for site in unit_sites]
+    requirements = raw_spec.get("requirement_clauses", [])
+    if not isinstance(requirements, (list, tuple)):
+        raise FrameFit5Error("subframe state scope has invalid requirements")
+
+    ledger_source = state.get("action_ledger")
+    ledger = ledger_source if isinstance(ledger_source, Mapping) else {}
+    opaque = ledger.get("unclassified_actions", [])
+    local_opaque = []
+    if isinstance(opaque, list):
+        for action in opaque:
+            if not isinstance(action, Mapping):
+                continue
+            if action.get("kind") == "parallel_disposition" or action.get("tool") == "parallel":
+                continue
+            local_opaque.append(copy.deepcopy(dict(action)))
+    last_test = ledger.get("last_test")
+    if isinstance(last_test, Mapping):
+        selector = last_test.get("target") or last_test.get("selector")
+        if isinstance(selector, str) and selector not in selectors:
+            last_test = None
+    else:
+        last_test = None
+    scoped_ledger: dict[str, object] = {
+        "schema": ledger.get("schema", "stateframe-framefit3-action-ledger/1"),
+        "reads": _unit_rows(ledger.get("reads"), visible_paths),
+        "edits": _unit_rows(ledger.get("edits"), owned_paths),
+        "applied_edits": _unit_rows(state.get("applied_edits"), owned_paths),
+        "last_test": copy.deepcopy(dict(last_test)) if isinstance(last_test, Mapping) else None,
+        "superseded_test_count": ledger.get("superseded_test_count", 0),
+        "unclassified_actions": local_opaque,
+    }
+    if type(scoped_ledger["superseded_test_count"]) is not int:
+        scoped_ledger["superseded_test_count"] = 0
+
+    raw_owner = state.get("owner_protocol")
+    owner_protocol: dict[str, object] | None = None
+    if isinstance(raw_owner, Mapping):
+        owner_protocol = {
+            key: copy.deepcopy(raw_owner[key])
+            for key in ("schema", "menu_source", "route", "admitted_actions",
+                        "continuation_limits", "evidence_pin", "terminal_line")
+            if key in raw_owner
+        }
+    live_continuation_limits = continuation_limits
+    continuation_limits = ""
+    if delivered_windows is not None:
+        from kernel_completion_owner import _contract_host_text
+
+        # The request contract pins the serialized line, which can differ from
+        # the live counter after a decision is reserved for this send.
+        continuation_limits = next((line.strip() for line in
+                                    _contract_host_text(delivered_windows).splitlines()
+                                    if line.startswith("[CONTINUATION LIMITS |")),
+                                   None)
+    if not continuation_limits and owner_protocol is not None:
+        # An already-serialized protocol line is what the request contract pinned; the live
+        # counter may be one decision ahead of it once this send is reserved.
+        existing = owner_protocol.get("continuation_limits")
+        continuation_limits = existing if isinstance(existing, str) and existing else None
+    if not continuation_limits:
+        continuation_limits = live_continuation_limits
+    if continuation_limits:
+        if owner_protocol is None:
+            owner_protocol = {"schema": "stateframe-framefit5-owner/1"}
+        owner_protocol["continuation_limits"] = continuation_limits
+    raw_verdict = state.get("last_verdict")
+    verdict: dict[str, object] = {}
+    if isinstance(raw_verdict, Mapping):
+        verdict = {
+            key: copy.deepcopy(raw_verdict[key])
+            for key in ("schema", "status", "current_revision", "tested_revision",
+                        "changed_since_check", "check_receipt_id")
+            if key in raw_verdict
+        }
+    verdict.setdefault("schema", "stateframe-framefit4-last-verdict/1")
+    verdict["line"] = "Unit-local check state is recorded in this frame."
+
+    contract: dict[str, object] = {
+        key: copy.deepcopy(raw_contract[key])
+        for key in ("id", "outcome")
+        if key in raw_contract
+    }
+    contract.update({
+        "owns": owns,
+        "creates": creates,
+        "reads": reads,
+        "requirement_ids": requirement_ids,
+        "check": {
+            "command_kind": raw_check.get("command_kind"),
+            "selectors": selectors,
+            "source_paths": check_sources,
+        },
+    })
+    for field in ("exports", "consumes"):
+        rows = raw_contract.get(field)
+        if not isinstance(rows, (list, tuple)):
+            continue
+        # Contract links keep symbols and ids while omitting paths owned elsewhere.
+        keep = ("id", "symbol", "signature") if field == "exports" else (
+            "export_id", "symbol", "signature")
+        contract[field] = [
+            {key: copy.deepcopy(row[key]) for key in keep if key in row}
+            for row in rows if isinstance(row, Mapping)
+        ]
+
+    result: dict[str, object] = {
+        "schema": state.get("schema", SCHEMA),
+        "mode": state.get("mode", PRODUCT_MODE),
+        "task": copy.deepcopy(state.get("task", {})),
+        "next_site": copy.deepcopy(unit_sites[0]) if unit_sites else None,
+        "open_sites": unit_sites,
+        "read_facts": _unit_rows(state.get("read_facts"), visible_paths),
+        "applied_edits": _unit_rows(state.get("applied_edits"), owned_paths),
+        "last_verdict": verdict,
+        "action_ledger": scoped_ledger,
+        "open_work": {
+            "next_site_available": bool(unit_sites),
+            "open_edit_site_count": len(unit_sites),
+            "next_site_source": "unit_scoped_paths",
+            "open_requirement_ids": requirement_ids,
+            "ticket_clause_completion": "OPEN" if requirements else "not_inferred",
+        },
+        "subframe_scope": {
+            "schema": "stateframe-subframe-state-scope/1",
+            "unit_id": raw_spec.get("unit_id"),
+            "contract": contract,
+            "requirements": copy.deepcopy(list(requirements)),
+        },
+    }
+    if owner_protocol is not None:
+        result["owner_protocol"] = owner_protocol
+    return result
+
+
 def _headcarry_mode() -> str:
     value = (os.environ.get("STATEFRAME_HEADCARRY", "off") or "off").strip().lower()
     return value if value in {"off", "shadow", "on"} else "off"
+
+
+def _validate_unit_headcarry(panel: Mapping[str, object]) -> None:
+    unit_module = sys.modules.get("kernel_unit_policy")
+    policy = unit_module.active() if unit_module is not None else None
+    if policy is None:
+        return
+    heads = panel.get("heads")
+    if not isinstance(heads, list) or any(
+            not isinstance(head, Mapping) or not policy.visible(str(head.get("path", "")))
+            for head in heads):
+        raise FrameFit5Error("subframe head-carry contains a withheld path")
 
 
 def _update_headcarry(
@@ -118,6 +426,7 @@ def _update_headcarry(
         panel = _json_value(panel)
         if not isinstance(panel, dict):
             raise TypeError("head-carry renderer did not return a JSON object")
+        _validate_unit_headcarry(panel)
     except (AttributeError, ImportError, OSError, RuntimeError, TypeError, ValueError):
         # Head carry is enrichment; a renderer fault must leave the legacy frame usable.
         frame.pop("headcarry", None)
@@ -401,6 +710,40 @@ def _opaque_actions(
 
     if not isinstance(turns, Sequence) or isinstance(turns, (str, bytes, bytearray)):
         raise FrameFit5Error("unclassified action turns are malformed")
+    from kernel_wire_identity import public_wire_text
+
+    disabled_parallel_result = (
+        "REFUSED RESOURCES_UNAVAILABLE: subframe execution is disabled for this run"
+    )
+    unit_policy = sys.modules.get("kernel_unit_policy")
+    is_subframe_child = unit_policy is not None and unit_policy.active() is not None
+    latest_parallel_call_id: str | None = None
+    for turn in turns:
+        if not isinstance(turn, Sequence) or isinstance(turn, (str, bytes, bytearray)):
+            continue
+        turn_results = {
+            str(item.get("tool_call_id")): item
+            for item in turn
+            if isinstance(item, Mapping) and item.get("role") == "tool"
+        }
+        for assistant in turn:
+            if not isinstance(assistant, Mapping) or assistant.get("role") != "assistant":
+                continue
+            calls = assistant.get("tool_calls") or ()
+            if not isinstance(calls, Sequence) or isinstance(calls, (str, bytes, bytearray)):
+                continue
+            for call in calls:
+                if not isinstance(call, Mapping):
+                    continue
+                function = call.get("function")
+                call_id = str(call.get("id") or "")
+                result = turn_results.get(call_id)
+                if (not isinstance(function, Mapping) or function.get("name") != "parallel"
+                        or not isinstance(result, Mapping)):
+                    continue
+                result_text = public_wire_text(str(result.get("content") or ""), journal)
+                if call_id and result_text != disabled_parallel_result:
+                    latest_parallel_call_id = call_id
     rows: list[dict[str, object]] = []
     ids: set[str] = set()
     for turn_index, turn in enumerate(turns):
@@ -464,6 +807,37 @@ def _opaque_actions(
                 from kernel_wire_identity import public_wire_text
                 result_text = public_wire_text(str(result.get("content") or ""), journal)
                 result_bytes = result_text.encode("utf-8")
+                tool_name = str(function.get("name") or "unknown")
+                if tool_name == "parallel" and result_text != disabled_parallel_result:
+                    if is_subframe_child:
+                        # The inherited parent exchange is not an action owned by this worker.
+                        continue
+                    from kernel_parallel import (
+                        ParallelError, action_receipt_source, action_receipt_summary,
+                        render_parallel_disposition,
+                    )
+                    try:
+                        parallel_result, expanded_plan = action_receipt_source(call_id)
+                        if public_wire_text(parallel_result.observation, journal) != result_text:
+                            raise ParallelError("subframe result differs from the tool reply")
+                        if call_id == latest_parallel_call_id:
+                            rows.append(render_parallel_disposition(
+                                parallel_result, expanded_plan, journal=journal,
+                            ))
+                            continue
+                        summary, omitted = action_receipt_summary(parallel_result, expanded_plan)
+                        summary = public_wire_text(summary, journal)
+                    except ParallelError as error:
+                        raise FrameFit5Error(f"typed subframe action receipt is unavailable: {error}") from error
+                    receipt = _bounded_action_receipt(
+                        call_id, tool_name, arguments, argument_bytes, result_text,
+                        turn_index=turn_index, journal=journal,
+                        result_summary=summary, omitted_committed=omitted,
+                        outcome=("REJECTED" if parallel_result.admission.status == "REFUSED"
+                                 or not parallel_result.txn_order else "APPLIED"),
+                    )
+                    rows.append(_validated_bounded_action_receipt(receipt))
+                    continue
                 if len(argument_bytes) > MAX_ACTION_ARGUMENT_BYTES:
                     receipt = _bounded_action_receipt(
                         call_id,
@@ -510,6 +884,9 @@ def _validated_bounded_action_receipt(value: object) -> dict[str, object]:
         "result_size_bytes", "result_sha256",
     }
     optional = {"call_id_sha256", "tool_sha256", "path_sha256", "turn_index"}
+    schema = value.get("schema") if isinstance(value, Mapping) else None
+    if schema == "stateframe-bounded-action-receipt/2":
+        optional.update({"result_summary", "result_chars", "omitted_committed"})
     if not isinstance(value, Mapping) or not required.issubset(value):
         raise FrameFit5Error("typed oversized action receipt is malformed")
     if set(value) - required - optional:
@@ -532,13 +909,16 @@ def _validated_bounded_action_receipt(value: object) -> dict[str, object]:
     first_line = value.get("result_first_line")
     path_valid = _valid_bounded_receipt_path(path)
     if (
-        value.get("schema") != "stateframe-bounded-action-receipt/1"
+        schema not in {"stateframe-bounded-action-receipt/1",
+                       "stateframe-bounded-action-receipt/2"}
         or value.get("kind") != "bounded_action_receipt"
         or not isinstance(call_id, str) or not call_id or len(call_id) > 160
         or not isinstance(tool, str) or not tool or len(tool) > 120
         or not path_valid
         or value.get("outcome") not in {"APPLIED", "REJECTED", "CLOSED"}
-        or type(argument_size) is not int or argument_size <= MAX_ACTION_ARGUMENT_BYTES
+        or type(argument_size) is not int or (
+            argument_size <= MAX_ACTION_ARGUMENT_BYTES
+            if schema == "stateframe-bounded-action-receipt/1" else argument_size < 0)
         or not valid_digest(value.get("argument_sha256"))
         or type(result_size) is not int or result_size < 0
         or not valid_digest(value.get("result_sha256"))
@@ -551,6 +931,127 @@ def _validated_bounded_action_receipt(value: object) -> dict[str, object]:
     turn_index = value.get("turn_index")
     if "turn_index" in value and (type(turn_index) is not int or turn_index < 0):
         raise FrameFit5Error("typed oversized action receipt index is invalid")
+    if schema == "stateframe-bounded-action-receipt/2":
+        from kernel_parallel import PARALLEL_ACTION_SUMMARY_BYTES
+        summary = value.get("result_summary")
+        if (tool != "parallel" or not isinstance(summary, str) or not summary
+                or len(summary.encode("utf-8")) > PARALLEL_ACTION_SUMMARY_BYTES
+                or type(value.get("result_chars")) is not int or value["result_chars"] <= 0
+                or value["result_chars"] > result_size
+                or type(value.get("omitted_committed")) is not int
+                or value["omitted_committed"] < 0):
+            raise FrameFit5Error("typed subframe action receipt fields are invalid")
+    return copy.deepcopy(dict(value))
+
+
+def _validated_parallel_disposition(value: object) -> dict[str, object]:
+    from kernel_parallel import (
+        MAX_PARALLEL_DISPOSITION_BYTES, MAX_PARALLEL_UNITS,
+        PARALLEL_ACTION_SUMMARY_BYTES, PARALLEL_DISPOSITION_SCHEMA,
+    )
+
+    if not isinstance(value, Mapping):
+        raise FrameFit5Error("parallel disposition is not an object")
+    sections = value.get("sections")
+    truncation = value.get("truncation")
+    if (
+        value.get("schema") != PARALLEL_DISPOSITION_SCHEMA
+        or value.get("kind") != "parallel_disposition"
+        or not isinstance(value.get("call_id"), str)
+        or not value["call_id"] or len(value["call_id"]) > 160
+        or not isinstance(sections, Mapping)
+        or not isinstance(sections.get("disposition"), Mapping)
+        or not isinstance(truncation, Mapping)
+    ):
+        raise FrameFit5Error("parallel disposition envelope is malformed")
+    disposition = sections["disposition"]
+    summary = disposition.get("result_summary")
+    admission = disposition.get("admission")
+    units = disposition.get("units")
+    details = disposition.get("unit_details")
+    expected_detail_fields = [
+        "id", "reason", "changed_files", "contract_ok", "check_status", "requests",
+    ]
+    if isinstance(summary, str):
+        try:
+            summary_bytes = len(summary.encode("utf-8"))
+        except UnicodeError as error:
+            raise FrameFit5Error("parallel disposition summary is not valid UTF-8") from error
+    else:
+        summary_bytes = 0
+    if (
+        not isinstance(summary, str) or not summary
+        or summary_bytes > PARALLEL_ACTION_SUMMARY_BYTES
+        or not isinstance(disposition.get("final_check"), str)
+        or not isinstance(disposition.get("integration"), str)
+        or disposition.get("unit_fields") != ["id", "status"]
+        or disposition.get("unit_details_fields") != expected_detail_fields
+        or not isinstance(admission, Mapping)
+        or not isinstance(admission.get("status"), str)
+        or admission["status"] not in {"ADMITTED", "REFUSED"}
+        or not isinstance(units, list) or not isinstance(details, list)
+        or len(units) > MAX_PARALLEL_UNITS or len(details) > MAX_PARALLEL_UNITS
+    ):
+        raise FrameFit5Error("parallel disposition section is malformed")
+    unit_ids: set[str] = set()
+    allowed_statuses = {
+        "NOT_STARTED", "COMMITTED", "COMMITTED_UNVERIFIED", "REFUSED", "BLOCKED",
+        "BUDGET_EXHAUSTED", "ENGINE_ERROR", "CANCELLED", "TIMED_OUT", "RECOVERY_REQUIRED",
+    }
+    for row in units:
+        if (not isinstance(row, list) or len(row) != 2
+                or not isinstance(row[0], str) or not row[0]
+                or len(row[0]) > 24
+                or row[0] in unit_ids or not isinstance(row[1], str)
+                or row[1] not in allowed_statuses):
+            raise FrameFit5Error("parallel disposition unit identity is invalid")
+        unit_ids.add(row[0])
+    detail_ids: set[str] = set()
+    for row in details:
+        if (
+            not isinstance(row, list) or len(row) != 6
+            or not isinstance(row[0], str) or row[0] not in unit_ids
+            or row[0] in detail_ids
+            or row[1] is not None and not isinstance(row[1], str)
+            or not isinstance(row[2], list)
+            or row[3] is not True and row[3] is not False and row[3] is not None
+            or not isinstance(row[4], str)
+            or type(row[5]) is not int or row[5] < 0
+        ):
+            raise FrameFit5Error("parallel disposition unit detail is invalid")
+        detail_ids.add(row[0])
+        for file_row in row[2]:
+            if (not isinstance(file_row, list) or len(file_row) != 4
+                    or not isinstance(file_row[0], str)
+                    or not isinstance(file_row[1], str)
+                    or file_row[1] not in {"modify", "create"}
+                    or type(file_row[2]) is not int or file_row[2] < 0
+                    or type(file_row[3]) is not int or file_row[3] < 0):
+                raise FrameFit5Error("parallel disposition changed-file detail is invalid")
+    omitted_units = truncation.get("omitted_units")
+    omitted_details = truncation.get("omitted_details")
+    status_counts = truncation.get("omitted_status_counts")
+    if (
+        type(truncation.get("truncated")) is not bool
+        or type(omitted_units) is not int or omitted_units < 0
+        or type(omitted_details) is not int or omitted_details < 0
+        or not isinstance(status_counts, Mapping)
+        or any(not isinstance(status, str) or type(count) is not int or count < 0
+               for status, count in status_counts.items())
+        or any(status not in allowed_statuses for status in status_counts)
+        or sum(status_counts.values()) != omitted_units
+        or len(details) + omitted_details != len(units) + omitted_units
+        or (omitted_units > 0 or omitted_details > 0) and not truncation.get("truncated")
+    ):
+        raise FrameFit5Error("parallel disposition truncation metadata is invalid")
+    try:
+        encoded_bytes = len(json.dumps(
+            value, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+        ).encode("utf-8"))
+    except (TypeError, UnicodeError, ValueError) as error:
+        raise FrameFit5Error("parallel disposition cannot be serialized") from error
+    if encoded_bytes > MAX_PARALLEL_DISPOSITION_BYTES:
+        raise FrameFit5Error("parallel disposition exceeds its byte budget")
     return copy.deepcopy(dict(value))
 
 
@@ -1058,6 +1559,18 @@ def build_typed_state(
     opaque, opaque_ids = _opaque_actions(
         action_context.get("unclassified_turns", ()), getattr(runtime, "journal", None))
     opaque.extend(ledger.pop("non_file_reads", ()))
+    parallel_dispositions = [
+        row for row in opaque
+        if isinstance(row, Mapping) and row.get("kind") == "parallel_disposition"
+    ]
+    if len(parallel_dispositions) > 1:
+        raise FrameFit5Error("multiple latest parallel dispositions were produced")
+    if parallel_dispositions:
+        latest_disposition = parallel_dispositions[0]
+        ledger["latest_parallel_disposition"] = _validated_parallel_disposition(
+            latest_disposition,
+        )
+        opaque = [row for row in opaque if row is not latest_disposition]
     ledger_ids = set(ledger["call_ids"])
     source_call_ids = {
         str(call.get("id"))
@@ -1824,6 +2337,28 @@ def assemble_framefit5_request(
             raise FrameFit5Error("MicroGraph projection requires one mutable StateFrame")
         if len(json.dumps(result, ensure_ascii=False, default=str).encode("utf-8")) > MAX_PRODUCT_BYTES:
             raise FrameFit5Error("frame-only request exceeds its product byte limit")
+    unit_spec = _active_unit_spec()
+    if unit_spec is not None:
+        state_messages = [message for message in result
+                          if isinstance(message, dict)
+                          and str(message.get("content") or "").startswith(STATE_HEADER + "\n")]
+        if len(state_messages) != 1:
+            raise FrameFit5Error("subframe state scoping requires one StateFrame")
+        state_message = state_messages[0]
+        payload, state = _state_payload(state_message)
+        frame = state.get("framefit5")
+        if not isinstance(frame, Mapping):
+            raise FrameFit5Error("subframe state scoping requires typed FrameFit5 state")
+        from kernel_lean_presentation import _runtime_continuation_limits
+        from kernel_cache_layout_view import semantic_messages
+
+        state["framefit5"] = scope_typed_state_for_unit(
+            frame, unit_spec, root=_workspace_root(runtime),
+            delivered_windows=semantic_messages(result),
+            continuation_limits=_runtime_continuation_limits(runtime),
+        )
+        payload["state"] = state
+        state_message["content"] = _serialize_state_message(payload)
     if projection_audit is not None:
         projection_audit["projected_count"] = projected_count
     return result
@@ -2190,9 +2725,32 @@ def attach_owner_protocol(
         protocol["evidence_pin"] = evidence_pin
     continuation_limits = (owner_presentation.continuation_limits if owner_presentation is not None
                            else _wire_continuation_limits(source_messages))
+    if not continuation_limits and isinstance(framefit5.get("subframe_scope"), Mapping):
+        # A scoped child can inherit a schema-only protocol. Recover the exact
+        # serialized host line first; its digest is what the owner contract pins.
+        from kernel_completion_owner import _contract_host_text
+        from kernel_lean_presentation import _runtime_continuation_limits
+
+        for source in (source_messages, result):
+            continuation_limits = next((line.strip() for line in
+                                        _contract_host_text(source).splitlines()
+                                        if line.startswith("[CONTINUATION LIMITS |")), None)
+            if continuation_limits:
+                break
+        if not continuation_limits:
+            continuation_limits = _runtime_continuation_limits(runtime)
     if isinstance(continuation_limits, str) and continuation_limits:
         protocol["continuation_limits"] = continuation_limits
     framefit5["owner_protocol"] = protocol
+    unit_spec = _active_unit_spec()
+    if unit_spec is not None:
+        context = getattr(runtime, "_framefit_action_context", None)
+        context_frame = context.get("framefit5") if isinstance(context, Mapping) else None
+        if not isinstance(context_frame, dict):
+            raise FrameFit5Error("subframe owner protocol has no host frame authority")
+        # Allocation validates a fresh projection of this host frame. Preserve
+        # the protocol built from the current owner contract as its authority.
+        context_frame["owner_protocol"] = copy.deepcopy(protocol)
     state["framefit5"] = framefit5
     payload["state"] = state
     state_messages[0]["content"] = _serialize_state_message(payload)
@@ -2203,17 +2761,18 @@ def attach_owner_protocol(
 
 
 
-def _verify_next_site_bytes(site: Mapping[str, object], workspace_root: str | Path) -> None:
+def _verify_next_site_bytes(site: Mapping[str, object], workspace_root: str | Path) -> bytes:
     raw_path = site.get("path")
     path = _safe_relative_path(raw_path)
     line = site.get("line")
     line_range = site.get("lines")
     current_bytes = site.get("current_bytes")
+    source_ref = site.get("source_ref")
     revision = site.get("revision")
     missing_fields = []
     if not isinstance(line_range, Mapping):
         missing_fields.append("lines")
-    if not isinstance(current_bytes, str):
+    if not isinstance(current_bytes, str) and not isinstance(source_ref, Mapping):
         missing_fields.append("current_bytes")
     if not isinstance(revision, str):
         missing_fields.append("revision")
@@ -2240,7 +2799,14 @@ def _verify_next_site_bytes(site: Mapping[str, object], workspace_root: str | Pa
             or start < 1 or end < start or end > len(raw_lines)):
         raise FrameFit5Error("typed next-site range is invalid")
     excerpt = b"".join(raw_lines[start - 1:end])
-    if excerpt.decode("utf-8") != current_bytes:
+    if isinstance(source_ref, Mapping):
+        expected_ref = {
+            "path": path, "lines": {"start": start, "end": end},
+            "content_sha256": site.get("content_sha256"),
+        }
+        if current_bytes is not None or dict(source_ref) != expected_ref:
+            raise FrameFit5Error("typed next-site source reference is invalid")
+    elif excerpt.decode("utf-8") != current_bytes:
         raise _CandidateSourceChanged("typed next-site bytes changed before dispatch")
     if line is not None:
         if line < start or line > end:
@@ -2250,6 +2816,57 @@ def _verify_next_site_bytes(site: Mapping[str, object], workspace_root: str | Pa
             raise _CandidateSourceChanged("typed next-site line changed before dispatch")
     if site.get("content_sha256") != _sha256(excerpt):
         raise FrameFit5Error("typed next-site excerpt digest is invalid")
+    return raw
+
+
+def _inline_unmatched_site_references(
+        messages: list[dict[str, object]], workspace_root: str | Path,
+) -> bool:
+    """Inline verified child source ranges whose final wire window was fitted away."""
+    state_messages = [message for message in messages
+                      if str(message.get("content") or "").startswith(STATE_HEADER + "\n")]
+    if len(state_messages) != 1:
+        return False
+    state_message = state_messages[0]
+    payload, state = _state_payload(state_message)
+    frame = state["framefit5"]
+    if not isinstance(frame.get("subframe_scope"), Mapping):
+        return False
+    open_sites = frame.get("open_sites")
+    if not isinstance(open_sites, list):
+        return False
+
+    def inline_if_unmatched(site: object) -> object:
+        if not isinstance(site, Mapping) or not isinstance(site.get("source_ref"), Mapping):
+            return copy.deepcopy(site)
+        raw = _verify_next_site_bytes(site, workspace_root)
+        bounds = site["lines"]
+        start, end = bounds["start"], bounds["end"]
+        excerpt = b"".join(raw.splitlines(keepends=True)[start - 1:end]).decode("utf-8")
+        inline = {**site, "current_bytes": excerpt}
+        inline.pop("source_ref", None)
+        if site_ref_or_inline(inline, messages) == dict(site):
+            return copy.deepcopy(dict(site))
+        return inline
+
+    repaired_sites = [inline_if_unmatched(site) for site in open_sites]
+    next_site = frame.get("next_site")
+    if (isinstance(next_site, Mapping) and open_sites
+            and isinstance(open_sites[0], Mapping)
+            and dict(next_site) == dict(open_sites[0])):
+        repaired_next = repaired_sites[0]
+    else:
+        repaired_next = inline_if_unmatched(next_site)
+    changed = repaired_sites != open_sites or repaired_next != next_site
+    if not changed:
+        return False
+    frame["open_sites"] = repaired_sites
+    frame["next_site"] = repaired_next
+    state["framefit5"] = frame
+    payload["state"] = state
+    state_message["content"] = _serialize_state_message(payload)
+    return True
+
 
 def _framefit5_deferred_paths(
         messages: Sequence[Mapping[str, object]],
@@ -2737,6 +3354,14 @@ def validate_product_request(
         raise FrameFit5Error("typed frame action ledger is missing")
     if not isinstance(ledger.get("reads"), list) or not isinstance(ledger.get("edits"), list):
         raise FrameFit5Error("typed frame action ledger lists are malformed")
+    opaque = ledger.get("unclassified_actions")
+    if not isinstance(opaque, list):
+        raise FrameFit5Error("typed frame unclassified actions are malformed")
+    for action in opaque:
+        if not isinstance(action, Mapping):
+            raise FrameFit5Error("typed frame unclassified action is malformed")
+        if action.get("kind") == "bounded_action_receipt":
+            _validated_bounded_action_receipt(action)
     from kernel_stateframe_capacity import validate_read_ranges, validate_coverage
 
     from kernel_read_receipts import enabled as allocator_enabled
@@ -2827,6 +3452,8 @@ def validate_product_request(
                         fresh_headcarry = _json_value(fresh_headcarry)
                     if not isinstance(fresh_headcarry, dict):
                         raise TypeError("head-carry renderer did not return a JSON object")
+                if isinstance(fresh_headcarry, Mapping):
+                    _validate_unit_headcarry(fresh_headcarry)
             except (AttributeError, ImportError, OSError, RuntimeError, TypeError, ValueError) as error:
                 if not refresh_headcarry:
                     raise FrameFit5Error(
@@ -2897,6 +3524,20 @@ def validate_product_request(
             if not isinstance(site.get("revision"), str):
                 raise FrameFit5Error("final typed next-site revision is missing")
             _verify_next_site_bytes(site, owner_root)
+            if isinstance(site.get("source_ref"), Mapping):
+                from kernel_stateframe_action_ledger import _read_open_site_file_bytes
+
+                path = _safe_relative_path(site.get("path"))
+                bounds = site.get("lines")
+                if not isinstance(bounds, Mapping):
+                    raise FrameFit5Error("typed next-site reference has no range")
+                raw_lines = _read_open_site_file_bytes(owner_root, path).splitlines(keepends=True)
+                full_site = {**site, "current_bytes": b"".join(
+                    raw_lines[bounds["start"] - 1:bounds["end"]]
+                ).decode("utf-8")}
+                full_site.pop("source_ref", None)
+                if site_ref_or_inline(full_site, messages) != site:
+                    raise FrameFit5Error("typed next-site reference lacks matching source delivery")
     raw_read_facts = framefit5.get("read_facts", [])
     if (not isinstance(raw_read_facts, list)
             or any(not isinstance(fact, Mapping) for fact in raw_read_facts)):

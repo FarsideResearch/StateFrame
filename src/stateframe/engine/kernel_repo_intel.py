@@ -206,6 +206,12 @@ def operation(runtime: object, name: str, arguments: Mapping[str, object] | None
     """Execute one admitted repo-intel query, returning a bounded JSON result."""
     if name not in {"where_defined", "who_calls", "references", "outline"}:
         return None
+    if getattr(runtime, "_unit_policy", None) is not None:
+        _emit(runtime, "unit_hidden_path", path=str((arguments or {}).get("path") or ""),
+              action=name)
+        return json.dumps({"schema": SCHEMA, "status": "REFUSED",
+                           "action": name, "reason": "HIDDEN_PATH", "results": []},
+                          sort_keys=True, separators=(",", ":"))
     args = arguments if isinstance(arguments, Mapping) else {}
     try:
         if name == "outline":
@@ -613,6 +619,11 @@ def _ensure_focus_entry(repo_root: Path, repo_map: str, target_path: str) -> str
 def intake_orientation(root: Path, *, target_path: str = "", symbol: str = "",
                        selectors: Sequence[object] = (), journal: object | None = None) -> str:
     """Produce map text for the single existing NAVBASICS orientation owner."""
+    import sys
+    unit_module = sys.modules.get("kernel_unit_policy")
+    if unit_module is not None and unit_module.active() is not None:
+        from kernel_nav_basics import render_intake_orientation
+        return render_intake_orientation(root, selectors)
     commit = (get_current_commit_sha(str(root), journal=journal) if journal is not None
               else get_current_commit_sha(str(root)))
     # Intake sees mutable run workspaces and should stay content-deterministic without a cache scan.

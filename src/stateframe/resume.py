@@ -18,10 +18,11 @@ import fcntl
 import hashlib
 import json
 import os
+import re
 import shutil
 import stat
 import sys
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 from . import outcomes, profiles, replay_tape, workcopy
@@ -44,10 +45,40 @@ ATTEMPT_FILES = ("resume-pending-verified.json", "worker", "wire", "requests", "
 
 
 CHECKPOINT_SCHEMA = "stateframe-engine-checkpoint/1"
+PARALLEL_RECOVERY_SCHEMA = "stateframe-parallel-recovery/1"
+PARALLEL_INTENT_SCHEMA = "stateframe-parallel-intent/1"
+PARALLEL_INPUT_REFUSAL_SCHEMA = "stateframe-parallel-input-refusal/1"
+_PARALLEL_CALL_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
+_SUBFRAME_BLOCK_REASONS = frozenset({
+    "NEEDS_UNOWNED_FILE", "INTERFACE_WRONG", "CONTRACT_IMPOSSIBLE", "CHECK_WRONG", "OTHER",
+})
 
 
 class ResumeRefused(RuntimeError):
     """The run directory cannot be resumed; the message says why and what to do."""
+
+
+def _blocked_dispatch_marker(run: Path) -> dict[str, str] | None:
+    """Read the consumed dispatch left even if the terminal receipt was interrupted."""
+    root = run / "worker" / "measurement-runs"
+    if root.is_symlink():
+        raise ResumeRefused("subframe blocked dispatch state is a symlink")
+    markers = list(root.glob("*/subframe-blocked.json"))
+    if not markers:
+        return None
+    if len(markers) != 1 or markers[0].is_symlink() or markers[0].parent.is_symlink():
+        raise ResumeRefused("subframe blocked dispatch state is ambiguous or unsafe")
+    try:
+        value = json.loads(markers[0].read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, ValueError) as error:
+        raise ResumeRefused(f"subframe blocked dispatch state is damaged: {error}") from error
+    if (not isinstance(value, dict) or set(value) != {"dispatch_id", "reason_code", "detail"}
+            or not isinstance(value["dispatch_id"], str) or not value["dispatch_id"]
+            or not isinstance(value["reason_code"], str)
+            or value["reason_code"] not in _SUBFRAME_BLOCK_REASONS
+            or not isinstance(value["detail"], str) or len(value["detail"]) > 300):
+        raise ResumeRefused("subframe blocked dispatch state has invalid fields")
+    return value
 
 
 def _lock_holder(path: Path) -> str | None:
@@ -256,6 +287,8 @@ def _terminal_resume_refusal(status: object, summary: dict, *, hooks_only: bool 
         return "CONTINUATION_BLOCKED run cannot be resumed; start a new run"
     if hooks_only:
         return None
+    if status == "SUBFRAME_BLOCKED":
+        return "this subframe run already finished blocked; start a new run for more work"
     if status == "SUBMITTED":
         return "this run already finished: the engine submitted its result " \
             "(see summary.json and final.diff); start a new run for more work"
@@ -283,7 +316,201 @@ def finished_for_good(run: Path) -> bool:
     return run_finished_for_good(run)
 
 
-def _tool_safety(run: Path, spec: dict, *, replay_external: bool) -> list[dict[str, str]]:
+def _inspect_parallel_pending(run: Path, pending: tuple[object, ...]) -> dict[str, object] | None:
+    """Inspect the one supported parallel recovery intent without changing run artifacts."""
+    if len(pending) != 1 or getattr(pending[0], "tool", None) != "parallel":
+        return None
+    record = pending[0]
+    args = getattr(record, "args", None)
+    if isinstance(args, dict) and args.get("schema") == PARALLEL_INPUT_REFUSAL_SCHEMA:
+        from .engine.kernel_parallel_records import canonical_json
+        arguments = args.get("arguments")
+        if (set(args) != {"schema", "arguments"} or not isinstance(arguments, dict)
+                or record.replay_class != "local"
+                or record.capability_digest != hashlib.sha256(b"stateframe-subframe-input/1").hexdigest()
+                or record.definition_digest != hashlib.sha256(canonical_json(arguments)).hexdigest()
+                or not isinstance(record.call_id, str) or not record.call_id):
+            raise ResumeRefused("pending subframe input refusal intent is invalid")
+        call_id = (record.call_id if _PARALLEL_CALL_ID.fullmatch(record.call_id)
+                   else "call_" + hashlib.sha256(record.call_id.encode()).hexdigest()[:40])
+        artifact_root = run / "parallel" / call_id
+        if (artifact_root.parent.is_symlink() or artifact_root.is_symlink()
+                or any((artifact_root / name).exists() or (artifact_root / name).is_symlink()
+                       for name in ("units", "snapshots", "proposals", "txn", "intent.json"))):
+            raise ResumeRefused("pending subframe input refusal has unexpected execution artifacts")
+        return {"schema": PARALLEL_INPUT_REFUSAL_SCHEMA,
+                "call_id": record.call_id, "arguments": arguments}
+    intents = []
+    if isinstance(args, dict) and args.get("schema") in {PARALLEL_RECOVERY_SCHEMA, PARALLEL_INTENT_SCHEMA}:
+        intents.append(args)
+    elif isinstance(args, dict):
+        for key in ("recovery", "parallel_recovery"):
+            candidate = args.get(key)
+            if isinstance(candidate, dict) and candidate.get("schema") == PARALLEL_RECOVERY_SCHEMA:
+                intents.append(candidate)
+    if len(intents) != 1:
+        return None
+    intent = intents[0]
+    from .engine.kernel_parallel_records import (
+        AdmissionResult,
+        ParallelRecordError,
+        ParallelRequest,
+        Proposal,
+        UnitSpec,
+    )
+    live_intent = intent.get("schema") == PARALLEL_INTENT_SCHEMA
+    required = {"schema", "call_id", "request", "admission", "reservations", "generation",
+                "mode", "policy_digest", "executions"}
+    if live_intent:
+        required |= {"meter_calibration", "subframe_cap_calibration", "requirements_digest",
+                     "snapshot_manifests"}
+    if set(intent) != required:
+        raise ResumeRefused(f"subframe recovery intent must contain exactly {sorted(required)}")
+    try:
+        request = ParallelRequest.from_json(intent["request"])
+        admission = AdmissionResult.from_json(intent["admission"])
+    except (ParallelRecordError, TypeError) as error:
+        raise ResumeRefused(f"subframe recovery intent has invalid records: {error}") from error
+    ids = {item.id for item in request.units}
+    reservations = intent["reservations"]
+    if (intent["call_id"] != request.call_id or intent["mode"] != request.mode
+            or intent["generation"] != admission.generation or admission.status != "ADMITTED"
+            or len(ids) != len(request.units) or set(admission.order) != ids
+            or len(admission.order) != len(ids) or not isinstance(reservations, dict)
+            or set(reservations) != ids or any(type(value) is not int or value < 1
+                                               for value in reservations.values())
+            or not isinstance(intent["policy_digest"], str)
+            or not re.fullmatch(r"[0-9a-f]{64}", intent["policy_digest"])):
+        raise ResumeRefused("subframe recovery intent identities are inconsistent")
+    call_id = intent.get("call_id")
+    if not isinstance(call_id, str) or not _PARALLEL_CALL_ID.fullmatch(call_id):
+        raise ResumeRefused("parallel recovery intent has an invalid call_id")
+    parallel_root = run / "parallel"
+    artifact_root = parallel_root / call_id
+    if parallel_root.is_symlink() or artifact_root.is_symlink():
+        raise ResumeRefused("parallel recovery artifacts contain a symlink")
+    if not parallel_root.is_dir() or not artifact_root.is_dir():
+        raise ResumeRefused("parallel recovery artifacts are missing")
+    from .engine.kernel_parallel import ParallelError, _StartSnapshot
+
+    if live_intent:
+        # The tape freezes admission; the host adds executions and later snapshots to
+        # intent.json. Authenticate the unchanged fields before using those additions.
+        path = artifact_root / "intent.json"
+        try:
+            if path.is_symlink() or not path.is_file() or path.stat().st_size > (16 << 20):
+                raise ValueError("live intent is missing, linked, or too large")
+            on_disk = json.loads(path.read_bytes())
+            if not isinstance(on_disk, dict) or set(on_disk) != required:
+                raise ValueError("live intent has invalid fields")
+            unchanged = {key: value for key, value in intent.items()
+                         if key not in {"executions", "snapshot_manifests"}}
+            durable_unchanged = {key: value for key, value in on_disk.items()
+                                 if key not in {"executions", "snapshot_manifests"}}
+            if durable_unchanged != unchanged:
+                raise ValueError("live intent differs from the tape")
+            initial = intent["snapshot_manifests"]
+            snapshots = on_disk["snapshot_manifests"]
+            if (not isinstance(initial, dict) or set(initial) != {"g0"}
+                    or not isinstance(snapshots, dict) or snapshots.get("g0") != initial["g0"]
+                    or not isinstance(on_disk["executions"], list)
+                    or record.replay_class != "local"
+                    or intent["call_id"] != (record.call_id if _PARALLEL_CALL_ID.fullmatch(record.call_id)
+                                              else "call_" + hashlib.sha256(record.call_id.encode()).hexdigest()[:40])
+                    or record.capability_digest != intent["policy_digest"]
+                    or record.definition_digest != request.digest()
+                    or record.pre_manifest_digest != admission.manifest_digest):
+                raise ValueError("live intent identity differs from the tape")
+            for key, digest in snapshots.items():
+                if (not isinstance(key, str) or not re.fullmatch(r"g[0-9]+", key)
+                        or not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest)):
+                    raise ValueError("live snapshot identity is invalid")
+                snapshot = artifact_root / "snapshots" / key
+                if snapshot.is_symlink() or snapshot.parent.is_symlink():
+                    raise ValueError("live snapshot is a symlink")
+                captured = _StartSnapshot(snapshot, int(key[1:]))
+                if (captured.snapshot_manifest_digest != digest
+                        or (key == "g0" and captured.manifest_digest != admission.manifest_digest)):
+                    raise ValueError("live snapshot differs from its recorded digest")
+        except (OSError, ValueError, TypeError, KeyError, ParallelError) as error:
+            raise ResumeRefused(f"parallel recovery live intent is damaged: {error}") from error
+        intent = on_disk
+    try:
+        from .engine.kernel_parallel_txn import (
+            TxnStore,
+            TxnStoreError,
+            inspect_recovery,
+        )
+    except ImportError as error:
+        raise ResumeRefused(f"parallel recovery support is unavailable: {error}") from error
+    try:
+        descriptor = inspect_recovery(artifact_root, intent)
+    except (OSError, TxnStoreError, ValueError) as error:
+        raise ResumeRefused(f"parallel recovery artifacts are damaged: {error}") from error
+    from .engine.kernel_parallel_admission import DirectorySnapshot
+    contracts = {item.id: item for item in request.units}
+    if len({item.unit_id for item in descriptor.executions}) != len(descriptor.executions):
+        raise ResumeRefused("subframe recovery has duplicate execution identities")
+    for execution in descriptor.executions:
+        expected = artifact_root / "units" / execution.unit_id
+        if (execution.unit_id not in ids or Path(execution.run_dir) != expected
+                or expected.is_symlink() or not expected.is_dir()):
+            raise ResumeRefused("subframe recovery execution path or identity is invalid")
+        path = expected / "unit-spec.json"
+        try:
+            if path.is_symlink():
+                raise ValueError("spec is a symlink")
+            unit_spec = UnitSpec.from_json(json.loads(path.read_text(encoding="utf-8")))
+            snapshot = artifact_root / "snapshots" / f"g{unit_spec.start_generation}"
+            if snapshot.is_symlink() or snapshot.parent.is_symlink():
+                raise ValueError("snapshot path is a symlink")
+            manifest = (_StartSnapshot(snapshot, unit_spec.start_generation).manifest_digest
+                        if live_intent else DirectorySnapshot(snapshot, unit_spec.start_generation).manifest_digest)
+        except (OSError, ValueError, ParallelRecordError, ParallelError) as error:
+            raise ResumeRefused(f"subframe recovery spec or snapshot is damaged: {error}") from error
+        if (unit_spec.digest() != execution.spec_digest or unit_spec.call_id != request.call_id
+                or unit_spec.unit_id != execution.unit_id
+                or unit_spec.execution_id != execution.execution_id
+                or unit_spec.contract.digest() != contracts[execution.unit_id].digest()
+                or unit_spec.policy_digest != intent["policy_digest"]
+                or unit_spec.limits != admission.limits
+                or unit_spec.admission_generation != admission.generation
+                or manifest != unit_spec.start_manifest_digest):
+            raise ResumeRefused("subframe recovery spec or start snapshot identity differs from intent")
+    for name in descriptor.proposals:
+        proposal_dir = artifact_root / "proposals" / name
+        proposal_path = proposal_dir / "proposal.json"
+        try:
+            if proposal_dir.is_symlink() or proposal_path.is_symlink():
+                raise ValueError("proposal path is a symlink")
+            proposal = Proposal.from_json(json.loads(proposal_path.read_text(encoding="utf-8")))
+            if proposal.call_id != request.call_id or proposal.unit_id != name or name not in ids:
+                raise ValueError("proposal identity differs from intent")
+            for entry in proposal.entries:
+                blob = proposal_dir / "blobs" / entry.after_sha256
+                if blob.is_symlink() or hashlib.sha256(blob.read_bytes()).hexdigest() != entry.after_sha256:
+                    raise ValueError(f"proposal blob is damaged: {entry.path}")
+            digest_path = proposal_dir / "digest.json"
+            if digest_path.exists() and json.loads(digest_path.read_text()).get("proposal_digest") != proposal.digest():
+                raise ValueError("proposal digest sidecar differs from proposal")
+        except (OSError, ValueError, ParallelRecordError) as error:
+            raise ResumeRefused(f"subframe recovery proposal is damaged: {error}") from error
+    try:
+        history = TxnStore(artifact_root / "txn")._read(repair=False)
+        for record, _, _ in history:
+            if record.unit_id not in ids or record.call_id != request.call_id:
+                raise ValueError("transaction identity differs from intent")
+            for digest in {record.pre_manifest_digest, *(entry.after_sha256 for entry in record.entries)}:
+                blob = artifact_root / "txn" / "blobs" / digest
+                if blob.is_symlink() or hashlib.sha256(blob.read_bytes()).hexdigest() != digest:
+                    raise ValueError(f"transaction blob is damaged: {digest}")
+    except (OSError, ValueError, TxnStoreError) as error:
+        raise ResumeRefused(f"subframe recovery transaction is damaged: {error}") from error
+    return descriptor.to_json()
+
+
+def _tool_safety(run: Path, spec: dict, *, replay_external: bool,
+                 parallel_pending: bool = False) -> list[dict[str, str]]:
     """Check the live tape and prior external effects before any attempt is archived."""
     try:
         tape = ToolTape(run)
@@ -293,7 +520,8 @@ def _tool_safety(run: Path, spec: dict, *, replay_external: bool) -> list[dict[s
         _reconcile_mutations(run, replay_external=replay_external)
         tape = ToolTape(run)
     pending = tape.pending()
-    if pending:
+    # A validated pending subframe call (parallel_pending) has its own recovery protocol.
+    if pending and not parallel_pending:
         calls = ", ".join(item.call_id for item in pending)
         raise ResumeRefused(f"operation {calls} may or may not have happened; reconcile and start a new run")
     resume_record = spec.get("resume")
@@ -485,7 +713,13 @@ def assess(run: Path, *, max_turns: int | None = None, model: str | None = None,
                                                 hooks_only=True)
     if terminal_refusal:
         raise ResumeRefused(terminal_refusal)
-    external = _tool_safety(run, spec, replay_external=True)
+    try:
+        pending = ToolTape(run).pending()
+    except (OSError, ValueError, ToolTapeError) as error:
+        raise ResumeRefused(f"tool tape is damaged: {error}") from error
+    parallel_recovery = _inspect_parallel_pending(run, pending) if pending else None
+    external = _tool_safety(run, spec, replay_external=True,
+                            parallel_pending=parallel_recovery is not None)
     if "hooks" in spec:
         from .hook_host import verify_resume_hooks
         try:
@@ -513,6 +747,18 @@ def assess(run: Path, *, max_turns: int | None = None, model: str | None = None,
         raise ResumeRefused(f"this run directory was moved: it was created at {original}, and its records "
                             f"use that path. Move it back to {original} (or copy it there) and resume from there")
 
+    blocked_dispatch = _blocked_dispatch_marker(run)
+    if blocked_dispatch is not None and status not in (None, "SUBFRAME_BLOCKED"):
+        raise ResumeRefused("subframe blocked dispatch conflicts with the terminal receipt")
+    if blocked_dispatch is not None and status == "SUBFRAME_BLOCKED" and (
+            terminal.get("reason_code") != blocked_dispatch["reason_code"]
+            or terminal.get("detail") != blocked_dispatch["detail"]):
+        raise ResumeRefused("subframe blocked terminal differs from its consumed dispatch")
+    if status == "SUBFRAME_BLOCKED" or blocked_dispatch is not None:
+        reason = terminal if status == "SUBFRAME_BLOCKED" else blocked_dispatch
+        raise ResumeRefused("this subframe run already finished blocked: "
+                            f"{reason.get('reason_code', 'UNKNOWN')} "
+                            f"({reason.get('detail', '')}); start a new run for more work")
     terminal_refusal = _terminal_resume_refusal(status, summary if isinstance(summary, dict) else {})
     if terminal_refusal:
         raise ResumeRefused(terminal_refusal)
@@ -551,16 +797,19 @@ def assess(run: Path, *, max_turns: int | None = None, model: str | None = None,
                             "this run cannot be resumed") from None
     attempts = sorted(int(p.name) for p in (run / "attempts").glob("[0-9]*") if p.name.isdigit()) \
         if (run / "attempts").is_dir() else []
-    return {"run": run, "spec": spec, "tape_count": len(tape), "previous_status": status,
-            "previous_error": terminal.get("error"), "max_turns": turns,
-            "external_operations": external,
-            "model_swap": model_swap_for(spec, model),
-            "attempt": (attempts[-1] if attempts else 0) + 1}
+    result = {"run": run, "spec": spec, "tape_count": len(tape), "previous_status": status,
+              "previous_error": terminal.get("error"), "max_turns": turns,
+              "external_operations": external,
+              "model_swap": model_swap_for(spec, model),
+              "attempt": (attempts[-1] if attempts else 0) + 1}
+    if parallel_recovery is not None:
+        result["parallel_recovery"] = parallel_recovery
+    return result
 
 
 def _record_checkpoint_refusal(root: Path, folder: Path, detail: str) -> None:
     """Keep preflight corruption visible after the run falls back to full replay."""
-    record = {"ts": round(datetime.now(timezone.utc).timestamp(), 3),
+    record = {"ts": round(datetime.now(UTC).timestamp(), 3),
               "event": "checkpoint_restore_refused", "source": str(folder), "detail": detail}
     try:
         with (root / "events.jsonl").open("a") as stream:
@@ -779,7 +1028,7 @@ def archive_attempt(state: dict[str, object], engine_dir: Path, *, use_checkpoin
     spec["resume"] = {"schema": replay_tape.SCHEMA, "attempt": number + 1,
                       "previous_attempt": str(source),
                       "previous_status": state.get("previous_status"),
-                      "resumed": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                      "resumed": datetime.now(UTC).isoformat(timespec="seconds"),
                       "tape": tape,
                       **({"pending": pending} if pending is not None else {}),
                       **({"pending_check": {"status": "skipped", "reason": skipped_reason}}
@@ -819,10 +1068,10 @@ def _compact_archived_checkpoints(root: Path) -> None:
     (root / "LATEST").unlink(missing_ok=True)
 
 
-def fresh_workcopy(run: Path, repo: Path) -> workcopy.WorkCopy:
+def fresh_workcopy(run: Path, repo: Path, *, preserve_symlinks: bool = False) -> workcopy.WorkCopy:
     """A new working copy of the start state, with the start-state hashes as its baseline."""
     parent = run / "parent"
-    shutil.copytree(parent, run / "workspace", symlinks=False)
+    shutil.copytree(parent, run / "workspace", symlinks=preserve_symlinks)
     baseline = {p.relative_to(parent).as_posix(): hashlib.sha256(p.read_bytes()).hexdigest()
                 for p in sorted(parent.rglob("*")) if p.is_file() and not p.is_symlink()}
     work = workcopy.WorkCopy(original=repo.resolve(), copy=run / "workspace", baseline=baseline,

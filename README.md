@@ -42,6 +42,26 @@ stateframe run --repo ~/code/shop \
 
 `structured_peek` handles CSV, TSV, JSON, JSONL, TOML and INI, and needs no network or write grant. The `authored` level also lets the model submit helpers for validation and smoke checks. Mutations are off by default. Public web fetches need `--mutation-network public-web` and `--shell-network full`; unit-proposed repository edits need `--mutation-write GLOB`. Mutation execution currently requires Linux. See the [mutation units guide](docs/guide/mutations.md) for the catalog, grants and sandbox limits.
 
+## Parallel subframes
+
+Use subframes when a task has separate pieces that change different files and each has a focused check. Set the mode
+with `stateframe run --repo <repo> --task "<task>" --parallel <off|auto|N>`. For example:
+
+```bash
+stateframe run --repo examples/parallel_fixes \
+  --task "Repair the pricing calculations and include tax in checkout." \
+  --parallel 2
+```
+
+`--parallel` accepts `off` (the default), `auto` to let the engine size concurrency, or a positive integer for the
+maximum concurrent subframes. Enabling it offers the `parallel` tool to the model; the model decides whether to split the
+work, so an enabled run can use zero subframes. `--parallel 1` allows only one subframe at a time.
+
+Each subframe is a fresh StateFrame run with inputs limited to its declared work. The parent verifies its proposal
+and commits accepted changes to the shared workspace before dependent work starts. Setup, checks, and competition
+for server prefill can make a run slower; subframes do not promise a general speedup. See the
+[subframes guide](docs/guide/subframes.md) for the contract, limits, result records, and recovery behavior.
+
 ## Coming next
 
 Upcoming, not in this release:
@@ -123,6 +143,7 @@ Set `STATEFRAME_REQUIREMENT_RECHECK=on` in the shell or a custom profile to get 
 - **Run commands:** foreground shell commands and read-only background jobs with bounded, budget-aware replies, per-run dependencies, protected-test restoration and replay verification. Execution sessions follow the engine lifetime, so a launch wrapper can exit without interrupting a live session and engine exit stops its jobs. See [agent tools](docs/guide/tools.md).
 - **Inspect and organize:** read sanitized Git history, fetch public documentation when enabled, and delete or move files within the task's edit scope. Explicitly trusted command tools can be supplied with `--tools`; local MCP stdio servers can be supplied with `--mcp`.
 - **Check its work:** run your tests, try code in a sandboxed probe, write and run its own checks, and read the check results.
+- **Split independent work:** the parent may use bounded subframes for disjoint file contracts, then verify and commit their proposals into its one authoritative state. See [subframes](docs/guide/subframes.md).
 - **Customize run boundaries:** use sandboxed hooks to add start context, guard admitted calls (including `skill_load` and MCP tools), inspect tool results, gate submissions and report final outcomes. See the [hooks guide](docs/guide/hooks.md).
 - **Finish:** a run counts as done only after its checks pass. The engine makes that call, not the model.
 - **Around that:** a map of your repository's code (12 languages, plus structure for HTML, CSS, JSON, TOML and YAML), an interactive chat with diff, undo and apply, resume after a stop, and inspect to see exactly what the model was sent.

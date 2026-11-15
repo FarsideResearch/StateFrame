@@ -232,7 +232,7 @@ def test_runner_drive_cleans_group_before_reaping_exited_leader(tmp_path, monkey
 
     monkeypatch.setattr(runner, "_stop_group", stop)
     options = SimpleNamespace(timeout_s=10, _deadline=None, python=sys.executable,
-                              shell_confirm=None, quiet=True)
+                              shell_confirm=None, quiet=True, parallel_mode="off")
     if survives:
         with pytest.raises(RuntimeError, match="engine survived process-group cleanup"):
             runner.drive(tmp_path, options)

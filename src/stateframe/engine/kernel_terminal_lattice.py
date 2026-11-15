@@ -10,6 +10,7 @@ import json
 import os
 import re
 from collections.abc import Mapping, Sequence
+from pathlib import Path
 
 
 MODE_ENV = "STATEFRAME_TERMINAL_LATTICE"
@@ -21,40 +22,42 @@ MAX_EVENT_TEXT = 100
 
 # Canonical stop labels are ranked by terminal strength. Same-rank labels remain
 # stable at their first observed value; evidence and certification are not ranked.
+# An authorized subframe block only outranks generic incomplete outcomes.
 STOP_REASON_RANKS = {
     "UNKNOWN": 0,
     "RUN_INCOMPLETE": 10,
-    "RUN_FAILED": 10,
-    "ATTEMPT_BUDGET_EXHAUSTED": 10,
-    "RESPONSE_BUDGET_EXHAUSTED": 10,
-    "TOOL_CALL_CAP": 10,
-    "TOOL_CALL_LOOP_BREAKER": 10,
-    "CONTEXT_OVERFLOW": 10,
-    "STOPPED_INCOMPLETE": 10,
-    "CONTINUATION_BLOCKED": 10,
-    "BLOCKED": 10,
-    "CANCELLED": 10,
-    "DEADLINE_EXCEEDED": 10,
-    "AUTHORITY_FAILURE": 10,
-    "HARNESS_ERROR": 10,
-    "ENVIRONMENT_BROKEN": 10,
-    "FINALIZATION_ERROR": 10,
-    "HARDEN8_CONTRACT_ERROR": 10,
-    "HARDEN8_EVIDENCE_PIN_ERROR": 10,
-    "HARDEN8_OWNER_FINALIZATION_ERROR": 10,
-    "HARDEN8_ROUTE_ERROR": 10,
-    "NO_CHANGES": 10,
-    "BOUNDED": 10,
-    "INVALIDATE_ATTEMPT": 10,
-    "STALLED": 10,
-    "CEILING_REACHED": 10,
-    "POSTGREEN_NO_PROGRESS": 10,
-    "EFFECT_BOUNDARY_SHADOW": 10,
-    "COMPLETION_OWNER_EXHAUSTED": 10,
-    "CONTINUATION_INCOMPLETE": 10,
-    "POST_GREEN_STALL": 10,
-    "QUARANTINE_HARNESS": 10,
-    "STEP_BUDGET_EXHAUSTED": 10,
+    "RUN_FAILED": 20,
+    "ATTEMPT_BUDGET_EXHAUSTED": 20,
+    "RESPONSE_BUDGET_EXHAUSTED": 20,
+    "TOOL_CALL_CAP": 20,
+    "TOOL_CALL_LOOP_BREAKER": 20,
+    "CONTEXT_OVERFLOW": 20,
+    "STOPPED_INCOMPLETE": 20,
+    "CONTINUATION_BLOCKED": 20,
+    "BLOCKED": 20,
+    "SUBFRAME_BLOCKED": 15,
+    "CANCELLED": 20,
+    "DEADLINE_EXCEEDED": 20,
+    "AUTHORITY_FAILURE": 20,
+    "HARNESS_ERROR": 20,
+    "ENVIRONMENT_BROKEN": 20,
+    "FINALIZATION_ERROR": 20,
+    "HARDEN8_CONTRACT_ERROR": 20,
+    "HARDEN8_EVIDENCE_PIN_ERROR": 20,
+    "HARDEN8_OWNER_FINALIZATION_ERROR": 20,
+    "HARDEN8_ROUTE_ERROR": 20,
+    "NO_CHANGES": 20,
+    "BOUNDED": 20,
+    "INVALIDATE_ATTEMPT": 20,
+    "STALLED": 20,
+    "CEILING_REACHED": 20,
+    "POSTGREEN_NO_PROGRESS": 20,
+    "EFFECT_BOUNDARY_SHADOW": 20,
+    "COMPLETION_OWNER_EXHAUSTED": 20,
+    "CONTINUATION_INCOMPLETE": 20,
+    "POST_GREEN_STALL": 20,
+    "QUARANTINE_HARNESS": 20,
+    "STEP_BUDGET_EXHAUSTED": 20,
     "HOOK_BLOCKED": 25,
     "HOOK_CONTAINMENT": 25,
     "UNCERTIFIED_SUBMIT": 20,
@@ -98,6 +101,8 @@ STOP_REASON_ALIASES = {
     "CONTEXT_OVERFLOW": "CONTEXT_OVERFLOW",
     "CONTINUATION_BLOCKED": "CONTINUATION_BLOCKED",
     "BLOCKED": "BLOCKED",
+    "UNIT_BLOCKED": "SUBFRAME_BLOCKED",
+    "SUBFRAME_BLOCKED": "SUBFRAME_BLOCKED",
     "NEEDS_WORK": "RUN_INCOMPLETE",
     "RED": "RUN_FAILED",
     "CANCELLED": "CANCELLED",
@@ -139,6 +144,9 @@ _UNPROVEN_ACCEPTANCE_IDS = frozenset({
     "DONE_FACTS_REJECTED",
     "DONE_FACTS_ACCEPTANCE_UNKNOWN",
 })
+_SUBFRAME_BLOCKED_LABELS = frozenset({"UNIT_BLOCKED", "SUBFRAME_BLOCKED"})
+_JOIN_AUTHORITY_KEY = "_terminal_lattice_join_authority"
+_JOIN_SUBFRAME_AUTHORITY = object()
 _TOKEN_RE = re.compile(r"[^A-Za-z0-9_.:-]+")
 
 
@@ -158,6 +166,39 @@ def enabled(runtime: object = None) -> bool:
     return mode(configured) == "on" if configured is not None else mode() == "on"
 
 
+def subframe_block_authorized(runtime: object) -> bool:
+    """Verify the consumed dispatch marker before accepting subframe terminals."""
+    try:
+        if getattr(runtime, "_unit_policy", None) is None:
+            return False
+        dispatch_id = getattr(runtime, "current_tool_call_id", None)
+        reason = getattr(runtime, "unit_blocked_reason", None)
+        detail = getattr(runtime, "unit_blocked_detail", None)
+        if (not isinstance(dispatch_id, str) or not dispatch_id
+                or getattr(runtime, "_subframe_block_dispatch_consumed", None) != dispatch_id
+                or not isinstance(reason, str) or not reason
+                or not isinstance(detail, str) or len(detail) > 300):
+            return False
+        journal_path = getattr(getattr(runtime, "journal", None), "path", None)
+        if journal_path is None:
+            return False
+        marker = Path(journal_path).parent / "subframe-blocked.json"
+        if marker.is_symlink() or not marker.is_file() or marker.stat().st_size > 1024:
+            return False
+        with marker.open("rb") as handle:
+            encoded = handle.read(1025)
+        if len(encoded) > 1024:
+            return False
+        payload = json.loads(encoded.decode("utf-8"))
+        return payload == {
+            "dispatch_id": dispatch_id,
+            "reason_code": reason,
+            "detail": detail,
+        }
+    except (OSError, TypeError, ValueError, UnicodeError, AttributeError):
+        return False
+
+
 def _text(value: object) -> str:
     return value.strip() if isinstance(value, str) else ""
 
@@ -166,9 +207,11 @@ def _normalise(value: object) -> str:
     return _text(value).upper().replace("-", "_").replace(" ", "_")
 
 
-def stop_reason_rank(value: object) -> int:
+def stop_reason_rank(value: object, *, allow_subframe_block: bool = False) -> int:
     """Return the explicit terminal rank for a stop reason or writer alias."""
     normalized = _normalise(value)
+    if normalized in _SUBFRAME_BLOCKED_LABELS and not allow_subframe_block:
+        return STOP_REASON_RANKS["UNKNOWN"]
     canonical = STOP_REASON_ALIASES.get(normalized)
     if canonical is None and normalized.startswith("HARDEN8_"):
         # Hardening failures are stop labels, never successful submissions.
@@ -210,7 +253,7 @@ def _statuses(value: object) -> dict[str, str]:
     return result
 
 
-def _facts(value: object) -> dict[str, object]:
+def _facts(value: object, *, allow_subframe_block: bool = False) -> dict[str, object]:
     if not isinstance(value, Mapping):
         return {
             "accepted": None, "delivery": None, "artifact": None,
@@ -242,8 +285,15 @@ def _facts(value: object) -> dict[str, object]:
             label = _text(source.get(key))
             if label:
                 statuses.setdefault(key, label)
+                reason_label = (
+                    "BLOCKED"
+                    if allow_subframe_block and key == "system_outcome"
+                    and _normalise(label) == "UNIT_BLOCKED"
+                    else label
+                )
                 reasons.append((
-                    stop_reason_rank(label), reason_priority[key], -reason_order, label,
+                    stop_reason_rank(label, allow_subframe_block=allow_subframe_block),
+                    reason_priority[key], -reason_order, reason_label,
                 ))
                 reason_order += 1
         digest = _text(source.get("artifact_digest"))
@@ -285,6 +335,8 @@ def _remember_digest(
 def _prior_facts(
     runtime: object,
     explicit_previous: object,
+    *,
+    allow_subframe_block: bool,
 ) -> tuple[dict[str, object], Mapping[str, object] | None, tuple[str, ...]]:
     try:
         state = getattr(runtime, "_terminal_lattice_state", None) if runtime is not None else None
@@ -328,11 +380,11 @@ def _prior_facts(
                     if facts[key] != STORED:
                         facts[key] = value[key]
             label = _text(value.get("stop_reason"))
-            rank = stop_reason_rank(label)
+            rank = stop_reason_rank(label, allow_subframe_block=allow_subframe_block)
             if rank > int(facts["stop_rank"]):
                 facts["stop_reason"], facts["stop_rank"] = label, rank
             continue
-        candidate = _facts(value)
+        candidate = _facts(value, allow_subframe_block=allow_subframe_block)
         if candidate["accepted"] is True:
             facts["accepted"] = True
         elif candidate["accepted"] is False and facts["accepted"] is None:
@@ -406,8 +458,10 @@ def _join_fields(
     candidate: Mapping[str, object],
     previous: Mapping[str, object],
 ) -> tuple[dict[str, object], list[tuple[object, object]]]:
+    """Join two projections while preserving the established two-argument seam."""
+    allow_subframe_block = previous.get(_JOIN_AUTHORITY_KEY) is _JOIN_SUBFRAME_AUTHORITY
     joined: dict[str, object] = dict(candidate)
-    current = _facts(candidate)
+    current = _facts(candidate, allow_subframe_block=allow_subframe_block)
     refusals: list[tuple[object, object]] = []
 
     if current["accepted"] is True:
@@ -425,13 +479,16 @@ def _join_fields(
         current["accepted"] is True
         or candidate_stop_rank >= STOP_REASON_RANKS["UNCERTIFIED_SUBMIT"]
     ):
-        if stop_reason_rank(_text(joined.get("stop_reason"))) < candidate_stop_rank:
+        if stop_reason_rank(
+                _text(joined.get("stop_reason")),
+                allow_subframe_block=allow_subframe_block) < candidate_stop_rank:
             joined["stop_reason"] = current_reason
         for key in _STATUS_KEYS:
             if key == "stop_reason":
                 continue
             value = _text(joined.get(key))
-            if value and stop_reason_rank(value) < candidate_stop_rank:
+            if value and stop_reason_rank(
+                    value, allow_subframe_block=allow_subframe_block) < candidate_stop_rank:
                 refusals.append((current_reason, value))
                 joined[key] = current_reason
 
@@ -455,9 +512,11 @@ def _join_fields(
     if isinstance(previous_statuses, Mapping):
         for key in _STATUS_KEYS:
             current_value = _text(joined.get(key))
-            current_rank = stop_reason_rank(current_value)
+            current_rank = stop_reason_rank(
+                current_value, allow_subframe_block=allow_subframe_block)
             old_value = _text(previous_statuses.get(key))
-            old_rank = stop_reason_rank(old_value)
+            old_rank = stop_reason_rank(
+                old_value, allow_subframe_block=allow_subframe_block)
             if old_value and current_value and old_rank > current_rank:
                 if key in {"result", "outcome", "result_class", "status",
                            "terminal_status", "stop_cause", "system_outcome"}:
@@ -468,7 +527,8 @@ def _join_fields(
     if prior_rank > candidate_stop_rank and prior_reason:
         for key in _STATUS_KEYS:
             current_value = _text(joined.get(key))
-            if not current_value or stop_reason_rank(current_value) >= prior_rank:
+            if (not current_value or stop_reason_rank(
+                    current_value, allow_subframe_block=allow_subframe_block) >= prior_rank):
                 continue
             old_value = (
                 _text(previous_statuses.get(key))
@@ -476,7 +536,8 @@ def _join_fields(
             )
             joined[key] = (
                 old_value
-                if old_value and stop_reason_rank(old_value) >= prior_rank
+                if old_value and stop_reason_rank(
+                    old_value, allow_subframe_block=allow_subframe_block) >= prior_rank
                 else prior_reason
             )
 
@@ -505,13 +566,20 @@ def _join_terminal_impl(
     if not enabled(runtime):
         return candidate if isinstance(candidate, dict) else dict(candidate)
 
-    prior, prior_receipt, prior_digests = _prior_facts(runtime, previous)
-    joined, refusals = _join_fields(candidate, prior)
+    allow_subframe_block = subframe_block_authorized(runtime)
+    prior, prior_receipt, prior_digests = _prior_facts(
+        runtime, previous, allow_subframe_block=allow_subframe_block,
+    )
+    join_previous = prior
+    if allow_subframe_block:
+        join_previous = dict(prior)
+        join_previous[_JOIN_AUTHORITY_KEY] = _JOIN_SUBFRAME_AUTHORITY
+    joined, refusals = _join_fields(candidate, join_previous)
 
     current_receipt = _receipt(candidate)
     receipt_output: Mapping[str, object] | None = None
     if current_receipt is not None and current_receipt is not candidate:
-        receipt_joined, receipt_refusals = _join_fields(current_receipt, prior)
+        receipt_joined, receipt_refusals = _join_fields(current_receipt, join_previous)
         refusals.extend(receipt_refusals)
         receipt_digest = _digest_receipt(receipt_joined)
         if _text(receipt_joined.get("receipt_digest")) != receipt_digest:
@@ -531,12 +599,14 @@ def _join_terminal_impl(
     except Exception:
         system_outcome = ""
     if ("system_outcome" not in candidate and system_outcome
-            and stop_reason_rank(system_outcome) < int(prior.get("stop_rank", 0) or 0)):
+            and stop_reason_rank(
+                system_outcome, allow_subframe_block=allow_subframe_block
+            ) < int(prior.get("stop_rank", 0) or 0)):
         refusals.append((prior.get("stop_reason", "UNKNOWN"), system_outcome))
     for old, new in refusals[:16]:
         _emit_refusal(runtime, old, new, writer)
 
-    final_facts = _facts(joined)
+    final_facts = _facts(joined, allow_subframe_block=allow_subframe_block)
     acceptance_unproven = _has_unproven_acceptance(joined)
     final_digest = _text(final_facts.get("artifact_digest"))
     observed_digests = list(prior_digests)
@@ -580,7 +650,9 @@ def _join_terminal_impl(
             setattr(runtime, "_terminal_disposition_receipt", dict(receipt_output))
         system_outcome = _text(getattr(runtime, "system_outcome", None))
         prior_reason = _text(state.get("stop_reason"))
-        if system_outcome and stop_reason_rank(system_outcome) < int(state["stop_rank"]):
+        if (system_outcome and stop_reason_rank(
+                system_outcome, allow_subframe_block=allow_subframe_block
+        ) < int(state["stop_rank"])):
             setattr(runtime, "system_outcome", prior_reason)
     except Exception:
         # Host objects may be immutable in adapters; returning the joined result
