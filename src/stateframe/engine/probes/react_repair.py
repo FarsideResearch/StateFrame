@@ -11207,12 +11207,12 @@ def work(d, *, resume=None):
                 except Exception:                                  # noqa: BLE001
                     pass
                 # Post-run boundary, not a request path. The reason row lands in problems.jsonl.
+                # journal=False: journal positions are identity-bearing, so no reason_logged event is added.
                 # record_fault never raises, and its result does not change the outcome returned below.
                 _err_message = str(e)[:600] or (_err_trace.strip().splitlines() or [""])[-1][:600]
                 from kernel_fault_disposition import record_fault
                 record_fault("react_repair.run_exception", e, disposition="boundary",
-                             observed_at="react_repair.run",
-                             journal=getattr(measurement, "journal", None))
+                             observed_at="react_repair.run", journal=False)
                 finish_native_batch_transcript(msgs)
                 _reported_edits, _reported_checks = _reported_progress_counts(locals())
                 from kernel_read_receipts import finish_pending

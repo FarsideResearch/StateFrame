@@ -1364,6 +1364,23 @@ def register_host_state(*, required: bool, secret: str = "") -> None:
         kernel_checkpoint.register_secret(secret)
 
 
+def _error_fields(error: BaseException) -> dict[str, str]:
+    """error_type/error_message for an engine terminal receipt. Empty when the exception has no text.
+
+    The message is whitespace-normalized and capped at 600 characters, matching the engine-result envelope.
+    outcomes.engine_error_reason reads these to name the cause.
+    """
+    message = " ".join(str(error).split())[:600]
+    if not message:
+        return {}
+    return {"error_type": type(error).__name__, "error_message": message}
+
+
+def _engine_error_terminal(kind: str, error: BaseException) -> dict[str, object]:
+    """Terminal receipt for an ENGINE_ERROR crash: the exception class plus its message when it has one."""
+    return {"result": kind, "error": type(error).__name__, **_error_fields(error)}
+
+
 def _finish_mutation_runtime(mutation_runtime, result: dict, status: int, emit_event):
     """Finish an enabled mutation runtime without turning host refusal into run failure."""
     try:
@@ -1377,7 +1394,8 @@ def _finish_mutation_runtime(mutation_runtime, result: dict, status: int, emit_e
             emit_event("mutation_refused", code=code, detail=str(error)[:300])
         else:
             emit_event("engine_error", error=type(error).__name__, detail=str(error)[:300])
-            result, status = {"result": "MUTATION_CONTAINMENT", "error": str(error)[:300]}, 1
+            result, status = {"result": "MUTATION_CONTAINMENT", "error": str(error)[:300],
+                              **_error_fields(error)}, 1
     return result, status
 
 
@@ -1706,7 +1724,8 @@ def main(argv: list[str]) -> int:
                 "HOOK_CONTAINMENT" if hook_containment else "ENGINE_ERROR")
         emit("recovery_required" if recovery_required else "engine_error",
              error=type(error).__name__, detail=" ".join(str(error).split())[:300])
-        result = {"result": kind, "error": type(error).__name__}
+        result = (_engine_error_terminal(kind, error) if kind == "ENGINE_ERROR"
+                  else {"result": kind, "error": type(error).__name__})
         if recovery_required:
             result["reason_code"] = "RECOVERY_REQUIRED"
             result["error_message"] = " ".join(str(error).split())[:300]

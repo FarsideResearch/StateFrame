@@ -14,6 +14,8 @@ INCOMPLETE = {"RUN_INCOMPLETE", "STOPPED_INCOMPLETE", "TEST_REPORTED_WRONG"}
 # The engine could not build/seal its next request (a harness contract or finalization failure): an engine
 # error with a named reason, never a silently "missing" result.
 SEAL_FAILURES = {"HARNESS_CONTRACT", "FINALIZATION_ERROR"}
+# Non-seal engine failures whose child terminal may carry error_type/error_message (see _child.py).
+ENGINE_FAILURES_WITH_MESSAGE = {"ENGINE_ERROR", "MUTATION_CONTAINMENT"}
 
 
 RECOVERED_FROM_JOURNAL = "recovered_from_journal"
@@ -263,13 +265,19 @@ def resume_hint_applies(summary: dict[str, object]) -> bool:
                                               "recovery_required"):
         return False
     terminal = summary.get("engine_terminal") or {}
-    return not (summary.get("engine_error_reason") and terminal.get("result") in SEAL_FAILURES)
+    result = terminal.get("result")
+    if isinstance(result, str) and result.startswith("ERR:"):
+        return True
+    # Everything else keeps the pre-existing rule. A reason on a stopped run (seal failure, or a
+    # ReplayUnfaithful/CheckpointUnfaithful copied from engine.log) means the resume would repeat it.
+    return not summary.get("engine_error_reason")
 
 
 def engine_error_reason(summary: dict[str, object]) -> str | None:
     """One readable line for an engine failure, from the engine's own terminal receipt.
 
     ERR:* outcomes name the exception class and message. Seal/finalization failures keep their own wording.
+    ENGINE_ERROR and MUTATION_CONTAINMENT name the class and message only when the child recorded a message.
     """
     terminal = summary.get("engine_terminal") or {}
     result = terminal.get("result")
@@ -278,6 +286,16 @@ def engine_error_reason(summary: dict[str, object]) -> str | None:
         if not message:
             return f"engine error: {result}"
         error_type = str(terminal.get("error_type") or result[len("ERR:"):])
+        return f"engine error: {error_type}: {message}"
+    if result in ENGINE_FAILURES_WITH_MESSAGE:
+        # A reason already copied from engine.log (ReplayUnfaithful guidance) is the actionable one: keep it.
+        existing = summary.get("engine_error_reason")
+        if isinstance(existing, str) and existing:
+            return existing
+        message = str(terminal.get("error_message") or "").strip()
+        if not message:
+            return None
+        error_type = str(terminal.get("error_type") or terminal.get("error") or result)
         return f"engine error: {error_type}: {message}"
     if result not in SEAL_FAILURES:
         return None
