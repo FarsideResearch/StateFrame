@@ -1,6 +1,7 @@
 """Exact range pins are dropped only when their bytes are delivered in the same request."""
 from __future__ import annotations
 
+import copy
 import hashlib
 from pathlib import Path
 from types import SimpleNamespace
@@ -92,3 +93,61 @@ def test_pin_for_current_revision_is_kept_by_the_unbacked_rule() -> None:
     capacity.drop_unbacked_range_pins(ledger, messages)
 
     assert ledger["reads"][0]["pinned_range"] == "alpha\nbeta\ngamma\n"
+
+
+def _frame_with(row: dict[str, object]) -> dict[str, object]:
+    """Minimal frame-only state carrying one read receipt (no same_request row yet)."""
+    from kernel_stateframe_framefit5 import PRODUCT_MODE
+
+    return {"mode": PRODUCT_MODE, "action_ledger": {
+        "schema": "stateframe-action-ledger/1", "reads": [row], "edits": [],
+        "unclassified_actions": [], "superseded_test_count": 0, "applied_edits": [],
+        "last_test": None,
+    }}
+
+
+def _state_message(frame: dict[str, object]) -> dict[str, object]:
+    from kernel_stateframe_framefit5 import _serialize_state_message
+
+    return {"role": "user", "content": _serialize_state_message({"state": {"framefit5": frame}})}
+
+
+def _frame_of(message: dict[str, object]) -> dict[str, object]:
+    return json.loads(str(message["content"]).split("\n", 1)[1])["state"]["framefit5"]
+
+
+def test_allocator_on_refresh_converts_delivered_pin_without_prior_receipt(monkeypatch) -> None:
+    """RED (fu070 red 2): a delivered current-revision pin with no same_request row must convert.
+
+    Otherwise the wire frame keeps pinned_range while the validator projection converts it,
+    and every replacement request fails the ledger comparison.
+    """
+    monkeypatch.setenv("STATEFRAME_WORKING_SET_ALLOCATOR", "on")
+    source = "alpha\nbeta\ngamma\n"
+    site = _site("pkg/reader.py", source)
+    row = _pinned_row(site, source, 1, 3)
+    message = _state_message(_frame_with(row))
+    messages = [{"role": "user", "content": _window(site, source, 1, 3)["content"]}, message]
+
+    expected = copy.deepcopy(_frame_of(message)["action_ledger"])
+    capacity.drop_delivered_range_pins(expected, messages, {})
+    capacity.refresh_read_ranges(messages, {})
+    actual = _frame_of(message)["action_ledger"]
+
+    assert actual == expected
+    assert "pinned_range" not in actual["reads"][0]
+    assert actual["reads"][0]["range_delivery"] == "same_request"
+
+
+def test_allocator_off_refresh_leaves_frame_byte_identical(monkeypatch) -> None:
+    """Allocator OFF keeps the pre-FU-070 wire: the same delivered pin is not rewritten."""
+    monkeypatch.delenv("STATEFRAME_WORKING_SET_ALLOCATOR", raising=False)
+    source = "alpha\nbeta\ngamma\n"
+    site = _site("pkg/reader.py", source)
+    message = _state_message(_frame_with(_pinned_row(site, source, 1, 3)))
+    before = str(message["content"])
+    messages = [{"role": "user", "content": _window(site, source, 1, 3)["content"]}, message]
+
+    capacity.refresh_read_ranges(messages, {})
+
+    assert message["content"] == before

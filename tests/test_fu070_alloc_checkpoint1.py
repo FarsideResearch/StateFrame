@@ -283,7 +283,6 @@ def _edit_first_then_read_steps() -> list[dict[str, object]]:
                       required=False)]
 
 
-@pytest.mark.xfail(strict=True, reason="FU-070-ALLOC: post-edit child request fails frame-only preflight seal (crew-01)")
 def test_edit_admitted_when_first_request_carries_full_file(
         tmp_path: Path, isolated_engine_python: Path) -> None:
     run_dir, endpoint = _run(tmp_path, isolated_engine_python,

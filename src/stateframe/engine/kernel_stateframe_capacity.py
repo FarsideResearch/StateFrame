@@ -433,6 +433,16 @@ def refresh_read_ranges(messages: list[dict[str, object]],
         ledger = frame.get("action_ledger")
         reads = ledger.get("reads") if isinstance(ledger, Mapping) else None
         original = copy.deepcopy(frame)
+        # Allocator-on: apply the same delivery rule the allocation validator
+        # projects with, so a pin this request delivers converts even before any
+        # same_request row exists. An unconverted wire frame fails the validator's
+        # ledger comparison (fu070 red 2).
+        from kernel_read_receipts import enabled as allocator_enabled
+
+        if allocator_enabled() and isinstance(reads, list):
+            from kernel_cache_layout_view import semantic_messages
+
+            drop_delivered_range_pins(ledger, semantic_messages(messages), frame)
         has_same_request_receipt = isinstance(reads, list) and any(
             isinstance(row, Mapping) and row.get("range_delivery") == "same_request"
             for row in reads
