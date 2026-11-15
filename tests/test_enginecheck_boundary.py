@@ -41,7 +41,6 @@ _ENGINE_FINDINGS: dict[str, tuple[str, str]] = {
         "wire string hygiene",
         "exit 2: engine could not seal request 2: serialized request failed wire string hygiene (HARNESS_CONTRACT)",
     ),
-    "long_line": ("ENGINE_ERROR", "exit 2: engine_result ENGINE_ERROR, error RuntimeError (child exit 1)"),
 }
 
 
