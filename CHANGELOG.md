@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Tests: adds the `tests/enginecheck` harness library (scripted-session adapter, proof integrity, boundary inputs, wire prefix stability, feature composition, race-seed registry and CLI, resume equivalence). Known engine defects it finds are pinned as strict xfails.
 ## 0.7.7 (2026-11-15)
 
 - Fixed: final request validation accepts the delivery-truth "not shown" next-site notice, so a run no longer stops with FrameFit5Error "typed next-site receipt is incomplete: current_bytes".
