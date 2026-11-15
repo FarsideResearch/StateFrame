@@ -15,7 +15,7 @@ sys.path.insert(0, str(_TEST_ROOT / "tests" / "fixtures" / "parallel"))
 from _journal import measurement_events
 from barrier_endpoint import BarrierEndpoint
 from e2e_support import (
-    create_engine_venv, install_startup_hook, run_cli, subframe_directories, tool_step,
+    create_engine_venv, run_cli, subframe_directories, tool_step,
 )
 
 
@@ -26,29 +26,6 @@ pytestmark = pytest.mark.host_sandbox
 def isolated_engine_python(tmp_path_factory: pytest.TempPathFactory) -> Path:
     """Reuse the existing real-child venv builder from the parallel E2E harness."""
     return create_engine_venv(tmp_path_factory.mktemp("fu070-parallel-engine") / "venv")
-
-_ALLOCATOR_TEST_HOOK = '''
-"""Test-only seam that re-enables the worker allocator after worker prep."""
-import json
-import os
-
-if os.environ.get("FU070_ALLOCATOR_TEST") == "on":
-    from stateframe import parallel_worker
-    _prepare_worker = parallel_worker.prepare_worker
-
-    def _prepare_with_allocator(*args, **kwargs):
-        result = _prepare_worker(*args, **kwargs)
-        # prepare_worker(spec, spec_path, run_dir, ...) records the worker spec at run_dir/spec.json.
-        spec_path = args[2] / "spec.json"
-        spec = json.loads(spec_path.read_text(encoding="utf-8"))
-        spec["environment"]["STATEFRAME_WORKING_SET_ALLOCATOR"] = "on"
-        spec["environment_sources"]["STATEFRAME_WORKING_SET_ALLOCATOR"] = "test:fu070-alloc"
-        spec_path.write_text(json.dumps(spec, sort_keys=True, separators=(",", ":")) + "\\n",
-                             encoding="utf-8")
-        return result
-
-    parallel_worker.prepare_worker = _prepare_with_allocator
-'''
 
 
 def _unit(path: str) -> dict[str, object]:
@@ -83,7 +60,6 @@ def _prepare(tmp_path: Path, isolated_engine_python: Path, *, line_count: int = 
         child_steps = [tool_step("done", {"summary": "The full source was available."},
                                  required=False)]
     endpoint = BarrierEndpoint(parent, {"large_source": child_steps}, slots=2)
-    install_startup_hook(isolated_engine_python, "fu070_allocator_test_hook", _ALLOCATOR_TEST_HOOK)
     return repo, endpoint, run_dir
 
 
@@ -105,7 +81,7 @@ def _run(tmp_path: Path, isolated_engine_python: Path, *,
             "Inspect the owned source with one subframe.", parallel="2",
             arguments=("--parallel-min-subframes", "1",
                        "--parallel-max-owned-bytes", "100000"),
-            extra_environment={"FU070_ALLOCATOR_TEST": "on"}, timeout=600,
+            extra_environment={"STATEFRAME_WORKING_SET_ALLOCATOR": "on"}, timeout=600,
         )
     assert completed.returncode == 0, completed.stdout + completed.stderr
     specs = list((run_dir / "parallel").glob("*/units/large_source/spec.json"))
@@ -282,7 +258,7 @@ def test_oversized_owned_file_refused_with_typed_capacity_and_zero_calls(
             "Inspect the owned source with one subframe.", parallel="2",
             arguments=("--parallel-min-subframes", "1",
                        "--parallel-max-owned-bytes", "10000000"),
-            extra_environment={"FU070_ALLOCATOR_TEST": "on",
+            extra_environment={"STATEFRAME_WORKING_SET_ALLOCATOR": "on",
                                "STATEFRAME_CONTEXT_TOKENS": "32768"},
             timeout=600,
         )
