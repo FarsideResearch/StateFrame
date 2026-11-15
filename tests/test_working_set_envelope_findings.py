@@ -1,4 +1,4 @@
-"""Astra round 2: early selection, reducible floors and shared-carrier bounds."""
+"""Review round 2: early selection, reducible floors and shared-carrier bounds."""
 import copy
 import itertools
 import json
@@ -71,7 +71,7 @@ def test_off_pretrim_matches_pinned_base_bytes(tmp_path, monkeypatch):
     root = Path(__file__).resolve().parents[1]
     original = subprocess.check_output(["git", "show",
         "56af0dc6d6:src/stateframe/engine/kernel_request_budget.py"], cwd=root)
-    baseline = ModuleType("_astra_budget_base")
+    baseline = ModuleType("_review_budget_base")
     baseline.__file__ = str(root / "src/stateframe/engine/kernel_request_budget.py")
     monkeypatch.setitem(sys.modules, baseline.__name__, baseline)
     # Execute only the pinned local baseline for byte-parity comparison.

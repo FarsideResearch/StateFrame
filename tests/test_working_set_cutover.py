@@ -183,7 +183,7 @@ def test_on_real_qualified_hook_sends_certified_wire(tmp_path, monkeypatch):
 
 @pytest.mark.parametrize("reference", ['56af0dc6d6', 'd7fd3aad93'])
 def test_off_complete_request_bytes_match_1de34aa4(tmp_path, tmp_path_factory, reference):
-    from test_working_set_astra_off_parity import test_off_provider_bytes_match_cutover_base
+    from test_working_set_off_parity_base import test_off_provider_bytes_match_cutover_base
 
     test_off_provider_bytes_match_cutover_base(tmp_path, tmp_path_factory, reference)
 
@@ -371,7 +371,7 @@ def test_admitted_reads_reach_real_qualified_hook(hook, tmp_path, monkeypatch, c
 
 
 def _assert_context_health(prepared, runtime, monkeypatch):
-    """Use crew-14's independent oracle when running the coordinated gate."""
+    """Use the independent context-alarm oracle when running the coordinated gate."""
     import importlib.util
     reference = os.environ.get("SF_TEST_CONTEXT_ALARM_SOURCE")
     if reference:
@@ -384,7 +384,7 @@ def _assert_context_health(prepared, runtime, monkeypatch):
         try:
             import kernel_context_alarm as alarm
         except ImportError:
-            return  # crew-14 is independently shipped; source/cursor assertions above always run
+            return  # the context alarm ships independently; source/cursor assertions above always run
     captures = runtime.read_capture_ledger.all()
     receipts = [capture.receipt() for capture in captures]
     index = alarm.index_request(prepared.wire)

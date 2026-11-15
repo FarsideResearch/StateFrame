@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.7.2 (2026-11-15)
+
+- Tests: neutral wording in test docstrings and module names; recorded-wire tests read STATEFRAME_RECORDED_WIRE and skip when it is unset.
+
 ## 0.7.1 (2026-11-15)
 
 - Docs: the README opens the subframes section with subframes as a fork-join replacement for sub-agents, and the mutations section with what mutations did in our tests; the subframes guide describes the fork-join model. KNOWN_LIMITATIONS.md is audited against 0.7.0: stale "fix in progress" and "fix planned" notes for line endings and stable wire are removed, the coalesce escalation outcome name, the resume-after-upgrade rule and the mutation platform note are corrected, a retired error name is dropped, the 0.6.44 large-repo fallback scope, the `--timeout` finalize reserve and the `CONTEXT_TOO_SMALL` result are added, and a new entry notes the `parallel` tool schema mismatch in 0.7.0 and 0.7.1.

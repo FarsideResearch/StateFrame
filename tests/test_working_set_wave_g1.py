@@ -252,7 +252,7 @@ def test_real_capture_edit_prepare_and_adoption_without_reread(tmp_path):
 def test_real_overflow_freezes_every_capture_and_retires_on_acceptance(tmp_path, monkeypatch):
     from kernel_working_set_snapshot import freeze_preparation
     from test_read_receipts import runtime as disk_runtime
-    from test_working_set_astra_reserve import add_capture, candidate
+    from test_working_set_reserve_replenish import add_capture, candidate
 
     # Exercise real blobs and certificates with a small reserve; the full-size
     # reducer regression above covers the shipped 256-identity boundary.

@@ -1,6 +1,7 @@
 """A1b read-time admission at the read boundary (K1/K2), OFF parity and journal shape."""
 from __future__ import annotations
 
+import os
 import json
 import re
 from pathlib import Path
@@ -266,7 +267,7 @@ def test_sealed_request_measurement_wins_over_messages_estimate(tmp_path):
 
 
 def test_recorded_wire_envelope_is_measured_not_guessed():
-    wire_path = Path("/home/mike/crew-lanes/tmp/crew-01/ret/r38g/run/wire/0020.request.json")
+    wire_path = Path(os.environ.get("STATEFRAME_RECORDED_WIRE") or "/nonexistent/recorded-wire.json")
     if not wire_path.exists():
         pytest.skip("recorded wire not present")
     import json

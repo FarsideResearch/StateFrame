@@ -1,4 +1,4 @@
-"""I-6 integration contract for crew-11; NO HOOK PRESENT in this base tree.
+"""I-6 integration contract for the view ladder; NO HOOK PRESENT in this base tree.
 
 When a production view ladder is merged, its entry point must consult
 kernel_read_receipts.enabled(), whose switch is STATEFRAME_WORKING_SET_ALLOCATOR.

@@ -236,7 +236,7 @@ REAL_INDEX_ENV = "SF_REAL_CROSSFILE_INDEX_DIR"
 
 
 def index_class():
-    """The fake by default; crew-02's real CrossFileIndex when REAL_INDEX_ENV names its dir."""
+    """The fake by default; the real CrossFileIndex when REAL_INDEX_ENV names its dir."""
     real_dir = os.environ.get(REAL_INDEX_ENV)
     if not real_dir:
         return FakeCrossFileIndex

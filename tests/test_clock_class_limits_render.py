@@ -17,7 +17,7 @@ from stateframe import replay_tape, resume
 
 @pytest.mark.parametrize("ledger_type", (ResponseBudget, ContinuationLimits))
 def test_limits_line_is_identical_under_two_clocks(monkeypatch, ledger_type):
-    """Repro of crew-07's egress diff: the same ledger rendered later must not change a byte."""
+    """Repro of the egress diff: the same ledger rendered later must not change a byte."""
     clock = {"now": 1000.0}
     monkeypatch.setattr(kernel_read_fixes.time, "monotonic", lambda: clock["now"])
     limits = ledger_type(limit=10, mode="response", sandbox_deadline_monotonic=1000.0 + 2400.0,

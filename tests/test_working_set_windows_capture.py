@@ -1,4 +1,4 @@
-"""Astra 5/8: historical pins and failed durable read capture."""
+"""Windows capture: historical pins and failed durable read capture."""
 from __future__ import annotations
 
 import hashlib

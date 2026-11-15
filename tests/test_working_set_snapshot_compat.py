@@ -1,4 +1,5 @@
 """Recorded overlays and closure windows retain exact immutable source bytes."""
+import os
 import copy
 import json
 from pathlib import Path
@@ -11,9 +12,9 @@ from kernel_working_set_snapshot_compat import snapshot_semantic_messages
 
 
 def test_recorded_overlay_reconstructs_source_references_without_mutating_wire():
-    path = Path.home() / "crew-lanes/tmp/crew-01/ret/r38g/run/wire/0020.request.json"
+    path = Path(os.environ.get("STATEFRAME_RECORDED_WIRE") or "/nonexistent/recorded-wire.json")
     if not path.is_file():
-        pytest.skip("recorded r38g wire absent")
+        pytest.skip("recorded wire absent")
     body = json.loads(path.read_bytes())
     before = copy.deepcopy(body)
     messages = snapshot_semantic_messages(body["messages"])

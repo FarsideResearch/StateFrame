@@ -128,7 +128,7 @@ def test_F1_negative_props_probe_keeps_template_reserve(monkeypatch) -> None:
 
 
 def test_F2_sixty_tool_menu_cannot_exhaust_the_template_bound(monkeypatch) -> None:
-    """F2: “60 tools, short 1,115 if templated” (luna-probes/resid_sol.final.md)."""
+    """F2: “60 tools, short 1,115 if templated”."""
     _force_negative_props_probe(monkeypatch)
     meter = _strict_probe_meter("f2-proxy")
     _record_four_bytes_per_token_samples(meter, model="hosted")
