@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import os
 import shlex
+import shutil
 import sys
 from pathlib import Path
 
@@ -54,10 +55,10 @@ def _run(tmp_path: Path, steps: list[dict[str, object]], *, extra_args: tuple[st
                "--task", "Change the values in a.py and b.py, each checked by its own test.",
                "--endpoint", f"http://127.0.0.1:{server.server_port}/v1",
                "--model", "scripted", "--run-dir", str(run),
-               "--test-python", "/usr/bin/python3",
+               "--test-python", shutil.which("python3") or sys.executable,
                # The outer check runs inside bwrap, which cannot exec a uv venv interpreter
                # on foundry-2; a system binary keeps the check path real without that dependency.
-               "--test-cmd", shlex.join(("/usr/bin/true",)),
+               "--test-cmd", shlex.join((shutil.which("true") or "true",)),
                # --max-turns is also the parallel request allowance; 0 means no cap, as in the e2e harness.
                "--max-turns", "0", "--quiet", *extra_args]
     try:

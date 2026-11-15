@@ -91,10 +91,10 @@ def test_strict_provider_six_sends_seal_provider_bytes(tmp_path: Path) -> None:
 @pytest.mark.host_sandbox
 def test_strict_provider_forced_subframes_send_multiple_child_requests(tmp_path: Path) -> None:
     plan: dict[str, object] = {"subframes": [
-        {"id": "left", "outcome": "Update the left adapter.", "owns": ["left.py"],
+        {"id": "left", "goal": "Update the left adapter.", "owns": ["left.py"],
          "creates": [], "reads": [], "exports": [], "consumes": [], "requirements": [],
          "check": {"tests": ["tests/test_left.py"]}},
-        {"id": "right", "outcome": "Update the right adapter.", "owns": ["right.py"],
+        {"id": "right", "goal": "Update the right adapter.", "owns": ["right.py"],
          "creates": [], "reads": [], "exports": [], "consumes": [], "requirements": [],
          "check": {"tests": ["tests/test_right.py"]}},
     ]}
