@@ -121,7 +121,7 @@ def _post_run_failure(message: str, run_dir: Path, completed: subprocess.Complet
     detail = [f"{message}", f"engine exit code: {completed.returncode}"]
     summary_error = _summary_error(run_dir)
     if summary_error:
-        detail.append(f"summary.json error: {summary_error}")
+        detail.append(f"summary.json error: {summary_error[:_FAILURE_TAIL_CHARS]}")
     detail.append(f"output tail: {output[-_FAILURE_TAIL_CHARS:]}")
     return HarnessError("; ".join(detail), exit_code=completed.returncode, output=output)
 

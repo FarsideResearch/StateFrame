@@ -6,14 +6,18 @@ binary was read lossily, and an exact-fit or limit+1 size broke the fitter.
 """
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from enginecheck import Need, Scenario, Trace
 
-# Exit codes a model-free run may end with. 0: completed (src/stateframe/outcomes.py:284-292). 1: blocked, suspended
-# or unfinished (outcomes.py:274-279 and the fallthrough at outcomes.py:293). 2: reported error (outcomes.py:280-282;
-# cli.py:561-566 _report_error). Any other code, including signal-style codes, is a crash for this check.
-CLEAN_EXIT_CODES = frozenset({0, 1, 2})
+# Exit codes a model-free run may end with. 0: completed (src/stateframe/outcomes.py:284-292). 2: reported error
+# (outcomes.py:280-282; cli.py:561-566 _report_error). 1 is a clean refusal only when the summary names one of
+# _REFUSAL_OUTCOMES (outcomes.py:274-279); the fallthrough at outcomes.py:293 also returns 1 and is flagged.
+# Any other code, including signal-style codes, is a crash for this check.
+CLEAN_EXIT_CODES = frozenset({0, 2})
+_REFUSAL_EXIT_CODE = 1
+_REFUSAL_OUTCOMES = frozenset({"hook_blocked", "continuation_blocked", "suspended"})
 
 _TRACEBACK = "Traceback (most recent call last)"
 # The engine refuses a read-only task without a named output file ("could not pick a starting file; name an output
@@ -78,10 +82,29 @@ def _has_traceback(run_dir: Path) -> bool:
     return False
 
 
+def _refusal_problems(run_dir: Path) -> list[str]:
+    """Exit 1 is clean only when summary.json names a refusal outcome and records no error."""
+    try:
+        summary = json.loads((run_dir / "summary.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return ["engine crashed: exit code 1 with no readable summary.json"]
+    if not isinstance(summary, dict):
+        return ["engine crashed: exit code 1 with a non-object summary.json"]
+    problems: list[str] = []
+    outcome = summary.get("runtime_outcome")
+    if outcome not in _REFUSAL_OUTCOMES:
+        problems.append(f"engine crashed: exit code 1 with runtime_outcome {outcome!r}, not a refusal")
+    if summary.get("error"):
+        problems.append("engine crashed: exit code 1 with a summary error")
+    return problems
+
+
 def check_survives(trace: Trace, scenario: Scenario) -> list[str]:
     """Problems found in a read-only session. An empty list means the engine survived."""
     problems: list[str] = []
-    if trace.exit_code not in CLEAN_EXIT_CODES:
+    if trace.exit_code == _REFUSAL_EXIT_CODE:
+        problems.extend(_refusal_problems(trace.run_dir))
+    elif trace.exit_code not in CLEAN_EXIT_CODES:
         problems.append(f"engine crashed: exit code {trace.exit_code} is not a completion or clean refusal")
     if _TRACEBACK in trace.output or _has_traceback(trace.run_dir):
         problems.append("engine crashed: Python traceback in engine output or run artifacts")
