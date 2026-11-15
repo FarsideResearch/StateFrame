@@ -30,6 +30,15 @@ Details: [ARCHITECTURE.md](ARCHITECTURE.md), [KNOWN_LIMITATIONS.md](KNOWN_LIMITA
 
 ## Mutations
 
+**Mutations let your agent build its own tools on the fly.** It runs or writes small sandboxed programs to do a job in one step, instead of making a long chain of tool calls. Each program returns only the answer.
+
+What it did in our tests, with the local Qwen3.6-35B-A3B model:
+- **Wrote its own file reader.** Faced with a compressed binary format it had no tool for, the agent wrote a reader. StateFrame validated and smoke-tested it, and the agent used it to get an answer that matched ground truth. The task went from fail to pass in 10 requests.
+- **Fixed its own tool.** When a helper broke on real input, the agent got a precise diagnostic and shipped a corrected revision.
+- **Peeked instead of reading everything.** One call returned a data file's columns, row count and sample values.
+
+Built-in helpers also list archives without extracting them, read SQLite schemas, diff snapshots, scan log tails and pull text, links and tables from web pages. At the `authored` level the agent writes its own helper, and StateFrame checks it before running it.
+
 Mutation units are small Python helpers with declared JSON inputs and outputs. They run in a sandbox and return untrusted observations for the model. They help with bounded jobs such as reading a structured file or comparing snapshots, without repeating a long sequence of tool calls.
 
 For a repository with `data/events.csv`, make the shipped `structured_peek` helper available for CSV inspection:
@@ -43,6 +52,8 @@ stateframe run --repo ~/code/shop \
 `structured_peek` handles CSV, TSV, JSON, JSONL, TOML and INI, and needs no network or write grant. The `authored` level also lets the model submit helpers for validation and smoke checks. Mutations are off by default. Public web fetches need `--mutation-network public-web` and `--shell-network full`; unit-proposed repository edits need `--mutation-write GLOB`. Mutation execution currently requires Linux. See the [mutation units guide](docs/guide/mutations.md) for the catalog, grants and sandbox limits.
 
 ## Parallel subframes
+
+> **Subframes replace sub-agents.** Instead of handing work to separate agents with their own chat histories, briefs and reports, StateFrame forks the task. Each subframe starts from a frozen snapshot of the parent's workspace, works on only the files it owns, and hands back a sealed proposal. The parent verifies every proposal and joins it into its one authoritative state. No hand-offs, no summaries, no drift between agents.
 
 Use subframes when a task has separate pieces that change different files and each has a focused check. Set the mode
 with `stateframe run --repo <repo> --task "<task>" --parallel <off|auto|N>`. For example:

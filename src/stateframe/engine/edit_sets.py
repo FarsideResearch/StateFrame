@@ -72,6 +72,7 @@ silent truncation of an exponential space.
 from __future__ import annotations
 
 import ast
+import os
 import re
 
 # ------------------------------------------------------------------ honest caps
@@ -1340,10 +1341,13 @@ MAX_WRAP_SITES = 6
 MAX_WRAP_WIDTH = 3
 #: "first three boundaries per signal class".
 MAX_BOUNDARIES_PER_CLASS = 3
-#: Files a provider index will read. A bigger corpus is not a better index, it is
-#: a slower one, and the cap is REPORTED (`ProviderIndex.truncated`) rather than
-#: silently applied.
-MAX_PROVIDER_FILES = 600
+#: Files a provider index will read by default. A bigger corpus is not a better
+#: index, it is a slower one, and the cap is REPORTED (`ProviderIndex.truncated`)
+#: rather than silently applied. Read at call time from the env var below.
+DEFAULT_PROVIDER_INDEX_MAX_FILES = 5000
+#: Ceiling for the env override, so a typo cannot make one request parse a monorepo.
+MAX_PROVIDER_INDEX_MAX_FILES = 200000
+PROVIDER_INDEX_MAX_FILES_ENV = "STATEFRAME_PROVIDER_INDEX_MAX_FILES"
 
 _BUILTIN_NAMES = frozenset(dir(__import__("builtins")))
 
@@ -1451,14 +1455,35 @@ def _handler_shape(handler):
     return None
 
 
+def provider_index_max_files():
+    """The effective file cap: the env override, else the default.
+
+    Unset, blank, non-integer, or non-positive values fall back to the default.
+    Values above ``MAX_PROVIDER_INDEX_MAX_FILES`` are clamped to it.
+    """
+    raw = os.environ.get(PROVIDER_INDEX_MAX_FILES_ENV, "").strip()
+    try:
+        value = int(raw) if raw else DEFAULT_PROVIDER_INDEX_MAX_FILES
+    except ValueError:
+        return DEFAULT_PROVIDER_INDEX_MAX_FILES
+    if value <= 0:
+        return DEFAULT_PROVIDER_INDEX_MAX_FILES
+    return min(value, MAX_PROVIDER_INDEX_MAX_FILES)
+
+
 def build_provider_index(files, exclude=None, max_files=None):
     """A `ProviderIndex` over ``{rel_path: source}``. Deterministic.
 
     ``exclude`` drops one path (the file under repair — its OWN imports are
     already bound, so it can never be a provider for a name that is undefined in
     it, and including it would let the index "discover" the bug's own absence).
+    ``max_files`` defaults to ``provider_index_max_files()``; any explicit value is
+    clamped to the same hard maximum.
     """
-    max_files = MAX_PROVIDER_FILES if max_files is None else max_files
+    if max_files is None:
+        max_files = provider_index_max_files()
+    else:
+        max_files = min(max_files, MAX_PROVIDER_INDEX_MAX_FILES)
     idx = ProviderIndex()
     imports = {}
     paths = sorted(p for p in (files or {}) if p != exclude)

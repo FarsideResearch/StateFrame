@@ -27,6 +27,8 @@ from kernel_reason_log import emit_refusal
 ESTIMATE_MARGIN = 1.02
 DEFAULT_MIN_OUTPUT_TOKENS = 512
 _PROBE_TIMEOUT_S = 3.0
+# Matches the request wire ceiling. A probe body above this is refused typed, never parsed as cut JSON.
+_PROBE_MAX_BYTES = 16 * 1024 * 1024
 _OUTPUT_KEYS = ("max_tokens", "max_completion_tokens", "n_predict")
 _cache: dict[str, int | None] = {}
 _lock = threading.Lock()
@@ -68,8 +70,17 @@ def _get_json(base: str, path: str, key: str) -> object:
         headers = {"Authorization": f"Bearer {key}"} if key else {}
         connection.request("GET", path, headers=headers)
         response = connection.getresponse()
-        data = response.read(1024 * 1024)
+        # Read one byte past the cap so an over-cap body is detectable instead of silently cut.
+        data = response.read(_PROBE_MAX_BYTES + 1)
         if response.status != 200:
+            return None
+        if len(data) > _PROBE_MAX_BYTES:
+            emit_refusal("context_capacity",
+                         what=f"context_probe_body_over_cap: GET {path} body exceeds "
+                              f"{_PROBE_MAX_BYTES} bytes",
+                         why="probe body not parsed; context size unknown, capacity preflight skipped",
+                         limit=_PROBE_MAX_BYTES, level="WARN", journal=False,
+                         cause_key=f"context_probe_body_over_cap:{path}")
             return None
         return json.loads(data)
     finally:

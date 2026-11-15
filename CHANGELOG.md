@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.7.1 (2026-11-15)
+
+- Docs: the README opens the subframes section with subframes as a fork-join replacement for sub-agents, and the mutations section with what mutations did in our tests; the subframes guide describes the fork-join model. KNOWN_LIMITATIONS.md is audited against 0.7.0: stale "fix in progress" and "fix planned" notes for line endings and stable wire are removed, the coalesce escalation outcome name, the resume-after-upgrade rule and the mutation platform note are corrected, a retired error name is dropped, the 0.6.44 large-repo fallback scope, the `--timeout` finalize reserve and the `CONTEXT_TOO_SMALL` result are added, and a new entry notes the `parallel` tool schema mismatch in 0.7.0 and 0.7.1.
+- Context-size probes now read `/slots` and `/props` bodies up to 16 MiB, and a larger body is reported as a typed refusal instead of silently ignored.
+- The corpus provider index now reads up to 5000 files by default, up from 600, so larger corpora are no longer cut short for import evidence. `STATEFRAME_PROVIDER_INDEX_MAX_FILES` sets the cap in a custom profile, clamped to 200000; a capped index still reports `truncated` and `files_scanned`.
+### localize: full query text and configurable inventory limits
+- Fixed: localize scanned only the first 2,400 characters of the brief and query, so a file or symbol name later in the text could never match. The whole text is scanned now. Only the scored input is capped: the term list at 64 terms (code-shaped and literal terms kept first), reported as `query_truncated` with `query_terms_total` and `query_terms_used`; literal, error and path anchor lists at 32 values each, reported as `anchors_truncated` with `anchor_totals` and `anchor_used`; and the echoed query at 400 characters, reported as `query_echo_truncated`, so a very large query stays small on the wire.
+- `STATEFRAME_LOCALIZE_MAX_FILES` (default 50000, max 1000000) and `STATEFRAME_LOCALIZE_MAX_SOURCE_BYTES` (default 4 MiB, max 64 MiB) are profile-only settings that replace the fixed 4,000-file and 512 KB caps, read at call time.
+
 ## 0.7.0 (2026-11-15)
 
 - Subframes: with the working-set allocator on, subframe workers run on the legacy frame allocation (the recorded worker environment pins `STATEFRAME_WORKING_SET_ALLOCATOR=off`), because the allocator has no unit tool surface or visibility yet. The allocator's read-loop protections therefore do not apply inside subframe workers yet; a fix is planned for a 0.7.x patch release. See KNOWN_LIMITATIONS.md. `STATEFRAME_PARALLEL_SUGGEST` also rides the legacy allocation and has no effect on a parent that runs the allocator.
