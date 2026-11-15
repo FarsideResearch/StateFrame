@@ -28,6 +28,8 @@ PROVIDERS = (
 
 @pytest.fixture
 def checkpoint_run(monkeypatch, tmp_path):
+    # Direct-engine fixture: no runner spec.json, so opt into the legacy home-identity path.
+    monkeypatch.setenv("STATEFRAME_CHECKPOINT_LEGACY_DIRECT_ENGINE", "1")
     # Snapshot the real layout module without serializing this pytest process's
     # unrelated engine patches, contexts or registered host participants.
     for name in ("_STATE", "_SAVE", "_SCANS", "_PARTICIPANTS"):
