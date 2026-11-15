@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.6.39 (2026-11-14)
+
+- Fixed: continuation objectives now keep long task specifications in bounded state, preserve the complete task in the request, and use bounded digests for oversized dependency keys.
+
 ## 0.6.38 (2026-11-14)
 
 - Fixed: a long-running process now reloads the installation identity key when the key file is rotated, rewritten, or recreated with its home, so checkpoint redaction always covers the key on disk.
