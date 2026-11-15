@@ -2790,7 +2790,9 @@ def summarize(run: Path, started: float) -> dict[str, object]:
     summary["engine_result"] = result.get("result")
     summary["engine_terminal"] = {key: result[key] for key in (
         "result", "reason_code", "error", "error_type", "error_message", "failure_origin", "behaviour",
-        "done_facts", "submission", "labels", "claims", "resumable", "suspension", "problems")
+        "done_facts", "submission", "labels", "claims", "resumable", "suspension", "problems",
+        "minimum_context_tokens", "configured_context_tokens", "minimum_prompt_tokens",
+        "minimum_measure_method", "message")
         if key in result}
     # Replay refusals keep their actionable detail in the event, not the terminal receipt.
     # Preserve it for the final CLI summary and --json, which suppresses live events.
@@ -3697,6 +3699,8 @@ def _execute(options: RunOptions, started: float, printer, run_dir: Path, work: 
     printer(str(summary["cached_share_display"]))
     summary["problems"] = _problems_summary(run_dir, options)
     _print_problems(summary["problems"], printer, str(summary["problems"]["log_level"]))
+    if (summary.get("engine_terminal") or {}).get("reason_code") == "CONTEXT_TOO_SMALL":
+        printer(str(summary["engine_terminal"]["message"]))
     if commits is not None:
         summary["commits"] = commits
         if "error" in commits:

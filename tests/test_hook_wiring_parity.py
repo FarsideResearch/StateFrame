@@ -4,7 +4,8 @@ SF_TEST_BASELINE_IMMEDIATE may name an explicit checkout. Otherwise use the in-t
 origin/main when it is a strict ancestor; without that ref, use the newest ancestor release commit
 (excluding HEAD) whose subject identifies a StateFrame version or release. Both sides explicitly
 disable the stable tool head and v0.4.0 final cache layout, which changes wire order: this
-parity is about hooks, not tool lists or cache layout.
+parity is about hooks, not tool lists or cache layout. The allocator is also
+explicitly disabled on both sides to retain the legacy request contract.
 """
 
 from __future__ import annotations
@@ -384,6 +385,7 @@ def _run_checkout(
     script = Script(document)
     server = serve(script)
     environment = dict(os.environ)
+    environment["STATEFRAME_WORKING_SET_ALLOCATOR"] = "off"
     environment.pop("PYTHONPATH", None)
     environment.pop("STATEFRAME_STABLE_TOOL_HEAD", None)
     if stable_tool_head is not None:
@@ -597,6 +599,7 @@ def _resume_checkout(checkout: Path, repo: Path, run: Path, launcher: Path,
     server = serve(script)
     endpoint = f"http://127.0.0.1:{server.server_port}/v1"
     environment = dict(os.environ)
+    environment["STATEFRAME_WORKING_SET_ALLOCATOR"] = "off"
     environment.pop("PYTHONPATH", None)
     environment.pop("STATEFRAME_STABLE_TOOL_HEAD", None)
     if stable_tool_head is not None:

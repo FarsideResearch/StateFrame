@@ -34,6 +34,8 @@ def _scripted_environment(checkout: Path) -> dict[str, str]:
         **os.environ,
         "PYTHONPATH": str(checkout / "src"),
         provider_dialect.PROVIDER_OVERRIDE_ENV: provider_dialect.LLAMA_CPP,
+        # These tests guard the legacy layout renderer. The allocator owns ON composition.
+        "STATEFRAME_WORKING_SET_ALLOCATOR": "off",
     }
 
 
@@ -42,6 +44,7 @@ def test_scripted_environment_pins_provider_dialect(monkeypatch):
     environment = _scripted_environment(ROOT)
     assert environment["PYTHONPATH"] == str(ROOT / "src")
     assert environment[provider_dialect.PROVIDER_OVERRIDE_ENV] == provider_dialect.LLAMA_CPP
+    assert environment["STATEFRAME_WORKING_SET_ALLOCATOR"] == "off"
 
 
 def _parity_launchers(tmp_path):

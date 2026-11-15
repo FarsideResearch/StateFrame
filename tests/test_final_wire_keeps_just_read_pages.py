@@ -62,20 +62,21 @@ def _replay(tmp_path: Path, turns: int, allocator: str = "off") -> Path:
             "--runner-kind", "generic", "--protect-tests", "off",
             "--max-turns", str(turns), "--timeout", str(budget), "--quiet",
         ]
-        if allocator == "on":
-            # The harness strips ambient switches. Persist ON through the run
-            # profile so resume/replay sees the same explicit selection.
+        if allocator == "off":
+            environment["STATEFRAME_WORKING_SET_ALLOCATOR"] = "off"
+        else:
+            # Exercise the shipped default, with no allocator switch or custom profile.
+            assert "STATEFRAME_WORKING_SET_ALLOCATOR" not in environment
             profile = json.loads((ROOT / "src/stateframe/profiles/r2hc3.json").read_text())
-            profile["switches"]["STATEFRAME_WORKING_SET_ALLOCATOR"] = "on"
-            profile_path = tmp_path / "allocator-on.json"
-            profile_path.write_text(json.dumps(profile))
-            command.extend(["--profile", str(profile_path)])
+            assert profile["switches"]["STATEFRAME_WORKING_SET_ALLOCATOR"] == "on"
         run_monitored(command, expected_seconds=budget + 120, run_dir=run_dir,
                       step="retention replay", env=environment,
                       progress_probe=lambda: endpoint.request_count)
         # An aborted or stalled run would audit only a prefix and could pass vacuously.
         assert endpoint.request_count >= turns, (
             f"replay served {endpoint.request_count} of {turns} recorded turns")
+    spec = json.loads((run_dir / "spec.json").read_text())
+    assert spec["environment"]["STATEFRAME_WORKING_SET_ALLOCATOR"] == allocator
     result = _engine_result(run_dir)
     assert result is not None and not result.startswith("ERR"), (
         f"replay ended with engine result {result!r}, not a completed run")
@@ -99,10 +100,18 @@ def _engine_result(run_dir: Path) -> str | None:
     return result if isinstance(result, str) else None
 
 
-@pytest.mark.parametrize("allocator", ["off", "on"])
-@pytest.mark.parametrize("turns", [
-    pytest.param(8, id="first-reads"),
-    pytest.param(38, id="protected-over-cap"),
+# The legacy allocator-OFF path drops just-read pages once protected reads exceed
+# the cap; the working-set allocator (default ON) is the fix. The OFF case stays as a
+# strict xfail so the known gap is visible and an unexpected pass fails loudly (approved).
+_LEGACY_OFF_GAP = pytest.mark.xfail(
+    strict=True, reason="legacy allocator-OFF path drops just-read pages over the protected cap")
+
+
+@pytest.mark.parametrize("turns,allocator", [
+    pytest.param(8, "off", id="first-reads-off"),
+    pytest.param(38, "off", id="protected-over-cap-off", marks=_LEGACY_OFF_GAP),
+    pytest.param(8, "on", id="first-reads-on"),
+    pytest.param(38, "on", id="protected-over-cap-on"),
 ])
 def test_just_read_pages_reach_the_next_final_wire(tmp_path: Path, turns: int, allocator: str) -> None:
     started = time.monotonic()

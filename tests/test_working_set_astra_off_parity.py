@@ -1,4 +1,4 @@
-"""Unset allocator preserves provider request bytes at each 0.6.23 ship point."""
+"""Explicitly disabled allocator preserves provider request bytes at each 0.6.23 ship point."""
 import json
 import os
 import subprocess
@@ -10,14 +10,17 @@ from tools.pinned_tree import pinned_tree
 from _stateframe_home import isolated_stateframe_home
 
 
-def _provider_hashes(tree, work):
+def _provider_hashes(tree, work, allocator="off"):
     driver = '''
 import json, sys
 from pathlib import Path
 import pytest
 from test_request_determinism import _run_scripted_example, EXAMPLES
 with pytest.MonkeyPatch.context() as patch:
-    patch.delenv("STATEFRAME_WORKING_SET_ALLOCATOR", raising=False)
+    if sys.argv[3] == "default":
+        patch.delenv("STATEFRAME_WORKING_SET_ALLOCATOR", raising=False)
+    else:
+        patch.setenv("STATEFRAME_WORKING_SET_ALLOCATOR", sys.argv[3])
     patch.setenv("SF_LAB_DETFIX3", "on")
     from stateframe import runner
     runner.test_interpreter.choose = lambda *args, **kwargs: (sys.executable, "parity test interpreter")
@@ -30,7 +33,7 @@ with pytest.MonkeyPatch.context() as patch:
     env["STATEFRAME_HOME"] = isolated_stateframe_home()
     env["PYTHONPATH"] = os.pathsep.join(str(tree / path) for path in
         ("src", "src/stateframe/engine", "tests"))
-    result = subprocess.run([sys.executable, "-c", driver, str(work / "run"), str(destination)],
+    result = subprocess.run([sys.executable, "-c", driver, str(work / "run"), str(destination), allocator],
         cwd=tree, env=env, capture_output=True, text=True, timeout=600, check=False)
     assert result.returncode == 0, result.stdout[-4000:] + result.stderr[-4000:]
     hashes = json.loads(destination.read_text())

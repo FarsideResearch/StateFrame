@@ -76,6 +76,28 @@ def _recovery_conditions():
     }
 
 
+def allocator_context_floor(snapshot, result, *, size=None):
+    """Return the normal small-context terminal only for a proven allocator floor.
+
+    The allocator's measured complete minimum is already represented by
+    ``floor_bytes``. Convert that wire floor with the same conservative byte
+    calibration used by the legacy context-floor path. Other allocator
+    refusals, explicit prompt budgets, and normal-sized slots remain untouched.
+    """
+    from kernel_working_set_stop import ReasonCode
+    if getattr(result, "reason", None) is not ReasonCode.FLOOR_INFEASIBLE:
+        return None
+    from kernel_endpoint_size import ENDPOINT_SIZE, DEFAULT_CONTEXT_TOKENS
+    endpoint_size = ENDPOINT_SIZE if size is None else size
+    if (snapshot.context_limit is None
+            or snapshot.context_limit != endpoint_size.context_tokens
+            or endpoint_size.context_tokens >= DEFAULT_CONTEXT_TOKENS):
+        return None
+    from kernel_context_floor import context_floor
+    return context_floor({"request_bytes": result.floor_bytes,
+                          "measure_method": "calibrated_bytes"}, size=endpoint_size)
+
+
 def _snapshot_failed(runtime, failure, *, request_id: str):
     """Snapshot construction failed: a durable, typed, non-floor suspension.
 
@@ -97,6 +119,15 @@ def _snapshot_failed(runtime, failure, *, request_id: str):
 
 
 def _blocked(runtime, snapshot, result):
+    capacity_stop = allocator_context_floor(snapshot, result)
+    if capacity_stop is not None:
+        from kernel_frame_allocation_capture import FrameFit5ImpossibleMinimum
+        raise FrameFit5ImpossibleMinimum({
+            "request_bytes": result.floor_bytes,
+            "prompt_tokens": None,
+            "measure_method": "calibrated_bytes",
+            "allocator_floor": True,
+        })
     from kernel_read_receipts import _blob
     from kernel_working_set_state import state_for
     from kernel_working_set_stop import MANDATORY_ENVELOPE_REASONS, Suspension, suspend

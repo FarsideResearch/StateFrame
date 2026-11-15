@@ -3766,8 +3766,17 @@ def _ensure_target_unit(plan: dict[str, object], path: str,
         return
     lines = [int(line) for line in reservation.get("selected_lines", ()) or ()
              if isinstance(line, int) and line >= 1]
-    if reservation.get("path") != path or not lines:
+    if reservation.get("path") != path:
         return
+    if not lines:
+        # No source bytes fit behind the mandatory envelope. Keep an obligation
+        # for the nonempty target so its revision-bound read route can be proved;
+        # an empty selection must never turn into an unselected deferred path.
+        total = reservation.get("total_lines")
+        if (type(total) is not int or total < 1
+                or reservation.get("revision") != plan.get("revisions", {}).get(path)):
+            return
+        lines = [1, total]
     units.append({
         "path": path, "start_line": min(lines), "end_line": max(lines),
         "role": "target_reservation", "reason": "source_reservation", "priority": 1,

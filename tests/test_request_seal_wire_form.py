@@ -74,7 +74,8 @@ def test_visible_message_change_still_breaks_seal(field: str, value: str) -> Non
 
 
 def _run_scripted(tmp_path: Path, *, strict: bool, steps: list[dict[str, object]],
-                  inject_allocation_replan: bool = False) -> tuple[object, Path, Script]:
+                  inject_allocation_replan: bool = False,
+                  allocator: str = "off") -> tuple[object, Path, Script]:
     source_root = Path(os.environ.get("SF_SEAL_TEST_SOURCE", str(ROOT / "src")))
     repo = tmp_path / "repo"
     repo.mkdir()
@@ -92,6 +93,8 @@ def _run_scripted(tmp_path: Path, *, strict: bool, steps: list[dict[str, object]
                                                          str(source_root / "stateframe/engine"))),
                         "PYTHONDONTWRITEBYTECODE": "1", "PYTHONHASHSEED": "0",
                         "STATEFRAME_HOME": str(tmp_path / "state-home")})
+    if allocator == "off":
+        environment["STATEFRAME_WORKING_SET_ALLOCATOR"] = "off"
     # The isolated startup probe replaces /dev, so a wrapper under a
     # /dev/shm-backed pytest basetemp is invisible inside its mount namespace.
     wrapper_directory = tempfile.TemporaryDirectory(prefix="stateframe-test-python-", dir="/tmp")
@@ -105,17 +108,29 @@ def _run_scripted(tmp_path: Path, *, strict: bool, steps: list[dict[str, object]
         "host.install_environment(json.loads((run / 'spec.json').read_text()))",
         "sys.path.insert(0, str(child.parent / 'engine'))",
         "import kernel_final_wire_allocation as allocation",
-        "original = allocation._prepare_qualified_hook_body",
-        "def tagged(context, body, request_id):",
-        "    result = original(context, body, request_id)",
-        "    for message in result.get('messages', []):",
+        "def mark(body, request_id):",
+        "    for message in body.get('messages', []):",
         "        content = str(message.get('content', ''))",
         "        if content.startswith(('[Current source:', '[Model source window]', '[read page]')):",
         "            message['_request_budget_section'] = 'stage_evidence'",
         "            (run / 'tagged-source-window').write_text(request_id)",
         "            break",
-        "    return result",
-        "allocation._prepare_qualified_hook_body = tagged",
+        *((
+            # ON validators are read-only after certification. Inject the same
+            # private classification before the provider normalizer certifies it.
+            "original = allocation._finalize_provider_request_body",
+            "def tagged(capture, body, capabilities):",
+            "    mark(body, capture.request_id)",
+            "    return original(capture, body, capabilities)",
+            "allocation._finalize_provider_request_body = tagged",
+        ) if allocator == "on" else (
+            "original = allocation._prepare_qualified_hook_body",
+            "def tagged(context, body, request_id):",
+            "    result = original(context, body, request_id)",
+            "    mark(result, request_id)",
+            "    return result",
+            "allocation._prepare_qualified_hook_body = tagged",
+        )),
         *((
             "import kernel_frame_allocation_validation as validation",
             "from kernel_frame_optional_allocation import FrameAllocationReplanNeeded",
@@ -182,13 +197,14 @@ def assert_sealed_wire(run: Path, *, minimum: int) -> None:
 
 
 @pytest.mark.host_sandbox
-def test_hosted_stage_evidence_sends_seal_exact_wire(tmp_path: Path) -> None:
+@pytest.mark.parametrize("allocator", ["off", "on"])
+def test_hosted_stage_evidence_sends_seal_exact_wire(tmp_path: Path, allocator: str) -> None:
     steps: list[dict[str, object]] = [
         {"tool": "read", "arguments": {"path": path}}
         for path in ("app.py", "tests/test_value.py", "app.py", "tests/test_value.py")
     ] + [{"tool": "run_tests", "arguments": {"target": "tests/test_value.py"}},
          {"tool": "done", "arguments": {"summary": "VALUE is seven and tests pass."}}]
-    process, run, script = _run_scripted(tmp_path, strict=True, steps=steps)
+    process, run, script = _run_scripted(tmp_path, strict=True, steps=steps, allocator=allocator)
     output = process.stdout + process.stderr
     traceback = run / "child-traceback.txt"
     if traceback.is_file():
@@ -197,5 +213,7 @@ def test_hosted_stage_evidence_sends_seal_exact_wire(tmp_path: Path) -> None:
     assert (run / "tagged-source-window").is_file(), output
     assert "measurement body/projection/provider identity changed" not in output
     assert process.returncode == 0, output
+    spec = json.loads((run / "spec.json").read_text())
+    assert spec["environment"]["STATEFRAME_WORKING_SET_ALLOCATOR"] == allocator
     script.assert_consumed()
     assert_sealed_wire(run, minimum=4)

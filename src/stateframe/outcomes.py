@@ -113,6 +113,8 @@ def project(summary: dict[str, object], *, cancelled: bool = False,
         runtime = "engine_error"
     elif status in BUDGET_STOPS:
         runtime = "budget_stop"
+    elif status == "RUN_INCOMPLETE" and terminal.get("reason_code") == "CONTEXT_TOO_SMALL":
+        runtime = "context_too_small"
     elif status == "SUBMITTED":
         # completed = the engine ended normally with a submission, not proof the task is correct.
         runtime = "completed"
@@ -206,7 +208,7 @@ def exit_code(summary: dict[str, object]) -> int:
         return 1
     if summary.get("apply_error"):
         return 2
-    if runtime in ("engine_error", "missing_result") or runtime is None:
+    if runtime in ("engine_error", "missing_result", "context_too_small") or runtime is None:
         return 2
     if (runtime == "completed" and summary.get("engine_result") == "SUBMITTED"
             and summary.get("artifact") == "saved"
