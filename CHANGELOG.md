@@ -1,5 +1,7 @@
 # Changelog
 
+## Unreleased
+
 ## 0.6.40 (2026-11-14)
 
 - Fixed: resuming a timed run preserves its declared allowance, keeping replayed requests byte-identical while remaining time stays private to the run record.
