@@ -206,6 +206,10 @@ class ShellTool:
 
     def execute(self, args: dict, call_id: str) -> ShellReply:
         try:
+            from kernel_read_receipts import enabled
+            if enabled():
+                from kernel_shell_read_receipts import execute_with_read_audit
+                return execute_with_read_audit(self, args, call_id)
             return self._execute(args, call_id)
         except (EffectError, RunEnvError, ToolTapeError, OSError) as error:
             raise ShellExecutionFailed(f"{type(error).__name__}: {error}") from error

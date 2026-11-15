@@ -1266,6 +1266,12 @@ def _graceful_trim_optional_messages(
     Native tool exchanges and volatile [V] tails are never removed. When
     optional messages are exhausted, older tool results are bounded explicitly.
     """
+    from kernel_read_receipts import enabled as working_set_enabled
+    if working_set_enabled():
+        # Preparation owns both source membership and envelope variants. In
+        # particular, heads must reach freeze_preparation before any fitter
+        # can remove their only source carrier. OFF retains the legacy path.
+        return ()
     if (max_request_tokens is None) != (measure_request_tokens is None):
         raise ValueError("request token ceiling and measurement must be provided together")
     messages = body.get("messages", [])

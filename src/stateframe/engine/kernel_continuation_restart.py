@@ -150,9 +150,17 @@ _EVICTFIX_NOTICE_FIELDS = (
 )
 
 
+def _working_set_checkpoint(runtime):
+    from kernel_working_set_state import state_for
+    return state_for(runtime).checkpoint()
+
+
 def runtime_fields(runtime=None) -> tuple[str, ...]:
     """Return checkpoint fields without changing the legacy OFF shape."""
     fields = list(RUNTIME_FIELDS)
+    from kernel_read_receipts import enabled as working_set_enabled
+    if working_set_enabled():
+        fields.append("working_set_state")
     from kernel_stable_wire import enabled_for_replay
     if enabled_for_replay():
         fields.append("_stable_wire_state")
@@ -176,6 +184,12 @@ def checkpoint_runtime_fields_match(runtime, saved_runtime) -> bool:
     if not isinstance(saved_runtime, dict):
         return False
     actual, expected = set(saved_runtime), set(runtime_fields(runtime))
+    if "working_set_state" in expected:
+        try:
+            from kernel_working_set_state import WorkingSetState
+            WorkingSetState.from_checkpoint(saved_runtime.get("working_set_state"))
+        except (KeyError, TypeError, ValueError, AttributeError):
+            return False
     if "_stable_wire_state" in expected:
         try:
             from kernel_stable_wire import validate_checkpoint_state
@@ -226,7 +240,11 @@ def restore_runtime_field_values(runtime, saved_runtime: Mapping[str, object]) -
     if not checkpoint_runtime_fields_match(runtime, saved_runtime):
         raise WorkerResumeError("invalid worker checkpoint")
     for key, value in saved_runtime.items():
-        if key == "micrograph_wire":
+        if key == "working_set_state":
+            from kernel_working_set_state import WorkingSetState, retry_unsent_boundary
+            runtime.working_set_state = WorkingSetState.from_checkpoint(value)
+            retry_unsent_boundary(runtime.working_set_state)
+        elif key == "micrograph_wire":
             from kernel_micrograph_wire import MicroGraphWire
             try:
                 runtime.micrograph_wire = MicroGraphWire.from_checkpoint(
@@ -359,6 +377,15 @@ _CAPACITY_SAFE_TAIL = frozenset(
     if classification == "SAFE_TAIL"
 )
 SAFE_TAIL = frozenset({
+    "read_attempt", "read_result",  # audit only; never source/selection authority
+    "read_capture_skipped", "read_capture_failed",  # audit only; delivery is unchanged
+    # SHADOW state is replayed with its reads/primary requests, without effects.
+    "working_set_capture", "working_set_submission", "working_set_response", "working_set_blocked",
+    "read_admission",  # audit only; the delivered page already carries its cursor
+    "working_set_prepared",  # proved candidate; submission owns lifecycle transitions
+    # Preparation diagnostics only; certification/submission retain authority.
+    "final_cache_layout_failed_open", "context_claim_reconciled",
+    "working_set_shadow_plan",  # observational candidate proof, never dispatch authority
     "continuation_writer_resumed", "rich_state_committed", "snapshot_committed",
     "history_decision", "history_exchange_removed", "selection_decision",
     "exposure_composition", "latest_exchange_decision", "request_prepared", "request_submitted",
@@ -921,6 +948,10 @@ DOCUMENTED_REJECT.update({
     if classification == "REJECT"
 })
 DOCUMENTED_REJECT.update({
+    "stable_wire_refused": (
+        "Allocator/stable-wire incompatibility requires a new run with compatible switches; "
+        "the refused combination has no submitted layout to replay."
+    ),
     "intake_orientation_failed": (
         "The failure omits orientation from the first request, so replay can rebuild different request bytes."
     ),
@@ -1517,7 +1548,8 @@ def checkpoint(runtime, messages, worker_state):
         "binding": runtime.binding(), "worker": _plain(worker_state),
         "owner": {key: _plain(getattr(runtime.owner, key))
                   for key in OWNER_FIELDS if hasattr(runtime.owner, key)},
-        "runtime": {key: (runtime.micrograph_wire.checkpoint() if key == "micrograph_wire"
+        "runtime": {key: (_working_set_checkpoint(runtime) if key == "working_set_state"
+                          else runtime.micrograph_wire.checkpoint() if key == "micrograph_wire"
                           else _plain(getattr(runtime, key, None)
                                       if key == "_stable_wire_state" else getattr(runtime, key)))
                     for key in runtime_fields(runtime)},
@@ -1727,6 +1759,11 @@ def restore_runtime(runtime):
     restore_notes(runtime, replay_saved, records, event)
     runtime.resume_worker_state = copy.deepcopy(saved["worker"])
     restore_runtime_field_values(runtime, saved["runtime"])
+    if "working_set_state" in saved["runtime"]:
+        # Captures/obligations journaled after the checkpoint must survive the
+        # restart (finding 5); the provider counter restored below is not a clock.
+        from kernel_working_set_state import restore_tail as restore_working_set_tail
+        restore_working_set_tail(runtime, records, event["sequence"])
     request_count = restore_provider_request_count(runtime, saved)
     if "code_bookmark_replay" in saved:
         from kernel_code_bookmarks import enabled as bookmarks_enabled

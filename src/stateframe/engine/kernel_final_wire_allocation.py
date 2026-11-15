@@ -221,6 +221,10 @@ def build_qualified_request(capture, runtime, body, *, endpoint, key, deadline=N
         return previous
     if deadline is not None and time.monotonic() >= deadline:
         raise TimeoutError("request deadline expired before qualification")
+    from kernel_read_receipts import enabled as working_set_enabled
+    if working_set_enabled():
+        from kernel_stable_wire import require_allocator_compatibility
+        require_allocator_compatibility(capture)
     # Availability is a logical-request service, not detached candidate
     # authority. Even a failed first candidate must consume the same retries.
     from kernel_request_budget import _request_token_meter
@@ -244,8 +248,12 @@ def build_qualified_request(capture, runtime, body, *, endpoint, key, deadline=N
             body["messages"].append({"role": "user", "content": capsule})
     from kernel_read_once import append_final_message
     body["messages"] = append_final_message(context, body["messages"])
-    body, visibility = prepare_final_visibility(candidate, context, body, preserve_deferred=True)
-    body = render_visibility_sources(candidate, context, body, visibility)
+    if working_set_enabled():
+        # Receipt witnesses replace the path-based legacy pin/forgiveness loop.
+        visibility = {"candidates": [], "missing_ranges": [], "pins_added": 0}
+    else:
+        body, visibility = prepare_final_visibility(candidate, context, body, preserve_deferred=True)
+        body = render_visibility_sources(candidate, context, body, visibility)
     body = candidate._ensure_final_wire_ticket(body)
     from kernel_provider_dialect import RUN_CAPABILITY_CACHE, capabilities_for
     provider_capabilities = capabilities_for(endpoint, key, cache=RUN_CAPABILITY_CACHE)
@@ -299,34 +307,61 @@ def build_qualified_request(capture, runtime, body, *, endpoint, key, deadline=N
     body = compose_stable_guidance(candidate, body)
     maybe_append_greenfact(body["messages"], context, journal=candidate.journal,
                            turn=candidate.step, request_id=candidate.request_id)
-    before_fit_bytes = len(json.dumps(body).encode())
-    body = finalize_frame_candidate(context, candidate, body, frame_counter=token_estimate)
-    fitted_body = copy.deepcopy(body)
-    fitted_counter = candidate._frame_candidate_counter
-    # Snapshot only allocation inputs. The projection consumes its trim callback
-    # below; recovery must never pass it to capture_candidate as a keyword.
-    fitted_inputs = {
-        name: copy.deepcopy(value)
-        for name, value in candidate._frame_candidate_inputs.items()
-        if name != "_final_layout_trim"
-    }
-    fitted_delivery = copy.deepcopy(candidate.request_source_final_delivery)
-    from kernel_cache_layout_candidate import (
-        render_cache_candidate, render_final_cache_candidate, pending_publication,
-    )
+    allocated = None
+    from kernel_cache_layout_candidate import pending_publication
     from kernel_cache_layout_view import semantic_messages
-    from kernel_request_budget import _request_token_meter
-    body = render_cache_candidate(
-        candidate, context, body, meter=_request_token_meter(context, candidate),
-        inputs=candidate._frame_candidate_inputs)
-    body = render_final_cache_candidate(
-        candidate, context, body, meter=_request_token_meter(context, candidate),
-        inputs=candidate._frame_candidate_inputs)
-    body, projection_recovered = _recover_post_fit_growth(
-        candidate, context, body, fitted_body, fitted_counter,
-        fitted_inputs, fitted_delivery,
-        meter=_request_token_meter(context, candidate), endpoint=endpoint, key=key,
-    )
+    before_fit_bytes = len(json.dumps(body).encode())
+    if working_set_enabled():
+        # Stable wire was explicitly refused before candidate construction: its
+        # append-only source placement is not certified by the allocator yet.
+        # CARRY-NOTE: legacy cache-layout fail-open and _recover_post_fit_growth
+        # remain in the 0.6.23 OFF branch; ON keeps the allocator authoritative.
+        from kernel_working_set_live import prepare_live
+        from kernel_working_set_stop import WorkingSetSuspended
+        try:
+            body, allocated = prepare_live(candidate, context, body,
+                dialect=provider_capabilities.dialect,
+                reasoning_mode=reasoning_profile(manifest=capture.journal.manifest).mode)
+        except WorkingSetSuspended:
+            # The blocked event is already durable. Preserve its checkpoint
+            # authority without publishing any unsent source/layout changes.
+            runtime.working_set_state = copy.deepcopy(context.working_set_state)
+            raise
+        from kernel_frame_source_snapshot import reconciled_source_coverage_suffix
+        # Allocation ownership must describe the same healed suffix as the wire.
+        candidate._framefit5_newest_user_suffix = reconciled_source_coverage_suffix(
+            semantic_messages(body["messages"]),
+            getattr(candidate, "_framefit5_newest_user_suffix", ()))
+        projection_recovered = False
+    else:
+        before_fit_bytes = len(json.dumps(body).encode())
+        body = finalize_frame_candidate(context, candidate, body, frame_counter=token_estimate)
+        fitted_body = copy.deepcopy(body)
+        fitted_counter = candidate._frame_candidate_counter
+        # Snapshot only allocation inputs. The projection consumes its trim callback
+        # below; recovery must never pass it to capture_candidate as a keyword.
+        fitted_inputs = {
+            name: copy.deepcopy(value)
+            for name, value in candidate._frame_candidate_inputs.items()
+            if name != "_final_layout_trim"
+        }
+        fitted_delivery = copy.deepcopy(candidate.request_source_final_delivery)
+        from kernel_cache_layout_candidate import (
+            render_cache_candidate, render_final_cache_candidate, pending_publication,
+        )
+        from kernel_cache_layout_view import semantic_messages
+        from kernel_request_budget import _request_token_meter
+        body = render_cache_candidate(
+            candidate, context, body, meter=_request_token_meter(context, candidate),
+            inputs=candidate._frame_candidate_inputs)
+        body = render_final_cache_candidate(
+            candidate, context, body, meter=_request_token_meter(context, candidate),
+            inputs=candidate._frame_candidate_inputs)
+        body, projection_recovered = _recover_post_fit_growth(
+            candidate, context, body, fitted_body, fitted_counter,
+            fitted_inputs, fitted_delivery,
+            meter=_request_token_meter(context, candidate), endpoint=endpoint, key=key,
+        )
     layout_record = getattr(candidate, "_final_cache_layout_record", None)
     if isinstance(layout_record, Mapping):
         try:
@@ -356,16 +391,25 @@ def build_qualified_request(capture, runtime, body, *, endpoint, key, deadline=N
         refresh_headcarry=False, frame_selection=selection)
     # Output normalization can change body identity and prompt reserves. It
     # precedes the final receipt, whose measurement is carried into the seal.
-    enforce_context_capacity(candidate, body, endpoint=endpoint, key=key)
-    # The qualified path seals its own wire and bypasses RequestCapture's final
-    # serializer. Keep typed panel metadata through classification and fitting,
-    # then remove private fields from the body that final measurement seals.
-    body = _prepare_qualified_hook_body(context, body, candidate.request_id)
-    body, refitted = _recover_post_fit_growth(
-        candidate, context, body, fitted_body, fitted_counter,
-        fitted_inputs, fitted_delivery,
-        meter=_request_token_meter(context, candidate), endpoint=endpoint, key=key,
-    )
+    if allocated is None:
+        enforce_context_capacity(candidate, body, endpoint=endpoint, key=key)
+        # The qualified path seals its own wire and bypasses RequestCapture's final
+        # serializer. Keep typed panel metadata through classification and fitting,
+        # then remove private fields from the body that final measurement seals.
+        body = _prepare_qualified_hook_body(context, body, candidate.request_id)
+        body, refitted = _recover_post_fit_growth(
+            candidate, context, body, fitted_body, fitted_counter,
+            fitted_inputs, fitted_delivery,
+            meter=_request_token_meter(context, candidate), endpoint=endpoint, key=key,
+        )
+    else:
+        from kernel_working_set_live import assert_certified_body
+        assert_certified_body(body, allocated)
+        # Hook admission is validation only; private metadata was stripped by
+        # the oracle before costing. Any rewrite violates the certificate.
+        checked_body = _prepare_qualified_hook_body(context, body, candidate.request_id)
+        assert_certified_body(checked_body, allocated)
+        refitted = False
     if projection_recovered or refitted:
         # The earlier extension and product receipts described the rejected
         # projection. Rebind both against the canonical recovered body.
@@ -383,6 +427,13 @@ def build_qualified_request(capture, runtime, body, *, endpoint, key, deadline=N
     budget = dict(getattr(candidate, "request_budget_final_wire", None) or {})
     budget["max_request_bytes"] = candidate._frame_candidate_inputs["byte_ceiling"]
     candidate.request_budget_final_wire = budget
+    if allocated is not None:
+        from kernel_frame_source_snapshot import verify_source_coverage_claims
+        # Freeze removes owned legacy coverage panels; the allocator generates
+        # its own facts. Any remaining marker belongs to an opaque fixed owner.
+        # This seam is read-only even in production: never heal certified bytes.
+        verify_source_coverage_claims(body["messages"], strict=True, owned_indexes=(),
+                                      journal=candidate.journal, request_id=candidate.request_id)
     # Keep classification metadata on the candidate for allocation readers, but
     # prove capacity and bind the seal against the exact provider wire copy.
     wire_body = _finalize_provider_request_body(capture, body, provider_capabilities)
@@ -416,11 +467,18 @@ def build_qualified_request(capture, runtime, body, *, endpoint, key, deadline=N
             token_ceiling=budget["max_prompt_tokens"],
             measurement_identity=budget["measure_method"],
         )
+    if allocated is not None:
+        assert_certified_body(body, allocated)
+        wire = allocated.wire
     candidate._assert_wire_string_hygiene(wire)
-    visibility, visibility_receipt = qualify_visibility(
-        candidate, context, wire, visibility, candidate.request_source_final_delivery,
-        candidate._frame_candidate_inputs["sources"],
-    )
+    if allocated is not None:
+        from kernel_working_set_live import certified_visibility
+        visibility, visibility_receipt = certified_visibility(allocated)
+    else:
+        visibility, visibility_receipt = qualify_visibility(
+            candidate, context, wire, visibility, candidate.request_source_final_delivery,
+            candidate._frame_candidate_inputs["sources"],
+        )
     from kernel_continuation_journal import journal_safe_fields
     candidate.journal.emit("request_source_final_wire", request_id=candidate.request_id,
                            original_request_id=getattr(capture, "_replacement_lineage", candidate.request_id),
@@ -464,11 +522,15 @@ def build_qualified_request(capture, runtime, body, *, endpoint, key, deadline=N
     if check.wire != wire or check.verdict not in {"PASS", "DISABLED"}:
         log_seal_violation("candidate wire truth changed or rejected the proven bytes")
         raise RequestSealError("candidate wire truth changed or rejected the proven bytes")
+    if allocated is not None:
+        assert_certified_body(body, allocated)
     # Every body producer and proof above precedes the sole allocation capture.
     allocation = capture_candidate(runtime=context, capture=candidate, body=body,
                                    previous_allocation=getattr(capture, "_replacement_allocation", None),
                                    request_lineage=getattr(capture, "_replacement_lineage", None),
                                    **candidate._frame_candidate_inputs)
+    if allocated is not None:
+        assert_certified_body(body, allocated)
     metadata = {
         "request_kind": getattr(capture, "request_kind", None),
         "adapter": getattr(capture, "_qualified_adapter", None),
@@ -486,6 +548,8 @@ def build_qualified_request(capture, runtime, body, *, endpoint, key, deadline=N
         "visibility_receipt": visibility_receipt,
         "host_contribution": getattr(candidate, "release_precomposed_host_text", None),
     }
+    if allocated is not None:
+        metadata["working_set_assignment_digest"] = allocated.assignment_digest
     record = QualifiedRequest(
         request_id=capture.request_id, wire=wire,
         body_digest=hashlib.sha256(wire).hexdigest(), allocation=allocation,
@@ -535,6 +599,8 @@ def build_qualified_request(capture, runtime, body, *, endpoint, key, deadline=N
         "_tokenize_endpoint": candidate._tokenize_endpoint,
         "_tokenize_deadline": candidate._tokenize_deadline,
     }
+    if allocated is not None:
+        capture_updates["_working_set_certificate"] = allocated.rendered.certificate
     # Finish all fallible copies before publishing. The record is the sole
     # request authority; allocation and its body/proof aliases move together.
     runtime.__dict__.update(runtime_updates)
@@ -547,6 +613,8 @@ def build_qualified_request(capture, runtime, body, *, endpoint, key, deadline=N
     if callable(gate):
         gate(record, capture, runtime)
     record.validate(capture, runtime, body)
+    if allocated is not None:
+        assert_certified_body(body, allocated)
     # Internal candidate construction may have no enclosing adapter. It does
     # not grant transport admission; physical send requires a bound gate.
     capture._qualified_request_gate_passed = callable(gate)

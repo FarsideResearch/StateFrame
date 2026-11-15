@@ -23,6 +23,9 @@ from kernel_source_delivery import (
     deliver_source, normalize_read_request,
 )
 from kernel_launch_identity_cost import ENVIRONMENT, UNKNOWN, PhaseMeter
+from kernel_read_receipts import (capture_read, capture_failed, enabled as read_captures_enabled,
+                                  uncaptured_path_reason,
+                                  relative_path as _receipt_relative_path)
 
 
 def read_limit(args: object) -> int:
@@ -301,6 +304,9 @@ def _unchanged_request_number(
         measurement: object, page: Mapping[str, object] | None,
         args: Mapping[str, object], start: int) -> int | None:
     """Only a prior delivered default page may become an unchanged notice."""
+    from kernel_read_receipts import enabled as allocator_enabled
+    if allocator_enabled():
+        return None  # delivery request numbers are never source-presence proof
     if page is None or start != 0 or any(
             args.get(key) not in (None, "", 0)
             for key in ("line", "start_line", "end_line", "symbol", "cursor",
@@ -527,7 +533,8 @@ def execute_read(root: Path, p: Path, raw: str, display: str, start: int, *,
     """Read ``p`` exactly as the runner does.  Returns (result_class, observation, bytes)."""
     read_bytes: bytes | None = None
     from kernel_reread_result_truth import enabled as result_truth_enabled, result_note
-    result_truth = result_truth_enabled()
+    from kernel_read_receipts import enabled as allocator_enabled
+    result_truth = result_truth_enabled() or allocator_enabled()
     if delivery is not None:
         # A requested read is chargeable even when authorization or the host
         # reports a typed failure; callers must not silently erase its receipt.
@@ -596,10 +603,40 @@ def execute_read(root: Path, p: Path, raw: str, display: str, start: int, *,
             )
             if stale is not None:
                 return stale
+        if (cached_page is not None and read_captures_enabled()
+                and str(cached_page[1].get("metadata", {}).get("result_class", "OK")) == "OK"):
+            # A1b: a cached page that overflows the fresh-exposure allowance is
+            # re-rendered shorter by the live path instead of being replayed whole.
+            from kernel_read_admission import fits as admission_fits, spend as admission_spend
+            cached_text = str(cached_page[1].get("observation", ""))
+            if not admission_fits(measurement, visible_messages, cached_text):
+                cached_page = None
+            elif cache_entry is not None and cache_entry.content is None:
+                # The replay below bypasses admit(); charge it so the batch total stays truthful.
+                admission_spend(measurement, visible_messages, cached_text, path=display)
         if cache_entry is not None and cache_entry.content is None and cached_page is not None:
             cached_key, page = cached_page
             cached_metadata = dict(page.get("metadata", {}))
             cached_content = str(page.get("content", ""))
+            if read_captures_enabled():
+                try:
+                    capture_read(
+                        measurement, path=_receipt_relative_path(root, p),
+                        metadata=cached_metadata, payload=cached_content,
+                        original_page=str(page.get("observation", "")), source="page_cache",
+                        arguments=request.arguments, skip_reason=uncaptured_path_reason(root, p))
+                except Exception as error:
+                    capture_failed(measurement, error)
+                    if allocator_enabled():
+                        # No successful page may escape without durable exposure debt.
+                        if delivery is not None:
+                            delivery.update({
+                                "result_class": "ERROR", "host_outcome": ENVIRONMENT,
+                                "failure_class": "capture_failed", "error_type": type(error).__name__,
+                                "effective_range": None, "delivery_status": "WITHHELD",
+                                "requested_bytes_delivered": 0,
+                            })
+                        return "ERROR", f"Read failed for {raw}: {type(error).__name__}. Retry or choose another path.", None
             cached_observation = str(page.get("observation", ""))
             effective = cached_metadata.get("effective_range")
             dedup_receipt: dict[str, object] = {
@@ -760,6 +797,33 @@ def execute_read(root: Path, p: Path, raw: str, display: str, start: int, *,
             reuse_dispatch = None
         shaped: dict[str, object] = {}
         source = deliver_source(read_bytes, display, start, args=request, metadata_out=shaped)
+        if read_captures_enabled():
+            # A1b admission BEFORE capture: the capture covers exactly the delivered range.
+            from kernel_read_admission import admit as admit_fresh_page
+            source = admit_fresh_page(
+                measurement, raw=read_bytes, display=display, start=start, request=request,
+                source=source, visible_messages=visible_messages)
+            shaped.clear()
+            shaped.update(source.metadata)
+        if read_captures_enabled() and source.result_class == "OK":
+            try:
+                capture_read(
+                    measurement, path=_receipt_relative_path(root, p),
+                    metadata=source.metadata, payload=source.content, original_page=source.text,
+                    source="file_cache" if file_cache_hit else "disk", arguments=request.arguments,
+                    skip_reason=uncaptured_path_reason(root, p))
+            except Exception as error:
+                capture_failed(measurement, error)
+                if allocator_enabled():
+                    # Fail before reuse, caching or visibility can claim delivery.
+                    if delivery is not None:
+                        delivery.update({
+                            "result_class": "ERROR", "host_outcome": ENVIRONMENT,
+                            "failure_class": "capture_failed", "error_type": type(error).__name__,
+                            "effective_range": None, "delivery_status": "WITHHELD",
+                            "requested_bytes_delivered": 0,
+                        })
+                    return "ERROR", f"Read failed for {raw}: {type(error).__name__}. Retry or choose another path.", None
         if source.result_class == "OK":
             try:
                 from kernel_read_reuse_visibility import remember_read_span
@@ -1066,6 +1130,8 @@ def dispatch_live_read(root: Path, p: Path, raw: str, display: str, start: int, 
                        ) -> tuple[str, str, bytes | None, dict[str, object]]:
     """Run the shared live read executor and close its receipt with the same delivery."""
     delivery: dict[str, object] = {}
+    ledger = getattr(measurement, "read_capture_ledger", None)
+    capture_count = len(ledger) if ledger is not None else 0
     result, observation, source_bytes = execute_read(
         root, p, raw, display, start, args=args, measurement=measurement,
         step=step, policy=policy, delivery=delivery,
@@ -1092,6 +1158,13 @@ def dispatch_live_read(root: Path, p: Path, raw: str, display: str, start: int, 
             and dedup.get("status") == "UNCHANGED_VISIBLE"
             and observation.startswith(f"[read] {display[:120]} unchanged since request ")
             and delivery.get("requested_bytes_delivered", 0) == 0)
+    if read_captures_enabled() and result == "OK":
+        ledger = getattr(measurement, "read_capture_ledger", None)
+        if ledger is not None and len(ledger) > capture_count:
+            capture = ledger.all()[-1]
+            # Host-only loop accounting, never source-presence authority. Full
+            # repeated reads still charge one idle native batch, like before.
+            delivery["working_set_repeat_capture"] = len(ledger.by_identity(capture.identity)) > 1
     from kernel_serve_reads import enabled as serve_reads_enabled, note_read_outcome
     if serve_reads_enabled():
         from kernel_gate_switches import deliver_requested_bytes_enabled
@@ -1103,4 +1176,12 @@ def dispatch_live_read(root: Path, p: Path, raw: str, display: str, start: int, 
             bytes_read=bytes_read,
         )
     emit_read_receipt(bolt, root, p, raw, start, result, delivery)
+    scope = getattr(measurement, "_read_attempt_scope", None)
+    if scope is not None:
+        dedup = delivery.get("read_dedup")
+        audit_status = {"PermissionError": "PERMISSION", "TimeoutError": "DEADLINE",
+                        "FileNotFoundError": "MISSING"}.get(delivery.get("error_type"), result)
+        scope.finish(audit_status, dedup=(
+            delivery.get("delivery_status") == "REUSED_PROVEN"
+            or (isinstance(dedup, Mapping) and dedup.get("status") == "UNCHANGED_VISIBLE")))
     return result, observation, source_bytes, delivery

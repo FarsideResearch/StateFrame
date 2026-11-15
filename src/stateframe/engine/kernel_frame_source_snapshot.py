@@ -6,6 +6,8 @@ import copy
 import ast
 import hashlib
 import json
+import logging
+import os
 import re
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from pathlib import Path
@@ -545,7 +547,8 @@ def public_check_source_windows(runtime: object, state: Mapping[str, object]) ->
 
 
 def _source_coverage_line_items(messages: Sequence[Mapping[str, object]],
-                                editable_paths: Sequence[str] = ()) -> list[str]:
+                                editable_paths: Sequence[str] = (), *,
+                                delivered_only: bool = False) -> list[str]:
     """Describe exact current ranges after selection, using final wire metadata."""
     from kernel_request_source_window import parse_model_source_window
     from kernel_stateframe_framefit5 import STATE_HEADER, _state_payload
@@ -566,7 +569,19 @@ def _source_coverage_line_items(messages: Sequence[Mapping[str, object]],
         break
 
     shown: dict[tuple[str, str, int], list[tuple[int, int]]] = {}
+    native_paths: set[str] = set()
     for message in messages:
+        if delivered_only:
+            # Native pages have their own allocator facts. Do not duplicate their
+            # claims here or call their paths absent just because no model window
+            # remains (a clipped native page may carry only part of a line).
+            from kernel_stateframe_framefit5 import _framefit5_delivered_source_ranges
+            content = str(message.get("content") or "")
+            if content.startswith("[read page]"):
+                for (path, revision), spans in _framefit5_delivered_source_ranges([message]).items():
+                    if frame_source_path_allowed(path) and spans:
+                        native_paths.add(path)
+                continue
         metadata = parse_model_source_window(message.get("content"))
         if not isinstance(metadata, Mapping) or metadata.get("absence") != "NONE":
             continue
@@ -575,8 +590,17 @@ def _source_coverage_line_items(messages: Sequence[Mapping[str, object]],
         if (not isinstance(path, str) or not frame_source_path_allowed(path)
                 or not isinstance(revision, str) or type(total) is not int):
             continue
+        spans = metadata.get("ranges", ())
+        if delivered_only:
+            from kernel_request_source_window import _model_window_segments
+            spans = [span for span, text in _model_window_segments(str(message["content"]), metadata)
+                     if type(span.get("start_line")) is int and type(span.get("end_line")) is int
+                     and 1 <= span["start_line"] <= span["end_line"]
+                     and len(text.splitlines()) == span["end_line"] - span["start_line"] + 1]
+            if not spans:
+                continue
         ranges = shown.setdefault((path, revision, total), [])
-        for span in metadata.get("ranges", ()):
+        for span in spans:
             if (isinstance(span, Mapping) and type(span.get("start_line")) is int
                     and type(span.get("end_line")) is int):
                 ranges.append((span["start_line"], span["end_line"]))
@@ -607,11 +631,173 @@ def _source_coverage_line_items(messages: Sequence[Mapping[str, object]],
         else:
             visibility = "partial source shown below; complete line coverage unverified."
         lines.append(f"{path} ({total} {noun}, {change}): {visibility}")
-    shown_paths = {path for path, _revision, _total in shown}
+    shown_paths = {path for path, _revision, _total in shown} | native_paths
     for path in sorted(path for path in (set(editable_paths) | set(facts)) - shown_paths
                        if frame_source_path_allowed(path)):
         lines.append(f"{path}: not shown; read this path to see current source.")
     return sorted(lines)
+
+
+SOURCE_COVERAGE_HEADER = "[Source coverage]"
+
+
+def _source_coverage_listed_paths(content: str) -> list[str]:
+    """Paths named by an existing coverage block, both shown and "not shown" lines."""
+    paths = []
+    for line in content.splitlines()[1:]:
+        if line.endswith("read this path to see current source."):
+            path = line[:line.index(": not shown;")] if ": not shown;" in line else ""
+        else:
+            path = line[:line.index(" (")] if " (" in line else ""
+        if path:
+            paths.append(path)
+    return paths
+
+
+def reconcile_source_coverage(messages: list[dict[str, object]], *,
+                              owned_indexes: Sequence[int] | None = None) -> None:
+    """Rebuild the "[Source coverage]" block from the windows the request now carries.
+
+    The block is first written while fitting candidate rows. Transforms that run
+    afterwards may drop or clip source windows, so the final block is recomputed
+    here from the delivered bytes; a path whose window is gone becomes "not shown".
+    Allocator callers must supply host-owned coordinates. None preserves the
+    legacy OFF fitter's reconciliation contract.
+    """
+    indexes = [index for index, message in enumerate(messages)
+               if (owned_indexes is None or (index in owned_indexes and message.get("role") == "user"))
+               and isinstance(message, Mapping) and isinstance(message.get("content"), str)
+               and message["content"].startswith(SOURCE_COVERAGE_HEADER + "\n")]
+    if not indexes:
+        return
+    listed = {path for index in indexes
+              for path in _source_coverage_listed_paths(str(messages[index]["content"]))}
+    coverage = _source_coverage_line_items(messages, sorted(listed), delivered_only=True)
+    first = messages[indexes[0]]
+    content = SOURCE_COVERAGE_HEADER + "\n" + "\n".join(coverage)
+    if first.get("content") != content:
+        first["content"] = content
+        if "content_sha256" in first:
+            first["content_sha256"] = hashlib.sha256(content.encode("utf-8")).hexdigest()
+    # Fitting never inserts an empty block; a block with nothing left to say goes too.
+    for index in reversed(indexes[1:] if coverage else indexes):
+        del messages[index]
+
+
+def reconciled_source_coverage_suffix(messages: Sequence[Mapping[str, object]],
+                                      suffix: Sequence[Mapping[str, object]]) -> list[dict[str, object]]:
+    """The newest user suffix is opaque; marker text grants no host ownership."""
+    return [copy.deepcopy(dict(message)) for message in suffix]
+
+
+_COVERAGE_SHOWN_LINE = re.compile(
+    r"^(?P<path>.+?) \((?P<total>\d+) lines?, [^)]*\): (?P<visibility>.*)$")
+_COVERAGE_SPAN = re.compile(r"(\d+)-(\d+)")
+
+
+class SourceCoverageClaimError(ValueError):
+    """A "[Source coverage]" line claims lines whose bytes the request does not carry."""
+
+
+def _source_coverage_claimed_ranges(content: str) -> dict[str, list[tuple[int, int]]]:
+    """Line ranges each "shown below" coverage line claims, keyed by path."""
+    claimed: dict[str, list[tuple[int, int]]] = {}
+    for line in content.splitlines()[1:]:
+        match = _COVERAGE_SHOWN_LINE.match(line)
+        if match is None or "shown below" not in match["visibility"]:
+            continue
+        visibility = match["visibility"]
+        total = int(match["total"])
+        if visibility.startswith(("all ", "the single line")):
+            spans = [(1, total)]
+        else:
+            spans = [(int(start), int(end))
+                     for start, end in _COVERAGE_SPAN.findall(visibility.split(";", 1)[0])]
+        claimed.setdefault(match["path"], []).extend(spans)
+    return claimed
+
+
+def _uncovered_coverage_claims(messages: Sequence[Mapping[str, object]], *,
+                               owned_indexes: Sequence[int] | None = None) -> dict[str, list[tuple[int, int]]]:
+    """Claimed ranges with at least one line absent from the delivered source bytes."""
+    from kernel_stateframe_framefit5 import _framefit5_delivered_source_ranges
+    from kernel_request_source_window import _model_window_segments, parse_model_source_window
+
+    claimed: dict[str, list[tuple[int, int]]] = {}
+    for index, message in enumerate(messages):
+        if owned_indexes is not None and index not in owned_indexes:
+            continue
+        content = message.get("content") if isinstance(message, Mapping) else None
+        if isinstance(content, str) and content.startswith(SOURCE_COVERAGE_HEADER + "\n"):
+            for path, spans in _source_coverage_claimed_ranges(content).items():
+                claimed.setdefault(path, []).extend(spans)
+    if not claimed:
+        return {}
+    delivered: dict[str, list[tuple[int, int]]] = {}
+    for message in messages:
+        content = message.get("content")
+        metadata = parse_model_source_window(content)
+        if metadata is not None:
+            path = metadata.get("path")
+            if isinstance(path, str) and metadata.get("absence") == "NONE":
+                for span, text in _model_window_segments(str(content), metadata):
+                    first, last = span.get("start_line"), span.get("end_line")
+                    if (type(first) is int and type(last) is int and 1 <= first <= last
+                            and len(text.splitlines()) == last - first + 1):
+                        delivered.setdefault(path, []).append((first, last))
+            continue
+        for (path, _revision), spans in _framefit5_delivered_source_ranges([message]).items():
+            delivered.setdefault(path, []).extend(spans)
+
+    def covered(path: str, start: int, end: int) -> bool:
+        cursor = start
+        for first, last in sorted(delivered.get(path, ())):
+            if first > cursor:
+                break
+            cursor = max(cursor, last + 1)
+            if cursor > end:
+                return True
+        return False
+
+    return {path: spans for path, spans in claimed.items()
+            if any(not covered(path, start, end) for start, end in spans)}
+
+
+def verify_source_coverage_claims(messages: list[dict[str, object]], *,
+                                  strict: bool | None = None,
+                                  journal: object = None,
+                                  request_id: object = None,
+                                  owned_indexes: Sequence[int] | None = None) -> bool:
+    """Final-wire invariant: every coverage "shown below" claim is delivered in the body.
+
+    The claimed line ranges of each "[Source coverage]" line must be a subset of the
+    source ranges whose bytes the messages carry. Under pytest (``strict`` unset and
+    ``PYTEST_CURRENT_TEST`` present) a violation raises so a new lie path fails
+    loudly. In production it self-heals: the block is reconciled once more and a
+    ``context_claim_reconciled`` journal event records it; the run is never blocked.
+    Returns True when the claims held without repair.
+    """
+    uncovered = _uncovered_coverage_claims(messages, owned_indexes=owned_indexes)
+    if not uncovered:
+        return True
+    if strict is None:
+        strict = bool(os.environ.get("PYTEST_CURRENT_TEST"))
+    detail = {path: [f"{start}-{end}" for start, end in spans]
+              for path, spans in sorted(uncovered.items())}
+    if strict:
+        raise SourceCoverageClaimError(
+            f"[Source coverage] claims lines the request does not carry: {detail}")
+    reconcile_source_coverage(messages, owned_indexes=owned_indexes)
+    healed = not _uncovered_coverage_claims(messages, owned_indexes=owned_indexes)
+    emit = getattr(journal, "emit", None)
+    if callable(emit):
+        emit("context_claim_reconciled", producer="kernel_frame_source_snapshot",
+             request_id=request_id, claim="source_coverage", uncovered=detail,
+             healed=healed, dispatch=False)
+    if not healed:
+        logging.getLogger(__name__).warning(
+            "source coverage claims still exceed delivered ranges after reconcile: %s", detail)
+    return False
 
 
 def _prune_redundant_source_metadata(messages: list[dict[str, object]]) -> None:

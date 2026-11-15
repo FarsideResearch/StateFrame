@@ -21,6 +21,11 @@ READ_CONTRACT_FIELDS = (
 )
 
 
+def read_page_header_reserve(path: str, revision: str) -> int:
+    """Character allowance for a page's receipt header and continuation line."""
+    return max(512, len(path) + len(revision) + 320)
+
+
 class ReadArgumentError(ValueError):
     """A malformed or contradictory read contract the caller can repair."""
 
@@ -493,7 +498,7 @@ def deliver_source(raw: bytes, display: str, start: int, *, args: object,
 
     # Reserve room for the receipt header and continuation line.  The source body
     # is the only part allowed to consume the remaining character budget.
-    overhead = min(max_chars - 1, max(512, len(display) + len(revision) + 320))
+    overhead = min(max_chars - 1, read_page_header_reserve(display, revision))
     body_budget = max(1, max_chars - overhead)
     max_bytes = request.max_bytes
     remaining_bytes: int | None = None

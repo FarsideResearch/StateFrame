@@ -170,6 +170,9 @@ READ_OUTCOMES = {
 READ_NOT_APPLIED_RESULTS = frozenset({"ERROR", "OUT_OF_RANGE"})
 READ_NOT_APPLIED_RESULTS_BY_TOOL = {
     **{name: frozenset({"REFUSED"}) for name in HOST_OBSERVATIONS},
+    # Budget admission refused before capture: the attempt is settled, but it
+    # did not acquire source and must not become an unknown-effect repair loop.
+    "read": READ_NOT_APPLIED_RESULTS | frozenset({"REFUSED_ADMISSION"}),
     # These host producers have distinct refusal classes; keep each vocabulary
     # scoped to its producer instead of broadening shared read/search results.
     "list_files": frozenset({"REJECTED"}),
@@ -180,7 +183,7 @@ READ_NOT_APPLIED_RESULTS_BY_TOOL = {
 }
 READ_RESULT_CLASSES = {
     **{name: frozenset({"NO_OP", "REFUSED"}) for name in HOST_OBSERVATIONS},
-    "read": frozenset(READ_OUTCOMES["read"]) | READ_NOT_APPLIED_RESULTS,
+    "read": frozenset(READ_OUTCOMES["read"]) | READ_NOT_APPLIED_RESULTS_BY_TOOL["read"],
     "text": frozenset(READ_OUTCOMES["text"]) | READ_NOT_APPLIED_RESULTS,
     "grep": frozenset(READ_OUTCOMES["grep"]) | READ_NOT_APPLIED_RESULTS,
     "ls": frozenset(READ_OUTCOMES["ls"]),

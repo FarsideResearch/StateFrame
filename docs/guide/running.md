@@ -349,3 +349,5 @@ exit code, workspace and environment identity before their recorded output is
 served. Full-network and host calls require `--replay-external`; incomplete calls
 refuse resume. Raw retained output and truncation counters remain in the run
 directory. The foreground shell tool does not launch background shell commands; read-only background jobs use the separate job tools.
+
+`STATEFRAME_WORKING_SET_ALLOCATOR=on` enables read captures, read attempt/result audit events and read-time admission (default `off`). Fresh pages are shortened on whole-line boundaries when needed to fit the measured request envelope; a page with no admissible line returns `REFUSED_ADMISSION` with a continuation cursor. The allocator owns ON request composition: its complete provider wire is certified and measured before read-only final validation. Accepted assignments persist residency, and failed sends retain exposure debt. The unset/default OFF path retains the 0.6.23 request bytes. `STATEFRAME_STABLE_WIRE=on` is incompatible with allocator ON and is refused before allocation. A resumed run keeps its recorded setting.

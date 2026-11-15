@@ -25,7 +25,8 @@ def detached_context(capture, runtime):
     for name in dict.fromkeys((*runtime_authority_fields(runtime),
             "_framefit_action_context", "_request_source_closure",
             "_empirical_frame_sources", "_request_deferred_source_paths",
-            "prepared_binding", "_framefit5_owner_presentation_contract")):
+            "prepared_binding", "_framefit5_owner_presentation_contract",
+            "working_set_state")):
         if hasattr(runtime, name):
             setattr(candidate_runtime, name, copy.deepcopy(getattr(runtime, name)))
     candidate_runtime.owner = copy.copy(runtime.owner)

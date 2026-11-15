@@ -1677,6 +1677,8 @@ def assemble_framefit5_request(
         frame_request_allocation: FrameRequestAllocation | None = None,
 ) -> list[dict[str, object]]:
     """Build one complete FrameFit5 provider surface for prep and every recovery path."""
+    from kernel_read_receipts import enabled as allocator_enabled
+    allocator_on = allocator_enabled()
     prepared_for_composition: Sequence[Mapping[str, object]] = prepared
     if frame_request_allocation is None:
         _task, original_newest, _task_index, _action_index = _task_and_latest_turn(source_messages)
@@ -1684,14 +1686,14 @@ def assemble_framefit5_request(
         # Allocated assembly must consume its captured ownership, including
         # callers that intentionally supply no mutable transcript at all.
         original_newest = frame_request_allocation.source_layout["newest_user_suffix"]
-    if frame_request_allocation is None and isinstance(source_plan, Mapping):
+    if not allocator_on and frame_request_allocation is None and isinstance(source_plan, Mapping):
         from kernel_frame_source_snapshot import retire_f4_deferred_carriers
 
         prepared_for_composition = retire_f4_deferred_carriers(
             prepared, source_messages, source_plan, sources,
         )
     required_deferred_paths: list[object] = []
-    if isinstance(source_plan, Mapping):
+    if not allocator_on and isinstance(source_plan, Mapping):
         deferred_paths = source_plan.get("deferred_paths", ())
         if (isinstance(deferred_paths, Sequence)
                 and not isinstance(deferred_paths, (str, bytes, bytearray))
@@ -1732,7 +1734,7 @@ def assemble_framefit5_request(
         volatile_micrograph=getattr(runtime, "micrograph_wire", None) is not None,
     )
     projected_count = 0
-    if frame_request_allocation is None and isinstance(source_plan, Mapping):
+    if not allocator_on and frame_request_allocation is None and isinstance(source_plan, Mapping):
         from kernel_request_source_window import project_model_source_messages
 
         projected_count = project_model_source_messages(
@@ -1761,13 +1763,13 @@ def assemble_framefit5_request(
                 "FrameFit5 assembly could not preserve the existing volatile tail"
             )
         result[volatile_indexes[0]]["content"] = preserved_tail_content
-    if frame_request_allocation is None:
+    if not allocator_on and frame_request_allocation is None:
         from kernel_stateframe_capacity import refresh_read_ranges
 
         refresh_read_ranges(result, getattr(runtime, "_framefit_action_context", None))
     # Allocated layouts already pin source notices as ordered facts. Rebuilding
     # them from mutable runtime evidence here would move captured carriers.
-    source_notice_requested = frame_request_allocation is None and (
+    source_notice_requested = not allocator_on and frame_request_allocation is None and (
         bool(required_deferred_paths)
         or any(
             _is_framefit5_source_notice(message)
@@ -1805,7 +1807,7 @@ def assemble_framefit5_request(
         micrograph_fact = "micrograph: " + canonical_bytes(
             wire.projection()).decode("utf-8")
     result = finalize_frame_only_wire_order(result, micrograph_fact=micrograph_fact)
-    if frame_request_allocation is not None:
+    if not allocator_on and frame_request_allocation is not None:
         from kernel_request_source_window import project_model_source_messages
 
         projected_count = project_model_source_messages(
@@ -2737,7 +2739,9 @@ def validate_product_request(
         raise FrameFit5Error("typed frame action ledger lists are malformed")
     from kernel_stateframe_capacity import validate_read_ranges, validate_coverage
 
-    if isinstance(framefit5.get("headcarry"), Mapping) and isinstance(state_message, dict):
+    from kernel_read_receipts import enabled as allocator_enabled
+    if (not allocator_enabled() and isinstance(framefit5.get("headcarry"), Mapping)
+            and isinstance(state_message, dict)):
         # verified heads are read-delivery carriers. Allocation paths re-render the
         # optional heads after the last delivery reconcile, so derive delivery claims from the
         # carriers in THIS final frame before validating it (the validator still runs below).
@@ -2748,7 +2752,13 @@ def validate_product_request(
         if framefit5.get("read_facts") != before_facts:
             _payload["state"] = state
             state_message["content"] = _serialize_state_message(_payload)
-    validate_read_ranges(framefit5, messages)
+    certificate = getattr(getattr(runtime, "_active_capture", None), "_working_set_certificate", None)
+    if (allocator_enabled() and certificate is not None
+            and (frame_selection is not None or frame_request_allocation is not None)):
+        from kernel_working_set_proof import verify_messages
+        verify_messages(messages, certificate)
+    else:
+        validate_read_ranges(framefit5, messages)
     validate_coverage(framefit5, getattr(runtime, "_framefit_action_context", None))
     if not isinstance(framefit5.get("applied_edits"), list):
         raise FrameFit5Error("typed frame journal applied edits are missing")

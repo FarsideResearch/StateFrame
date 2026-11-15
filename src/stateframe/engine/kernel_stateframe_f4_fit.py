@@ -1270,6 +1270,16 @@ def fit_f4_request(messages: Sequence[Mapping[str, object]], tools: object,
     """
     if type(ceiling_tokens) is not int or ceiling_tokens <= 0:
         raise ValueError("F4 fit ceiling must be a positive integer")
+    from kernel_read_receipts import enabled as allocator_enabled
+    if allocator_enabled():
+        # Preserve every source proposal for freeze_preparation/propose_slots;
+        # the F4/M3 heuristic caps cannot commit membership or reject the wire.
+        initial = _estimate(messages, tools)
+        manifest = _manifest(initial=initial, final=initial, ceiling=ceiling_tokens,
+                             fits=True, changed=False, enabled_value=False)
+        return {"messages": messages, "manifest": manifest, "fits": True,
+                "changed": False, "initial_tokens": initial, "final_tokens": initial,
+                "ceiling_tokens": ceiling_tokens}
     active = enabled() if enabled_value is None else bool(enabled_value)
     framefit_active = type(framefit_enabled_value) is bool and framefit_enabled_value
     protected_ids = {

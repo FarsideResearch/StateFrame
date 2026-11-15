@@ -26,7 +26,7 @@ def read_receipt(event: Mapping[str, object]) -> tuple[str, dict[str, object]] |
         return None
     if str(receipt.get("result_class") or "").strip().upper() in {
         "RECALLED", "RECALL_REJECTED", "REJECTED", "FAILED", "ERROR",
-        "INVALID_ARGUMENT", "MISSING", "NOT_FOUND", "OUT_OF_RANGE",
+        "INVALID_ARGUMENT", "MISSING", "NOT_FOUND", "OUT_OF_RANGE", "REFUSED_ADMISSION",
     }:
         return None
     from kernel_stateframe_framefit5 import FrameFit5Error, _pathless_source_path, _safe_relative_path

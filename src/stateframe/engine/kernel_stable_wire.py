@@ -9,6 +9,7 @@ from collections import Counter
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict, is_dataclass
 
+from kernel_request_seal import RequestSealError
 from kernel_stable_wire_ownership import (
     CanonicalMessages, ProjectionOrder, RequestOwnership, projection_order, request_ownership,
     request_exchange_start, request_frame_index,
@@ -45,6 +46,12 @@ class StableWireError(ValueError):
     """A stable-wire projection cannot prove its representation is faithful."""
 
 
+class StableWireAllocatorConflict(RequestSealError):
+    """The allocator cannot yet certify append-only stable-wire placement."""
+
+    reason_code = "working_set_allocator_incompatible"
+
+
 def mode(environ: Mapping[str, str] | None = None) -> str:
     source = os.environ if environ is None else environ
     value = str(source.get(MODE_ENV, "off")).strip().lower()
@@ -68,6 +75,26 @@ def enabled_for_replay(environ: Mapping[str, str] | None = None) -> bool:
         return True
     from kernel_cache_layout_candidate import replay_stable_wire_decision
     return replay_stable_wire_decision() == "applied"
+
+
+def require_allocator_compatibility(capture: object) -> None:
+    """Refuse before allocation; neither layout may silently bypass its owner.
+
+    Called only on the allocator-ON path. A recorded applied projection still
+    requires stable placement even when the current environment has it off.
+    Journal directly: this refusal is a contract event, not optional telemetry.
+    """
+    if not enabled_for_replay():
+        return
+    error = StableWireAllocatorConflict(
+        f"{StableWireAllocatorConflict.reason_code}: "
+        "STATEFRAME_WORKING_SET_ALLOCATOR=on cannot preserve the stable-wire prefix; "
+        "disable the allocator or stable wire before starting a new run")
+    capture.journal.emit(
+        "stable_wire_refused", producer="kernel_stable_wire",
+        request_id=capture.request_id, reason_code=error.reason_code,
+        outcome=error.outcome, dispatch=False)
+    raise error
 
 
 def headroom_tokens(environ: Mapping[str, str] | None = None) -> int:

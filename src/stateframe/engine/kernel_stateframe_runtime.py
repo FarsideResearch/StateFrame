@@ -2827,12 +2827,18 @@ def _authored_candidate_revision(runtime: object) -> str | None:
     return value or None
 
 
-def note_provider_request(runtime: object, messages: Sequence[Mapping[str, object]]) -> None:
+def note_provider_request(runtime: object, messages: Sequence[Mapping[str, object]],
+                          tools: Sequence[object] | None = None) -> None:
     """Advance the delivered-request clock on every qualified provider path."""
     from kernel_read_exec import record_serialized_read_pages
 
     runtime._frame_budget_request_count = getattr(runtime, "_frame_budget_request_count", 0) + 1
     record_serialized_read_pages(runtime, messages, runtime._frame_budget_request_count)
+    from kernel_read_receipts import enabled as read_receipts_enabled
+    if read_receipts_enabled():
+        # A1b: the sealed request is the measured envelope the next read boundary admits against.
+        from kernel_read_admission import note_sealed_request
+        note_sealed_request(runtime, messages, tools)
 
 
 def _prepare_request_capture(runtime: object) -> RequestCapture:
@@ -24750,6 +24756,9 @@ class StateFrameRuntime:
                     # fitting discovered late; only a page or read route the
                     # admitted request really dropped is a loss. Anything else
                     # is journaled as a typed harden8 advisory, not a crash.
+                    # CARRY-NOTE: under working-set ON the receipt comes from the certified
+                    # allocator closure (capture._request_source_closure_override). Its
+                    # deferred_paths carry matching wire notices; see kernel_working_set_live.
                     reconcile_owner_source_delivery(
                         self, capture, previous_source_delivery, final_source_delivery,
                         tools=tools,
@@ -25426,7 +25435,7 @@ class StateFrameRuntime:
                 )
                 raise RuntimeError("frame-only request final validation failed") from error
         if provider_request and overflow is None:
-            note_provider_request(self, prepared)
+            note_provider_request(self, prepared, prepared_tools)
         if framefit_on:
             prepared_event = emit_request_prepared_event()
             if (delivery_manifest_rendered
@@ -25604,6 +25613,9 @@ class StateFrameRuntime:
             return
         boundary_terminated = str(result.get("result", "")).upper() in {
             "HOOK_BLOCKED", "HOOK_CONTAINMENT", "CONTINUATION_BLOCKED"}
+        from kernel_working_set_stop import is_suspended_result
+        suspended = is_suspended_result(result)
+        boundary_terminated = boundary_terminated or suspended
         if (not boundary_terminated
                 and getattr(self, "stateframe_completion_owner_mode", "off") == "on"):
             from kernel_completion_owner import reconcile_submitted_request, request_pending
@@ -25628,7 +25640,9 @@ class StateFrameRuntime:
             cleanup_environment(self)
         from kernel_done_is_submit_authority import terminal_from_seal
         sealed_terminal = terminal_from_seal(self)
-        host_done_facts_on = getattr(self, "stateframe_host_done_facts_mode", "off") == "on"
+        # A suspension is an unsent boundary, not a completion: no done facts.
+        host_done_facts_on = (getattr(self, "stateframe_host_done_facts_mode", "off") == "on"
+                              and not suspended)
         from kernel_repair_blocks_done import terminal_stop_active
         repair_blocks_done_stopped = (
             False if sealed_terminal is not None else terminal_stop_active(self))

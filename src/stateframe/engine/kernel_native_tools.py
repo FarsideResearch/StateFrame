@@ -10,6 +10,10 @@ import kernel_frame_routes as _frame_routes
 
 import copy
 import os
+import sys
+from types import SimpleNamespace
+
+from kernel_read_receipts import refused_calls, finish_pending, enabled as read_audit_enabled
 
 from kernel_tool_reply import Outcome, tool_reply
 
@@ -154,6 +158,7 @@ class NativeToolBatch:
                          result='NO_EXECUTION_RECEIPT', reason='unclosed_before_next_selection',
                          **self._lineage())
             call = copy.deepcopy(self.inflight)
+            self._audit_unexecuted_reads([call], selected=True)
             if not any(message.get("role") == "tool" and message.get("tool_call_id") == call.get("id")
                        for message in messages):
                 self._pending_tool_result_messages.extend([
@@ -181,6 +186,9 @@ class NativeToolBatch:
         self.journal = capture.journal
         from kernel_pilot import ACTIVE_RUNTIME
         runtime = ACTIVE_RUNTIME.get()
+        if read_audit_enabled():
+            self._read_audit_runtime = (runtime if runtime is not None else
+                getattr(self, "_read_audit_runtime", SimpleNamespace(journal=self.journal)))
         content = ''
         if not self.pending:
             content, calls = ask(messages, **kwargs)
@@ -206,6 +214,7 @@ class NativeToolBatch:
                             "NOT_RUN",
                             "BATCH_REJECTED: malformed or oversized tool batch",
                         )
+                self._audit_unexecuted_reads(calls)
                 self.journal.emit('native_batch_rejected', request_id=capture.request_id,
                                   reason='batch exceeds 16 calls or lacks function name and serialized arguments', dispatch=False, **response_lineage)
                 return 'Invalid tool-call batch. Return named tools with JSON arguments.', []
@@ -219,13 +228,18 @@ class NativeToolBatch:
                             "NOT_RUN",
                             "BATCH_REJECTED: done must be the unique final call",
                         )
+                self._audit_unexecuted_reads(calls)
                 self.journal.emit("native_batch_rejected", request_id=capture.request_id,
                                   reason="done_must_be_unique_final", calls=calls,
                                   dispatch=False, **response_lineage)
                 return ("Invalid tool-call batch: done must appear at most once, as the final call. "
                         "No calls from this batch were executed; submit a corrected batch."), []
             if before_commit is not None and callable(before_commit):
-                before_commit(calls)
+                try:
+                    before_commit(calls)
+                except BaseException:
+                    self._audit_unexecuted_reads(calls)
+                    raise
             # Selection and feedback consumption commit only after routing accepts the full batch.
             from kernel_native_prefix import enabled as prefix_enabled
             if before_commit is not None and prefix_enabled():
@@ -371,6 +385,7 @@ class NativeToolBatch:
         if self.journal is None:
             raise RuntimeError("in-flight native call lacks its journal")
         call = copy.deepcopy(self.inflight)
+        self._audit_unexecuted_reads([call], selected=True)
         self.journal.emit(
             "native_batch_action_force_closed",
             origin_request_id=self.origin,
@@ -399,6 +414,7 @@ class NativeToolBatch:
         if self.journal is None:
             raise RuntimeError("in-flight native call lacks its journal")
         call = copy.deepcopy(self.inflight)
+        self._audit_unexecuted_reads([call], selected=True)
         self.journal.emit(
             "native_batch_action_force_closed",
             origin_request_id=self.origin,
@@ -415,6 +431,29 @@ class NativeToolBatch:
         self.discard_pending(reason)
         return call
 
+    def _audit_unexecuted_reads(self, calls: list[dict], *, selected: bool = False) -> None:
+        if not read_audit_enabled():
+            return
+        runtime = getattr(self, "_read_audit_runtime", None)
+        if runtime is None:
+            from kernel_pilot import ACTIVE_RUNTIME
+            runtime = ACTIVE_RUNTIME.get()
+        if runtime is None:
+            runtime = self._read_audit_runtime = SimpleNamespace(journal=self.journal)
+        # A terminal transcript may close a selected read after its worker
+        # scope already settled. Reuse that attempt instead of inventing a
+        # second read for the same call, including on exception cleanup.
+        if selected and len(calls) == 1:
+            call = calls[0]
+            if (call.get("function", {}).get("name") == "read"
+                    and call.get("id") is not None
+                    and call.get("id") == getattr(runtime, "_read_last_attempt_call_id", None)):
+                scope = getattr(runtime, "_read_attempt_scope", None)
+                if scope is not None and scope.call_id == call.get("id"):
+                    finish_pending(runtime, error=sys.exc_info()[1])
+                return
+        refused_calls(runtime, calls)
+
     def discard_pending(
             self,
             reason: str,
@@ -429,6 +468,7 @@ class NativeToolBatch:
             if self.journal is None:
                 raise RuntimeError("queued native calls lack their journal")
             calls = copy.deepcopy(self.pending)
+            self._audit_unexecuted_reads(calls)
             self.journal.emit("native_batch_discarded", origin_request_id=self.origin,
                               calls=calls, reason=reason, **self._lineage())
             if self._integrity_enabled():

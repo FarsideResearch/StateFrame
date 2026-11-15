@@ -11,7 +11,7 @@ from kernel_measurement import digest
 KINDS = frozenset({"native_batch_received", "native_batch_action_selected",
                   "native_batch_action_closed", "native_batch_discarded",
                   "native_batch_unexecuted", "native_batch_action_unresolved",
-                  "request_source_closure"})
+                  "request_source_closure", "working_set_response"})
 VALIDATION_KINDS = KINDS | frozenset({
     "action_outcome_closed", "request_prepared", "request_final_wire_prepared",
 })

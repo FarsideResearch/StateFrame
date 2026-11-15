@@ -166,6 +166,13 @@ class QualifiedRequest:
             if field in authority and authority[field] != getattr(capture, attribute, None):
                 _seal_violation("qualified request classification changed: " + field)
                 raise RequestSealError("qualified request classification changed: " + field)
+        if "working_set_assignment_digest" in authority:
+            certificate = getattr(capture, "_working_set_certificate", None)
+            if (certificate is None or certificate.assignment_digest
+                    != authority["working_set_assignment_digest"]):
+                raise RequestSealError("qualified working-set assignment changed")
+            from kernel_working_set_proof import verify_certificate
+            verify_certificate(self.wire, certificate)
         meter = (getattr(capture, "_request_token_meter", None)
                  if _frame_routes.ROUTES_ACTIVE and getattr(capture, "frame_route", None) is not None
                  else getattr(runtime, "_request_token_meter", None))
