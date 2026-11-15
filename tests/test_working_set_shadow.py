@@ -1,4 +1,5 @@
 """Shadow admission is observational and uses detached capture authority."""
+import os
 from dataclasses import replace
 import hashlib
 import json
@@ -102,7 +103,7 @@ def test_overshoot_active_index_is_frozen_not_a_shadow_diagnostic(monkeypatch):
 def test_recorded_wire_0020_fresh_page_full_and_within_cap(tmp_path, monkeypatch):
     """Hydrate the recorded complete envelope, not an underestimated toy shell."""
     monkeypatch.setenv("STATEFRAME_WORKING_SET_ALLOCATOR", "on")
-    path = Path.home() / "crew-lanes/tmp/crew-01/ret/r38g/run/wire/0020.request.json"
+    path = Path(os.environ.get("STATEFRAME_RECORDED_WIRE") or "/nonexistent/recorded-wire.json")
     if not path.exists():
         pytest.skip("recorded r38g wire absent")
     from kernel_read_receipts import capture_read

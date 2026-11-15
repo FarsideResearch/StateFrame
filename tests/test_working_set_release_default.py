@@ -1,7 +1,7 @@
 """The shipped allocator default and its public opt-out retain exact wire contracts."""
 from pathlib import Path
 
-from test_working_set_astra_off_parity import _cached_provider_hashes, _provider_hashes
+from test_working_set_off_parity_base import _cached_provider_hashes, _provider_hashes
 from tools.pinned_tree import pinned_tree
 
 from stateframe import profiles, runner

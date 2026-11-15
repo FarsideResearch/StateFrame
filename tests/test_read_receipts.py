@@ -594,7 +594,7 @@ def test_attempt_ids_survive_a_fresh_runtime_on_existing_journal(tmp_path):
 
 
 def test_line_digest_matches_the_shared_alarm_definition_byte_for_byte():
-    # crew-14's context alarm uses this exact definition; trailing whitespace is ignored.
+    # The context alarm uses this exact definition; trailing whitespace is ignored.
     def alarm_digest(line):
         return hashlib.blake2b(line.rstrip().encode("utf-8"), digest_size=8).hexdigest()
     for line in ("x = 1", "x = 1   ", "x = 1\t", "  indented\r"):

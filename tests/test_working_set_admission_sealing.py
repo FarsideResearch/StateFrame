@@ -1,4 +1,4 @@
-"""Independent crew-14 alarm gates for the real K1/K2 qualification cases."""
+"""Independent context-alarm gates for the real K1/K2 qualification cases."""
 from __future__ import annotations
 
 import importlib.util
@@ -18,7 +18,7 @@ def _alarm(monkeypatch):
         monkeypatch.setitem(sys.modules, spec.name, module)
         spec.loader.exec_module(module)
         return module
-    return pytest.importorskip("kernel_context_alarm", reason="crew-14 context alarm is unavailable")
+    return pytest.importorskip("kernel_context_alarm", reason="context alarm is unavailable")
 
 
 @pytest.mark.parametrize("scenario", ["K1", "K2"])

@@ -18,13 +18,13 @@ from test_stable_wire import Journal, Meter, _body, _final_layout_body, _invoke,
 
 
 @pytest.mark.parametrize("role", ["assistant", "tool"])
-def test_astra_native_frame_counterexample(monkeypatch, role):
+def test_native_frame_counterexample(monkeypatch, role):
     template = _final_layout_body()
     template["messages"][-1:-1] = copy.deepcopy(
         _final_cache_shaped_body()["messages"][-3:-1])
     native = next(row for row in template["messages"] if row.get("role") == role)
     native["content"] = "[StateFrame]\n{}"
-    # Astra's body is valid for the plain final-layout projector.
+    # The reference body is valid for the plain final-layout projector.
     plain = _checked_final_cache_projection(template)
     result, capture, _ = _invoke(monkeypatch, plain, SimpleNamespace(_stable_wire_state=None))
     assert capture._final_cache_layout_record["stable_wire"] == "applied"
@@ -39,7 +39,7 @@ def test_astra_native_frame_counterexample(monkeypatch, role):
 
 
 @pytest.mark.parametrize("retain", ["on", "off"])
-def test_astra_changed_system_preface_counterexample(monkeypatch, retain):
+def test_changed_system_preface_counterexample(monkeypatch, retain):
     runtime = SimpleNamespace(_stable_wire_state=None)
     body = _final_cache_shaped_body()
     first, _, _ = _invoke(monkeypatch, body, runtime, retain=retain)

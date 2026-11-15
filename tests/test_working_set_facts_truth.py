@@ -231,7 +231,7 @@ def test_clipped_carrier_is_not_promoted_to_whole_line_coverage():
 
 
 def test_off_provider_bytes_match_group_base(tmp_path, tmp_path_factory):
-    from test_working_set_astra_off_parity import (
+    from test_working_set_off_parity_base import (
         test_off_provider_bytes_match_cutover_base,
     )
 

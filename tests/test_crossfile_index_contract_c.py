@@ -1,6 +1,6 @@
 """Pins the slice of the CrossFileIndex surface that chains_recall (piece C) consumes.
 
-The real index (crew-02) must satisfy the same assertions as the fake before it is
+The real index must satisfy the same assertions as the fake before it is
 swapped in: point INDEX_FACTORY at it. Names, signatures and dataclass fields are
 taken from crew-ops/plans/build_specs/crossfile_index_api.md.
 """

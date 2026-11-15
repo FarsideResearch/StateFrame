@@ -1,4 +1,4 @@
-"""Astra 11: replenish the native-batch reserve with accepted O carriers."""
+"""Reserve: replenish the native-batch reserve with accepted O carriers."""
 from __future__ import annotations
 
 import json
