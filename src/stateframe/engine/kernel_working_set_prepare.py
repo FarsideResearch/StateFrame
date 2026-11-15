@@ -474,6 +474,26 @@ def _mandatory_lower_bound(snapshot: PreparationSnapshot, slots: tuple[core.Slot
     return json.dumps(_normalize(body, snapshot)).encode()
 
 
+def allocator_mandatory_bytes(snapshot: PreparationSnapshot, slots: tuple[core.Slot, ...],
+                              floor: RenderedCandidate) -> bytes:
+    """The allocator's mandatory wire: the single proof input for FLOOR_INFEASIBLE.
+
+    Admission (turn-one check) and preparation both price the request through this
+    one function, so a byte cap is never judged against a second formula.
+    """
+    if all(len(slot.allowed) == 1 for slot in slots):
+        return floor.wire
+    compact = min(_envelope_variants(snapshot), key=lambda variant: len(variant.fixed_body))
+    return _mandatory_lower_bound(compact, slots)
+
+
+def mandatory_bytes(snapshot: PreparationSnapshot) -> bytes:
+    """Public entry: mandatory wire for a frozen snapshot (slots and floor derived here)."""
+    slots = tuple(propose_slots(snapshot))
+    _, floor = _minimum_completion(snapshot, slots)
+    return allocator_mandatory_bytes(snapshot, slots, floor)
+
+
 def _choose_slot(snapshot: PreparationSnapshot, slot: core.Slot,
                  completion: Mapping[str, core.Mode], cap: int,
                  *, carried_prefix: bool) -> tuple[core.Mode, RenderedCandidate] | None:
@@ -591,9 +611,7 @@ def prepare_candidate(snapshot: PreparationSnapshot, *, measure: Measure | None 
             # The bound is taken over the most compact priced envelope: a
             # bounded execution reply or narrative row is a legal delivery,
             # so an unbounded flood never certifies impossibility by itself.
-            compact = min(_envelope_variants(snapshot), key=lambda variant: len(variant.fixed_body))
-            mandatory = (floor.wire if all(len(slot.allowed) == 1 for slot in slots)
-                         else _mandatory_lower_bound(compact, slots))
+            mandatory = allocator_mandatory_bytes(snapshot, slots, floor)
             if len(mandatory) <= snapshot.byte_cap:
                 return blocked(ReasonCode.BYTE_POLICY_DOMAIN_EXHAUSTED,
                                detail="policy minimum exceeds cap without an impossibility proof")
