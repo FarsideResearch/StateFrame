@@ -34,7 +34,7 @@ INPUT = 5
 SYNTH_SPEC = HandlerSpec(
     handler_id=SYNTH_HANDLER, module=__name__, function="guarded_op", op="synthetic_guarded_op",
     taxonomy="D", tier="T3", requiredness="optional", expected=("ValueError",), dispositions=("boundary",),
-    fallback_id=None, owner="crew-08", contract_tests=("tests/test_fault_contract.py::test_fault_contract",),
+    fallback_id=None, owner="engine", contract_tests=("tests/test_fault_contract.py::test_fault_contract",),
     policy_version=1,
 )
 NOCASE_SPEC = HandlerSpec(
@@ -188,7 +188,7 @@ from kernel_fault_registry import HandlerSpec
 SPEC = HandlerSpec(
     handler_id="synthetic.pytester_probe", module=__name__, function="probe", op="pytester_probe",
     taxonomy="D", tier="T3", requiredness="optional", expected=("ValueError",), dispositions=("boundary",),
-    fallback_id=None, owner="crew-08", contract_tests=("tests/test_fault_contract.py::test_fault_contract",),
+    fallback_id=None, owner="engine", contract_tests=("tests/test_fault_contract.py::test_fault_contract",),
     policy_version=1,
 )
 

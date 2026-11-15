@@ -22,7 +22,7 @@ ENGINE_MODULE = "stateframe.engine.kernel_fault_disposition"
 _VALID = dict(
     handler_id="x.probe", module=ENGINE_MODULE, function="record_fault",
     op="x_probe", taxonomy="D", tier="T3", requiredness="optional", expected=("ValueError",),
-    dispositions=("boundary",), fallback_id=None, owner="crew-08", contract_tests=(), policy_version=1,
+    dispositions=("boundary",), fallback_id=None, owner="engine", contract_tests=(), policy_version=1,
 )
 PROBE_SPEC = HandlerSpec(**{**_VALID, "handler_id": PROBE, "op": "synthetic_probe"})
 UNCLASSIFIED_SPEC = HandlerSpec(**{**_VALID, "handler_id": UNCLASSIFIED_PROBE, "requiredness": "UNCLASSIFIED"})

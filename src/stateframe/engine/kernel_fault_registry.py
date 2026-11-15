@@ -83,7 +83,7 @@ HANDLERS: dict[str, HandlerSpec] = {
     "react_repair.run_exception": HandlerSpec(
         handler_id="react_repair.run_exception", module="probes.react_repair", function="work",
         op="react_repair.run", taxonomy="D", tier="T0", requiredness="required", expected=(),
-        dispositions=("boundary",), fallback_id=None, owner="crew-08",
+        dispositions=("boundary",), fallback_id=None, owner="engine",
         contract_tests=(
             "tests/test_engine_error_reason.py::test_catch_all_returns_class_and_message_and_records_reason_row",
         ),
