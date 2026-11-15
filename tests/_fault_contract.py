@@ -1,10 +1,12 @@
 """Contract runner for registered guard handlers (V-FAILOPEN step 2).
 
 Every HandlerSpec needs a ContractCase: an inject hook that monkeypatches the SMALLEST inner operation the
-handler guards (never the fallback or the record path), a run hook that drives the real guarded path, and
-the expected Outcome for each scenario. tests/test_fault_contract.py parametrizes over every effective
-handler x scenario. An entry without a case is reported xfail(strict=True, reason="contract missing").
-Isolation of the reason log mirrors tests/test_fault_disposition.py (fresh problems file, _Journal, reset).
+handler guards (never the fallback or the record path), a run hook that drives the real guarded path and
+returns a RunResult, and the expected Outcome for each scenario. tests/test_fault_contract.py parametrizes over
+every effective handler x scenario inside pytest_generate_tests (collection time). An entry without a case is
+reported xfail(strict=True, reason="contract missing").
+
+This module is the single copy of the reason-log isolation helpers (fresh problems file, _Journal, reset).
 """
 from __future__ import annotations
 
@@ -22,21 +24,34 @@ import kernel_reason_log as rl
 from kernel_fault_registry import HANDLERS, HandlerSpec, register_for_tests
 
 Scenario = Literal[
-    "no_fault", "expected_fault", "unexpected_fault", "repeated_fault", "empty_valueerror", "resume",
+    "no_fault", "expected_fault", "unexpected_fault", "repeated_fault", "empty_valueerror", "journal_suppressed",
 ]
 SCENARIOS: tuple[str, ...] = (
-    "no_fault", "expected_fault", "unexpected_fault", "repeated_fault", "empty_valueerror", "resume",
+    "no_fault", "expected_fault", "unexpected_fault", "repeated_fault", "empty_valueerror", "journal_suppressed",
 )
 OBSERVED_AT = "2026-11-15T00:00:00Z"
 CONTRACT_MISSING = "contract missing"
 
 
 @dataclass(frozen=True)
+class RunResult:
+    """What one scenario run returned. results: guarded op return per call. records: record_fault return per fault."""
+
+    results: tuple[object, ...]
+    records: tuple[bool, ...]
+
+
+@dataclass(frozen=True)
 class Outcome:
-    """Expected result of one scenario. rows/count/journal_events describe the reason log after run()."""
+    """Expected result of one scenario. rows/count/journal_events describe the reason log after run().
+
+    A scenario that writes a row must also assert records (every record_fault return is True) and detail
+    (the row's why text). ContractCase enforces both at definition time.
+    """
 
     results: tuple[object, ...]
     rows: int
+    records: tuple[bool, ...] = ()
     expectation: str | None = None
     cause_code: str | None = None
     detail: str | None = None
@@ -48,7 +63,7 @@ class Outcome:
 class ContractCase:
     handler_id: str
     inject: Callable[[pytest.MonkeyPatch, Scenario], None]
-    run: Callable[[Scenario], tuple[object, ...]]
+    run: Callable[[Scenario], RunResult]
     outcomes: Mapping[Scenario, Outcome]
 
     def __post_init__(self) -> None:
@@ -56,6 +71,13 @@ class ContractCase:
         extra = [s for s in self.outcomes if s not in SCENARIOS]
         if missing or extra:
             raise ValueError(f"{self.handler_id}: outcomes missing={missing} unknown={extra}")
+        for scenario, outcome in self.outcomes.items():
+            if outcome.rows == 0:
+                continue
+            if not outcome.records or not all(outcome.records):
+                raise ValueError(f"{self.handler_id}/{scenario}: a row is expected, so record_fault must return True")
+            if outcome.detail is None:
+                raise ValueError(f"{self.handler_id}/{scenario}: a row is expected, so detail (why) must be asserted")
 
 
 # Module-level case table. Test modules register their synthetic cases here; product cases land with batch 1.
@@ -125,12 +147,33 @@ def build_params(specs: Iterable[HandlerSpec], cases: Mapping[str, ContractCase]
     return params
 
 
-def assert_outcome(spec: HandlerSpec, results: tuple[object, ...], harness: ReasonHarness,
-                   outcome: Outcome) -> None:
-    assert tuple(results) == outcome.results, f"op results {results!r} != {outcome.results!r}"
+def parametrize_contract(metafunc: pytest.Metafunc, specs: Iterable[HandlerSpec],
+                         cases: Mapping[str, ContractCase]) -> None:
+    """Call from pytest_generate_tests so the spec list is read at collection time, not at import time."""
+    metafunc.parametrize(("spec", "scenario"), build_params(specs, cases))
+
+
+def run_contract(spec: HandlerSpec, scenario: Scenario, cases: Mapping[str, ContractCase],
+                 harness: ReasonHarness, monkeypatch: pytest.MonkeyPatch) -> None:
+    case = cases.get(spec.handler_id)
+    if case is None:
+        raise AssertionError(CONTRACT_MISSING)
+    case.inject(monkeypatch, scenario)
+    with registered(spec):
+        run = case.run(scenario)
+    assert_outcome(spec, run, harness, case.outcomes[scenario])
+
+
+def assert_outcome(spec: HandlerSpec, run: RunResult, harness: ReasonHarness, outcome: Outcome) -> None:
+    assert tuple(run.results) == outcome.results, f"op results {run.results!r} != {outcome.results!r}"
+    # Any emit_reason self-error means the record path failed silently (record_fault also returns False).
+    self_errors = int(rl.run_summary().get("self_errors", 0))
+    assert self_errors == 0, f"reason log recorded {self_errors} self-error(s) during {spec.handler_id}"
+    assert run.records == outcome.records, f"record_fault returned {run.records!r}, expected {outcome.records!r}"
     rows = harness.rows()
     assert len(rows) == outcome.rows, rows
-    assert harness.journal_events() == outcome.journal_events
+    assert harness.journal_events() == outcome.journal_events, \
+        f"bound journal received {harness.journal_events()} events, expected {outcome.journal_events}"
     if outcome.rows == 0:
         return
     row = rows[0]
@@ -144,8 +187,7 @@ def assert_outcome(spec: HandlerSpec, results: tuple[object, ...], harness: Reas
     assert fields["expectation"] == outcome.expectation
     assert fields["cause_code"] == outcome.cause_code
     assert row["cause_key"] == f"{spec.handler_id}:{fields['disposition']}:{outcome.cause_code}"
-    if outcome.detail is not None:
-        assert row["why"] == outcome.detail
+    assert row["why"] == outcome.detail, f"why {row['why']!r} != {outcome.detail!r}"
     summary = rl.run_summary()["by_cause"].get(f"{row['category']}:{row['cause_key']}")
     assert summary is not None, "cause missing from run summary"
     assert summary["count"] == outcome.count
