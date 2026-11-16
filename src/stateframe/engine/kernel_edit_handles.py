@@ -18,8 +18,9 @@ delivery annotations excluded there are a separate carrier; this module adds non
 from __future__ import annotations
 
 import enum
+import json
 import re
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 
 from kernel_paged_source import source_revision
@@ -352,6 +353,204 @@ def append_map_to_final_user_message(messages: Sequence[Mapping[str, object]],
     separator = "" if not content else ("\n\n" if not content.endswith("\n") else "\n")
     placed = {**final, "content": content + separator + handle_map.render()}
     return [*messages[:-1], placed]
+
+
+# ---------------------------------------------------------------------------
+# Request map: one minter over two span providers.
+#
+# Provider A (frame / allocator): open-site rows of the request's [StateFrame]
+# block, read through ``spans_from_open_sites``; the rows are never written.
+# Provider B (legacy source blocks): exact runs of current file lines that the
+# request text carries verbatim ([Current source:]/[Working source:] windows,
+# read pages, exact clipped reads). A run counts only when the bytes the model
+# saw are byte-equal to the current file, so a handle never names unseen bytes.
+# Both providers feed ``request_spans``, which unions covered lines per file and
+# mints one handle per maximal run (whole file -> REWRITE). Paged descriptors and
+# allocator source-range handles stay paging addresses; edit handles are only
+# ever spelled ``q{request_ordinal}h{n}``.
+# ---------------------------------------------------------------------------
+
+_STATE_HEADER = "[StateFrame]\n"
+_SOURCE_HEADER_RE = re.compile(
+    r"\[(?:Current source|Working source|Retained source|Observed source|Repair source"
+    r"|Paged source|Exact clipped read): (?P<path>[^\]\n]+)\]")
+_READ_PAGE_RE = re.compile(r"\[read page\] path=(?P<path>\S+) ")
+_PATH_REVISION_SUFFIX_RE = re.compile(r" revision sha256:[0-9a-f]{64}.*$")
+# Delivery text a request carries for the model; assistant turns are model output.
+_DELIVERY_ROLES = frozenset({"user", "tool", "system"})
+MAX_MAP_FILES = 16
+MAX_MAP_FILE_BYTES = 512 * 1024
+# A run of fewer non-blank lines than this is coincidence, not delivery
+# (a lone "return None" in the task text), unless it is the whole file.
+MIN_RUN_NONBLANK_LINES = 2
+# A start line that occurs this often in the request text is boilerplate.
+MAX_RUN_START_OCCURRENCES = 256
+
+def _delivery_text(messages: Sequence[Mapping[str, object]]) -> str:
+    return "\n".join(str(message.get("content")) for message in messages
+                     if isinstance(message, Mapping) and message.get("role") in _DELIVERY_ROLES
+                     and isinstance(message.get("content"), str))
+
+
+def _clean_path(raw: str) -> str | None:
+    path = _PATH_REVISION_SUFFIX_RE.sub("", raw.strip()).replace("\\", "/")
+    while path.startswith("./"):
+        path = path[2:]
+    if not path or path.startswith("/") or any(part == ".." for part in path.split("/")):
+        return None
+    return path
+
+
+def _frame_open_sites(messages: Sequence[Mapping[str, object]]) -> list[Mapping[str, object]]:
+    sites: list[Mapping[str, object]] = []
+    for message in messages:
+        content = message.get("content") if isinstance(message, Mapping) else None
+        if not isinstance(content, str) or not content.startswith(_STATE_HEADER):
+            continue
+        try:
+            payload = json.loads(content[len(_STATE_HEADER):])
+        except (TypeError, ValueError, RecursionError):
+            continue
+        state = payload.get("state") if isinstance(payload, Mapping) else None
+        for holder in ((state.get("framefit5"), state) if isinstance(state, Mapping) else ()):
+            rows = holder.get("open_sites") if isinstance(holder, Mapping) else None
+            if isinstance(rows, list):
+                sites.extend(row for row in rows if isinstance(row, Mapping))
+                break
+    return sites
+
+
+def candidate_paths(messages: Sequence[Mapping[str, object]]) -> tuple[str, ...]:
+    """Workspace-relative paths the request names as delivered source, first mention first."""
+    seen: list[str] = []
+    text = _delivery_text(messages)
+    found = [(match.start(), match.group("path"))
+             for pattern in (_SOURCE_HEADER_RE, _READ_PAGE_RE) for match in pattern.finditer(text)]
+    for _, raw in sorted(found):
+        path = _clean_path(raw)
+        if path is not None and path not in seen:
+            seen.append(path)
+    for site in _frame_open_sites(messages):
+        path = _clean_path(site.get("path")) if isinstance(site.get("path"), str) else None
+        if path is not None and path not in seen:
+            seen.append(path)
+    return tuple(seen)
+
+
+def verbatim_line_runs(source: str, text: str) -> list[tuple[int, int]]:
+    """Inclusive 1-based maximal runs of ``source`` lines that ``text`` carries verbatim."""
+    lines = _lines(source)
+    runs: list[tuple[int, int]] = []
+    index = 0
+    while index < len(lines):
+        first = lines[index]
+        if not first.strip():
+            index += 1
+            continue
+        positions: list[int] = []
+        cursor = text.find(first)
+        while cursor >= 0 and len(positions) <= MAX_RUN_START_OCCURRENCES:
+            positions.append(cursor + len(first))
+            cursor = text.find(first, cursor + 1)
+        if not positions or len(positions) > MAX_RUN_START_OCCURRENCES:
+            index += 1
+            continue
+        end = index
+        while end + 1 < len(lines):
+            following = lines[end + 1]
+            extended = [p + len(following) for p in positions if text.startswith(following, p)]
+            if not extended:
+                break
+            positions = extended
+            end += 1
+        nonblank = sum(1 for line in lines[index:end + 1] if line.strip())
+        if nonblank >= MIN_RUN_NONBLANK_LINES or (index == 0 and end == len(lines) - 1):
+            runs.append((index + 1, end + 1))
+        index = end + 1
+    return runs
+
+
+def request_spans(messages: Sequence[Mapping[str, object]],
+                  read_source: Callable[[str], "str | None"]) -> tuple[DeliveredSpan, ...]:
+    """Delivered spans of one request from both providers, unioned into maximal runs per file.
+
+    ``read_source(path)`` returns the current full text of a workspace-relative path, or
+    None when it is unreadable, missing, binary or too large. Nothing here writes.
+    """
+    text = _delivery_text(messages)
+    sites = _frame_open_sites(messages)
+    spans: list[DeliveredSpan] = []
+    for path in candidate_paths(messages)[:MAX_MAP_FILES]:
+        source = read_source(path)
+        if not isinstance(source, str) or not source:
+            continue
+        try:
+            if len(source.encode("utf-8")) > MAX_MAP_FILE_BYTES:
+                continue
+        except UnicodeError:
+            continue                         # undecodable bytes cannot be addressed by text
+        covered: list[tuple[int, int]] = list(verbatim_line_runs(source, text))
+        for site in sites:
+            if _clean_path(str(site.get("path", ""))) != path:
+                continue
+            try:
+                row = {**site, "path": path}
+                covered.extend((span.start_line, span.end_line)
+                               for span in spans_from_open_sites([row], {path: source}))
+            except ValueError:
+                continue                     # stale or malformed row: its bytes are not current
+        total = len(_lines(source))
+        for start, end in _merge_ranges(covered):
+            kind = SpanKind.REWRITE if (start, end) == (1, total) else SpanKind.SPAN
+            spans.append(DeliveredSpan.from_source(path, source, start_line=start,
+                                                   end_line=end, kind=kind))
+    return tuple(spans)
+
+
+# A rendered map header at a line start; file text merely quoting the prefix is not a map.
+_MAP_HEADER_RE = re.compile(r"(?:^|\n)" + re.escape(CURRENT_SOURCE_PREFIX) + r"\nrequest q\d+: ")
+
+
+def current_turn_has_map(messages: Sequence[Mapping[str, object]]) -> bool:
+    """True when a message after the last assistant turn already carries a map.
+
+    That is a repair request: its map and handles are this request's, and a second map
+    would contradict it. Maps in older turns are history and do not count.
+    """
+    for message in reversed(messages):
+        if not isinstance(message, Mapping):
+            continue
+        if message.get("role") == "assistant":
+            return False
+        content = message.get("content")
+        if isinstance(content, str) and _MAP_HEADER_RE.search(content):
+            return True
+    return False
+
+
+def compose_request_map(messages: Sequence[Mapping[str, object]], *, request_ordinal: int,
+                        read_source: Callable[[str], "str | None"],
+                        ) -> tuple[list[dict[str, object]], HandleMap | None]:
+    """Mint this request's handles and place the map at the end of the final user message.
+
+    Returns (messages, map). Earlier messages are returned as the same objects, so the
+    retained prefix of request N and N+1 is untouched; the caller sends the result and
+    keeps its own transcript map-free. When this turn already carries a map (a repair
+    request) or nothing was delivered, the messages come back unchanged with
+    map None. A final message that is not user text gets a NEW user message after it.
+    """
+    messages = list(messages)
+    if not messages or current_turn_has_map(messages):
+        return messages, None
+    final = messages[-1]
+    final_content = final.get("content") if isinstance(final, Mapping) else None
+    spans = request_spans(messages, read_source)
+    if not spans:
+        return messages, None
+    handle_map = mint_handles(request_ordinal, spans)
+    if final.get("role") == "user" and isinstance(final_content, str):
+        return append_map_to_final_user_message(messages, handle_map), handle_map
+    return [*messages, {"role": "user", "content": handle_map.render()}], handle_map
 
 
 _FILE_LINE_RE = re.compile(r"^file (?P<path>.+) revision (?P<revision>sha256:[0-9a-f]{64}) "

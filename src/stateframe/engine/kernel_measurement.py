@@ -5878,6 +5878,13 @@ class RequestCapture:
             if not lean_on:
                 from kernel_read_once import append_final_message as _read_once_final
                 body["messages"] = _read_once_final(wire_truth_runtime, body.get("messages"))
+            if side_call_contract is None:
+                # Edit protocol (handles only): this request's [CURRENT SOURCE] map, placed on
+                # the outgoing body before budget and capacity; the transcript never holds it.
+                from kernel_edit_request_map import apply as _edit_request_map
+                body["messages"] = _edit_request_map(
+                    wire_truth_runtime, body.get("messages"), request_ordinal=self.step,
+                    journal=self.journal)
             from kernel_read_reuse_visibility import prepare_final_visibility, verify_final_visibility
             if _boundary_state is not None:
                 _boundary_state.phase = "final_source_visibility"

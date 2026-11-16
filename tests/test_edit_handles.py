@@ -317,7 +317,11 @@ def test_only_the_protocol_executor_imports_the_module():
         for path in (ROOT / "src").rglob("*.py")
         if needle.search(path.read_text(encoding="utf-8"))
     )
-    assert importers == ["src/stateframe/engine/kernel_edit_source_tool.py"]
+    # Edit protocol modules only; legacy paths reach it solely through the
+    # handles-gated send-time placement (kernel_edit_request_map).
+    assert importers == ["src/stateframe/engine/kernel_edit_repair_hook.py",
+                         "src/stateframe/engine/kernel_edit_request_map.py",
+                         "src/stateframe/engine/kernel_edit_source_tool.py"]
 
 
 def test_module_is_pure_no_environment_or_io():

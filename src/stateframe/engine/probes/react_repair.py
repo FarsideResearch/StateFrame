@@ -7704,8 +7704,8 @@ def work(d, *, resume=None):
         _hook_wiring_for_run = globals().get("_hook_wiring")
         from kernel_edit_protocol_switch import handles_enabled as _edit_protocol_handles
         from kernel_edit_source_tool import EditProtocolRunState
-        # Handle maps are attached per request by the current-source wiring; an
-        # empty map refuses every handle as STALE_HANDLE.
+        # The transport attaches each request's handle map (kernel_edit_request_map);
+        # an empty map refuses every handle as STALE_HANDLE.
         _edit_protocol_state = EditProtocolRunState()
         if _shell is not None:
             if _hook_wiring_for_run is None:
@@ -8312,6 +8312,9 @@ def work(d, *, resume=None):
             step_limit=_budget.tool_attempt_limit,
             multi_file=multifile, edit_contract=_edit_contract, workspace=continuation_workspace, resume=resume)
         measurement.run_limitations = run_limitations
+        if _edit_protocol_handles():
+            # The transport mints each request's handle map into this state (kernel_edit_request_map).
+            measurement._edit_protocol_state = _edit_protocol_state
 
         def _free(getter: Callable[[], object], default: object = None) -> object:
             # A closure cell for a local the host has not assigned yet raises NameError; treat it as absent.

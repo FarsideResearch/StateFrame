@@ -248,6 +248,11 @@ def build_qualified_request(capture, runtime, body, *, endpoint, key, deadline=N
             body["messages"].append({"role": "user", "content": capsule})
     from kernel_read_once import append_final_message
     body["messages"] = append_final_message(context, body["messages"])
+    # Edit protocol (handles only): this request's [CURRENT SOURCE] map, placed before
+    # fit and seal so its bytes are budgeted and sealed; the transcript never holds it.
+    from kernel_edit_request_map import apply as edit_request_map
+    body["messages"] = edit_request_map(context, body["messages"], request_ordinal=capture.step,
+                                        journal=candidate.journal)
     if working_set_enabled():
         # Receipt witnesses replace the path-based legacy pin/forgiveness loop.
         visibility = {"candidates": [], "missing_ranges": [], "pins_added": 0}
