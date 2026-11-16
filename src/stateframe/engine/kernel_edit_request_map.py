@@ -13,7 +13,9 @@ with fresh handles for the touched file.
 """
 from __future__ import annotations
 
+import threading
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 
 from kernel_edit_handles import MAX_MAP_FILE_BYTES, compose_request_map, current_turn_has_map
@@ -23,6 +25,33 @@ SCHEMA = "stateframe-edit-request-map/1"
 # The edit protocol run state (kernel_edit_source_tool.EditProtocolRunState) the host
 # binds on its runtime; the executors read the handle map this module attaches.
 STATE_ATTR = "_edit_protocol_state"
+
+
+@dataclass(frozen=True)
+class RunBinding:
+    """The run's edit-protocol state and workspace root, for sends that carry no runtime."""
+    state: object
+    root: Path
+
+
+# The transport does not always hold the host runtime at the send seam (no active runtime in
+# plain worker runs), and it sends from a worker thread that does not inherit context
+# variables. An engine run owns its process (parallel workers are subprocesses), so the host
+# binds the run's state + root here, process-wide, for the run's duration.
+_BINDING_LOCK = threading.Lock()
+_RUN_BINDING: "RunBinding | None" = None
+
+
+def bind_run(state: object, root: object) -> None:
+    """Bind (or with ``state=None`` clear) the run's state and workspace root."""
+    global _RUN_BINDING
+    with _BINDING_LOCK:
+        _RUN_BINDING = None if state is None else RunBinding(state=state, root=Path(str(root)))
+
+
+def current_binding() -> "RunBinding | None":
+    with _BINDING_LOCK:
+        return _RUN_BINDING
 
 
 def _workspace_reader(root: Path) -> Callable[[str], "str | None"]:
@@ -40,6 +69,9 @@ def _workspace_reader(root: Path) -> Callable[[str], "str | None"]:
 
 def _root(runtime: object) -> Path | None:
     value = getattr(getattr(runtime, "owner", None), "root", None)
+    if value is None:
+        binding = current_binding()
+        value = binding.root if binding is not None else None
     if value is None:
         return None
     try:
@@ -60,6 +92,9 @@ def apply(runtime: object, messages: object, *, request_ordinal: object,
     if not handles_enabled():
         return messages
     state = getattr(runtime, STATE_ATTR, None)
+    if state is None:
+        binding = current_binding()
+        state = binding.state if binding is not None else None
     set_request = getattr(state, "set_request", None)
     if not callable(set_request) or not isinstance(messages, list) or not messages:
         return messages
@@ -85,4 +120,4 @@ def apply(runtime: object, messages: object, *, request_ordinal: object,
     return placed
 
 
-__all__ = ["SCHEMA", "STATE_ATTR", "apply"]
+__all__ = ["SCHEMA", "STATE_ATTR", "RunBinding", "apply", "bind_run", "current_binding"]
