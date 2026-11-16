@@ -379,6 +379,9 @@ _CAPACITY_SAFE_TAIL = frozenset(
 SAFE_TAIL = frozenset({
     "read_attempt", "read_result",  # audit only; never source/selection authority
     "read_capture_skipped", "read_capture_failed",  # audit only; delivery is unchanged
+    # Opt-in check-truth failure records (audit only): the fallback they describe is re-derived on replay.
+    "check_execution_binding_register_failed", "check_truth_vacuity_journal_failed",
+    "check_execution_binding_scope_failed",
     # SHADOW state is replayed with its reads/primary requests, without effects.
     "working_set_capture", "working_set_submission", "working_set_response", "working_set_blocked",
     "read_admission",  # audit only; the delivered page already carries its cursor
