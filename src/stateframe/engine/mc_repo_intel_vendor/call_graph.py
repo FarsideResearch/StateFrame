@@ -2019,7 +2019,7 @@ class DispatchBoundary:
     """A runtime-resolved call site the static graph cannot follow through."""
     file: str
     lineno: int
-    kind: str          # "getattr" | "computed_subscript" | "string_keyed_bus"
+    kind: str          # "getattr" | "computed_subscript" | "string_keyed_bus" | SCAN_FAILED_KIND
     key_expr: str      # the token/expression that selects the target at runtime
     note: str          # human/agent-readable "flow continues dynamically" note
 
@@ -2082,29 +2082,48 @@ class _DispatchVisitor(ast.NodeVisitor):
         self.generic_visit(node)
 
 
+# Kind of the file-level marker returned when a boundary scan could not finish:
+# the file's runtime-resolved edges are UNKNOWN, which is not the same as "none".
+SCAN_FAILED_KIND = "scan_failed"
+
+
+def _scan_failed_boundary(relpath: str, reason: str) -> DispatchBoundary:
+    """File-level marker for an unfinished dispatch scan (line 1 = whole file)."""
+    logger.warning("dispatch boundary scan failed for %s: %s; dynamic edges are unknown", relpath, reason)
+    return DispatchBoundary(
+        file=relpath, lineno=1, kind=SCAN_FAILED_KIND, key_expr="",
+        note=(f"dynamic dispatch in this file is UNKNOWN: the boundary scan failed ({reason}); "
+              "do not assume the static callee set is complete"),
+    )
+
+
 def dispatch_boundaries_in_file(source: str, relpath: str) -> list[DispatchBoundary]:
-    """Scan one file's source for runtime dispatch sites. Never raises → [].
+    """Scan one file's source for runtime dispatch sites. Never raises.
 
     Python uses the stdlib-ast visitor; TS/JS/Vue use a tree-sitter scan for the
     JS-flavoured dynamic forms (computed-member call, dynamic import(), string-
     keyed bus emit). Other tree-sitter languages have no boundary scan yet → [].
+    A scan that cannot finish returns a ``SCAN_FAILED_KIND`` marker (after any
+    boundaries already found) so callers never read the failure as "no boundaries".
     """
     ext = "." + relpath.rsplit(".", 1)[-1].lower() if "." in relpath else ""
     if ext != ".py":
         try:
             from . import ts_dispatch  # noqa: PLC0415
             return ts_dispatch.dispatch_boundaries_in_file(source, relpath)
-        except Exception:  # pragma: no cover - degrade if the ts scan/module is unavailable
-            return []
+        except Exception as exc:  # noqa: BLE001 - typed UNKNOWN marker, never an empty scan
+            return [_scan_failed_boundary(relpath, type(exc).__name__)]
     try:
         tree = ast.parse(source, filename=relpath)
-    except (SyntaxError, ValueError, MemoryError, RecursionError):
-        return []
+    except (SyntaxError, ValueError):
+        return []  # source that does not parse has no runtime dispatch to follow
+    except (MemoryError, RecursionError) as exc:
+        return [_scan_failed_boundary(relpath, type(exc).__name__)]
     v = _DispatchVisitor(relpath)
     try:
         v.visit(tree)
     except RecursionError:
-        return []
+        return [*v.boundaries, _scan_failed_boundary(relpath, "RecursionError")]
     return v.boundaries
 
 
@@ -2122,7 +2141,11 @@ def dispatch_boundaries_near(
     except OSError:
         return []
     lo, hi = min(lineno, end_lineno), max(lineno, end_lineno)
-    return [b for b in dispatch_boundaries_in_file(src, relpath) if lo <= b.lineno <= hi]
+    # A scan-failure marker covers the whole file, so it applies to every range.
+    return [
+        b for b in dispatch_boundaries_in_file(src, relpath)
+        if b.kind == SCAN_FAILED_KIND or lo <= b.lineno <= hi
+    ]
 
 
 # ── Skeletonization (adaptive-budget helper) ─────────────────────────────────

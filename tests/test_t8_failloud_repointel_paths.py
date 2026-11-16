@@ -1,0 +1,485 @@
+"""Fail-loud checks for broad except sites in the repo-intel modules (catalog, intel, call graph, LSP, repo map, tree-sitter).
+
+Scope: kernel_repo_catalog, kernel_repo_intel, mc_repo_intel_vendor/{call_graph, lsp_resolve, repo_map,
+ts_dispatch, ts_extract}.
+
+Loudness bar: a raise, a WARNING-or-higher record from the owning module, or a typed field / span / capability
+string that a reader checks. Documented fail-open paths and telemetry helpers are degrade-OK and only pinned
+where the typed outcome is the safety argument.
+
+Tag convention: ``T8-<MODULE>-<line>`` names the guarded ``except`` line. The three CRASH-HIDER sites on
+default paths (catalog callee lookup, TS dispatch scan, has_error probe) were strict xfails; they are now fixed
+and asserted, each with a regression test for the typed outcome its caller reads.
+"""
+from __future__ import annotations
+
+import logging
+import re
+import sys
+import types
+from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
+
+import kernel_repo_catalog as catalog
+from kernel_catalog_contracts import CoverageStatus
+import kernel_repo_intel as repo_intel
+from mc_repo_intel_vendor import call_graph
+from mc_repo_intel_vendor import repo_map
+from mc_repo_intel_vendor import ts_dispatch
+from mc_repo_intel_vendor import ts_extract
+
+ENGINE = Path(repo_intel.__file__).resolve().parent
+_MODULE_FILES = (
+    ENGINE / "kernel_repo_catalog.py",
+    ENGINE / "kernel_repo_intel.py",
+    ENGINE / "mc_repo_intel_vendor" / "call_graph.py",
+    ENGINE / "mc_repo_intel_vendor" / "lsp_resolve.py",
+    ENGINE / "mc_repo_intel_vendor" / "repo_map.py",
+    ENGINE / "mc_repo_intel_vendor" / "ts_dispatch.py",
+    ENGINE / "mc_repo_intel_vendor" / "ts_extract.py",
+)
+
+
+def _loud(caplog: pytest.LogCaptureFixture, module_name: str) -> bool:
+    return any(record.levelno >= logging.WARNING and module_name in record.name for record in caplog.records)
+
+
+class _Ref(SimpleNamespace):
+    """Stand-in for a graph callee reference with the ``symbol`` attribute the catalog reads."""
+
+
+# T8-KERNEL_REPO_CATALOG-857: a source whose callee lookup fails must not lose its CALLS edges silently.
+def test_graph_dependency_callee_failure_is_loud(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+                                                 caplog: pytest.LogCaptureFixture) -> None:
+    class _Graph:
+        defs = {"a.py::f": object(), "b.py::g": object()}
+
+        def find_callees(self, source_id: str):
+            if source_id == "a.py::f":
+                raise RuntimeError("forced: callee lookup")
+            return [_Ref(symbol="b.py::h")]
+
+    monkeypatch.setattr(catalog, "build_graph", lambda *a, **k: _Graph())
+    coverage = {
+        "a.py": catalog.CoverageRef("cov:a", "structural_index", CoverageStatus.COMPLETE),
+        "b.py": catalog.CoverageRef("cov:b", "structural_index", CoverageStatus.COMPLETE),
+    }
+    with caplog.at_level(logging.WARNING, logger=catalog.__name__):
+        records = catalog._graph_dependencies(tmp_path, [], coverage)
+
+    assert [r.target_id for r in records] == ["b.py::h"], "healthy source still contributes its edges"
+    assert _loud(caplog, "kernel_repo_catalog"), "a dropped source must leave a WARNING+ record"
+    assert "a.py::f (RuntimeError)" in caplog.text, "the record names the source and the failure type"
+
+
+# T8-CALL_GRAPH-2114: a tree-sitter boundary scan failure must read as UNKNOWN boundaries, not "none".
+def test_ts_dispatch_scan_failure_is_loud_not_empty(monkeypatch: pytest.MonkeyPatch,
+                                                    caplog: pytest.LogCaptureFixture) -> None:
+    def _boom(source: str, relpath: str):
+        raise RuntimeError("forced: ts dispatch scan")
+
+    monkeypatch.setattr(ts_dispatch, "dispatch_boundaries_in_file", _boom)
+    with caplog.at_level(logging.WARNING, logger=call_graph.__name__):
+        result = call_graph.dispatch_boundaries_in_file("export const a = 1;\n", "web/app.ts")
+    assert result != [], "scan failure must not look like an empty scan"
+    assert [b.kind for b in result] == [call_graph.SCAN_FAILED_KIND]
+    assert result[0].file == "web/app.ts" and "UNKNOWN" in result[0].note and "RuntimeError" in result[0].note
+    assert _loud(caplog, "call_graph"), "scan failure must leave a WARNING+ record"
+
+
+# T8-TS_EXTRACT-850: a binding quirk in has_error must not read as "no syntax errors" (file marked INDEXED).
+def test_has_error_probe_failure_is_not_read_as_clean(caplog: pytest.LogCaptureFixture) -> None:
+    class _Root:
+        def has_error(self) -> bool:
+            raise RuntimeError("forced: binding quirk")
+
+    with caplog.at_level(logging.WARNING, logger=ts_extract.__name__):
+        result = ts_extract._has_error(_Root())
+    assert result is True, "unknown error state must not read as clean"
+    assert _loud(caplog, "ts_extract"), "probe failure must leave a WARNING+ record"
+
+
+# ── Regressions for the three fixed sites ─────────────────────────────────────────────────────────
+
+def test_graph_dependencies_report_only_indexed_sources_once(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+                                                            caplog: pytest.LogCaptureFixture) -> None:
+    class _Graph:
+        defs = {"a.py::f": object(), "a.py::g": object(), "vendor.py::x": object(), "b.py::h": object()}
+
+        def find_callees(self, source_id: str):
+            if source_id != "b.py::h":
+                raise KeyError(source_id)
+            return [_Ref(symbol="a.py::f")]
+
+    monkeypatch.setattr(catalog, "build_graph", lambda *a, **k: _Graph())
+    coverage = {
+        "a.py": catalog.CoverageRef("cov:a", "structural_index", CoverageStatus.COMPLETE),
+        "b.py": catalog.CoverageRef("cov:b", "structural_index", CoverageStatus.COMPLETE),
+    }
+    with caplog.at_level(logging.WARNING, logger=catalog.__name__):
+        records = catalog._graph_dependencies(tmp_path, [], coverage)
+
+    assert [(r.source_id, r.target_id, r.relation) for r in records] == [("b.py::h", "a.py::f", "CALLS")]
+    warnings = [r for r in caplog.records if r.levelno >= logging.WARNING and r.name == catalog.__name__]
+    assert len(warnings) == 1, "one aggregated record per build, not one per source"
+    message = warnings[0].getMessage()
+    assert "for 2 source(s)" in message and "a.py::f (KeyError)" in message and "a.py::g (KeyError)" in message
+    assert "vendor.py" not in message, "sources outside the index never had edges to lose"
+
+
+def test_graph_dependencies_all_healthy_stays_quiet(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+                                                    caplog: pytest.LogCaptureFixture) -> None:
+    class _Graph:
+        defs = {"a.py::f": object()}
+
+        def find_callees(self, source_id: str):
+            return [_Ref(symbol="a.py::g")]
+
+    monkeypatch.setattr(catalog, "build_graph", lambda *a, **k: _Graph())
+    coverage = {"a.py": catalog.CoverageRef("cov:a", "structural_index", CoverageStatus.COMPLETE)}
+    with caplog.at_level(logging.WARNING, logger=catalog.__name__):
+        records = catalog._graph_dependencies(tmp_path, [], coverage)
+    assert [r.target_id for r in records] == ["a.py::g"]
+    assert not _loud(caplog, "kernel_repo_catalog")
+
+
+def test_ts_dispatch_module_import_failure_reads_unknown(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A missing ts_dispatch module is the same unknown state as a failed scan.
+    monkeypatch.setitem(sys.modules, "mc_repo_intel_vendor.ts_dispatch", None)
+    monkeypatch.delattr(sys.modules["mc_repo_intel_vendor"], "ts_dispatch", raising=False)
+    result = call_graph.dispatch_boundaries_in_file("export const a = 1;\n", "web/app.js")
+    assert [b.kind for b in result] == [call_graph.SCAN_FAILED_KIND]
+    assert "ImportError" in result[0].note or "ModuleNotFoundError" in result[0].note
+
+
+def test_python_dispatch_scan_recursion_keeps_found_boundaries_and_marks_unknown(
+        monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture) -> None:
+    source = "def f(obj, name):\n    return getattr(obj, name)()\n"
+    baseline = call_graph.dispatch_boundaries_in_file(source, "pkg/mod.py")
+    assert baseline and all(b.kind != call_graph.SCAN_FAILED_KIND for b in baseline)
+
+    original_visit = call_graph._DispatchVisitor.visit
+    depth = {"n": 0}
+
+    def _visit_then_overflow(self, node):
+        depth["n"] += 1
+        try:
+            original_visit(self, node)
+        finally:
+            depth["n"] -= 1
+        if depth["n"] == 0:  # overflow only after the whole tree was walked
+            raise RecursionError("forced: deep tree")
+
+    monkeypatch.setattr(call_graph._DispatchVisitor, "visit", _visit_then_overflow)
+    with caplog.at_level(logging.WARNING, logger=call_graph.__name__):
+        result = call_graph.dispatch_boundaries_in_file(source, "pkg/mod.py")
+    assert [b.kind for b in result] == [*(b.kind for b in baseline), call_graph.SCAN_FAILED_KIND]
+    assert _loud(caplog, "call_graph")
+
+
+def test_python_parse_overflow_reads_unknown_but_syntax_error_stays_empty(monkeypatch: pytest.MonkeyPatch) -> None:
+    assert call_graph.dispatch_boundaries_in_file("def broken(:\n", "pkg/bad.py") == []
+
+    def _overflow(*args, **kwargs):
+        raise RecursionError("forced: deep nesting")
+
+    monkeypatch.setattr(call_graph.ast, "parse", _overflow)
+    result = call_graph.dispatch_boundaries_in_file("x = 1\n", "pkg/deep.py")
+    assert [b.kind for b in result] == [call_graph.SCAN_FAILED_KIND]
+
+
+def test_scan_failure_marker_is_byte_stable_across_failures(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The marker reaches agent-facing rows, so it carries only the exception type: no message, path or address.
+    messages = iter(("forced: /private/a 0x7f00 first", "forced: second run, other text"))
+
+    def _boom(source: str, relpath: str):
+        raise RuntimeError(next(messages))
+
+    monkeypatch.setattr(ts_dispatch, "dispatch_boundaries_in_file", _boom)
+    first = call_graph.dispatch_boundaries_in_file("export const a = 1;\n", "web/app.ts")
+    second = call_graph.dispatch_boundaries_in_file("export const a = 1;\n", "web/app.ts")
+    assert first == second
+    assert "private" not in first[0].note and "0x" not in first[0].note
+
+
+def test_dispatch_boundaries_near_keeps_scan_failure_marker_for_any_range(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    (tmp_path / "web").mkdir()
+    (tmp_path / "web" / "app.ts").write_text("export const a = 1;\n" * 50, encoding="utf-8")
+
+    def _boom(source: str, relpath: str):
+        raise RuntimeError("forced: ts dispatch scan")
+
+    monkeypatch.setattr(ts_dispatch, "dispatch_boundaries_in_file", _boom)
+    result = call_graph.dispatch_boundaries_near(tmp_path, "web/app.ts", 30, 40)
+    assert [b.kind for b in result] == [call_graph.SCAN_FAILED_KIND], "a whole-file unknown covers every range"
+
+
+def test_has_error_probe_states_stay_exact() -> None:
+    assert ts_extract._has_error(SimpleNamespace(has_error=True)) is True
+    assert ts_extract._has_error(SimpleNamespace(has_error=False)) is False
+    assert ts_extract._has_error(SimpleNamespace(has_error=lambda: False)) is False, "method binding is called"
+    assert ts_extract._has_error(SimpleNamespace(has_error=lambda: True)) is True
+    assert ts_extract._has_error(SimpleNamespace()) is False
+
+
+def test_has_error_probe_failure_marks_extract_parse_partial_without_grammars(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    class _Root:
+        def has_error(self) -> bool:
+            raise RuntimeError("forced: binding quirk")
+
+    class _Visitor:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            self.defs: list[object] = []
+            self.calls: list[object] = []
+
+        def run(self, root: object) -> str:
+            return ""
+
+    monkeypatch.setattr(ts_extract, "is_tree_sitter_functional", lambda: True)
+    monkeypatch.setattr(ts_extract, "_tslp", SimpleNamespace(get_parser=lambda lang: object()))
+    monkeypatch.setattr(ts_extract, "_parse", lambda parser, data: SimpleNamespace(root_node=_Root()))
+    monkeypatch.setattr(ts_extract, "_build_import_table", lambda *args: {})
+    monkeypatch.setattr(ts_extract, "_TSVisitor", _Visitor)
+    result = ts_extract.extract_ts_like("export const a = 1;\n", "web/app.ts", "typescript")
+    assert result.status == call_graph.COVERAGE_PARSE_PARTIAL, "unknown error state must not be INDEXED"
+
+
+@pytest.mark.skipif(not ts_extract.is_tree_sitter_functional(), reason="tree-sitter unavailable")
+def test_has_error_probe_failure_marks_extract_parse_partial(monkeypatch: pytest.MonkeyPatch) -> None:
+    class _RootProxy:
+        def __init__(self, inner: object) -> None:
+            self._inner = inner
+
+        def __getattr__(self, name: str) -> object:
+            if name == "has_error":
+                raise RuntimeError("forced: binding quirk")
+            return getattr(self._inner, name)
+
+    real_parse = ts_extract._parse
+
+    def _parse(parser, data):
+        tree = real_parse(parser, data)
+        return SimpleNamespace(root_node=_RootProxy(tree.root_node))
+
+    source = "export function f() { return g(); }\nfunction g() { return 1; }\n"
+    clean = ts_extract.extract_ts_like(source, "web/app.ts", "typescript")
+    assert clean.status == call_graph.COVERAGE_INDEXED, "control: a clean parse is INDEXED"
+
+    monkeypatch.setattr(ts_extract, "_parse", _parse)
+    result = ts_extract.extract_ts_like(source, "web/app.ts", "typescript")
+    assert result.status == call_graph.COVERAGE_PARSE_PARTIAL, "unknown error state must not be INDEXED"
+
+
+# T8-KERNEL_REPO_INTEL-159: suggestions are advisory; the NOT_FOUND status stays typed.
+def test_not_found_survives_suggestion_failure() -> None:
+    class _Graph:
+        def search_names(self, symbol: str, limit: int = 5):
+            raise RuntimeError("forced: search")
+
+        def coverage_summary(self):
+            return {}
+
+    result = repo_intel._not_found("explore", "Missing", _Graph())
+    assert result["status"] == "NOT_FOUND"
+    assert result["suggestions"] == []
+
+
+# T8-KERNEL_REPO_INTEL-612: focused orientation is documented fail-open; the map is returned unchanged.
+def test_focus_entry_failure_is_fail_open(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    (tmp_path / "pkg").mkdir()
+    (tmp_path / "pkg" / "mod.py").write_text("def f():\n    return 1\n", encoding="utf-8")
+
+    def _boom(file_path: Path, repo_root: Path):
+        raise RuntimeError("forced: file entry")
+
+    monkeypatch.setattr(repo_intel._repo_map_module, "_file_entry", _boom)
+    assert repo_intel._ensure_focus_entry(tmp_path, "MAP", "pkg/mod.py") == "MAP"
+
+
+# T8-KERNEL_REPO_CATALOG-942: a failed outline is recorded on the file's outline as degraded with a reason.
+def test_outline_failure_is_typed_degraded(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    (tmp_path / "mod.py").write_text("def f():\n    return 1\n", encoding="utf-8")
+
+    def _boom(source: str, relpath: str):
+        raise RuntimeError("forced: outline")
+
+    monkeypatch.setattr(catalog, "outline_source", _boom)
+    index = catalog.build_structural_index(str(tmp_path))
+    modules = [m for m in index.modules if m.path == "mod.py"]
+    assert modules, "the file must still be indexed"
+    assert modules[0].degraded is True
+    assert modules[0].parser == "unavailable"
+
+
+# T8-REPO_MAP-237: outline failure on a non-scanned language lists the file as text scan and keeps the reason.
+def test_file_entry_outline_failure_keeps_text_scan_and_reason(tmp_path: Path,
+                                                               monkeypatch: pytest.MonkeyPatch) -> None:
+    src = tmp_path / "svc.go"
+    src.write_text("package svc\n\nfunc Run() {}\n", encoding="utf-8")
+
+    def _boom(source: str, rel_path: str):
+        raise RuntimeError("forced: outline sigs")
+
+    monkeypatch.setattr(repo_map, "_outline_sigs", _boom)
+    monkeypatch.setattr(repo_map, "_TREE_SITTER_AVAILABLE", True)
+    entry, mode, failure = repo_map._file_entry_with_mode(src, tmp_path)
+    assert mode == repo_map._TEXT_SCAN
+    assert failure == "RuntimeError"
+    assert entry is not None and "svc.go" in entry
+
+
+# T8-REPO_MAP-247: a tree-sitter extract failure degrades that file to the text scan and records the failure type.
+def test_file_entry_tree_sitter_failure_degrades_and_records(tmp_path: Path,
+                                                             monkeypatch: pytest.MonkeyPatch) -> None:
+    src = tmp_path / "mod.py"
+    src.write_text("def handler(x):\n    return x\n", encoding="utf-8")
+
+    def _boom(source_bytes: bytes):
+        raise RuntimeError("forced: python extract")
+
+    monkeypatch.setattr(repo_map, "_TREE_SITTER_AVAILABLE", True)
+    monkeypatch.setattr(repo_map, "_get_parser", lambda *a, **k: object())
+    monkeypatch.setattr(repo_map, "_extract_python_sigs", _boom)
+    entry, mode, failure = repo_map._file_entry_with_mode(src, tmp_path)
+    assert failure == "RuntimeError"
+    assert mode == repo_map._TEXT_SCAN
+    assert entry is not None
+
+
+# T8-TS_DISPATCH-1288: a broken <script> block degrades the SFC outline with a typed reason.
+def test_vue_script_parse_failure_is_typed_degraded(monkeypatch: pytest.MonkeyPatch) -> None:
+    source = "<script>\nexport const a = 1\n</script>\n<template><div>{{ a }}</div></template>\n"
+
+    def _boom(language: str, text: str):
+        raise RuntimeError("forced: parse")
+
+    monkeypatch.setattr(ts_dispatch, "_parse_source", _boom)
+    outline = ts_dispatch._vue_outline(source, "Widget.vue", "extension")
+    assert outline["degraded"] is True
+    assert "script:RuntimeError" in str(outline.get("degraded_reason", ""))
+
+
+# T8-TS_DISPATCH-1687: a script-block parser failure in structural spans is recorded as a parser-status span.
+def test_structural_spans_script_failure_records_parser_status(monkeypatch: pytest.MonkeyPatch) -> None:
+    source = "<script>\nexport const a = 1\n</script>\n"
+
+    def _boom(language: str, text: str):
+        raise RuntimeError("forced: parse")
+
+    monkeypatch.setattr(ts_dispatch, "_parse_source", _boom)
+    result = ts_dispatch.structural_spans(source, "Widget.vue")
+    statuses = [span for span in result["spans"] if span.get("kind") == "parser-status"]
+    assert statuses and statuses[0]["reason"] == "RuntimeError"
+    assert result["degraded"] is True
+
+
+# T8-TS_DISPATCH-1711: an unavailable parser refuses structural edits with a typed unavailable outcome.
+def test_structural_spans_unavailable_parser_is_typed(monkeypatch: pytest.MonkeyPatch) -> None:
+    def _boom(language: str, text: str):
+        raise RuntimeError("forced: parser missing")
+
+    monkeypatch.setattr(ts_dispatch, "_parse_source", _boom)
+    result = ts_dispatch.structural_spans("export const a = 1;\n", "app.ts")
+    assert result["parser"] == "unavailable"
+    assert result["degraded"] is True
+    assert result["reason"] == "RuntimeError"
+
+
+# T8-TS_DISPATCH-1721: a Python grammar probe failure reports the stdlib ast identity, never a tree-sitter one.
+def test_python_parser_identity_falls_back_to_ast(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake = types.ModuleType("tree_sitter_language_pack")
+
+    def _get_parser(name: str):
+        raise RuntimeError("forced: grammar missing")
+
+    fake.get_parser = _get_parser  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "tree_sitter_language_pack", fake)
+    assert ts_dispatch._python_outline_parser_identity() == ("ast", "AVAILABLE", "stdlib")
+
+
+# T8-TS_DISPATCH-1734: a Vue grammar probe failure is reported in the outline capability key.
+def test_vue_capability_probe_failure_is_typed(monkeypatch: pytest.MonkeyPatch) -> None:
+    def _boom() -> bool:
+        raise RuntimeError("forced: probe")
+
+    monkeypatch.setattr(ts_dispatch, "_vue_grammar_available", _boom)
+    key = ts_dispatch.outline_capability_key("Widget.vue", "<template/>")
+    assert ":DEGRADED:" in key
+
+
+# T8-TS_DISPATCH-1747: a TS grammar lookup failure is reported in the outline capability key.
+def test_ts_capability_probe_failure_is_typed(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake = types.ModuleType("tree_sitter_language_pack")
+
+    def _get_parser(name: str):
+        raise RuntimeError("forced: grammar missing")
+
+    fake.get_parser = _get_parser  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "tree_sitter_language_pack", fake)
+    key = ts_dispatch.outline_capability_key("app.ts", "export const a = 1;\n")
+    assert key.startswith("typescript:DEGRADED:RuntimeError") or ":DEGRADED:RuntimeError:" in key
+
+
+# T8-TS_DISPATCH-1758: an unreadable file yields a lexical outline that names the read failure.
+def test_outline_file_unreadable_is_typed_lexical(tmp_path: Path) -> None:
+    result = ts_dispatch.outline_file(tmp_path / "missing.ts")
+    assert result["degraded"] is True
+    assert "FileNotFoundError" in str(result)
+
+
+# ── Inventory guard and tag self-check ────────────────────────────────────────────────────────────
+
+_BROAD = re.compile(r"^\s*except\s*(?:\(|Exception\b|BaseException\b|:)")
+
+
+def test_repointel_broad_excepts_are_triaged() -> None:
+    # Unit sites: 24 silent sites (verdicts in the T8H-REPOINTEL md). The remaining 26 are census-v2 LOUD
+    # (census counts any logger.* call as loud, so several are debug-only; flagged in the md for re-triage).
+    unit_sites = {
+        ("kernel_repo_catalog", 857), ("kernel_repo_catalog", 942),
+        ("kernel_repo_intel", 159), ("kernel_repo_intel", 612),
+        ("call_graph", 2031), ("call_graph", 2114), ("call_graph", 2201),
+        ("lsp_resolve", 87), ("lsp_resolve", 362),
+        ("repo_map", 237), ("repo_map", 247), ("repo_map", 542), ("repo_map", 552),
+        ("repo_map", 560), ("repo_map", 580),
+        ("ts_dispatch", 1092), ("ts_dispatch", 1288), ("ts_dispatch", 1687), ("ts_dispatch", 1711),
+        ("ts_dispatch", 1721), ("ts_dispatch", 1734), ("ts_dispatch", 1747), ("ts_dispatch", 1758),
+        ("ts_extract", 850),
+    }
+    census_loud = {
+        ("kernel_repo_catalog", 845), ("kernel_repo_intel", 655),
+        ("call_graph", 1103), ("call_graph", 1416), ("call_graph", 1451), ("call_graph", 1812),
+        ("call_graph", 2334), ("call_graph", 2364), ("call_graph", 2387), ("call_graph", 2407),
+        ("call_graph", 2410), ("call_graph", 2439),
+        ("lsp_resolve", 412), ("lsp_resolve", 516), ("lsp_resolve", 519),
+        ("repo_map", 489),
+        ("ts_dispatch", 133), ("ts_dispatch", 211), ("ts_dispatch", 1392), ("ts_dispatch", 1515),
+        ("ts_dispatch", 1554),
+        ("ts_extract", 53), ("ts_extract", 101), ("ts_extract", 717), ("ts_extract", 887), ("ts_extract", 893),
+    }
+    triaged = unit_sites | census_loud
+    found: set[tuple[str, int]] = set()
+    for path in _MODULE_FILES:
+        for number, text in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+            if not _BROAD.match(text):
+                continue
+            if re.match(r"^\s*except\s*\(", text) and not re.search(r"Exception|BaseException", text):
+                continue  # narrow tuple
+            found.add((path.stem, number))
+    assert found == triaged, (
+        f"untriaged: {sorted(found - triaged)}; stale: {sorted(triaged - found)}")
+
+
+def test_repointel_journal_tags_point_at_broad_except_sites() -> None:
+    source = Path(__file__).read_text(encoding="utf-8")
+    by_stem = {path.stem.upper(): path for path in _MODULE_FILES}
+    tags = re.findall(r"T8-([A-Z0-9_]+)-(\d+)", source)
+    assert tags, "expected T8 tags in this file"
+    for stem, line in tags:
+        path = by_stem[stem]
+        lines = path.read_text(encoding="utf-8").splitlines()
+        assert _BROAD.match(lines[int(line) - 1]), f"{stem}-{line} does not point at a broad except"

@@ -4182,16 +4182,7 @@
     {
       "file": "src/stateframe/engine/mc_repo_intel_vendor/call_graph.py",
       "function": "dispatch_boundaries_in_file",
-      "except_clause": "except Exception:",
-      "fingerprint": "36e82a764303e95ed8015171",
-      "ordinal": 1,
-      "reason": "baseline debt 2026-11-05, see inventory",
-      "risk": "unclassified"
-    },
-    {
-      "file": "src/stateframe/engine/mc_repo_intel_vendor/call_graph.py",
-      "function": "dispatch_boundaries_in_file",
-      "except_clause": "except (SyntaxError, ValueError, MemoryError, RecursionError):",
+      "except_clause": "except (SyntaxError, ValueError):",
       "fingerprint": "b976ff6979ac7020067da13f",
       "ordinal": 1,
       "reason": "baseline debt 2026-11-05, see inventory",

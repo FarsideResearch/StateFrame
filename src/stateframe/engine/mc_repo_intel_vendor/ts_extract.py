@@ -839,14 +839,18 @@ def _has_error(root) -> bool:
     `has_error` is a PROPERTY on modern tree-sitter bindings and a METHOD on
     older ones — reading it blindly would make `bool(<bound method>)` always
     True and mark every file parse_partial (a silent-wrong-answer, #158-class).
+    A probe that raises leaves the error state unknown, which reads as True so
+    the file is reported parse_partial, never INDEXED (same #158 class).
     """
     attr = getattr(root, "has_error", None)
     if attr is None:
         return False
     try:
         return bool(attr() if callable(attr) else attr)
-    except Exception:  # noqa: BLE001 - a binding quirk must never fail the build
-        return False
+    except Exception as exc:  # noqa: BLE001 - a binding quirk must never fail the build
+        logger.warning("ts_extract: has_error probe failed (%s); treating the parse as partial",
+                       type(exc).__name__)
+        return True
 
 
 def _empty_extract(status: Optional[str] = None, reason: str = ""):
