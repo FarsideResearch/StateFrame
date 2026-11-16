@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- Public tree: removed the internal benchmark lab tooling (`bench/lab`) and private project names from code, comments and tests. Schema ids `aha-bug-replay-stage6-*` and `frame-lab*` are renamed (`bug-replay-stage6-*`, `frame*`); the old ids are still accepted on read. Probe repo keys are now `primary`/`secondary`, and `.mission` is no longer a default excluded directory.
+- Public tree: internal benchmark tooling removed and private project names dropped from code, comments and tests; two replay schema id families renamed (old ids still accepted on read); probe repo keys are now `primary`/`secondary`, and one private tool directory is no longer excluded by default.
 - Docs: corrected stale and contradictory statements and documented previously undocumented flags and switches (`--log-level`/`STATEFRAME_LOG_LEVEL`, `--quiet`, `--json`, `--session-dir`, transport retry, zero-progress nudge, catalog/crossfile switches, partial-pass reporting).
 - The repair probe's source-repo environment variables are renamed to `STATEFRAME_SOURCE_REPO_PRIMARY` and `STATEFRAME_SOURCE_REPO_SECONDARY`.
 - Test fixtures and comments no longer carry local paths or internal names; the internal-name test now also scans fixtures.
