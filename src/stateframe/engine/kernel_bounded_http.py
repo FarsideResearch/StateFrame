@@ -874,8 +874,11 @@ def request_bytes(wire: bytes, endpoint: str, key: str, *,
                   route_allow_remote: bool = False,
                   record_attempts: Callable[[list[dict[str, object]]], None] | None = None,
                   record_queue_wait: Callable[[float, int, str], None] | None = None,
-                  before_attempt: Callable[[int], None] | None = None) -> bytes:
+                  before_attempt: Callable[[int], None] | None = None,
+                  send_index: int | None = None) -> bytes:
     """Bound the full HTTP operation and abort it after provider liveness is lost."""
+    if send_index is not None and (type(send_index) is not int or send_index < 1):
+        raise ValueError("send index must be a positive integer")
     if not math.isfinite(deadline) or not math.isfinite(socket_timeout) or socket_timeout <= 0:
         raise ValueError("invalid HTTP deadline or socket timeout")
     if liveness_timeout is None:
@@ -900,7 +903,8 @@ def request_bytes(wire: bytes, endpoint: str, key: str, *,
                    "socket_timeout": min(socket_timeout, remaining),
                    "send_stall_seconds": send_stall_seconds(), "report_body_sent": True,
                    "gzip": request_gzip_enabled(),
-                   **({"route_allow_remote": route_allow_remote} if route_meta is not None else {})}
+                   **({"route_allow_remote": route_allow_remote} if route_meta is not None else {}),
+                   **({"send_index": send_index} if send_index is not None else {})}
     authority_parent, authority_child = socket.socketpair() if before_attempt is not None else (None, None)
     if authority_child is not None:
         packet_data["authority_fd"] = authority_child.fileno()
@@ -985,6 +989,9 @@ def request_bytes(wire: bytes, endpoint: str, key: str, *,
 
 REQUEST_GZIP_ENV = "STATEFRAME_HTTP_GZIP"
 REQUEST_GZIP_MIN_BYTES = 32 * 1024
+SEND_INDEX_ENV = "STATEFRAME_SEND_INDEX_HEADER"
+SEND_INDEX_HEADER = "X-SF-Send-Index"
+SEND_ATTEMPT_HEADER = "X-SF-Send-Attempt"
 _Response = TypeVar("_Response")
 
 
@@ -1009,6 +1016,28 @@ def request_gzip_enabled(environ: dict[str, str] | None = None) -> bool:
     if mode not in {"on", "off"}:
         raise ValueError(f"{REQUEST_GZIP_ENV} must be 'on' or 'off'")
     return mode == "on"
+
+
+def send_index_header_enabled(environ: dict[str, str] | None = None) -> bool:
+    """``STATEFRAME_SEND_INDEX_HEADER`` off (default) | on; anything else fails closed.
+
+    On, each recorded chat POST names its engine send number and its physical attempt within that
+    send in two request headers, so a server that numbers arrivals can tell a transport retry from
+    a new send. The request body and every recorded identity are the same either way.
+    """
+    mode = str((environ if environ is not None else os.environ).get(SEND_INDEX_ENV, "off")).strip().lower()
+    if mode not in {"on", "off"}:
+        raise ValueError(f"{SEND_INDEX_ENV} must be 'on' or 'off'")
+    return mode == "on"
+
+
+def send_index_headers(send_index: object, attempt: int) -> dict[str, str]:
+    """Headers for one physical attempt; empty when the caller supplied no send number."""
+    if send_index is None:
+        return {}
+    if type(send_index) is not int or send_index < 1 or type(attempt) is not int or attempt < 1:
+        raise ValueError("send index and attempt must be positive integers")
+    return {SEND_INDEX_HEADER: str(send_index), SEND_ATTEMPT_HEADER: str(attempt)}
 
 
 def encode_request(wire: bytes, *, gzip_enabled: bool) -> tuple[bytes, dict[str, str]]:
@@ -1432,7 +1461,8 @@ def _child() -> None:
             authority.sendall(b"?")
             if authority.recv(1) != b"Y":
                 raise PermissionError("HTTP attempt was refused before submission")
-        request_headers = {"Content-Type": "application/json", **headers}
+        request_headers = {"Content-Type": "application/json", **headers,
+                           **send_index_headers(packet.get("send_index"), len(attempts) + 1)}
         request_headers["Authorization"] = "Bearer " + packet["key"]
         request = urllib.request.Request(packet["endpoint"], data=data,
                                          headers=request_headers)
