@@ -16,6 +16,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from kernel_done_acceptance import done_accepted
+from kernel_edit_tool_names import PROTOCOL_EDIT_TOOL_NAMES
 
 
 MODE_ENV = "STATEFRAME_COMMON_SENSE_GOVERNOR"
@@ -30,8 +31,8 @@ _UNKNOWN = frozenset({
     "CLAUSE_COVERAGE", "COVERAGE_OPEN", "INCONCLUSIVE", "UNVERIFIED",
     "NOT_EXECUTED", "STALE", "UNBOUND_OBSERVABLE",
 })
-_EDIT_KINDS = frozenset({"edit", "str_replace", "file_create", "work"})
-_OBSERVATION_KINDS = frozenset({"read", "edit", "str_replace", "file_create", "done"})
+_EDIT_KINDS = frozenset({"edit", "str_replace", "file_create", "work", *PROTOCOL_EDIT_TOOL_NAMES})
+_OBSERVATION_KINDS = frozenset({"read", "edit", "str_replace", "file_create", "done", *PROTOCOL_EDIT_TOOL_NAMES})
 _NO_OP_RESULTS = frozenset({"NO_OP", "NOOP", "EDIT_NOOP", "IDENTICAL"})
 _NO_OP_TEXT = re.compile(r"\b(?:NO[- _]?OP|IDENTICAL)\b", re.IGNORECASE)
 _CONCRETE_BEHAVIOR = re.compile(

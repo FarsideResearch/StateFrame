@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- Edit protocol: `edit_source` (1-4 handle-addressed edits in one file, applied atomically or refused with every problem at once) and `rewrite_source` (replace a whole REWRITE region, behind the shrink guard) with their executors and run-loop dispatch, selected by an internal edit-protocol switch that defaults to the legacy editors. Default runs are unchanged: the same menu, request and observation bytes. Tests: `tests/test_edit_protocol_menu.py`, `tests/test_edit_source_tool.py`, `tests/test_rewrite_source_tool.py`, `tests/test_edit_source_dispatch.py`, `tests/test_edit_tool_classification.py`.
+- Edit protocol groundwork (not wired, no behavior change): closed edit refusal codes, request-scoped edit handles with a current-source map, handle binding in the revision-bound edit authority, an all-issues-at-once edit batch validator, a repair-request builder with a retry/narrow/blocked ladder, and shared edit-tool name constants. Tests pin today's str_replace observation strings and a zero-read repair round trip per refusal code.
+
 ## 0.7.21 (2026-11-16)
 
 - Tests: the release gate now checks its own integrity (the collected tests must match the expected set, with exact ids and failing pipelines caught) and runs 52 more request-identity parity tests as mandatory.

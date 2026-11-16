@@ -5,6 +5,7 @@ import pytest
 
 from kernel_continuation_menu_authority import EDIT_TOOLS, state_allow_set, per_step_allow_set
 from kernel_continuation_runtime import EFFECT_TOOLS, LiveContinuation
+from kernel_edit_tool_names import PROTOCOL_EDIT_TOOL_NAMES
 from kernel_stale_edit_policy import STALE_REPAIR_TOOLS
 from test_agent_tools import host as host
 
@@ -29,7 +30,10 @@ def test_live_intention_menu_product_tools(host, monkeypatch, stale, repair):
     allowed = per_step_allow_set(runtime)
     assert "parallel" not in allowed
     if not stale or repair == "1":
-        assert EDIT_TOOLS - {"parallel"} <= allowed
+        # The edit-protocol tools are classified as edits but have no host
+        # execution-receipt contract yet, so the dispatch filter withholds them.
+        assert EDIT_TOOLS - {"parallel"} - PROTOCOL_EDIT_TOOL_NAMES <= allowed
+        assert not PROTOCOL_EDIT_TOOL_NAMES & allowed
     else:
         assert not EDIT_TOOLS & allowed
     assert "web_fetch" in allowed

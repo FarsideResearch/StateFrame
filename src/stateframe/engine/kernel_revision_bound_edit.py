@@ -426,6 +426,125 @@ class AdmissionResult:
                 "operation_indexes": list(self.operation_indexes)}
 
 
+# --- Request-scoped edit handles -> SiteReference ---------------------------------
+#
+# A handle record is what the handle minter delivers alongside a source span. This
+# module reads it through a minimal duck-typed interface (attributes or mapping keys):
+#   handle           "q{request_ordinal}h{n}"
+#   path             workspace-relative path of the delivered file
+#   revision         "sha256:<hex>" of the whole delivered file (kernel_paged_source.source_revision)
+#   start, end       byte offsets of the delivered span within that file
+#   kind             "SPAN" (replace inside the span) or "REWRITE" (replace the whole span)
+# Handles are single-use per request: once `EditAuthority.consume(request_ordinal)` runs,
+# every handle of that request (and of any earlier request) is STALE_HANDLE.
+
+HANDLE_KINDS = frozenset({"SPAN", "REWRITE"})
+_HANDLE_RE = re.compile(r"^q(\d+)h(\d+)$")
+_DIAGNOSTIC_RE = re.compile(r"^([A-Z_]+)(?:\[(\d+)\])?:(.*?)(?:\[(\d+)\])?$")
+
+# Admission diagnostic prefix -> closed refusal code. Only the handle path reads this map;
+# the prose diagnostics themselves are unchanged.
+_DIAGNOSTIC_CODES: dict[str, str] = {
+    "STALE_SOURCE": "SOURCE_CHANGED",
+    "STALE_REVISION": "SOURCE_CHANGED",
+    "SOURCE": "SOURCE_CHANGED",
+    "STALE_SPAN": "UNCOVERED_SOURCE",
+    "OVERLAP": "OVERLAPPING_EDITS",
+    "AMBIGUOUS": "AMBIGUOUS_MATCH",
+    "AMBIGUOUS_ORDER": "OVERLAPPING_EDITS",
+    "MATCH": "OLD_NOT_FOUND",
+    "OMISSION_MARKER": "DISPLAY_MARKER",
+}
+_DIAGNOSTIC_DEFAULT_CODE = "NOT_EDITABLE"
+
+
+class HandleRefusal(EditPlanError):
+    """A handle could not be bound; `code` is a closed refusal code name."""
+
+    def __init__(self, code: str, message: str, *, handle: str, path: str, old_text: str) -> None:
+        super().__init__(code, message)
+        self.handle = handle
+        self.path = path
+        self.old_text = old_text
+
+    def refusal(self, *, edit_index: int = 0) -> object:
+        """Typed Refusal (kernel_edit_refusal_codes) with a handle-free fingerprint."""
+        from kernel_edit_refusal_codes import Refusal, RefusalCode
+
+        return Refusal.build(RefusalCode(self.code), edit_index=edit_index, path=self.path,
+                             old_text=self.old_text)
+
+
+@dataclass(frozen=True)
+class HandleRecord:
+    """Minimal handle record this module can bind. The minter may deliver any object
+    with the same attribute names; `HandleRecord.coerce` normalises it."""
+
+    handle: str
+    path: str
+    revision: str
+    start: int
+    end: int
+    kind: str = "SPAN"
+
+    @property
+    def request_ordinal(self) -> int:
+        match = _HANDLE_RE.match(self.handle)
+        if match is None:
+            raise EditPlanError("STALE_HANDLE", f"malformed handle: {self.handle!r}")
+        return int(match.group(1))
+
+    @classmethod
+    def coerce(cls, value: object) -> "HandleRecord":
+        if isinstance(value, cls):
+            return value
+
+        def read(name: str) -> object:
+            if isinstance(value, Mapping):
+                return value.get(name)
+            return getattr(value, name, None)
+
+        handle = str(read("handle") or "").strip()
+        if not _HANDLE_RE.match(handle):
+            raise EditPlanError("STALE_HANDLE", f"malformed handle: {handle!r}")
+        raw_kind = read("kind") or "SPAN"
+        kind = str(getattr(raw_kind, "value", raw_kind)).upper()
+        if kind not in HANDLE_KINDS:
+            raise EditPlanError("SCHEMA", f"unknown handle kind: {kind}")
+        # Minted handle records carry byte offsets on a nested span (byte_start/byte_end).
+        span = read("span")
+
+        def offset(name: str) -> object:
+            direct = read(name)
+            if direct is not None:
+                return direct
+            byte_name = f"byte_{name}"
+            nested = (span.get(byte_name) if isinstance(span, Mapping)
+                      else getattr(span, byte_name, None)) if span is not None else None
+            return nested if nested is not None else read(byte_name)
+
+        try:
+            start, end = int(offset("start")), int(offset("end"))  # type: ignore[arg-type]
+        except (TypeError, ValueError) as error:
+            raise EditPlanError("SPAN", "handle span requires integer start/end") from error
+        if start < 0 or end < start:
+            raise EditPlanError("SPAN", "handle span must be non-negative and ordered")
+        return cls(handle=handle, path=_path(read("path")),
+                   revision=_revision(read("revision"), "revision"), start=start, end=end,
+                   kind=kind)
+
+
+def refusal_code_for_diagnostic(diagnostic: str) -> tuple[str, int | None]:
+    """Map one admission diagnostic (unchanged prose) to (closed refusal code, edit index)."""
+    match = _DIAGNOSTIC_RE.match(diagnostic.strip())
+    if match is None:
+        return _DIAGNOSTIC_DEFAULT_CODE, None
+    prefix, inner_index, _body, trailing_index = match.groups()
+    index_text = inner_index if inner_index is not None else trailing_index
+    index = int(index_text) if index_text is not None else None
+    return _DIAGNOSTIC_CODES.get(prefix, _DIAGNOSTIC_DEFAULT_CODE), index
+
+
 class EditAuthority:
     """Host-owned source/revision/authority registry for one base generation."""
 
@@ -447,6 +566,10 @@ class EditAuthority:
         self.allowed_paths = frozenset(_path(item) for item in (allowed_paths or self.sources))
         self.journal = journal
         self.sites: dict[str, SiteReference] = {}
+        # Handle bookkeeping (handles protocol only; unused by the legacy site path).
+        self._handle_sites: dict[str, tuple[HandleRecord, str]] = {}  # site_id -> (record, old_text)
+        self._consumed_requests: set[int] = set()
+        self._latest_consumed: int = -1
 
     def _snapshot_absence(self, path: str, *, source_kind: str = "source") -> str:
         fact = _workspace_truth.exists(self.root, path, journal=self.journal)
@@ -481,6 +604,119 @@ class EditAuthority:
                         source=raw_source, authority_ref=self.authority_ref, path=path, **kwargs)
         self.sites[ref.site_id] = ref
         return ref
+
+    # -- request-scoped handles -------------------------------------------------
+
+    def handle_is_stale(self, request_ordinal: int) -> bool:
+        """True once the request was consumed or a later request was consumed."""
+        return request_ordinal in self._consumed_requests or request_ordinal <= self._latest_consumed
+
+    def consume(self, request_ordinal: int) -> tuple[str, ...]:
+        """Retire every handle minted for `request_ordinal` (and earlier requests).
+
+        Returns the site ids that were bound from the retired handles. Idempotent."""
+        if type(request_ordinal) is not int or request_ordinal < 0:
+            raise EditPlanError("SCHEMA", "request_ordinal must be a non-negative integer")
+        self._consumed_requests.add(request_ordinal)
+        self._latest_consumed = max(self._latest_consumed, request_ordinal)
+        retired = tuple(site_id for site_id, (record, _old) in self._handle_sites.items()
+                        if self.handle_is_stale(record.request_ordinal))
+        for site_id in retired:
+            self._handle_sites.pop(site_id, None)
+            self.sites.pop(site_id, None)
+        return retired
+
+    def bind_handle(self, handle_record: object, *, old_text: str | None = None,
+                    node_kind: str = "handle") -> SiteReference:
+        """Bind a delivered handle to a SiteReference against the current source.
+
+        Without `old_text` the reference covers the whole delivered span (REWRITE).
+        With `old_text` the reference is narrowed to that text, which must occur exactly
+        once inside the span. Refusals raise HandleRefusal with a closed code:
+        STALE_HANDLE (consumed/earlier request), SOURCE_CHANGED (file revision moved),
+        UNCOVERED_SOURCE (span or old_text outside the delivered span), OLD_NOT_FOUND,
+        AMBIGUOUS_MATCH, NOT_EDITABLE (path outside authority)."""
+        record = HandleRecord.coerce(handle_record)
+        anchor = old_text if old_text is not None else ""
+
+        def refuse(code: str, message: str) -> HandleRefusal:
+            return HandleRefusal(code, message, handle=record.handle, path=record.path,
+                                 old_text=anchor)
+
+        if self.handle_is_stale(record.request_ordinal):
+            raise refuse("STALE_HANDLE", f"handle belongs to a consumed request: {record.handle}")
+        try:
+            self._check_path(record.path)
+        except EditPlanError as error:
+            raise refuse("NOT_EDITABLE", str(error)) from error
+        current = self.sources.get(record.path)
+        if current is None:
+            raise refuse("NOT_EDITABLE", f"source is not present in authority: {record.path}")
+        if record.revision != _digest(current):
+            raise refuse("SOURCE_CHANGED", f"file revision changed since delivery: {record.path}")
+        if record.end > len(current):
+            raise refuse("UNCOVERED_SOURCE", f"handle span is outside current source: {record.handle}")
+        if record.kind == "REWRITE" and old_text is not None:
+            raise refuse("UNCOVERED_SOURCE", "a REWRITE handle replaces its whole span; omit old_text")
+        if old_text is None:
+            if record.end == record.start:
+                raise refuse("UNCOVERED_SOURCE", f"handle span is empty: {record.handle}")
+            start, end = record.start, record.end
+        else:
+            if not isinstance(old_text, str) or not old_text:
+                raise refuse("EMPTY_OLD_TEXT", "old_text is required and must be non-empty")
+            needle = old_text.encode("utf-8")
+            span = current[record.start:record.end]
+            count = span.count(needle)
+            if count == 0:
+                if current.count(needle):
+                    raise refuse("UNCOVERED_SOURCE",
+                                 f"old_text lies outside the span of {record.handle}")
+                raise refuse("OLD_NOT_FOUND", f"old_text does not occur in the span of {record.handle}")
+            if count > 1:
+                raise refuse("AMBIGUOUS_MATCH",
+                             f"old_text occurs {count} times in the span of {record.handle}")
+            start = record.start + span.index(needle)
+            end = start + len(needle)
+        ref = bind_site(path=record.path, file_revision=record.revision, source=current,
+                        start=start, end=end, node_kind=node_kind,
+                        source_receipt=record.handle, permitted_operations=("replace",),
+                        authority_ref=self.authority_ref)
+        self.sites[ref.site_id] = ref
+        self._handle_sites[ref.site_id] = (record, anchor)
+        return ref
+
+    def handle_refusals(self, plan: EditPlan,
+                        sources: Mapping[str, BytesLike] | None = None) -> tuple[object, ...]:
+        """Run the unchanged `admit` and translate its diagnostics into typed Refusals.
+
+        Diagnostics for edits whose site was bound from a handle use that handle's path and
+        old_text for the fingerprint; others fall back to the plan edit's path."""
+        from kernel_edit_refusal_codes import Refusal, RefusalCode
+
+        admission = self.admit(plan, sources)
+        refusals: list[object] = []
+        seen: set[tuple[str, int, str]] = set()
+        for diagnostic in admission.diagnostics:
+            code, index = refusal_code_for_diagnostic(diagnostic)
+            edit_index = index if index is not None else 0
+            path, anchor = plan.authority_ref, ""
+            if 0 <= edit_index < len(plan.edits):
+                edit = plan.edits[edit_index]
+                if edit.site_ref is not None:
+                    path = edit.site_ref.path
+                    bound = self._handle_sites.get(edit.site_ref.site_id)
+                    if bound is not None:
+                        anchor = bound[1]
+                elif edit.legacy_path is not None:
+                    path, anchor = edit.legacy_path, edit.legacy_old or ""
+            key = (code, edit_index, path)
+            if key in seen:
+                continue
+            seen.add(key)
+            refusals.append(Refusal.build(RefusalCode(code), edit_index=edit_index, path=path,
+                                          old_text=anchor))
+        return tuple(refusals)
 
     def _validate_ref(self, ref: SiteReference, sources: Mapping[str, bytes]) -> list[str]:
         diagnostics: list[str] = []

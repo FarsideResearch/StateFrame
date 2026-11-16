@@ -1,0 +1,18 @@
+{
+  "observations": {
+    "off_empty_old": "str_replace REJECTED: old_str is required and must be non-empty: copy the exact current text to replace. Nothing was changed.",
+    "off_missing_file": "str_replace REJECTED: mod.py does not exist.",
+    "off_n_places": "str_replace REJECTED: old_str matches 2 places. Include more surrounding lines so it is unique.",
+    "off_noop": "str_replace NO-OP: old_str and new_str are identical — nothing would change. You just re-emitted the CURRENT code, which means you believe it is already correct. If so, the defect is NOT on this line: check the CALLEE's signature/behaviour (does it use every kwarg passed?), a different call site, or the code path that runs when this one doesn't.",
+    "off_not_found": "str_replace REJECTED: old_str not found. Copy the exact current text (check whitespace) — `read` the region first.",
+    "off_parse_break": "str_replace REJECTED: the file would not parse afterwards (unmatched ')' line 6). Nothing was changed.",
+    "off_success": "str_replace applied.",
+    "on_missing_target": "str_replace REJECTED: bound edit target required: supply target_ref from the repair packet",
+    "on_n_places": "str_replace REJECTED: old_str matches 2 places. Include more surrounding lines so it is unique.",
+    "on_not_found": "str_replace REJECTED: old_str not found. Copy the exact current text (check whitespace) — `read` the region first.",
+    "on_parse_break": "str_replace REJECTED: the file would not parse afterwards (unmatched ')' line 6). Nothing was changed.",
+    "on_stale_target": "str_replace REJECTED: bound edit target rejected: stale revision; rebind the current source",
+    "on_success": "str_replace applied."
+  },
+  "schema": "legacy-safe-observations/1"
+}

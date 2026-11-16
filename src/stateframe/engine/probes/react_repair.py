@@ -169,6 +169,7 @@ from kernel_silent_off_organs import (  # noqa: E402
 )
 from sampler_config import apply_to_request as _apply_sampler_fields  # noqa: E402
 from kernel_done_acceptance import done_accepted  # noqa: E402
+from kernel_edit_tool_names import PROTOCOL_EDIT_TOOL_NAMES  # noqa: E402
 import kernel_workspace_truth as _workspace_truth  # noqa: E402
 import kernel_frame_routes as _frame_routes  # noqa: E402
 from stateframe.test_runners import collection_change_reason, pytest_plugin_modules  # noqa: E402
@@ -2847,7 +2848,7 @@ _JQ_REPLACE_MODULE_TOOL = {"type": "function", "function": {
 # dispatch. Shell and authored checks have separate effect/write authorities.
 SCOPED_WRITE_TOOLS = frozenset({
     "edit", "str_replace", "insert_before", "replace_module",
-    "file_create", "file_delete", "file_move",
+    "file_create", "file_delete", "file_move", *PROTOCOL_EDIT_TOOL_NAMES,
 })
 
 def _nonpy_neutralize_tool_surface(tools: Sequence[Mapping[str, object]]) -> list:
@@ -3128,8 +3129,9 @@ def _tools_for_probe_modes(*, probe_gate_on: bool,
         from kernel_job_watch import tool_surface as job_tool_surface
         selected = job_tool_surface(selected)
         from kernel_completion_owner import canonicalize_tool_surface
-        return canonicalize_tool_surface(
-            _owner_coordinate_read_surface(selected), probe_modes=probe_modes)
+        from kernel_edit_source_tool_surface import tool_surface as _edit_protocol_surface
+        return _edit_protocol_surface(canonicalize_tool_surface(
+            _owner_coordinate_read_surface(selected), probe_modes=probe_modes))
     selected = copy.deepcopy(selected)
     for tool in selected:
         function = tool.get("function", {})
@@ -3143,8 +3145,9 @@ def _tools_for_probe_modes(*, probe_gate_on: bool,
     from kernel_job_watch import tool_surface as job_tool_surface
     selected = job_tool_surface(selected)
     from kernel_completion_owner import canonicalize_tool_surface
-    return canonicalize_tool_surface(
-        _owner_coordinate_read_surface(selected), probe_modes=probe_modes)
+    from kernel_edit_source_tool_surface import tool_surface as _edit_protocol_surface
+    return _edit_protocol_surface(canonicalize_tool_surface(
+        _owner_coordinate_read_surface(selected), probe_modes=probe_modes))
 
 
 def _execute_parent_parallel(measurement, bolt, root, created_this_run,
@@ -7668,6 +7671,11 @@ def work(d, *, resume=None):
         from kernel_shell_tool import service as shell_service
         _shell = shell_service()
         _hook_wiring_for_run = globals().get("_hook_wiring")
+        from kernel_edit_protocol_switch import handles_enabled as _edit_protocol_handles
+        from kernel_edit_source_tool import EditProtocolRunState
+        # Handle maps are attached per request by the current-source wiring; an
+        # empty map refuses every handle as STALE_HANDLE.
+        _edit_protocol_state = EditProtocolRunState()
         if _shell is not None:
             if _hook_wiring_for_run is None:
                 _shell.bind(root, d, baseline_tests)
@@ -9423,6 +9431,7 @@ def work(d, *, resume=None):
             _rejection_template_source = None
             _rejection_template_path = None
             tool_target_ref = None        # optional STATEFRAME_BOUND_EDIT target
+            tool_edit_protocol_args = None   # (tool_name, args) for edit_source / rewrite_source
             tool_probe_args = None        # structured probe arguments (gate or observation mode)
             tool_repro_args = None        # model-authored scratch reproduction arguments
             tool_predict_args = None      # host-owned scratch prediction arguments
@@ -11099,6 +11108,9 @@ def work(d, *, resume=None):
                                 model_action_args=_args,
                             )
                             continue
+                        elif _name in ("edit_source", "rewrite_source") and _edit_protocol_handles():
+                            line = _name
+                            tool_edit_protocol_args = (_name, dict(_args))
                         elif _name == "str_replace":
                             # Rides the `edit` rail (kernel treats it as the action it is:
                             # ledger cleared, edits counted) with its own applicator.
@@ -13591,6 +13603,53 @@ def work(d, *, resume=None):
                     # dispatch_live_read applies repeat-read notes to this tool result.
                 finally:
                     _finish_read_attempt(measurement, error=sys.exc_info()[1])
+            elif line in ("edit_source", "rewrite_source") and tool_edit_protocol_args is not None:
+                from kernel_edit_source_tool import APPLIED as _EP_APPLIED, EXECUTORS as _EP_EXECUTORS
+                from kernel_edit_source_tool import REPLAYED as _EP_REPLAYED
+                from kernel_scope_widen_guard import read as _ep_read
+                _ep_tool, _ep_args = tool_edit_protocol_args
+
+                def _ep_not_editable(relative: str) -> str | None:
+                    _ep_path = root / relative
+                    if protected_test_path(_ep_path, baseline_tests):
+                        return "NOT_EDITABLE: protected public test paths are immutable"
+                    if multifile:
+                        _scope_widen(relative)
+                    if _outside_edit_scope(relative):
+                        return "NOT_EDITABLE: path is outside editable_paths"
+                    return None
+
+                def _ep_write(path: pathlib.Path, data: bytes) -> tuple[bool, str | None]:
+                    return _effect_write_bytes(path, data, operation=_ep_tool)
+
+                if _hook_gate_route(_ep_tool, _ep_args):
+                    continue
+                _ep_extra = ({"public_brief": _task_public_brief(d)}
+                             if _ep_tool == "rewrite_source" else {})
+                _ep_out = _EP_EXECUTORS[_ep_tool](
+                    root, _ep_args, state=_edit_protocol_state, read_bytes=_ep_read,
+                    journal=measurement.journal, not_editable=_ep_not_editable,
+                    write_bytes=_ep_write, **_ep_extra)
+                obs = _ep_out.observation()
+                bolt.receipt(
+                    "edit", _ep_tool, json.dumps(_ep_args, sort_keys=True),
+                    "APPLIED" if _ep_out.status == _EP_APPLIED else
+                    "NO_OP" if _ep_out.status == _EP_REPLAYED else "REJECTED", obs[:240])
+                measurement.observe(line, obs)
+                msgs.append(_tool_reply_for_call(msgs, tool_call_id, obs) if tool_call_id else
+                            {"role": "user", "content": obs})
+                if _ep_out.status == _EP_APPLIED:
+                    # The published bytes invalidate every handle of this request.
+                    _edit_protocol_state.set_request(None)
+                    if _hook_wiring_for_run is not None:
+                        _hook_wiring_for_run.note_applied(tool_call_id, _ep_out.changed_paths)
+                    if first_edit_step is None:
+                        first_edit_step = step
+                    edits += len(_ep_out.changed_paths)
+                    from kernel_green_lock import note_applied_product_edit
+                    for _ep_rel in _ep_out.changed_paths:
+                        note_applied_product_edit(root / _ep_rel)
+                continue
             elif line == "str_replace" and tool_batch_args is not None:
                 from kernel_coordinated_change_ledger import (
                     APPLY_EVENT, APPLY_SCHEMA, BatchFailure, BatchResult,

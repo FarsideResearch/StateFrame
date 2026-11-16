@@ -9,6 +9,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 
 from kernel_bounded_locate import EditSiteHypothesis, EditSpan
+from kernel_edit_tool_names import PROTOCOL_EDIT_TOOL_NAMES
 
 
 # Source navigation is a host-registered read effect.  Completion holds may
@@ -23,6 +24,7 @@ from kernel_git_commit import registered_names as _commit_names  # noqa: E402 - 
 OBSERVATION_TOOLS = OBSERVATION_TOOLS | _commit_names()
 EDIT_TOOLS = frozenset({
     "edit", "str_replace", "file_create", "file_delete", "file_move", "shell", "replace_module", "write", "replace",
+    *PROTOCOL_EDIT_TOOL_NAMES,
 })
 
 
