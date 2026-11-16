@@ -601,8 +601,19 @@ def build_qualified_request(capture, runtime, body, *, endpoint, key, deadline=N
     }
     if allocated is not None:
         capture_updates["_working_set_certificate"] = allocated.rendered.certificate
+    # A subframe's sealed frame carries the owner protocol of the final (rebound)
+    # contract; the live host frame must project that same protocol, or every
+    # later validation of this sealed request replans forever. Allocator-ON only.
+    sealed_owner_protocol = None
+    if working_set_enabled():
+        from kernel_stateframe_framefit5 import (
+            publish_scoped_owner_protocol, sealed_scoped_owner_protocol,
+        )
+        sealed_owner_protocol = sealed_scoped_owner_protocol(context)
     # Finish all fallible copies before publishing. The record is the sole
     # request authority; allocation and its body/proof aliases move together.
+    if sealed_owner_protocol is not None:
+        publish_scoped_owner_protocol(runtime, sealed_owner_protocol)
     runtime.__dict__.update(runtime_updates)
     capture.__dict__.update(capture_updates)
     capture.journal.emit("qualified_request_sealed", request_id=capture.request_id,

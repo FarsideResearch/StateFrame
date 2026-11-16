@@ -179,12 +179,18 @@ def _segments(messages: Sequence[Mapping[str, object]],
 
 
 def drop_unbacked_range_pins(ledger: dict[str, object],
-                             messages: Sequence[Mapping[str, object]]) -> None:
+                             messages: Sequence[Mapping[str, object]],
+                             frame: Mapping[str, object] | None = None) -> None:
     """Drop exact range pins whose revision is not a complete current source window.
 
     A pin for a superseded revision carries bytes the request no longer shows as
     current. The fitted frame drops it (see kernel_working_set_facts._update_frame);
     the host projection must drop it too before the two are compared.
+
+    A pin whose exact bytes this request delivers through another carrier (a whole
+    read page after an edit, or with ``frame`` its selected next_site/headcarry) is
+    backed too: the fitted frame keeps it and drop_delivered_range_pins converts it
+    to a same_request receipt, so the projection must leave it for that same rule.
     """
     from kernel_request_source_window import parse_model_source_window
 
@@ -194,8 +200,15 @@ def drop_unbacked_range_pins(ledger: dict[str, object],
         if (meta is not None and meta.get("absence") == "NONE"
                 and meta.get("status") == "COMPLETE" and isinstance(meta.get("path"), str)):
             current[meta["path"]] = meta.get("revision")
+    # Only carriers outside the ledger back a pin; another pin cannot back itself.
+    carriers = _read_source_segments(messages, frame if frame is not None else {}, ())
     for row in ledger["reads"]:
         if "pinned_range" in row and current.get(row.get("path")) != row.get("revision"):
+            pin = row["pinned_range"]
+            if (isinstance(pin, str)
+                    and hashlib.sha256(pin.encode()).hexdigest() == row.get("content_sha256")
+                    and _delivered(row, carriers)):
+                continue
             row.pop("pinned_range")
 
 

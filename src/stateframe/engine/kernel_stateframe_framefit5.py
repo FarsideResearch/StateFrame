@@ -2861,6 +2861,38 @@ def attach_owner_protocol(
     return result
 
 
+def sealed_scoped_owner_protocol(candidate_runtime: object) -> dict[str, object] | None:
+    """The subframe owner protocol a detached candidate's final assembly bound.
+
+    Final qualification re-renders the frame from the sealed (possibly rebound)
+    owner contract on a detached runtime. Only that copy of the host frame learns
+    the sealed protocol; the caller publishes it with the qualified record.
+    """
+    if _active_unit_spec() is None:
+        return None
+    context = getattr(candidate_runtime, "_framefit_action_context", None)
+    context_frame = context.get("framefit5") if isinstance(context, Mapping) else None
+    protocol = context_frame.get("owner_protocol") if isinstance(context_frame, Mapping) else None
+    return copy.deepcopy(dict(protocol)) if isinstance(protocol, Mapping) else None
+
+
+def publish_scoped_owner_protocol(runtime: object, protocol: Mapping[str, object] | None) -> None:
+    """Bind the live host frame to the owner protocol its sealed request carries.
+
+    Without this, the live host frame keeps the protocol of the last prepare-time
+    attach (for example a callable menu in surface order), while the sealed wire
+    frame carries the final rebound contract, and every later allocation
+    validation of that sealed request reports an owner_protocol mismatch.
+    """
+    if protocol is None:
+        return
+    context = getattr(runtime, "_framefit_action_context", None)
+    context_frame = context.get("framefit5") if isinstance(context, Mapping) else None
+    if not isinstance(context_frame, dict):
+        raise FrameFit5Error("subframe owner protocol has no host frame authority")
+    context_frame["owner_protocol"] = copy.deepcopy(dict(protocol))
+
+
 
 
 def _verify_next_site_bytes(site: Mapping[str, object], workspace_root: str | Path) -> bytes:

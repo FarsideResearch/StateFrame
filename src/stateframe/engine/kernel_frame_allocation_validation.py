@@ -437,7 +437,7 @@ def validate_allocation_authority(
 
         projected_ledger = copy.deepcopy(wire_projection.get("action_ledger"))
         if isinstance(projected_ledger, dict) and isinstance(projected_ledger.get("reads"), list):
-            drop_unbacked_range_pins(projected_ledger, semantic_messages(messages))
+            drop_unbacked_range_pins(projected_ledger, semantic_messages(messages), frame)
             drop_delivered_range_pins(projected_ledger, semantic_messages(messages), frame)
             wire_projection = {**wire_projection, "action_ledger": projected_ledger}
         if frame.get("action_ledger") != wire_projection.get("action_ledger"):
