@@ -3709,8 +3709,7 @@ def resume_run(run_dir: Path, *, endpoint: Endpoint | None = None, max_turns: in
             # environment, shell home and baseline), saves the execution session unstarted, and is
             # refused while a job is live; recorded exchanges after it replay through the tool tape.
             checkpoint_eligible = same_limits and not checkpoint_off
-            checkpoint_skip_reason = ("mutations_configured" if "mutations" in spec else
-                                      "hooks_configured" if hooks_configured else
+            checkpoint_skip_reason = ("hooks_configured" if hooks_configured else
                                       "routes_configured" if routes_configured else
                                       "edit_scope_widen" if widen_configured else None)
             checkpoint_skipped = checkpoint_eligible and checkpoint_skip_reason is not None
@@ -3759,10 +3758,7 @@ def resume_run(run_dir: Path, *, endpoint: Endpoint | None = None, max_turns: in
                         "and checked byte for byte, then the run continues live")
             else:
                 if checkpoint_skipped:
-                    if checkpoint_skip_reason == "mutations_configured":
-                        printer("checkpoint: not restored because mutations are configured for this run; "
-                                "replaying the recorded exchanges instead")
-                    elif checkpoint_skip_reason == "hooks_configured":
+                    if checkpoint_skip_reason == "hooks_configured":
                         printer("checkpoint: not restored because hooks are configured for this run; "
                                 "replaying the recorded exchanges instead")
                     elif checkpoint_skip_reason == "edit_scope_widen":

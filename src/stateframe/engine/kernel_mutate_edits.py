@@ -523,6 +523,52 @@ class MutationEdits:
                     os.close(fd)
                 os.close(root_fd)
 
+    def roll_forward_committed(self, saved: frozenset[str]) -> tuple[str, ...]:
+        """After a checkpoint restore, reapply edits committed after the checkpoint was saved.
+
+        The restored workspace holds the checkpoint's files, so an edit committed later (live, or
+        by resume reconciliation) is missing; replay serves its recorded observation and never
+        reruns it. Each file must still hold its recorded preimage (or already its postimage);
+        anything else refuses, and the caller falls back to full replay.
+        """
+        runtime = self.runtime
+        rows = [row for row in runtime.journal.events()
+                if row.get("kind") == "EFFECT_COMMITTED" and row.get("call") not in saved]
+        applied: list[str] = []
+        if not rows:
+            return ()
+        with _writer_lock(runtime.journal):
+            root_fd = os.open(runtime.repo, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+            try:
+                for row in rows:
+                    files = row.get("files")
+                    if not isinstance(files, list):
+                        raise EditConflict("committed file evidence is invalid")
+                    for file in files:
+                        parts = _parts(file.get("path") if isinstance(file, dict) else None)
+                        parent_fd = _parent(root_fd, parts)
+                        try:
+                            identity = _identity(parent_fd)
+                        finally:
+                            os.close(parent_fd)
+                        with _current_parent(root_fd, parts, identity) as parent_fd:
+                            current, mode = _read_at(parent_fd, parts[-1])
+                            digest = hashlib.sha256(current).hexdigest() if current is not None else None
+                            if digest == file["post_sha256"]:
+                                continue
+                            if digest != file["pre_sha256"]:
+                                raise EditConflict("restored file differs from the committed edit's preimage")
+                            post = (runtime.journal.get_blob(file["post_blob"])
+                                    if file["post_blob"] is not None else None)
+                            if post is not None and hashlib.sha256(post).hexdigest() != file["post_sha256"]:
+                                raise EditConflict("committed edit postimage digest differs")
+                            with _bound_write_context(root_fd, parts, identity, current):
+                                _write_at(parent_fd, parts[-1], post, mode or 0o644)
+                        applied.append(file["path"])
+            finally:
+                os.close(root_fd)
+        return tuple(applied)
+
     def recover(self, call: str, *, allow_rollforward: bool = True) -> EditResult:
         runtime = self.runtime
         rows = [row for row in runtime.journal.events() if row.get("call") == call]

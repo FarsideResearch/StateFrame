@@ -77,6 +77,7 @@
 
 ## 0.7.28 (2026-11-17)
 
+- Fixed: a mutation run that crashes resumes from its newest checkpoint instead of replaying from the first request. The mutation journal is no longer rolled back with the checkpoint, the executor's sandbox is started fresh after a restore, edits committed after the checkpoint are rolled forward, and an interrupted launch is still journaled as interrupted and never rerun.
 - Fixed: mutation runs can checkpoint and resume; the launch ledger reopens on restore. Before, the ledger handle could not be pickled, so a mutation run never wrote a checkpoint.
 - Fixed: full-network mutation brokers start again. The broker boot directory now carries `kernel_reason_log.py`, which `kernel_web_fetch.py` imports, and refuses to start when any broker file is missing.
 - Tests: the pinned 0.3.30 checkpoint producer gets a test interpreter its check sandbox can execute, so the old-checkpoint refusal test no longer fails on uv-managed Pythons.
