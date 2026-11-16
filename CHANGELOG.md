@@ -1,9 +1,10 @@
 # Changelog
 
-## Unreleased
+## 0.7.20 (2026-11-16)
 
 - Removed the read lockout. The engine never hides read, grep or shell from the model on its own. STATEFRAME_READ_LOCKOUT is retired: a host that still sets it gets a journal note instead of a refused run.
 - Unknown STATEFRAME settings still refuse the run; retired ones are listed in the switch registry module and ignored.
+
 ## 0.7.19 (2026-11-16)
 
 - Added (off by default): `STATEFRAME_HOST_ROW_IDENTITY` (`off`, `shadow`, `on`). The engine can now record, outside the request, which rows and spans of a request it wrote itself, so later checks can tell host text from file, tool and user text that merely contains the same markers. This release adds the foundation only: the per-step record, its hand-off to every request of the step, and (with `on`) a `host_authorship_manifest` journal event beside each final request. No reader uses the record yet, so request bytes are the same in every mode. With the switch off nothing is created. Tests: `tests/test_host_authorship*.py`, and `tests/test_host_marker_sniff_guard.py`, which fails on any new engine function that decides authorship by searching for marker text.
