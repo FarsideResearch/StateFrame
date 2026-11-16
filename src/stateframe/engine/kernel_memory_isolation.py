@@ -198,6 +198,16 @@ class TaskNamespace:
     def label(self) -> str:
         return self.digest[:23]
 
+    @property
+    def render_label(self) -> str:
+        """Label rendered into request bytes: task identity only, never run_id.
+
+        The runtime's run_id is the continuation journal's random per-run id, so
+        rendering it would make identical runs send different bytes.  Isolation
+        still keys on the full namespace (``==``, ``digest``, seal), not this label.
+        """
+        return _digest({"worker_id": self.worker_id, "task_id": self.task_id})[:23]
+
 
 @dataclass(frozen=True)
 class MemoryRecord:
@@ -306,7 +316,7 @@ class TypedCarryCapsule:
         )
 
     def render(self) -> str:
-        lines = [f"[Memory isolation capsule | kind={self.kind} | target={self.target.label}]"]
+        lines = [f"[Memory isolation capsule | kind={self.kind} | target={self.target.render_label}]"]
         for record in self.records:
             value = _thaw(record.value)
             rendered = value if isinstance(value, str) else json.dumps(
