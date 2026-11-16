@@ -59,6 +59,11 @@ def _fixed_env_capability(name: str, unit_root: Path, read_roots: tuple[Path, ..
     """Give every mutation child the same fixed environment."""
     return ExecCapability(name, unit_root, False, read_roots, (), network, _ENV, limits)
 
+def _exclusive_private(path: str, flags: int) -> int:
+    """open() opener: create the launch ledger exclusively with owner-only permissions."""
+    return os.open(path, flags | os.O_EXCL, 0o600)
+
+
 
 @dataclass(frozen=True)
 class MutationLimits:
@@ -386,8 +391,8 @@ class MutationExecutor:
                 "mutation", self.root, (*self._roots, *self._broker_roots, self.root),
                 network_envelope, ExecLimits())
             self._session.configure(envelope)
-            ledger_fd = os.open(self.root / "launches.jsonl", os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-            self._ledger = os.fdopen(ledger_fd, "ab", buffering=0)
+            # Opened by path (not fdopen) so the checkpoint pickler can reopen it on resume.
+            self._ledger = open(self.root / "launches.jsonl", "ab", buffering=0, opener=_exclusive_private)
             self._session._start(envelope)
             # Popen is not a readiness signal. Await the supervisor's first reply
             # before a hook is allowed to start its one-second budget.
@@ -411,6 +416,8 @@ class MutationExecutor:
                "call": spec.call, "role": spec.role, "state": state,
                "t": time.monotonic_ns(), "identity": identity}
         self._ledger.write(json.dumps(row, separators=(",", ":")).encode() + b"\n")
+        # A ledger reopened after a checkpoint resume is buffered; flush before the fsync.
+        self._ledger.flush()
         os.fsync(self._ledger.fileno())
         if self._launch_stage_hook is not None:
             self._launch_stage_hook(state)
