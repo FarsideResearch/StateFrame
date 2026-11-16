@@ -39,7 +39,6 @@ RELAY_ERROR_LABELS = frozenset({
 
 
 DEFAULT_PROVIDER_LIVENESS_S = 90.0
-DEFAULT_QUEUE_WAIT_MAX_S = 1800.0
 DEFAULT_SEND_STALL_S = 90.0
 
 
@@ -237,11 +236,14 @@ def provider_liveness_timeout_seconds() -> float:
     return seconds
 
 
-def queue_wait_max_seconds() -> float:
-    """Maximum total time for a silent, reachable provider request."""
+def queue_wait_max_seconds() -> float | None:
+    """User cap on total silent wait for a reachable provider request, or None (no engine cap).
+
+    A dead server is still caught by the provider liveness probe, not by this cap.
+    """
     raw = os.environ.get("STATEFRAME_QUEUE_WAIT_MAX_S")
     if raw is None:
-        return DEFAULT_QUEUE_WAIT_MAX_S
+        return None
     try:
         seconds = float(raw)
     except ValueError as error:
@@ -249,6 +251,22 @@ def queue_wait_max_seconds() -> float:
     if not math.isfinite(seconds) or seconds <= 0:
         raise ValueError("STATEFRAME_QUEUE_WAIT_MAX_S must be finite and positive")
     return seconds
+
+
+def _hard_deadline(run_deadline: float | None, now: float) -> float | None:
+    """Absolute total cap for a send: the earlier of the run deadline and the user's queue wait cap.
+
+    None means no total cap. Only the provider liveness rules then end the request.
+    """
+    cap = queue_wait_max_seconds()
+    bounds = [bound for bound in (run_deadline, None if cap is None else now + cap)
+              if bound is not None]
+    return min(bounds) if bounds else None
+
+
+def _time_left(hard_deadline: float | None, now: float) -> float | None:
+    """Seconds until the total cap, or None when there is no total cap."""
+    return None if hard_deadline is None else hard_deadline - now
 
 
 def send_stall_seconds() -> float:
@@ -676,9 +694,13 @@ def _deliver_packet(process: subprocess.Popen[bytes], packet: bytes) -> threadin
 
 def _communicate_with_liveness(
         process: subprocess.Popen[bytes], packet: bytes, endpoint: str, key: str, *,
-        deadline: float, hard_deadline: float, liveness_timeout: float,
+        deadline: float, hard_deadline: float | None, liveness_timeout: float,
         probe_state: dict[str, int | float | None]) -> tuple[bytes, bytes]:
-    """Extend a silent send only after the selected provider answers a probe."""
+    """Extend a silent send only after the selected provider answers a probe.
+
+    ``deadline`` (per attempt) bounds upload completion and the first liveness verdict.
+    ``hard_deadline`` (total) is None when there is no user cap: then only liveness ends a wait.
+    """
     probe_interval = min(10.0, max(0.01, liveness_timeout / 3))
     probe_floor = 0.01 if _numeric_http_origin(_provider_probe_origin(endpoint)) else 0.25
     last_liveness = time.monotonic()
@@ -698,8 +720,8 @@ def _communicate_with_liveness(
 
     while True:
         now = time.monotonic()
-        remaining = hard_deadline - now
-        if remaining <= 0:
+        remaining = _time_left(hard_deadline, now)
+        if remaining is not None and remaining <= 0:
             _terminate_child(process)
             raise TimeoutError("HTTP absolute deadline exceeded")
         if now >= deadline and probe_state["status"] is None:
@@ -713,7 +735,8 @@ def _communicate_with_liveness(
             # A synchronous probe can span the cap. Drain what is available, but
             # let the child decide whether its final socket send beat the cap.
             try:
-                output, diagnostic = process.communicate(timeout=min(0.01, remaining))
+                output, diagnostic = process.communicate(
+                    timeout=0.01 if remaining is None else min(0.01, remaining))
             except subprocess.TimeoutExpired as error:
                 record_markers(error.stderr)
             else:
@@ -724,7 +747,9 @@ def _communicate_with_liveness(
                 return output, diagnostic
         completed_at = probe_state["completed_at"]
         body_sent_before_cap = isinstance(completed_at, float) and completed_at <= deadline
-        wait_for = min(remaining, max(0.01, next_probe - now))
+        wait_for = max(0.01, next_probe - now)
+        if remaining is not None:
+            wait_for = min(remaining, wait_for)
         if (probe_state["status"] is None or not body_sent_before_cap) and now < deadline:
             wait_for = min(wait_for, deadline - now)
         try:
@@ -741,14 +766,15 @@ def _communicate_with_liveness(
             communication_started = True
             record_markers(error.stderr)
             now = time.monotonic()
-            if now >= hard_deadline:
+            if hard_deadline is not None and now >= hard_deadline:
                 _terminate_child(process)
                 raise TimeoutError("HTTP absolute deadline exceeded")
             if now < next_probe:
                 continue
-            probe_timeout = min(
-                2.0, max(probe_floor, liveness_timeout / 4),
-                hard_deadline - now)
+            probe_caps = [2.0, max(probe_floor, liveness_timeout / 4)]
+            if hard_deadline is not None:
+                probe_caps.append(hard_deadline - now)
+            probe_timeout = min(probe_caps)
             status = _probe_liveness(endpoint, key, probe_timeout)
             probed_at = time.monotonic()
             if status is not None:
@@ -863,13 +889,11 @@ def request_bytes(wire: bytes, endpoint: str, key: str, *,
         raise TimeoutError("HTTP deadline expired before submission")
     if route_meta is not None:
         _require_routed_local(endpoint, route_allow_remote)
-    hard_deadline = deadline
-    if run_deadline is not None:
-        if not math.isfinite(run_deadline):
-            raise ValueError("invalid run deadline")
-        hard_deadline = min(run_deadline,
-                            time.monotonic() + queue_wait_max_seconds())
-    if hard_deadline <= time.monotonic():
+    if run_deadline is not None and not math.isfinite(run_deadline):
+        raise ValueError("invalid run deadline")
+    # None = no total cap (no run deadline and no user queue wait cap); liveness alone ends the wait.
+    hard_deadline = _hard_deadline(run_deadline, time.monotonic())
+    if hard_deadline is not None and hard_deadline <= time.monotonic():
         raise TimeoutError("HTTP run deadline expired before submission")
     packet_data = {"wire": wire.decode("utf-8"), "endpoint": endpoint, "key": key,
                    "deadline": hard_deadline, "request_deadline": deadline,
@@ -948,7 +972,8 @@ def request_bytes(wire: bytes, endpoint: str, key: str, *,
                 first_response_at = detail.get("first_response_at") if isinstance(detail, dict) else None
                 finished_at = (first_response_at if isinstance(first_response_at, (int, float))
                                and math.isfinite(first_response_at) else time.monotonic())
-                waited = max(0.0, min(finished_at, hard_deadline) - deadline)
+                capped_at = finished_at if hard_deadline is None else min(finished_at, hard_deadline)
+                waited = max(0.0, capped_at - deadline)
                 if waited > 0:
                     record_queue_wait(waited, probe_state["status"], _safe_origin(endpoint))
         finally:
@@ -1010,7 +1035,7 @@ class _AbortiveConnectionTracker:
         self._connections: list[_AbortiveConnectionMixin] = []
         self._aborted = False
         self.request_deadline = 0.0
-        self.hard_deadline = 0.0
+        self.hard_deadline: float | None = None  # None = no total cap (see _hard_deadline)
         self.socket_timeout = 0.0
         self.response_deadline = 0.0
         self.first_response_at: float | None = None
@@ -1162,8 +1187,10 @@ class _AbortiveConnectionMixin:
             if self._tracking_body and now >= self._tracker.request_deadline:
                 raise RequestBodyDeadlineTimeout()
             stalled = now - last_progress
-            remaining = min(self._tracker.send_stall_seconds - stalled,
-                            self._tracker.hard_deadline - now)
+            remaining = self._tracker.send_stall_seconds - stalled
+            hard_left = _time_left(self._tracker.hard_deadline, now)
+            if hard_left is not None:
+                remaining = min(remaining, hard_left)
             if self._tracking_body:
                 remaining = min(remaining, self._tracker.request_deadline - now)
             if stalled >= self._tracker.send_stall_seconds:
@@ -1189,8 +1216,10 @@ class _AbortiveConnectionMixin:
         active_socket = self.sock
         response_deadline = self._tracker.request_deadline
         if active_socket is not None:
-            remaining = self._tracker.hard_deadline - time.monotonic()
-            if remaining <= 0 or not select.select([active_socket], [], [], remaining)[0]:
+            # select(timeout=None) waits for the first byte; the parent's liveness probe ends a dead peer.
+            remaining = _time_left(self._tracker.hard_deadline, time.monotonic())
+            if ((remaining is not None and remaining <= 0)
+                    or not select.select([active_socket], [], [], remaining)[0]):
                 raise TimeoutError("HTTP absolute deadline exceeded before response")
             arrived_at = time.monotonic()
             # A reset or EOF also makes select readable. For plain HTTP, peek so
@@ -1203,7 +1232,8 @@ class _AbortiveConnectionMixin:
                 self._tracker.first_response_at = arrived_at
             if arrived_at >= response_deadline:
                 response_deadline = arrived_at + self._tracker.socket_timeout
-            response_deadline = min(response_deadline, self._tracker.hard_deadline)
+            if self._tracker.hard_deadline is not None:
+                response_deadline = min(response_deadline, self._tracker.hard_deadline)
             self._tracker.response_deadline = response_deadline
             active_socket.settimeout(max(0.001, min(
                 self._tracker.socket_timeout,
@@ -1365,8 +1395,17 @@ def _child() -> None:
     body, encoding = encode_request(wire, gzip_enabled=packet.get("gzip") is True)
     identity, identity_headers = encode_request(wire, gzip_enabled=False)
     tracker = _AbortiveConnectionTracker()
-    tracker.request_deadline = packet.get("request_deadline", packet["deadline"])
-    tracker.hard_deadline = packet["deadline"]
+    request_deadline = packet.get("request_deadline", packet["deadline"])
+    if (isinstance(request_deadline, bool) or not isinstance(request_deadline, (int, float))
+            or not math.isfinite(request_deadline)):
+        raise ValueError("HTTP child packet needs a finite request deadline")
+    tracker.request_deadline = float(request_deadline)
+    hard_deadline = packet["deadline"]  # null = no total cap; only provider liveness ends the wait
+    if hard_deadline is not None and (isinstance(hard_deadline, bool)
+                                      or not isinstance(hard_deadline, (int, float))
+                                      or not math.isfinite(hard_deadline)):
+        raise ValueError("HTTP child packet has an invalid total deadline")
+    tracker.hard_deadline = None if hard_deadline is None else float(hard_deadline)
     tracker.socket_timeout = packet["socket_timeout"]
     tracker.send_stall_seconds = packet.get("send_stall_seconds", DEFAULT_SEND_STALL_S)
     tracker.report_body_sent = packet.get("report_body_sent") is True
@@ -1402,12 +1441,14 @@ def _child() -> None:
                    "http_status": None}
         attempts.append(attempt)
         try:
-            remaining = packet["deadline"] - time.monotonic()
-            if remaining <= 0:
+            remaining = _time_left(tracker.hard_deadline, time.monotonic())
+            if remaining is not None and remaining <= 0:
                 raise TimeoutError("HTTP absolute deadline exceeded before send")
             if tracker.report_body_sent and time.monotonic() >= tracker.request_deadline:
                 raise RequestBodyDeadlineTimeout()
-            with opener.open(request, timeout=remaining) as response:
+            # Without a total cap the per-operation socket timeout is the only connect/read bound here.
+            open_timeout = packet["socket_timeout"] if remaining is None else remaining
+            with opener.open(request, timeout=open_timeout) as response:
                 attempt["http_status"] = response.status
                 if response.length is not None and response.length > MAX_RESPONSE_BYTES:
                     raise ValueError("HTTP response exceeds bounded transport limit")

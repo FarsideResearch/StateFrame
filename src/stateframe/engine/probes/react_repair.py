@@ -3755,8 +3755,11 @@ def _await_failed_request_destination(capture) -> bool:
 
 
 def _transport_future_timeout(capture, wall_timeout: float,
-                              frozen_timeout_retry_active: bool) -> float:
-    """Keep the outer future alive through an entitled provider queue wait."""
+                              frozen_timeout_retry_active: bool) -> float | None:
+    """Keep the outer future alive through an entitled provider queue wait.
+
+    None means no outer cap: the inner send is still bounded by its finite request deadline.
+    """
     from kernel_measurement import request_timeout_budget_seconds
     from kernel_bounded_http import queue_wait_max_seconds
 
@@ -3768,7 +3771,10 @@ def _transport_future_timeout(capture, wall_timeout: float,
                       if _frame_routes.ROUTES_ACTIVE else None)
     if route_deadline is not None:
         return max(0.001, route_deadline - time.monotonic())
-    return max(baseline, queue_wait_max_seconds() + wall_timeout)
+    queue_cap = queue_wait_max_seconds()
+    if queue_cap is None:
+        return None
+    return max(baseline, queue_cap + wall_timeout)
 
 
 def _live_action_references(measurement, bolt, fileset, target=None) -> dict[str, list[object]]:

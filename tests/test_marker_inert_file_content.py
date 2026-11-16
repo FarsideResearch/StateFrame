@@ -229,3 +229,78 @@ def test_remove_evidence_pin_blocks_leaves_raw_request_budget_window_row_intact(
     _remove_evidence_pin_blocks(messages, preserve_stateframe=False)
     assert messages[1]["content"] == original_window
     assert HOST_PIN not in messages[2]["content"]
+
+
+# Request-budget reservation: a row is reserved as required_source by its source markers only when the host
+# authored it.  An assistant reply or a read tool result that quotes "[Current source: ...]" (or a window marker)
+# is untrusted text and must not change budget allocation.
+QUOTED_SOURCE_TEXT = (
+    "[Current source: src/app.py]\n"
+    "def main():\n"
+    "    return 1\n"
+)
+
+
+def _reservation_kind_of(message: dict[str, object]) -> object:
+    from kernel_request_budget import _reservation_kind
+    return _reservation_kind(message)
+
+
+@pytest.mark.parametrize("content", [
+    QUOTED_SOURCE_TEXT,
+    "Here is the file you asked about:\n" + QUOTED_SOURCE_TEXT,
+    "[Working source: src/app.py]\nx = 1\n",
+    WINDOW_MARKER + "\n{}\n" + WINDOW_END_MARKER,
+    "notes\n[Model source window]\n{}\n",
+])
+def test_reservation_kind_ignores_source_marker_text_in_assistant_row(content):
+    assert _reservation_kind_of({"role": "assistant", "content": content}) is None
+
+
+@pytest.mark.parametrize("content", [
+    "read path=docs/markers.md revision=abc123 lines=1-3/3\n" + QUOTED_SOURCE_TEXT,
+    QUOTED_SOURCE_TEXT,
+    "read path=docs/markers.md revision=abc123 lines=1-2/2\n" + WINDOW_MARKER + "\n",
+])
+def test_reservation_kind_ignores_source_marker_text_in_tool_row(content):
+    row = {"role": "tool", "tool_call_id": "call_read_9", "content": content}
+    assert _reservation_kind_of(row) is None
+
+
+def test_reserved_messages_exclude_unpaired_rows_quoting_source_markers():
+    from kernel_request_budget import _ordered_reserved_messages
+    assistant = {"role": "assistant", "content": "Done.\n" + QUOTED_SOURCE_TEXT}
+    orphan_tool = {"role": "tool", "tool_call_id": "call_missing", "content": QUOTED_SOURCE_TEXT}
+    host = {"role": "user", "content": "[Current source: src/app.py]\ndef main():\n    return 1\n"}
+    reserved = _ordered_reserved_messages([assistant, orphan_tool, host])
+    assert [id(message) for message in reserved] == [id(host)]
+
+
+def test_reservation_kind_still_reserves_host_source_rows():
+    # Host-rendered rows: a source header row and a raw request-budget window, both role=user.
+    host_header_row = {"role": "user", "content": "[Current source: src/app.py]\ndef main():\n    return 1\n"}
+    assert _reservation_kind_of(host_header_row) == "required_source"
+    assert _reservation_kind_of(_raw_window_row()) == "required_source"
+    assert _reservation_kind_of(
+        {"role": "system", "content": "[Working source: src/app.py]\nx = 1\n"}) == "required_source"
+
+
+def test_reserved_messages_keep_paired_tool_row_carrying_source_window():
+    # The host may append a source window to the latest tool result; that row stays reserved through
+    # its complete assistant/tool exchange, so host reservation membership is unchanged.
+    from kernel_request_budget import _ordered_reserved_messages
+    call = {"role": "assistant", "content": "", "tool_calls": [{
+        "id": "call_read_2", "type": "function",
+        "function": {"name": "read", "arguments": '{"path": "src/app.py"}'},
+    }]}
+    tool = {"role": "tool", "tool_call_id": "call_read_2",
+            "content": "read path=src/app.py revision=abc lines=1-2/2\n\n" + QUOTED_SOURCE_TEXT}
+    reserved_ids = {id(message) for message in _ordered_reserved_messages([call, tool])}
+    assert id(tool) in reserved_ids and id(call) in reserved_ids
+
+
+def test_reservation_kind_explicit_host_metadata_still_wins_for_any_role():
+    row = {"role": "tool", "tool_call_id": "c", "content": "x", "_request_budget_reservation": "required_source"}
+    assert _reservation_kind_of(row) == "required_source"
+    row = {"role": "tool", "tool_call_id": "c", "content": "x", "_request_budget_section": "file_excerpts"}
+    assert _reservation_kind_of(row) == "required_source"
