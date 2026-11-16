@@ -20,7 +20,6 @@ from kernel_check_receipts import _emit as emit_check_receipt
 from kernel_code_bookmarks import windows
 from kernel_continuation_journal import ContinuationJournal
 from kernel_read_exec import _source_identity
-from kernel_read_lockout import append_frame_line
 from kernel_reread_result_truth import result_note
 from kernel_stateframe_framefit5 import _serialize_state_message
 from kernel_stateframe_runtime import StateFrameRuntime, note_provider_request
@@ -126,7 +125,7 @@ def _replayed_actions(recorded, checks, root):
     return rows
 
 
-def _menu_replay(recorded, checks, root, actions, *, stop_on_lockout=False):
+def _menu_replay(recorded, checks, root, actions):
     runtime = _runtime(recorded["cases"][0], checks, root)
     decisions = []
     for case in recorded["cases"]:
@@ -139,11 +138,8 @@ def _menu_replay(recorded, checks, root, actions, *, stop_on_lockout=False):
         menu = StateFrameRuntime.tool_menu(runtime, tools, [])
         names = [tool["function"]["name"] for tool in menu]
         messages = [{"role": "user", "content": "[StateFrame]\nrecorded request state"}]
-        append_frame_line(runtime, messages)
         decisions.append((case["request"], names, json.dumps(messages).encode(),
                           tuple(runtime._replay_events)))
-        if stop_on_lockout and "read" not in names:
-            break  # Later recorded read actions require a menu the fixed run excludes.
     return decisions
 
 
@@ -257,7 +253,6 @@ if __name__ == "__main__":
             print(f"request {item['request']}: recorded={item['decision']['reason']} "
                   f"replay={decision['reason']} bookmarks={len(marks)}")
         for number, names, _wire, _events in _menu_replay(
-                data, proof, root, _replayed_actions(data, proof, root),
-                stop_on_lockout=True):
+                data, proof, root, _replayed_actions(data, proof, root)):
             print(f"request {number}: read={'read' in names} grep={'grep' in names} "
                   f"shell={'shell' in names}")

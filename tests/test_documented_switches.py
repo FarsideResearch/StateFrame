@@ -24,7 +24,6 @@ PROFILE_ONLY = {
     "STATEFRAME_HOST_CLOSURE",
     "STATEFRAME_RESULTS_DIR",
     "STATEFRAME_CODE_BOOKMARKS",
-    "STATEFRAME_READ_LOCKOUT",
     "STATEFRAME_ROUTEBUDGET_MODE",
     "STATEFRAME_HTTP_GZIP",
     "STATEFRAME_PLAIN_GZIP",
@@ -43,6 +42,9 @@ EXAMPLES = {"STATEFRAME_MY_SWITCH"}
 TEST_FIXTURE_ONLY = {"STATEFRAME_RECORDED_WIRE"}
 # Switches removed from the product; older CHANGELOG entries still name them.
 RETIRED = {"STATEFRAME_EDIT_NTURN_RUN_BUDGET_SECONDS"}
+# Removed switches: no engine code reads them and no profile sets them. Older CHANGELOG entries still name them as
+# history, so they are exempt from the check. Nothing may register them (see test_retired_switch_is_not_registered_anywhere).
+RETIRED_SWITCHES = {"STATEFRAME_READ_LOCKOUT"}
 PREFIXES = {"STATEFRAME_ROUTE_"}
 NAME = re.compile(r"STATEFRAME_[A-Z0-9_]+")
 
@@ -72,6 +74,8 @@ def unsupported(documented: dict[str, list[str]], allowlist, product: set[str]) 
     for name, sentences in sorted(documented.items()):
         if name in EXAMPLES or name in PREFIXES or name in allowlist or name in TEST_FIXTURE_ONLY or name in RETIRED:
             continue
+        if name in RETIRED_SWITCHES:
+            continue
         if name in PROFILE_ONLY:
             if not any("profile" in sentence.lower() for sentence in sentences):
                 problems.append(f"{name}: profile-only switch, but no doc sentence says to set it in a profile")
@@ -84,6 +88,14 @@ def unsupported(documented: dict[str, list[str]], allowlist, product: set[str]) 
 
 def test_every_documented_switch_takes_effect():
     assert unsupported(_documented(), runner.OPT_IN_SWITCHES, _product_reads()) == []
+
+
+def test_retired_switch_is_not_registered_anywhere():
+    for name in RETIRED_SWITCHES:
+        assert name not in runner.OPT_IN_SWITCHES
+        assert name not in runner.engine_switches()
+        assert name not in _product_reads()
+        assert unsupported({name: [f"Set {name}=on in a custom profile."]}, {}, set()) == []
 
 
 def test_test_fixture_variables_are_never_product_switches():

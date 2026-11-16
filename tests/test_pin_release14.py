@@ -89,7 +89,6 @@ def test_oversized_whole_file_does_not_block_later_small_upgrade(tmp_path, monke
 
 def test_switches_off_matches_021_protected_window_bytes(tmp_path, monkeypatch):
     monkeypatch.setenv("STATEFRAME_CODE_BOOKMARKS", "off")
-    monkeypatch.setenv("STATEFRAME_READ_LOCKOUT", "off")
     (tmp_path / "module.py").write_text("value = 1\n")
     window = _window(tmp_path, "module.py", 1, 1)
     protected = {"role": "user", "content": window["content"]}
@@ -203,7 +202,6 @@ def test_switches_off_checkpoint_has_no_request_counter(tmp_path, monkeypatch):
     # 0.2.1 checkpoints never carried the provider request counter; with both switches off the
     # checkpoint bytes (and so its hash and journal event) must stay identical to the release.
     monkeypatch.setenv("STATEFRAME_CODE_BOOKMARKS", "off")
-    monkeypatch.setenv("STATEFRAME_READ_LOCKOUT", "off")
     monkeypatch.setenv("KERNEL_CONTINUATION_RESTART", "1")
     saved = _checkpoint_after_four_requests(tmp_path)
     assert "provider_request_count" not in saved

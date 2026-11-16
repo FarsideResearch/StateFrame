@@ -126,14 +126,12 @@ def test_offerable_sources_merge_once_with_registered_schema_priority(monkeypatc
 def test_final_surface_seeds_request_one_without_changing_callable_names(monkeypatch):
     import kernel_completion_owner as completion_owner
     import kernel_done_is_submit_authority as done_authority
-    import kernel_read_lockout
     import kernel_request_tool_surface as request_surface
 
     monkeypatch.setenv(head.MODE_ENV, "on")
     monkeypatch.setenv("STATEFRAME_TOOL_MENU_MEMO", "off")
     monkeypatch.setattr(done_authority, "enabled", lambda _runtime: False)
     monkeypatch.setattr(done_authority, "candidate_exists", lambda _runtime: False)
-    monkeypatch.setattr(kernel_read_lockout, "filter_tools", lambda _runtime, tools: list(tools))
     monkeypatch.setattr(completion_owner, "bind_final_tool_surface", lambda *args, **kwargs: True)
 
     runtime = SimpleNamespace()

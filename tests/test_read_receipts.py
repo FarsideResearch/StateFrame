@@ -435,7 +435,7 @@ def test_saved_golden_request_bytes_and_selection_stay_unchanged(tmp_path, monke
     assert after == before
     assert request_wire_id(rt.journal, 20, body) == before_id
     # Also exercise the real read-derived menu selector with captures enabled.
-    from test_read_lockout import _trigger, _live_read, _menu
+    from test_code_bookmarks_watch import _trigger, _live_read, _menu
     work = tmp_path / "selection"
     a, _ = _trigger(work)
     a.journal.path = rt.journal.path
