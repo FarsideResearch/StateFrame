@@ -97,6 +97,34 @@ def _authority_view(frame: Mapping[str, object]) -> dict[str, object]:
     return view
 
 
+def _owner_protocol_mismatch_keys(
+    frame_view: Mapping[str, object], projection_view: Mapping[str, object]
+) -> list[str] | None:
+    """Return owner_protocol subkeys that differ, or None when either side is not a mapping.
+
+    Key names only: values are never included so the message stays free of payload data.
+    """
+    frame_owner = frame_view.get("owner_protocol")
+    projection_owner = projection_view.get("owner_protocol")
+    if not isinstance(frame_owner, Mapping) or not isinstance(projection_owner, Mapping):
+        return None
+    keys = set(frame_owner) | set(projection_owner)
+    differing = [key for key in keys if frame_owner.get(key) != projection_owner.get(key)]
+    return [str(key) for key in sorted(differing, key=str)]
+
+
+def _authority_mismatch_message(
+    changed: list[str], frame_view: Mapping[str, object], projection_view: Mapping[str, object]
+) -> str:
+    """Build the replan reason for a scoped frame whose authority differs from its unit projection."""
+    message = f"scoped allocation frame differs from its unit authority (fields={changed!r}"
+    if "owner_protocol" in changed:
+        owner_keys = _owner_protocol_mismatch_keys(frame_view, projection_view)
+        if owner_keys is not None:
+            message += f", owner_protocol_keys={owner_keys!r}"
+    return message + ")"
+
+
 def _site_view(site: Mapping[str, object]) -> dict[str, object]:
     """Identity of an open site independent of how its bytes ride the wire.
 
@@ -430,10 +458,9 @@ def validate_allocation_authority(
                 key for key in set(authority_frame_view) | set(authority_projection_view)
                 if authority_frame_view.get(key) != authority_projection_view.get(key)
             )
-            raise FrameAllocationReplanNeeded(
-                "scoped allocation frame differs from its unit authority "
-                f"(fields={changed!r})"
-            )
+            raise FrameAllocationReplanNeeded(_authority_mismatch_message(
+                changed, authority_frame_view, authority_projection_view,
+            ))
 
 
 def require_active_allocation(
