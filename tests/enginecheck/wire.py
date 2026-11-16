@@ -8,6 +8,7 @@ kernel_cache_layout bands, never from the observed longest common prefix. Cached
 from __future__ import annotations
 
 import json
+import os
 import time
 import urllib.error
 import urllib.request
@@ -19,7 +20,8 @@ from typing import Mapping, Sequence
 from enginecheck import ROOT, HarnessError, Trace
 from stateframe.engine import kernel_cache_layout as layout
 
-RELAY = "http://127.0.0.1:18592"
+RELAY_ENV = "STATEFRAME_TEST_TOKENIZER_RELAY"
+RELAY: str | None = os.environ.get(RELAY_ENV) or None
 RELAY_RETRIES = 3
 RELAY_TIMEOUT_SECONDS = 120
 OPEN_ASSISTANT = "<|im_start|>assistant"

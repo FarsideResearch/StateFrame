@@ -29,7 +29,7 @@ def test_limit_values_are_sorted_unique_and_non_negative(limit: int, expected: t
 
 
 # Real-engine findings, not defects in the check. Each run() raises HarnessError before a survival verdict exists, so
-# these are strict xfails. Reasons carry the engine exit code and its error line from the captured run (f2run ecitem3).
+# these are strict xfails. Reasons carry the engine exit code and its error line from the captured run (captured run, 2026-11-15).
 # src/ is unchanged and the check is not weakened.
 # Each entry: (text the HarnessError must contain, xfail reason). A HarnessError without that text fails the test.
 _ENGINE_FINDINGS: dict[str, tuple[str, str]] = {

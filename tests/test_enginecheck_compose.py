@@ -208,7 +208,7 @@ def test_off_pairs_complete_with_absent_witnesses(real_report: ComposeReport) ->
     assert rows["00"].witness_a is False and rows["01"].witness_a is False
 
 
-# Real-engine finding, not a harness defect (f2run ecitem5): with the shipped profile, pair 11 (allocator and stable
+# Real-engine finding, not a harness defect (captured run, 2026-11-15): with the shipped profile, pair 11 (allocator and stable
 # wire on) is refused by the engine before any provider verdict exists. Pairs 00, 10 and 01 still run and pass.
 # Strict xfail: only failures whose lines are all pair 11 or full, each carrying this exact refusal, satisfy it.
 _ALLOCATOR_STABLE_WIRE_TEXT = ("working_set_allocator_incompatible: STATEFRAME_WORKING_SET_ALLOCATOR=on "

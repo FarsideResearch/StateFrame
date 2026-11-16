@@ -181,11 +181,13 @@ def test_cache_drop_gate_uses_tolerance() -> None:
 # --- 2. One real scripted engine run through relay tokenization ---
 
 def _relay_reachable() -> None:
+    if not wire_module.RELAY:
+        pytest.skip("tokenizer relay not configured (set STATEFRAME_TEST_TOKENIZER_RELAY)")
     try:
         OfflineTokenizer().marker()
     except HarnessError as error:
         if "tokenizer_relay_unreachable" in str(error):
-            pytest.skip("offline tokenizer relay unreachable (127.0.0.1:18592); cannot tokenize the real run")
+            pytest.skip(f"offline tokenizer relay unreachable ({wire_module.RELAY}); cannot tokenize the real run")
         raise
 
 
@@ -202,7 +204,7 @@ def _read_three_scenario() -> Scenario:
     )
 
 
-# Real engine cache break under the SHIPPED profile (f2run, 2026-11-15). Not a harness defect: the check is unchanged and
+# Real engine cache break under the SHIPPED profile (captured run, 2026-11-15). Not a harness defect: the check is unchanged and
 # pinned to this exact failure tuple. A different failure list raises RuntimeError, which strict xfail does not accept.
 SHIPPED_ENGINE_FAILURES: tuple[str, ...] = (
     "prefix_turn_2_tool_menu_added_ungated_added_recall_generated_artifact_removed_-_offset_5024",
@@ -367,12 +369,12 @@ def test_relay_http_error_is_not_retried_as_unreachable(monkeypatch: pytest.Monk
 
     def fake_urlopen(request: object, timeout: float) -> object:
         calls.append(1)
-        raise urllib.error.HTTPError("http://127.0.0.1:18592/tokenize", 500, "relay fault", {}, None)
+        raise urllib.error.HTTPError("http://relay.invalid/tokenize", 500, "relay fault", {}, None)
 
     monkeypatch.setattr(wire_module.urllib.request, "urlopen", fake_urlopen)
     monkeypatch.setattr(wire_module.time, "sleep", lambda seconds: None)
     with pytest.raises(HarnessError, match="tokenizer_relay_http_error"):
-        OfflineTokenizer().tokenize("x")
+        OfflineTokenizer("http://relay.invalid").tokenize("x")
     assert len(calls) == 1
 
 
