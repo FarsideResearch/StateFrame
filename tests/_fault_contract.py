@@ -80,7 +80,7 @@ class ContractCase:
                 raise ValueError(f"{self.handler_id}/{scenario}: a row is expected, so detail (why) must be asserted")
 
 
-# Module-level case table. Test modules register their synthetic cases here; product cases land with batch 1.
+# Module-level case table. Test modules register their synthetic cases here; product cases are added as sites are converted.
 CASES: dict[str, ContractCase] = {}
 
 
