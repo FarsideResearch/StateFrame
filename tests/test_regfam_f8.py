@@ -37,7 +37,9 @@ PENDING_RELEASE_SELECTION: dict[str, int] = {
     "tests/e2e/test_e2e_parallel_f4_receipt.py": 1,  # [partial] and [paged_refusal] failed
     "tests/e2e/test_e2e_parallel_recovery.py": 2,  # both tests failed (5 of 5 crash points, checkpoint case)
     "tests/test_env_seed_request_parity.py": 1,  # all 3 example cases failed
+    "tests/test_fu070_offparity_gates.py": 6,  # pending release-owner selection
     "tests/test_hook_wiring_parity.py": 1,  # test_no_hooks_real_shaped_llama_keeps_automatic_pin_and_release_bytes
+    "tests/test_ledger_pin_delivery.py": 1,  # pending release-owner selection
     "tests/test_parallel_worker_prep.py": 1,  # test_default_parallel_off_wire_and_public_artifacts_match_merged_main
     "tests/test_working_set_off_parity_base.py": 1,  # test_off_provider_bytes_match_cutover_base, both bases
     "tests/test_working_set_render_off_parity.py": 1,  # test_off_wire_bytes_match_1de34aa4, both bases
@@ -49,6 +51,7 @@ PENDING_RELEASE_SELECTION: dict[str, int] = {
     "tests/test_journal_replay_publication.py": 2,  # external_effect / parent_meter refusal type change controls
     "tests/test_llama_wire_seal_parity.py": 1,  # test_wire_guard_rejects_planted_changes
     "tests/test_native_prefix_whole_file_edit.py": 1,  # test_whole_file_executor_proof_parity
+    "tests/test_source_window_length_framing.py": 1,  # pending release-owner selection
     "tests/test_unit_coalesce.py": 3,  # missing addition history, history errors, rejects pinned oracles
 }
 
