@@ -48,6 +48,26 @@ def _validated_check_paths(paths: tuple[str, ...]) -> tuple[str, ...]:
     return tuple(normalized)
 
 
+def _is_test_path(path: str, check_paths: tuple[str, ...]) -> bool:
+    # Same test-file rule as react_repair: declared check sources, tests/ dir, or pytest naming.
+    filename = PurePosixPath(path).name
+    return (
+        path in check_paths
+        or path.startswith("tests/")
+        or (filename.startswith("test_") and filename.endswith(".py"))
+        or filename.endswith("_test.py")
+    )
+
+
+def _entry_source(owns: tuple[str, ...], check_paths: tuple[str, ...]) -> str:
+    # The repair harness moves test files out of `files`, so the entry must be a
+    # non-test owned source. Keeps owns order; falls back to owns[0] if all are tests.
+    for path in owns:
+        if not _is_test_path(path, check_paths):
+            return path
+    return owns[0]
+
+
 def build_public_row(spec: UnitSpec, start_files: Mapping[str, bytes]) -> dict:
     if not isinstance(spec, UnitSpec):
         raise TypeError("subframe task requires UnitSpec")
@@ -61,7 +81,8 @@ def build_public_row(spec: UnitSpec, start_files: Mapping[str, bytes]) -> dict:
     files = {path: {"parent_src": _text(start_files, path)} for path in owns}
     check_paths = _validated_check_paths(spec.contract.check.source_paths)
     public_tests = {path: _text(start_files, path) for path in check_paths}
-    entry = ({"path": owns[0], "fn": ""} if owns else
+    entry_path = _entry_source(owns, check_paths) if owns else ""
+    entry = ({"path": entry_path, "fn": ""} if owns else
              {"create_path": creates[0], "absent_paths": list(creates)})
     row = {
         "task_id": spec.execution_id,
@@ -79,8 +100,8 @@ def build_public_row(spec: UnitSpec, start_files: Mapping[str, bytes]) -> dict:
         "public_tests": public_tests,
         "check_selectors": list(spec.contract.check.selectors),
         "entry": entry,
-        "path": owns[0] if owns else "",
-        "rel": owns[0] if owns else "",
+        "path": entry_path,
+        "rel": entry_path,
         "fn": "",
         "_skip_db": True,
     }
