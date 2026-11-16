@@ -525,7 +525,7 @@
   "kernel_redirect_policy.py": "b1d907f54aedcfe49086c72cd5ece68bb6348f238ca6a8e74f932aa1591ee760",
   "kernel_reference_index.py": "4d06f9541a9597a8f5dac0eb8686b888420a105ffb3386423dce18754522a88c",
   "kernel_reflection.py": "2b8d7cb3b3c7c4d005c59ec671b5e43aecb014e951172b2a4d49ba2679e18435",
-  "kernel_refusal_compact.py": "2a68fd500073f92edbe229182d729630d893c29028b47f24aea3eda3ec5c418a",
+  "kernel_refusal_compact.py": "c93f9baab9b030ea7aed9120a1278ef1023e0704d8e09a7beb3a472d38742390",
   "kernel_rejected_candidate.py": "fbc0519c9adc77df5063684812bb5d901743031c929731a780f859a03af87139",
   "kernel_rejection_template.py": "86db83d1182b97d1670be6c495727c165b2118aecf674bbd73ba4f0509ae6e80",
   "kernel_rejection_template_restrict.py": "cf099695179a4caa40a281d87632b734572f5f7312aa3e6483519e5cb17039cd",

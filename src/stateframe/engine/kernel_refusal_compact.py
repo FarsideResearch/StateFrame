@@ -7,6 +7,8 @@ import os
 import re
 from collections.abc import Mapping, Sequence
 
+from kernel_request_source_window import MODEL_WINDOW_MARKER, WINDOW_MARKER
+
 MODE_ENV = "STATEFRAME_REFUSAL_COMPACT"
 START = "[STATEFRAME compact refusal]"
 END = "[/STATEFRAME compact refusal]"
@@ -975,8 +977,11 @@ def _update_typed_owner_pin(messages: list[dict[str, object]], value: str) -> bo
 _HOST_PIN_ROLES = frozenset({"system", "user"})
 _SOURCE_WINDOW_PREFIXES = (
     "[Working source: ", "[Current source: ", "CURRENT_SOURCE ",
-    "[Model source window]",
+    MODEL_WINDOW_MARKER, WINDOW_MARKER,
 )
+# A raw request-budget window is role=user file text quoted verbatim, so its body can
+# carry host marker text.  Such rows are opaque: never scanned, counted, truncated or rewritten.
+_OPAQUE_WINDOW_PREFIXES = (WINDOW_MARKER,)
 
 
 def _is_host_pin_row(message: Mapping[str, object]) -> bool:
@@ -1020,6 +1025,8 @@ def _remove_evidence_pin_blocks(
             continue
         if not isinstance(content, str) or EVIDENCE_START not in content:
             continue
+        if content.startswith(_OPAQUE_WINDOW_PREFIXES):
+            continue
         if content.startswith(_SOURCE_WINDOW_PREFIXES):
             source_prefix = content.split(EVIDENCE_START, 1)[0]
             message["content"] = (
@@ -1032,17 +1039,13 @@ def _remove_evidence_pin_blocks(
 def _append_evidence_pin_panel(
         messages: list[dict[str, object]], panel: str, *, preserve_stateframe: bool,
 ) -> None:
-    source_prefixes = (
-        "[Working source: ", "[Current source: ", "CURRENT_SOURCE ",
-        "[Model source window]",
-    )
     target = next((
         message for message in reversed(messages)
         if message.get("role") == "user"
         and not (preserve_stateframe and _is_stateframe_message(message))
     ), None)
     content = target.get("content") if isinstance(target, Mapping) else None
-    if target is None or not isinstance(content, str) or content.startswith(source_prefixes):
+    if target is None or not isinstance(content, str) or content.startswith(_SOURCE_WINDOW_PREFIXES):
         messages.append({"role": "user", "content": panel})
     else:
         target["content"] = content + "\n\n" + panel
@@ -1159,6 +1162,8 @@ def ensure_final_evidence_pin(runtime: object, messages: Sequence[Mapping[str, o
         content = str(message.get("content") or "")
         if content.startswith(DEFERRED_SOURCE_NOTICE_HEADER):
             continue
+        if content.startswith(_OPAQUE_WINDOW_PREFIXES):
+            continue
         for index, segment in enumerate(content.split(value)):
             if index:
                 wire_values.append(value)  # one exact typed pin sat before this segment
@@ -1183,6 +1188,8 @@ def ensure_final_evidence_pin(runtime: object, messages: Sequence[Mapping[str, o
         if not isinstance(content, str) or EVIDENCE_START not in content:
             continue
         if continuity_on and _is_stateframe_message(message):
+            continue
+        if content.startswith(_OPAQUE_WINDOW_PREFIXES):
             continue
         if content.startswith(_SOURCE_WINDOW_PREFIXES):
             source_prefix = content.split(EVIDENCE_START, 1)[0]

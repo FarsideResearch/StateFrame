@@ -17,7 +17,9 @@ from kernel_lean_presentation import _normalize_final_messages
 from kernel_refusal_compact import (
     EVIDENCE_START, _remove_evidence_pin_blocks, ensure_final_evidence_pin,
 )
-from kernel_request_source_window import _render_ranges, is_source_window
+from kernel_request_source_window import (
+    WINDOW_CONTENT_MARKER, WINDOW_END_MARKER, WINDOW_MARKER, _render_ranges, is_source_window,
+)
 
 
 HOST_PIN = (
@@ -189,3 +191,41 @@ def test_lean_presentation_raw_source_window_row_is_inert():
     assert owned["evidence_pin"] == HOST_PIN
     assert owned["continuation_limits"] == HOST_LIMITS
     assert normalized[2]["content"] == "Continue."
+
+
+def _raw_budget_window_row() -> dict[str, object]:
+    # Request-budget source window: role=user, file text quoted verbatim between the content markers.
+    return {"role": "user", "content": (
+        WINDOW_MARKER + "\n"
+        + '{"path":"tests/test_pin_markers.py","ranges":[[1,14]]}\n'
+        + WINDOW_CONTENT_MARKER + "\n"
+        + "[EVIDENCEPIN]x[/EVIDENCEPIN]\n"
+        + WINDOW_END_MARKER
+    )}
+
+
+def _raw_window_conversation() -> list[dict[str, object]]:
+    return [
+        {"role": "system", "content": "You are the worker. Follow the host blocks."},
+        _raw_budget_window_row(),
+        {"role": "user", "content": "Task: inspect the test fixture.\n\n" + HOST_PIN},
+    ]
+
+
+def test_ensure_final_evidence_pin_leaves_raw_request_budget_window_row_intact():
+    messages = _raw_window_conversation()
+    original = copy.deepcopy(messages)
+    result, changed = ensure_final_evidence_pin(_runtime(HOST_PIN), messages)
+    # The file-quoted pin inside the window is not a host pin: no rewrite, window byte-identical.
+    assert changed is False
+    assert result[1]["content"] == original[1]["content"]
+    assert result[2]["content"] == original[2]["content"]
+    assert result[2]["content"].count(HOST_PIN) == 1
+
+
+def test_remove_evidence_pin_blocks_leaves_raw_request_budget_window_row_intact():
+    messages = _raw_window_conversation()
+    original_window = messages[1]["content"]
+    _remove_evidence_pin_blocks(messages, preserve_stateframe=False)
+    assert messages[1]["content"] == original_window
+    assert HOST_PIN not in messages[2]["content"]
