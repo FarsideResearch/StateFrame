@@ -8,7 +8,7 @@ import sys
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 
-from kernel_frame_optional_allocation import FrameAllocationReplanNeeded, identity
+from kernel_frame_optional_allocation import FrameAllocationReplanNeeded, identity, site_identity
 from kernel_frame_request_allocation import FrameRequestAllocation
 
 
@@ -49,7 +49,7 @@ def _with_unit_sites(
     result.pop("open_sites", None)
     next_site_id = site_inventory.get("next_site")
     result["next_site"] = next(
-        (site for site in sites if identity(site) == next_site_id),
+        (site for site in sites if site_identity(site) == next_site_id),
         sites[0] if sites else None,
     )
     encoding = site_inventory.get("encoding_mode")
@@ -218,8 +218,8 @@ def validate_allocation_authority(
         host_sites = host_projection["open_sites"]
         if not isinstance(host_sites, list):
             raise FrameAllocationReplanNeeded("unit allocation site projection is invalid")
-        if [identity(site) for site in unit_projection["open_sites"]] != [
-                identity(site) for site in host_sites]:
+        if [site_identity(site) for site in unit_projection["open_sites"]] != [
+                site_identity(site) for site in host_sites]:
             raise FrameAllocationReplanNeeded("unit allocation host sites changed")
         # The allocation records the child wire representation. Build it from
         # fresh full-byte host sites and this request's delivered windows.
@@ -229,7 +229,7 @@ def validate_allocation_authority(
         )
         unit_sites = wire_host_projection["open_sites"]
         inventory = allocation.site_inventory
-        site_ids = [identity(site) for site in unit_sites]
+        site_ids = [site_identity(site) for site in unit_sites]
         if site_ids != inventory["inventory_identity"]:
             raise FrameAllocationReplanNeeded(
                 "unit-scoped allocation inventory differs from host authority "
@@ -246,7 +246,7 @@ def validate_allocation_authority(
                 serialized_frame, unit_spec, root=root,
             )
             serialized_sites = serialized_projection["open_sites"]
-            if [identity(site) for site in serialized_sites] != site_ids:
+            if [site_identity(site) for site in serialized_sites] != site_ids:
                 raise FrameAllocationReplanNeeded("unit-scoped serialized site inventory changed")
     elif scoped:
         raise FrameAllocationReplanNeeded("scoped allocation has no active unit authority")
@@ -254,7 +254,7 @@ def validate_allocation_authority(
         from kernel_stateframe_framefit5 import _next_sites
 
         if [
-            identity(site) for site in _next_sites(runtime, context)
+            site_identity(site) for site in _next_sites(runtime, context)
         ] != allocation.site_inventory["inventory_identity"]:
             raise FrameAllocationReplanNeeded(
                 "allocation semantic site inventory changed"

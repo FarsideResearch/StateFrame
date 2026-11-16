@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.7.9 (2026-11-15)
+
+- Fixed: editing a file during a run no longer stops it with "allocation semantic site inventory changed" (source_revision_replan_exhausted); the site inventory now ignores per-request delivery annotations.
+
 ## 0.7.8 (2026-11-15)
 
 - Tests: adds the `tests/enginecheck` harness library (scripted-session adapter, proof integrity, boundary inputs, wire prefix stability, feature composition, race-seed registry and CLI, resume equivalence). Known engine defects it finds are pinned as strict xfails.

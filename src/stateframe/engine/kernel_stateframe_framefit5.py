@@ -3246,9 +3246,9 @@ def _refresh_framefit5_sources(
             messages=messages,
         )
     if frame_request_allocation is not None:
-        from kernel_frame_optional_allocation import render_optional_selection, identity
+        from kernel_frame_optional_allocation import render_optional_selection, site_identity
         inventory = frame_request_allocation.site_inventory
-        if [identity(site) for site in sites] != inventory["inventory_identity"]:
+        if [site_identity(site) for site in sites] != inventory["inventory_identity"]:
             from kernel_frame_optional_allocation import FrameAllocationReplanNeeded
             raise FrameAllocationReplanNeeded("semantic site inventory changed")
         current_frame = render_optional_selection(

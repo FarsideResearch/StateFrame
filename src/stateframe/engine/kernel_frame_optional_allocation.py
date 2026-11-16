@@ -24,6 +24,22 @@ def identity(value: object) -> str:
     return "sha256:" + hashlib.sha256(canonical_allocation_bytes(value)).hexdigest()
 
 
+# Per-request delivery annotations written by rebuild_delivery_truth. They describe
+# what this request showed, not what the site is, so they stay out of inventory
+# identity. Source pins (path, revision, lines, content_sha256) remain in it.
+_SITE_DELIVERY_KEYS = frozenset({"read_this_request", "current_bytes"})
+# source_ref is the other delivery carrier: site_ref_or_inline swaps current_bytes for
+# source_ref per request when the bytes are proven present in that request's windows.
+# Which carrier a request uses is a delivery choice, so source_ref is excluded too.
+_SITE_CARRIER_KEYS = frozenset({"source_ref"})
+
+
+def site_identity(site: Mapping[str, object]) -> str:
+    """Identity of an open site, independent of how this request delivered its bytes."""
+    excluded = _SITE_DELIVERY_KEYS | _SITE_CARRIER_KEYS
+    return identity({key: value for key, value in site.items() if key not in excluded})
+
+
 def head_identity(head: Mapping[str, object]) -> str:
     return identity(
         {
@@ -127,12 +143,12 @@ def snapshot_optional_inputs(
         "dependency_revisions": dependencies,
         "panel": panel,
     }
-    site_ids = [identity(site) for site in sites]
+    site_ids = [site_identity(site) for site in sites]
     inventory = {
         "inventory_identity": site_ids,
         "selected_identities": list(site_ids),
         "open_sites": list(site_ids),
-        "next_site": identity(frame["next_site"])
+        "next_site": site_identity(frame["next_site"])
         if isinstance(frame.get("next_site"), Mapping)
         else None,
         "encoding_mode": LOCATION_MODE if compact_inventory else "full_inventory",
@@ -271,7 +287,7 @@ def singleton_alias_candidate(frame: Mapping[str, object]) -> dict[str, object] 
     site = frame.get("next_site")
     if not isinstance(site, Mapping) or frame.get("open_sites") != [site]:
         return None
-    key = identity(site)
+    key = site_identity(site)
     return render_optional_selection(
         frame,
         {},
