@@ -275,11 +275,13 @@ completion_owner_runtime presentation_runtime preedit_coverage_runtime
 provider_adapter_cold_resume cancel_requested postgreen_done_stripped_by unified_cap_noted
 template_conformance_mode template_conformance_runtime template_conformance_renderer
 template_conformance_adapter template_conformance_arm
+_host_authorship
 """.split()
 _OPAQUE = frozenset("""_qualified_request_gate _qualified_host_text_preparer model_router model_router_decision model_router_frame
 thinking_router thinking_router_classification long_horizon_depth_tracker
 completion_owner_runtime presentation_runtime preedit_coverage_runtime
-template_conformance_runtime template_conformance_renderer""".split())
+template_conformance_runtime template_conformance_renderer
+_host_authorship""".split())
 _REGENERATED = frozenset("""provider_adapter_contract request_action_contract _lean_required_source_paths
 _request_measurement _frame_candidate_measurement
 _frame_request_allocation_candidate _frame_candidate_inputs _replacement_allocation _replacement_lineage
@@ -448,6 +450,21 @@ def prepare_replacement(runtime: object, original: object, preparation: Preparat
     return PreparedRequest(tuple(body["messages"]), original, tools=tuple(body["tools"]))
 
 
+def _replacement_capture(original: object):
+    """A fresh capture carrying the original's stable fields; opaque ones by reference."""
+    from kernel_measurement import RequestCapture
+    fresh = RequestCapture(original.journal, original.step, original.snapshot_id,
+        endpoint_profile=original.endpoint_profile, parent_meter=original.parent_meter)
+    unknown = set(vars(original)) - set(vars(fresh)) - set(_STABLE) - _REGENERATED
+    if unknown:
+        raise RequestPreparationContractError("unsupported replacement ownership fields: " + ",".join(sorted(unknown)))
+    for name in _STABLE:
+        if hasattr(original, name):
+            value = getattr(original, name)
+            setattr(fresh, name, value if name in _OPAQUE else copy.deepcopy(value))
+    return fresh
+
+
 def _prepare_replacement_candidate(runtime: object, original: object, preparation: PreparationInput,
                         transport_body: Mapping[str, object], *, deadline: float | None,
                         boundary_recovery: bool = False,
@@ -496,15 +513,7 @@ def _prepare_replacement_candidate(runtime: object, original: object, preparatio
         original.request_action_contract.get("contract_kind")
         if isinstance(original.request_action_contract, Mapping) else None
     )
-    fresh = RequestCapture(original.journal, original.step, original.snapshot_id,
-        endpoint_profile=original.endpoint_profile, parent_meter=original.parent_meter)
-    unknown = set(vars(original)) - set(vars(fresh)) - set(_STABLE) - _REGENERATED
-    if unknown:
-        raise RequestPreparationContractError("unsupported replacement ownership fields: " + ",".join(sorted(unknown)))
-    for name in _STABLE:
-        if hasattr(original, name):
-            value = getattr(original, name)
-            setattr(fresh, name, value if name in _OPAQUE else copy.deepcopy(value))
+    fresh = _replacement_capture(original)
     fresh._framefit5_pending_qualification = getattr(original, "_framefit5_pending_qualification", False)
     fresh._frame_request_allocation_candidate = copy.deepcopy(
         getattr(original, "_frame_request_allocation_candidate", None))
