@@ -3299,6 +3299,25 @@ class RequestCapture:
             attempt_reasons=attempt_reasons,
         )
 
+    def _emit_host_authorship_manifest(self, body: Mapping[str, object], wire: bytes) -> None:
+        """With host-row identity on, journal which rows of this wire the host authored.
+
+        Journal-only: offline readers load it by the wire's hash. Off and shadow emit nothing.
+        """
+        ledger = self._host_authorship
+        if ledger is None:
+            return
+        from kernel_host_authorship import mode
+        if mode() != "on":
+            return
+        messages = body.get("messages") if isinstance(body, Mapping) else None
+        if not isinstance(messages, list) or not all(isinstance(row, dict) for row in messages):
+            return
+        from kernel_host_authorship_shadow import manifest
+        payload = manifest(ledger, messages, wire=wire, capture=self)
+        payload["request_id"] = self.request_id
+        self.journal.emit("host_authorship_manifest", **payload, dispatch=False)
+
     def _assert_wire_string_hygiene(self, wire: bytes) -> None:
         from kernel_wire_string_hygiene import first_wire_string_violation
 
@@ -6046,6 +6065,7 @@ class RequestCapture:
                                          dialect=provider_capabilities.dialect,
                                          side_call=side_call_contract is not None)
             wire = _serialize_final_request_body(body, wire_truth_runtime, self.request_id)
+            self._emit_host_authorship_manifest(body, wire)
             if _boundary_state is not None:
                 _boundary_state.phase = "final_serialization_validation"
                 _boundary_state.body_digest = "sha256:" + hashlib.sha256(wire).hexdigest()
@@ -6544,6 +6564,7 @@ class RequestCapture:
                                          dialect=provider_capabilities.dialect,
                                          side_call=side_call_contract is not None)
             wire = _serialize_final_request_body(body, wire_truth_runtime, self.request_id)
+            self._emit_host_authorship_manifest(body, wire)
             if _boundary_state is not None:
                 _boundary_state.phase = "final_serialization_validation"
                 _boundary_state.body_digest = "sha256:" + hashlib.sha256(wire).hexdigest()
@@ -6817,6 +6838,7 @@ class RequestCapture:
                 wire = _serialize_final_request_body(
                     body, wire_truth_runtime, self.request_id,
                 )
+                self._emit_host_authorship_manifest(body, wire)
                 try:
                     self._assert_wire_string_hygiene(wire)
                 except RequestPreparationContractError as error:
