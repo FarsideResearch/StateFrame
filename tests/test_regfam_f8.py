@@ -133,7 +133,7 @@ def _rules(text: str, **kwargs) -> list[str]:
     "if pytest -q tests | tail -5; then echo ok; fi\n",
     "pytest -q tests | tail -40 && echo GREEN\n",
     "set -e\npytest -q tests | tee log\necho done\n",
-    "#!/bin/bash\npytest -q tests 2>&1 | tail -40\n",                 # script exit status = tail's
+    "#!/bin/sh\npytest -q tests 2>&1 | tail -40\n",                 # script exit status = tail's
     "while ! grep -q ready log | head -1; do sleep 1; done\n",
 ])
 def test_pipe_status_rule_fires(script):
