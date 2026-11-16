@@ -1,5 +1,7 @@
 # Changelog
 
+## Unreleased
+
 ## 0.7.20 (2026-11-16)
 
 - Removed the read lockout. The engine never hides read, grep or shell from the model on its own. STATEFRAME_READ_LOCKOUT is retired: a host that still sets it gets a journal note instead of a refused run.
