@@ -353,6 +353,67 @@ def test_props_probe_handler_is_registered():
     assert dialect.ProbePropsUnreachable.fault_code == dialect.PROBE_DEGRADED_CODE
 
 
+def test_parallel_first_requests_record_one_fault_row(run_cache, monkeypatch, tmp_path, capsys):
+    # Parallel tool calls can reach the request path for the same degraded origin at once; the
+    # once-per-origin guard must still give one fault row and one journal event, not one per thread.
+    origin = "http://127.0.0.1:8081"
+    caps = _degraded_caps()
+    workers = 8
+    barrier = threading.Barrier(workers)
+    events: list[dict[str, object]] = []
+    errors: list[BaseException] = []
+
+    def first_request() -> None:
+        try:
+            barrier.wait(timeout=10)
+            if dialect.mark_dialect_journaled(origin):
+                degraded = dialect.probe_degradation_event(caps, origin)
+                if degraded is not None:
+                    events.append(degraded)
+        except BaseException as error:  # surfaced below; a thread cannot fail the test itself
+            errors.append(error)
+
+    with isolated_reason_log(monkeypatch, tmp_path) as harness:
+        threads = [threading.Thread(target=first_request) for _ in range(workers)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=30)
+        rows = harness.rows()
+    assert not [thread for thread in threads if thread.is_alive()], "a request thread hung"
+    assert errors == []
+    assert len(events) == 1, events
+    assert len(rows) == 1, rows
+    assert rows[0]["fields"]["origin"] == origin
+    capsys.readouterr()
+
+
+@pytest.mark.host_sandbox
+def test_probe_error_type_is_per_thread():
+    # The failure class rides in thread-local state; a concurrent probe on another thread must not see it.
+    from kernel_bounded_http import bounded_json_probe, last_probe_error
+
+    seen: dict[str, object] = {}
+
+    def failing_probe() -> None:
+        seen["result"] = bounded_json_probe(_closed_port_endpoint(), KEY, "/props", timeout=10)
+        seen["error"] = last_probe_error()
+
+    def bystander() -> None:
+        seen["bystander"] = last_probe_error()
+
+    worker = threading.Thread(target=failing_probe)
+    worker.start()
+    worker.join(timeout=30)
+    assert not worker.is_alive()
+    other = threading.Thread(target=bystander)
+    other.start()
+    other.join(timeout=5)
+    assert seen["result"] is None
+    assert seen["error"] == "ConnectionRefusedError"
+    assert seen["bystander"] is None
+
+
 def test_runner_preflight_warns_once_per_degraded_origin(capsys):
     from stateframe import runner
 
