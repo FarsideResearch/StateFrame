@@ -9813,6 +9813,7 @@ def work(d, *, resume=None):
                 rerouted = False
                 reroute_action = None
                 while True:
+                    _provider_t0 = None
                     try:
                         if _unit is not None and _provider_request and not getattr(
                                 measurement, "_unit_first_request_sent", False) and (
@@ -9847,10 +9848,14 @@ def work(d, *, resume=None):
                         else:
                             response = ask(list(_prepared.messages), temp=run_temp)
                         _edit_nturn_provider_wait += time.monotonic() - _provider_t0
+                        _provider_t0 = None
                         if _unit is not None and _provider_request:
                             measurement._unit_first_request_sent = True
                         return response
                     except Exception as error:                       # noqa: BLE001
+                        if _provider_t0 is not None:
+                            # A failed or timed-out provider call is model wait too.
+                            _edit_nturn_provider_wait += time.monotonic() - _provider_t0
                         from capability_capacity_preflight import CapacityRefusal
                         if (not isinstance(error, CapacityRefusal)
                                 or not getattr(error, "long_horizon_reroutable", False)):

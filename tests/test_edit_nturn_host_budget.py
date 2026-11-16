@@ -102,5 +102,7 @@ def test_react_repair_wiring_uses_host_time_budget():
     assert "_edit_nturn_run_started + EDIT_NTURN_RUN_BUDGET_SECONDS" not in text
     assert "edit_nturn_remaining_seconds(" in text
     assert "_edit_nturn_provider_wait +=" in text
+    # Both the successful and the failed provider call add their wait.
+    assert text.count("_edit_nturn_provider_wait += time.monotonic() - _provider_t0") == 2
     assert any("nonlocal" in line and "_edit_nturn_provider_wait" in line
                for line in text.splitlines())
