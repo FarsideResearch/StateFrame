@@ -400,6 +400,9 @@ def test_gzip_415_retry_authorizes_each_physical_attempt(
 @pytest.mark.host_sandbox
 def test_timed_out_physical_attempt_remains_spent_without_settlement(tmp_path, monkeypatch):
     _isolate_child_state(monkeypatch)
+    # Without a user queue cap a silent but alive provider has no total cap (see test_queue_wait_user_only).
+    # This case times out on purpose, so it sets the user cap that ends the wait before the attempt deadline.
+    monkeypatch.setenv("STATEFRAME_QUEUE_WAIT_MAX_S", "0.5")
     class SlowHandler(BaseHTTPRequestHandler):
         requests = 0
 
