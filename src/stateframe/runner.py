@@ -2195,6 +2195,24 @@ def _provider_preflight_summary(options: RunOptions) -> str:
     return result
 
 
+def _provider_preflight_warnings(capabilities: Mapping[str, object]) -> list[str]:
+    """One warning per origin whose dialect is a transient-failure fallback.
+
+    The engine child receives these capabilities pre-proven and never re-probes,
+    so the operator is told here, once, next to the provider dialect line.
+    """
+    from .engine.kernel_provider_dialect import probe_degradation_warning
+
+    warnings: list[str] = []
+    for origin, capability in sorted(capabilities.items()):
+        if not isinstance(origin, str) or getattr(capability, "probe_degradation", None) is None:
+            continue
+        warning = probe_degradation_warning(capability, origin)
+        if warning is not None:
+            warnings.append(warning)
+    return warnings
+
+
 def _provider_environment(options: RunOptions) -> dict[str, str]:
     """Resolve the same operator/profile environment used by the engine."""
     result = dict(os.environ)
@@ -3907,6 +3925,8 @@ def _run(options: RunOptions, started: float, printer=print) -> dict[str, object
     _select_prompt_cache_slot(options, preflight_messages.append)
     _probe_routes(options, preflight_messages.append, warnings=preflight_warnings)
     printer(f"{options._capabilities['display']}; {_provider_preflight_summary(options)}")
+    for warning in _provider_preflight_warnings(options._provider_capabilities):
+        print(warning, file=sys.stderr, flush=True)
     _print_run_banner(options, printer)
     for message in preflight_messages:
         printer(message)

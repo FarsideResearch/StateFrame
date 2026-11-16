@@ -69,7 +69,29 @@ class ProviderCapabilities:
             "reason": self.reason,
             "props_status": self.props_status,
             "slots_status": self.slots_status,
+            "probe_degradation": (
+                None if self.probe_degradation is None else {
+                    "attempts": self.probe_degradation.attempts,
+                    "last_error_type": self.probe_degradation.last_error_type,
+                    "elapsed_ms": self.probe_degradation.elapsed_ms,
+                }
+            ),
         }
+
+
+def _probe_degradation_from_record(value: object) -> ProbeDegradation | None:
+    """Rebuild a host-proven degradation; anything unknown or malformed is dropped."""
+    if not isinstance(value, Mapping):
+        return None
+    attempts = value.get("attempts")
+    last_error_type = value.get("last_error_type")
+    elapsed_ms = value.get("elapsed_ms")
+    if (type(attempts) is not int or attempts < 1
+            or type(elapsed_ms) is not int or elapsed_ms < 0
+            or not isinstance(last_error_type, str) or not last_error_type.isidentifier()
+            or len(last_error_type) > 64):
+        return None
+    return ProbeDegradation(attempts=attempts, last_error_type=last_error_type, elapsed_ms=elapsed_ms)
 
 
 def seed_run_capability_cache(records: object) -> None:
@@ -98,6 +120,7 @@ def seed_run_capability_cache(records: object) -> None:
         RUN_CAPABILITY_CACHE[origin] = ProviderCapabilities(
             dialect=dialect, slots=slots, slot_ids=frozenset(slot_ids), reason=reason,
             props_status=props_status, slots_status=slots_status,
+            probe_degradation=_probe_degradation_from_record(value.get("probe_degradation")),
         )
 
 
@@ -189,6 +212,18 @@ def _transient_probe(result: tuple[int, object] | None) -> bool:
     return result is None or result[0] >= 500
 
 
+def probe_degradation_warning(capabilities: ProviderCapabilities, origin: str) -> str | None:
+    """One operator-facing line for a transient-failure fallback, or None."""
+    degradation = capabilities.probe_degradation
+    if degradation is None:
+        return None
+    return (
+        f"WARNING: /props probe to {origin} gave no usable answer after "
+        f"{degradation.attempts} attempt(s) ({degradation.last_error_type}); running as "
+        "openai-strict with no tokenizer and no llama.cpp request shape"
+    )
+
+
 def probe_degradation_event(
     capabilities: ProviderCapabilities, origin: str,
 ) -> dict[str, object] | None:
@@ -199,14 +234,11 @@ def probe_degradation_event(
     dialect was not a transient fallback.
     """
     degradation = capabilities.probe_degradation
-    if degradation is None:
+    warning = probe_degradation_warning(capabilities, origin)
+    if degradation is None or warning is None:
         return None
-    print(
-        f"WARNING: /props probe to {origin} gave no usable answer after "
-        f"{degradation.attempts} attempt(s) ({degradation.last_error_type}); running as "
-        "openai-strict with no tokenizer and no llama.cpp request shape",
-        file=sys.stderr, flush=True,
-    )
+    # Standalone adapters have no host preflight, so the child prints its own line.
+    print(warning, file=sys.stderr, flush=True)
     return {
         "code": PROBE_DEGRADED_CODE,
         "endpoint_origin": origin,
